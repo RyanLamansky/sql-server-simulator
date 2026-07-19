@@ -221,14 +221,42 @@ public sealed class CollationMetadataTests
             "SELECT DATABASEPROPERTYEX('simulated', 'Version')"));
 
     [TestMethod]
-    public void DatabasePropertyEx_Version_SurfacesAsIntType()
+    public void DatabasePropertyEx_Version_SurfacesAsSqlVariant()
     {
+        // Like real SQL Server, DATABASEPROPERTYEX projects sql_variant; the
+        // Version cell carries an int inner base type, which SqlClient unwraps.
         using var reader = new Simulation().ExecuteReader(
             "SELECT DATABASEPROPERTYEX('simulated', 'Version')");
         IsTrue(reader.Read());
-        AreEqual("int", reader.GetDataTypeName(0));
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
         _ = Assert.IsInstanceOfType<int>(reader.GetValue(0));
     }
+
+    [TestMethod]
+    public void DatabasePropertyEx_Version_InnerBaseTypeIsInt()
+        => AreEqual("int", new Simulation().ExecuteScalar(
+            "SELECT SQL_VARIANT_PROPERTY(DATABASEPROPERTYEX('simulated', 'Version'), 'BaseType')"));
+
+    [TestMethod]
+    public void DatabasePropertyEx_SqlSortOrder_InnerBaseTypeIsTinyInt()
+        => AreEqual("tinyint", new Simulation().ExecuteScalar(
+            "SELECT SQL_VARIANT_PROPERTY(DATABASEPROPERTYEX('simulated', 'SQLSortOrder'), 'BaseType')"));
+
+    [TestMethod]
+    public void DatabasePropertyEx_Collation_InnerBaseTypeIsNVarchar()
+        => AreEqual("nvarchar", new Simulation().ExecuteScalar(
+            "SELECT SQL_VARIANT_PROPERTY(DATABASEPROPERTYEX('simulated', 'Collation'), 'BaseType')"));
+
+    /// <summary>
+    /// DBCC CHECKDB isn't modeled, so the property is a NULL sql_variant;
+    /// SMO's CAST(ISNULL(prop, 0) AS datetime) must resolve to 1900-01-01
+    /// (ISNULL fixes to sql_variant wrapping the int 0, CAST to datetime
+    /// epoch) — probe-confirmed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void DatabasePropertyEx_LastGoodCheckDbTime_SmoIsNullCastShape_ResolvesToEpoch()
+        => AreEqual(new DateTime(1900, 1, 1), new Simulation().ExecuteScalar(
+            "SELECT CAST(ISNULL(DATABASEPROPERTYEX('simulated', 'LastGoodCheckDbTime'), 0) AS datetime)"));
 
     [TestMethod]
     public void DatabasePropertyEx_ComparisonStyle_ReturnsInt()
@@ -246,10 +274,13 @@ public sealed class CollationMetadataTests
             "SELECT DATABASEPROPERTYEX('simulated', 'SQLSortOrder')"));
 
     [TestMethod]
-    public void DatabasePropertyEx_NonConstantProperty_FallsBackToNVarchar()
+    public void DatabasePropertyEx_NonConstantProperty_StillProjectsSqlVariant()
     {
+        // The projection type is always sql_variant (no compile-time-constant
+        // dependency), so a non-constant property name resolves its inner base
+        // type at runtime identically — Version's int inner unwraps to 0.
         var sim = new Simulation();
-        AreEqual("0", sim.ExecuteScalar(
+        AreEqual(0, sim.ExecuteScalar(
             "declare @p nvarchar(30) = 'Version'; SELECT DATABASEPROPERTYEX('simulated', @p)"));
     }
 

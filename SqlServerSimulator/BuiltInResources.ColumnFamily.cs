@@ -134,20 +134,22 @@ internal static partial class BuiltInResources
             new("is_computed", SqlType.Bit, null, true),
         ], EnumerateComputedColumns);
 
-        // sys.identity_columns: one row per IDENTITY column. Real SQL Server
-        // types seed_value / increment_value / last_value as sql_variant; the
-        // simulator surfaces them as bigint (the same sql_variant-to-concrete
-        // substitution sys.sequences / sys.configurations use). SMO's
-        // CREATE-scripting column query reads seed_value / increment_value /
-        // is_not_for_replication. last_value tracks the identity high-water mark.
+        // sys.identity_columns: one row per IDENTITY column. seed_value /
+        // increment_value / last_value are first-class sql_variant, each
+        // carrying the identity column's declared type as its inner base type
+        // (int → int, bigint → bigint, decimal(p, s) → decimal —
+        // probe-confirmed against SQL Server 2025). SMO's CREATE-scripting
+        // column query reads seed_value / increment_value /
+        // is_not_for_replication. last_value tracks the identity high-water
+        // mark (NULL, as a NULL sql_variant, before the first insert).
         Sys("identity_columns",
         [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, true),
             new("column_id", SqlType.Int32, null, false),
-            new("seed_value", SqlType.BigInt, null, true),
-            new("increment_value", SqlType.BigInt, null, true),
-            new("last_value", SqlType.BigInt, null, true),
+            new("seed_value", SqlType.SqlVariant, null, true),
+            new("increment_value", SqlType.SqlVariant, null, true),
+            new("last_value", SqlType.SqlVariant, null, true),
             new("is_not_for_replication", SqlType.Bit, null, true),
         ], EnumerateIdentityColumns);
 
@@ -361,15 +363,15 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Rows for <c>sys.identity_columns</c>: one row per IDENTITY column.
-    /// seed / increment / last are surfaced as bigint (sql_variant in real SQL
-    /// Server). last_value is the identity high-water mark, NULL before the
-    /// first insert.
+    /// seed / increment / last are sql_variant carrying the column's declared
+    /// type as inner base type. last_value is the identity high-water mark,
+    /// a NULL sql_variant before the first insert.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateIdentityColumns(Parser.BatchContext batch, Database database)
     {
         _ = batch;
         var falseBit = SqlValue.FromBoolean(false);
-        var nullLast = SqlValue.Null(SqlType.BigInt);
+        var nullLast = SqlValue.Null(SqlType.SqlVariant);
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
@@ -384,9 +386,9 @@ internal static partial class BuiltInResources
                         objectId,
                         SqlValue.FromSystemName(col.Name),
                         SqlValue.FromInt32(i + 1),
-                        SqlValue.FromInt64(identity.Seed),
-                        SqlValue.FromInt64(identity.Increment),
-                        identity.Snapshot() is { } last ? SqlValue.FromInt64(last) : nullLast,
+                        IdentityVariant(identity.Seed, col.Type),
+                        IdentityVariant(identity.Increment, col.Type),
+                        identity.Snapshot() is { } last ? IdentityVariant(last, col.Type) : nullLast,
                         SqlValue.FromBoolean(identity.NotForReplication),
                     ];
                 }
@@ -410,8 +412,8 @@ internal static partial class BuiltInResources
                         objectId,
                         SqlValue.FromSystemName(col.Name),
                         SqlValue.FromInt32(i + 1),
-                        SqlValue.FromInt64(identity.Seed),
-                        SqlValue.FromInt64(identity.Increment),
+                        IdentityVariant(identity.Seed, col.Type),
+                        IdentityVariant(identity.Increment, col.Type),
                         nullLast,
                         falseBit,
                     ];
@@ -419,6 +421,17 @@ internal static partial class BuiltInResources
             }
         }
     }
+
+    /// <summary>
+    /// Wraps an identity seed / increment / high-water-mark
+    /// <see cref="long"/> as a sql_variant carrying the identity column's
+    /// declared type as its inner base type — the projection form
+    /// <c>sys.identity_columns</c>'s seed_value / increment_value / last_value
+    /// use (each a sql_variant in real SQL Server). The stored value always
+    /// fits the declared numeric type (enforced at column creation).
+    /// </summary>
+    private static SqlValue IdentityVariant(long value, SqlType columnType) =>
+        SqlValue.FromVariant(SqlValue.FromInt64(value).CoerceTo(columnType));
 
     /// <summary>
     /// Rows for <c>sys.sql_modules</c>: one per programmable module across

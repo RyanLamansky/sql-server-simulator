@@ -318,9 +318,13 @@ public sealed class PropertyFunctionsTests
 
     // === OBJECTPROPERTYEX ===
 
+    /// <summary>
+    /// OBJECTPROPERTYEX projects sql_variant; the boolean Is-X properties
+    /// carry an int inner base type, which SqlClient unwraps to an int.
+    /// </summary>
     [TestMethod]
     public void ObjectPropertyEx_IsTable_OnTable_Returns1()
-        => AreEqual("1", new Simulation().ExecuteScalar(
+        => AreEqual(1, new Simulation().ExecuteScalar(
             "create table t (id int); " +
             "select objectpropertyex(object_id('t'), 'IsTable')"));
 
@@ -346,87 +350,127 @@ public sealed class PropertyFunctionsTests
         AreEqual("P ", sim.ExecuteScalar("select objectpropertyex(object_id('p'), 'BaseType')"));
     }
 
+    /// <summary>
+    /// SchemaId's inner base type is int.
+    /// </summary>
     [TestMethod]
     public void ObjectPropertyEx_SchemaId_Dbo_Returns1()
-        => AreEqual("1", new Simulation().ExecuteScalar(
+        => AreEqual(1, new Simulation().ExecuteScalar(
             "create table t (id int); " +
             "select objectpropertyex(object_id('t'), 'SchemaId')"));
 
+    /// <summary>
+    /// Cardinality's inner base type is bigint, which unwraps to a long.
+    /// </summary>
     [TestMethod]
     public void ObjectPropertyEx_Cardinality_EmptyTable_Returns0()
-        => AreEqual("0", new Simulation().ExecuteScalar(
+        => AreEqual(0L, new Simulation().ExecuteScalar(
             "create table t (id int); " +
             "select objectpropertyex(object_id('t'), 'Cardinality')"));
 
     [TestMethod]
     public void ObjectPropertyEx_Cardinality_ThreeRows_Returns3()
-        => AreEqual("3", new Simulation().ExecuteScalar(
+        => AreEqual(3L, new Simulation().ExecuteScalar(
             "create table t (id int); " +
             "insert t values (1), (2), (3); " +
             "select objectpropertyex(object_id('t'), 'Cardinality')"));
 
     [TestMethod]
     public void ObjectPropertyEx_TableHasIdentity_WithIdentity_Returns1()
-        => AreEqual("1", new Simulation().ExecuteScalar(
+        => AreEqual(1, new Simulation().ExecuteScalar(
             "create table t (id int identity(1,1) primary key); " +
             "select objectpropertyex(object_id('t'), 'TableHasIdentity')"));
 
     [TestMethod]
     public void ObjectPropertyEx_TableHasIdentity_NoIdentity_Returns0()
-        => AreEqual("0", new Simulation().ExecuteScalar(
+        => AreEqual(0, new Simulation().ExecuteScalar(
             "create table t (id int); " +
             "select objectpropertyex(object_id('t'), 'TableHasIdentity')"));
 
     [TestMethod]
     public void ObjectPropertyEx_TableHasPrimaryKey_WithPK_Returns1()
-        => AreEqual("1", new Simulation().ExecuteScalar(
+        => AreEqual(1, new Simulation().ExecuteScalar(
             "create table t (id int primary key); " +
             "select objectpropertyex(object_id('t'), 'TableHasPrimaryKey')"));
 
     [TestMethod]
     public void ObjectPropertyEx_TableHasPrimaryKey_NoPK_Returns0()
-        => AreEqual("0", new Simulation().ExecuteScalar(
+        => AreEqual(0, new Simulation().ExecuteScalar(
             "create table t (id int); " +
             "select objectpropertyex(object_id('t'), 'TableHasPrimaryKey')"));
 
     [TestMethod]
     public void ObjectPropertyEx_TableHasUniqueCnst_WithUnique_Returns1()
-        => AreEqual("1", new Simulation().ExecuteScalar(
+        => AreEqual(1, new Simulation().ExecuteScalar(
             "create table t (id int, name varchar(50), constraint uq unique (name)); " +
             "select objectpropertyex(object_id('t'), 'TableHasUniqueCnst')"));
 
     [TestMethod]
     public void ObjectPropertyEx_TableHasCheckCnst_WithCheck_Returns1()
-        => AreEqual("1", new Simulation().ExecuteScalar(
+        => AreEqual(1, new Simulation().ExecuteScalar(
             "create table t (id int, check (id > 0)); " +
             "select objectpropertyex(object_id('t'), 'TableHasCheckCnst')"));
 
     [TestMethod]
     public void ObjectPropertyEx_TableHasForeignKey_WithFK_Returns1()
-        => AreEqual("1", new Simulation().ExecuteScalar(
+        => AreEqual(1, new Simulation().ExecuteScalar(
             "create table p (id int primary key); " +
             "create table c (id int primary key, p_id int references p(id)); " +
             "select objectpropertyex(object_id('c'), 'TableHasForeignKey')"));
 
     [TestMethod]
     public void ObjectPropertyEx_TableHasForeignRef_WithIncoming_Returns1()
-        => AreEqual("1", new Simulation().ExecuteScalar(
+        => AreEqual(1, new Simulation().ExecuteScalar(
             "create table p (id int primary key); " +
             "create table c (id int primary key, p_id int references p(id)); " +
             "select objectpropertyex(object_id('p'), 'TableHasForeignRef')"));
 
     [TestMethod]
     public void ObjectPropertyEx_TableHasIndex_WithIndex_Returns1()
-        => AreEqual("1", new Simulation().ExecuteScalar(
+        => AreEqual(1, new Simulation().ExecuteScalar(
             "create table t (id int, name varchar(50)); " +
             "create index ix on t(name); " +
             "select objectpropertyex(object_id('t'), 'TableHasIndex')"));
 
     [TestMethod]
     public void ObjectPropertyEx_TableHasRowGuidCol_AlwaysZero()
-        => AreEqual("0", new Simulation().ExecuteScalar(
+        => AreEqual(0, new Simulation().ExecuteScalar(
             "create table t (id int); " +
             "select objectpropertyex(object_id('t'), 'TableHasRowGuidCol')"));
+
+    [TestMethod]
+    public void ObjectPropertyEx_ProjectsSqlVariant()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "create table t (id int); " +
+            "select objectpropertyex(object_id('t'), 'SchemaId')");
+        IsTrue(reader.Read());
+        AreEqual("sql_variant", reader.GetDataTypeName(0));
+    }
+
+    [TestMethod]
+    public void ObjectPropertyEx_BaseType_InnerBaseTypeIsChar()
+        => AreEqual("char", new Simulation().ExecuteScalar(
+            "create table t (id int); " +
+            "select sql_variant_property(objectpropertyex(object_id('t'), 'BaseType'), 'BaseType')"));
+
+    [TestMethod]
+    public void ObjectPropertyEx_SchemaId_InnerBaseTypeIsInt()
+        => AreEqual("int", new Simulation().ExecuteScalar(
+            "create table t (id int); " +
+            "select sql_variant_property(objectpropertyex(object_id('t'), 'SchemaId'), 'BaseType')"));
+
+    [TestMethod]
+    public void ObjectPropertyEx_Cardinality_InnerBaseTypeIsBigInt()
+        => AreEqual("bigint", new Simulation().ExecuteScalar(
+            "create table t (id int); " +
+            "select sql_variant_property(objectpropertyex(object_id('t'), 'Cardinality'), 'BaseType')"));
+
+    [TestMethod]
+    public void ObjectPropertyEx_TableHasIdentity_InnerBaseTypeIsInt()
+        => AreEqual("int", new Simulation().ExecuteScalar(
+            "create table t (id int identity(1,1)); " +
+            "select sql_variant_property(objectpropertyex(object_id('t'), 'TableHasIdentity'), 'BaseType')"));
 
     [TestMethod]
     public void ObjectPropertyEx_UnknownProperty_ReturnsNull()

@@ -4,19 +4,16 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// SQL <c>DATABASEPROPERTYEX(database_name, property_name)</c>: returns
-/// the named property of a database. Real SQL Server projects this as
-/// <c>sql_variant</c> carrying a per-property inner base type; the
-/// simulator doesn't model sql_variant here, so it surfaces the bare true
-/// type instead — numeric properties as <see cref="SqlType.Int32"/> /
-/// <see cref="SqlType.TinyInt"/>, string properties as
-/// <see cref="SqlType.NVarchar"/>. When the property-name argument is a
-/// compile-time constant the true type flows to the projection schema;
-/// when it isn't, the type falls back to <see cref="SqlType.NVarchar"/>
-/// and the runtime value is coerced to match (the static/runtime parity
-/// contract; only the property name drives the type — the database-name
-/// argument may be non-constant). NULL database / NULL property → NULL
-/// result; unknown database → NULL; unknown property → NULL (matches real
-/// SQL Server, probe-confirmed 2026-05-16).
+/// the named property of a database. Like real SQL Server, the result is
+/// always <c>sql_variant</c> (<see cref="SqlType.SqlVariant"/>); each
+/// property carries its probed inner base type — numeric properties as
+/// <see cref="SqlType.Int32"/> / <see cref="SqlType.TinyInt"/>, string
+/// properties as <see cref="SqlType.NVarchar"/>, <c>LastGoodCheckDbTime</c>
+/// as <see cref="SqlType.DateTime"/> — so the projection reports
+/// <c>sql_variant</c> and each cell surfaces its inner type. NULL database /
+/// NULL property → NULL <c>sql_variant</c>; unknown database → NULL;
+/// unknown property → NULL (matches real SQL Server, probe-confirmed
+/// 2026-05-16).
 /// </summary>
 /// <remarks>
 /// Closed accept-list of recognized property names mirrors what BACPAC
@@ -25,10 +22,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <c>SnapshotIsolationState</c>, <c>IsReadCommittedSnapshotOn</c>,
 /// <c>ComparisonStyle</c>, <c>LCID</c>, <c>SQLSortOrder</c>, <c>Version</c>.
 /// Properties not on the list return NULL (forward-compatible with future
-/// tooling that may query newer property names). <see cref="Produce"/> and
-/// <see cref="TypeOf"/> carry mirrored arm lists — every property appears in
-/// both, with <see cref="TypeOf"/> declaring the type the matching
-/// <see cref="Produce"/> arm's non-NULL value carries.
+/// tooling that may query newer property names). <see cref="Produce"/>
+/// resolves a property to its inner value; a NULL result (a null-valued
+/// property, or an unrecognized name via the default arm) becomes the NULL
+/// <c>sql_variant</c> in <see cref="Run"/>.
 /// </remarks>
 internal sealed class DatabasePropertyEx : Expression
 {
@@ -50,7 +47,7 @@ internal sealed class DatabasePropertyEx : Expression
         var dbNameValue = this.dbNameArg.Run(runtime);
         var propertyValue = this.propertyArg.Run(runtime);
         if (dbNameValue.IsNull || propertyValue.IsNull)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(SqlType.SqlVariant);
 
         var dbName = dbNameValue.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;
         var property = propertyValue.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;
@@ -58,25 +55,20 @@ internal sealed class DatabasePropertyEx : Expression
         // The simulator's database dictionary is keyed by name; only the
         // currently-attached databases resolve.
         if (!runtime.Batch.Connection.Simulation.Databases.TryGetValue(dbName, out var db))
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(SqlType.SqlVariant);
 
         var value = Produce(property, db);
-        // A non-constant property name couldn't resolve a true type at parse
-        // time (GetSqlType fell back to NVarchar); coerce so runtime agrees.
-        return this.propertyArg is Value ? value : value.CoerceTo(SqlType.NVarchar);
+        return value.IsNull ? SqlValue.Null(SqlType.SqlVariant) : SqlValue.FromVariant(value);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
-        => this.propertyArg is Value { Constant: { IsNull: false } constant }
-            ? TypeOf(constant.CoerceTo(SqlType.NVarchar).AsString)
-            : SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
 
     private static SqlValue Produce(string property, Database db)
     {
         // Longer than any recognized property name; also bounds the stackalloc
         // against an adversarially long argument.
         if (property.Length > 32)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(SqlType.SqlVariant);
         Span<char> upper = stackalloc char[property.Length];
         _ = property.AsSpan().ToUpperInvariant(upper);
         return upper switch
@@ -86,10 +78,11 @@ internal sealed class DatabasePropertyEx : Expression
             "ISAUTOCLOSE" => SqlValue.FromInt32(0),
             "ISAUTOSHRINK" => SqlValue.FromInt32(0),
             "ISREADCOMMITTEDSNAPSHOTON" => SqlValue.FromInt32(db.ReadCommittedSnapshot ? 1 : 0),
-            // DBCC CHECKDB isn't modeled, so the last-good-checkdb time is
-            // NULL — typed datetime (not the unknown-property NVarchar) so
-            // SMO's CAST(ISNULL(..., 0) AS datetime) resolves to 1900-01-01
-            // rather than failing to convert the string '0' to datetime.
+            // DBCC CHECKDB isn't modeled, so the last-good-checkdb time is a
+            // NULL sql_variant. SMO's CAST(ISNULL(..., 0) AS datetime) resolves
+            // to 1900-01-01: ISNULL over the NULL variant fixes to sql_variant
+            // wrapping the int 0, which CASTs to the datetime epoch (matching
+            // real, probe-confirmed 2026-07-19).
             "LASTGOODCHECKDBTIME" => SqlValue.Null(SqlType.DateTime),
             "LCID" => SqlValue.FromInt32(1033),
             "RECOVERY" => SqlValue.FromNVarchar("FULL"),
@@ -102,35 +95,7 @@ internal sealed class DatabasePropertyEx : Expression
             "UPDATEABILITY" => SqlValue.FromNVarchar("READ_WRITE"),
             "USERACCESS" => SqlValue.FromNVarchar("MULTI_USER"),
             "VERSION" => SqlValue.FromInt32(0),
-            _ => SqlValue.Null(SqlType.NVarchar),
-        };
-    }
-
-    private static SqlType TypeOf(string property)
-    {
-        // Same bound as Produce so a long name types as the unknown-property
-        // NVarchar it evaluates to.
-        if (property.Length > 32)
-            return SqlType.NVarchar;
-        Span<char> upper = stackalloc char[property.Length];
-        _ = property.AsSpan().ToUpperInvariant(upper);
-        return upper switch
-        {
-            "COLLATION" => SqlType.NVarchar,
-            "COMPARISONSTYLE" => SqlType.Int32,
-            "ISAUTOCLOSE" => SqlType.Int32,
-            "ISAUTOSHRINK" => SqlType.Int32,
-            "ISREADCOMMITTEDSNAPSHOTON" => SqlType.Int32,
-            "LASTGOODCHECKDBTIME" => SqlType.DateTime,
-            "LCID" => SqlType.Int32,
-            "RECOVERY" => SqlType.NVarchar,
-            "SNAPSHOTISOLATIONSTATE" => SqlType.Int32,
-            "SQLSORTORDER" => SqlType.TinyInt,
-            "STATUS" => SqlType.NVarchar,
-            "UPDATEABILITY" => SqlType.NVarchar,
-            "USERACCESS" => SqlType.NVarchar,
-            "VERSION" => SqlType.Int32,
-            _ => SqlType.NVarchar,
+            _ => SqlValue.Null(SqlType.SqlVariant),
         };
     }
 

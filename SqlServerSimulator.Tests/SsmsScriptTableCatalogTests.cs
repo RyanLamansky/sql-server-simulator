@@ -81,8 +81,11 @@ public sealed class SsmsScriptTableCatalogTests
             "select name, seed_value, increment_value, cast(is_not_for_replication as int) from sys.identity_columns where object_id = object_id('t')");
         IsTrue(reader.Read());
         AreEqual("id", reader.GetString(0));
-        AreEqual(5L, reader.GetInt64(1));
-        AreEqual(3L, reader.GetInt64(2));
+        // seed_value / increment_value are sql_variant carrying the identity
+        // column's declared type (int here); SqlClient surfaces the inner int.
+        AreEqual("sql_variant", reader.GetDataTypeName(1));
+        AreEqual(5, reader.GetValue(1));
+        AreEqual(3, reader.GetValue(2));
         AreEqual(0, reader.GetInt32(3));
         IsFalse(reader.Read());
     }
@@ -92,6 +95,27 @@ public sealed class SsmsScriptTableCatalogTests
         => AreEqual(1, new Simulation().ExecuteScalar<int>("""
             create table t (id int identity(1, 1) not null primary key);
             select case when last_value is null then 1 else 0 end from sys.identity_columns where object_id = object_id('t')
+            """));
+
+    // Decimal identity columns aren't modeled (Msg 2749), so only the integer
+    // family is exercised here.
+    [TestMethod]
+    [DataRow("bigint", "bigint")]
+    [DataRow("int", "int")]
+    [DataRow("smallint", "smallint")]
+    [DataRow("tinyint", "tinyint")]
+    public void IdentityColumns_SeedValue_InnerBaseTypeMatchesColumnType(string declared, string expectedBaseType)
+        => AreEqual(expectedBaseType, new Simulation().ExecuteScalar($"""
+            create table t (id {declared} identity(5, 3) not null primary key);
+            select sql_variant_property(seed_value, 'BaseType') from sys.identity_columns where object_id = object_id('t')
+            """));
+
+    [TestMethod]
+    public void IdentityColumns_LastValue_InnerBaseTypeIsColumnType_AfterInsert()
+        => AreEqual("bigint", new Simulation().ExecuteScalar("""
+            create table t (id bigint identity(1, 1) not null primary key, x int);
+            insert t (x) values (1);
+            select sql_variant_property(last_value, 'BaseType') from sys.identity_columns where object_id = object_id('t')
             """));
 
     // === sys.trigger_events ===

@@ -458,9 +458,10 @@ internal static partial class BuiltInResources
         // (every table reads as a single unpartitioned partition — see
         // sys.data_spaces / sys.partitions), so all three ship empty with the
         // full probe-confirmed shape (SQL Server 2025). partition_range_values'
-        // value column is sql_variant on real SQL Server; substituted here as
-        // nvarchar since the view is always empty (the same sql_variant→nvarchar
-        // substitution sys.asymmetric_keys uses). See docs/claude/catalog-views.md.
+        // value column is a first-class sql_variant matching real SQL Server —
+        // the view is always empty, so only the column type carries (a boundary
+        // value's inner base type would be the partition function's parameter
+        // type). See docs/claude/catalog-views.md.
         Sys("partition_functions",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -488,7 +489,7 @@ internal static partial class BuiltInResources
             new("function_id", SqlType.Int32, null, false),
             new("boundary_id", SqlType.Int32, null, false),
             new("parameter_id", SqlType.Int32, null, false),
-            new("value", SqlType.NVarchar, 4000, true),
+            new("value", SqlType.SqlVariant, null, true),
         ], static (_, _) => EmptyCatalogRows);
 
         // sys.partition_parameters / sys.destination_data_spaces: the

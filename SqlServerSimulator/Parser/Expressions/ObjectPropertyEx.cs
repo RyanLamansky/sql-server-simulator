@@ -11,11 +11,12 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Real SQL Server projects this as <c>sql_variant</c>; the simulator
-/// returns <see cref="SqlType.NVarchar"/> throughout, matching the
-/// <see cref="ServerProperty"/> convention. Integer-valued properties
-/// surface as their decimal string form (SqlClient transparently casts
-/// back through implicit conversion).
+/// Like real SQL Server, the result is always <c>sql_variant</c>
+/// (<see cref="SqlType.SqlVariant"/>); each property carries its probed inner
+/// base type — <c>BaseType</c> as <c>char(2)</c>, <c>Cardinality</c> as
+/// <see cref="SqlType.BigInt"/>, and every other shipped property
+/// (<c>SchemaId</c>, the <c>Is*</c> booleans, the <c>TableHas*</c> flags) as
+/// <see cref="SqlType.Int32"/>.
 /// </para>
 /// <para>
 /// Shipped properties (all probe-confirmed against SQL Server 2025):
@@ -56,16 +57,17 @@ internal sealed class ObjectPropertyEx : Expression
         var idValue = this.idArg.Run(runtime);
         var propValue = this.propertyArg.Run(runtime);
         if (idValue.IsNull || propValue.IsNull)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(SqlType.SqlVariant);
         var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
 
         var obj = ObjectProperty.FindObject(runtime.Batch.CurrentDatabase, id);
-        // Boolean Is-X props share OBJECTPROPERTY's dispatch verbatim.
+        // Boolean Is-X props share OBJECTPROPERTY's dispatch verbatim; real
+        // carries them as an int inner base type inside the sql_variant.
         return obj is null
-            ? SqlValue.Null(SqlType.NVarchar)
+            ? SqlValue.Null(SqlType.SqlVariant)
             : ObjectProperty.EvaluateProperty(obj, prop) is int booleanResult
-                ? SqlValue.FromNVarchar(booleanResult.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                ? SqlValue.FromVariant(SqlValue.FromInt32(booleanResult))
                 : EvaluateExtendedProperty(obj, prop, runtime.Batch.CurrentDatabase);
     }
 
@@ -78,31 +80,35 @@ internal sealed class ObjectPropertyEx : Expression
         {
             8 => upper[..len] switch
             {
-                "BASETYPE" => SqlValue.FromNVarchar(BaseTypeFor(obj)),
-                "SCHEMAID" => IntValue(ObjectProperty.FindOwningSchema(database, obj)?.SchemaId),
-                _ => SqlValue.Null(SqlType.NVarchar),
+                // BaseType's inner type is char(2) in the database collation
+                // (probe-confirmed) — the 2-char object-type code with its
+                // trailing-space padding.
+                "BASETYPE" => SqlValue.FromVariant(SqlValue.FromChar(CharSqlType.Get(2, database.Collation, Coercibility.Implicit), BaseTypeFor(obj))),
+                "SCHEMAID" => IntVariant(ObjectProperty.FindOwningSchema(database, obj)?.SchemaId),
+                _ => SqlValue.Null(SqlType.SqlVariant),
             },
             11 => upper[..len] switch
             {
+                // Cardinality's inner type is bigint (probe-confirmed).
                 "CARDINALITY" => obj is HeapTable table
-                    ? SqlValue.FromNVarchar(table.Heap.RowCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                    : SqlValue.Null(SqlType.NVarchar),
-                _ => SqlValue.Null(SqlType.NVarchar),
+                    ? SqlValue.FromVariant(SqlValue.FromInt64(table.Heap.RowCount))
+                    : SqlValue.Null(SqlType.SqlVariant),
+                _ => SqlValue.Null(SqlType.SqlVariant),
             },
             13 => upper[..len] switch
             {
                 "TABLEHASINDEX" => TableFlag(obj, HasAnyIndex),
-                _ => SqlValue.Null(SqlType.NVarchar),
+                _ => SqlValue.Null(SqlType.SqlVariant),
             },
             16 => upper[..len] switch
             {
                 "TABLEHASIDENTITY" => TableFlag(obj, HasIdentity),
-                _ => SqlValue.Null(SqlType.NVarchar),
+                _ => SqlValue.Null(SqlType.SqlVariant),
             },
             17 => upper[..len] switch
             {
                 "TABLEHASCHECKCNST" => TableFlag(obj, HasCheckConstraint),
-                _ => SqlValue.Null(SqlType.NVarchar),
+                _ => SqlValue.Null(SqlType.SqlVariant),
             },
             18 => upper[..len] switch
             {
@@ -112,20 +118,20 @@ internal sealed class ObjectPropertyEx : Expression
                 "TABLEHASPRIMARYKEY" => TableFlag(obj, HasPrimaryKey),
                 "TABLEHASROWGUIDCOL" => TableFlag(obj, AlwaysFalse),
                 "TABLEHASUNIQUECNST" => TableFlag(obj, HasUniqueConstraint),
-                _ => SqlValue.Null(SqlType.NVarchar),
+                _ => SqlValue.Null(SqlType.SqlVariant),
             },
-            _ => SqlValue.Null(SqlType.NVarchar),
+            _ => SqlValue.Null(SqlType.SqlVariant),
         };
     }
 
-    private static SqlValue IntValue(int? value) => value is int v
-        ? SqlValue.FromNVarchar(v.ToString(System.Globalization.CultureInfo.InvariantCulture))
-        : SqlValue.Null(SqlType.NVarchar);
+    private static SqlValue IntVariant(int? value) => value is int v
+        ? SqlValue.FromVariant(SqlValue.FromInt32(v))
+        : SqlValue.Null(SqlType.SqlVariant);
 
     private static SqlValue TableFlag(SchemaObject obj, Func<HeapTable, bool> predicate) =>
         obj is HeapTable table
-            ? SqlValue.FromNVarchar(predicate(table) ? "1" : "0")
-            : SqlValue.Null(SqlType.NVarchar);
+            ? SqlValue.FromVariant(SqlValue.FromInt32(predicate(table) ? 1 : 0))
+            : SqlValue.Null(SqlType.SqlVariant);
 
     private static bool HasAnyIndex(HeapTable table) => table.Indexes.Count > 0 || table.KeyConstraints.Count > 0;
 
@@ -193,7 +199,7 @@ internal sealed class ObjectPropertyEx : Expression
         _ => string.Empty,
     };
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
 
     internal override string DebugDisplay() =>
         $"OBJECTPROPERTYEX({this.idArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";

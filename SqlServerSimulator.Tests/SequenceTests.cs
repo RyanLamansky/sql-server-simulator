@@ -331,11 +331,15 @@ public sealed class SequenceTests
             """).ExecuteReader();
         IsTrue(reader.Read());
         AreEqual("sysview1", reader.GetString(0));
-        AreEqual(100L, reader.GetInt64(1));
-        AreEqual(5L, reader.GetInt64(2));
+        // start_value / increment / current_value are sql_variant carrying the
+        // sequence's declared type (int here); SqlClient surfaces the inner int
+        // via GetValue.
+        AreEqual("sql_variant", reader.GetDataTypeName(1));
+        AreEqual(100, reader.GetValue(1));
+        AreEqual(5, reader.GetValue(2));
         IsTrue(reader.GetBoolean(3));
         IsFalse(reader.GetBoolean(4));
-        AreEqual(100L, reader.GetInt64(5));
+        AreEqual(100, reader.GetValue(5));
     }
 
     [TestMethod]
@@ -346,9 +350,31 @@ public sealed class SequenceTests
         _ = simulation.ExecuteScalar("select next value for sysview2");
         _ = simulation.ExecuteScalar("select next value for sysview2");
         // After two advances starting from 1 with increment 1, current_value
-        // is the next value to emit: 3.
-        AreEqual(3L, simulation.ExecuteScalar<long>("select current_value from sys.sequences where name = 'sysview2'"));
+        // is the next value to emit: 3 (int inner base type for an int sequence).
+        AreEqual(3, simulation.ExecuteScalar<int>("select current_value from sys.sequences where name = 'sysview2'"));
     }
+
+    // A decimal sequence's inner type reports BaseType 'numeric' — the
+    // simulator's single decimal family surfaces as numeric (documented quirk),
+    // diverging from real's 'decimal' for a decimal-declared sequence.
+    [TestMethod]
+    [DataRow("bigint", "bigint")]
+    [DataRow("int", "int")]
+    [DataRow("smallint", "smallint")]
+    [DataRow("tinyint", "tinyint")]
+    [DataRow("decimal(18,0)", "numeric")]
+    public void SysSequences_StartValue_InnerBaseTypeMatchesDeclaredType(string declared, string expectedBaseType)
+        => AreEqual(expectedBaseType, new Simulation().ExecuteScalar($"""
+            create sequence sv_bt as {declared} start with 5;
+            select sql_variant_property(start_value, 'BaseType') from sys.sequences where name = 'sv_bt'
+            """));
+
+    [TestMethod]
+    public void SysSequences_BigIntSequence_StartValueUnwrapsToLong()
+        => AreEqual(5000000000L, new Simulation().ExecuteScalar("""
+            create sequence sv_big as bigint start with 5000000000;
+            select start_value from sys.sequences where name = 'sv_big'
+            """));
 
     /// <summary>
     /// last_used_value is NULL until the first NEXT VALUE FOR (probe-confirmed:

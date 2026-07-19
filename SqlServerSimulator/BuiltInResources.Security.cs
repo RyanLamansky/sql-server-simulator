@@ -247,8 +247,9 @@ internal static partial class BuiltInResources
         // sys.credentials ON credential_id (also reached as
         // master.sys.certificates / master.sys.asymmetric_keys). Without the
         // views those bag queries fail Msg 208 and every Login / User property
-        // errors. cryptographic_provider_algid is sql_variant in real SQL
-        // Server; surfaced here as nvarchar since the view is always empty.
+        // errors. cryptographic_provider_algid is a first-class sql_variant
+        // matching real SQL Server (the view is always empty, so only the
+        // column type carries).
         Sys("asymmetric_keys",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -266,7 +267,7 @@ internal static partial class BuiltInResources
             new("attested_by", SqlType.NVarchar, 260, true),
             new("provider_type", SqlType.NVarchar, 120, true),
             new("cryptographic_provider_guid", SqlType.UniqueIdentifier, null, true),
-            new("cryptographic_provider_algid", SqlType.NVarchar, 4000, true),
+            new("cryptographic_provider_algid", SqlType.SqlVariant, null, true),
         ], static (_, _) => EmptyCatalogRows);
 
         Sys("certificates",
@@ -310,9 +311,10 @@ internal static partial class BuiltInResources
         // shared EmptyCatalogRows — DacFx's bacpac-export reverse-engineering
         // references them (e.g. sys.symmetric_keys LEFT JOIN
         // sys.cryptographic_providers) and must resolve to an empty result,
-        // not Msg 208. sql_variant columns (key_thumbprint /
-        // cryptographic_provider_algid) are substituted as nvarchar since the
-        // views are always empty, matching sys.asymmetric_keys. server_audits /
+        // not Msg 208. The sql_variant columns (key_thumbprint /
+        // cryptographic_provider_algid) are first-class sql_variant matching
+        // real SQL Server; the views are always empty, so only the column type
+        // carries. server_audits /
         // server_file_audits / cryptographic_providers are server-scoped (the
         // row generator ignores the database). See docs/claude/catalog-views.md.
         var charFour = CharSqlType.Get(4, Collation.Catalog, Coercibility.Implicit);
@@ -327,10 +329,10 @@ internal static partial class BuiltInResources
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("key_guid", SqlType.UniqueIdentifier, null, true),
-            new("key_thumbprint", SqlType.NVarchar, 4000, true),
+            new("key_thumbprint", SqlType.SqlVariant, null, true),
             new("provider_type", nvarchar60Catalog, 60, true),
             new("cryptographic_provider_guid", SqlType.UniqueIdentifier, null, true),
-            new("cryptographic_provider_algid", SqlType.NVarchar, 4000, true),
+            new("cryptographic_provider_algid", SqlType.SqlVariant, null, true),
         ], static (_, _) => EmptyCatalogRows);
         Sys("cryptographic_providers",
         [

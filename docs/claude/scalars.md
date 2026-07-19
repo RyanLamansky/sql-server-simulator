@@ -257,7 +257,7 @@ An **unknown property**, an **unknown file name**, a **NULL file name**, or a **
 
 ### `sql_variant` expression semantics
 
-`SERVERPROPERTY` / `SESSIONPROPERTY` / `CONNECTIONPROPERTY` / `COLLATIONPROPERTY` / `LOGINPROPERTY` / `SESSION_CONTEXT` / `SQL_VARIANT_PROPERTY` all now project true `sql_variant` (`SqlType.SqlVariant`), so the flows they realistically feed match real (probe-confirmed against SQL Server 2025):
+`SERVERPROPERTY` / `SESSIONPROPERTY` / `CONNECTIONPROPERTY` / `COLLATIONPROPERTY` / `LOGINPROPERTY` / `SESSION_CONTEXT` / `SQL_VARIANT_PROPERTY` / `DATABASEPROPERTYEX` / `OBJECTPROPERTYEX` all project true `sql_variant` (`SqlType.SqlVariant`), so the flows they realistically feed match real (probe-confirmed against SQL Server 2025):
 
 - **ExecuteScalar / GetValue** surface the inner CLR object (a bare `int` for `SERVERPROPERTY('EngineEdition')`, `string` for `Edition`), so most existing value assertions are unchanged; `GetDataTypeName` reports `sql_variant` and `GetFieldType` is `object`.
 - **`ISNULL` / `COALESCE` / `CASE`** keep the `sql_variant` result type (variant has highest data-type precedence in `SqlType.Promote`) and preserve each value's inner type — `ISNULL(SESSIONPROPERTY('ANSI_NULLS'), 0)` stays `sql_variant`.

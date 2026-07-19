@@ -114,10 +114,10 @@ internal static partial class BuiltInResources
             new("is_cursor_ref", SqlType.Bit, null, false),
             new("has_default_value", SqlType.Bit, null, false),
             new("is_xml_document", SqlType.Bit, null, false),
-            // default_value is sql_variant in real SQL Server; surfaced here as
-            // nvarchar (always NULL — the simulator doesn't track parameter
-            // default values).
-            new("default_value", SqlType.NVarchar, 4000, true),
+            // default_value is a first-class sql_variant matching real SQL
+            // Server; always a NULL sql_variant here (the simulator doesn't
+            // track parameter default values).
+            new("default_value", SqlType.SqlVariant, null, true),
             new("xml_collection_id", SqlType.Int32, null, false),
             new("is_readonly", SqlType.Bit, null, false),
             new("is_nullable", SqlType.Bit, null, false),
@@ -371,11 +371,11 @@ internal static partial class BuiltInResources
         // system_type_id / user_type_id / is_exhausted. cache_size is NULL
         // when no explicit CACHE n was given (real SQL Server behavior;
         // the simulator never tracks an explicit value so this is always
-        // NULL). Values widen to decimal(38, 0) to match SQL Server's
-        // sql_variant-typed columns in real sys.sequences, but the simulator
-        // emits bigint here since all sequence state is tracked as long
-        // (a minor projection-schema divergence; SqlClient surfaces these
-        // as long, which matches what HiLo-style apps assert on).
+        // NULL). start_value / increment / minimum_value / maximum_value /
+        // current_value are first-class sql_variant, each carrying the
+        // sequence's declared scalar type as its inner base type (int → int,
+        // bigint → bigint, decimal(p, s) → decimal — probe-confirmed against
+        // SQL Server 2025).
         Sys("sequences",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -388,14 +388,14 @@ internal static partial class BuiltInResources
             new("principal_id", SqlType.Int32, null, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
-            new("start_value", SqlType.BigInt, null, false),
-            new("increment", SqlType.BigInt, null, false),
-            new("minimum_value", SqlType.BigInt, null, false),
-            new("maximum_value", SqlType.BigInt, null, false),
+            new("start_value", SqlType.SqlVariant, null, false),
+            new("increment", SqlType.SqlVariant, null, false),
+            new("minimum_value", SqlType.SqlVariant, null, false),
+            new("maximum_value", SqlType.SqlVariant, null, false),
             new("is_cycling", SqlType.Bit, null, false),
             new("is_cached", SqlType.Bit, null, false),
             new("cache_size", SqlType.Int32, null, true),
-            new("current_value", SqlType.BigInt, null, false),
+            new("current_value", SqlType.SqlVariant, null, false),
             // last_used_value: sql_variant carrying the last emitted value in
             // the sequence's declared type, NULL until the first NEXT VALUE FOR
             // (and after ALTER … RESTART). DacFx's sequence reverse-engineering
@@ -808,14 +808,14 @@ internal static partial class BuiltInResources
                     nullPrincipal,
                     SqlValue.FromDateTime(seq.CreateDate),
                     SqlValue.FromDateTime(seq.ModifyDate),
-                    SqlValue.FromInt64(seq.StartValue),
-                    SqlValue.FromInt64(seq.Increment),
-                    SqlValue.FromInt64(seq.MinValue),
-                    SqlValue.FromInt64(seq.MaxValue),
+                    seq.AsDeclaredVariant(seq.StartValue),
+                    seq.AsDeclaredVariant(seq.Increment),
+                    seq.AsDeclaredVariant(seq.MinValue),
+                    seq.AsDeclaredVariant(seq.MaxValue),
                     seq.Cycle ? trueBit : falseBit,
                     trueBit,
                     nullCache,
-                    SqlValue.FromInt64(seq.CurrentValue),
+                    seq.AsDeclaredVariant(seq.CurrentValue),
                     seq.LastUsedValueAsVariant,
                     SqlValue.FromByte(systemTypeId),
                     SqlValue.FromInt32(userTypeId),
@@ -957,7 +957,7 @@ internal static partial class BuiltInResources
         var falseBit = SqlValue.FromBoolean(false);
         var zeroByte = SqlValue.FromByte(0);
         var zeroInt = SqlValue.FromInt32(0);
-        var nullDefault = SqlValue.Null(SqlType.NVarchar);
+        var nullDefault = SqlValue.Null(SqlType.SqlVariant);
         var nullVectorDims = SqlValue.Null(SqlType.Int32);
         var nullVectorDesc = SqlValue.Null(SqlType.NVarchar);
         foreach (var schema in database.Schemas.Values)

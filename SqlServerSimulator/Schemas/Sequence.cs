@@ -107,6 +107,15 @@ internal sealed class Sequence(
         : SqlValue.Null(SqlType.SqlVariant);
 
     /// <summary>
+    /// Wraps a <see cref="long"/> as a sql_variant carrying the sequence's
+    /// declared scalar type — the projection form for the
+    /// <c>start_value</c> / <c>increment</c> / <c>minimum_value</c> /
+    /// <c>maximum_value</c> / <c>current_value</c> columns of
+    /// <c>sys.sequences</c>, each a sql_variant in real SQL Server.
+    /// </summary>
+    public SqlValue AsDeclaredVariant(long value) => SqlValue.FromVariant(this.WrapAsDeclaredType(value));
+
+    /// <summary>
     /// Computes and reserves the next value for emission. Caller is
     /// responsible for the per-row cache check before calling — this method
     /// always advances. Raises Msg 11728 when no-cycle and already exhausted.
