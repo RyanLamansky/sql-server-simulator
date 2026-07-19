@@ -1233,25 +1233,27 @@ internal abstract class BooleanExpression
     /// </summary>
     internal static bool? CompareValuesPromoted(SqlValue l, SqlValue r, string operatorName, Func<SqlValue, SqlValue, bool> compare)
     {
-        // Both operands sql_variant: real compares by datatype-family rank
-        // then value within the family (probe-confirmed — bigint 1000 < float
-        // 0.5, variant int 5 = variant bigint 5), which the SqlValue variant
-        // arms implement; apply the operator to the wrapped pair directly.
-        if (l.Type is SqlVariantSqlType && r.Type is SqlVariantSqlType)
-            return l.IsNull || r.IsNull ? null : compare(l, r);
-
-        // One sql_variant operand against a base-typed one: unwrap so the
-        // downstream promote-and-compare runs on the base types (a variant int
-        // vs an int literal, a variant bit vs 0, etc.). A NULL variant stays
-        // wrapped — the NULL short-circuit below folds it to UNKNOWN.
-        // Residual: real converts the base-typed side UP to sql_variant
-        // (highest precedence) and applies the family rules, so a string
-        // variant never matches a numeric literal on real, while the unwrap
-        // path here converts and can match — unprobed, retained.
-        if (l.Type is SqlVariantSqlType && !l.IsNull)
-            l = l.AsVariantInner;
-        if (r.Type is SqlVariantSqlType && !r.IsNull)
-            r = r.AsVariantInner;
+        // Either operand sql_variant: real converts a base-typed side UP to
+        // sql_variant (probe-confirmed as CONVERT_IMPLICIT(sql_variant, …) in
+        // the plan) and compares by datatype-family rank then value within the
+        // family — so a string variant is less than any exact-numeric value
+        // and never equal to it, cross-family comparison is value-blind, and
+        // no comparison error is possible (variant nvarchar 'abc' vs int 5 is
+        // simply 'lt', never Msg 245). The SqlValue variant arms implement
+        // the family rules; wrap the base side and apply the operator to the
+        // pair.
+        if (l.Type is SqlVariantSqlType || r.Type is SqlVariantSqlType)
+        {
+            if (l.IsNull || r.IsNull)
+                return null;
+            if (l.Type.IsLob || r.Type.IsLob)
+                throw SimulatedSqlException.IncompatibleDataTypesInOperator(l.Type, r.Type, operatorName);
+            if (l.Type is not SqlVariantSqlType)
+                l = SqlValue.FromVariant(l);
+            if (r.Type is not SqlVariantSqlType)
+                r = SqlValue.FromVariant(r);
+            return compare(l, r);
+        }
 
         if (l.Type.IsLob || r.Type.IsLob)
             throw SimulatedSqlException.IncompatibleDataTypesInOperator(l.Type, r.Type, operatorName);

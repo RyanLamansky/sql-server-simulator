@@ -238,4 +238,92 @@ public sealed class SqlVariantOrderingTests
                     @b sql_variant = cast('ABC' collate SQL_Latin1_General_CP1_CI_AS as varchar(5));
             select case when @a < @b then 'lt' when @a > @b then 'gt' else 'eq' end
             """));
+
+    // One sql_variant operand against a base-typed one: the base side
+    // converts UP to sql_variant and the family rules apply — the variant
+    // never unwraps into ordinary type-precedence promotion (probe-confirmed
+    // via CONVERT_IMPLICIT(sql_variant, …) in real's plan).
+    [TestMethod]
+    public void OneSideVariant_BaseSideConvertsUp_FamilyRules()
+    {
+        var sim = new Simulation();
+        // Same family: value-compared, equal across base types.
+        AreEqual("eq", sim.ExecuteScalar("""
+            declare @v sql_variant = cast(5 as int);
+            select case when @v = 5 then 'eq' when @v < 5 then 'lt' else 'gt' end
+            """));
+        AreEqual("eq", sim.ExecuteScalar("""
+            declare @v sql_variant = cast(5 as int);
+            select case when @v = cast(5 as bigint) then 'eq' else 'ne' end
+            """));
+        // Cross-family: value-blind — nvarchar '5' converts to a character-
+        // family variant, never to int 5, so it is LESS than int 5 and never
+        // equal.
+        AreEqual("lt", sim.ExecuteScalar("""
+            declare @v sql_variant = cast(N'5' as nvarchar(10));
+            select case when @v = 5 then 'eq' when @v < 5 then 'lt' else 'gt' end
+            """));
+        AreEqual("gt", sim.ExecuteScalar("""
+            declare @v sql_variant = cast(5 as int);
+            select case when @v = N'5' then 'eq' when @v < N'5' then 'lt' else 'gt' end
+            """));
+        // A bare string literal promotes to a character-family variant, so a
+        // datetime variant outranks it; the explicitly-typed side matches.
+        AreEqual("gt", sim.ExecuteScalar("""
+            declare @v sql_variant = cast('2020-01-01' as datetime);
+            select case when @v = '2020-01-01' then 'eq' when @v < '2020-01-01' then 'lt' else 'gt' end
+            """));
+        AreEqual("eq", sim.ExecuteScalar("""
+            declare @v sql_variant = cast('2020-01-01' as datetime);
+            select case when @v = cast('2020-01-01' as datetime) then 'eq' else 'ne' end
+            """));
+    }
+
+    // Probe-confirmed: no comparison error is possible — nvarchar 'abc' vs
+    // int 5 is cleanly 'lt' by family rank, never Msg 245.
+    [TestMethod]
+    public void OneSideVariant_NonConvertibleString_ComparesCleanly()
+        => AreEqual("lt", new Simulation().ExecuteScalar("""
+            declare @v sql_variant = cast(N'abc' as nvarchar(10));
+            select case when @v = 5 then 'eq' when @v < 5 then 'lt' else 'gt' end
+            """));
+
+    // The value-blind exact < approximate rule holds when the float side is
+    // NOT variant: the base float converts up and family rank decides.
+    [TestMethod]
+    public void OneSideVariant_BaseFloat_ValueBlindFamilyRank()
+        => AreEqual("lt", new Simulation().ExecuteScalar("""
+            declare @v sql_variant = cast(1000000 as bigint);
+            select case when @v < cast(0.5 as float) then 'lt' when @v > cast(0.5 as float) then 'gt' else 'eq' end
+            """));
+
+    [TestMethod]
+    public void OneSideVariant_WhereAndJoin_FamilyScopedMatches()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table a (id int, v sql_variant);
+            insert a values (1, cast(5 as int)), (2, cast(N'5' as nvarchar(10))), (3, cast(N'abc' as nvarchar(10)));
+            create table b (i int, s nvarchar(10));
+            insert b values (5, N'5')
+            """);
+        AreEqual(1, sim.ExecuteScalar("select id from a where v = 5"));
+        AreEqual(2, sim.ExecuteScalar("select id from a where v = N'5'"));
+        AreEqual(1, sim.ExecuteScalar("select a.id from a join b on a.v = b.i"));
+        AreEqual(2, sim.ExecuteScalar("select a.id from a join b on a.v = b.s"));
+    }
+
+    [TestMethod]
+    public void OneSideVariant_Null_ThreeValued()
+    {
+        var sim = new Simulation();
+        AreEqual("unknown", sim.ExecuteScalar("""
+            declare @v sql_variant = cast(5 as int);
+            select case when @v = cast(null as int) then 'eq' when @v <> cast(null as int) then 'ne' else 'unknown' end
+            """));
+        AreEqual("unknown", sim.ExecuteScalar("""
+            declare @v sql_variant = null;
+            select case when @v = 5 then 'eq' when @v <> 5 then 'ne' else 'unknown' end
+            """));
+    }
 }

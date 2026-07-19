@@ -421,7 +421,7 @@ These carry real per-session state on `SimulatedDbConnection` (not placeholder c
   A missing key reads as NULL; a NULL key argument to `SESSION_CONTEXT` raises **Msg 8116** (`session_context` lowercase in the wording).
   `sp_set_session_context` with a NULL `@key` raises **Msg 225**; re-setting a key previously stored with `@read_only = 1` raises **Msg 15664**.
   Like real SQL Server, `SESSION_CONTEXT` returns **`sql_variant`** preserving the stored value's base type — an `int` stored round-trips as `int`, an `nvarchar` as `nvarchar`.
-  The common `WHERE int_col = SESSION_CONTEXT(N'key')` shape works by the comparison path unwrapping the variant to its inner value.
+  The common `WHERE int_col = SESSION_CONTEXT(N'key')` shape works by the comparison path converting the column side up to `sql_variant` and matching within the exact-numeric family (the family rules below).
 - **`SESSIONPROPERTY(name)`** (`Parser/Expressions/SessionProperty.cs`) — the current session setting for one of the ANSI / arithmetic SET options: `ANSI_NULLS`, `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `CONCAT_NULL_YIELDS_NULL`, `NUMERIC_ROUNDABORT`, `QUOTED_IDENTIFIER`.
   DacFx's bacpac-export preamble reads `ISNULL(SESSIONPROPERTY('ANSI_NULLS'), 0)` / `ISNULL(SESSIONPROPERTY('QUOTED_IDENTIFIER'), 1)`.
   Like real SQL Server the result is **`sql_variant`** with an inner base type of `int` (each option reads back 1 / 0).
@@ -507,9 +507,9 @@ Probe-confirmed against SQL Server 2025 (2026-07-16):
 - **ExecuteScalar / GetValue** surface the inner CLR object (a bare `int` for `SERVERPROPERTY('EngineEdition')`, `string` for `Edition`), so most existing value assertions are unchanged; `GetDataTypeName` reports `sql_variant` and `GetFieldType` is `object`.
 - **`ISNULL` / `COALESCE` / `CASE`** keep the `sql_variant` result type (variant has highest data-type precedence in `SqlType.Promote`) and preserve each value's inner type — `ISNULL(SESSIONPROPERTY('ANSI_NULLS'), 0)` stays `sql_variant`.
 - **`UNION [ALL]`** keeps each row's own inner base type — no schema unification/promotion (a variant column can be `int` on one row, `nvarchar` on the next).
-- **Comparison** against a non-variant (`WHERE int_col = SESSION_CONTEXT(N'k')`) unwraps the variant to its inner value.
-  **Both-operands-variant comparison** follows the family rules below (probe-confirmed: variant `bigint 1000 < float 0.5`, variant `int 5 = bigint 5`, variant `nvarchar N'x' = varchar 'x'`).
-  Residual: real converts the base-typed side of a mixed pair *up* to `sql_variant` (highest precedence) and applies the family rules — so a string variant never matches a numeric literal on real, while the unwrap path converts and can match; unprobed, retained.
+- **Comparison** with a `sql_variant` on *either* side follows the family rules below — the base-typed side of a mixed pair converts *up* to `sql_variant` (probe-confirmed as `CONVERT_IMPLICIT(sql_variant, …)` in real's plan; the variant never unwraps into ordinary type-precedence promotion).
+  So a string variant is less than any exact-numeric value and never equal to it (`variant nvarchar N'5' < 5`, never `=`), cross-family comparison stays value-blind even when one side is a plain literal or column, and **no comparison error is possible** — `variant nvarchar N'abc'` vs `int 5` is cleanly `<`, never Msg 245 (all probe-confirmed, including WHERE and JOIN forms over mixed-inner-type variant columns).
+  A bare string literal against a `datetime` variant promotes to a *character*-family variant (not to `datetime`), so `variant datetime = '2020-01-01'` is false while `= CAST('2020-01-01' AS datetime)` is true.
 - **`SELECT … INTO`** from a variant-producing built-in creates a `sql_variant` column (probe-confirmed).
 - **Arithmetic** rejects: `variant + non-variant` → **Msg 257** (`Implicit conversion from data type sql_variant to <target> is not allowed. Use the CONVERT function to run this query.`); `variant + variant` and `string + variant` → **Msg 402** (`… incompatible in the add operator`).
   `PromoteForArithmetic` is the single source; a runtime guard in `IntegerArithmetic` routes through it so `Run`-time and projection-schema errors agree.
@@ -519,7 +519,8 @@ Probe-confirmed against SQL Server 2025 (2026-07-16):
   NULL sorts lowest.
   `MIN`/`MAX` pick the family-hierarchy extremes.
   Same-collation character pairs compare under that collation; cross-collation pairs compare by code point **without** a Msg 468 conflict (probed) — the character family hashes by rank alone since no single hash agrees with both regimes.
-  The `SqlValue` variant arms (`CompareTo` / `Equals` / `GetHashCode`) implement the rules, so ORDER BY, GROUP BY, DISTINCT, MIN/MAX, and hash joins all inherit them via `SqlValueKey`.
+  The `SqlValue` variant arms (`CompareTo` / `Equals` / `GetHashCode`) implement the rules, so ORDER BY, GROUP BY, DISTINCT, MIN/MAX, and hash joins all inherit them via `SqlValueKey`; a variant-vs-base equi-join key promotes to `sql_variant` (`Promote` → `CoerceTo` wraps the base side), so the hash fast path keys by the same family semantics.
+  Oracle: `SqlVariantOrderingTests` (in-process; the one-side-variant comparison tests live there too).
 
 ## Built-in TVF: `STRING_SPLIT`
 `STRING_SPLIT(input, separator [, enable_ordinal])` dispatches in `ParseSingleFromSource` alongside `OPENJSON` — case-insensitive name match before generic name resolution.

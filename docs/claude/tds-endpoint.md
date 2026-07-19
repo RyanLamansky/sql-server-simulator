@@ -8,8 +8,14 @@ The listener binds IPv4 loopback plus best-effort IPv6 loopback on the same port
 Oracle: `NetworkListenerTests`.
 
 Connection-string requirements: `TrustServerCertificate=true` (the endpoint presents an ephemeral in-memory self-signed cert generated per listener) and credentials per the enforcement rule below (any credentials when no logins exist).
-`Encrypt=Strict` (TDS 8.0) is not supported; default/`Mandatory`/`Optional` all negotiate to full encryption via `ENCRYPT_REQ`.
+Default/`Mandatory`/`Optional` all negotiate to full encryption via `ENCRYPT_REQ`.
 A client that cannot do TLS at all (`ENCRYPT_NOT_SUP`) is disconnected after the prelogin response — there is no plaintext mode.
+
+**`Encrypt=Strict` (TDS 8.0) ships**: the client opens with a bare TLS ClientHello negotiating ALPN `tds/8.0`, and every TDS packet — prelogin included — flows inside the TLS channel; the session routes on the first wire byte (TLS handshake record `0x16` vs cleartext PRELOGIN `0x12`).
+SqlClient **ignores `TrustServerCertificate` in strict mode** and always validates the certificate (chain + hostname), so a strict client must pin instead: export `SimulatedNetworkListener.ServerCertificate` (the presented certificate, public part only) to a file and reference it with the connection string's `ServerCertificate` keyword (empirically confirmed against SqlClient 7.0.2 — `TrustServerCertificate=True` alone fails strict with `UntrustedRoot` + hostname mismatch).
+The strict TLS handshake is not version-pinned (TLS 1.3 negotiates; raw records make NewSessionTicket harmless), and LOGINACK echoes TDS version `0x08000000` when LOGIN7 requested it.
+MARS and `SqlBulkCopy` ride the strict channel unchanged.
+Oracle: `StrictEncryptionTests`.
 
 ## Credential enforcement
 
@@ -30,14 +36,15 @@ Login DDL details in [`permissions.md`](permissions.md).
 ## Architecture
 
 Everything lives in `Network/` (internal) except the public `SimulatedNetworkListener` (root) and `Simulation.Listen.cs` (the `ListenLocalAsync` / `ListenNetworkAsync` partial).
-One task per accepted socket runs `TdsSession.RunAsync`: prelogin → TLS handshake → LOGIN7 → batch loop.
+One task per accepted socket runs `TdsSession.RunAsync`: prelogin → TLS handshake → LOGIN7 → batch loop (TDS 7.x), or TLS handshake → prelogin → LOGIN7 → batch loop (TDS 8.0 strict, routed by the peeked first byte).
 The session maps 1:1 onto a `SimulatedDbConnection`; execution flows through `Simulation.CreateResultSetsForCommand`, which yields both result sets and per-statement `RecordsAffected` — the TDS layer is a pure translator and touches no engine code.
 
 - `TdsPacketTransport` — packet framing both directions: reassembles inbound packet sequences into `TdsMessage` (EOM-terminated), stamps outbound headers (type 0x04, SPID truncated to 16 bits, incrementing packet id).
   The stream it rides is swapped from the raw `NetworkStream` to the `SslStream` after the handshake.
 - `TlsHandshakeFramingStream` — the TDS 7.x TLS seam: handshake records travel wrapped in PRELOGIN-type packets, so this shim strips/adds packet headers under `SslStream` during `AuthenticateAsServerAsync`, then flips to transparent passthrough.
-  **TLS is pinned to 1.2**: a TLS 1.3 server emits NewSessionTicket records at handshake completion, which would still be prelogin-wrapped after the client switched to reading raw records ("cannot determine frame size" on the client).
+  **TLS is pinned to 1.2 on this path**: a TLS 1.3 server emits NewSessionTicket records at handshake completion, which would still be prelogin-wrapped after the client switched to reading raw records ("cannot determine frame size" on the client).
   Matches SqlClient/real-server behavior for pre-TDS-8 encryption.
+  The TDS 8.0 strict path needs no shim (the `SslStream` sits directly on the socket, records flow raw) and no version pin.
 - `Login7Request` — parses TDS version, packet size (accepted when 512–32767 and acked via ENVCHANGE type 4), hostname/username/password (de-obfuscated)/appname/database.
   An **empty** requested database maps to the default (user) database; **any non-empty name — including `master` — resolves genuinely through `ChangeDatabase`** (master is a real seeded database now, so `Database=master` lands in master rather than being aliased to the default).
   A `ChangeDatabase` failure becomes the probe-confirmed login pair — Msg 4060 severity 11 (`Cannot open database "x" requested by the login. The login failed.`, double-quoted name) then Msg 18456 severity 14 — before the connection closes.
@@ -385,7 +392,7 @@ A real build number is load-bearing for SSMS's per-build client feature gates (A
 ## Divergences / deferred
 
 - Login INFO states are approximations.
-- MARS ships (see [MARS](#mars-multiple-active-result-sets) below); no TDS 8.0 / `Encrypt=Strict`, no plaintext sessions, no integrated auth (an SSPI/FedAuth login presents an empty SQL username, which under a non-empty registry fails as Msg 18456 rather than negotiating).
+- MARS and TDS 8.0 / `Encrypt=Strict` ship (see [MARS](#mars-multiple-active-result-sets) below and the strict paragraph up top); no plaintext sessions, no integrated auth (an SSPI/FedAuth login presents an empty SQL username, which under a non-empty registry fails as Msg 18456 rather than negotiating).
 - Credential-enforcement edges not modeled: `ALTER LOGIN … DISABLE` parses but doesn't block login; password policy (`CHECK_POLICY` / expiration / lockout) never enforced; no login auditing.
 - RPC parameters are gap-free in both directions: every input TYPE_INFO is accepted — TVP / UDT / `sql_variant` / `text` / `ntext` / `image` — every client value-stream column type (bulk / TVP) decodes through the shared `TdsWireValue` / `TdsColumnDecoder`, and output-direction UDT / `sql_variant` parameters write back as RETURNVALUE tokens (see [CLR-UDT / sql_variant parameters](#clr-udt--sql_variant-parameters)).
   Non-cursor well-known ProcIDs beyond the sp_execute/sp_prepare family are rejected with ERROR 50000 naming the id.

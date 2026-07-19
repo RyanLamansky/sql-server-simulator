@@ -15,6 +15,9 @@ namespace SqlServerSimulator.Network;
 /// </summary>
 internal sealed partial class TdsSession(Simulation simulation, Socket socket, X509Certificate2 certificate) : IDisposable, ISmpHost
 {
+    /// <summary>The ALPN protocol name a TDS 8.0 strict-encryption client negotiates.</summary>
+    private static readonly SslApplicationProtocol Tds8AlpnProtocol = new("tds/8.0");
+
     private readonly Queue<SimulatedError> pendingInfoMessages = new();
     private SimulatedDbConnection? connection;
 
@@ -58,6 +61,30 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         TdsTokenWriter? writer = null;
         try
         {
+            // TDS 8.0 (Encrypt=Strict) opens with a bare TLS ClientHello
+            // negotiating ALPN "tds/8.0", and every TDS packet — prelogin
+            // included — then flows inside the TLS channel. TDS 7.x opens
+            // with a cleartext PRELOGIN packet and wraps the TLS handshake
+            // in prelogin packets afterward. The first byte on the wire
+            // routes between them.
+            var peek = new byte[1];
+            if (await socket.ReceiveAsync(peek, SocketFlags.Peek, cancellationToken).ConfigureAwait(false) == 0)
+                return;
+
+            var strictEncryption = peek[0] == Tds.TlsRecordHandshake;
+            if (strictEncryption)
+            {
+                var strictSsl = new SslStream(transportStream, leaveInnerStreamOpen: false);
+                transportStream = strictSsl;
+                await strictSsl.AuthenticateAsServerAsync(
+                    new SslServerAuthenticationOptions
+                    {
+                        ServerCertificate = certificate,
+                        ApplicationProtocols = [Tds8AlpnProtocol],
+                    },
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             var transport = new TdsPacketTransport(transportStream);
 
             var prelogin = await transport.ReadMessageAsync(cancellationToken).ConfigureAwait(false);
@@ -68,29 +95,32 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             var fedAuthRequested = ParsePreloginHasOption(prelogin.Payload, Tds.PreloginFedAuthRequired);
             var marsRequested = ParsePreloginMars(prelogin.Payload);
             await transport.WritePacketAsync(Tds.PacketTabularResult, BuildPreloginResponse(fedAuthRequested, marsRequested), endOfMessage: true, cancellationToken).ConfigureAwait(false);
-            if (clientEncryption == Tds.EncryptNotSupported)
-                return;
+            if (!strictEncryption)
+            {
+                if (clientEncryption == Tds.EncryptNotSupported)
+                    return;
 
-            var framing = new TlsHandshakeFramingStream(transportStream);
-            var ssl = new SslStream(framing, leaveInnerStreamOpen: false);
-            transportStream = ssl;
-            // TLS 1.2 ceiling, matching SqlClient and real SQL Server for
-            // prelogin-wrapped encryption: a TLS 1.3 server emits session
-            // tickets at handshake completion, which would still be wrapped
-            // in prelogin packets after the client has switched to reading
-            // raw records. TDS 8.0 is the protocol's TLS 1.3 path.
+                var framing = new TlsHandshakeFramingStream(transportStream);
+                var ssl = new SslStream(framing, leaveInnerStreamOpen: false);
+                transportStream = ssl;
+                // TLS 1.2 ceiling, matching SqlClient and real SQL Server for
+                // prelogin-wrapped encryption: a TLS 1.3 server emits session
+                // tickets at handshake completion, which would still be wrapped
+                // in prelogin packets after the client has switched to reading
+                // raw records. The strict path above is the protocol's TLS 1.3
+                // home (records flow raw, so tickets are harmless).
 #pragma warning disable CA5398
-            await ssl.AuthenticateAsServerAsync(
-                new SslServerAuthenticationOptions
-                {
-                    ServerCertificate = certificate,
-                    EnabledSslProtocols = SslProtocols.Tls12,
-                },
-                cancellationToken).ConfigureAwait(false);
+                await ssl.AuthenticateAsServerAsync(
+                    new SslServerAuthenticationOptions
+                    {
+                        ServerCertificate = certificate,
+                        EnabledSslProtocols = SslProtocols.Tls12,
+                    },
+                    cancellationToken).ConfigureAwait(false);
 #pragma warning restore CA5398
-            framing.EnablePassthrough();
-            Stream postTls = ssl;
-            transport.SwitchStream(postTls);
+                framing.EnablePassthrough();
+                transport.SwitchStream(ssl);
+            }
 
             var loginMessage = await transport.ReadMessageAsync(cancellationToken).ConfigureAwait(false);
             if (loginMessage is null || loginMessage.PacketType != Tds.PacketLogin7)
@@ -120,7 +150,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             }
 
             transport.Spid = unchecked((ushort)this.connection!.Spid);
-            this.WriteLoginResponse(writer, transport.PacketSize);
+            this.WriteLoginResponse(writer, transport.PacketSize, login.TdsVersion == Tds.Version8 ? Tds.Version8 : Tds.Version74);
             await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
 
             // MARS negotiated: prelogin, TLS, and LOGIN7 stayed raw (the login
@@ -132,7 +162,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             if (marsRequested)
             {
                 this.marsPacketSize = transport.PacketSize;
-                this.multiplexer = new SmpMultiplexer(postTls, this);
+                this.multiplexer = new SmpMultiplexer(transportStream, this);
                 await this.multiplexer.RunAsync(cancellationToken).ConfigureAwait(false);
                 return;
             }
@@ -369,7 +399,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             this.pendingInfoMessages.Enqueue(error);
     }
 
-    private void WriteLoginResponse(TdsTokenWriter writer, int packetSize)
+    private void WriteLoginResponse(TdsTokenWriter writer, int packetSize, uint tdsVersion)
     {
         var database = this.connection!.Database;
         writer.WriteEnvChange(Tds.EnvDatabase, database, "master");
@@ -379,7 +409,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var serverCollation = TdsCollationCodec.For(Collation.Get(simulation.ServerCollationName));
         writer.WriteEnvChangeSqlCollation(serverCollation.Info, serverCollation.SortId);
         writer.WriteLoginAck(
-            Tds.Version74,
+            tdsVersion,
             "Microsoft SQL Server",
             checked((byte)ReferenceBuild.Version.Major),
             checked((byte)ReferenceBuild.Version.Minor),

@@ -34,6 +34,7 @@ public class QualityTests
             ],
             [typeof(SimulatedNetworkListener)] = [
                 nameof(SimulatedNetworkListener.Port),
+                nameof(SimulatedNetworkListener.ServerCertificate),
                 nameof(SimulatedNetworkListener.Dispose),
                 nameof(SimulatedNetworkListener.DisposeAsync),
             ],

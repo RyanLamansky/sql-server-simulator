@@ -28,6 +28,17 @@ public sealed class SimulatedNetworkListener : IDisposable, IAsyncDisposable
     /// </summary>
     public int Port { get; }
 
+    /// <summary>
+    /// The certificate the listener presents during the TLS handshake,
+    /// public part only. Clients using <c>Encrypt=Strict</c> (TDS 8.0)
+    /// cannot rely on <c>TrustServerCertificate</c> — SqlClient ignores it
+    /// in strict mode and always validates the certificate — so they pin
+    /// instead: export this certificate to a file and reference it with the
+    /// connection string's <c>ServerCertificate</c> keyword. Disposed with
+    /// the listener.
+    /// </summary>
+    public X509Certificate2 ServerCertificate { get; }
+
     private readonly Socket listenerV4;
     private readonly Socket? listenerV6;
     private readonly X509Certificate2 certificate;
@@ -40,6 +51,7 @@ public sealed class SimulatedNetworkListener : IDisposable, IAsyncDisposable
         this.listenerV4 = listenerV4;
         this.listenerV6 = listenerV6;
         this.certificate = certificate;
+        this.ServerCertificate = X509CertificateLoader.LoadCertificate(certificate.Export(X509ContentType.Cert));
         this.Port = port;
 
         _ = this.AcceptLoopAsync(simulation, listenerV4);
@@ -63,6 +75,7 @@ public sealed class SimulatedNetworkListener : IDisposable, IAsyncDisposable
             session.Abort();
 
         this.certificate.Dispose();
+        this.ServerCertificate.Dispose();
         this.stopSource.Dispose();
     }
 

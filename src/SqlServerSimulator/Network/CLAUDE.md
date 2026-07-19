@@ -79,6 +79,8 @@ These notes are the local implementation contracts.
   Probe-anchored rules: width=bit22 / kana=bit23 (MS-TDS's own field-order text is wrong), fUTF8=bit26 *displaces* the binary bits, version nibble 160→4, `SQL_Latin1_General_CP1254_*` → Turkish LCID.
   Baseline must derive to `09 04 D0 00 34`.
 - **Login response**: the ENVCHANGE type 7 (server collation) is load-bearing — SqlClient NREs building any RPC without it.
-  TLS is pinned 1.2 (TLS 1.3 post-handshake tickets would be prelogin-wrapped after the client stops unwrapping; TDS 8.0 is the 1.3 path).
+  The 7.x prelogin-wrapped handshake is pinned TLS 1.2 (TLS 1.3 post-handshake tickets would be prelogin-wrapped after the client stops unwrapping); the TDS 8.0 strict path (first wire byte `0x16` → `SslStream` straight on the socket, ALPN `tds/8.0`, prelogin inside TLS, LOGINACK echoes `0x08000000`) has no pin and no framing shim.
+  SqlClient ignores `TrustServerCertificate` under `Encrypt=Strict` — strict clients pin via the `ServerCertificate` connection-string keyword against the listener's exported `ServerCertificate` property.
+  Oracle: `StrictEncryptionTests`.
 - **Oracle**: `SqlServerSimulator.Tests.SqlClient` (real SqlClient over loopback) is the regression contract for this directory; `SqlServerSimulator.Tests.Smo` drives real SMO (`Microsoft.SqlServer.SqlManagementObjects`, the library behind SSMS Object Explorer + Script-As) against a listener over one shared WWI-shaped fixture — the permanent home of the SSMS-shakedown surface; `EFCoreOverWire` in `*.Tests.EFCore` covers vanilla `UseSqlServer`.
   For nontrivial expected values use the dual-read pattern (same query in-process and over the wire against one `Simulation`).

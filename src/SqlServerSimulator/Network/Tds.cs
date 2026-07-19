@@ -16,6 +16,19 @@ internal static class Tds
     /// <summary>The TDS 7.4 version constant exchanged during login.</summary>
     public const uint Version74 = 0x74000004;
 
+    /// <summary>
+    /// The TDS 8.0 version constant a strict-encryption client sends in
+    /// LOGIN7 and expects echoed in LOGINACK.
+    /// </summary>
+    public const uint Version8 = 0x08000000;
+
+    /// <summary>
+    /// The TLS record content type of a handshake record: a TDS 8.0
+    /// (<c>Encrypt=Strict</c>) client's first byte on the wire, where a TDS
+    /// 7.x client's is <see cref="PacketPrelogin"/>.
+    /// </summary>
+    public const byte TlsRecordHandshake = 0x16;
+
     // Packet header types.
     public const byte PacketSqlBatch = 1;
     public const byte PacketRpc = 3;
