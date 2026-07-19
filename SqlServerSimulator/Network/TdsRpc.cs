@@ -85,7 +85,7 @@ internal sealed class TdsRpcRequest
         var token = reader.ReadByte();
         return token switch
         {
-            0x22 => throw Unsupported("image"),
+            0x22 => DecodeImage(reader, name, isOutput),
             0x23 => DecodeLegacyLob(reader, name, isOutput, ansi: true),
             0x24 => DecodeGuid(reader, name, isOutput),
             0x26 => DecodeIntN(reader, name, isOutput),
@@ -114,8 +114,25 @@ internal sealed class TdsRpcRequest
         };
     }
 
-    private static NotSupportedException Unsupported(string feature) =>
-        new($"The network listener does not accept {feature} RPC parameters.");
+    /// <summary>
+    /// Decodes a legacy <c>image</c> RPC parameter (type token <c>0x22</c>):
+    /// TYPE_INFO is a 4-byte LONGLEN max size (ignored) with no collation, and
+    /// the value is a 4-byte data length (<c>0xFFFFFFFF</c> = NULL) followed by
+    /// the raw bytes — the contiguous legacy form, not PLP (probe-confirmed
+    /// against SqlClient 7.0.2 that even a &gt;1-packet image parameter arrives
+    /// this way, 2026-07-19). Binds as <see cref="DbType.Binary"/>; the engine
+    /// coerces varbinary into the target <c>image</c> column, mirroring how the
+    /// <c>text</c> / <c>ntext</c> string parameters bind. Output-direction image
+    /// parameters are not a real SQL Server feature, so none arrive.
+    /// </summary>
+    private static TdsRpcParameter DecodeImage(TdsValueReader reader, string name, bool isOutput)
+    {
+        _ = reader.ReadUInt32();
+        var dataLength = reader.ReadUInt32();
+        return dataLength == 0xFFFFFFFF
+            ? new TdsRpcParameter(name, isOutput, DbType.Binary, null, size: -1)
+            : new TdsRpcParameter(name, isOutput, DbType.Binary, reader.ReadBytes(checked((int)dataLength)).ToArray(), size: -1);
+    }
 
     /// <summary>
     /// Decodes a table-valued parameter (type token <c>0xF3</c>) into a

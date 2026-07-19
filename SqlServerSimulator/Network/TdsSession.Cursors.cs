@@ -427,7 +427,6 @@ internal sealed partial class TdsSession
         Array.Copy(cursor.Selection.ColumnNames, names, baseSchema.Length);
         names[^1] = "ROWSTAT";
 
-        TdsTypeCodec.ValidateSchema(schema);
         TdsTypeCodec.WriteColMetadata(writer, schema, names, columnNullability: null);
 
         if (rows is null)

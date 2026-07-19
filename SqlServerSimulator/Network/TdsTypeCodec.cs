@@ -17,22 +17,16 @@ internal static class TdsTypeCodec
 {
     private static readonly DateTime Epoch1900 = new(1900, 1, 1);
 
-    /// <summary>
-    /// Rejects result-set column types that have no wire encoding here, so
-    /// the failure surfaces as an ERROR token before any COLMETADATA bytes
-    /// rather than as a mid-stream protocol desync.
-    /// </summary>
-    public static void ValidateSchema(SqlType[] schema)
-    {
-        foreach (var type in schema)
-        {
-            switch (type)
-            {
-                case TextSqlType or NTextSqlType or ImageSqlType:
-                    throw new NotSupportedException($"The network listener does not support '{type.SqlServerName}' result columns.");
-            }
-        }
-    }
+    // Real SQL Server 2025 sends these exact placeholder bytes as the 16-byte
+    // text pointer and 8-byte timestamp of every text / ntext / image result
+    // value — ASCII "dummy textptr\0\0\0" and "dummyTS\0". SqlClient ignores
+    // their content (they exist only so the deprecated in-band value form is
+    // well-shaped), so mirroring the literal bytes matches real exactly.
+    // Probe-captured against SQL Server 2025 through a cleartext tee proxy
+    // (Encrypt=False leaves post-login tokens in the clear), 2026-07-19.
+    private static readonly byte[] LegacyLobTextPointer = "dummy textptr\0\0\0"u8.ToArray();
+
+    private static readonly byte[] LegacyLobTimestamp = "dummyTS\0"u8.ToArray();
 
     /// <summary>
     /// <paramref name="columnNullability"/> feeds each column's fNullable
@@ -335,6 +329,30 @@ internal static class TdsTypeCodec
                 writer.WriteBVarchar("hierarchyid");
                 writer.WriteUsVarchar(HierarchyIdAssemblyQualifiedName);
                 break;
+            case TextSqlType tx:
+                // TEXTTYPE (MS-TDS 2.2.5.4.2): LONGLEN max size 0x7FFFFFFF, the
+                // 5-byte collation, then the TableName field these legacy LOB
+                // types uniquely carry. Probe-captured 2026-07-19.
+                writer.WriteByte(0x23);
+                writer.WriteUInt32(0x7FFFFFFF);
+                TdsCollationCodec.For(tx.Collation).Write(writer);
+                WriteLegacyLobTableName(writer);
+                break;
+            case NTextSqlType nx:
+                // NTEXTTYPE: identical shape to TEXTTYPE but LONGLEN max size
+                // 0x7FFFFFFE (the value real sends for ntext).
+                writer.WriteByte(0x63);
+                writer.WriteUInt32(0x7FFFFFFE);
+                TdsCollationCodec.For(nx.Collation).Write(writer);
+                WriteLegacyLobTableName(writer);
+                break;
+            case ImageSqlType:
+                // IMAGETYPE: LONGLEN max size 0x7FFFFFFF then TableName — no
+                // collation (binary).
+                writer.WriteByte(0x22);
+                writer.WriteUInt32(0x7FFFFFFF);
+                WriteLegacyLobTableName(writer);
+                break;
             default:
                 throw new NotSupportedException($"The network listener does not support '{type.SqlServerName}' result columns.");
         }
@@ -544,9 +562,58 @@ internal static class TdsTypeCodec
                 else
                     WritePlpChunks(writer, value.AsHierarchyIdBytes);
                 break;
+            case TextSqlType tx:
+                WriteLegacyLob(writer, value.IsNull ? null : TdsCollationCodec.For(tx.Collation).WireEncoding.GetBytes(value.AsString));
+                break;
+            case NTextSqlType:
+                WriteLegacyLob(writer, value.IsNull ? null : System.Text.Encoding.Unicode.GetBytes(value.AsString));
+                break;
+            case ImageSqlType:
+                WriteLegacyLob(writer, value.IsNull ? null : value.AsBytes);
+                break;
             default:
                 throw new NotSupportedException($"The network listener does not support '{type.SqlServerName}' result columns.");
         }
+    }
+
+    /// <summary>
+    /// The TableName field carried only by the text / ntext / image TYPE_INFO
+    /// (MS-TDS 2.2.7.4). Real SQL Server sends the value's base table as a
+    /// <c>[schema, table]</c> (or <c>[schema, view]</c>) name; the simulator's
+    /// result metadata does not thread per-column source-table identity, so it
+    /// emits the single-empty-part form real uses for expression columns
+    /// (e.g. <c>CAST(x AS text)</c>) — NumParts 1 plus one empty US_VARCHAR.
+    /// Probe-captured 2026-07-19; SqlClient accepts it (the field surfaces only
+    /// as the cosmetic <c>BaseTableName</c> in <c>GetSchemaTable</c>).
+    /// </summary>
+    private static void WriteLegacyLobTableName(TdsTokenWriter writer)
+    {
+        writer.WriteByte(1);
+        writer.WriteUsVarchar(string.Empty);
+    }
+
+    /// <summary>
+    /// Writes a text / ntext / image ROW value in the legacy in-band form
+    /// (MS-TDS 2.2.5.5.1): a NULL is a single zero text-pointer-length byte; a
+    /// non-NULL value is the 16-byte text pointer + 8-byte timestamp
+    /// placeholders real sends, a 4-byte data length, then the raw data bytes
+    /// (CP1252 for text, UTF-16LE for ntext, verbatim for image). The
+    /// transport packetizes an oversize value transparently, so the data is
+    /// written as one contiguous block. Probe-captured 2026-07-19.
+    /// </summary>
+    private static void WriteLegacyLob(TdsTokenWriter writer, byte[]? data)
+    {
+        if (data is null)
+        {
+            writer.WriteByte(0);
+            return;
+        }
+
+        writer.WriteByte(16);
+        writer.WriteBytes(LegacyLobTextPointer);
+        writer.WriteBytes(LegacyLobTimestamp);
+        writer.WriteUInt32((uint)data.Length);
+        writer.WriteBytes(data);
     }
 
     /// <summary>

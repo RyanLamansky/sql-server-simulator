@@ -594,7 +594,6 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 writer.WriteDoneToken(effectiveDoneToken, Tds.DoneMore, 0);
             if (outcome is SimulatedQueryResult query)
             {
-                TdsTypeCodec.ValidateSchema(query.Schema);
                 TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames, query.ColumnNullability);
                 long rows = 0;
                 using (var cursor = query.CreateCursor())
