@@ -1,0 +1,26 @@
+<Project>
+
+  <!-- Shared defaults for every project in the repo. A project overrides by
+       setting the property in its own csproj (imported after this file) —
+       e.g. the analyzer targets netstandard2.0 and the main package opts back
+       into IsPackable. Package versions are centralized separately in
+       Directory.Packages.props. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <DebugType>embedded</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <!-- Only SqlServerSimulator publishes; everything else opts out here and
+         the package project sets true. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory).editorconfig" Link=".editorconfig" />
+  </ItemGroup>
+
+</Project>

@@ -8,7 +8,7 @@ Auto-loaded orientation. `README.md` is for humans.
 
 `SqlServerSimulator.EFCore` is a sibling package whose only public method is `UseSqlServerSimulator(DbContextOptionsBuilder, DbConnection)`. EF Core's SqlServer provider keeps emitting SQL-Server-flavored SQL; the adapter registers an `IRelationalTypeMappingSourcePlugin` for the (CLR, store) pairs whose default mappings downcast to `SqlParameter` (the simulator's connection isn't a `SqlConnection`).
 
-**Packaging:** only `SqlServerSimulator` publishes; `SqlServerSimulator.EFCore` and `Example` are `IsPackable=false` — the adapter stays in-repo-but-unpublished as a deliberate demand signal, so don't pitch publishing it without a user request.
+**Packaging:** only `SqlServerSimulator` publishes — the root `Directory.Build.props` defaults every project to `IsPackable=false` and the package project alone opts back in. The adapter stays in-repo-but-unpublished as a deliberate demand signal, so don't pitch publishing it without a user request.
 
 ## Operating goal
 
@@ -31,7 +31,7 @@ dotnet build
 dotnet test
 ```
 
-Every `.csproj` sets `EnforceCodeStyleInBuild=true`, so `dotnet build` runs the IDE / SSS / MSTEST analyzers and fails on violations. No separate `dotnet format` pass — it catches nothing build doesn't. CI matrix: Debug + Release. `obj/` permission errors mean building outside the dev container; `rm -rf obj/ bin/` clears them.
+Shared build settings live in the root `Directory.Build.props` (TargetFramework, nullable, warnings-as-errors, `EnforceCodeStyleInBuild=true` — so `dotnet build` runs the IDE / SSS / MSTEST analyzers and fails on violations); package versions are centralized in `Directory.Packages.props` (NuGet CPM), with deliberate per-project divergences as visible `VersionOverride`s (Tests.Smo pins SqlClient 5.1.x, SMO's supported line, while Tests.SqlClient tests the current 7.x — the reason those two projects stay separate). Csprojs carry only per-project content. No separate `dotnet format` pass — it catches nothing build doesn't. CI matrix: Debug + Release. `obj/` permission errors mean building outside the dev container; `rm -rf obj/ bin/` clears them.
 
 A full build + test cycle runs 20–30s; single-test filter (`--filter "FullyQualifiedName~Foo"`) stays fast. Still cheap enough to treat `dotnet test` as a verifier between micro-edits, not a checkpoint.
 

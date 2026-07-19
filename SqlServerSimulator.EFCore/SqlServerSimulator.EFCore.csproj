@@ -14,31 +14,21 @@
     <RepositoryType>git</RepositoryType>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
-    <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <GenerateDocumentationFile>True</GenerateDocumentationFile>
-    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <DebugType>embedded</DebugType>
-    <DebugSymbols>true</DebugSymbols>
-    <ImplicitUsings>enable</ImplicitUsings>
     <IsTrimmable>true</IsTrimmable>
     <AnalysisMode>All</AnalysisMode>
-    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <RootNamespace>SqlServerSimulator.EFCore</RootNamespace>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <!-- The simulator package ships on its own; the EF Core adapter is not
-         published separately. Excluded from `dotnet pack` output. -->
-    <IsPackable>false</IsPackable>
+         published separately (IsPackable false via Directory.Build.props). -->
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="../.editorconfig" Link=".editorconfig" />
     <None Include="../LICENSE.txt" Pack="true" PackagePath="/" />
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.2" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" />
   </ItemGroup>
 
   <ItemGroup>
