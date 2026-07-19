@@ -531,6 +531,26 @@ partial class SimulatedSqlException
         new($"Error converting string value '{value}' into data type {targetTypeName} using culture '{cultureName}'.", 9819, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 8064: an RPC parameter declares a CLR-UDT type
+    /// name (TDS type token <c>0xF0</c>) that resolves to no known type. Real
+    /// substitutes the current database for the client's empty db segment and
+    /// leaves the schema segment empty. Probe-confirmed against SQL Server 2025
+    /// (2026-07-19).
+    /// </summary>
+    internal static SimulatedSqlException RpcClrTypeDoesNotExist(int ordinal, string database, string typeName) =>
+        new($"Parameter {ordinal} ([{database}].[].[{typeName}]): The CLR type does not exist or you do not have permissions to access it.", 8064, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8023: an RPC CLR-UDT parameter's serialized bytes
+    /// are not a valid (modeled) instance of the declared spatial type — the
+    /// simulator's WKB decoder covers a 2D shape subset, so bytes outside it (or
+    /// genuinely corrupt bytes) surface here as real's bind-time rejection.
+    /// Probe-confirmed against SQL Server 2025 (2026-07-19).
+    /// </summary>
+    internal static SimulatedSqlException RpcInvalidUdtInstance(int ordinal, string parameterName, string typeName) =>
+        new($"The incoming tabular data stream (TDS) remote procedure call (RPC) protocol stream is incorrect. Parameter {ordinal} (\"{parameterName}\"): The supplied value is not a valid instance of data type {typeName}. Check the source data for invalid values. An example of an invalid value is data of numeric type with scale greater than precision.", 8023, 16, 4);
+
+    /// <summary>
     /// Returns the type name SQL Server uses in Msg 402 / 206 / 529 for a
     /// date/time type: the family root (e.g. <c>datetime2</c>,
     /// <c>datetimeoffset</c>) without a precision suffix, matching

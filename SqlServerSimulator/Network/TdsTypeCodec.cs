@@ -162,6 +162,14 @@ internal static class TdsTypeCodec
     /// </summary>
     public static void WriteReturnValue(TdsTokenWriter writer, ushort ordinal, string name, DbType dbType, object? value)
     {
+        // DbType.Object is the RPC read side's marker for a CLR-UDT / sql_variant
+        // parameter (its value rode a pre-built SqlValue, not a DbType). Writing
+        // one back as a RETURNVALUE is unmodeled; reject up front — before any
+        // token bytes — rather than emit a malformed RETURNVALUE that desyncs the
+        // client (SqlClient surfaces the half-token as ArgumentOutOfRangeException).
+        if (dbType == DbType.Object)
+            throw new NotSupportedException("output CLR UDT / sql_variant RPC parameters");
+
         writer.WriteByte(Tds.TokenReturnValue);
         writer.WriteUInt16(ordinal);
         writer.WriteBVarchar(name);

@@ -934,10 +934,23 @@ public sealed partial class Simulation
                 continue;
             }
 
-            var dbType = SqlType.GetByDbType(parameter.DbType);
-            var value = parameter.Value is null or DBNull
-                ? SqlValue.Null(dbType)
-                : dbType.ConvertParameter(parameter.Value);
+            // A parameter carrying a pre-built SqlValue (the TDS listener's
+            // CLR-UDT / sql_variant RPC parameters) binds it verbatim, its own
+            // type driving the argument and any output slot; otherwise the
+            // declared DbType converts the CLR value.
+            SqlType dbType;
+            SqlValue value;
+            if (parameter.Value is SqlValue preBuilt)
+            {
+                dbType = preBuilt.Type;
+                value = preBuilt;
+            }
+            else
+            {
+                dbType = SqlType.GetByDbType(parameter.DbType);
+                value = parameter.Value is null or DBNull ? SqlValue.Null(dbType) : dbType.ConvertParameter(parameter.Value);
+            }
+
             // For OUTPUT-direction parameters we need a live VariableSlot in
             // the outer batch so InvokeProcedure can write back through it.
             // The slot's DeclaredType drives the coercion on writeback.

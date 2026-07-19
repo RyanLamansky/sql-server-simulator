@@ -1165,6 +1165,16 @@ internal sealed class BatchContext
             var name = parameter.ParameterName;
             if (name.StartsWith('@'))
                 name = name[1..];
+            // A parameter carrying a pre-built SqlValue binds it verbatim — the
+            // path the TDS listener's CLR-UDT (hierarchyid / geography /
+            // geometry) and sql_variant RPC parameters take, whose wire form
+            // decodes straight to a typed SqlValue that no DbType can express.
+            if (parameter.Value is SqlValue preBuilt)
+            {
+                dict[name] = new VariableSlot(preBuilt.Type, declaredMaxLength: null, preBuilt, parameter);
+                continue;
+            }
+
             var dbType = SqlType.GetByDbType(parameter.DbType);
             // SqlClient's Size = -1 convention declares a MAX-typed
             // parameter (varchar(max) / nvarchar(max) / varbinary(max)).

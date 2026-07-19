@@ -31,7 +31,7 @@ internal sealed class TdsRpcRequest
     /// total length covering the header block), then one or more RPC requests
     /// separated by the 0xFF batch-flag byte (TDS 7.2+).
     /// </summary>
-    public static List<TdsRpcRequest> ParseMessage(byte[] payload)
+    public static List<TdsRpcRequest> ParseMessage(byte[] payload, string currentDatabase)
     {
         var reader = new TdsValueReader(payload);
 
@@ -43,12 +43,12 @@ internal sealed class TdsRpcRequest
 
         var requests = new List<TdsRpcRequest>();
         while (!reader.AtEnd)
-            requests.Add(ParseRequest(reader));
+            requests.Add(ParseRequest(reader, currentDatabase));
 
         return requests;
     }
 
-    private static TdsRpcRequest ParseRequest(TdsValueReader reader)
+    private static TdsRpcRequest ParseRequest(TdsValueReader reader, string currentDatabase)
     {
         var procName = "";
         ushort procId = 0;
@@ -72,13 +72,13 @@ internal sealed class TdsRpcRequest
                 break;
             }
 
-            parameters.Add(ParseParameter(reader));
+            parameters.Add(ParseParameter(reader, currentDatabase, parameters.Count + 1));
         }
 
         return new TdsRpcRequest(procName, procId, parameters);
     }
 
-    private static TdsRpcParameter ParseParameter(TdsValueReader reader)
+    private static TdsRpcParameter ParseParameter(TdsValueReader reader, string currentDatabase, int ordinal)
     {
         var name = reader.ReadUcs2(reader.ReadByte());
         var isOutput = (reader.ReadByte() & 0x01) != 0;
@@ -93,7 +93,7 @@ internal sealed class TdsRpcRequest
             0x29 => DecodeTime(reader, name, isOutput),
             0x2A => DecodeDateTime2(reader, name, isOutput),
             0x2B => DecodeDateTimeOffset(reader, name, isOutput),
-            0x62 => throw Unsupported("sql_variant"),
+            0x62 => DecodeSqlVariant(reader, name, isOutput),
             0x63 => DecodeLegacyLob(reader, name, isOutput, ansi: false),
             0x68 => DecodeBit(reader, name, isOutput),
             0x6A => DecodeDecimal(reader, name, isOutput),
@@ -107,7 +107,7 @@ internal sealed class TdsRpcRequest
             0xAF => DecodeAnsiString(reader, name, isOutput, DbType.AnsiStringFixedLength),
             0xE7 => DecodeNationalString(reader, name, isOutput, DbType.String),
             0xEF => DecodeNationalString(reader, name, isOutput, DbType.StringFixedLength),
-            0xF0 => throw Unsupported("CLR UDT"),
+            0xF0 => DecodeClrUdt(reader, name, isOutput, currentDatabase, ordinal),
             0xF1 => DecodeXml(reader, name, isOutput),
             0xF3 => DecodeTableValued(reader, name, isOutput),
             _ => throw new NotSupportedException($"Unrecognized TDS RPC parameter type token 0x{token:X2}."),
@@ -130,6 +130,219 @@ internal sealed class TdsRpcRequest
         var data = TdsTableValuedParameterReader.Read(reader);
         return new TdsRpcParameter(name, isOutput, DbType.Object, data);
     }
+
+    /// <summary>
+    /// Decodes a CLR-UDT parameter (type token <c>0xF0</c>): the client-sent
+    /// UDT_INFO is three B_VARCHAR names (db / schema / type — SqlClient fills
+    /// only the type from <c>SqlParameter.UdtTypeName</c>, leaving db + schema
+    /// empty), with neither the leading <c>USHORT</c> max byte size nor the
+    /// assembly-qualified name the server's COLMETADATA form carries
+    /// (probe-confirmed against SqlClient 7.0.2, 2026-07-19). The value is PLP
+    /// carrying the CLR-UDT serialization: OrdPath bytes for
+    /// <c>hierarchyid</c> (stored verbatim) or the MS spatial binary for
+    /// <c>geography</c> / <c>geometry</c> (decoded back to WKT). The decoded
+    /// <see cref="SqlValue"/> is carried on the parameter and bound directly by
+    /// the engine (the <c>BatchContext</c> variable-seed <see cref="SqlValue"/>
+    /// passthrough). An unrecognized type name raises Msg 8064; spatial bytes the
+    /// decoder cannot model raise Msg 8023 — both probe-confirmed against SQL
+    /// Server 2025 (2026-07-19).
+    /// </summary>
+    private static TdsRpcParameter DecodeClrUdt(TdsValueReader reader, string name, bool isOutput, string currentDatabase, int ordinal)
+    {
+        var db = reader.ReadUcs2(reader.ReadByte());
+        _ = reader.ReadUcs2(reader.ReadByte());
+        var typeName = reader.ReadUcs2(reader.ReadByte());
+        var bytes = ReadPlp(reader);
+        var value = BuildUdtValue(typeName, db, currentDatabase, ordinal, name, bytes);
+        return new TdsRpcParameter(name, isOutput, DbType.Object, value);
+    }
+
+    private static SqlValue BuildUdtValue(string typeName, string db, string currentDatabase, int ordinal, string parameterName, byte[]? bytes)
+    {
+        if (typeName.Equals("hierarchyid", StringComparison.OrdinalIgnoreCase))
+            return bytes is null ? SqlValue.Null(SqlType.HierarchyId) : SqlValue.FromHierarchyIdBytes(bytes);
+
+        var isGeography = typeName.Equals("geography", StringComparison.OrdinalIgnoreCase);
+        if (isGeography || typeName.Equals("geometry", StringComparison.OrdinalIgnoreCase))
+        {
+            SqlType type = isGeography ? SqlType.Geography : SqlType.Geometry;
+            if (bytes is null)
+                return SqlValue.Null(type);
+            var wkt = Storage.Bacpac.SpatialWkbDecoder.TryDecode(bytes, isGeography)
+                ?? throw SimulatedSqlException.RpcInvalidUdtInstance(ordinal, parameterName, typeName);
+            return isGeography ? SqlValue.FromGeography(wkt) : SqlValue.FromGeometry(wkt);
+        }
+
+        throw SimulatedSqlException.RpcClrTypeDoesNotExist(ordinal, db.Length == 0 ? currentDatabase : db, typeName);
+    }
+
+    /// <summary>
+    /// Decodes a <c>sql_variant</c> parameter (type token <c>0x62</c>): the
+    /// TYPE_INFO is a 4-byte max length (ignored) and the value is a 4-byte total
+    /// length (<c>0</c> = NULL) followed by the MS-TDS §2.2.5.5.3 body — a base-type
+    /// token, a property-byte count, the property bytes, then the inner value's raw
+    /// data. The body is the read mirror of <c>TdsTypeCodec.BuildVariantBody</c>;
+    /// the decoded inner <see cref="SqlValue"/> is wrapped via
+    /// <see cref="SqlValue.FromVariant"/> so <c>SQL_VARIANT_PROPERTY(@p,'BaseType')</c>
+    /// reports the sent base type. Probe-confirmed against SQL Server 2025 +
+    /// SqlClient 7.0.2 (2026-07-19).
+    /// </summary>
+    private static TdsRpcParameter DecodeSqlVariant(TdsValueReader reader, string name, bool isOutput)
+    {
+        _ = reader.ReadUInt32();
+        var length = reader.ReadUInt32();
+        if (length == 0)
+            return new TdsRpcParameter(name, isOutput, DbType.Object, SqlValue.Null(SqlType.SqlVariant));
+
+        var inner = ReadVariantBody(reader);
+        return new TdsRpcParameter(name, isOutput, DbType.Object, SqlValue.FromVariant(inner));
+    }
+
+    /// <summary>
+    /// Reads the MS-TDS §2.2.5.5.3 <c>sql_variant</c> body — base-type token,
+    /// property-byte count, per-family property bytes, then the raw inner value —
+    /// into the matching inner <see cref="SqlValue"/>. The base-type tokens and
+    /// property layouts mirror <c>TdsTypeCodec.BuildVariantBody</c> exactly.
+    /// </summary>
+    private static SqlValue ReadVariantBody(TdsValueReader reader)
+    {
+        var baseType = reader.ReadByte();
+        var propBytes = reader.ReadByte();
+#pragma warning disable SSS005 // Grouped by variant base-type family (fixed-length / temporal / decimal / string / binary), not numeric order.
+        return baseType switch
+        {
+            0x30 => SqlValue.FromByte(reader.ReadByte()),
+            0x32 => SqlValue.FromBoolean(reader.ReadByte() != 0),
+            0x34 => SqlValue.FromInt16(BinaryPrimitives.ReadInt16LittleEndian(reader.ReadBytes(2))),
+            0x38 => SqlValue.FromInt32(BinaryPrimitives.ReadInt32LittleEndian(reader.ReadBytes(4))),
+            0x7F => SqlValue.FromInt64(BinaryPrimitives.ReadInt64LittleEndian(reader.ReadBytes(8))),
+            0x3B => SqlValue.FromSingle(BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(reader.ReadBytes(4)))),
+            0x3E => SqlValue.FromDouble(BitConverter.Int64BitsToDouble(BinaryPrimitives.ReadInt64LittleEndian(reader.ReadBytes(8)))),
+            0x7A => SqlValue.FromMoney(SqlType.SmallMoney, BinaryPrimitives.ReadInt32LittleEndian(reader.ReadBytes(4)) / 10000m),
+            0x3C => ReadVariantMoney(reader),
+            0x24 => SqlValue.FromGuid(new Guid(reader.ReadBytes(16))),
+            0x28 => SqlValue.FromDate(DateOnly.FromDayNumber(ReadThreeByteInt(reader.ReadBytes(3)))),
+            0x3A => ReadVariantSmallDateTime(reader),
+            0x3D => ReadVariantDateTime(reader),
+            0x6A or 0x6C => ReadVariantDecimal(reader, propBytes),
+            0x29 => ReadVariantTime(reader),
+            0x2A => ReadVariantDateTime2(reader),
+            0x2B => ReadVariantDateTimeOffset(reader),
+            0xA7 or 0xAF => ReadVariantAnsiString(reader, propBytes),
+            0xE7 or 0xEF => ReadVariantNationalString(reader, propBytes),
+            0xA5 or 0xAD => ReadVariantBinary(reader, propBytes),
+            _ => throw new NotSupportedException($"The network listener does not accept sql_variant parameters with base type token 0x{baseType:X2}."),
+        };
+#pragma warning restore SSS005
+    }
+
+    private static SqlValue ReadVariantMoney(TdsValueReader reader)
+    {
+        var payload = reader.ReadBytes(8);
+        var high = BinaryPrimitives.ReadInt32LittleEndian(payload);
+        var low = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
+        return SqlValue.FromMoney(SqlType.Money, (((long)high << 32) | low) / 10000m);
+    }
+
+    private static SqlValue ReadVariantSmallDateTime(TdsValueReader reader)
+    {
+        var payload = reader.ReadBytes(4);
+        var days = BinaryPrimitives.ReadUInt16LittleEndian(payload);
+        var minutes = BinaryPrimitives.ReadUInt16LittleEndian(payload[2..]);
+        return SqlValue.FromSmallDateTime(Epoch1900.AddDays(days).AddMinutes(minutes));
+    }
+
+    private static SqlValue ReadVariantDateTime(TdsValueReader reader)
+    {
+        var payload = reader.ReadBytes(8);
+        var days = BinaryPrimitives.ReadInt32LittleEndian(payload);
+        var thirds = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
+        var ticks = (((long)thirds * 10_000_000) + 150) / 300;
+        return SqlValue.FromDateTime(Epoch1900.AddDays(days).AddTicks(ticks));
+    }
+
+    private static SqlValue ReadVariantDecimal(TdsValueReader reader, byte propBytes)
+    {
+        var precision = reader.ReadByte();
+        var scale = reader.ReadByte();
+        for (var i = 2; i < propBytes; i++)
+            _ = reader.ReadByte();
+        var type = SqlType.GetDecimal(precision, scale);
+        var isNegative = reader.ReadByte() != 1;
+        var magnitude = reader.ReadBytes(MagnitudeBytes(precision));
+        for (var i = 12; i < magnitude.Length; i++)
+        {
+            if (magnitude[i] != 0)
+                throw new NotSupportedException("A sql_variant decimal parameter exceeds the range of System.Decimal.");
+        }
+
+        Span<byte> assembled = stackalloc byte[12];
+        assembled.Clear();
+        magnitude[..Math.Min(magnitude.Length, 12)].CopyTo(assembled);
+        var lo = BinaryPrimitives.ReadInt32LittleEndian(assembled);
+        var mid = BinaryPrimitives.ReadInt32LittleEndian(assembled[4..]);
+        var hi = BinaryPrimitives.ReadInt32LittleEndian(assembled[8..]);
+        return SqlValue.FromDecimal(type, new decimal(lo, mid, hi, isNegative, scale));
+    }
+
+    private static SqlValue ReadVariantTime(TdsValueReader reader)
+    {
+        var scale = reader.ReadByte();
+        var ticks = ScaledUnitsToTicks(AssembleLittleEndian(reader.ReadBytes(TimeValueBytes(scale))), scale);
+        return SqlValue.FromTime(SqlType.GetTime(scale), TimeSpan.FromTicks(ticks));
+    }
+
+    private static SqlValue ReadVariantDateTime2(TdsValueReader reader)
+    {
+        var scale = reader.ReadByte();
+        var timeBytes = TimeValueBytes(scale);
+        var payload = reader.ReadBytes(timeBytes + 3);
+        var ticks = ScaledUnitsToTicks(AssembleLittleEndian(payload[..timeBytes]), scale);
+        var days = ReadThreeByteInt(payload[timeBytes..]);
+        return SqlValue.FromDateTime2(SqlType.GetDateTime2(scale), DateOnly.FromDayNumber(days).ToDateTime(TimeOnly.MinValue).AddTicks(ticks));
+    }
+
+    private static SqlValue ReadVariantDateTimeOffset(TdsValueReader reader)
+    {
+        var scale = reader.ReadByte();
+        var timeBytes = TimeValueBytes(scale);
+        var payload = reader.ReadBytes(timeBytes + 5);
+        var ticks = ScaledUnitsToTicks(AssembleLittleEndian(payload[..timeBytes]), scale);
+        var days = ReadThreeByteInt(payload[timeBytes..(timeBytes + 3)]);
+        var offsetMinutes = BinaryPrimitives.ReadInt16LittleEndian(payload[(timeBytes + 3)..]);
+        var offset = TimeSpan.FromMinutes(offsetMinutes);
+        var utcTicks = DateOnly.FromDayNumber(days).ToDateTime(TimeOnly.MinValue).Ticks + ticks;
+        return SqlValue.FromDateTimeOffset(SqlType.GetDateTimeOffset(scale), new DateTimeOffset(utcTicks + offset.Ticks, offset));
+    }
+
+    private static SqlValue ReadVariantAnsiString(TdsValueReader reader, byte propBytes)
+    {
+        var utf8 = ReadCollation(reader);
+        var maxLength = reader.ReadUInt16();
+        for (var i = 7; i < propBytes; i++)
+            _ = reader.ReadByte();
+        var encoding = utf8 ? Encoding.UTF8 : CharSqlType.Cp1252Encoder;
+        return SqlValue.FromVarchar(encoding.GetString(reader.ReadBytes(maxLength)));
+    }
+
+    private static SqlValue ReadVariantNationalString(TdsValueReader reader, byte propBytes)
+    {
+        _ = ReadCollation(reader);
+        var maxLength = reader.ReadUInt16();
+        for (var i = 7; i < propBytes; i++)
+            _ = reader.ReadByte();
+        return SqlValue.FromNVarchar(Encoding.Unicode.GetString(reader.ReadBytes(maxLength)));
+    }
+
+    private static SqlValue ReadVariantBinary(TdsValueReader reader, byte propBytes)
+    {
+        var maxLength = reader.ReadUInt16();
+        for (var i = 2; i < propBytes; i++)
+            _ = reader.ReadByte();
+        return SqlValue.FromVarbinary(reader.ReadBytes(maxLength).ToArray());
+    }
+
+    private static int MagnitudeBytes(byte precision) => precision <= 9 ? 4 : precision <= 19 ? 8 : precision <= 28 ? 12 : 16;
 
     private static TdsRpcParameter DecodeIntN(TdsValueReader reader, string name, bool isOutput)
     {

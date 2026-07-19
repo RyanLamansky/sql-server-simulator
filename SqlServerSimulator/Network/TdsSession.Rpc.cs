@@ -37,11 +37,21 @@ internal sealed partial class TdsSession
         List<TdsRpcRequest> requests;
         try
         {
-            requests = TdsRpcRequest.ParseMessage(message.Payload);
+            requests = TdsRpcRequest.ParseMessage(message.Payload, this.connection!.Database);
         }
         catch (NotSupportedException ex)
         {
             writer.WriteErrorOrInfo(Tds.TokenError, 50000, 1, 16, $"SqlServerSimulator: {ex.Message}", "SIMULATED", "", 1);
+            writer.WriteDoneToken(Tds.TokenDoneProc, Tds.DoneError, 0);
+            return;
+        }
+        catch (SimulatedSqlException ex)
+        {
+            // An RPC parameter whose wire form fails validation up front (an
+            // unknown CLR-UDT type name → Msg 8064, invalid spatial bytes →
+            // Msg 8023) is raised from the parser; surface it as a real error
+            // rather than letting it escape the session's crash boundary.
+            WriteErrors(writer, ex);
             writer.WriteDoneToken(Tds.TokenDoneProc, Tds.DoneError, 0);
             return;
         }
