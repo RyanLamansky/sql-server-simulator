@@ -92,16 +92,31 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
             Name n => n.Value,
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
-        // catalog_default / database_default are pseudo-collations SQL Server
-        // accepts in a COLLATE clause: catalog_default resolves to the fixed
-        // metadata (catalog) collation, database_default to the active
-        // database's collation. SMO's system-configuration query uses
-        // `name COLLATE catalog_default` to normalize catalog string columns.
-        var collation =
-            string.Equals(collationName, "catalog_default", StringComparison.OrdinalIgnoreCase) ? Collation.Catalog
-            : string.Equals(collationName, "database_default", StringComparison.OrdinalIgnoreCase) ? context.Batch.CurrentDatabase.Collation
-            : Collation.TryGet(collationName)
-                ?? throw SimulatedSqlException.InvalidCollation(collationName);
+        var collation = Collation.TryGet(ResolvePseudoCollationName(collationName, context.Batch))
+            ?? throw SimulatedSqlException.InvalidCollation(collationName);
         return new CollateExpression(source, collation);
     }
+
+    /// <summary>
+    /// Expands the pseudo-collation keywords <c>database_default</c> (the active
+    /// database's collation) and <c>catalog_default</c> (the fixed metadata /
+    /// catalog collation) to their concrete collation name; any other name
+    /// passes through unchanged for the caller's own recognition check. The
+    /// keyword match is case-insensitive. Shared by the expression-level postfix
+    /// and the CREATE TABLE / ALTER COLUMN / table-variable / temp-table
+    /// column-definition parse sites, all of which resolve at bind time against
+    /// the session's active database (safe under the plan cache, which keys per
+    /// database). Real SQL Server records the resolved name in
+    /// <c>sys.columns.collation_name</c>; <c>catalog_default</c> resolves to the
+    /// database collation in a non-contained database (containment isn't
+    /// modeled) but is kept pinned to the catalog collation here to match the
+    /// simulator's catalog-column comparison contract. Probe-confirmed
+    /// (SQL Server 2025): <c>N'x' COLLATE database_default</c> reports the
+    /// active database's collation from <c>SQL_VARIANT_PROPERTY</c>, including
+    /// for <c>#temp</c> columns (the session database, not tempdb).
+    /// </summary>
+    internal static string ResolvePseudoCollationName(string collationName, BatchContext batch) =>
+        string.Equals(collationName, "database_default", StringComparison.OrdinalIgnoreCase) ? batch.CurrentDatabase.Collation.Name
+        : string.Equals(collationName, "catalog_default", StringComparison.OrdinalIgnoreCase) ? Collation.Catalog.Name
+        : collationName;
 }

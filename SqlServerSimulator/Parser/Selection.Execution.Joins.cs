@@ -87,24 +87,60 @@ internal sealed partial class Selection
         Func<MultiPartName, SqlValue> resolve = null!;
         resolve = name => ResolveAcrossTuple(sources, tuple, name, batch, outerResolver, resolve, memo);
 
-        var rowset = EnumerateLeftmost(sources[0], tuple, batch, outerResolver);
-        for (var level = 1; level < sources.Length; level++)
+        return EnumerateFoldRange(sources, joins, 0, sources.Length, tuple, batch, resolve, outerResolver);
+    }
+
+    /// <summary>
+    /// Folds a contiguous slot range <c>[start, start + count)</c> of the flat
+    /// source array into a joined row stream — the whole FROM at the top level
+    /// (<c>start = 0</c>, <c>count = sources.Length</c>), and each parenthesized
+    /// join group's interior when materialized as a unit. The leftmost slot of
+    /// the range drives; each subsequent level applies its join, and a level
+    /// whose <see cref="JoinSpec.GroupCount"/> exceeds 1 recurses through
+    /// <see cref="GroupJoin"/> over its own sub-range.
+    /// </summary>
+    private static IEnumerable<byte[]?[]> EnumerateFoldRange(
+        FromSource[] sources,
+        JoinSpec[] joins,
+        int start,
+        int count,
+        byte[]?[] tuple,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue> resolve,
+        Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        var rowset = EnumerateLeftmost(sources[start], tuple, start, batch, outerResolver);
+        var level = start + 1;
+        var end = start + count;
+        while (level < end)
         {
-            rowset = ApplyJoin(rowset, sources, joins[level - 1], tuple, level, batch, resolve, outerResolver);
+            var join = joins[level - 1];
+            if (join.GroupCount > 1)
+            {
+                rowset = GroupJoin(rowset, sources, joins, join, tuple, level, join.GroupCount, batch, resolve, outerResolver);
+                level += join.GroupCount;
+            }
+            else
+            {
+                rowset = ApplyJoin(rowset, sources, join, tuple, level, batch, resolve, outerResolver);
+                level++;
+            }
         }
         return rowset;
     }
 
     /// <summary>
-    /// Drives <c>sources[0]</c>: its rows directly for a base / view /
-    /// system table, or its <see cref="FromSource.LateralPlan"/> executed
-    /// once with the enclosing-scope <paramref name="outerResolver"/>
-    /// (the only correlation available at the outermost FROM level).
-    /// Writes slot 0 of the shared buffer on each yield.
+    /// Drives the leftmost slot of a fold range (<paramref name="slot"/>): its
+    /// rows directly for a base / view / system table, or its
+    /// <see cref="FromSource.LateralPlan"/> executed once with the
+    /// enclosing-scope <paramref name="outerResolver"/> (the only correlation
+    /// available at a fold range's outermost level). Writes the slot on each
+    /// yield.
     /// </summary>
     private static IEnumerable<byte[]?[]> EnumerateLeftmost(
         FromSource source,
         byte[]?[] tuple,
+        int slot,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver)
     {
@@ -113,10 +149,111 @@ internal sealed partial class Selection
             : source.Rows;
         foreach (var row in rows)
         {
-            tuple[0] = row;
+            tuple[slot] = row;
             yield return tuple;
         }
-        tuple[0] = null;
+        tuple[slot] = null;
+    }
+
+    /// <summary>
+    /// Joins the accumulated <paramref name="left"/> spine against a
+    /// parenthesized join group spanning slots
+    /// <c>[start, start + count)</c> as a unit. The group is materialized once
+    /// (its interior fold is uncorrelated to the left, matching SQL Server's
+    /// grammar-grouping semantics) into a list of per-slot-range snapshots,
+    /// then nested-loop joined per <paramref name="join"/>'s kind. An outer-join
+    /// miss NULL-fills every slot in the range (both group members read as
+    /// typed NULL); RIGHT / FULL emit unmatched group rows with the whole left
+    /// spine NULL-filled. The equi-join fast path is intentionally bypassed for
+    /// group joins — correctness over a rare, typically tiny shape.
+    /// </summary>
+    private static IEnumerable<byte[]?[]> GroupJoin(
+        IEnumerable<byte[]?[]> left,
+        FromSource[] sources,
+        JoinSpec[] joins,
+        JoinSpec join,
+        byte[]?[] tuple,
+        int start,
+        int count,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue> resolve,
+        Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        // Materialize the group's interior rows up front, snapshotting the
+        // group's slot range out of the shared tuple (the byte[] row values are
+        // immutable; only the tuple container is reused).
+        var groupRows = new List<byte[]?[]>();
+        foreach (var _ in EnumerateFoldRange(sources, joins, start, count, tuple, batch, resolve, outerResolver))
+        {
+            var snapshot = new byte[]?[count];
+            Array.Copy(tuple, start, snapshot, 0, count);
+            groupRows.Add(snapshot);
+        }
+        for (var s = start; s < start + count; s++)
+            tuple[s] = null;
+
+        var predicate = join.OnPredicate;
+        var runtime = new RuntimeContext(resolve, batch);
+        var emitUnmatchedLeft = join.Kind is JoinKind.Left or JoinKind.Full;
+        var emitUnmatchedRight = join.Kind is JoinKind.Right or JoinKind.Full;
+        var matched = new bool[groupRows.Count];
+
+        foreach (var _ in left)
+        {
+            var leftMatched = false;
+            for (var i = 0; i < groupRows.Count; i++)
+            {
+                WriteGroupSlots(tuple, start, groupRows[i]);
+                if (predicate is null || predicate.Run(runtime) == true)
+                {
+                    matched[i] = true;
+                    leftMatched = true;
+                    yield return tuple;
+                }
+            }
+            for (var s = start; s < start + count; s++)
+                tuple[s] = null;
+            if (!leftMatched && emitUnmatchedLeft)
+                yield return tuple;
+        }
+
+        if (emitUnmatchedRight)
+        {
+            for (var s = 0; s < start; s++)
+                tuple[s] = null;
+            for (var i = 0; i < groupRows.Count; i++)
+            {
+                if (matched[i])
+                    continue;
+                WriteGroupSlots(tuple, start, groupRows[i]);
+                yield return tuple;
+            }
+            for (var s = start; s < start + count; s++)
+                tuple[s] = null;
+        }
+    }
+
+    private static void WriteGroupSlots(byte[]?[] tuple, int start, byte[]?[] snapshot)
+    {
+        for (var j = 0; j < snapshot.Length; j++)
+            tuple[start + j] = snapshot[j];
+    }
+
+    /// <summary>
+    /// True when any join's right operand is a parenthesized join group
+    /// (<see cref="JoinSpec.GroupCount"/> &gt; 1). Such queries go through the
+    /// group-aware nested-loop fold and bypass the flat left-deep optimizations
+    /// (comma→equi rewrite, index-seek narrowing, ordered-scan elimination),
+    /// which assume one source per join level.
+    /// </summary>
+    internal static bool ContainsJoinGroup(JoinSpec[] joins)
+    {
+        foreach (var join in joins)
+        {
+            if (join.GroupCount > 1)
+                return true;
+        }
+        return false;
     }
 
     private static IEnumerable<byte[]?[]> ApplyJoin(

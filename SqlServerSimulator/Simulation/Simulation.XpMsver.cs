@@ -1,5 +1,3 @@
-using System.Globalization;
-using System.Runtime.InteropServices;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Storage;
 
@@ -19,10 +17,13 @@ partial class Simulation
         ["Index", "Name", "Internal_Value", "Character_Value"];
 
     /// <summary>
-    /// The <c>xp_msver</c> rows, materialized once. Host-dependent cells
-    /// (platform, OS version, processor mask/count, physical memory) are
-    /// computed exception-safe at type-init; version-identity cells use the
-    /// simulator's claimed 17.0.0.0 identity rather than a live server build.
+    /// The <c>xp_msver</c> rows, materialized once. Every cell is a fixed value
+    /// mirroring the SQL Server 2025 reference instance (17.0.4065.4, RTM-CU7):
+    /// version-identity cells carry the real build, and the host-shaped cells
+    /// (platform, OS version, processor count/type/mask, physical memory) report
+    /// the reference's fixed values rather than the simulator's live host —
+    /// matching real, whose xp_msver reports Windows-style host strings even on
+    /// Linux. The processor/memory figures are documented as fixed placeholders.
     /// </summary>
     private static readonly SqlValue[][] XpMsverRows = BuildXpMsverRows();
 
@@ -86,73 +87,32 @@ partial class Simulation
         characterValue is { } cv ? SqlValue.FromNVarchar(cv) : SqlValue.Null(SqlType.NVarchar),
     ];
 
-    private static SqlValue[][] BuildXpMsverRows()
-    {
-        var processorCount = Environment.ProcessorCount;
-        var (osValue, osText) = ComputeOsVersion();
-        var (memoryMb, memoryBytes) = ComputePhysicalMemory();
-        return
+    private static SqlValue[][] BuildXpMsverRows() =>
         [
             // ProductVersion Internal_Value packs the major version as
             // (major << 16) — 17 << 16 = 1114112 — matching real xp_msver.
             XpMsverRow(1, "ProductName", null, "Microsoft SQL Server"),
-            XpMsverRow(2, "ProductVersion", 17 << 16, "17.0.0.0"),
-            XpMsverRow(3, "Language", 1033, "English (United States)"),
-            XpMsverRow(4, "Platform", null, ComputePlatform()),
+            XpMsverRow(2, "ProductVersion", 17 << 16, "17.0.4065.4"),
+            XpMsverRow(3, "Language", null, "English"),
+            XpMsverRow(4, "Platform", null, "NT x64"),
             XpMsverRow(5, "Comments", null, "SQL"),
             XpMsverRow(6, "CompanyName", null, "Microsoft Corporation"),
-            XpMsverRow(7, "FileDescription", null, OperatingSystem.IsWindows()
-                ? "SQL Server Windows NT - 64 Bit"
-                : "SQL Server Linux - 64 Bit"),
-            XpMsverRow(8, "FileVersion", null, "2025.0170.0000.00"),
+            XpMsverRow(7, "FileDescription", null, "SQL Server Windows NT - 64 Bit"),
+            XpMsverRow(8, "FileVersion", null, "2025.0170.4065.04 ((sql2025_rtm_qfe-cu7).260709-0512)"),
             XpMsverRow(9, "InternalName", null, "SQLSERVR"),
             XpMsverRow(10, "LegalCopyright", null, "Microsoft. All rights reserved."),
             XpMsverRow(11, "LegalTrademarks", null, "Microsoft SQL Server is a registered trademark of Microsoft Corporation."),
             XpMsverRow(12, "OriginalFilename", null, "SQLSERVR.EXE"),
             XpMsverRow(13, "PrivateBuild", null, null),
-            XpMsverRow(14, "SpecialBuild", 0, null),
-            XpMsverRow(15, "WindowsVersion", osValue, osText),
-            XpMsverRow(16, "ProcessorCount", processorCount, processorCount.ToString(CultureInfo.InvariantCulture)),
-            XpMsverRow(17, "ProcessorActiveMask", null, ComputeProcessorActiveMask()),
+            XpMsverRow(14, "SpecialBuild", 266403844, null),
+            // Fixed host-shaped placeholders (see XpMsverRows summary): the
+            // reference reports a Windows OS version, 16 processors, and 3 GB
+            // even on Linux.
+            XpMsverRow(15, "WindowsVersion", 266403844, "6.3 (20348)"),
+            XpMsverRow(16, "ProcessorCount", 16, "16"),
+            XpMsverRow(17, "ProcessorActiveMask", null, "ffff"),
             XpMsverRow(18, "ProcessorType", 8664, null),
-            XpMsverRow(19, "PhysicalMemory", memoryMb, $"{memoryMb} ({memoryBytes})"),
+            XpMsverRow(19, "PhysicalMemory", 3072, "3072 (3221225472)"),
             XpMsverRow(20, "Product ID", null, null),
         ];
-    }
-
-    private static string ComputePlatform()
-    {
-        // Lowercase architecture token to mirror real xp_msver's 'NT x64';
-        // the common arches are mapped explicitly (CA1308 forbids
-        // ToLowerInvariant, and the switch reads honestly per meaning).
-        var architecture = RuntimeInformation.OSArchitecture switch
-        {
-            Architecture.X64 => "x64",
-            Architecture.Arm64 => "arm64",
-            Architecture.X86 => "x86",
-            Architecture.Arm => "arm",
-            var other => other.ToString().ToUpperInvariant(),
-        };
-        return OperatingSystem.IsWindows() ? $"NT {architecture}" : $"Linux {architecture}";
-    }
-
-    private static (int Value, string Text) ComputeOsVersion()
-    {
-        var version = Environment.OSVersion.Version;
-        var packed = (version.Major << 16) | (version.Build & 0xFFFF);
-        return (packed, $"{version.Major}.{version.Minor} ({version.Build})");
-    }
-
-    private static string ComputeProcessorActiveMask()
-    {
-        var count = Environment.ProcessorCount;
-        var mask = count >= 64 ? ulong.MaxValue : (1UL << count) - 1;
-        return mask.ToString("x", CultureInfo.InvariantCulture);
-    }
-
-    private static (int Megabytes, long Bytes) ComputePhysicalMemory()
-    {
-        var bytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
-        return ((int)(bytes / (1024 * 1024)), bytes);
-    }
 }

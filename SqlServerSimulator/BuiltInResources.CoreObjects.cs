@@ -347,6 +347,26 @@ internal static partial class BuiltInResources
             new("is_masked", SqlType.Bit, null, false),
             new("is_rowguidcol", SqlType.Bit, null, false),
             new("rule_object_id", SqlType.Int32, null, false),
+            // Replication / subscription flags — all 0 (replication isn't
+            // modeled). SSMS's Table-Designer column query reads is_replicated;
+            // the sibling three round out real's replication group. is_data_
+            // deletion_filter_column (retention-policy filter) is likewise 0.
+            new("is_replicated", SqlType.Bit, null, true),
+            new("is_non_sql_subscribed", SqlType.Bit, null, true),
+            new("is_merge_published", SqlType.Bit, null, true),
+            new("is_dts_replicated", SqlType.Bit, null, true),
+            // generated_always_type_desc: the enum text for the temporal ROW
+            // START / END marker (NOT_APPLICABLE for ordinary columns).
+            // encryption_type_desc / column_encryption_key_database_name are
+            // Always-Encrypted metadata (unmodeled, NULL); graph_type_desc is
+            // the graph node/edge column-kind text (unmodeled, NULL);
+            // vector_base_type the VECTOR element type id (unmodeled, NULL).
+            new("generated_always_type_desc", nvarchar60Catalog, 60, true),
+            new("encryption_type_desc", NVarcharSqlType.Get(64, Collation.Catalog, Coercibility.Implicit), 64, true),
+            new("column_encryption_key_database_name", SqlType.SystemName, 128, true),
+            new("graph_type_desc", nvarchar60Catalog, 60, true),
+            new("is_data_deletion_filter_column", SqlType.Bit, null, true),
+            new("vector_base_type", SqlType.TinyInt, null, true),
         ];
         IEnumerable<SqlValue[]> ColumnRows(Parser.BatchContext batch, Database database, CatalogFilter filter) =>
             EnumerateColumns(batch, database, defaultCollation, nullCollation, filter);
@@ -376,6 +396,18 @@ internal static partial class BuiltInResources
         var nullSysName = SqlValue.Null(SqlType.SystemName);
         var nullVectorBaseType = SqlValue.Null(NVarcharSqlType.Get(20, Collation.Catalog, Coercibility.Implicit));
         var nullLedgerViewColumnTypeDesc = SqlValue.Null(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit));
+        var nullEncryptionTypeDesc = SqlValue.Null(NVarcharSqlType.Get(64, Collation.Catalog, Coercibility.Implicit));
+        var nullGraphTypeDesc = SqlValue.Null(nvarchar60Catalog);
+        var nullVectorBaseTypeId = SqlValue.Null(SqlType.TinyInt);
+        // generated_always_type_desc mirrors generated_always_type's enum text;
+        // ordinary (non-temporal) columns report NOT_APPLICABLE.
+        SqlValue GeneratedAlwaysDescFor(HeapColumn c) =>
+            SqlValue.FromString(nvarchar60Catalog, c.GeneratedAs switch
+            {
+                GeneratedAlwaysAsRow.Start => "AS_ROW_START",
+                GeneratedAlwaysAsRow.End => "AS_ROW_END",
+                _ => "NOT_APPLICABLE",
+            });
         // is_ansi_padded is 1 for char / varchar / nchar / nvarchar / binary /
         // varbinary (all simulator tables are created under ANSI_PADDING ON);
         // 0 for every other type, including the deprecated LOB types
@@ -448,6 +480,16 @@ internal static partial class BuiltInResources
                         falseBit,
                         SqlValue.FromBoolean(col.IsRowGuidCol),
                         zeroInt,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        GeneratedAlwaysDescFor(col),
+                        nullEncryptionTypeDesc,
+                        nullSysName,
+                        nullGraphTypeDesc,
+                        falseBit,
+                        nullVectorBaseTypeId,
                     ];
                 }
             }
@@ -497,6 +539,16 @@ internal static partial class BuiltInResources
                         falseBit,
                         SqlValue.FromBoolean(col.IsRowGuidCol),
                         zeroInt,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        GeneratedAlwaysDescFor(col),
+                        nullEncryptionTypeDesc,
+                        nullSysName,
+                        nullGraphTypeDesc,
+                        falseBit,
+                        nullVectorBaseTypeId,
                     ];
                 }
             }
@@ -546,6 +598,16 @@ internal static partial class BuiltInResources
                         falseBit,
                         SqlValue.FromBoolean(col.IsRowGuidCol),
                         zeroInt,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        GeneratedAlwaysDescFor(col),
+                        nullEncryptionTypeDesc,
+                        nullSysName,
+                        nullGraphTypeDesc,
+                        falseBit,
+                        nullVectorBaseTypeId,
                     ];
                 }
             }
@@ -595,6 +657,16 @@ internal static partial class BuiltInResources
                         falseBit,
                         SqlValue.FromBoolean(col.IsRowGuidCol),
                         zeroInt,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        falseBit,
+                        GeneratedAlwaysDescFor(col),
+                        nullEncryptionTypeDesc,
+                        nullSysName,
+                        nullGraphTypeDesc,
+                        falseBit,
+                        nullVectorBaseTypeId,
                     ];
                 }
             }

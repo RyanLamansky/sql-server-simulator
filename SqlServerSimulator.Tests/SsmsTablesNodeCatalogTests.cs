@@ -33,6 +33,61 @@ public sealed class SsmsTablesNodeCatalogTests
             sim.ExecuteScalar<int>("select count(*) from sys.all_columns where object_id = object_id('t')"));
     }
 
+    /// <summary>
+    /// SSMS's Table-Designer column query reads <c>col.is_replicated</c> and
+    /// its replication siblings off sys.columns; before this those columns
+    /// were absent and the query failed to bind. Probe-confirmed values for an
+    /// ordinary user-table column (SQL Server 2025): the four replication flags
+    /// and is_data_deletion_filter_column are 0, generated_always_type_desc is
+    /// <c>NOT_APPLICABLE</c>, and the encryption / graph / vector metadata is
+    /// NULL. One fix covers both sys.columns and sys.all_columns.
+    /// </summary>
+    [TestMethod]
+    public void Columns_ExposesReplicationAndAddedMetadataColumns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key)");
+        using var reader = sim.ExecuteReader("""
+            select cast(is_replicated as int), cast(is_non_sql_subscribed as int),
+                   cast(is_merge_published as int), cast(is_dts_replicated as int),
+                   cast(is_data_deletion_filter_column as int), generated_always_type_desc,
+                   encryption_type_desc, column_encryption_key_database_name,
+                   graph_type_desc, vector_base_type
+            from sys.columns where object_id = object_id('t') and name = 'id'
+            """);
+        IsTrue(reader.Read());
+        AreEqual(0, reader.GetInt32(0));
+        AreEqual(0, reader.GetInt32(1));
+        AreEqual(0, reader.GetInt32(2));
+        AreEqual(0, reader.GetInt32(3));
+        AreEqual(0, reader.GetInt32(4));
+        AreEqual("NOT_APPLICABLE", reader.GetString(5));
+        IsTrue(reader.IsDBNull(6));
+        IsTrue(reader.IsDBNull(7));
+        IsTrue(reader.IsDBNull(8));
+        IsTrue(reader.IsDBNull(9));
+    }
+
+    /// <summary>
+    /// generated_always_type_desc mirrors the temporal ROW START / END marker.
+    /// A system-versioned table's period columns report AS_ROW_START /
+    /// AS_ROW_END; ordinary columns report NOT_APPLICABLE.
+    /// </summary>
+    [TestMethod]
+    public void Columns_GeneratedAlwaysTypeDesc_ReflectsPeriodColumns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (
+                id int not null primary key,
+                validfrom datetime2 generated always as row start not null,
+                validto datetime2 generated always as row end not null,
+                period for system_time (validfrom, validto))
+            """);
+        AreEqual("AS_ROW_START", sim.ExecuteScalar("select generated_always_type_desc from sys.columns where object_id = object_id('t') and name = 'validfrom'"));
+        AreEqual("AS_ROW_END", sim.ExecuteScalar("select generated_always_type_desc from sys.columns where object_id = object_id('t') and name = 'validto'"));
+    }
+
     [TestMethod]
     public void DataSpaces_ReturnsPrimaryFilegroup()
     {

@@ -181,7 +181,7 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
         BinaryPrimitives.WriteUInt16LittleEndian(this.buffer.AsSpan(lengthPosition), checked((ushort)(this.length - lengthPosition - 2)));
     }
 
-    public void WriteLoginAck(uint tdsVersion, string programName, byte versionMajor, byte versionMinor)
+    public void WriteLoginAck(uint tdsVersion, string programName, byte versionMajor, byte versionMinor, ushort build)
     {
         this.WriteByte(Tds.TokenLoginAck);
         this.WriteUInt16(checked((ushort)(1 + 4 + 1 + (programName.Length * 2) + 4)));
@@ -192,14 +192,11 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
         this.WriteBVarchar(programName);
         this.WriteByte(versionMajor);
         this.WriteByte(versionMinor);
-        // ProgVersion build field left 0 — the simulator deliberately reports a
-        // 0-build version (SqlConnection.ServerVersion "17.00.0000") as an
-        // honest "this is not a real SQL Server build" marker. Probed harmless
-        // to SMO's Object Explorer (2026-07-15): the user-database enumeration
-        // populates regardless — the actual gate was ntext RPC-parameter
-        // support, not the reported version.
-        this.WriteByte(0);
-        this.WriteByte(0);
+        // ProgVersion build is a big-endian 16-bit field; SqlConnection.ServerVersion
+        // reads it as "major.minor.build" (build 4065 → "17.00.4065"), matching the
+        // SQL Server 2025 reference instance the simulator emulates.
+        this.WriteByte((byte)(build >> 8));
+        this.WriteByte((byte)(build & 0xFF));
     }
 
     public void WriteDone(ushort status, long rowCount) => this.WriteDoneToken(Tds.TokenDone, status, rowCount);

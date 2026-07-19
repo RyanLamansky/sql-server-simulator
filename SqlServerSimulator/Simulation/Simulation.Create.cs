@@ -741,12 +741,12 @@ partial class Simulation
                     // database's <see cref="Database.Collation"/>.
                     if (context.GetNextRequired() is not { } collationToken)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
-                    var collationName = collationToken switch
+                    var collationName = Parser.Expressions.CollateExpression.ResolvePseudoCollationName(collationToken switch
                     {
                         UnquotedString us => us.Value,
                         Name n => n.Value,
                         _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-                    };
+                    }, context.Batch);
                     if (!Collation.IsRecognized(collationName))
                         throw new NotSupportedException($"COLLATE: collation '{collationName}' isn't on the simulator's recognized list.");
                     columnCollation = collationName;

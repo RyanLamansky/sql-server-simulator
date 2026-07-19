@@ -961,6 +961,7 @@ internal abstract class Expression
                 "JSON_MODIFY" => new JsonModify(context),
                 "JSON_OBJECT" => new JsonObject(context),
                 "OBJECT_NAME" => new ObjectName(context),
+                "PERMISSIONS" => new Permissions(context),
                 "RIGHT_SHIFT" => new BitShift(context, isLeftShift: false),
                 "SCHEMA_NAME" => new SchemaName(context),
                 "SUSER_SNAME" => new SUserName(context, isSidVariant: true),

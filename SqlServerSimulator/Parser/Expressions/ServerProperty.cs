@@ -23,15 +23,18 @@ internal sealed class ServerProperty : Expression
     {
         ["Edition"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("Developer Edition (64-bit)")),
         ["ProductLevel"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("RTM")),
-        ["ProductVersion"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("17.0.0.0")),
+        // Version identity mirrors the SQL Server 2025 reference build the
+        // simulator emulates (17.0.4065.4, RTM-CU7 / KB5096981); a real build
+        // number is what lets SSMS's per-build client feature gates proceed.
+        ["ProductVersion"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("17.0.4065.4")),
         ["ProductMajorVersion"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("17")),
         ["ProductMinorVersion"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("0")),
-        ["ProductBuild"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("0")),
-        ["ProductBuildType"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("R")),
-        // Real SQL Server returns NULL for ProductUpdateLevel on an RTM/GDR
-        // build; the simulator reports build 0 / RTM, so NULL is correct.
-        ["ProductUpdateLevel"] = (SqlType.NVarchar, _ => SqlValue.Null(SqlType.NVarchar)),
-        ["ProductUpdateReference"] = (SqlType.NVarchar, _ => SqlValue.Null(SqlType.NVarchar)),
+        ["ProductBuild"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("4065")),
+        // Real SQL Server reports NULL for ProductBuildType on a CU build
+        // (it's non-null only for GDR/OD servicing branches).
+        ["ProductBuildType"] = (SqlType.NVarchar, _ => SqlValue.Null(SqlType.NVarchar)),
+        ["ProductUpdateLevel"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("CU7")),
+        ["ProductUpdateReference"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("KB5096981")),
         ["EngineEdition"] = (SqlType.Int32, _ => SqlValue.FromInt32(3)),
         ["IsClustered"] = (SqlType.Int32, _ => SqlValue.FromInt32(0)),
         ["IsFullTextInstalled"] = (SqlType.Int32, _ => SqlValue.FromInt32(1)),
@@ -44,6 +47,13 @@ internal sealed class ServerProperty : Expression
         ["MachineName"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("SIMULATED")),
         ["ServerName"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("SIMULATED")),
         ["InstanceName"] = (SqlType.NVarchar, _ => SqlValue.Null(SqlType.NVarchar)),
+        // Real reports the engine's OS process id and physical host name; both
+        // must be non-NULL — SSMS Activity Monitor casts them without a NULL
+        // check ("Object cannot be cast from DBNull to other types"). The
+        // simulator's engine process is the host process, so its id is the
+        // faithful value.
+        ["ProcessID"] = (SqlType.Int32, _ => SqlValue.FromInt32(Environment.ProcessId)),
+        ["ComputerNamePhysicalNetBIOS"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("SIMULATED")),
         ["Collation"] = (SqlType.NVarchar, r => SqlValue.FromNVarchar(r.Batch.Connection.Simulation.ServerCollationName)),
         ["CollationID"] = (SqlType.Int32, _ => SqlValue.FromInt32(872468488)),
         ["ComparisonStyle"] = (SqlType.Int32, _ => SqlValue.FromInt32(196609)),
@@ -54,7 +64,7 @@ internal sealed class ServerProperty : Expression
         // for the default collation's sortId (52). Other SQL sort orders fall
         // back to "BIN" rather than their true probed name.
         ["SqlSortOrderName"] = (SqlType.NVarchar, r => SqlValue.FromNVarchar(SortIdFor(r.Batch.Connection.Simulation.ServerCollationName) == 52 ? "nocase_iso" : "BIN")),
-        ["ResourceVersion"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("17.00.0")),
+        ["ResourceVersion"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("17.00.4065")),
         ["BuildClrVersion"] = (SqlType.NVarchar, _ => SqlValue.FromNVarchar("v4.0.30319")),
         ["EditionID"] = (SqlType.Int32, _ => SqlValue.FromInt32(-2117995310)),
         ["FilestreamShareName"] = (SqlType.NVarchar, _ => SqlValue.Null(SqlType.NVarchar)),

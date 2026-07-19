@@ -543,7 +543,7 @@ public sealed class SimulatedDbConnection : DbConnection
     public override string DataSource => DataSourceName;
 
     /// <inheritdoc/>
-    public override string ServerVersion => "17.0.0";
+    public override string ServerVersion => "17.00.4065";
 
     private ConnectionState state;
 

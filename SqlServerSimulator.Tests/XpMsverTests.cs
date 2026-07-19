@@ -1,4 +1,3 @@
-using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -7,10 +6,11 @@ namespace SqlServerSimulator;
 /// Tests for the <c>xp_msver</c> system procedure: a single 20-row result set
 /// (columns <c>Index smallint</c>, <c>Name nvarchar</c>,
 /// <c>Internal_Value int</c>, <c>Character_Value nvarchar</c>) that SSMS calls
-/// on connect. Version-identity cells reflect the simulator's claimed 17.0.0.0
-/// identity; host cells (processor count, memory, platform) are honest. The
-/// proc resolves as <c>xp_msver</c>, <c>dbo.xp_msver</c>, and
-/// <c>master.dbo.xp_msver</c> from any current database.
+/// on connect. Every cell is fixed, mirroring the SQL Server 2025 reference
+/// (17.0.4065.4, RTM-CU7); the host-shaped cells (processor count, memory,
+/// platform) report the reference's fixed placeholders. The proc resolves as
+/// <c>xp_msver</c>, <c>dbo.xp_msver</c>, and <c>master.dbo.xp_msver</c> from
+/// any current database.
 /// </summary>
 [TestClass]
 public sealed class XpMsverTests
@@ -58,19 +58,27 @@ public sealed class XpMsverTests
     }
 
     [TestMethod]
-    public void XpMsver_ProductVersion_PacksMajorShiftedLeft16()
+    public void XpMsver_ProductVersion_CarriesReferenceBuild()
     {
         var row = ReadRows("exec xp_msver").Single(r => r.Name == "ProductVersion");
         AreEqual(17 << 16, row.InternalValue);
-        AreEqual("17.0.0.0", row.CharacterValue);
+        AreEqual("17.0.4065.4", row.CharacterValue);
     }
 
     [TestMethod]
-    public void XpMsver_ProcessorCount_IsHonest()
+    public void XpMsver_Platform_IsFixedNtX64()
+    {
+        var row = ReadRows("exec xp_msver").Single(r => r.Name == "Platform");
+        AreEqual(DBNull.Value, row.InternalValue);
+        AreEqual("NT x64", row.CharacterValue);
+    }
+
+    [TestMethod]
+    public void XpMsver_ProcessorCount_IsFixed()
     {
         var row = ReadRows("exec xp_msver").Single(r => r.Name == "ProcessorCount");
-        AreEqual(Environment.ProcessorCount, row.InternalValue);
-        AreEqual(Environment.ProcessorCount.ToString(CultureInfo.InvariantCulture), row.CharacterValue);
+        AreEqual(16, row.InternalValue);
+        AreEqual("16", row.CharacterValue);
     }
 
     [TestMethod]
@@ -128,5 +136,22 @@ public sealed class XpMsverTests
     {
         var row = ReadRows("exec xp_msver @optname = 'Platform'").Single();
         AreEqual("Platform", row.Name);
+    }
+
+    // SSMS Activity Monitor's opener: capture xp_msver's rowset into a temp
+    // table via INSERT … EXEC, then read it back. The four-column shape maps
+    // positionally (ID <- Index, Name, Internal_Value, Value <- Character_Value).
+    [TestMethod]
+    public void XpMsver_InsertExecIntoTempTable_ActivityMonitorPattern()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table #SVer(ID int, Name sysname, Internal_Value int, Value nvarchar(512));
+            insert #SVer exec master.dbo.xp_msver
+            """).ExecuteNonQuery();
+        AreEqual(20, connection.CreateCommand("select count(*) from #SVer").ExecuteScalar());
+        AreEqual("17.0.4065.4", connection.CreateCommand(
+            "select Value from #SVer where Name = 'ProductVersion'").ExecuteScalar());
     }
 }

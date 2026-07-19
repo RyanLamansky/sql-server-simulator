@@ -330,7 +330,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         writer.WriteErrorOrInfo(Tds.TokenInfo, 5703, 1, 0, "Changed language setting to us_english.", "SIMULATED", "", 1);
         var serverCollation = TdsCollationCodec.For(Collation.Get(simulation.ServerCollationName));
         writer.WriteEnvChangeSqlCollation(serverCollation.Info, serverCollation.SortId);
-        writer.WriteLoginAck(Tds.Version74, "Microsoft SQL Server", 17, 0);
+        writer.WriteLoginAck(Tds.Version74, "Microsoft SQL Server", 17, 0, 4065);
         writer.WriteEnvChange(Tds.EnvPacketSize, packetSize.ToString(System.Globalization.CultureInfo.InvariantCulture), Tds.DefaultPacketSize.ToString(System.Globalization.CultureInfo.InvariantCulture));
         writer.WriteDone(Tds.DoneFinal, 0);
     }
@@ -543,6 +543,10 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
         var hasOutcome = outcomes.MoveNext();
         var anyOutcome = hasOutcome;
+        // Depth of EXEC('…') / sp_executesql scopes currently open: while > 0,
+        // statement outcomes render with DONEINPROC (0xFF) instead of the
+        // batch/RPC done token, matching real SQL Server's nested-proc discipline.
+        var procScopeDepth = 0;
         while (hasOutcome)
         {
             // Client attention (SqlCommand.Cancel / CommandTimeout) observed at
@@ -553,6 +557,32 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 return true;
 
             var outcome = outcomes.Current;
+
+            // Proc-scope markers bracket a dynamic-SQL body. Entry raises the
+            // depth (no token); exit lowers it and closes the scope with
+            // RETURNSTATUS + DONEPROC, exactly as real SQL Server frames an
+            // EXEC('…'). The DONEPROC carries the usual more/final bit.
+            if (outcome is SimulatedProcScopeBoundary boundary)
+            {
+                hasOutcome = outcomes.MoveNext();
+                if (boundary.IsEnter)
+                {
+                    procScopeDepth++;
+                    continue;
+                }
+
+                procScopeDepth--;
+                var procStatus = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
+                if ((procStatus & Tds.DoneMore) == 0)
+                    this.WriteDatabaseChangeIfAny(writer);
+                writer.WriteReturnStatus(0);
+                writer.WriteDoneToken(Tds.TokenDoneProc, procStatus, 0);
+                continue;
+            }
+
+            // Inside a dynamic-SQL scope every statement uses DONEINPROC.
+            var effectiveDoneToken = procScopeDepth > 0 ? Tds.TokenDoneInProc : doneToken;
+
             // Messages from a preceding no-outcome statement (PRINT,
             // severity<=10 RAISERROR): real SQL Server gives that statement
             // its own DONE after the INFO tokens. Without it SqlClient's
@@ -561,7 +591,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             // responses skip the extra DONEINPROC — their per-statement
             // DONEINPROC stream is already well-formed for proc-body PRINT.
             if (this.FlushInfoMessages(writer) && !trailingTokensFollow)
-                writer.WriteDoneToken(doneToken, Tds.DoneMore, 0);
+                writer.WriteDoneToken(effectiveDoneToken, Tds.DoneMore, 0);
             if (outcome is SimulatedQueryResult query)
             {
                 TdsTypeCodec.ValidateSchema(query.Schema);
@@ -587,7 +617,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 var queryStatus = (ushort)(this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow) | Tds.DoneCount);
                 if ((queryStatus & Tds.DoneMore) == 0)
                     this.WriteDatabaseChangeIfAny(writer);
-                writer.WriteDoneToken(doneToken, queryStatus, rows);
+                writer.WriteDoneToken(effectiveDoneToken, queryStatus, rows);
             }
             else if (outcome is SimulatedErrorOutcome errorOutcome)
             {
@@ -603,7 +633,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 var status = (ushort)(this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow) | Tds.DoneError);
                 if ((status & Tds.DoneMore) == 0)
                     this.WriteDatabaseChangeIfAny(writer);
-                writer.WriteDoneToken(doneToken, status, 0);
+                writer.WriteDoneToken(effectiveDoneToken, status, 0);
             }
             else
             {
@@ -615,7 +645,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
                 if ((status & Tds.DoneMore) == 0)
                     this.WriteDatabaseChangeIfAny(writer);
-                writer.WriteDoneToken(doneToken, status, Math.Max(affected, 0));
+                writer.WriteDoneToken(effectiveDoneToken, status, Math.Max(affected, 0));
             }
         }
 
@@ -777,7 +807,9 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var dataStart = (optionCount * 5) + 1;
         var data = new List<(byte Token, byte[] Value)>
         {
-            (Tds.PreloginVersion, [17, 0, 0, 0, 0, 0]),
+            // VERSION = major, minor, build (big-endian u16), subbuild (u16).
+            // Build 4065 = 0x0FE1; mirrors the SQL Server 2025 reference build.
+            (Tds.PreloginVersion, [17, 0, 0x0F, 0xE1, 0, 0]),
             (Tds.PreloginEncryption, [Tds.EncryptRequired]),
             (Tds.PreloginInstance, [0]),
             (Tds.PreloginThreadId, []),

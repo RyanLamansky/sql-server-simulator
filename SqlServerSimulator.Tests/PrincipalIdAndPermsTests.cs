@@ -95,4 +95,81 @@ public sealed class PrincipalIdAndPermsTests
     [TestMethod]
     public void IsSrvRoleMember_DatabaseRole_ReturnsNull()
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select is_srvrolemember('db_owner')"));
+
+    // permissions() — the legacy deprecated bitmap. The simulator's session
+    // principal is always the database-owning dbo, so these return the fixed
+    // privileged (owner) masks probed against SQL Server 2025.
+
+    [TestMethod]
+    public void Permissions_Niladic_ReturnsDbOwnerStatementMask()
+        => AreEqual(50201342, new Simulation().ExecuteScalar("select permissions()"));
+
+    [TestMethod]
+    public void Permissions_Niladic_UnaffectedByCreateUserAndGrant()
+    {
+        // The simulator has no EXECUTE AS principal switching; the session is
+        // always dbo, so granting a statement permission to another user does
+        // not change dbo's privileged mask.
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand("create user app_user without login").ExecuteNonQuery();
+        _ = connection.CreateCommand("grant create table to app_user").ExecuteNonQuery();
+        AreEqual(50201342, connection.CreateCommand("select permissions()").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Permissions_Object_ResolvableTable_ReturnsOwnerMask()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand("create table dbo.t (id int, name nvarchar(20))").ExecuteNonQuery();
+        AreEqual(1948217375, connection.CreateCommand("select permissions(object_id('dbo.t'))").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Permissions_Object_NullArgument_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select permissions(null)"));
+
+    [TestMethod]
+    public void Permissions_Object_UnresolvedId_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select permissions(999999999)"));
+
+    [TestMethod]
+    public void Permissions_Column_ExistingColumn_ReturnsColumnMask()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand("create table dbo.t (id int, name nvarchar(20))").ExecuteNonQuery();
+        AreEqual(1082605703, connection.CreateCommand("select permissions(object_id('dbo.t'), 'name')").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Permissions_Column_UnknownColumn_ReturnsNull()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand("create table dbo.t (id int)").ExecuteNonQuery();
+        AreEqual(DBNull.Value, connection.CreateCommand("select permissions(object_id('dbo.t'), 'nope')").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Permissions_Column_NullColumnArgument_ReturnsNull()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand("create table dbo.t (id int)").ExecuteNonQuery();
+        AreEqual(DBNull.Value, connection.CreateCommand("select permissions(object_id('dbo.t'), null)").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Permissions_SsmsTableDesignerProbeBatch_ExecutesAllColumns()
+    {
+        // The exact pre-open probe SSMS's Table Designer issues; it failed on
+        // the unrecognized permissions() built-in. ExecuteScalar returns the
+        // first column (user_name()), proving the whole 7-column SELECT — the
+        // permissions() call included — parsed and executed.
+        AreEqual("dbo", new Simulation().ExecuteScalar(
+            "select user_name(), @@MAX_PRECISION, is_member('db_owner'), permissions(), "
+            + "DatabasePropertyEx(db_name(), N'collation'), SERVERPROPERTY('IsFullTextInstalled'), schema_name()"));
+    }
 }

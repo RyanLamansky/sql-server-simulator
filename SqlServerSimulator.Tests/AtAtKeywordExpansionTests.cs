@@ -23,7 +23,7 @@ public sealed class AtAtKeywordExpansionTests
 
     [TestMethod]
     public void AtAt_MicrosoftVersion_ReturnsProductVersionEncoding()
-        => AreEqual(285212672, new Simulation().ExecuteScalar("select @@microsoftversion"));
+        => AreEqual(285216737, new Simulation().ExecuteScalar("select @@microsoftversion"));
 
     [TestMethod]
     public void AtAt_MicrosoftVersion_ComposesInExpression()

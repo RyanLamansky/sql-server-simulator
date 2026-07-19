@@ -407,7 +407,7 @@ public sealed class JoinTests
     public void RightJoin_DerivedTableRight_LateralCorrelationToLeft_Rejected()
     {
         // Real SQL Server raises Msg 4104 ("multi-part identifier could not be bound")
-        // at bind-time; the simulator raises Msg 207 ("Invalid column name 'a.id'") at
+        // at bind-time; the simulator raises Msg 207 ("Invalid column name 'id'") at
         // runtime because Reference.Run is the resolution point — the derived-table
         // parse doesn't see the left-side snapshot resolver, so resolution falls through
         // to the (null at top-level) outer resolver and fails on the first inner row.
@@ -420,6 +420,19 @@ public sealed class JoinTests
             select a.id, bx.id from a right join (select id from b where b.id = a.id) bx on a.id = bx.id
             """, 207);
     }
+
+    /// <summary>
+    /// Msg 207 renders only the leaf identifier — a qualified reference to a
+    /// nonexistent column drops the table / alias qualifier, matching real
+    /// SQL Server verbatim (probe-confirmed: <c>col.is_replicated</c> surfaces
+    /// as <c>"Invalid column name 'is_replicated'."</c>, not the qualified
+    /// form). Surfaced by SSMS's Table-Designer column query.
+    /// </summary>
+    [TestMethod]
+    public void InvalidColumnName_QualifiedReference_RendersLeafOnly()
+        => new Simulation().AssertSqlError(
+            "create table t (id int); select t.nosuchcol from t",
+            207, "Invalid column name 'nosuchcol'.");
 
     [TestMethod]
     public void CommaFrom_TwoSources_FilterEqualsInnerJoin()

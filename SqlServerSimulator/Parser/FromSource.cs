@@ -261,4 +261,20 @@ internal sealed class JoinSpec(JoinKind kind, BooleanExpression? onPredicate)
 {
     public readonly JoinKind Kind = kind;
     public readonly BooleanExpression? OnPredicate = onPredicate;
+
+    /// <summary>
+    /// The number of contiguous flat <c>sources[]</c> slots this join's right
+    /// operand spans. <c>1</c> for an ordinary single-source join (the common
+    /// case). Greater than 1 when the right operand is a parenthesized join
+    /// group (<c>A LEFT JOIN (B JOIN C ON …) ON …</c>): the group's interior
+    /// sources occupy slots <c>[level, level + GroupCount)</c> and are joined
+    /// to each other by the interior <see cref="JoinSpec"/>s immediately
+    /// following this one in the flat array, while this <see cref="OnPredicate"/>
+    /// joins the accumulated left spine against the group as a unit — an
+    /// outer-join miss NULL-fills every slot in the range, matching SQL
+    /// Server's grammar-grouping (not derived-table) semantics for the group.
+    /// Set during parsing once the group's source count is known; a left-operand
+    /// group needs no marker because a left-deep spine already groups the left.
+    /// </summary>
+    public int GroupCount = 1;
 }

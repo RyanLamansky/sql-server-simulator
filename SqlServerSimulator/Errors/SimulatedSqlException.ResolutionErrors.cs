@@ -9,7 +9,10 @@ partial class SimulatedSqlException
 
     internal static SimulatedSqlException InvalidColumnName(string name) => new($"Invalid column name '{name}'.", 207, 16, 1);
 
-    internal static SimulatedSqlException InvalidColumnName(MultiPartName name) => InvalidColumnName(name.ToString());
+    // Msg 207 renders only the leaf identifier — real SQL Server drops any
+    // table / alias qualifier (probe-confirmed: `col.is_replicated` surfaces
+    // as "Invalid column name 'is_replicated'.").
+    internal static SimulatedSqlException InvalidColumnName(MultiPartName name) => InvalidColumnName(name.Leaf);
 
     /// <summary>
     /// Mimics SQL Server's Msg 209 — fired when an unqualified column

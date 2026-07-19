@@ -470,12 +470,28 @@ internal static partial class BuiltInResources
             new("is_nullable", SqlType.Bit, null, true),
             new("is_user_defined", SqlType.Bit, null, false),
             new("is_assembly_type", SqlType.Bit, null, false),
+            // default_object_id / rule_object_id: the column-level DEFAULT /
+            // RULE object bindings (both non-nullable int, 0 for the three
+            // system CLR types). Real SQL Server's column order places these
+            // before assembly_id; SSMS's Table-Designer UDT query left-joins
+            // sys.objects on both to detect an attached DEFAULT / RULE.
+            new("default_object_id", SqlType.Int32, null, false),
+            new("rule_object_id", SqlType.Int32, null, false),
             new("assembly_id", SqlType.Int32, null, false),
-            new("is_table_type", SqlType.Bit, null, false),
             // assembly_class: the CLR type name (probe-confirmed
             // Microsoft.SqlServer.Types.Sql{HierarchyId,Geometry,Geography}).
             // DacFx's assembly-type scripting query joins it.
             new("assembly_class", SqlType.SystemName, 128, true),
+            // is_binary_ordered: 1 only for hierarchyid (byte-comparable
+            // OrdPath), 0 for the two spatial types. is_fixed_length: 0 for
+            // all three. prog_id: always NULL. assembly_qualified_name: the
+            // full CLR AssemblyQualifiedName (probe-confirmed, SQL Server
+            // 2025). is_table_type moves last to match real's column order.
+            new("is_binary_ordered", SqlType.Bit, null, true),
+            new("is_fixed_length", SqlType.Bit, null, true),
+            new("prog_id", SqlType.NVarchar, 40, true),
+            new("assembly_qualified_name", SqlType.NVarchar, 4000, true),
+            new("is_table_type", SqlType.Bit, null, false),
         ], EnumerateAssemblyTypes);
 
         // sys.numbered_procedure_parameters / sys.function_order_columns:
@@ -587,7 +603,9 @@ internal static partial class BuiltInResources
         var falseBit = SqlValue.FromBoolean(false);
         var assemblyId = SqlValue.FromInt32(1);
         var systemTypeId = SqlValue.FromByte(240);
-        SqlValue[] Row(string name, int userTypeId, short maxLength, string assemblyClass) =>
+        var zeroInt = SqlValue.FromInt32(0);
+        var nullProgId = SqlValue.Null(SqlType.NVarchar);
+        SqlValue[] Row(string name, int userTypeId, short maxLength, string assemblyClass, bool binaryOrdered) =>
         [
             SqlValue.FromSystemName(name),
             systemTypeId,
@@ -601,13 +619,19 @@ internal static partial class BuiltInResources
             trueBit,
             falseBit,
             trueBit,
+            zeroInt,
+            zeroInt,
             assemblyId,
-            falseBit,
             SqlValue.FromSystemName(assemblyClass),
+            SqlValue.FromBoolean(binaryOrdered),
+            falseBit,
+            nullProgId,
+            SqlValue.FromNVarchar($"{assemblyClass}, Microsoft.SqlServer.Types, Version=11.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91"),
+            falseBit,
         ];
-        yield return Row("hierarchyid", 128, 892, "Microsoft.SqlServer.Types.SqlHierarchyId");
-        yield return Row("geometry", 129, -1, "Microsoft.SqlServer.Types.SqlGeometry");
-        yield return Row("geography", 130, -1, "Microsoft.SqlServer.Types.SqlGeography");
+        yield return Row("hierarchyid", 128, 892, "Microsoft.SqlServer.Types.SqlHierarchyId", true);
+        yield return Row("geometry", 129, -1, "Microsoft.SqlServer.Types.SqlGeometry", false);
+        yield return Row("geography", 130, -1, "Microsoft.SqlServer.Types.SqlGeography", false);
     }
 
     /// <summary>

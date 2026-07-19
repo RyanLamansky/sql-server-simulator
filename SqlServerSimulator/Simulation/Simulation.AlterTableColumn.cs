@@ -702,12 +702,12 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.Collate })
         {
             context.MoveNextRequired();
-            newCollationName = context.Token switch
+            newCollationName = Parser.Expressions.CollateExpression.ResolvePseudoCollationName(context.Token switch
             {
                 UnquotedString us => us.Value,
                 Name n => n.Value,
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-            };
+            }, context.Batch);
             if (!Collation.IsRecognized(newCollationName))
                 throw new NotSupportedException($"COLLATE: collation '{newCollationName}' isn't on the simulator's recognized list.");
             context.MoveNextOptional();

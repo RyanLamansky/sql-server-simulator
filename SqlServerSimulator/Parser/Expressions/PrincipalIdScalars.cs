@@ -69,6 +69,120 @@ internal enum PrincipalIdKind
 }
 
 /// <summary>
+/// Legacy SQL <c>permissions([object_id [, 'column']])</c>: a bitmap of the
+/// current principal's permissions. Deprecated but still evaluated by real
+/// SQL Server (SSMS's Table Designer pre-open probe batch calls the niladic
+/// form), so no deprecation warning is raised. The simulator's session
+/// principal is always the database-owning <c>dbo</c> (consistent with
+/// <see cref="HasPermsByName"/> always returning 1 and the current-principal
+/// placeholders resolving to <c>dbo</c>), so the returned masks are the fixed
+/// privileged (owner) defaults probed against SQL Server 2025 rather than a
+/// per-grant computation:
+/// <list type="bullet">
+/// <item>niladic → <c>50201342</c> — the statement-permission mask a db_owner
+/// carries (CREATE TABLE/PROCEDURE/VIEW/RULE/DEFAULT/FUNCTION + BACKUP
+/// DATABASE/LOG, each mirrored into the with-grant-option high half; the
+/// server-scope CREATE DATABASE bit is absent in a user database).</item>
+/// <item><c>permissions(object_id)</c> → <c>1948217375</c> for an object that
+/// resolves in the current database (the owner mask for a user table/view);
+/// NULL argument or an id that resolves to no object → NULL.</item>
+/// <item><c>permissions(object_id, 'column')</c> → <c>1082605703</c> when the
+/// id resolves to a table carrying the named column; NULL argument, an
+/// unresolved id, or an unknown column → NULL.</item>
+/// </list>
+/// Result type is <see cref="SqlType.Int32"/>.
+/// </summary>
+internal sealed class Permissions : Expression
+{
+    private const int StatementMask = 50201342;
+    private const int ObjectMask = 1948217375;
+    private const int ColumnMask = 1082605703;
+
+    private readonly Expression? objectIdArg;
+    private readonly Expression? columnArg;
+
+    public Permissions(ParserContext context)
+    {
+        if (context.Token is Tokens.Operator { Character: ')' })
+            return;
+        this.objectIdArg = Parse(context);
+        if (context.Token is Tokens.Operator { Character: ',' })
+            this.columnArg = Parse(context.MoveNextRequiredReturnSelf());
+        if (context.Token is not Tokens.Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        if (this.objectIdArg is null)
+            return SqlValue.FromInt32(StatementMask);
+
+        var idValue = this.objectIdArg.Run(runtime);
+        if (idValue.IsNull)
+            return SqlValue.Null(SqlType.Int32);
+        var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
+
+        if (this.columnArg is null)
+        {
+            return ObjectExists(runtime.Batch.CurrentDatabase, id)
+                ? SqlValue.FromInt32(ObjectMask)
+                : SqlValue.Null(SqlType.Int32);
+        }
+
+        var columnValue = this.columnArg.Run(runtime);
+        if (columnValue.IsNull)
+            return SqlValue.Null(SqlType.Int32);
+        var columnName = columnValue.CoerceTo(SqlType.NVarchar).AsString;
+        return TableColumnExists(runtime.Batch.CurrentDatabase, id, columnName)
+            ? SqlValue.FromInt32(ColumnMask)
+            : SqlValue.Null(SqlType.Int32);
+    }
+
+    private static bool ObjectExists(Database database, int objectId)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var obj in schema.SchemaObjects())
+            {
+                if (obj.ObjectId == objectId)
+                    return true;
+            }
+            foreach (var tableType in schema.TableTypes.Values)
+            {
+                if (tableType.ObjectId == objectId)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool TableColumnExists(Database database, int objectId, string columnName)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                if (table.ObjectId != objectId)
+                    continue;
+                foreach (var column in table.Columns)
+                {
+                    if (BuiltInToken.Comparer.Equals(column.Name, columnName))
+                        return true;
+                }
+                return false;
+            }
+        }
+        return false;
+    }
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+
+    internal override string DebugDisplay() => this.objectIdArg is null
+        ? "PERMISSIONS()"
+        : $"PERMISSIONS({this.objectIdArg.DebugDisplay()})";
+}
+
+/// <summary>
 /// SQL <c>HAS_PERMS_BY_NAME(securable, securable_class, permission [, ...])</c>:
 /// returns 1 when the current principal has the given permission, 0
 /// otherwise. The simulator doesn't enforce permissions (GRANT/REVOKE

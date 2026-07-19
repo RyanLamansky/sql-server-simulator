@@ -422,6 +422,77 @@ public sealed class CollationDeclaredColumnTests
     }
 
     /// <summary>
+    /// <c>COLLATE database_default</c> in a table-variable column definition
+    /// resolves to the active database's collation at bind time. SSMS's Disk
+    /// Usage report declares <c>nvarchar(...) COLLATE database_default</c>
+    /// table variables; before this the keyword was rejected as an
+    /// unrecognized collation. Probe-confirmed against SQL Server 2025:
+    /// <c>SQL_VARIANT_PROPERTY(..., 'Collation')</c> reports the active
+    /// database's collation.
+    /// </summary>
+    [TestMethod]
+    public void TableVariable_CollateDatabaseDefault_ResolvesToActiveDatabaseCollation()
+    {
+        var sim = new Simulation();
+        using var conn = sim.CreateOpenConnection();
+        _ = conn.CreateCommand("alter database simulated collate Latin1_General_CS_AS").ExecuteNonQuery();
+        var coll = conn.CreateCommand(
+            "declare @tv table (c nvarchar(10) collate database_default); insert @tv values (N'a'); " +
+            "select convert(sysname, sql_variant_property(cast(c as sql_variant), 'Collation')) from @tv").ExecuteScalar();
+        AreEqual("Latin1_General_CS_AS", coll);
+    }
+
+    /// <summary>
+    /// <c>COLLATE database_default</c> on a <c>#temp</c> column resolves to the
+    /// *session* database's collation — probe-confirmed the real server uses
+    /// the connection's active database, not tempdb's, so the resolved value
+    /// matches an ordinary column's.
+    /// </summary>
+    [TestMethod]
+    public void TempTable_CollateDatabaseDefault_ResolvesToSessionDatabaseCollation()
+    {
+        var sim = new Simulation();
+        using var conn = sim.CreateOpenConnection();
+        _ = conn.CreateCommand("alter database simulated collate Latin1_General_CS_AS").ExecuteNonQuery();
+        _ = conn.CreateCommand("create table #t (c nvarchar(10) collate database_default); insert #t values (N'a')").ExecuteNonQuery();
+        var coll = conn.CreateCommand(
+            "select convert(sysname, sql_variant_property(cast(c as sql_variant), 'Collation')) from #t").ExecuteScalar();
+        AreEqual("Latin1_General_CS_AS", coll);
+    }
+
+    /// <summary>
+    /// <c>COLLATE database_default</c> in a regular <c>CREATE TABLE</c> column
+    /// records the resolved database collation in
+    /// <c>sys.columns.collation_name</c> (matching real), and the keyword is
+    /// case-insensitive.
+    /// </summary>
+    [TestMethod]
+    public void CreateTable_CollateDatabaseDefault_RecordsResolvedCollationCaseInsensitive()
+    {
+        var sim = new Simulation();
+        using var conn = sim.CreateOpenConnection();
+        _ = conn.CreateCommand("alter database simulated collate Latin1_General_CS_AS").ExecuteNonQuery();
+        _ = conn.CreateCommand("create table t (a nvarchar(10) collate DATABASE_DEFAULT)").ExecuteNonQuery();
+        AreEqual("Latin1_General_CS_AS", conn.CreateCommand(
+            "select collation_name from sys.columns where object_id = object_id('t') and name = 'a'").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// Expression-level <c>expr COLLATE database_default</c> resolves to the
+    /// active database's collation (probe-confirmed), sharing the same
+    /// keyword-resolution seam as the column-definition sites.
+    /// </summary>
+    [TestMethod]
+    public void Expression_CollateDatabaseDefault_ResolvesToActiveDatabaseCollation()
+    {
+        var sim = new Simulation();
+        using var conn = sim.CreateOpenConnection();
+        _ = conn.CreateCommand("alter database simulated collate Latin1_General_CS_AS").ExecuteNonQuery();
+        AreEqual("Latin1_General_CS_AS", conn.CreateCommand(
+            "select convert(sysname, sql_variant_property(N'x' collate database_default, 'Collation'))").ExecuteScalar());
+    }
+
+    /// <summary>
     /// LIKE consults the column's collation's <c>CaseSensitive</c> flag —
     /// covers the <c>CultureCollation.CaseSensitive</c> property path the
     /// locale collations expose. The locale set is all case-insensitive

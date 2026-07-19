@@ -226,7 +226,11 @@ internal sealed partial class Selection
         // WHERE into an INNER JOIN, so it rides the equi-join seek / hash path
         // instead of the O(L×R) nested loop. Value-independent, so it's done
         // once here and the rewritten array is captured in the cached plan.
-        joins = RewriteCommaJoinsToEquiJoins(sources, joins, fromClause.Excluders);
+        // A parenthesized join group's connecting join spans multiple slots;
+        // the comma→equi rewrite assumes a single-source right operand, so skip
+        // it when a group is present (the group folds via the nested-loop path).
+        if (!ContainsJoinGroup(joins))
+            joins = RewriteCommaJoinsToEquiJoins(sources, joins, fromClause.Excluders);
 
         // Catalog-view predicate pushdown: when the leftmost source is a
         // pushdown-aware catalog view (sys.columns etc.) and WHERE carries a
@@ -497,13 +501,18 @@ internal sealed partial class Selection
         // column, enumerate the source in key order and stream (no buffer + sort).
         // Residual WHERE and projection preserve order; OFFSET / FETCH / TOP then
         // read only the rows they need.
-        if (!distinct && orderBy.Count > 0
+        // Parenthesized join groups fold through the group-aware nested-loop
+        // path; the flat left-deep index-seek / ordered-scan optimizations
+        // assume one source per join level, so bypass them when a group is present.
+        var hasJoinGroup = ContainsJoinGroup(joins);
+        if (!hasJoinGroup && !distinct && orderBy.Count > 0
             && TryApplyOrderedScan(sources, joins, orderBy, excluders, batch, outerResolver, out var orderedSources))
         {
             return ProjectStreaming(orderedSources, joins, expressions, excluders, topCount, offsetCount, fetchCount, batch, outerResolver);
         }
 
-        sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
+        if (!hasJoinGroup)
+            sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
         sources = NarrowLeftmostJoinSource(sources, excluders, batch, outerResolver);
         return !distinct && orderBy.Count == 0
             ? ProjectStreaming(sources, joins, expressions, excluders, topCount, offsetCount, fetchCount, batch, outerResolver)

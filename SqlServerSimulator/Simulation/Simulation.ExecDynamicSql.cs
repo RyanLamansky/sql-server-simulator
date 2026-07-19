@@ -386,8 +386,15 @@ partial class Simulation
                 preDeclaredVariables[name] = variables[name];
         }
 
+        // Bracket the dynamic batch's outcomes with proc-scope markers so the
+        // TDS endpoint renders them with DONEINPROC and closes the scope with
+        // RETURNSTATUS + DONEPROC — matching real SQL Server, which runs an
+        // EXEC('…') / sp_executesql body as a nested procedure scope. In-process
+        // consumers ignore the markers.
+        yield return new SimulatedProcScopeBoundary(isEnter: true);
         foreach (var outcome in outcomes)
             yield return outcome;
+        yield return new SimulatedProcScopeBoundary(isEnter: false);
     }
 
     /// <summary>

@@ -1044,7 +1044,14 @@ internal sealed partial class Selection
         List<JoinSpec> joins,
         Func<MultiPartName, SqlType>? outerTypeResolver)
     {
-        sources.Add(ParseSingleFromSource(context, depth, outerTypeResolver));
+        // A parenthesized join group as the leftmost item — `(A JOIN B ON …)
+        // [LEFT] JOIN C …` — is a pure grammar grouping: a left-deep spine
+        // already groups its left operand, so the group's interior sources /
+        // joins splice directly into this chain with no group marker.
+        if (NextSourceIsJoinGroup(context))
+            ParseJoinGroup(context, depth, sources, joins, outerTypeResolver);
+        else
+            sources.Add(ParseSingleFromSource(context, depth, outerTypeResolver));
 
         // Parse JOIN clauses. ParseSingleFromSource ends with the cursor at
         // the lookahead-after-source token (e.g. WHERE, ORDER, JOIN, INNER,
@@ -1057,6 +1064,49 @@ internal sealed partial class Selection
                 if (context.Token is ReservedKeyword { Keyword: Keyword.On } onToken)
                     throw SimulatedSqlException.SyntaxErrorNearKeyword(onToken);
                 joins.Add(new JoinSpec(kind, onPredicate: null));
+                continue;
+            }
+
+            // A parenthesized join group as this join's right operand —
+            // `A LEFT JOIN (B JOIN C ON c1) ON c2` — changes associativity from
+            // the default left-deep fold: the interior join binds first, then
+            // this ON joins the accumulated left spine against the whole group
+            // (an outer-join miss NULL-fills every group slot). The interior
+            // sources / joins are spliced by ParseJoinGroup; the connecting
+            // JoinSpec (carrying GroupCount) is inserted at the group's leading
+            // slot, ahead of the interior joins ParseJoinGroup appended.
+            if (NextSourceIsJoinGroup(context))
+            {
+                var groupStart = sources.Count;
+                // The connecting join is inserted ahead of the interior joins
+                // ParseJoinGroup appends. Capture the insertion index now: the
+                // flat `joins.Count == sources.Count - 1` invariant doesn't hold
+                // mid-parse of an enclosing group (its own connecting join is
+                // inserted only after this nested group finishes), so
+                // `groupStart - 1` would misplace the join under nesting.
+                var groupJoinIndex = joins.Count;
+                ParseJoinGroup(context, depth, sources, joins, outerTypeResolver);
+                var groupCount = sources.Count - groupStart;
+                BooleanExpression? groupOn = null;
+                if (kind == JoinKind.Cross)
+                {
+                    if (context.Token is ReservedKeyword { Keyword: Keyword.On })
+                        throw SimulatedSqlException.SyntaxErrorNearKeyword((ReservedKeyword)context.Token);
+                }
+                else if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
+                {
+                    // A group takes no alias: `(…) AS x` → Msg 156 near the AS
+                    // keyword, a bare-name alias → Msg 102, matching real.
+                    throw context.Token is ReservedKeyword aliasKeyword
+                        ? SimulatedSqlException.SyntaxErrorNearKeyword(aliasKeyword)
+                        : SimulatedSqlException.SyntaxErrorNear(context);
+                }
+                else
+                {
+                    context.MoveNextRequired();
+                    groupOn = BooleanExpression.Parse(context);
+                }
+                joins.Insert(groupJoinIndex, new JoinSpec(kind, groupOn) { GroupCount = groupCount });
                 continue;
             }
 
@@ -1082,6 +1132,51 @@ internal sealed partial class Selection
             }
             joins.Add(new JoinSpec(kind, on));
         }
+    }
+
+    /// <summary>
+    /// Peeks whether the FROM source about to be parsed is a parenthesized
+    /// join group — an opening <c>(</c> whose first interior token is not
+    /// <c>SELECT</c> (a derived table) or <c>VALUES</c> (a table-value
+    /// constructor). Entered with the cursor on the token preceding the source
+    /// (<c>FROM</c> / a JOIN keyword / a comma / the group's own <c>(</c> when
+    /// this is an interior leftmost), matching the one-token lookahead
+    /// <see cref="ParseSingleFromSource"/> consumes; the checkpoint is restored
+    /// so the dispatch is non-destructive.
+    /// </summary>
+    private static bool NextSourceIsJoinGroup(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var opensParen = context.GetNextOptional() is Operator { Character: '(' };
+        var interior = context.GetNextOptional();
+        context.RestoreCheckpoint(checkpoint);
+        return opensParen && interior is not (null or ReservedKeyword { Keyword: Keyword.Select or Keyword.Values });
+    }
+
+    /// <summary>
+    /// Parses a parenthesized join group — <c>( &lt;join chain&gt; )</c> — by
+    /// recursively parsing the interior chain into the same
+    /// <paramref name="sources"/> / <paramref name="joins"/> lists as the
+    /// enclosing FROM, so the group's members occupy their own flat slots and
+    /// resolve by their own qualifiers outside the parens (a grammar grouping,
+    /// not a derived-table scope). Entered with the cursor on the token
+    /// preceding the opening <c>(</c>; leaves it on the lookahead token past
+    /// the closing <c>)</c>. A group must contain at least one join — SQL
+    /// Server rejects a parenthesized single source (<c>(t)</c>) with Msg 102.
+    /// </summary>
+    private static void ParseJoinGroup(
+        ParserContext context,
+        uint depth,
+        List<FromSource> sources,
+        List<JoinSpec> joins,
+        Func<MultiPartName, SqlType>? outerTypeResolver)
+    {
+        var joinsBefore = joins.Count;
+        context.MoveNextRequired();
+        ParseExplicitJoinChain(context, depth, sources, joins, outerTypeResolver);
+        if (joins.Count == joinsBefore || context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
     }
 
     /// <summary>

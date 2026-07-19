@@ -27,7 +27,12 @@ public class SelectTests
     [DataRow("SELECT @@VERSION")]
     [DataRow("select @@version")]
     [DataRow("Select @@Version")]
-    public void SelectVersion(string commandText) => AreEqual("SQL Server Simulator", new Simulation().ExecuteScalar(commandText));
+    public void SelectVersion(string commandText) => AreEqual(
+        "Microsoft SQL Server 2025 (RTM-CU7) (KB5096981) - 17.0.4065.4 (X64) \n" +
+        "\tJul  8 2026 23:26:08 \n" +
+        "\tCopyright (C) 2025 Microsoft Corporation\n" +
+        "\tDeveloper Edition (64-bit) on SQL Server Simulator",
+        new Simulation().ExecuteScalar(commandText));
 
     [TestMethod]
     [DataRow("select @p0", "p0", 5)]

@@ -133,6 +133,48 @@ public sealed class SsmsProgrammabilityNodeCatalogTests
     public void AssemblyTypes_UserDefinedFilterReturnsEmpty()
         => AreEqual(0, new Simulation().ExecuteScalar<int>("select count(*) from sys.assembly_types where is_user_defined = 1"));
 
+    /// <summary>
+    /// SSMS's Table-Designer UDT query self-joins sys.assembly_types on
+    /// <c>a.is_user_defined = 1</c> and left-joins sys.objects on
+    /// <c>default_object_id</c> / <c>rule_object_id</c>. Before this the query
+    /// failed to bind (default_object_id / rule_object_id / is_binary_ordered /
+    /// is_fixed_length missing). All three system CLR types report
+    /// is_user_defined = 0, so the self-join yields no rows.
+    /// </summary>
+    [TestMethod]
+    public void AssemblyTypes_SsmsTableDesignerJoin_ReturnsNoRows()
+        => AreEqual(0, new Simulation().ExecuteScalar<int>("""
+            select count(*) from (
+              (sys.assembly_types a inner join sys.assembly_types b on a.is_user_defined = 1)
+              left outer join sys.objects s1 on s1.object_id = a.default_object_id and s1.type = 'D'
+              left outer join sys.objects s2 on s2.object_id = a.rule_object_id and s2.type = 'R'
+            ) q
+            """));
+
+    /// <summary>
+    /// Probe-confirmed (SQL Server 2025) column shape added to
+    /// sys.assembly_types: default_object_id / rule_object_id are 0,
+    /// is_fixed_length is 0, prog_id is NULL, is_table_type is 0, and
+    /// is_binary_ordered is 1 only for hierarchyid (0 for the spatial types).
+    /// assembly_qualified_name is the full CLR AssemblyQualifiedName.
+    /// </summary>
+    [TestMethod]
+    public void AssemblyTypes_ExposesReplicationAndOrderingColumns()
+    {
+        var sim = new Simulation();
+        AreEqual(0, sim.ExecuteScalar<int>("select default_object_id from sys.assembly_types where name = 'hierarchyid'"));
+        AreEqual(0, sim.ExecuteScalar<int>("select rule_object_id from sys.assembly_types where name = 'hierarchyid'"));
+        AreEqual(1, sim.ExecuteScalar<int>("select cast(is_binary_ordered as int) from sys.assembly_types where name = 'hierarchyid'"));
+        AreEqual(0, sim.ExecuteScalar<int>("select cast(is_binary_ordered as int) from sys.assembly_types where name = 'geometry'"));
+        AreEqual(0, sim.ExecuteScalar<int>("select cast(is_binary_ordered as int) from sys.assembly_types where name = 'geography'"));
+        AreEqual(0, sim.ExecuteScalar<int>("select cast(is_fixed_length as int) from sys.assembly_types where name = 'geography'"));
+        AreEqual(0, sim.ExecuteScalar<int>("select cast(is_table_type as int) from sys.assembly_types where name = 'geometry'"));
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select prog_id from sys.assembly_types where name = 'geometry'"));
+        AreEqual(
+            "Microsoft.SqlServer.Types.SqlGeography, Microsoft.SqlServer.Types, Version=11.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91",
+            new Simulation().ExecuteScalar("select assembly_qualified_name from sys.assembly_types where name = 'geography'"));
+    }
+
     [TestMethod]
     public void PlanGuides_IsEmpty()
         => AreEqual(0, new Simulation().ExecuteScalar<int>("select count(*) from sys.plan_guides"));

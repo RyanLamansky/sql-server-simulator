@@ -31,14 +31,21 @@ internal sealed class Value : Expression
         switch (doubleAtPrefixedString.Parse())
         {
             case AtAtKeyword.Version:
-                this.Constant = SqlValue.FromNVarchar("SQL Server Simulator");
+                // Mirrors the real SQL Server 2025 @@VERSION banner's multi-line
+                // shape and reference build (17.0.4065.4), with the simulator's
+                // own identity standing in for the host-OS line.
+                this.Constant = SqlValue.FromNVarchar(
+                    "Microsoft SQL Server 2025 (RTM-CU7) (KB5096981) - 17.0.4065.4 (X64) \n" +
+                    "\tJul  8 2026 23:26:08 \n" +
+                    "\tCopyright (C) 2025 Microsoft Corporation\n" +
+                    "\tDeveloper Edition (64-bit) on SQL Server Simulator");
                 return;
             case AtAtKeyword.MicrosoftVersion:
                 // (major << 24) | (minor << 16) | build, self-consistent with
-                // SERVERPROPERTY('ProductVersion') = "17.0.0.0" → 0x11000000.
-                // The deliberately 0-build version doubles as a "not a real
-                // SQL Server" marker.
-                this.Constant = SqlValue.FromInt32(0x11000000);
+                // SERVERPROPERTY('ProductVersion') = "17.0.4065.4":
+                // (17 << 24) | 4065 = 285216737 (0x11000FE1). Matches the real
+                // reference instance's @@MICROSOFTVERSION.
+                this.Constant = SqlValue.FromInt32((17 << 24) | 4065);
                 return;
             case AtAtKeyword.MaxPrecision:
                 this.Constant = SqlValue.FromByte(38);

@@ -37,18 +37,16 @@ public sealed class NetworkListenerTests
     }
 
     // SqlConnection.ServerVersion is parsed from the LOGINACK token's
-    // ProgVersion (major.minor.build). The simulator deliberately reports a
-    // 0 build ("17.00.0000") as an honest "not a real SQL Server build"
-    // marker — probed harmless to SMO's Object Explorer (the Databases node
-    // populates regardless; the enumeration gate was ntext RPC-param support,
-    // not the reported version).
+    // ProgVersion (major.minor.build). The simulator reports the SQL Server
+    // 2025 reference build 17.0.4065.4, so SqlClient reads "17.00.4065" — a
+    // real build number is what lets SSMS's per-build feature gates proceed.
     [TestMethod]
-    public async Task LoginAck_ReportsSimulatedZeroBuild()
+    public async Task LoginAck_ReportsReferenceBuild()
     {
         var simulation = new Simulation();
         await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
         await using var connection = new SqlConnection(ConnectionString(listener));
         await connection.OpenAsync(TestContext.CancellationToken);
-        AreEqual("17.00.0000", connection.ServerVersion);
+        AreEqual("17.00.4065", connection.ServerVersion);
     }
 }
