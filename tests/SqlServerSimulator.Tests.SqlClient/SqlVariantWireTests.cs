@@ -19,7 +19,7 @@ public sealed class SqlVariantWireTests
     public async Task DscValues_ReadOverWire_WithPerRowInnerTypes()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand(
             "SELECT name, value FROM sys.database_scoped_configurations ORDER BY configuration_id", connection);
@@ -43,7 +43,7 @@ public sealed class SqlVariantWireTests
     public async Task DscValueForSecondary_ReadOverWire_IsDbNull()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand(
             "SELECT value_for_secondary FROM sys.database_scoped_configurations WHERE name = 'MAXDOP'", connection);
@@ -63,7 +63,7 @@ public sealed class SqlVariantWireTests
     public async Task DacFxLegacyCardinalityEstimation_UnboxesToBool()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("""
             SELECT [dbscl].[value] AS [LegacyCardinalityEstimation]
@@ -85,7 +85,7 @@ public sealed class SqlVariantWireTests
     public async Task ServerProperty_ReadOverWire_ReportsVariantWithInnerTypes()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand(
             "SELECT SERVERPROPERTY('EngineEdition') AS engine, SERVERPROPERTY('Edition') AS edition", connection);
@@ -105,7 +105,7 @@ public sealed class SqlVariantWireTests
     public async Task SessionContext_ReadOverWire_PreservesIntInner()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using (var set = new SqlCommand("exec sp_set_session_context N'tenant', 42", connection))
             _ = await set.ExecuteNonQueryAsync(TestContext.CancellationToken);
@@ -122,7 +122,7 @@ public sealed class SqlVariantWireTests
     public async Task CastWrappedInnerTypes_ReadOverWire()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand(
             """

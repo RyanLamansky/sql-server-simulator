@@ -21,7 +21,7 @@ public sealed class QueryStoreProbeWireTests
     public async Task SsmsQueryStoreProbeBatch_OverWire_ReturnsZeroThenZero()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand(
             "IF OBJECT_ID (N'[sys].[database_query_store_options]') IS NOT NULL " +

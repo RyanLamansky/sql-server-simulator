@@ -39,7 +39,7 @@ public sealed class AttentionTests
     public async Task CommandTimeout_OnWaitfor_RaisesTimeoutAndSessionStaysReusable()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var command = new SqlCommand(LongWait, connection) { CommandTimeout = 1 })
@@ -56,7 +56,7 @@ public sealed class AttentionTests
     public async Task Cancel_DuringWaitfor_RaisesCancelAndSessionStaysReusable()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var command = new SqlCommand(LongWait, connection) { CommandTimeout = 0 })
@@ -74,7 +74,7 @@ public sealed class AttentionTests
     public async Task Cancel_MidLargeResult_AbortsAndSessionStaysReusable()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         const string bigResult = "select value, replicate('x', 200) from generate_series(1, 500000)";
@@ -98,7 +98,7 @@ public sealed class AttentionTests
     {
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int)");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var begin = new SqlCommand("begin tran; insert t values (1)", connection))
@@ -128,7 +128,7 @@ public sealed class AttentionTests
     {
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int)");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var begin = new SqlCommand("set xact_abort on; begin tran; insert t values (1)", connection))
@@ -153,7 +153,7 @@ public sealed class AttentionTests
     {
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int)");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         // The first statement commits (autocommit); the cancel fires during the
@@ -175,7 +175,7 @@ public sealed class AttentionTests
     public async Task Cancel_DuringParameterizedRpc_AbortsAndSessionStaysReusable()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var command = new SqlCommand($"select @p; {LongWait}", connection) { CommandTimeout = 0 })
@@ -202,7 +202,7 @@ public sealed class AttentionTests
     public async Task Cancel_RacingNaturalCompletion_DoesNotHang()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         // Fire a cancel around a query that completes almost immediately: the
@@ -238,7 +238,7 @@ public sealed class AttentionTests
     public async Task SequentialCommands_AfterCancel_AllSucceed()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var command = new SqlCommand(LongWait, connection) { CommandTimeout = 0 })

@@ -46,7 +46,7 @@ public sealed class AuthenticationTests
     public async Task EmptyRegistry_AcceptsAnyCredentials()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await AssertLoginSucceeds(listener, "whoever", "whatever", TestContext.CancellationToken);
     }
 
@@ -55,7 +55,7 @@ public sealed class AuthenticationTests
     {
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = 'S3cret!Pass'");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await AssertLoginSucceeds(listener, "app", "S3cret!Pass", TestContext.CancellationToken);
     }
 
@@ -64,7 +64,7 @@ public sealed class AuthenticationTests
     {
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = 'S3cret!Pass'");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         _ = await AssertLoginFails(listener, "app", "wrong", TestContext.CancellationToken);
     }
 
@@ -73,7 +73,7 @@ public sealed class AuthenticationTests
     {
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = 'S3cret!Pass'");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         _ = await AssertLoginFails(listener, "nosuchuser", "S3cret!Pass", TestContext.CancellationToken);
     }
 
@@ -82,7 +82,7 @@ public sealed class AuthenticationTests
     {
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = 'S3cret!Pass'");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         _ = await AssertLoginFails(listener, "app", "", TestContext.CancellationToken);
     }
 
@@ -93,7 +93,7 @@ public sealed class AuthenticationTests
         // LOGIN7 nibble-swap/XOR de-obfuscation and the char-counted length.
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = N'pä£€🙂ß'");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await AssertLoginSucceeds(listener, "app", "pä£€🙂ß", TestContext.CancellationToken);
         _ = await AssertLoginFails(listener, "app", "pä£€ß", TestContext.CancellationToken);
     }
@@ -103,7 +103,7 @@ public sealed class AuthenticationTests
     {
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = 'S3cret!Pass'");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await AssertLoginSucceeds(listener, "APP", "S3cret!Pass", TestContext.CancellationToken);
     }
 
@@ -112,7 +112,7 @@ public sealed class AuthenticationTests
     {
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = 'OldPass1!'");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await AssertLoginSucceeds(listener, "app", "OldPass1!", TestContext.CancellationToken);
 
         Wire.ExecInProc(simulation, "ALTER LOGIN app WITH PASSWORD = 'NewPass2!'");
@@ -125,7 +125,7 @@ public sealed class AuthenticationTests
     {
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = 'S3cret!Pass'");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         _ = await AssertLoginFails(listener, "other", "whatever", TestContext.CancellationToken);
 
         Wire.ExecInProc(simulation, "DROP LOGIN app");
@@ -140,7 +140,7 @@ public sealed class AuthenticationTests
     public async Task LoginToMissingDatabase_Fails4060Then18456()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
 
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
         {
@@ -167,7 +167,7 @@ public sealed class AuthenticationTests
     public async Task LoginToMaster_LandsInMaster()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = new SqlConnection(
             $"Server=127.0.0.1,{listener.Port};User ID=sa;Password=anything;Database=master;TrustServerCertificate=True;Pooling=False;Connect Timeout=15");
         await connection.OpenAsync(TestContext.CancellationToken);
@@ -179,7 +179,7 @@ public sealed class AuthenticationTests
     public async Task LoginWithNoDatabase_LandsInDefault()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = new SqlConnection(Wire.ConnectionString(listener));
         await connection.OpenAsync(TestContext.CancellationToken);
         await using var command = new SqlCommand("select db_name()", connection);
@@ -192,7 +192,7 @@ public sealed class AuthenticationTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "CREATE LOGIN app1 WITH PASSWORD = 'Pass!One1'");
         Wire.ExecInProc(simulation, "CREATE LOGIN app2 WITH PASSWORD = 'Pass!Two2'");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await AssertLoginSucceeds(listener, "app1", "Pass!One1", TestContext.CancellationToken);
         await AssertLoginSucceeds(listener, "app2", "Pass!Two2", TestContext.CancellationToken);
         _ = await AssertLoginFails(listener, "app1", "Pass!Two2", TestContext.CancellationToken);

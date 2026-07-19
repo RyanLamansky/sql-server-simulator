@@ -22,7 +22,7 @@ public sealed class XpMsverRpcTests
     public async Task XpMsver_FiveRepeatedOptnames_ReturnIndexOrderedRows()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("xp_msver", connection) { CommandType = CommandType.StoredProcedure };

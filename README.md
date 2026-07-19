@@ -66,12 +66,12 @@ The companion `SqlServerSimulator.EFCore` package adds `UseSqlServerSimulator(..
 A simulation can optionally listen on a real TDS endpoint over loopback TCP with TLS, so genuine SQL Server clients connect to it exactly as they would to a real server:
 
 ```C#
-await using var listener = await simulation.ListenAsync(11433);
+await using var listener = await simulation.ListenLocalAsync(11433);
 // Now connect with any SQL Server client, e.g.:
 //   Server=127.0.0.1,11433;User ID=dev;Password=anything;TrustServerCertificate=True
 ```
 
-Real `Microsoft.Data.SqlClient` works end-to-end — including parameterized RPC, table-valued parameters, `SqlBulkCopy`, MARS, and query cancellation — as does Entity Framework Core over the wire via a plain connection string. SQL Server Management Studio connects and browses: Object Explorer, the query editor, and object scripting run against the simulator, which presents itself as SQL Server 2025 (build 17.0.4065.4). By default any credentials are accepted; run `CREATE LOGIN` to switch the endpoint to enforced authentication.
+Real `Microsoft.Data.SqlClient` works end-to-end — including parameterized RPC, table-valued parameters, `SqlBulkCopy`, MARS, and query cancellation — as does Entity Framework Core over the wire via a plain connection string. SQL Server Management Studio connects and browses: Object Explorer, the query editor, and object scripting run against the simulator, which presents itself as SQL Server 2025 (build 17.0.4065.4). By default any credentials are accepted; run `CREATE LOGIN` to switch the endpoint to enforced authentication. For clients on other machines, `ListenNetworkAsync` binds all interfaces — it requires at least one registered login up front, so an open endpoint can never face a network.
 
 ## Fidelity
 
@@ -111,4 +111,4 @@ A few examples:
 ## Limitations
 
 - No physical storage - all data lives in memory for the lifetime of the `Simulation`. Suited to test runs and bounded workloads, not larger-than-RAM datasets.
-- The network endpoint binds to loopback only, and is meant for development tooling and tests - it is not a hardened server for untrusted clients.
+- The network endpoint is meant for development tooling and tests, not untrusted clients: `ListenNetworkAsync` enforces authentication, but there is no authorization model - every login that connects has unrestricted access to every database.

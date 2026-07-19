@@ -41,7 +41,7 @@ public sealed class MarsTests
     public async Task OverlappingReaders_TwoDeep_NestedQueryPerRow()
     {
         var simulation = Seeded();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
 
         var seen = new List<string>();
@@ -64,7 +64,7 @@ public sealed class MarsTests
     public async Task OverlappingReaders_ThreeDeep_NestedReadersInterleave()
     {
         var simulation = Seeded(3);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
 
         var triples = new List<string>();
@@ -94,7 +94,7 @@ public sealed class MarsTests
     public async Task SessionReuse_CommandAfterReaderClose_Succeeds()
     {
         var simulation = Seeded();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
 
         // SqlClient reuses an SMP session id once its reader closes; run several
@@ -113,7 +113,7 @@ public sealed class MarsTests
     public async Task NonMars_SecondCommandWhileReaderOpen_RejectedClientSide()
     {
         var simulation = Seeded();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
 
         // No MultipleActiveResultSets: SqlClient rejects the overlap itself,
         // before anything reaches the server — the regression guard proving the
@@ -132,7 +132,7 @@ public sealed class MarsTests
     public async Task SharedState_SpidAndTempTable_AcrossSessions()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
 
         await using (var mk = new SqlCommand("create table #s (x int); insert into #s values (42)", connection))
@@ -156,7 +156,7 @@ public sealed class MarsTests
     public async Task Transaction_SharedAcrossOverlappingCommands_RollbackUndoesAll()
     {
         var simulation = Seeded(3);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
 
         var transaction = (SqlTransaction)await connection.BeginTransactionAsync(TestContext.CancellationToken);
@@ -186,7 +186,7 @@ public sealed class MarsTests
         // by SqlClient itself (InvalidOperationException) before any bytes hit
         // the wire — there is no server-side Msg 3997 to mirror.
         var simulation = Seeded();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
 
         var transaction = (SqlTransaction)await connection.BeginTransactionAsync(TestContext.CancellationToken);
@@ -203,7 +203,7 @@ public sealed class MarsTests
     public async Task LargeDrain_OnOneSession_WhileAnotherExecutes()
     {
         var simulation = Seeded();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
 
         // A large result streams on one session while short commands run on
@@ -231,7 +231,7 @@ public sealed class MarsTests
     public async Task Cancel_OneOfTwoActiveCommands_LeavesOtherReaderUsable()
     {
         var simulation = Seeded();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
 
         // Reader A stays open (its rows already buffered) while command B waits
@@ -258,7 +258,7 @@ public sealed class MarsTests
     public async Task PooledConnectionReset_WithMars_ReusesAndWorks()
     {
         var simulation = Seeded();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         var connectionString = Wire.ConnectionString(listener, ";Max Pool Size=1" + MarsExtra)
             .Replace("Pooling=False", "Pooling=True", StringComparison.Ordinal);
 

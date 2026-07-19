@@ -35,7 +35,7 @@ internal static class SmoFixture
         var sim = new Simulation();
         SeedSchema(sim);
         // The listener roots the simulation for the run; no separate field needed.
-        listener = sim.ListenAsync(0).GetAwaiter().GetResult();
+        listener = sim.ListenLocalAsync(0).GetAwaiter().GetResult();
         ConnectionString =
             $"Server=127.0.0.1,{listener.Port};Database={DatabaseName};User ID=smo;Password=smo;" +
             "TrustServerCertificate=True;Encrypt=True;Connect Timeout=30";

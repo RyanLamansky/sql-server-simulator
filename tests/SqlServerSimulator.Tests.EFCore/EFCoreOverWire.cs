@@ -36,7 +36,7 @@ public sealed class EFCoreOverWire
     public async Task VanillaUseSqlServer_OverTcp_FullCrudRoundTrip()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         var connectionString = $"Server=127.0.0.1,{listener.Port};User ID=sa;Password=anything;TrustServerCertificate=True;Connect Timeout=15";
 
         using (var context = new WireDbContext(connectionString))
@@ -87,7 +87,7 @@ public sealed class EFCoreOverWire
     public async Task VanillaUseSqlServer_OverTcp_ExplicitTransactionRollback()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         var connectionString = $"Server=127.0.0.1,{listener.Port};User ID=sa;Password=anything;TrustServerCertificate=True;Connect Timeout=15";
 
         using var context = new WireDbContext(connectionString);

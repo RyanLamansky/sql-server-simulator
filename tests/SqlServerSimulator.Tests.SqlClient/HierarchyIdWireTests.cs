@@ -38,7 +38,7 @@ public sealed class HierarchyIdWireTests
                 (5, null)
             """);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select node from Org order by id", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -80,7 +80,7 @@ public sealed class HierarchyIdWireTests
                 (2, hierarchyid::Parse('/3/4/7/8/15/16/79/'))
             """);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select node, datalength(node) from Org order by id", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);

@@ -20,7 +20,7 @@ public sealed class SystemDatabaseTests
     public async Task HasDbAccessMsdb_OverWire_ReturnsOne()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("select has_dbaccess('msdb')", connection);
@@ -31,7 +31,7 @@ public sealed class SystemDatabaseTests
     public async Task SyspolicyHealthState_OverWire_ReturnsSixColumnsNoRows()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand(

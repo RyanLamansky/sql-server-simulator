@@ -16,7 +16,7 @@ public sealed class BatchSemanticsTests
     public async Task MultiStatementBatch_NextResult_WalksResultSets()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select 1; select 2, 3", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -41,7 +41,7 @@ public sealed class BatchSemanticsTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("insert t values (1), (2); insert t values (3)", connection);
         AreEqual(3, await command.ExecuteNonQueryAsync(TestContext.CancellationToken));
@@ -53,7 +53,7 @@ public sealed class BatchSemanticsTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (a int, b int)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select a, b from t where 1 = 0", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -69,7 +69,7 @@ public sealed class BatchSemanticsTests
         var simulation = new Simulation();
         var oracle = Wire.ReadAllInProc(simulation, "select @@spid");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select @@spid", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);

@@ -28,7 +28,7 @@ public sealed class BatchErrorRecoveryTests
     public async Task DacFxShape_MissingObjectMidBatch_FirstResultReadable_NextResultThrowsSingleMsg208()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var batch =
@@ -55,7 +55,7 @@ public sealed class BatchErrorRecoveryTests
     public async Task DacFxShape_MissingObjectMidBatch_ExactlyOneErrorToken_LaterStatementDoesNotRun()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
 
         var errors = new List<int>();
         await using var connection = new SqlConnection(Wire.ConnectionString(listener));
@@ -107,7 +107,7 @@ public sealed class BatchErrorRecoveryTests
     public async Task SkippedBranch_ExistsMissingTableWithInnerElse_StreamsCleanly()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
 
         var errors = new List<int>();
         await using var connection = new SqlConnection(Wire.ConnectionString(listener));
@@ -133,7 +133,7 @@ public sealed class BatchErrorRecoveryTests
     public async Task UseHintUnknownName_SurfacesMsg10715()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand(

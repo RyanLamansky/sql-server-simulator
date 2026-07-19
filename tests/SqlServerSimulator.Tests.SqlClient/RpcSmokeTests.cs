@@ -16,7 +16,7 @@ public sealed class RpcSmokeTests
     public async Task ParameterizedSelect_RoundTrips()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("select @a + @b", connection);
@@ -31,7 +31,7 @@ public sealed class RpcSmokeTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int, name nvarchar(50))");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var insert = new SqlCommand("insert t values (@id, @name)", connection))
@@ -50,7 +50,7 @@ public sealed class RpcSmokeTests
     public async Task OutputParameter_ThroughSpExecuteSql()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("set @result = @input * 3", connection);
@@ -67,7 +67,7 @@ public sealed class RpcSmokeTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("insert t values (@v)", connection);
@@ -100,7 +100,7 @@ public sealed class RpcSmokeTests
             values (1, '2020-01-01', 100), (2, '2020-02-01', 200), (3, '2020-03-01', 300)
             """);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var update = new SqlCommand(

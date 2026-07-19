@@ -29,7 +29,7 @@ public sealed class StoredProcedureRpcTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create procedure dbo.p @a int, @b int as select @a as sum1, @a + @b as sum2");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = ProcCommand("dbo.p", connection);
@@ -49,7 +49,7 @@ public sealed class StoredProcedureRpcTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create procedure dbo.p @x int, @out int output as set @out = @x * 10");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = ProcCommand("dbo.p", connection);
@@ -67,7 +67,7 @@ public sealed class StoredProcedureRpcTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create procedure dbo.p as return 7");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = ProcCommand("dbo.p", connection);
@@ -84,7 +84,7 @@ public sealed class StoredProcedureRpcTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create procedure dbo.p @x int, @out int output as set @out = @x * 10; return @x + 1");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = ProcCommand("dbo.p", connection);
@@ -105,7 +105,7 @@ public sealed class StoredProcedureRpcTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create procedure dbo.p as raiserror('boom from proc', 16, 1)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
@@ -132,7 +132,7 @@ public sealed class StoredProcedureRpcTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create procedure dbo.p as print 'hello from proc'");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var messages = new List<string>();
@@ -152,7 +152,7 @@ public sealed class StoredProcedureRpcTests
     public async Task TopLevelPrint_ViaSpExecuteSql_ReachesInfoMessage()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var messages = new List<string>();
@@ -176,7 +176,7 @@ public sealed class StoredProcedureRpcTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create procedure dbo.p @x int as select @x");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>

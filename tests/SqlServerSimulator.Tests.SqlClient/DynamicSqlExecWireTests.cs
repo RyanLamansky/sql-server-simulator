@@ -23,7 +23,7 @@ public sealed class DynamicSqlExecWireTests
     public async Task ExecInBatch_AfterBatchLevelSelects_AllResultSetsRead()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         // Batch-level SELECTs (plain DONE) followed by an EXEC('…') result set
@@ -49,7 +49,7 @@ public sealed class DynamicSqlExecWireTests
     public async Task ReportViewerEnvironmentProbe_ThreeResultSets()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var lockTimeout = new SqlCommand("SET LOCK_TIMEOUT 10000", connection))

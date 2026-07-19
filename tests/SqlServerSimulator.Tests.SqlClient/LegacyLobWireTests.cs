@@ -37,7 +37,7 @@ public sealed class LegacyLobWireTests
 
         var oracle = Wire.ReadAllInProc(simulation, "select t, n, i from L order by id");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select t, n, i from L order by id", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -67,7 +67,7 @@ public sealed class LegacyLobWireTests
         Wire.ExecInProc(simulation, "create table L (id int not null, t text null, n ntext null, i image null);");
         Wire.ExecInProc(simulation, "insert L values (1, 'hello world', N'grüße', 0x00ff10203040);");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select t, n, i from L", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -110,7 +110,7 @@ public sealed class LegacyLobWireTests
 
         var oracle = Wire.ReadAllInProc(simulation, "select t, n, datalength(t), datalength(n) from L");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select t, n, datalength(t), datalength(n) from L", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -132,7 +132,7 @@ public sealed class LegacyLobWireTests
         Wire.ExecInProcParam(simulation, "insert L (n) values (@x)", "@x", LargeNText);
         Wire.ExecInProcParam(simulation, "insert L (i) values (@x)", "@x", MakeBytes(100_000));
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select t, n, i from L", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -158,7 +158,7 @@ public sealed class LegacyLobWireTests
                 insert L (t, n, i) values (@a, @b, @c);
             """);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await ExecProc(connection, "hi", "né", [9, 8, 7]);
@@ -174,7 +174,7 @@ public sealed class LegacyLobWireTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table L (id int identity primary key, t text null, n ntext null, i image null);");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await ExecInsert(connection, "hi", "né", [9, 8, 7]);

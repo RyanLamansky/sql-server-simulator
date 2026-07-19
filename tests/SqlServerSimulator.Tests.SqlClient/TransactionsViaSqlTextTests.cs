@@ -19,7 +19,7 @@ public sealed class TransactionsViaSqlTextTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var batch = new SqlCommand("begin tran; insert t values (1); insert t values (2); rollback", connection))
@@ -35,7 +35,7 @@ public sealed class TransactionsViaSqlTextTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var transaction = connection.BeginTransaction();
@@ -54,7 +54,7 @@ public sealed class TransactionsViaSqlTextTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var transaction = connection.BeginTransaction();
@@ -73,7 +73,7 @@ public sealed class TransactionsViaSqlTextTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var transaction = connection.BeginTransaction();
@@ -100,7 +100,7 @@ public sealed class TransactionsViaSqlTextTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var transaction = connection.BeginTransaction(System.Data.IsolationLevel.Serializable);

@@ -22,7 +22,7 @@ public sealed class StringLiteralWidthWireTests
     private async Task<int> ColumnSizeAsync(string sql)
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand(sql, connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);

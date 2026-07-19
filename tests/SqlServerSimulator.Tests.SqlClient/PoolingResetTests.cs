@@ -17,7 +17,7 @@ public sealed class PoolingResetTests
     public async Task PooledReopen_ResetsSessionTempTables()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         var connectionString = Wire.PooledConnectionString(listener);
 
         await using (var first = new SqlConnection(connectionString))

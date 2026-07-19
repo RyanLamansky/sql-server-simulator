@@ -28,7 +28,7 @@ public sealed class InfoMessageTests
     public async Task Print_RaisesInfoMessage()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         var messages = Subscribe(connection);
 
@@ -42,7 +42,7 @@ public sealed class InfoMessageTests
     public async Task RaiseError_LowSeverity_ArrivesAsInfoMessage()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         var messages = Subscribe(connection);
 
@@ -56,7 +56,7 @@ public sealed class InfoMessageTests
     public async Task Print_InfoToken_CarriesBatchRelativeLineNumber()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         var lines = new List<int>();
         connection.InfoMessage += (_, e) =>
@@ -89,7 +89,7 @@ public sealed class InfoMessageTests
     {
         var simulation = new Simulation();
         _ = Wire.ReadAllInProc(simulation, "create table t (id int); insert t values (1)");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         var messages = Subscribe(connection);
 

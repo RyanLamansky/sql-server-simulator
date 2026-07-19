@@ -20,7 +20,7 @@ public sealed class RpcOutputParameterTests
     public async Task IntOutput_Assigned()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("set @out = @input * 3", connection);
@@ -36,7 +36,7 @@ public sealed class RpcOutputParameterTests
     public async Task NVarcharOutput_Assigned()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("set @out = N'café アイウ'", connection);
@@ -53,7 +53,7 @@ public sealed class RpcOutputParameterTests
         var simulation = new Simulation();
         var oracle = Wire.OutputInProc(simulation, "set @out = 123.45", "@out", DbType.Decimal, ParameterDirection.Output, null);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("set @out = 123.45", connection);
@@ -73,7 +73,7 @@ public sealed class RpcOutputParameterTests
         const string sql = "set @out = cast('2024-02-29T13:45:30.1234567' as datetime2(7))";
         var oracle = Wire.OutputInProc(simulation, sql, "@out", DbType.DateTime2, ParameterDirection.Output, null);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand(sql, connection);
@@ -88,7 +88,7 @@ public sealed class RpcOutputParameterTests
     public async Task UniqueIdentifierOutput_Assigned()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("set @out = cast('6F9619FF-8B86-D011-B42D-00C04FC964FF' as uniqueidentifier)", connection);
@@ -103,7 +103,7 @@ public sealed class RpcOutputParameterTests
     public async Task InputOutput_ValueInChangedOut()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("set @out = @out * 2", connection);
@@ -123,7 +123,7 @@ public sealed class RpcOutputParameterTests
         // value vs NULL) is the contract, so trust the in-process surface.
         var oracle = Wire.OutputInProc(simulation, "select 1", "@out", DbType.Int32, ParameterDirection.Output, null);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("select 1", connection);

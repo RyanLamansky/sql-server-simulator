@@ -20,7 +20,7 @@ public sealed class BatchErrorContinuationTests
     public async Task StatementError_MidBatch_LaterStatementStillRuns()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         // drop of a nonexistent temp table raises Msg 3701 (severity 11);
@@ -44,7 +44,7 @@ public sealed class BatchErrorContinuationTests
     public async Task SmoStyleTempDropCleanup_AllRaise3701_SessionStaysUsable()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         // The exact shape of SMO's Object-Explorer "Databases" refresh cleanup:
@@ -70,7 +70,7 @@ public sealed class BatchErrorContinuationTests
     public async Task ResultSetBeforeError_FirstResultReadable_NextResultThrows()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("select 1 as a; drop table #nope", connection);
@@ -91,7 +91,7 @@ public sealed class BatchErrorContinuationTests
     public async Task ExecuteScalar_TrailingError_DrainsBatch_Throws()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         // ExecuteScalar drains the whole batch: the value of the first result
@@ -107,7 +107,7 @@ public sealed class BatchErrorContinuationTests
     public async Task BatchAbortingError_AbortsBatch_LaterStatementDoesNotRun()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         // No SimulatedSqlException factory produces a class >= 17 (batch/

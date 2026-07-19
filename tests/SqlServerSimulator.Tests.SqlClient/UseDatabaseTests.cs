@@ -19,7 +19,7 @@ public sealed class UseDatabaseTests
     public async Task UseMaster_ExecuteNonQuery_SwitchesDatabase()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var use = new SqlCommand("use [master]", connection))
@@ -34,7 +34,7 @@ public sealed class UseDatabaseTests
     public async Task UseMaster_RaisesChangedDatabaseContextInfoMessage()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var messages = new List<string>();
@@ -49,7 +49,7 @@ public sealed class UseDatabaseTests
     public async Task UseInMultiStatementBatch_WithResultSet()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("use [master] select db_name()", connection);
@@ -61,7 +61,7 @@ public sealed class UseDatabaseTests
     public async Task UseViaRpc_ParameterizedCommand_SwitchesDatabase()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         // A parameter forces the sp_executesql RPC path instead of SQLBatch.
@@ -75,7 +75,7 @@ public sealed class UseDatabaseTests
     public async Task UseThenError_StillSwitchesDatabase()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var command = new SqlCommand("use [master] select * from nosuchtable", connection))
@@ -93,7 +93,7 @@ public sealed class UseDatabaseTests
     public async Task UseRoundTrip_MasterAndBack()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var toMaster = new SqlCommand("use [master]", connection))
@@ -110,7 +110,7 @@ public sealed class UseDatabaseTests
     public async Task UseMissingDatabase_RaisesMsg911_SessionSurvives()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var command = new SqlCommand("use [nosuchdb]", connection))

@@ -39,7 +39,7 @@ public sealed class SpatialWireTests
                 (3, null)
             """);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select CityID, Location from Cities order by CityID", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -70,7 +70,7 @@ public sealed class SpatialWireTests
                 (2, geometry::STGeomFromText(N'POLYGON ((0 0, 4 0, 4 4, 0 4, 0 0))', 0))
             """);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select g from Shapes order by id", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);

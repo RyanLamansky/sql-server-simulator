@@ -20,7 +20,7 @@ public sealed class BulkCopyTests
     {
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, ddl);
-        var listener = await simulation.ListenAsync(0, token);
+        var listener = await simulation.ListenLocalAsync(0, token);
         var connection = await Wire.OpenAsync(listener, token);
         return (simulation, listener, connection);
     }

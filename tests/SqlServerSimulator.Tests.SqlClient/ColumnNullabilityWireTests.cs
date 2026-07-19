@@ -28,7 +28,7 @@ public sealed class ColumnNullabilityWireTests
             insert t values (1, N'a', '2026-01-01')
             """);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select id, v, d, id + 1, isnull(v, N'x') from t", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -57,7 +57,7 @@ public sealed class ColumnNullabilityWireTests
             insert a values (1); insert b values (10, 1)
             """);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand(
             "select a.id, b.id from a join b on b.aid = a.id", connection);

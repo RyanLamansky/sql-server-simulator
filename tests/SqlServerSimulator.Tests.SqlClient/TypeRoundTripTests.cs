@@ -57,7 +57,7 @@ public sealed class TypeRoundTripTests
             """);
         var oracle = Wire.ReadAllInProc(simulation, "select v from t order by id");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select v from t order by id", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -83,7 +83,7 @@ public sealed class TypeRoundTripTests
             """);
         var oracle = Wire.ReadAllInProc(simulation, "select v from t");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select v from t", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -104,7 +104,7 @@ public sealed class TypeRoundTripTests
             insert t values (200, -12345, 1000000, 9000000000, 1)
             """);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select a, b, c, d, e from t", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -127,7 +127,7 @@ public sealed class TypeRoundTripTests
             """);
         var oracle = Wire.ReadAllInProc(simulation, "select r, f, sm, m, d from t");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select r, f, sm, m, d from t", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -150,7 +150,7 @@ public sealed class TypeRoundTripTests
             """);
         var oracle = Wire.ReadAllInProc(simulation, "select dt, tm, d2, dto, sdt, legacy from t");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select dt, tm, d2, dto, sdt, legacy from t", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -174,7 +174,7 @@ public sealed class TypeRoundTripTests
             insert t values ('6F9619FF-8B86-D011-B42D-00C04FC964FF')
             """);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select g from t", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -193,7 +193,7 @@ public sealed class TypeRoundTripTests
             """);
         var oracle = Wire.ReadAllInProc(simulation, "select fixed, ansi, unicode, empty from t");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select fixed, ansi, unicode, empty from t", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -215,7 +215,7 @@ public sealed class TypeRoundTripTests
             insert t values (0x0102030405060708, 0xDEADBEEF)
             """);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select fixed, var from t", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);

@@ -20,7 +20,7 @@ public sealed class RpcParameterTypeTests
     private async Task RoundTrip(Action<SqlParameter> configure)
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         _ = await Wire.AssertScalarParamRoundTrips(simulation, connection, TestContext.CancellationToken, configure);
     }
@@ -146,7 +146,7 @@ public sealed class RpcParameterTypeTests
     public async Task Xml_Parameter_RoundTrips()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("select @p", connection);
@@ -158,7 +158,7 @@ public sealed class RpcParameterTypeTests
     public async Task Null_TypedParameters_RoundTripAsDbNull()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var typedNulls = new Action<SqlParameter>[]
@@ -194,7 +194,7 @@ public sealed class RpcParameterTypeTests
     public async Task LargeStatement_SentAsNtextRpcParam_Executes()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         // ~12 KB of statement text → over nvarchar(4000) and multi-packet.
         var pad = "/* " + new string('x', 6000) + " */";
@@ -214,7 +214,7 @@ public sealed class RpcParameterTypeTests
     public async Task LargeStatement_NtextValue_DecodesExactly()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         var marker = string.Concat(Enumerable.Range(0, 500).Select(i => $"m{i:D4}"));
         var terms = string.Join(" + ", Enumerable.Repeat("1", 200));

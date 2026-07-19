@@ -35,7 +35,7 @@ public sealed class UdtRpcParameterTests
     public async Task GeographyParameter_TypedValue_RoundTripsToWkt()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select @p.ToString()", connection);
         _ = command.Parameters.Add(new SqlParameter("@p", SqlDbType.Udt)
@@ -51,7 +51,7 @@ public sealed class UdtRpcParameterTests
     public async Task GeographyParameter_Null_ReadsAsNull()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select @p.ToString()", connection);
         _ = command.Parameters.Add(new SqlParameter("@p", SqlDbType.Udt) { UdtTypeName = "geography", Value = DBNull.Value });
@@ -63,7 +63,7 @@ public sealed class UdtRpcParameterTests
     public async Task GeometryParameter_RawWkbBytes_RoundTripsToWkt()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select @p.ToString()", connection);
         _ = command.Parameters.Add(new SqlParameter("@p", SqlDbType.Udt)
@@ -79,7 +79,7 @@ public sealed class UdtRpcParameterTests
     public async Task HierarchyIdParameter_TypedValue_RoundTripsToPathAndDataLength()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select @p.ToString(), datalength(@p)", connection);
         _ = command.Parameters.Add(new SqlParameter("@p", SqlDbType.Udt)
@@ -98,7 +98,7 @@ public sealed class UdtRpcParameterTests
     public async Task HierarchyIdParameter_RawOrdPathBytes_RoundTripsToPath()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select @p.ToString()", connection);
         _ = command.Parameters.Add(new SqlParameter("@p", SqlDbType.Udt) { UdtTypeName = "hierarchyid", Value = Node1_2 });
@@ -110,7 +110,7 @@ public sealed class UdtRpcParameterTests
     public async Task HierarchyIdParameter_Null_ReadsAsNull()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select @p.ToString()", connection);
         _ = command.Parameters.Add(new SqlParameter("@p", SqlDbType.Udt) { UdtTypeName = "hierarchyid", Value = DBNull.Value });
@@ -122,7 +122,7 @@ public sealed class UdtRpcParameterTests
     public async Task UnknownUdtTypeName_RaisesMsg8064()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select @p", connection);
         _ = command.Parameters.Add(new SqlParameter("@p", SqlDbType.Udt) { UdtTypeName = "nosuchtype", Value = new byte[] { 1, 2 } });
@@ -138,7 +138,7 @@ public sealed class UdtRpcParameterTests
     public async Task InvalidGeographyBytes_RaisesMsg8023()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select @p.ToString()", connection);
         _ = command.Parameters.Add(new SqlParameter("@p", SqlDbType.Udt) { UdtTypeName = "geography", Value = new byte[] { 0, 1, 2, 3 } });
@@ -154,7 +154,7 @@ public sealed class UdtRpcParameterTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create procedure dbo.EchoNode @h hierarchyid as select @h.ToString()");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("dbo.EchoNode", connection) { CommandType = CommandType.StoredProcedure };
         _ = command.Parameters.Add(new SqlParameter("@h", SqlDbType.Udt)

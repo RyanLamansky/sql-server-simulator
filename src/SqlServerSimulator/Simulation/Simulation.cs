@@ -391,7 +391,7 @@ public sealed partial class Simulation
     /// <summary>
     /// SQL-authentication server logins created via <c>CREATE LOGIN</c>, keyed
     /// by name. Empty by default, in which case the TDS endpoint
-    /// (<see cref="ListenAsync"/>) accepts any credentials; once at least one
+    /// (<see cref="ListenLocalAsync"/>) accepts any credentials; once at least one
     /// login exists, the endpoint enforces LOGIN7 credentials against this
     /// registry (mismatch → Msg 18456 and disconnect). In-process
     /// <see cref="CreateDbConnection"/> sessions never authenticate — that's

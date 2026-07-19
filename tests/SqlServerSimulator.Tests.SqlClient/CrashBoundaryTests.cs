@@ -26,7 +26,7 @@ public sealed class CrashBoundaryTests
             // terminal backstop rather than a per-statement ERROR conversion.
             NetworkBatchCrashHookForTesting = () => throw new InvalidOperationException("forced internal failure"),
         };
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select 1", connection);
 
@@ -46,7 +46,7 @@ public sealed class CrashBoundaryTests
         {
             NetworkBatchCrashHookForTesting = () => throw new InvalidOperationException("forced internal failure"),
         };
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select 1", connection);
 

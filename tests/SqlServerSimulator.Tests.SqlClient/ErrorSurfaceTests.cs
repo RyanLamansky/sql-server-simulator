@@ -34,7 +34,7 @@ public sealed class ErrorSurfaceTests
         var simulation = new Simulation();
         var oracle = CaptureInProc(simulation, "select 1 / 0");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
@@ -60,7 +60,7 @@ public sealed class ErrorSurfaceTests
         var simulation = new Simulation();
         var oracle = CaptureInProc(simulation, "select from where");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
@@ -82,7 +82,7 @@ public sealed class ErrorSurfaceTests
     public async Task AfterError_SameConnection_StillExecutes()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         _ = await Assert.ThrowsAsync<SqlException>(async () =>
@@ -101,7 +101,7 @@ public sealed class ErrorSurfaceTests
     public async Task Error_CarriesBatchRelativeLineNumber()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
@@ -122,7 +122,7 @@ public sealed class ErrorSurfaceTests
         var simulation = new Simulation();
         var oracle = CaptureInProc(simulation, "select * from nonexistent_table");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>

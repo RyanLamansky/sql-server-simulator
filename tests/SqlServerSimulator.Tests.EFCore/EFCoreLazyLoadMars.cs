@@ -106,7 +106,7 @@ public class EFCoreLazyLoadMars
     {
         var simulation = new Simulation();
         Seed(simulation);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         var connectionString =
             $"Server=127.0.0.1,{listener.Port};User ID=sa;Password=x;TrustServerCertificate=True;" +
             "MultipleActiveResultSets=True;Connect Timeout=15";
@@ -125,7 +125,7 @@ public class EFCoreLazyLoadMars
     {
         var simulation = new Simulation();
         Seed(simulation);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         var connectionString =
             $"Server=127.0.0.1,{listener.Port};User ID=sa;Password=x;TrustServerCertificate=True;" +
             "MultipleActiveResultSets=True;Connect Timeout=15";
@@ -147,7 +147,7 @@ public class EFCoreLazyLoadMars
     {
         var simulation = new Simulation();
         Seed(simulation);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         var connectionString =
             $"Server=127.0.0.1,{listener.Port};User ID=sa;Password=x;TrustServerCertificate=True;" +
             "MultipleActiveResultSets=True;Connect Timeout=15";

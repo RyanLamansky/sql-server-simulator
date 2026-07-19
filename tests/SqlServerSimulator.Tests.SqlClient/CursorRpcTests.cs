@@ -91,7 +91,7 @@ public sealed class CursorRpcTests
     public async Task OpenFetchClose_KeysetLifecycle()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, Token);
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
         await using var connection = await OpenWithTableAsync(listener, Token);
 
         var (handle, scroll, cc, rowcount) = await OpenAsync(connection, "SELECT id, name, qty FROM dbo.curp ORDER BY id", 0x1, 0x1, Token);
@@ -124,7 +124,7 @@ public sealed class CursorRpcTests
     public async Task Open_ColumnMetadata_HasRowStatAndZeroRows()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, Token);
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
         await using var connection = await OpenWithTableAsync(listener, Token);
 
         await using var cmd = Proc("sp_cursoropen", connection);
@@ -145,7 +145,7 @@ public sealed class CursorRpcTests
     public async Task Open_ScrollOptDowngrade_NonUpdatableForcedStatic()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, Token);
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
         await using var connection = await OpenWithTableAsync(listener, Token);
 
         // Keyset over a GROUP BY is forced STATIC (0x8) / READ_ONLY (0x1); rowcount is the count.
@@ -164,7 +164,7 @@ public sealed class CursorRpcTests
     public async Task Open_DynamicAndForwardOnly_ReportNegativeRowCount()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, Token);
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
         await using var connection = await OpenWithTableAsync(listener, Token);
 
         var (_, dScroll, _, dRows) = await OpenAsync(connection, "SELECT id, name, qty FROM dbo.curp ORDER BY id", 0x2, 0x1, Token);
@@ -180,7 +180,7 @@ public sealed class CursorRpcTests
     public async Task PositionedUpdateAndDelete_ViaSpCursor()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, Token);
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
         await using var connection = await OpenWithTableAsync(listener, Token);
 
         var (handle, _, _, _) = await OpenAsync(connection, "SELECT id, name, qty FROM dbo.curp ORDER BY id", 0x1, 0x2, Token);
@@ -228,7 +228,7 @@ public sealed class CursorRpcTests
     public async Task PositionedUpdate_PastFetchBuffer_Msg16930()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, Token);
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
         await using var connection = await OpenWithTableAsync(listener, Token);
 
         var (handle, _, _, _) = await OpenAsync(connection, "SELECT id, name, qty FROM dbo.curp ORDER BY id", 0x1, 0x2, Token);
@@ -252,7 +252,7 @@ public sealed class CursorRpcTests
     public async Task PrepExecAndExecute_ReuseHandle()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, Token);
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
         await using var connection = await OpenWithTableAsync(listener, Token);
 
         int prepHandle, cursorHandle;
@@ -312,7 +312,7 @@ public sealed class CursorRpcTests
     public async Task Close_DoubleClose_And_InvalidHandle_Msg16909()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, Token);
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
         await using var connection = await OpenWithTableAsync(listener, Token);
 
         var (handle, _, _, _) = await OpenAsync(connection, "SELECT id FROM dbo.curp", 0x1, 0x1, Token);
@@ -331,7 +331,7 @@ public sealed class CursorRpcTests
     public async Task Open_InvalidStatement_Msg16945_ReturnsErrorNumber()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, Token);
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
         await using var connection = await OpenWithTableAsync(listener, Token);
 
         await using var cmd = Proc("sp_cursoropen", connection);
@@ -357,7 +357,7 @@ public sealed class CursorRpcTests
     public async Task CursorOption_AcceptedAndIgnored()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, Token);
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
         await using var connection = await OpenWithTableAsync(listener, Token);
 
         var (handle, _, _, _) = await OpenAsync(connection, "SELECT id FROM dbo.curp", 0x1, 0x1, Token);

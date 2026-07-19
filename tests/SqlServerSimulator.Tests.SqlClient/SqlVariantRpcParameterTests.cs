@@ -24,7 +24,7 @@ public sealed class SqlVariantRpcParameterTests
     public async Task VariantParameter_PerBaseType_RoundTripsWithBaseType()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await RoundTrip(connection, 42, "int", 42);
@@ -48,7 +48,7 @@ public sealed class SqlVariantRpcParameterTests
     public async Task VariantParameter_Null_ReadsAsNull()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select @p, SQL_VARIANT_PROPERTY(@p, 'BaseType')", connection);
         _ = command.Parameters.Add(new SqlParameter("@p", SqlDbType.Variant) { Value = DBNull.Value });
@@ -63,7 +63,7 @@ public sealed class SqlVariantRpcParameterTests
     public async Task VariantParameter_DecimalPrecisionScale_SurfaceViaProperty()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand(
             "select SQL_VARIANT_PROPERTY(@p, 'Precision'), SQL_VARIANT_PROPERTY(@p, 'Scale')", connection);
@@ -82,7 +82,7 @@ public sealed class SqlVariantRpcParameterTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create procedure dbo.EchoVariantType @v sql_variant as select SQL_VARIANT_PROPERTY(@v, 'BaseType')");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("dbo.EchoVariantType", connection) { CommandType = CommandType.StoredProcedure };
         _ = command.Parameters.Add(new SqlParameter("@v", SqlDbType.Variant) { Value = 99 });
@@ -102,7 +102,7 @@ public sealed class SqlVariantRpcParameterTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create procedure dbo.SetVariant @v sql_variant output as set @v = cast(5 as int)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("dbo.SetVariant", connection) { CommandType = CommandType.StoredProcedure };
         _ = command.Parameters.Add(new SqlParameter("@v", SqlDbType.Variant) { Direction = ParameterDirection.Output, Value = DBNull.Value });

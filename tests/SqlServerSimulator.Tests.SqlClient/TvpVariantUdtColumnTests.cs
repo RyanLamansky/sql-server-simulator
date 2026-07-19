@@ -53,7 +53,7 @@ public sealed class TvpVariantUdtColumnTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create type dbo.VarRows as table (id int, v sql_variant)");
         Wire.ExecInProc(simulation, "create table dbo.sink (id int, v sql_variant)");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var metadata = new[] { new SqlMetaData("id", SqlDbType.Int), new SqlMetaData("v", SqlDbType.Variant) };
@@ -90,7 +90,7 @@ public sealed class TvpVariantUdtColumnTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create type dbo.HierRows as table (id int, h hierarchyid)");
         Wire.ExecInProc(simulation, "create table dbo.sink (id int, h hierarchyid)");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var metadata = new[] { new SqlMetaData("id", SqlDbType.Int), new SqlMetaData("h", SqlDbType.Udt, typeof(SqlHierarchyId), "hierarchyid") };
@@ -113,7 +113,7 @@ public sealed class TvpVariantUdtColumnTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create type dbo.GeoRows as table (id int, g geography)");
         Wire.ExecInProc(simulation, "create table dbo.sink (id int, g geography)");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var metadata = new[] { new SqlMetaData("id", SqlDbType.Int), new SqlMetaData("g", SqlDbType.Udt, typeof(SqlGeography), "geography") };
@@ -133,7 +133,7 @@ public sealed class TvpVariantUdtColumnTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create type dbo.GeomRows as table (id int, g geometry)");
         Wire.ExecInProc(simulation, "create table dbo.sink (id int, g geometry)");
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var metadata = new[] { new SqlMetaData("id", SqlDbType.Int), new SqlMetaData("g", SqlDbType.Udt, typeof(SqlGeometry), "geometry") };

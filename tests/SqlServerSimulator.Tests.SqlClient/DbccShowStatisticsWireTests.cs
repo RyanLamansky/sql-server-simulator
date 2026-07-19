@@ -25,7 +25,7 @@ public sealed class DbccShowStatisticsWireTests
             insert t values (1), (2), (3), (4), (5)
             """);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("dbcc show_statistics(N't', N'pk_t') with histogram", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
@@ -58,7 +58,7 @@ public sealed class DbccShowStatisticsWireTests
             insert s values (N'alpha'), (N'bravo'), (N'charlie')
             """);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("dbcc show_statistics(N's', N'pk_s') with histogram", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);

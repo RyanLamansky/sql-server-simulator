@@ -22,7 +22,7 @@ public sealed class LargeValueTests
         Wire.ExecInProc(simulation, "create table t (v nvarchar(max))");
         Wire.ExecInProcParam(simulation, "insert t (v) values (@v)", "@v", value);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("select v from t", connection);
@@ -43,7 +43,7 @@ public sealed class LargeValueTests
     public async Task NVarcharMax_CastConcat_SelectsOverWire()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand(
@@ -63,7 +63,7 @@ public sealed class LargeValueTests
         Wire.ExecInProc(simulation, "create table t (v varbinary(max))");
         Wire.ExecInProcParam(simulation, "insert t (v) values (@v)", "@v", value);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("select v from t", connection);
@@ -88,7 +88,7 @@ public sealed class LargeValueTests
         var padding = new string('x', 40000);
         Wire.ExecInProc(simulation, $"create procedure dbo.big_proc as /* {padding} */ select 1");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select object_definition(object_id('dbo.big_proc'))", connection);
         var definition = (string?)await command.ExecuteScalarAsync(TestContext.CancellationToken);
@@ -118,7 +118,7 @@ public sealed class LargeValueTests
     public async Task NVarcharMaxScalars_LargeResult_RoundTripOverWire(string name, string expression)
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand($"select {expression}", connection);
         var result = (string?)await command.ExecuteScalarAsync(TestContext.CancellationToken);
@@ -136,7 +136,7 @@ public sealed class LargeValueTests
         // inflated payload exceeds the bounded wire prefix and must stream as
         // PLP. 40,000 nvarchar(max) chars → 80,000 UTF-16 bytes inflated.
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand(
             "select decompress(compress(replicate(cast(N'a' as nvarchar(max)), 40000)))", connection);
@@ -156,7 +156,7 @@ public sealed class LargeValueTests
         Wire.ExecInProc(simulation,
             "insert t (v) select replicate(cast(N'a' as nvarchar(max)), 40000) from generate_series(1, 3)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select string_agg(v, N',') from t", connection);
         var result = (string?)await command.ExecuteScalarAsync(TestContext.CancellationToken);
@@ -176,7 +176,7 @@ public sealed class LargeValueTests
         Wire.ExecInProc(simulation,
             "insert t (v) select replicate(N'a', 100) from generate_series(1, 200)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select string_agg(v, N',') from t", connection);
         var exception = await ThrowsExactlyAsync<SqlException>(
@@ -205,7 +205,7 @@ public sealed class LargeValueTests
         Wire.ExecInProc(simulation, "create table t (id int, big nvarchar(max))");
         Wire.ExecInProcParam(simulation, "insert t values (1, @v)", "@v", value);
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand(query, connection);
         var result = (string?)await command.ExecuteScalarAsync(TestContext.CancellationToken);
@@ -223,7 +223,7 @@ public sealed class LargeValueTests
         var padding = new string('x', 40000);
         Wire.ExecInProc(simulation, $"create procedure dbo.big_proc as /* {padding} */ select 1");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand(
             "select isnull(m.definition, N'') from sys.sql_modules m where m.object_id = object_id('dbo.big_proc')",
@@ -239,7 +239,7 @@ public sealed class LargeValueTests
     {
         var simulation = new Simulation();
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand("select value from generate_series(1, 10000) order by value", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);

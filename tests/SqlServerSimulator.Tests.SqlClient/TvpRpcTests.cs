@@ -49,7 +49,7 @@ public sealed class TvpRpcTests
     {
         var simulation = new Simulation();
         Seed(simulation);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("dbo.ins_idname", connection) { CommandType = CommandType.StoredProcedure };
@@ -71,7 +71,7 @@ public sealed class TvpRpcTests
     {
         var simulation = new Simulation();
         Seed(simulation);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         // CommandType.Text with a Structured parameter arrives as sp_executesql
@@ -93,7 +93,7 @@ public sealed class TvpRpcTests
     {
         var simulation = new Simulation();
         Seed(simulation);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         // IEnumerable<SqlDataRecord> is a documented TVP source the in-process
@@ -134,7 +134,7 @@ public sealed class TvpRpcTests
         Wire.ExecInProc(simulation, "create table dbo.src (id int, name nvarchar(50))");
         Wire.ExecInProc(simulation, "insert dbo.src values (30, 'p'), (31, 'q')");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
 
         // A separate connection drives the source reader (the simulator has no
         // MARS, so the source can't share the consuming command's connection).
@@ -159,7 +159,7 @@ public sealed class TvpRpcTests
     {
         var simulation = new Simulation();
         Seed(simulation);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("dbo.ins_idname", connection) { CommandType = CommandType.StoredProcedure };
@@ -176,7 +176,7 @@ public sealed class TvpRpcTests
     {
         var simulation = new Simulation();
         Seed(simulation);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("dbo.ins_idname", connection) { CommandType = CommandType.StoredProcedure };
@@ -197,7 +197,7 @@ public sealed class TvpRpcTests
     {
         var simulation = new Simulation();
         Seed(simulation);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var table = new DataTable();
@@ -219,7 +219,7 @@ public sealed class TvpRpcTests
     {
         var simulation = new Simulation();
         Seed(simulation);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var table = new DataTable();
@@ -243,7 +243,7 @@ public sealed class TvpRpcTests
     {
         var simulation = new Simulation();
         Seed(simulation);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         // Binding is positional (column names ignored): a (name, id) source
@@ -269,7 +269,7 @@ public sealed class TvpRpcTests
     {
         var simulation = new Simulation();
         Seed(simulation);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("dbo.ins_idname", connection) { CommandType = CommandType.StoredProcedure };
@@ -287,7 +287,7 @@ public sealed class TvpRpcTests
     {
         var simulation = new Simulation();
         Seed(simulation);
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("dbo.ins_idname", connection) { CommandType = CommandType.StoredProcedure };
@@ -308,7 +308,7 @@ public sealed class TvpRpcTests
         Wire.ExecInProc(simulation, "create table dbo.sink (id int, name nvarchar(50))");
         Wire.ExecInProc(simulation, "create proc dbo.ins_pk @rows dbo.PkType readonly as insert into dbo.sink select id, name from @rows");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var table = new DataTable();
@@ -335,7 +335,7 @@ public sealed class TvpRpcTests
         Wire.ExecInProc(simulation, "create table dbo.sink (id int)");
         Wire.ExecInProc(simulation, "create proc dbo.ins_ck @rows dbo.CkType readonly as insert into dbo.sink select id from @rows");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var table = new DataTable();
@@ -428,7 +428,7 @@ public sealed class TvpRpcTests
         var wireSimulation = new Simulation();
         Wire.ExecInProc(wireSimulation, createType);
         Wire.ExecInProc(wireSimulation, createSink);
-        await using var listener = await wireSimulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await wireSimulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var wireConnection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using (var command = new SqlCommand("insert into dbo.sink select * from @rows", wireConnection))
         {

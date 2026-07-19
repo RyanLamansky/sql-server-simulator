@@ -20,7 +20,7 @@ public sealed class PreparedStatementTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int, name nvarchar(50))");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using (var insert = new SqlCommand("insert t values (@id, @name)", connection))
@@ -55,7 +55,7 @@ public sealed class PreparedStatementTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var insert = new SqlCommand("insert t values (@v)", connection);
@@ -91,7 +91,7 @@ public sealed class PreparedStatementTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create table t (id int)");
 
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         var connectionString = Wire.PooledConnectionString(listener);
 
         await using (var first = new SqlConnection(connectionString))

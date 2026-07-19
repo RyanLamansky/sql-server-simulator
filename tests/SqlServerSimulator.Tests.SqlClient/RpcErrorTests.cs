@@ -18,7 +18,7 @@ public sealed class RpcErrorTests
     public async Task ParameterizedDivideByZero_Number8134()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
@@ -36,7 +36,7 @@ public sealed class RpcErrorTests
     public async Task OutputParameterBeforeErrorInBatch_ThrowsButWritesOutput()
     {
         var simulation = new Simulation();
-        await using var listener = await simulation.ListenAsync(0, TestContext.CancellationToken);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         await using var command = new SqlCommand("set @out = 5; select @a / @b", connection);
