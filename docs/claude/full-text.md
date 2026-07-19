@@ -6,11 +6,11 @@ The bacpac-loaded AW procedure `uspSearchCandidateResumes` (which exercises `CON
 
 ## Storage
 
-**`FullTextCatalog`** (`SqlServerSimulator/FullTextCatalog.cs`) carries id + name + is_default + is_accent_sensitivity_on + principal_id + create_date.
+**`FullTextCatalog`** (`src/SqlServerSimulator/FullTextCatalog.cs`) carries id + name + is_default + is_accent_sensitivity_on + principal_id + create_date.
 
 **`Database.FullTextCatalogs`** — per-database `ConcurrentDictionary<string, FullTextCatalog>` (case-insensitive). The catalog-id counter starts at 5 — matches Microsoft Learn's documented numbering convention (ids 0..4 are reserved internal slots).
 
-**`FullTextIndex`** (`SqlServerSimulator/FullTextIndex.cs`) carries catalog_id + key_index_name + unique_index_id (resolved at CREATE) + `List<FullTextIndexColumn>`.
+**`FullTextIndex`** (`src/SqlServerSimulator/FullTextIndex.cs`) carries catalog_id + key_index_name + unique_index_id (resolved at CREATE) + `List<FullTextIndexColumn>`.
 
 **`HeapTable.FullTextIndex`** — single nullable slot (real SQL Server's invariant: at most one FT index per table).
 

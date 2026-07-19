@@ -7,7 +7,7 @@ this is grammar compatibility: applications with `WITH (NOLOCK)` hints
 in their schema / raw SQL no longer trip `Msg 102` on parse.
 
 Implementation lives in
-[`SqlServerSimulator/Parser/Selection.Hints.cs`](../../SqlServerSimulator/Parser/Selection.Hints.cs).
+[`src/SqlServerSimulator/Parser/Selection.Hints.cs`](../../src/SqlServerSimulator/Parser/Selection.Hints.cs).
 
 ## Table hints
 

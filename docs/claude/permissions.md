@@ -4,7 +4,7 @@
 
 ## Storage
 
-**`DatabasePrincipal`** (`SqlServerSimulator/DatabasePrincipal.cs`) carries:
+**`DatabasePrincipal`** (`src/SqlServerSimulator/DatabasePrincipal.cs`) carries:
 - `principal_id` (int)
 - `name` (string)
 - `type_code` (char): `S` = SQL_USER, `R` = DATABASE_ROLE
@@ -12,7 +12,7 @@
 - `is_fixed_role` (bool)
 - `create_date` / `modify_date`
 
-**`DatabasePermission`** (`SqlServerSimulator/DatabasePermission.cs`) carries class + major_id + minor_id + grantee/grantor ids + permission_name + 4-char type code + state (`G`/`W`/`D`/`R`).
+**`DatabasePermission`** (`src/SqlServerSimulator/DatabasePermission.cs`) carries class + major_id + minor_id + grantee/grantor ids + permission_name + 4-char type code + state (`G`/`W`/`D`/`R`).
 
 Both live on `Database`:
 - `Database.Principals` — `ConcurrentDictionary<string, DatabasePrincipal>` keyed by name

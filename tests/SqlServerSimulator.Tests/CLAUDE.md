@@ -1,6 +1,6 @@
 # Claude Working Notes — `SqlServerSimulator.Tests`
 
-Auto-loaded when working in this directory. Test-shape conventions; assumes the root [`CLAUDE.md`](../CLAUDE.md) (architecture / probe workflow) is also in context.
+Auto-loaded when working in this directory. Test-shape conventions; assumes the root [`CLAUDE.md`](../../CLAUDE.md) (architecture / probe workflow) is also in context.
 
 ## Default test shape
 

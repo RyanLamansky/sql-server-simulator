@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <NoWarn>1591</NoWarn>
@@ -10,19 +10,13 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <!-- SMO 172.x supports the SqlClient 5.1.x line, not the 7.x the wire
-         oracle (Tests.SqlClient) uses from Directory.Packages.props. The
-         split is deliberate per-oracle pinning, and the reason this project
-         stays separate from Tests.SqlClient. -->
-    <PackageReference Include="Microsoft.Data.SqlClient" VersionOverride="5.1.6" />
-    <PackageReference Include="Microsoft.SqlServer.SqlManagementObjects" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="MSTest.TestAdapter" />
     <PackageReference Include="MSTest.TestFramework" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\SqlServerSimulator\SqlServerSimulator.csproj" />
+    <ProjectReference Include="..\..\src\SqlServerSimulator\SqlServerSimulator.csproj" />
   </ItemGroup>
 
 </Project>

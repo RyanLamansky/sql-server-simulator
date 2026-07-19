@@ -30,7 +30,7 @@ public void ImportBacpac(Stream stream, out BacpacImportResult result, BacpacImp
 
 Per-element exceptions land on `Skipped` with a `"Load failed: …"` prefix and the load continues; the entire load doesn't abort because one constraint / view / proc fails. Deferred-computed-column failures (phase 8, for the rare UDF-forward-ref table) use a `"Deferred: …"` prefix instead, so the `Load_AW_No_Per_Element_Failures` guard test stays meaningful — it would otherwise spuriously fire on known unmodeled-function gaps.
 
-## Code layout — `SqlServerSimulator/Storage/Bacpac/`
+## Code layout — `src/SqlServerSimulator/Storage/Bacpac/`
 
 - **`BacpacReader.cs`** — OPC zip walker, dispatches to model + data readers
 - **`ModelXmlReader.cs`** — `model.xml` → DDL emitter (the 9-phase dispatcher)
@@ -120,7 +120,7 @@ Both AW + WWI exports re-import cleanly into a real SQL Server 2025 (CU7, full-t
 
 ## Reference sample coverage
 
-Reference bacpacs live in `.vs/<probe>/` as gitignored cross-check probes (`aw-crosscheck`, `wwi-crosscheck`). The retired `*.Tests.Internal/Storage/BacpacLoaderTests.cs` suite has been replaced by synthetic in-memory bacpacs built via `SqlServerSimulator.Bacpac.BacpacBuilder` + `TableBuilder` in `SqlServerSimulator.Tests/Bacpac/`. CI runs against synthetic builders in seconds.
+Reference bacpacs live in `.vs/<probe>/` as gitignored cross-check probes (`aw-crosscheck`, `wwi-crosscheck`). The retired `*.Tests.Internal/Storage/BacpacLoaderTests.cs` suite has been replaced by synthetic in-memory bacpacs built via `SqlServerSimulator.Bacpac.BacpacBuilder` + `TableBuilder` in `tests/SqlServerSimulator.Tests/Bacpac/`. CI runs against synthetic builders in seconds.
 
 **AdventureWorks2025** — 100% row coverage (760,167 / 760,167 rows, zero BCP-file failures). 5/5 schemas, 71/71 tables, 90/90 FKs, 89/89 CHECKs, 152/152 DEFAULTs, 89/95 indexes, 11/20 views, 10/10 procs, 11/11 functions, 10/10 DML triggers, 1/1 DDL trigger, 538/538 extended properties, 8/8 XML indexes, 1/1 full-text catalog, 3/3 full-text indexes, 2/2 indexed-view `SqlIndex` elements. **Import skips are 0.** The DacFx-export element gap vs the Microsoft original is 0 missing; property diffs are 0. One pre-existing divergence surfaces as an "extra" element: AW's system-named UNIQUE constraint on `Production.Document.rowguid` is scripted anonymously (name in an annotation) by DacFx normally, but *named* once the table has a full-text index — and the simulator's auto-generated constraint name (FNV-based) differs from real's object-id-derived one (a documented quirk), so the named form doesn't byte-match. Doesn't block real import (verified: aw-export re-imports into a live SQL Server 2025, both view indexes present at index_id 1 / CLUSTERED / unique).
 

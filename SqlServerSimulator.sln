@@ -3,9 +3,9 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 18
 VisualStudioVersion = 18.3.11218.70
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SqlServerSimulator", "SqlServerSimulator\SqlServerSimulator.csproj", "{CF5684B4-08DF-4CD3-8342-5B627155B40A}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SqlServerSimulator", "src\SqlServerSimulator\SqlServerSimulator.csproj", "{CF5684B4-08DF-4CD3-8342-5B627155B40A}"
 EndProject
-Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SqlServerSimulator.Tests", "SqlServerSimulator.Tests\SqlServerSimulator.Tests.csproj", "{25DCB2FC-636F-4442-9662-894F2CA075A0}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SqlServerSimulator.Tests", "tests\SqlServerSimulator.Tests\SqlServerSimulator.Tests.csproj", "{25DCB2FC-636F-4442-9662-894F2CA075A0}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{527F1E6C-BCEE-442F-96C4-B0ED5E47B5EE}"
 	ProjectSection(SolutionItems) = preProject
@@ -15,21 +15,21 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution 
 		README.md = README.md
 	EndProjectSection
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Tests.EFCore", "SqlServerSimulator.Tests.EFCore\SqlServerSimulator.Tests.EFCore.csproj", "{C2F98EBD-5A19-45BC-A2AD-F24E4976909F}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Tests.EFCore", "tests\SqlServerSimulator.Tests.EFCore\SqlServerSimulator.Tests.EFCore.csproj", "{C2F98EBD-5A19-45BC-A2AD-F24E4976909F}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Example", "Example\Example.csproj", "{56BC4138-449D-456E-840F-6F55303BA26A}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Example", "src\Example\Example.csproj", "{56BC4138-449D-456E-840F-6F55303BA26A}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Tests.Internal", "SqlServerSimulator.Tests.Internal\SqlServerSimulator.Tests.Internal.csproj", "{6E34AEB7-52E7-4BB0-B179-F8CD56BE436F}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Tests.Internal", "tests\SqlServerSimulator.Tests.Internal\SqlServerSimulator.Tests.Internal.csproj", "{6E34AEB7-52E7-4BB0-B179-F8CD56BE436F}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Analyzers", "SqlServerSimulator.Analyzers\SqlServerSimulator.Analyzers.csproj", "{6CF65391-9236-486B-A6B9-AD2441D77259}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Analyzers", "src\SqlServerSimulator.Analyzers\SqlServerSimulator.Analyzers.csproj", "{6CF65391-9236-486B-A6B9-AD2441D77259}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Analyzers.Tests", "SqlServerSimulator.Analyzers.Tests\SqlServerSimulator.Analyzers.Tests.csproj", "{F90DB0DD-7A0C-4DBE-B5BB-786B295CC27B}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Analyzers.Tests", "tests\SqlServerSimulator.Analyzers.Tests\SqlServerSimulator.Analyzers.Tests.csproj", "{F90DB0DD-7A0C-4DBE-B5BB-786B295CC27B}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.EFCore", "SqlServerSimulator.EFCore\SqlServerSimulator.EFCore.csproj", "{D6BCA163-E34B-4066-A4D7-27882875A9B4}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.EFCore", "src\SqlServerSimulator.EFCore\SqlServerSimulator.EFCore.csproj", "{D6BCA163-E34B-4066-A4D7-27882875A9B4}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Tests.SqlClient", "SqlServerSimulator.Tests.SqlClient\SqlServerSimulator.Tests.SqlClient.csproj", "{68F4759F-61B2-4FF7-960A-B78C6BC689CC}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Tests.SqlClient", "tests\SqlServerSimulator.Tests.SqlClient\SqlServerSimulator.Tests.SqlClient.csproj", "{68F4759F-61B2-4FF7-960A-B78C6BC689CC}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Tests.Smo", "SqlServerSimulator.Tests.Smo\SqlServerSimulator.Tests.Smo.csproj", "{6297C6FC-9C79-4332-8F33-726B36B5639B}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Tests.Smo", "tests\SqlServerSimulator.Tests.Smo\SqlServerSimulator.Tests.Smo.csproj", "{6297C6FC-9C79-4332-8F33-726B36B5639B}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
