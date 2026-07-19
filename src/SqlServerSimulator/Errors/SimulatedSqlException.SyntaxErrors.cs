@@ -8,6 +8,15 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException MissingEndCommentMark() => new("Missing end comment mark '*/'.", 113, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 1080: an integral literal in a grammar slot
+    /// that demands an <c>int</c> (<c>SET TEXTSIZE</c> / <c>SET ROWCOUNT</c>)
+    /// exceeds the int range. Probe-confirmed against SQL Server 2025
+    /// (2026-07-19): <c>SET TEXTSIZE 2147483648</c> → Msg 1080, Level 15.
+    /// </summary>
+    internal static SimulatedSqlException IntegerValueOutOfRange(string literal) =>
+        new($"The integer value {literal} is out of range.", 1080, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 105: a string literal or quote-delimited
     /// identifier opened with <c>'</c> or <c>"</c> was never closed before
     /// end of input. Real SQL Server echoes the scanned body in the message

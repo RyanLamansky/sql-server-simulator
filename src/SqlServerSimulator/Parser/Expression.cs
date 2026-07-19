@@ -176,6 +176,7 @@ internal abstract class Expression
             AtAtKeyword.TranCount => new TranCountExpression(context),
             AtAtKeyword.RowCount => new RowCountExpression(),
             AtAtKeyword.LockTimeout => new LockTimeoutExpression(context),
+            AtAtKeyword.TextSize => new TextSizeExpression(context),
             AtAtKeyword.SpId => new SpidExpression(context),
             AtAtKeyword.NestLevel => new NestLevelExpression(),
             AtAtKeyword.Dbts => new DbTsExpression(),

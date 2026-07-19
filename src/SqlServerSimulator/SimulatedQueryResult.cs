@@ -33,6 +33,28 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     /// </summary>
     public bool[]? ColumnNullability;
 
+    /// <summary>
+    /// The session's <c>SET TEXTSIZE</c> byte cap in effect when this result
+    /// was produced; <c>-1</c> = unlimited. Stamped by the dispatch loop at
+    /// statement materialization so a later-read result truncates under the
+    /// value that governed its statement (a proc body's <c>SET TEXTSIZE</c>
+    /// reverts at proc exit, but the result sets it produced keep its cap —
+    /// probe-confirmed against SQL Server 2025, 2026-07-19).
+    /// </summary>
+    public int ClientTextSize = -1;
+
     /// <summary>Creates a fresh cursor that iterates this result's rows.</summary>
     public abstract RowCursor CreateCursor();
+
+    /// <summary>
+    /// A cursor for a client-boundary consumer (the in-process data reader /
+    /// <c>ExecuteScalar</c>, the TDS row writer): applies the
+    /// <see cref="ClientTextSize"/> truncation real SQL Server performs at
+    /// wire egress. Engine-internal consumers use <see cref="CreateCursor"/>.
+    /// </summary>
+    public RowCursor CreateClientCursor()
+    {
+        var cursor = this.CreateCursor();
+        return this.ClientTextSize < 0 ? cursor : new TextSizeCursor(cursor, this.Schema, this.ClientTextSize);
+    }
 }

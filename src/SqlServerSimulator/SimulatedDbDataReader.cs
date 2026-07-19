@@ -46,7 +46,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
             {
                 case SimulatedQueryResult query:
                     this.currentResult = query;
-                    this.cursor = query.CreateCursor();
+                    this.cursor = query.CreateClientCursor();
                     return true;
                 case SimulatedErrorOutcome { RowReturning: true } error:
                     // A row-returning statement (SELECT / VALUES) that failed

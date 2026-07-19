@@ -44,8 +44,8 @@ These notes are the local implementation contracts.
   ROW value (`WriteLegacyLob`) = text-pointer-length byte + 16-byte placeholder pointer (`"dummy textptr\0\0\0"`) + 8-byte timestamp (`"dummyTS\0"`) + 4-byte data length + data (CP1252 text / UTF-16LE ntext / verbatim image); NULL is a single `0x00`.
   `image` **input** parameters decode (`TdsRpc.DecodeImage`): 4-byte max size + 4-byte data length (`0xFFFFFFFF` = NULL) + raw bytes, contiguous (not PLP) even multi-packet, bound as `DbType.Binary`.
   **`SqlBulkCopy` into a `text`/`ntext`/`image` column decodes** (`TdsColumnDecoder`'s legacy-LOB arm): COLMETADATA LONGLEN TYPE_INFO (4-byte max size + 5-byte collation for the string pair + a two-byte zero-part TableName field SqlClient sends in a client value stream) then the in-band text-pointer ROW value (1-byte ptr length `0`=NULL, else 16-byte ptr + 8-byte timestamp — both `0xFF` from SqlClient — 4-byte data length, data).
-  Residual: `SET TEXTSIZE` doesn't truncate.
-  Oracles: `LegacyLobWireTests`, `BulkCopyTests.LegacyLobColumns_TextNtextImage_InsertAndRoundTrip`.
+  `SET TEXTSIZE` truncates legacy-LOB and MAX-typed result columns + output parameters at the client boundary (the shared `SimulatedQueryResult.CreateClientCursor` → `TextSizeCursor` seam, so the TDS row writer inherits it; docs/claude/scalars.md).
+  Oracles: `LegacyLobWireTests`, `BulkCopyTests.LegacyLobColumns_TextNtextImage_InsertAndRoundTrip`, `TextSizeWireTests`.
 - **Token writer contract**: `TdsTokenWriter` buffers synchronously; `FlushAsync(final: false)` after every row keeps memory bounded to max(row, packet).
   Only the final flush sets EOM.
   Tokens may legally split across packet boundaries.

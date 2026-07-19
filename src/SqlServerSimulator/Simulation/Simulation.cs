@@ -958,6 +958,12 @@ public sealed partial class Simulation
             else
             {
                 dbType = SqlType.GetByDbType(parameter.DbType);
+                // Size = -1 is SqlClient's MAX-typed declaration; without the
+                // promotion the slot's declared type is the bounded variant,
+                // which (among other things) exempts it from the TEXTSIZE
+                // output-parameter clip keyed off MAX-declared types.
+                if (parameter.Size == SqlType.MaxLengthSentinel && BatchContext.AsMaxVariant(dbType) is { } maxVariant)
+                    dbType = maxVariant;
                 value = parameter.Value is null or DBNull ? SqlValue.Null(dbType) : dbType.ConvertParameter(parameter.Value);
             }
 
@@ -995,9 +1001,10 @@ public sealed partial class Simulation
                 var pname = parameter.ParameterName.StartsWith('@') ? parameter.ParameterName[1..] : parameter.ParameterName;
                 if (batch.Variables.TryGetValue(pname, out var slot))
                 {
+                    var value = TextSizeCursor.Apply(slot.Value, slot.DeclaredType, batch.Connection.TextSize);
                     if (parameter is SimulatedDbParameter simulated)
-                        simulated.OutputSqlValue = slot.Value;
-                    parameter.Value = slot.Value.IsNull ? DBNull.Value : slot.Value.ToObject();
+                        simulated.OutputSqlValue = value;
+                    parameter.Value = value.IsNull ? DBNull.Value : value.ToObject();
                 }
             }
         }
@@ -1388,6 +1395,20 @@ public sealed partial class Simulation
         // wrote its own number and asked us not to clobber it).
         if (!batch.IsSkipping && !batch.CurrentStatement.SuppressErrorReset)
             connection.LastErrorNumber = 0;
+
+        // Stamp the session TEXTSIZE in effect when this statement produced
+        // its rows: client-boundary cursors truncate under the producing
+        // statement's cap even when the session value changes before the
+        // (lazily-read) result is drained — notably a proc body's SET
+        // TEXTSIZE, which reverts at proc exit while its result sets keep it.
+        if (connection.TextSize >= 0)
+        {
+            foreach (var o in outcomes!)
+            {
+                if (o is SimulatedQueryResult query)
+                    query.ClientTextSize = connection.TextSize;
+            }
+        }
 
         foreach (var o in outcomes!)
             yield return o;
@@ -1903,8 +1924,13 @@ public sealed partial class Simulation
             if (slot.Parameter is SimulatedDbParameter parameter
                 && parameter.Direction is ParameterDirection.InputOutput or ParameterDirection.Output)
             {
-                parameter.OutputSqlValue = slot.Value;
-                parameter.Value = slot.Value.IsNull ? DBNull.Value : slot.Value.ToObject();
+                // Output parameters ride the same TEXTSIZE wire-egress clip
+                // as result columns (probe-confirmed 2026-07-19: a
+                // varchar(max) OUTPUT under SET TEXTSIZE 10 arrives at the
+                // client 10 chars long); server-side state is untouched.
+                var value = TextSizeCursor.Apply(slot.Value, slot.DeclaredType, batch.Connection.TextSize);
+                parameter.OutputSqlValue = value;
+                parameter.Value = value.IsNull ? DBNull.Value : value.ToObject();
             }
         }
     }

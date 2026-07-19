@@ -662,7 +662,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             {
                 TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames, query.ColumnNullability);
                 long rows = 0;
-                using (var cursor = query.CreateCursor())
+                using (var cursor = query.CreateClientCursor())
                 {
                     while (cursor.MoveNext())
                     {

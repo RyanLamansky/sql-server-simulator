@@ -201,6 +201,11 @@ partial class Simulation
                     innerBatch.CursorVariables[param.Name] = null;
             }
             connection.NestingLevel++;
+            // SET TEXTSIZE issued inside a proc body reverts at proc exit
+            // (probe-confirmed 2026-07-19), like the standard SET options;
+            // the body's result sets keep their production-time cap via the
+            // dispatch loop's per-statement ClientTextSize stamp.
+            var savedTextSize = connection.TextSize;
             // Materialize outcomes to a list so the try/finally cleanup
             // (NestingLevel decrement, OUTPUT param writeback, return-code
             // assignment) runs even when the iterator is partially consumed.
@@ -213,6 +218,7 @@ partial class Simulation
             finally
             {
                 connection.NestingLevel--;
+                connection.TextSize = savedTextSize;
                 // The proc body's PRINT buffer belongs to the inner batch, so
                 // the top-level flush in CreateResultSetsForCommand never sees
                 // it; deliver it here (also on error, matching the real

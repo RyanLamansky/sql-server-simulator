@@ -52,8 +52,8 @@ partial class Simulation
             // ReservedKeyword options that take an integer (ROWCOUNT / TEXTSIZE).
             // They tokenize as ReservedKeyword because the words appear in the
             // T-SQL reserved set; the SET parser accepts them by Keyword check.
-            case ReservedKeyword { Keyword: Keyword.RowCount or Keyword.TextSize }:
-                return ConsumeIntegerValue(context);
+            case ReservedKeyword { Keyword: var intOption and (Keyword.RowCount or Keyword.TextSize) }:
+                return ConsumeIntegerValue(context, applyTextSize: intOption == Keyword.TextSize);
         }
 
         if (afterSet is not UnquotedString unquoted)
@@ -353,16 +353,41 @@ partial class Simulation
     /// <summary>
     /// Reads the value token following a ReservedKeyword SET option that
     /// takes an integer (ROWCOUNT / TEXTSIZE). Cursor on entry is positioned
-    /// at the option keyword; advances once (twice for a signed value —
-    /// <c>SET TEXTSIZE -1</c> is real's reset-to-default form) and validates
-    /// the value token is a non-NULL <see cref="Numeric"/>.
+    /// at the option keyword; advances once (twice for a signed value) and
+    /// validates the value token is a non-NULL <see cref="Numeric"/>. An
+    /// integral literal past the int range raises Msg 1080 regardless of
+    /// skip state (Level 15, a compile-time check). TEXTSIZE carries semantic
+    /// effect (probe-confirmed against SQL Server 2025, 2026-07-19): the
+    /// value lands in <c>SimulatedDbConnection.TextSize</c> with <c>-1</c>
+    /// preserved verbatim (unlimited, SqlClient's login value) while <c>0</c>
+    /// and every other negative collapse to the 4096 default; ROWCOUNT stays
+    /// parse-and-discard.
     /// </summary>
-    private static bool ConsumeIntegerValue(ParserContext context)
+    private static bool ConsumeIntegerValue(ParserContext context, bool applyTextSize)
     {
         var value = context.GetNextRequired();
+        var negative = false;
         if (value is Operator { Character: '-' })
+        {
+            negative = true;
             value = context.GetNextRequired();
-        return value is Numeric { Value.IsNull: false };
+        }
+
+        if (value is not Numeric { Value.IsNull: false } literal)
+            return false;
+
+        if (literal.Value.Type == SqlType.BigInt)
+            throw SimulatedSqlException.IntegerValueOutOfRange((negative ? -literal.Value.AsInt64 : literal.Value.AsInt64).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (literal.Value.Type is DecimalSqlType { scale: 0 })
+            throw SimulatedSqlException.IntegerValueOutOfRange((negative ? -literal.Value.AsDecimal : literal.Value.AsDecimal).ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+        if (applyTextSize && !context.Batch.IsSkipping && literal.Value.Type == SqlType.Int32)
+        {
+            var requested = negative ? -literal.Value.AsInt32 : literal.Value.AsInt32;
+            context.Connection.TextSize = requested == -1 ? -1 : requested <= 0 ? 4096 : requested;
+        }
+
+        return true;
     }
 
     /// <summary>

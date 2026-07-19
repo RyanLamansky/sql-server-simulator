@@ -86,6 +86,20 @@ public sealed class SimulatedDbConnection : DbConnection
     internal int LockTimeoutMillis = -1;
 
     /// <summary>
+    /// Session-scoped <c>SET TEXTSIZE</c> state: the byte cap applied to
+    /// MAX-typed and legacy-LOB values (<c>varchar/nvarchar/varbinary(max)</c>,
+    /// <c>text</c>/<c>ntext</c>/<c>image</c>) as they leave the server for the
+    /// client — result columns and output parameters; never server-side
+    /// computation, variable assignment, or stored data. <c>-1</c> (the
+    /// fresh-session default a SqlClient login establishes, and the only
+    /// negative preserved verbatim) means unlimited; <c>SET TEXTSIZE 0</c> and
+    /// every other negative collapse to 4096. All probe-confirmed against SQL
+    /// Server 2025 (2026-07-19). Read by <c>@@TEXTSIZE</c> and stamped onto
+    /// each result set at statement production.
+    /// </summary>
+    internal int TextSize = -1;
+
+    /// <summary>
     /// Session-scoped <c>SET FMTONLY</c> state. While <see langword="true"/>,
     /// a SELECT returns its result-set metadata (COLMETADATA) with zero rows
     /// and every data-modifying statement is suppressed (no side effects) —

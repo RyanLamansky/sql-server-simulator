@@ -172,7 +172,9 @@ public sealed class SimulatedDbCommand : DbCommand
                     (errors ??= []).Add(error.Exception);
                     break;
                 case SimulatedQueryResult query when !haveScalar:
-                    using (var cursor = query.CreateCursor())
+#pragma warning disable CA2000 // The using disposes the returned cursor; a TextSizeCursor wrapper disposes its wrapped inner cursor, an ownership transfer the analyzer can't see.
+                    using (var cursor = query.CreateClientCursor())
+#pragma warning restore CA2000
                     {
                         if (cursor.MoveNext())
                         {

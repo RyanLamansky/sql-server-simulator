@@ -398,7 +398,10 @@ Constants whose values don't carry real session/server identity in the simulator
 - **`@@SERVICENAME`** — `"MSSQLSERVER"`.
 - **`@@LANGID`** — 0.
 - **`@@LANGUAGE`** — `"us_english"`.
-- **`@@TEXTSIZE`** — -1 (matches SQL Server's documented default).
+- **`@@TEXTSIZE`** — session state (`SimulatedDbConnection.TextSize`), default -1 (unlimited — the value a fresh SqlClient login establishes, probe-confirmed).
+  `SET TEXTSIZE` carries semantic effect: the byte cap clips MAX-typed / legacy-LOB values at the client boundary (result columns via the `TextSizeCursor` decorator installed by `SimulatedQueryResult.CreateClientCursor`, output parameters at write-back), never server-side computation, variable assignment, or stored data; `varchar(max)`/`text` truncate at 1 byte per char, `nvarchar(max)`/`ntext` at 2 with an odd byte floored, `varbinary(max)`/`image` at raw bytes, while `xml`, bounded var types, and UDTs are exempt.
+  Value mapping: `-1` preserved verbatim, `0` and every other negative collapse to 4096; a past-int-range literal raises **Msg 1080**; issued inside a proc body it reverts at proc exit while the body's result sets keep their production-time cap (`ClientTextSize` stamped per statement).
+  All probe-confirmed against SQL Server 2025 (2026-07-19).
 - **`@@OPTIONS`** — 5432 (composite of ANSI/ARITHABORT/QUOTED_IDENTIFIER/CONCAT_NULL_YIELDS_NULL flags matching the simulator's defaults).
 - **`@@VERSION`** — a multi-line banner mirroring the real SQL Server 2025 `@@VERSION` shape (`Microsoft SQL Server 2025 (RTM-CU7) (KB5096981) - 17.0.4065.4 (X64)` / build-date line / copyright / edition line), with the simulator's own identity (`Developer Edition (64-bit) on SQL Server Simulator`) standing in for real's host-OS line.
 - **`@@MICROSOFTVERSION`** — int `285216737` (`0x11000FE1`), the `(major << 24) | (minor << 16) | build` packing of version `17.0.4065.4` (`(17 << 24) | 4065`), self-consistent with `SERVERPROPERTY('ProductVersion')` = `"17.0.4065.4"` and the real reference instance's value.

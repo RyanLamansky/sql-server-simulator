@@ -26,8 +26,9 @@ internal sealed class Value : Expression
         // batch/connection/database access this constant form can't reach.
         // Values below match SQL Server 2025 defaults (probe-confirmed
         // 2026-05-22) — exact server name and configurable session knobs
-        // (TEXTSIZE, DATEFIRST) collapse to documented defaults since the
-        // simulator parses-and-discards the corresponding SET commands.
+        // (DATEFIRST) collapse to documented defaults since the simulator
+        // parses-and-discards the corresponding SET commands. @@TEXTSIZE
+        // routes to TextSizeExpression (SET TEXTSIZE carries semantic effect).
         switch (doubleAtPrefixedString.Parse())
         {
             case AtAtKeyword.Version:
@@ -59,9 +60,6 @@ internal sealed class Value : Expression
                 return;
             case AtAtKeyword.DateFirst:
                 this.Constant = SqlValue.FromByte(7);
-                return;
-            case AtAtKeyword.TextSize:
-                this.Constant = SqlValue.FromInt32(-1);
                 return;
         }
 

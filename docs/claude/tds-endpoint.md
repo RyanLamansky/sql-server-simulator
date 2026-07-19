@@ -355,10 +355,9 @@ A value larger than one packet is written as one contiguous data block — the t
 Both direct-proc RPC and `sp_executesql` bind identically.
 Output-direction legacy-LOB parameters aren't a real SQL Server feature and don't arrive.
 
-**Residuals.**
-`SET TEXTSIZE` — real truncates returned `text`/`ntext`/`image` data to the byte limit; the simulator parse-and-discards TEXTSIZE (`Simulation.Set.cs`), so it always returns the full value.
-**`SqlBulkCopy` into a `text`/`ntext`/`image` column** now decodes (see [Bulk load](#bulk-load-sqlbulkcopy) step 3).
-Oracles: `LegacyLobWireTests`, `BulkCopyTests.LegacyLobColumns_TextNtextImage_InsertAndRoundTrip`.
+**`SET TEXTSIZE` truncates at wire egress** (shipped 2026-07-19): the session byte cap clips `text`/`ntext`/`image` and the MAX-typed trio in result columns and output parameters — the truncation rides the shared client-boundary cursor (`SimulatedQueryResult.CreateClientCursor` → `TextSizeCursor`), so the TDS row writer inherits it; see [`scalars.md`](scalars.md) for the full semantics.
+**`SqlBulkCopy` into a `text`/`ntext`/`image` column** decodes (see [Bulk load](#bulk-load-sqlbulkcopy) step 3).
+Oracles: `LegacyLobWireTests`, `BulkCopyTests.LegacyLobColumns_TextNtextImage_InsertAndRoundTrip`, `TextSizeWireTests`.
 
 ## Collation wire structure
 

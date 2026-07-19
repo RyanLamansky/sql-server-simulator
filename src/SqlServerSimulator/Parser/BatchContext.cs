@@ -1200,9 +1200,11 @@ internal sealed class BatchContext
 
     /// <summary>
     /// The MAX-typed variant of a variable-length parameter type, or null
-    /// when the type has no MAX form.
+    /// when the type has no MAX form. Applied when a parameter declares
+    /// SqlClient's <c>Size = -1</c> MAX convention — both the batch
+    /// variable-seed path and the direct stored-procedure binding.
     /// </summary>
-    private static SqlType? AsMaxVariant(SqlType dbType) => dbType switch
+    internal static SqlType? AsMaxVariant(SqlType dbType) => dbType switch
     {
         VarcharSqlType varchar => VarcharSqlType.Get(SqlType.MaxLengthSentinel, varchar.Collation ?? Collation.Baseline, varchar.Coercibility),
         NVarcharSqlType nvarchar => NVarcharSqlType.Get(SqlType.MaxLengthSentinel, nvarchar.Collation ?? Collation.Baseline, nvarchar.Coercibility),
