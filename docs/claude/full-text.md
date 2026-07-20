@@ -81,7 +81,14 @@ The simulator reports Full-Text as installed (`SERVERPROPERTY('IsFullTextInstall
 The reference box returns `0` only because Full-Text isn't installed there — and while uninstalled it returns NULL for the resource-tuning properties too, so their installed values can't be probed.
 The simulator reports the installed value of `0` for each: `ConnectTimeout`, `LoadOSResources`, `ResourceUsage`, `VerifyResourceUsage`.
 An unrecognized property name returns NULL `int` (probe-confirmed convention); names are case-insensitive.
-`FULLTEXTCATALOGPROPERTY` is not modeled.
+
+## `FULLTEXTCATALOGPROPERTY('catalog_name', 'property')`
+
+`Parser/Expressions/FullTextCatalogProperty.cs`.
+Returns an `int` property of a full-text catalog resolved by name against `Database.FullTextCatalogs` (probe-confirmed return type; 2026-07-20).
+The simulator has no indexing engine, so the population / size / status properties report the idle-empty answers a freshly created catalog gives — `ItemCount`, `IndexSize`, `PopulateStatus`, `PopulateCompletionAge`, `MergeStatus`, `ImportStatus`, `UniqueKeyCount`, `LogSize` all `0`.
+`AccentSensitivity` reflects the catalog's DDL-captured `ACCENT_SENSITIVITY` option (`FullTextCatalog.IsAccentSensitive`, defaulting `1` / accent-sensitive) — the one property that varies with catalog state.
+An unknown catalog name or unrecognized property returns NULL; property names are case-insensitive.
 
 ## Known gaps
 

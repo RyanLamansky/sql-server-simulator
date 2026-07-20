@@ -591,3 +591,33 @@ Probe-confirmed against SQL Server 2025 (2026-05-23).
 - **`SID_BINARY(name)`** is constant NULL — probe-confirmed against SQL Server 2025: it resolves only Windows / Entra-ID directory principals and returns NULL even for existing SQL-auth logins, so NULL is faithful for every input the simulator can host.
   The argument still parses and evaluates.
   Surfaced by SSMS's Select-Top-1000 server-properties batch (`suser_sname(sid_binary(@SqlGroup))`).
+
+## Legacy text-pointer scalars: `TEXTPTR` / `TEXTVALID`
+
+`Parser/Expressions/TextPointer.cs` (`LegacyTextPointer` helper + `TextPointer`), `Parser/Expressions/TextValid.cs`.
+Probe-confirmed against SQL Server 2025 (2026-07-20).
+
+- **`TEXTPTR(column)`** returns the 16-byte `varbinary` text pointer of a base-table `text` / `ntext` / `image` column, or NULL when the cell is NULL.
+  The argument must be a base-table column reference: a literal, CAST, or computed expression raises **Msg 280** (`Only base table columns are allowed in the TEXTPTR function.`), and a column of any other type (including `varchar(max)`) raises **Msg 8116** (`Argument data type <t> is invalid for argument 1 of textptr function.`).
+  Real varies the pointer per row; the simulator fabricates a shape carrying only column identity — an 8-byte signature plus an 8-byte FNV-1a-64 hash of the case-folded column name — since the only sanctioned consumers (`READTEXT` / `WRITETEXT` / `UPDATETEXT`) stay unmodeled.
+  Two non-NULL cells of one column therefore share a pointer (a divergence with no observable consumer).
+- **`TEXTVALID('table.column', text_ptr)`** returns `int` `1` when the pointer is valid for the named column, else `0`.
+  A NULL pointer / NULL name, a pointer that isn't a simulator-fabricated text pointer (e.g. arbitrary bytes), and a name whose final (column) segment doesn't match the pointer's source column all return `0`.
+  The name must have at least two dotted parts (`table.column`) — a bare single-part name returns `0`, matching real — but only its column segment is matched against the pointer's embedded column-identity hash; the table portion is not resolved against the catalog.
+  A syntactically valid name whose column segment matches the pointer's source column therefore returns `1` even if its table portion names a different table (real cross-checks the exact column object); this is unobservable through the sanctioned `TEXTVALID('t.c', TEXTPTR(c))` idiom, where the two column names always agree.
+
+## Placeholder security / FILESTREAM scalars: `CERTENCODED` / `CERTPRIVATEKEY` / `GET_FILESTREAM_TRANSACTION_CONTEXT`
+
+`Parser/Expressions/CertificateFunctions.cs` (`CertificateFunction`, `isPrivateKey` flag), `Parser/Expressions/GetFilestreamTransactionContext.cs`.
+The simulator models no certificate store or FILESTREAM storage, so each returns a NULL `varbinary(max)` — the faithful answer for the state the simulator is always in.
+Probe-confirmed against SQL Server 2025 (2026-07-20).
+
+- **`CERTENCODED(cert_id)`** → NULL (the answer real gives for a nonexistent certificate id).
+  Exactly one argument; any other count raises **Msg 174** (`The CertEncoded function requires 1 argument(s).` — PascalCase function name, unlike the lowercase-rendered `PI` / `ISNULL` form).
+- **`CERTPRIVATEKEY(cert_id, N'encryption_password' [, N'decryption_password'])`** → NULL.
+  Two or three arguments; any other count raises **Msg 189** (`The CertPrivateKey function requires 2 to 3 arguments.`, via `SimulatedSqlException.FunctionArgumentCountRange`).
+- **`GET_FILESTREAM_TRANSACTION_CONTEXT()`** → NULL, the faithful "no active FILESTREAM transaction" answer a FILESTREAM-enabled server gives outside such a transaction.
+  (A reference instance with FILESTREAM file-system access disabled at the instance level instead raises Msg 5592; the simulator returns the enabled-but-idle answer.)
+  Zero arguments; any argument raises **Msg 174** (`The get_filestream_transaction_context function requires 0 argument(s).` — lowercase function name).
+
+The untyped-NULL-literal argument diagnostic (real raises Msg 8116 for `CERTENCODED(NULL)` because an untyped `NULL` literal has no type) is not modeled — the simulator's untyped `NULL` literal carries `Type=Int32`, so it flows through as a valid int argument and returns NULL.

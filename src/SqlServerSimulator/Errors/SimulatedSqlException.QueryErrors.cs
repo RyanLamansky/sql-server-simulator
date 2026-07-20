@@ -148,6 +148,15 @@ partial class SimulatedSqlException
         new($"The {functionLowerName} function requires {argumentCount} argument(s).", 174, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 280 — <c>TEXTPTR</c> was applied to something
+    /// other than a base-table <c>text</c> / <c>ntext</c> / <c>image</c> column
+    /// (a literal, a CAST, or any computed expression). Probe-confirmed against
+    /// SQL Server 2025 (2026-07-20).
+    /// </summary>
+    internal static SimulatedSqlException OnlyBaseTableColumnsInTextPtr() =>
+        new("Only base table columns are allowed in the TEXTPTR function.", 280, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 6607: the password-encryption machinery
     /// rejected an input — fired by <c>PWDENCRYPT</c> for a clear text over
     /// 128 characters (probe-confirmed at exactly the 128/129 boundary, same

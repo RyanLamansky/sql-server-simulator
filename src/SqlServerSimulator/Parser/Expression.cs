@@ -882,6 +882,7 @@ internal abstract class Expression
                 "REVERSE" => new Reverse(context),
                 "SET_BIT" => new SetBit(context),
                 "SOUNDEX" => new Soundex(context),
+                "TEXTPTR" => new TextPointer(context),
                 "TYPE_ID" => new TypeId(context),
                 "UNICODE" => new UnicodeCodepoint(context),
                 "USER_ID" => new PrincipalIdLookup(context, PrincipalIdKind.UserId),
@@ -924,6 +925,7 @@ internal abstract class Expression
                 "SCHEMA_ID" => new SchemaId(context),
                 "SUBSTRING" => new Substring(context),
                 "SUSER_SID" => new SUserSid(context),
+                "TEXTVALID" => new TextValid(context),
                 "TRANSLATE" => new Translate(context),
                 "TRY_PARSE" => new ParseFunction(context, tryMode: true),
                 "TYPE_NAME" => new TypeName(context),
@@ -958,6 +960,7 @@ internal abstract class Expression
             },
             11 => uppercaseName switch
             {
+                "CERTENCODED" => new CertificateFunction(context, isPrivateKey: false),
                 "DATE_BUCKET" => new DateBucket(context),
                 "ERROR_STATE" => new ErrorStateFunction(context),
                 "FIRST_VALUE" => WindowExpression.ParseFirstValue(context),
@@ -1008,6 +1011,7 @@ internal abstract class Expression
             },
             14 => uppercaseName switch
             {
+                "CERTPRIVATEKEY" => new CertificateFunction(context, isPrivateKey: true),
                 "COLUMNPROPERTY" => new ColumnProperty(context),
                 "ERROR_SEVERITY" => new ErrorSeverityFunction(context),
                 "FILEGROUP_NAME" => new FilegroupName(context),
@@ -1082,7 +1086,13 @@ internal abstract class Expression
             23 => uppercaseName switch
             {
                 "DATETIMEOFFSETFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeOffsetFromParts),
+                "FULLTEXTCATALOGPROPERTY" => new FullTextCatalogProperty(context),
                 "FULLTEXTSERVICEPROPERTY" => new FullTextServiceProperty(context),
+                _ => null
+            },
+            34 => uppercaseName switch
+            {
+                "GET_FILESTREAM_TRANSACTION_CONTEXT" => new GetFilestreamTransactionContext(context),
                 _ => null
             },
             _ => (Expression?)null

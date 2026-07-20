@@ -59,14 +59,10 @@ Blocked on a larger unmodeled parent feature (shipping a function here implies t
 
 Low priority / niche — simulatable (as placeholder constants or a small model) but rarely hit, so not worth attention yet:
 
-- **Legacy text/image** — TEXTPTR / TEXTVALID (the `text` / `ntext` / `image` types ship; these navigate the deprecated READTEXT / WRITETEXT / UPDATETEXT pointer path).
-- **Certificates** — CERTENCODED / CERTPRIVATEKEY (needs a small certificate-name → bytes model, or NULL placeholders).
-- **Full-text properties** — FULLTEXTCATALOGPROPERTY (the `CREATE FULLTEXT CATALOG` / `INDEX` DDL already ships; this reads its metadata).
 - **`sql_variant` minor quirk** (cross-type family ordering and one-side-variant comparison both shipped 2026-07-19 — see [`scalars.md`](scalars.md#sql_variant-expression-semantics)): a decimal-declared inner reports BaseType `numeric` rather than real's `decimal`.
   Probed 2026-07-19: real preserves the declared keyword *distinctly* — `decimal` and `numeric` never collapse — through literals, table columns, variant columns, and variant variables assigned from typed variables.
   The faithful fix splits the per-`(p, s)` `DecimalSqlType` singleton by declared keyword, forking the reference-identity space the row encoder, promote paths, and catalog surfaces key on — a medium refactor whose blast radius far exceeds the one metadata string it corrects, so it's deliberately deferred.
   Deliberate exclusion, don't re-pitch: `msdb.dbo.syspolicy_configuration.current_value` stays `nvarchar` — it's a *view-body* projection (not a resource column) mixing `int` rows with a `binary` GUID row, every consumer reads a single named row and CASTs it, so a variant migration there would only touch the view SQL text for no observable gain.
-- **FILESTREAM** — GET_FILESTREAM_TRANSACTION_CONTEXT (needs a FILESTREAM storage binding; NULL is a faithful "no FILESTREAM context" placeholder).
 
 ## Fidelity gaps in shipped behavior
 

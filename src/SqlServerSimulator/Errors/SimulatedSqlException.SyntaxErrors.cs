@@ -151,6 +151,17 @@ partial class SimulatedSqlException
         new($"The {lowercaseFunctionName} function requires {min} to 254 arguments.", 189, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 189 with an explicit upper bound: a built-in
+    /// function received the wrong number of arguments where the accepted count
+    /// is a small range (e.g. <c>"The CertPrivateKey function requires 2 to 3
+    /// arguments."</c>). Probe-confirmed against SQL Server 2025 (2026-07-20) —
+    /// the function name is rendered with its documented PascalCase spelling,
+    /// unlike the lowercase-rendered <see cref="FunctionArgumentCount"/> family.
+    /// </summary>
+    internal static SimulatedSqlException FunctionArgumentCountRange(string functionName, int min, int max) =>
+        new($"The {functionName} function requires {min} to {max} arguments.", 189, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 3902: a <c>COMMIT</c> was issued with no
     /// active transaction. Probe-confirmed against SQL Server 2025
     /// (2026-05-08): Class 16, State 1, exact wording verbatim.

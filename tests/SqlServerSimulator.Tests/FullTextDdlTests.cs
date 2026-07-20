@@ -248,4 +248,55 @@ public sealed class FullTextDdlTests
     public void FullTextServiceProperty_NonConstantName_StillInt()
         => AreEqual(1, new Simulation().ExecuteScalar(
             "declare @p nvarchar(40) = 'IsFullTextInstalled'; select fulltextserviceproperty(@p)"));
+
+    [TestMethod]
+    public void FullTextCatalogProperty_EmptyCatalog_PopulationPropertiesAreZero()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create fulltext catalog mycat");
+        foreach (var property in new[]
+        {
+            "ItemCount", "IndexSize", "PopulateStatus", "PopulateCompletionAge",
+            "MergeStatus", "ImportStatus", "UniqueKeyCount", "LogSize",
+        })
+        {
+            AreEqual(0, sim.ExecuteScalar($"select fulltextcatalogproperty('mycat', '{property}')"), property);
+        }
+    }
+
+    [TestMethod]
+    public void FullTextCatalogProperty_AccentSensitivity_DefaultsOne()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create fulltext catalog mycat");
+        AreEqual(1, sim.ExecuteScalar("select fulltextcatalogproperty('mycat', 'AccentSensitivity')"));
+    }
+
+    [TestMethod]
+    public void FullTextCatalogProperty_AccentSensitivity_ReflectsDdlOption()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create fulltext catalog mycat with accent_sensitivity = off");
+        AreEqual(0, sim.ExecuteScalar("select fulltextcatalogproperty('mycat', 'AccentSensitivity')"));
+    }
+
+    [TestMethod]
+    public void FullTextCatalogProperty_PropertyNameCaseInsensitive()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create fulltext catalog mycat");
+        AreEqual(0, sim.ExecuteScalar("select fulltextcatalogproperty('mycat', 'itemcount')"));
+    }
+
+    [TestMethod]
+    public void FullTextCatalogProperty_UnknownCatalog_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select fulltextcatalogproperty('nosuchcat', 'ItemCount')"));
+
+    [TestMethod]
+    public void FullTextCatalogProperty_UnknownProperty_ReturnsNull()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create fulltext catalog mycat");
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select fulltextcatalogproperty('mycat', 'NotAProperty')"));
+    }
 }
