@@ -74,15 +74,24 @@ public sealed class WaitForDelayTests
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "waitfor delay '00:00:30'";
+        // Retry the cancel until ExecuteNonQuery returns: a cancel landing
+        // before the execution scope opens targets the prior scope's token
+        // and is dropped, so a single timer-fired cancel can miss on a
+        // stalled runner and let the 30-second wait run to completion.
+        var done = false;
         var canceller = new Thread(() =>
         {
-            Thread.Sleep(200);
-            command.Cancel();
+            while (!Volatile.Read(ref done))
+            {
+                Thread.Sleep(100);
+                command.Cancel();
+            }
         });
 
         var start = Stopwatch.GetTimestamp();
         canceller.Start();
         _ = command.ExecuteNonQuery();
+        Volatile.Write(ref done, true);
         canceller.Join();
         var elapsed = Stopwatch.GetElapsedTime(start);
 

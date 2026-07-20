@@ -429,6 +429,11 @@ Batch-scoped variables go with the ended batch either way; connection-scoped tem
 `SimulatedDbCommand.Cancel()` routes to the same machinery, so an in-process `Cancel()` from another thread interrupts a running `WAITFOR` / long batch identically (the reader then drains already-materialized rows, nothing left in flight — the documented in-process reaction bound).
 Oracle: `AttentionTests` (Tests.SqlClient), `WaitForDelayTests.Delay_InterruptedByInProcessCancel_ReturnsPromptly` (Tests).
 
+**Partial response packets don't flush early (probed 2026-07-20).**
+The server accumulates response tokens into a TDS packet and sends it only when the packet fills or the response ends — real SQL Server behaves identically: for `select @p; waitfor delay '00:00:30'` the one-row first result set sits in the send buffer for the full 30 seconds and the client's first `ReadAsync` blocks until the batch ends, on real and sim alike.
+Two consequences: a client can't observe an early small result set to sequence a cancel after (the cancel must land while the client read is parked — `AttentionTests` retries via `CancelUntilComplete` for exactly this reason), and the attention path is the only way a blocked mid-batch client wakes early.
+A `SqlCommand.Cancel()` racing execution *start* is different: a cancel before the batch begins executing is a documented client-side no-op, and one landing inside `Execute*Async`'s setup surfaces SqlClient's own `InvalidOperationException` instead of the cancel `SqlException` — client-side races independent of the server, so tests never fire a single timer-based cancel.
+
 ## MARS (Multiple Active Result Sets)
 
 `MultipleActiveResultSets=True` lets a client run a second command while a reader is still open — the EF-lazy-load shape (iterate a parent query, touch a navigation per row).

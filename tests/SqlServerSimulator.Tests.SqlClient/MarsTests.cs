@@ -21,12 +21,22 @@ public sealed class MarsTests
 
     private const string MarsExtra = ";MultipleActiveResultSets=True";
 
-    private static void CancelAfter(SqlCommand command, int millis) =>
-        _ = Task.Run(async () =>
+    /// <summary>
+    /// Cancels the command repeatedly until the in-flight execution completes.
+    /// A cancel landing before the batch starts executing is a documented
+    /// <see cref="SqlCommand.Cancel"/> no-op, so a single timer-fired cancel
+    /// can miss on a stalled runner and let the 30-second WAITFOR run to
+    /// natural completion; retrying until the task transitions guarantees an
+    /// attention lands mid-execution.
+    /// </summary>
+    private static async Task CancelUntilComplete(SqlCommand command, Task execution, CancellationToken cancellationToken)
+    {
+        while (!execution.IsCompleted)
         {
-            await Task.Delay(millis);
+            await Task.Delay(100, cancellationToken);
             command.Cancel();
-        });
+        }
+    }
 
     private static Simulation Seeded(int rows = 5)
     {
@@ -243,9 +253,9 @@ public sealed class MarsTests
 
         await using (var b = new SqlCommand("waitfor delay '00:00:30'", connection) { CommandTimeout = 0 })
         {
-            CancelAfter(b, 200);
-            _ = await ThrowsExactlyAsync<SqlException>(
-                async () => await b.ExecuteNonQueryAsync(TestContext.CancellationToken));
+            var execution = b.ExecuteNonQueryAsync(TestContext.CancellationToken);
+            await CancelUntilComplete(b, execution, TestContext.CancellationToken);
+            _ = await ThrowsExactlyAsync<SqlException>(async () => await execution);
         }
 
         var remaining = new List<int> { readerA.GetInt32(0) };
