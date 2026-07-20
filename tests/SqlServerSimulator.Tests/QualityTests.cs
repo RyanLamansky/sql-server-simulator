@@ -38,6 +38,12 @@ public class QualityTests
                 nameof(SimulatedNetworkListener.Dispose),
                 nameof(SimulatedNetworkListener.DisposeAsync),
             ],
+            [typeof(SimulatedNetworkListenerOptions)] = [
+                ".ctor",
+                nameof(SimulatedNetworkListenerOptions.Port),
+                nameof(SimulatedNetworkListenerOptions.BindAddress),
+                nameof(SimulatedNetworkListenerOptions.ServerCertificate),
+            ],
             [typeof(SimulatedDbConnection)] = [
                 nameof(SimulatedDbConnection.InfoMessage),
                 nameof(SimulatedDbConnection.ConnectionString),

@@ -10,7 +10,19 @@ namespace SqlServerSimulator.Network;
 /// </summary>
 internal static class TdsServerCertificate
 {
-    public static X509Certificate2 Create()
+    public static X509Certificate2 Create() =>
+        X509CertificateLoader.LoadPkcs12(CreatePkcs12(), password: null);
+
+    /// <summary>
+    /// PKCS#12 bytes (no password) for a fresh certificate. Exposed
+    /// separately from <see cref="Create"/> because the bytes must be
+    /// captured before <see cref="X509CertificateLoader"/> touches
+    /// a platform key store: Windows marks a loaded private key
+    /// non-exportable, so a store-loaded certificate cannot be re-exported
+    /// as PKCS#12 ("Key not valid for use in specified state") — callers
+    /// persisting the certificate write these bytes instead.
+    /// </summary>
+    public static byte[] CreatePkcs12()
     {
         using var rsa = RSA.Create(2048);
         var request = new CertificateRequest("CN=SqlServerSimulator", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
@@ -19,6 +31,6 @@ internal static class TdsServerCertificate
         // SslStream requires a certificate whose private key is loadable by
         // the platform TLS stack; round-tripping through PKCS#12 guarantees
         // that on every OS, where the CreateSelfSigned result alone does not.
-        return X509CertificateLoader.LoadPkcs12(selfSigned.Export(X509ContentType.Pkcs12), password: null);
+        return selfSigned.Export(X509ContentType.Pkcs12);
     }
 }

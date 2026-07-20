@@ -51,6 +51,78 @@ public sealed class NetworkListenerTests
         Assert.Contains("CREATE LOGIN", ex.Message);
     }
 
+    [TestMethod]
+    public async Task ListenNetworkAsync_Options_WithoutLogins_Throws()
+    {
+        var simulation = new Simulation();
+        var ex = await ThrowsExactlyAsync<InvalidOperationException>(
+            () => simulation.ListenNetworkAsync(new SimulatedNetworkListenerOptions { Port = 0 }, TestContext.CancellationToken));
+        Assert.Contains("CREATE LOGIN", ex.Message);
+    }
+
+    // The options overloads mirror the port-only ones' defaults, so leaving
+    // both unset binds 1433 presenting a generated ephemeral certificate.
+    [TestMethod]
+    public void Options_Defaults_MatchPortOnlyOverloads()
+    {
+        var options = new SimulatedNetworkListenerOptions();
+        AreEqual(1433, options.Port);
+        IsNull(options.ServerCertificate);
+    }
+
+    // The options overload with a generated (null) certificate behaves like
+    // the port-only overload: TrustServerCertificate connects.
+    [TestMethod]
+    public async Task ListenLocalAsync_Options_GeneratedCertificate_RoundTrips()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(
+            new SimulatedNetworkListenerOptions { Port = 0 }, TestContext.CancellationToken);
+        await using var connection = new SqlConnection(ConnectionString(listener));
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await using var command = new SqlCommand("select 3", connection);
+        AreEqual(3, await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    // BindAddress belongs to ListenNetworkAsync: honoring it on the loopback
+    // method would let its accept-anyone-until-CREATE-LOGIN credential model
+    // face a network interface.
+    [TestMethod]
+    public async Task ListenLocalAsync_Options_BindAddress_Rejected()
+    {
+        var ex = await ThrowsExactlyAsync<ArgumentException>(() => new Simulation().ListenLocalAsync(
+            new SimulatedNetworkListenerOptions { Port = 0, BindAddress = IPAddress.Loopback },
+            TestContext.CancellationToken));
+        Assert.Contains("ListenNetworkAsync", ex.Message);
+    }
+
+    // Per-interface selection, provable without a firewall consent prompt:
+    // a loopback bind through ListenNetworkAsync accepts via 127.0.0.1 and
+    // deliberately leaves the IPv6 side unbound.
+    [TestMethod]
+    public async Task ListenNetworkAsync_BindAddress_BindsOnlyThatInterface()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "CREATE LOGIN dev WITH PASSWORD = 'S3cure!Pass'");
+        await using var listener = await simulation.ListenNetworkAsync(
+            new SimulatedNetworkListenerOptions { Port = 0, BindAddress = IPAddress.Loopback },
+            TestContext.CancellationToken);
+
+        await using var connection = new SqlConnection(
+            $"Server=127.0.0.1,{listener.Port};User ID=dev;Password=S3cure!Pass;TrustServerCertificate=True;Pooling=False;Connect Timeout=15");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await using var command = new SqlCommand("select 1", connection);
+        AreEqual(1, await command.ExecuteScalarAsync(TestContext.CancellationToken));
+
+        // An explicit bind address binds exactly that interface — no
+        // best-effort other-family sibling — so IPv6 loopback refuses
+        // immediately. (Only a foreign process listening on this ephemeral
+        // port's IPv6 side could connect here.)
+        using var probe = new Socket(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp);
+        _ = await ThrowsExactlyAsync<SocketException>(async () =>
+            await probe.ConnectAsync(new IPEndPoint(IPAddress.IPv6Loopback, listener.Port), TestContext.CancellationToken));
+    }
+
     // Not run automatically: binding all interfaces triggers a Windows
     // Firewall consent prompt and could trip network policy on CI runners.
     // Re-add [TestMethod] to verify the off-loopback path manually.
@@ -70,6 +142,35 @@ public sealed class NetworkListenerTests
         await connection.OpenAsync(TestContext.CancellationToken);
         await using var command = new SqlCommand("select 1", connection);
         AreEqual(1, await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    // Not run automatically: binding a machine address triggers a Windows
+    // Firewall consent prompt and could trip network policy on CI runners.
+    // Re-add [TestMethod] to verify the per-interface bind manually.
+    // [TestMethod]
+    public async Task ListenNetworkAsync_BindAddress_MachineAddress_AcceptsOnlyThatAddress()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "CREATE LOGIN dev WITH PASSWORD = 'S3cure!Pass'");
+        var address = FindNonLoopbackIPv4();
+        if (address is null)
+            Assert.Inconclusive("No non-loopback IPv4 interface on this machine.");
+
+        await using var listener = await simulation.ListenNetworkAsync(
+            new SimulatedNetworkListenerOptions { Port = 0, BindAddress = address },
+            TestContext.CancellationToken);
+
+        await using var connection = new SqlConnection(
+            $"Server={address},{listener.Port};User ID=dev;Password=S3cure!Pass;TrustServerCertificate=True;Pooling=False;Connect Timeout=15");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await using var command = new SqlCommand("select 1", connection);
+        AreEqual(1, await command.ExecuteScalarAsync(TestContext.CancellationToken));
+
+        // Loopback was not bound: the listener serves the selected interface
+        // only, unlike the all-interfaces default.
+        using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        _ = await ThrowsExactlyAsync<SocketException>(async () =>
+            await probe.ConnectAsync(new IPEndPoint(IPAddress.Loopback, listener.Port), TestContext.CancellationToken));
     }
 
     /// <summary>

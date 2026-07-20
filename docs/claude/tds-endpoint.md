@@ -4,15 +4,18 @@
 Returns `Task<SimulatedNetworkListener>`; `port: 0` binds an OS-assigned ephemeral port (read `Port`), the right shape for parallel tests.
 Port-in-use surfaces as the raw `SocketException`.
 The listener binds IPv4 loopback plus best-effort IPv6 loopback on the same port.
+Both listen methods also take a **`SimulatedNetworkListenerOptions`** overload (`Port`, default 1433 matching the int overloads; `BindAddress`; `ServerCertificate`, default null = generate ephemeral): a supplied certificate must carry a private key (`ArgumentException` otherwise) and **stays owned by the caller — the listener never disposes it** — so one certificate serves many listeners (created once at suite setup, its public part exported once for strict-mode pinning instead of per-listener temp files).
+`BindAddress` narrows `ListenNetworkAsync` from all interfaces to exactly one address — its family decides the socket family and **no best-effort other-family sibling is bound** — while `ListenLocalAsync` rejects a non-null value with `ArgumentException` (honoring it would put the loopback method's accept-anyone-until-`CREATE LOGIN` credential model on a network interface).
 **`ListenNetworkAsync`** is the all-interfaces sibling (`IPAddress.Any` + best-effort `IPv6Any`, same core): it throws `InvalidOperationException` at call time when no logins are registered — the loopback listener's accept-anyone-until-`CREATE LOGIN` model must never face a network — and its XML docs carry the honest caveat that authentication is the *only* enforcement (no authorization model; every login has unrestricted access; the self-signed cert doesn't authenticate the server).
 Oracle: `NetworkListenerTests`.
 
-Connection-string requirements: `TrustServerCertificate=true` (the endpoint presents an ephemeral in-memory self-signed cert generated per listener) and credentials per the enforcement rule below (any credentials when no logins exist).
+Connection-string requirements: `TrustServerCertificate=true` (the endpoint presents an ephemeral in-memory self-signed cert generated per listener, unless the options overload supplied one — a CA-trusted supplied certificate makes the flag unnecessary) and credentials per the enforcement rule below (any credentials when no logins exist).
 Default/`Mandatory`/`Optional` all negotiate to full encryption via `ENCRYPT_REQ`.
 A client that cannot do TLS at all (`ENCRYPT_NOT_SUP`) is disconnected after the prelogin response — there is no plaintext mode.
 
 **`Encrypt=Strict` (TDS 8.0) ships**: the client opens with a bare TLS ClientHello negotiating ALPN `tds/8.0`, and every TDS packet — prelogin included — flows inside the TLS channel; the session routes on the first wire byte (TLS handshake record `0x16` vs cleartext PRELOGIN `0x12`).
 SqlClient **ignores `TrustServerCertificate` in strict mode** and always validates the certificate (chain + hostname), so a strict client must pin instead: export `SimulatedNetworkListener.ServerCertificate` (the presented certificate, public part only) to a file and reference it with the connection string's `ServerCertificate` keyword (empirically confirmed against SqlClient 7.0.2 — `TrustServerCertificate=True` alone fails strict with `UntrustedRoot` + hostname mismatch).
+Supplying one certificate through `SimulatedNetworkListenerOptions` makes the pin file a create-once artifact shared by every listener (the shape `StrictEncryptionTests` uses: one class-level certificate, its public part written to a fixed-name file in the OS temp directory).
 The strict TLS handshake is not version-pinned (TLS 1.3 negotiates; raw records make NewSessionTicket harmless), and LOGINACK echoes TDS version `0x08000000` when LOGIN7 requested it.
 MARS and `SqlBulkCopy` ride the strict channel unchanged.
 Oracle: `StrictEncryptionTests`.
