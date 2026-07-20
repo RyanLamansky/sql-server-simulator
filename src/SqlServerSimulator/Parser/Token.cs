@@ -45,19 +45,27 @@ abstract class Token
     /// CRLF and LF behave the same). Used to render <c>"Line N"</c> prefixes
     /// in error messages that mirror SQL Server's parse-time errors.
     /// </summary>
-    public int LineNumber
+    public int LineNumber => LineAt(command, StartIndex);
+
+    /// <summary>
+    /// 1-based line number of the character at <paramref name="index"/> within
+    /// <paramref name="command"/>, counting <c>\n</c> delimiters (CR folded into
+    /// the following LF, so CRLF and LF behave the same). Shared by
+    /// <see cref="LineNumber"/> and the tokenizer's mid-token failure paths
+    /// (unclosed string Msg 105 at the opening quote, unclosed block comment
+    /// Msg 113 at end-of-input), whose reported line comes from the tokenizer's
+    /// own position rather than the last-consumed token.
+    /// </summary>
+    public static int LineAt(string command, int index)
     {
-        get
+        var line = 1;
+        var prefix = command.AsSpan(0, index);
+        foreach (var c in prefix)
         {
-            var line = 1;
-            var prefix = command.AsSpan(0, StartIndex);
-            foreach (var c in prefix)
-            {
-                if (c == '\n')
-                    line++;
-            }
-            return line;
+            if (c == '\n')
+                line++;
         }
+        return line;
     }
 
     // This is used for various error messages even though tokens are not directly accessible to user code.

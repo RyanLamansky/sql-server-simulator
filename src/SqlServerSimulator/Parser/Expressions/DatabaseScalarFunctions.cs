@@ -165,3 +165,166 @@ internal sealed class HasDbAccess : Expression
 
     internal override string DebugDisplay() => $"HAS_DBACCESS({this.nameArg.DebugDisplay()})";
 }
+
+/// <summary>
+/// SQL <c>FILE_ID('file_name')</c> (smallint) / <c>FILE_IDEX('file_name')</c>
+/// (int): the <c>file_id</c> of a logical file in the current database.
+/// The simulator models two files per database, mirroring
+/// <c>sys.database_files</c>: <c>&lt;db&gt;_Data</c> (file_id 1, primary ROWS)
+/// and <c>&lt;db&gt;_Log</c> (file_id 2, LOG). An unknown / NULL file name
+/// returns NULL. File-name comparison is trailing-space insensitive (SQL
+/// Server's internal <c>=</c>). The two forms differ only in projected result
+/// type — probe-confirmed against SQL Server 2025: FILE_ID → smallint,
+/// FILE_IDEX → int; both resolve identically over the two-file model.
+/// </summary>
+internal sealed class FileId : Expression
+{
+    private readonly Expression nameArg;
+    private readonly bool extended;
+
+    public FileId(ParserContext context, bool extended)
+    {
+        this.extended = extended;
+        this.nameArg = Parse(context);
+        if (context.Token is not Tokens.Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        SqlType resultType = this.extended ? SqlType.Int32 : SqlType.SmallInt;
+        var value = this.nameArg.Run(runtime);
+        if (value.IsNull)
+            return SqlValue.Null(resultType);
+        // File-name matching is trailing-space insensitive (SQL Server's
+        // internal = comparison); the modeled names carry no trailing spaces,
+        // so trimming the argument is sufficient.
+        var name = value.CoerceTo(SqlType.NVarchar).AsString.TrimEnd(' ');
+        var database = runtime.Batch.CurrentDatabase;
+        int fileId;
+        if (Collation.Baseline.Equals(name, database.Name + "_Data"))
+            fileId = 1;
+        else if (Collation.Baseline.Equals(name, database.Name + "_Log"))
+            fileId = 2;
+        else
+            return SqlValue.Null(resultType);
+        return this.extended ? SqlValue.FromInt32(fileId) : SqlValue.FromInt16((short)fileId);
+    }
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        this.extended ? SqlType.Int32 : SqlType.SmallInt;
+
+    internal override string DebugDisplay() =>
+        $"{(this.extended ? "FILE_IDEX" : "FILE_ID")}({this.nameArg.DebugDisplay()})";
+}
+
+/// <summary>
+/// SQL <c>FILE_NAME(file_id)</c>: the logical name of a file in the current
+/// database — <c>&lt;db&gt;_Data</c> for file_id 1, <c>&lt;db&gt;_Log</c> for
+/// file_id 2 (the two-file model shared with <c>sys.database_files</c> /
+/// <see cref="FileId"/> / <see cref="FileProperty"/>). Any other id (0,
+/// negative, &gt; 2) or a NULL argument returns NULL. Result type is
+/// <see cref="SqlType.SystemName"/> (sysname).
+/// </summary>
+internal sealed class FileNameLookup : Expression
+{
+    private readonly Expression idArg;
+
+    public FileNameLookup(ParserContext context)
+    {
+        this.idArg = Parse(context);
+        if (context.Token is not Tokens.Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        var value = this.idArg.Run(runtime);
+        if (value.IsNull)
+            return SqlValue.Null(SqlType.SystemName);
+        var database = runtime.Batch.CurrentDatabase;
+        return value.CoerceTo(SqlType.Int32).AsInt32 switch
+        {
+            1 => SqlValue.FromString(SqlType.SystemName, database.Name + "_Data"),
+            2 => SqlValue.FromString(SqlType.SystemName, database.Name + "_Log"),
+            _ => SqlValue.Null(SqlType.SystemName),
+        };
+    }
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+
+    internal override string DebugDisplay() => $"FILE_NAME({this.idArg.DebugDisplay()})";
+}
+
+/// <summary>
+/// SQL <c>FILEGROUP_ID('filegroup_name')</c>: the <c>data_space_id</c> of a
+/// filegroup in the current database, read from <see cref="Database.Filegroups"/>
+/// (PRIMARY = 1, user filegroups 2, 3, … in registration order). An unknown /
+/// NULL name returns NULL. Name lookup is case-insensitive per the database
+/// collation. Result type is <see cref="SqlType.SmallInt"/> (smallint) —
+/// probe-confirmed against SQL Server 2025.
+/// </summary>
+internal sealed class FilegroupId : Expression
+{
+    private readonly Expression nameArg;
+
+    public FilegroupId(ParserContext context)
+    {
+        this.nameArg = Parse(context);
+        if (context.Token is not Tokens.Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        var value = this.nameArg.Run(runtime);
+        if (value.IsNull)
+            return SqlValue.Null(SqlType.SmallInt);
+        // Filegroup-name matching is trailing-space insensitive (probe-confirmed);
+        // registered names carry no trailing spaces, so trim the argument.
+        var name = value.CoerceTo(SqlType.NVarchar).AsString.TrimEnd(' ');
+        return runtime.Batch.CurrentDatabase.Filegroups.TryGetValue(name, out var id)
+            ? SqlValue.FromInt16((short)id)
+            : SqlValue.Null(SqlType.SmallInt);
+    }
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
+
+    internal override string DebugDisplay() => $"FILEGROUP_ID({this.nameArg.DebugDisplay()})";
+}
+
+/// <summary>
+/// SQL <c>FILEGROUP_NAME(filegroup_id)</c>: the name of a filegroup in the
+/// current database, reverse-looked-up in <see cref="Database.Filegroups"/>.
+/// An unknown id (0, negative, or unregistered) or a NULL argument returns
+/// NULL. Result type is <see cref="SqlType.SystemName"/> (sysname).
+/// </summary>
+internal sealed class FilegroupName : Expression
+{
+    private readonly Expression idArg;
+
+    public FilegroupName(ParserContext context)
+    {
+        this.idArg = Parse(context);
+        if (context.Token is not Tokens.Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        var value = this.idArg.Run(runtime);
+        if (value.IsNull)
+            return SqlValue.Null(SqlType.SystemName);
+        var requested = value.CoerceTo(SqlType.Int32).AsInt32;
+        foreach (var (name, id) in runtime.Batch.CurrentDatabase.Filegroups)
+        {
+            if (id == requested)
+                return SqlValue.FromString(SqlType.SystemName, name);
+        }
+        return SqlValue.Null(SqlType.SystemName);
+    }
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+
+    internal override string DebugDisplay() => $"FILEGROUP_NAME({this.idArg.DebugDisplay()})";
+}

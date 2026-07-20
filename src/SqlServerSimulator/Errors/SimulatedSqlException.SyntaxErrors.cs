@@ -5,7 +5,28 @@ namespace SqlServerSimulator;
 
 partial class SimulatedSqlException
 {
-    internal static SimulatedSqlException MissingEndCommentMark() => new("Missing end comment mark '*/'.", 113, 15, 1);
+    /// <summary>
+    /// Mimics SQL Server error 113: a block comment (<c>/* … */</c>) opened but
+    /// never closed before end of input. <paramref name="lineNumber"/> is the
+    /// tokenizer's end-of-input line — probe-confirmed real SQL Server reports
+    /// the *last* line the unclosed comment reached, not the line it opened on
+    /// (SQL Server 2025, 2026-07-19).
+    /// </summary>
+    internal static SimulatedSqlException MissingEndCommentMark(int lineNumber) =>
+        WithLine(new("Missing end comment mark '*/'.", 113, 15, 1), lineNumber);
+
+    /// <summary>
+    /// Stamps <paramref name="lineNumber"/> onto <paramref name="exception"/>'s
+    /// first error so a tokenizer-thrown mid-token failure (Msg 105 / 113)
+    /// carries the tokenizer's own position rather than the last-consumed
+    /// token's line. <see cref="ResolveDiagnostics"/> preserves an already-set
+    /// non-zero line, so the enclosing dispatch frame leaves it intact.
+    /// </summary>
+    private static SimulatedSqlException WithLine(SimulatedSqlException exception, int lineNumber)
+    {
+        exception.Errors[0].LineNumber = lineNumber;
+        return exception;
+    }
 
     /// <summary>
     /// Mimics SQL Server error 1080: an integral literal in a grammar slot
@@ -21,9 +42,13 @@ partial class SimulatedSqlException
     /// identifier opened with <c>'</c> or <c>"</c> was never closed before
     /// end of input. Real SQL Server echoes the scanned body in the message
     /// (probe-confirmed for the <c>"</c> form against SQL Server 2025).
+    /// <paramref name="lineNumber"/> is the tokenizer's line at the *opening*
+    /// quote — probe-confirmed real SQL Server reports the line the literal
+    /// opened on, even when its body runs across several lines to end of input
+    /// (SQL Server 2025, 2026-07-19).
     /// </summary>
-    internal static SimulatedSqlException UnclosedStringLiteral(string body) =>
-        new($"Unclosed quotation mark after the character string '{body}'.", 105, 15, 1);
+    internal static SimulatedSqlException UnclosedStringLiteral(string body, int lineNumber) =>
+        WithLine(new($"Unclosed quotation mark after the character string '{body}'.", 105, 15, 1), lineNumber);
 
     /// <summary>
     /// Mimics SQL Server error 8631: expression parsing consumed the thread's

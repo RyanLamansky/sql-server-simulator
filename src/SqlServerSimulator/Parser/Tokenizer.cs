@@ -299,6 +299,7 @@ static class Tokenizer
     /// </summary>
     private static string ParseQuotedBody(string command, ref int index, char quote)
     {
+        var openIndex = index;
         var builder = new StringBuilder();
         while (++index < command.Length)
         {
@@ -320,7 +321,7 @@ static class Tokenizer
             return builder.ToString();
         }
 
-        throw SimulatedSqlException.UnclosedStringLiteral(builder.ToString());
+        throw SimulatedSqlException.UnclosedStringLiteral(builder.ToString(), Token.LineAt(command, openIndex));
     }
 
     /// <summary>

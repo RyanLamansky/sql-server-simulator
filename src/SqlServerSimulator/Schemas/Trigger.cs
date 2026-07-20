@@ -66,10 +66,23 @@ internal sealed class Trigger(
     TriggerActions actions,
     TriggerTiming timing,
     string bodyText,
-    DateTime createDate)
+    DateTime createDate,
+    int bodyLineOffset = 0)
     : SchemaObject(name, objectId, schema.SchemaId, createDate)
 {
     public Schema Schema = schema;
+
+    /// <summary>
+    /// Number of newlines in the <c>CREATE TRIGGER</c> text preceding
+    /// <see cref="BodyText"/>'s start — added to a body error's line so it
+    /// reports the whole-<c>CREATE</c>-relative line, mirroring
+    /// <see cref="Procedure.BodyLineOffset"/>. Unlike procedures, real SQL
+    /// Server attributes a trigger-body error to the trigger's *unqualified*
+    /// name (probe-confirmed: <c>ERROR_PROCEDURE()</c> / <c>SqlError.Procedure</c>
+    /// return <c>tr_name</c>, not <c>dbo.tr_name</c>). Threaded onto the
+    /// per-fire child batch's <see cref="Parser.BatchContext.LineOffset"/>.
+    /// </summary>
+    public readonly int BodyLineOffset = bodyLineOffset;
 
     public override string ObjectTypeCode => "TR";
     public override string ObjectTypeDescription => "SQL_TRIGGER";

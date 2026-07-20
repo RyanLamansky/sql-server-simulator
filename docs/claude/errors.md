@@ -10,12 +10,16 @@ All semantics below are probe-confirmed against SQL Server 2025 (2026-07-18).
 | Runtime error (divide-by-zero, conversion) | failing statement's **start** line | not the erroring expression's line — a SELECT spanning lines 3-4 with `5/0` on line 4 reports line 3 |
 | Bind error (Msg 208 invalid object) | statement start line | |
 | Constraint violation (INSERT/UPDATE) | the DML statement's line | |
-| Syntax error (severity 15: Msg 102/156/105/…) | the **offending token's** line | differs from statement start for multi-line statements |
+| Syntax error (severity 15: Msg 102/156/…) | the **offending token's** line | differs from statement start for multi-line statements |
+| Unclosed string (Msg 105) | the line the literal **opened** on | even when the body runs across several lines to end of input |
+| Unclosed block comment (Msg 113) | the **end-of-input** line the comment ran to | *not* the line it opened on — the one asymmetry from Msg 105 |
 | Two statements on one line | that shared line | |
 | `THROW n, m, s` (value form) | the THROW statement's line | |
 | `THROW;` (re-raise in CATCH) | the **original** error's line | not the re-raising statement's line |
 | Procedure body error | line relative to the whole **CREATE** statement (header lines counted) | + `Procedure = "dbo.<name>"` (schema-qualified) |
-| Nested procedure call | **innermost** frame's line + procedure | |
+| Trigger body error | CREATE-relative line | + `Procedure = "<name>"` (**unqualified** — the one asymmetry from procedures) |
+| Scalar-UDF / inline-TVF / multi-statement-TVF / view body error | the **outer invoking** statement's line | no `Procedure` — real inlines these for attribution (even the multi-statement TVF) |
+| Nested procedure call | **innermost** procedure/trigger frame's line + procedure | a UDF error inside a proc attributes to the **proc's** calling line, not the UDF |
 | `EXEC('…')` / `sp_executesql` | line relative to the **dynamic batch** | no `Procedure` |
 | PRINT / RAISERROR ≤ 10 (INFO) | statement start line | on `SqlError.LineNumber` |
 
@@ -33,9 +37,16 @@ The static exception factories (`SimulatedSqlException.*Errors.cs`) can't reach 
 - **`SimulatedError.LineNumber` / `.Procedure`** gain an `internal set` (public contract stays get-only, mirroring `SqlError`) so the boundary can stamp them.
 - **`SimulatedSqlException.ResolveDiagnostics(baseLine, lineOffset, procedure)`** runs once per exception, guarded by a `diagnosticsResolved` flag so the **innermost** dispatch frame — where the error was born — wins as it propagates outward (matching SQL Server's innermost-frame attribution).
   - `baseLine`: chosen at the boundary in `Simulation.DispatchOneStatement` — the parser's **current-token line** for severity-15 (syntax) errors, else the failing statement's `StatementContext.StartLine`.
-  - `lineOffset`: `BatchContext.LineOffset`, the newline count preceding a procedure body's start within its CREATE text, so body errors report a CREATE-relative line.
+  - `lineOffset`: `BatchContext.LineOffset`, the newline count preceding a procedure/trigger body's start within its CREATE text, so body errors report a CREATE-relative line.
     Zero for top-level and dynamic-SQL batches.
-  - `procedure`: `BatchContext.ErrorProcedureName`, the schema-qualified name, empty outside a stored-procedure body.
+  - `procedure`: `BatchContext.ErrorProcedureName` — the schema-qualified name for a stored-procedure body (`dbo.p`), the **unqualified** name for a trigger body (`tr`, matching real's `ERROR_PROCEDURE()` / `SqlError.Procedure` for triggers), empty otherwise.
+- **Body-type attribution** hinges on which frame stamps.
+  Procedures and triggers push their own attribution frame (they set `LineOffset` + `ErrorProcedureName` on the child batch); scalar UDFs, inline TVFs, multi-statement TVFs, and views **inline** — their child batch sets `BatchContext.SuppressDiagnosticsResolution`, so the dispatch catch skips `ResolveDiagnostics` and lets the error propagate unresolved to the enclosing invoking statement's frame (probe-confirmed: real reports the outer statement's line with no procedure, even for a multi-statement TVF's mid-body error).
+  A UDF error inside a procedure body therefore attributes to the procedure's calling statement, not the UDF.
+  `Procedure.BodyLineOffset` / `Trigger.BodyLineOffset` are each computed once at CREATE (`Simulation.CountNewlines` over `[statement-start, body-start)`).
+- **Tokenizer-thrown line** (unclosed string Msg 105, unclosed block comment Msg 113): the parse frontier lags the tokenizer's internal position across a multi-line token, so these two factories carry the line explicitly, computed from the tokenizer's own index via `Token.LineAt`.
+  Msg 105 stamps the **opening-quote** line (`ParseQuotedBody`'s captured open index); Msg 113 stamps the **end-of-input** line (`command.Length`), matching real's probed asymmetry.
+  A pre-stamped non-zero `SimulatedError.LineNumber` survives `ResolveDiagnostics` (which only fills a zero line), so the enclosing frame leaves it intact.
 - **`ERROR_LINE()` / `ERROR_PROCEDURE()`**: the TRY-frame `CaughtError` captures the already-resolved `ex.LineNumber` / `ex.Procedure`, so the CATCH scalars report exactly what the exception carries.
 - **`THROW;` re-raise** (`ThrowReRaised`) pre-stamps the in-flight error's captured line + procedure via `PreserveDiagnostics` and marks the exception resolved, so the enclosing frame leaves the preserved line alone.
 - **TDS tokens**: `TdsSession.WriteErrors` / `FlushInfoMessages` write `TdsSession.ServerName` (`"SIMULATED"`, = `@@SERVERNAME`) as the token's server field, decoupled from `SimulatedError.Server` (the data source SqlClient surfaces).
@@ -48,11 +59,5 @@ The static exception factories (`SimulatedSqlException.*Errors.cs`) can't reach 
 
 ## Divergences / residuals
 
-- **Tokenizer-thrown errors on a later token line** (unclosed string Msg 105, unclosed comment Msg 113): the parse frontier (`batch.Parser.Token`) lags the tokenizer's internal position, so a literal opened on line *n* and unclosed at EOF reports the prior token's line rather than the literal's.
-  Off by the token's internal newline count.
-  Narrow (multi-line unterminated literals).
-- **Scalar-UDF / TVF / trigger / view body errors** report a **body-relative** line (no `BodyLineOffset`) and carry no `Procedure` — only stored procedures thread the offset + qualified name.
-  Real reports a definition-relative line + the object name.
-  The line is still non-zero and server correct.
 - **`THROW; re-raise inside a proc body`** preserves the original line but not a body-relative offset re-application; top-level re-raise is exact.
-- `ERROR_PROCEDURE()` / `SqlError.Procedure` are populated only for stored procedures (see above).
+- **DDL triggers** are parse-and-store-**no-fire** (see [`triggers.md`](triggers.md)), so no body-error attribution path exists for them; the body-line/name threading above covers DML triggers only.

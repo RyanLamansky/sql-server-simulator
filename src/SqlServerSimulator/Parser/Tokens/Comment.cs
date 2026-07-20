@@ -61,6 +61,6 @@ sealed class Comment : Token
             }
         }
 
-        throw SimulatedSqlException.MissingEndCommentMark();
+        throw SimulatedSqlException.MissingEndCommentMark(Token.LineAt(command, command.Length));
     }
 }

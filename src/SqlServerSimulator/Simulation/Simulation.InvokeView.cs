@@ -38,7 +38,9 @@ partial class Simulation
         // a view body is a plain SELECT with no RETURN.
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var dummyFrame = new UdfFrame(SqlType.Int32);
-        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame);
+        // Body errors attribute to the outer statement that referenced the view
+        // (probe-confirmed: real reports the outer SELECT's line, no procedure).
+        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
         connection.NestingLevel++;
         try
         {

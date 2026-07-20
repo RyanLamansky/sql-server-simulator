@@ -99,7 +99,9 @@ partial class Simulation
         // batch constructor with scalar UDF invocation keeps the per-call
         // setup uniform across kinds.
         var dummyFrame = new UdfFrame(SqlType.Int32);
-        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame);
+        // Body errors attribute to the outer invoking statement (probe-
+        // confirmed: real reports the referencing SELECT's line, no procedure).
+        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
         connection.NestingLevel++;
         try
         {

@@ -179,7 +179,15 @@ partial class Simulation
 #pragma warning disable CA2100 // trigger.BodyText is the simulator's own captured body span
                     bodyCommand.CommandText = trigger.BodyText;
 #pragma warning restore CA2100
-                    var innerBatch = new BatchContext(bodyCommand, triggerFrame);
+                    var innerBatch = new BatchContext(bodyCommand, triggerFrame)
+                    {
+                        // Trigger-body errors report a CREATE-relative line and
+                        // carry the trigger's UNQUALIFIED name (probe-confirmed:
+                        // ERROR_PROCEDURE / SqlError.Procedure = "tr", not
+                        // "dbo.tr" — the one asymmetry from stored procedures).
+                        LineOffset = trigger.BodyLineOffset,
+                        ErrorProcedureName = trigger.Name,
+                    };
                     var parser = innerBatch.Parser;
                     parser.MoveNextOptional();
                     foreach (var _ in DispatchStatementsUntil(innerBatch, endKeyword: null))

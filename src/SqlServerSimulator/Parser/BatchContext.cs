@@ -476,6 +476,21 @@ internal sealed class BatchContext
     public string ErrorProcedureName = "";
 
     /// <summary>
+    /// When set, a caught exception is <em>not</em> stamped at this batch's
+    /// dispatch frame — it propagates unresolved so the enclosing invoking
+    /// statement's frame attributes the line / procedure. Scalar-UDF,
+    /// inline-TVF, multi-statement-TVF, and view bodies set this: real SQL
+    /// Server inlines them for error attribution, reporting the outer invoking
+    /// statement's line with no procedure name (probe-confirmed — a divide-by-
+    /// zero inside any of these surfaces the <c>SELECT</c>/<c>INSERT</c> that
+    /// invoked them, not a body-relative line). Procedures, triggers, and
+    /// dynamic-SQL batches leave it false and resolve at their own frame, so a
+    /// UDF error inside a procedure body attributes to the enclosing procedure.
+    /// Read by <see cref="Simulation.DispatchOneStatement"/>.
+    /// </summary>
+    public bool SuppressDiagnosticsResolution;
+
+    /// <summary>
     /// Non-null when this batch is executing a trigger body. Holds the
     /// <c>INSERTED</c> / <c>DELETED</c> pseudo-tables (materialized from
     /// the firing DML's affected rows) so the trigger body's bare-name

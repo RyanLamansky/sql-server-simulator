@@ -1260,10 +1260,18 @@ public sealed partial class Simulation
                 // ResolveDiagnostics no-ops on an already-resolved error as it
                 // propagates outward (matching SQL Server's innermost-frame
                 // attribution for nested calls).
-                var diagnosticLine = ex.Class == 15
-                    ? batch.Parser.Token?.LineNumber ?? batch.CurrentStatement.StartLine
-                    : batch.CurrentStatement.StartLine;
-                ex.ResolveDiagnostics(diagnosticLine, batch.LineOffset, batch.ErrorProcedureName);
+                // Scalar-UDF / TVF / view bodies inline for attribution: they
+                // leave the error unresolved so the enclosing invoking
+                // statement's frame stamps it (probe-confirmed — real reports
+                // the outer statement's line, no procedure). All other frames
+                // (top-level, procedure, trigger, dynamic-SQL) resolve here.
+                if (!batch.SuppressDiagnosticsResolution)
+                {
+                    var diagnosticLine = ex.Class == 15
+                        ? batch.Parser.Token?.LineNumber ?? batch.CurrentStatement.StartLine
+                        : batch.CurrentStatement.StartLine;
+                    ex.ResolveDiagnostics(diagnosticLine, batch.LineOffset, batch.ErrorProcedureName);
+                }
                 // Class 13 = deadlock victim. Real SQL Server auto-rolls
                 // back the active transaction before propagating (probe-
                 // confirmed: @@TRANCOUNT reads 0 in the catch handler).

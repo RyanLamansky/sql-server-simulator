@@ -79,7 +79,10 @@ partial class Simulation
         }
 
         var udfFrame = new UdfFrame(function.ReturnType);
-        var innerBatch = new BatchContext(bodyCommand, variables, udfFrame);
+        // Errors inside a scalar-UDF body attribute to the outer invoking
+        // statement (probe-confirmed: real reports the SELECT's line, no
+        // procedure) — so this frame leaves the exception unresolved.
+        var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true };
         connection.NestingLevel++;
         try
         {

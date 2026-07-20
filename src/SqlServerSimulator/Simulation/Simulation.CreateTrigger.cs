@@ -200,6 +200,8 @@ partial class Simulation
             context.Batch.AcquireStatementLock(existing!.SchemaLock, LockMode.SchemaModification);
 
         var objectId = existed ? existing!.ObjectId : context.CurrentDatabase.AllocateObjectId();
+        // Newlines before the body start, so per-fire body errors report a
+        // line relative to the whole CREATE statement (probe-confirmed).
         var trigger = new Trigger(
             triggerSchema,
             triggerName.Leaf,
@@ -208,7 +210,8 @@ partial class Simulation
             actions,
             timing,
             bodyText,
-            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow)
+            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow,
+            bodyLineOffset: CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart))
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
         };

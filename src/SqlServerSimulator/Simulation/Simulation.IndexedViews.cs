@@ -200,7 +200,7 @@ partial class Simulation
 #pragma warning restore CA2100
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var dummyFrame = new UdfFrame(SqlType.Int32);
-        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame);
+        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
         connection.NestingLevel++;
         try
         {
@@ -253,7 +253,7 @@ partial class Simulation
 #pragma warning restore CA2100
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var dummyFrame = new UdfFrame(SqlType.Int32);
-        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame);
+        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
         var nestedViews = new HashSet<View>();
         innerBatch.DependencySink = (tables, nestedViews);
         connection.NestingLevel++;

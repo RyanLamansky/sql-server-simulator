@@ -109,7 +109,11 @@ partial class Simulation
 
         // MS-TVF body batches have no UdfFrame / ProcFrame — see Msg 178 note
         // on the dedicated BatchContext constructor's remarks.
-        var innerBatch = new BatchContext(bodyCommand, variables);
+        // Body errors attribute to the outer invoking statement (probe-
+        // confirmed: even a multi-statement TVF's mid-body error surfaces the
+        // referencing SELECT's line, no procedure), so this frame leaves the
+        // exception unresolved for the enclosing statement to stamp.
+        var innerBatch = new BatchContext(bodyCommand, variables) { SuppressDiagnosticsResolution = true };
         innerBatch.TableVariables[function.ReturnVariableName] = returnTable;
         connection.NestingLevel++;
         try

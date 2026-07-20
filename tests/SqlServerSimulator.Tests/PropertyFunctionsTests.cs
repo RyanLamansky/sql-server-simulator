@@ -1,3 +1,4 @@
+using SqlServerSimulator.Bacpac;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -566,4 +567,220 @@ public sealed class PropertyFunctionsTests
     public void FileProperty_NullProperty_ReturnsNull()
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
             "select fileproperty(N'simulated_Data', null)"));
+
+    // === FILE_ID / FILE_IDEX / FILE_NAME ===
+    // The current database's two modeled files are <db>_Data (file_id 1) and
+    // <db>_Log (file_id 2), consistent with sys.database_files; the default
+    // simulation database is "simulated". Return types / NULL cases
+    // probe-confirmed against SQL Server 2025 (2026-07-20): FILE_ID → smallint,
+    // FILE_IDEX → int, FILE_NAME → nvarchar(128).
+
+    [TestMethod]
+    public void FileId_DataFile_Returns1()
+        => AreEqual((short)1, new Simulation().ExecuteScalar<short>(
+            "select file_id(N'simulated_Data')"));
+
+    [TestMethod]
+    public void FileId_LogFile_Returns2()
+        => AreEqual((short)2, new Simulation().ExecuteScalar<short>(
+            "select file_id(N'simulated_Log')"));
+
+    [TestMethod]
+    public void FileId_TrailingSpaceInsensitive()
+        => AreEqual((short)1, new Simulation().ExecuteScalar<short>(
+            "select file_id(N'simulated_Data ')"));
+
+    [TestMethod]
+    public void FileId_UnknownFile_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select file_id(N'NoSuchFile')"));
+
+    [TestMethod]
+    public void FileId_NullArgument_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select file_id(null)"));
+
+    [TestMethod]
+    public void FileId_ResultType_IsSmallInt()
+        => AreEqual("smallint", new Simulation().ExecuteScalar(
+            "select sql_variant_property(cast(file_id(N'simulated_Data') as sql_variant), 'BaseType')"));
+
+    [TestMethod]
+    public void FileIdEx_DataFile_Returns1()
+        => AreEqual(1, new Simulation().ExecuteScalar<int>(
+            "select file_idex(N'simulated_Data')"));
+
+    [TestMethod]
+    public void FileIdEx_UnknownFile_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select file_idex(N'NoSuchFile')"));
+
+    [TestMethod]
+    public void FileIdEx_ResultType_IsInt()
+        => AreEqual("int", new Simulation().ExecuteScalar(
+            "select sql_variant_property(cast(file_idex(N'simulated_Log') as sql_variant), 'BaseType')"));
+
+    [TestMethod]
+    public void FileName_File1_ReturnsDataFile()
+        => AreEqual("simulated_Data", new Simulation().ExecuteScalar(
+            "select file_name(1)"));
+
+    [TestMethod]
+    public void FileName_File2_ReturnsLogFile()
+        => AreEqual("simulated_Log", new Simulation().ExecuteScalar(
+            "select file_name(2)"));
+
+    [TestMethod]
+    public void FileName_UnknownId_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select file_name(99)"));
+
+    [TestMethod]
+    public void FileName_ZeroId_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select file_name(0)"));
+
+    [TestMethod]
+    public void FileName_NegativeId_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select file_name(-1)"));
+
+    [TestMethod]
+    public void FileName_NullArgument_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select file_name(null)"));
+
+    // FILE_ID / FILE_NAME are exact inverses over the modeled file pair.
+    [TestMethod]
+    public void FileName_OfFileId_RoundTrips()
+        => AreEqual("simulated_Data", new Simulation().ExecuteScalar(
+            "select file_name(file_id(N'simulated_Data'))"));
+
+    // === FILEGROUP_ID / FILEGROUP_NAME ===
+    // Every database carries the PRIMARY filegroup at data_space_id 1; user
+    // filegroups (bacpac SqlFilegroup) take 2, 3, …. Return types / NULL cases
+    // probe-confirmed against SQL Server 2025 (2026-07-20): FILEGROUP_ID →
+    // smallint, FILEGROUP_NAME → nvarchar(128).
+
+    [TestMethod]
+    public void FilegroupId_Primary_Returns1()
+        => AreEqual((short)1, new Simulation().ExecuteScalar<short>(
+            "select filegroup_id('PRIMARY')"));
+
+    [TestMethod]
+    public void FilegroupId_CaseInsensitive()
+        => AreEqual((short)1, new Simulation().ExecuteScalar<short>(
+            "select filegroup_id('primary')"));
+
+    [TestMethod]
+    public void FilegroupId_UnknownName_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select filegroup_id('NoSuchFilegroup')"));
+
+    [TestMethod]
+    public void FilegroupId_NullArgument_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select filegroup_id(null)"));
+
+    [TestMethod]
+    public void FilegroupId_ResultType_IsSmallInt()
+        => AreEqual("smallint", new Simulation().ExecuteScalar(
+            "select sql_variant_property(cast(filegroup_id('PRIMARY') as sql_variant), 'BaseType')"));
+
+    [TestMethod]
+    public void FilegroupName_Id1_ReturnsPrimary()
+        => AreEqual("PRIMARY", new Simulation().ExecuteScalar(
+            "select filegroup_name(1)"));
+
+    [TestMethod]
+    public void FilegroupName_ZeroId_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select filegroup_name(0)"));
+
+    [TestMethod]
+    public void FilegroupName_UnknownId_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select filegroup_name(99)"));
+
+    [TestMethod]
+    public void FilegroupName_NullArgument_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select filegroup_name(null)"));
+
+    // A bacpac SqlFilegroup registers as data_space_id 2; the file/filegroup
+    // scalars read it and stay consistent with sys.filegroups.
+    [TestMethod]
+    public void FilegroupId_UserFilegroup_FromBacpac_Returns2()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Item", t => t.Column("Id", "int").Row(1))
+            .Filegroup("FG_Indexes")
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out _);
+        AreEqual((short)2, sim.ExecuteScalar<short>("select filegroup_id('FG_Indexes')"));
+        AreEqual("FG_Indexes", sim.ExecuteScalar("select filegroup_name(2)"));
+    }
+
+    // === FILEGROUPPROPERTY ===
+    // Returns int. PRIMARY and user-filegroup values probe-confirmed against
+    // SQL Server 2025 (2026-07-20): PRIMARY is the default, not user-defined;
+    // a user filegroup is user-defined, not the default; no read-only
+    // filegroups modeled.
+
+    [TestMethod]
+    public void FilegroupProperty_IsDefault_Primary_Returns1()
+        => AreEqual(1, new Simulation().ExecuteScalar<int>(
+            "select filegroupproperty('PRIMARY', 'IsDefault')"));
+
+    [TestMethod]
+    public void FilegroupProperty_IsUserDefinedFG_Primary_Returns0()
+        => AreEqual(0, new Simulation().ExecuteScalar<int>(
+            "select filegroupproperty('PRIMARY', 'IsUserDefinedFG')"));
+
+    [TestMethod]
+    public void FilegroupProperty_IsReadOnly_Primary_Returns0()
+        => AreEqual(0, new Simulation().ExecuteScalar<int>(
+            "select filegroupproperty('PRIMARY', 'IsReadOnly')"));
+
+    [TestMethod]
+    public void FilegroupProperty_Property_CaseAndTrailingSpaceInsensitive()
+        => AreEqual(1, new Simulation().ExecuteScalar<int>(
+            "select filegroupproperty('PRIMARY', 'isDEFAULT ')"));
+
+    [TestMethod]
+    public void FilegroupProperty_UnknownProperty_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select filegroupproperty('PRIMARY', 'NotAProperty')"));
+
+    [TestMethod]
+    public void FilegroupProperty_UnknownFilegroup_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select filegroupproperty('NoSuchFilegroup', 'IsDefault')"));
+
+    [TestMethod]
+    public void FilegroupProperty_NullFilegroup_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select filegroupproperty(null, 'IsDefault')"));
+
+    [TestMethod]
+    public void FilegroupProperty_NullProperty_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "select filegroupproperty('PRIMARY', null)"));
+
+    // A user filegroup: user-defined, not the default (probe-confirmed against
+    // a scratch database's ADD FILEGROUP on SQL Server 2025).
+    [TestMethod]
+    public void FilegroupProperty_UserFilegroup_IsUserDefined_NotDefault()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Item", t => t.Column("Id", "int").Row(1))
+            .Filegroup("FG_Indexes")
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out _);
+        AreEqual(1, sim.ExecuteScalar<int>("select filegroupproperty('FG_Indexes', 'IsUserDefinedFG')"));
+        AreEqual(0, sim.ExecuteScalar<int>("select filegroupproperty('FG_Indexes', 'IsDefault')"));
+        AreEqual(0, sim.ExecuteScalar<int>("select filegroupproperty('FG_Indexes', 'IsReadOnly')"));
+    }
 }

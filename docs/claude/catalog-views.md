@@ -410,6 +410,23 @@ Empty / NULL input → NULL; out-of-range index → NULL.
 Treats bracket-quoting at the segment level (`'[a.b].c'` keeps the dotted segment intact when the outer quotes balance).
 Common use in dynamic-SQL identifier manipulation.
 
+**File / filegroup metadata scalars** (`Parser/Expressions/DatabaseScalarFunctions.cs`, `FilegroupProperty.cs`, `FileProperty.cs`) — return types probe-confirmed against SQL Server 2025 (2026-07-20):
+
+- **`FILE_ID('file_name')`** (`smallint`) / **`FILE_IDEX('file_name')`** (`int`) / **`FILE_NAME(file_id)`** (`sysname`): the two forms of `FILE_ID` differ only in projected result type (real: FILE_ID → smallint, FILE_IDEX → int) and resolve identically over the placeholder file model.
+- **`FILEGROUP_ID('filegroup_name')`** (`smallint`) / **`FILEGROUP_NAME(filegroup_id)`** (`sysname`): read `Database.Filegroups` (PRIMARY = `data_space_id` 1; user filegroups 2, 3, … in registration order — same registry `sys.filegroups` / `sys.data_spaces` enumerate).
+- **`FILEGROUPPROPERTY('filegroup_name', 'property')`** (`int`): `IsDefault` (1 for PRIMARY, 0 for user — the simulator has no `MODIFY FILEGROUP … DEFAULT`, so PRIMARY is always the default), `IsUserDefinedFG` (0 for PRIMARY, 1 for a registered user filegroup), `IsReadOnly` (always 0 — no read-only filegroups modeled).
+- **`FILEPROPERTY('file_name', 'property')`** (`int`): `IsPrimaryFile` / `IsLogFile` / `IsReadOnly` / `SpaceUsed` — full deep-dive in [`scalars.md`](scalars.md); see the `sys.database_files` self-consistency contract above.
+
+Shared conventions across the family (probe-confirmed):
+- NULL on any NULL argument, an unknown / unregistered name or id (including `FILE_NAME` / `FILEGROUP_NAME` of 0, a negative, or an out-of-range id), and an unknown property.
+- Name lookups are case-insensitive and trailing-space insensitive (SQL Server's internal `=` comparison — the `FILE_ID` / `FILEGROUP_ID` / `FILEGROUPPROPERTY` argument is `TrimEnd(' ')`'d before matching, since the modeled names carry no trailing spaces).
+- Property names are case-insensitive and trailing-space insensitive.
+- All operate on the **current** database only.
+
+**Placeholder file model** (the file-level divergence): there is no physical file model.
+Each database exposes exactly two synthetic files, mirroring `sys.database_files` / `sys.master_files`: `<db>_Data` (`file_id` 1, primary ROWS, on PRIMARY) and `<db>_Log` (`file_id` 2, LOG).
+So `FILE_ID(N'simulated_Data')` = 1, `FILE_NAME(1)` = `simulated_Data`, and the file-level scalars stay consistent with those views; real SQL Server's actual logical file names (e.g. master's `master` / `mastlog`) are database-install artifacts the simulator doesn't reproduce.
+
 Cross-cutting notes:
 - **Column subset (sys.* only)**: real SQL Server's `sys.tables` / `sys.objects` / `sys.columns` have 30+ columns each; the simulator ships the load-bearing subset that EF / migration tooling and the probe queried.
   `SELECT *` returns fewer columns than real SQL Server — apps that depend on a specific full-column shape will surface gaps, address those as needed.
