@@ -3,12 +3,16 @@
 enum AtAtKeyword
 {
     _ = 0, // "Default" value for the enum, indicating not a keyword.
+    Connections,
+    CpuBusy,
     CursorRows,
     DateFirst,
     Dbts,
     Error,
     FetchStatus,
     Identity,
+    Idle,
+    IoBusy,
     LangId,
     Language,
     LockTimeout,
@@ -17,6 +21,9 @@ enum AtAtKeyword
     MicrosoftVersion,
     NestLevel,
     Options,
+    PackReceived,
+    PacketErrors,
+    PackSent,
     ProcId,
     RemServer,
     RowCount,
@@ -24,6 +31,10 @@ enum AtAtKeyword
     ServiceName,
     SpId,
     TextSize,
+    TimeTicks,
+    TotalErrors,
+    TotalRead,
+    TotalWrite,
     TranCount,
     Version
 }

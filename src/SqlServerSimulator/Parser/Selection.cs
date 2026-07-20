@@ -1390,6 +1390,18 @@ internal sealed partial class Selection
             AfterBuiltInRowsetDispatch:
                 var objectName = BatchContext.ParseObjectName(context);
 
+                // fn_virtualfilestats: a 2-arg system TVF invoked bare or
+                // `sys.`-qualified. Handled after ParseObjectName (unlike the
+                // 1-part rowset functions above) precisely because it accepts
+                // the `sys.` schema qualifier, so the 2-part name must be
+                // parsed first. Wins over catalog-view / table lookup.
+                if (BuiltInToken.Equals(objectName.Leaf, "fn_virtualfilestats")
+                    && (objectName.Count == 1
+                        || (objectName.Count == 2 && BuiltInToken.Equals(objectName.ImmediateQualifier, "sys"))))
+                {
+                    return BuiltInRowsetSource(context, ParseVirtualFileStats(context, objectName.ToString()));
+                }
+
                 // Linked-server fork: four-part `server.db.schema.t` routes
                 // to the matching <see cref="LinkedServer"/>'s remote
                 // <see cref="HeapTable"/>. The lateral plan opens a fresh

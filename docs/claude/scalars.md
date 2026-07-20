@@ -411,6 +411,29 @@ Constants whose values don't carry real session/server identity in the simulator
 
 Server-instance metadata accessed via **`SERVERPROPERTY(name)`** — see [`catalog-views.md`](catalog-views.md).
 
+## System statistical counters + `sys.fn_virtualfilestats`
+
+DBA-introspection surface for cumulative server activity.
+Every `@@`-counter is **`int`** (probe-confirmed against SQL Server 2025, 2026-07-19); real reports live totals since server start, but the in-process simulator performs no physical IO, CPU-time accounting, or TDS-packet counting, so the elapsed-activity totals report a plausible **0** (the honest reading for a freshly started, idle instance).
+Rarely read from application code; the constants exist so DBA tooling / health scripts receive a sensible non-error response.
+
+- **`@@CPU_BUSY`** / **`@@IDLE`** / **`@@IO_BUSY`** — 0 (no CPU-time / idle-time / IO-time accounting).
+- **`@@PACK_RECEIVED`** / **`@@PACK_SENT`** — 0 (no TDS packet counting, even on the network endpoint).
+- **`@@PACKET_ERRORS`** / **`@@TOTAL_ERRORS`** — 0 (also 0 on a healthy real server).
+- **`@@TOTAL_READ`** / **`@@TOTAL_WRITE`** — 0 (no physical disk-read / -write accounting).
+- **`@@TIMETICKS`** — **31250**, the hardware-invariant microseconds-per-tick constant real reports (Value-constant form).
+- **`@@CONNECTIONS`** — live signal, unlike the frozen constants above: a dedicated `ConnectionsExpression` reads `Simulation.ConnectionsAllocated` (the SPID allocator's distance past its seed of 50), so it advances on every session without separate instrumentation.
+  Real reports cumulative login attempts since server start; the session-allocation count is the closest cheap in-process proxy.
+  A fresh `Simulation`'s first connection reads 1.
+
+**`sys.fn_virtualfilestats(database_id, file_id)`** — system TVF, invoked bare (`fn_virtualfilestats(...)`) or `sys.`-qualified.
+Column shape mirrors real exactly: `(DbId smallint, FileId smallint, TimeStamp bigint, NumberReads bigint, BytesRead bigint, IoStallReadMS bigint, NumberWrites bigint, BytesWritten bigint, IoStallWriteMS bigint, IoStallMS bigint, BytesOnDisk bigint, FileHandle varbinary(8))`.
+`NULL` is the wildcard at either argument (all databases / all files); a non-NULL id naming no database or file yields zero rows (including negatives such as `-1`), matching real.
+The simulator has no physical file model, so it reports **one row per (database, `file_id 1`)** with every IO counter, `BytesOnDisk`, and `FileHandle` at 0 — the file cardinality per database differs from real (real seeds tempdb with multiple data files) but the wildcard / filter semantics and column shape match.
+Wrong arg count matches real: one argument → **Msg 313** (insufficient arguments), three → **Msg 8144** (too many arguments).
+The legacy `::fn_virtualfilestats(...)` prefix form isn't tokenized (`::` needs grammar work); the bare and `sys.`-qualified forms cover the documented invocations.
+Dispatch lives in `Parser/Selection.VirtualFileStats.cs`, wired into `ParseSingleFromSourceCore` after `ParseObjectName` (so the `sys.` qualifier parses first, unlike the qualifier-less rowset functions).
+
 ## Session-state store: `SESSION_CONTEXT` / `CONTEXT_INFO` / connection scalars
 
 These carry real per-session state on `SimulatedDbConnection` (not placeholder constants), so values persist across batches on the same connection and reset with a new connection.

@@ -3,6 +3,25 @@ using SqlServerSimulator.Storage;
 namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
+/// Backs <c>@@CONNECTIONS</c>: returns the number of sessions the
+/// <see cref="Simulation"/> has allocated as <see cref="SqlType.Int32"/>
+/// (real SQL Server's @@CONNECTIONS is <c>int</c> — probe-confirmed). Reads
+/// <see cref="Simulation.ConnectionsAllocated"/>, a live count derived from
+/// the SPID allocator; on real SQL Server this is cumulative login attempts
+/// since server start, which the session-allocation count proxies without
+/// separate instrumentation.
+/// </summary>
+internal sealed class ConnectionsExpression : Expression
+{
+    public override SqlValue Run(RuntimeContext runtime) =>
+        SqlValue.FromInt32(runtime.Batch.Connection.Simulation.ConnectionsAllocated);
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+
+    internal override string DebugDisplay() => "@@CONNECTIONS";
+}
+
+/// <summary>
 /// Backs <c>@@NESTLEVEL</c>: returns the connection's current nesting
 /// depth (the count of active procedure/UDF/trigger frames) as
 /// <see cref="SqlType.Int32"/>. The connection's

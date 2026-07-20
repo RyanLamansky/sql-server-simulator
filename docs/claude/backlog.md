@@ -61,8 +61,6 @@ Blocked on a larger unmodeled parent feature (shipping a function here implies t
 Low priority / niche — simulatable (as placeholder constants or a small model) but rarely hit, so not worth attention yet:
 
 - **Legacy text/image** — TEXTPTR / TEXTVALID (the `text` / `ntext` / `image` types ship; these navigate the deprecated READTEXT / WRITETEXT / UPDATETEXT pointer path).
-- **System statistical** (DBA introspection) — @@CONNECTIONS / @@CPU_BUSY / @@IDLE / @@IO_BUSY / @@PACK_RECEIVED / @@PACK_SENT / @@PACKET_ERRORS / @@TIMETICKS / @@TOTAL_ERRORS / @@TOTAL_READ / @@TOTAL_WRITE / fn_virtualfilestats.
-  Plausible constants would satisfy most callers; rarely hit from app code.
 - **Files / filegroups** — FILE_ID / FILE_IDEX / FILE_NAME / FILEGROUP_ID / FILEGROUP_NAME / FILEGROUPPROPERTY / FILEPROPERTY.
   No physical file model.
   A named-filegroup registry now ships (`Database.Filegroups`, seeded PRIMARY=1, extended by the bacpac loader's `SqlFilegroup` dispatch; surfaced by `sys.filegroups`/`sys.data_spaces` and FILEGROUP-scoped extended properties) — the scalar helpers above could read it, though a `file_id` 1 placeholder is still needed for the file-level ones.

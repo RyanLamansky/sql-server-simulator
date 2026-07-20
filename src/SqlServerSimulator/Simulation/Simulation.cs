@@ -604,6 +604,16 @@ public sealed partial class Simulation
     internal int AllocateSpid() => Interlocked.Increment(ref this.nextSpid);
 
     /// <summary>
+    /// Backs <c>@@CONNECTIONS</c>: the count of sessions allocated since the
+    /// <see cref="Simulation"/> was constructed. Derived from the SPID
+    /// allocator's distance past its seed (50), so it advances on every
+    /// <see cref="SimulatedDbConnection"/> without a separate counter. Real
+    /// SQL Server reports cumulative login attempts since server start; the
+    /// session-allocation count is the closest cheap in-process proxy.
+    /// </summary>
+    internal int ConnectionsAllocated => Volatile.Read(ref this.nextSpid) - 50;
+
+    /// <summary>
     /// Monotonic counter for <see cref="GenerateNewSequentialId"/>; each call
     /// reserves the next value via <see cref="Interlocked.Increment(ref long)"/>
     /// and packs it into raw bytes [0..3] of the produced GUID.

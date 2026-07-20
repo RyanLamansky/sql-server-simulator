@@ -61,6 +61,29 @@ internal sealed class Value : Expression
             case AtAtKeyword.DateFirst:
                 this.Constant = SqlValue.FromByte(7);
                 return;
+            // System statistical counters (all int, probe-confirmed
+            // 2026-07-19 against SQL Server 2025). The in-process simulator
+            // does no physical IO, CPU-time accounting, or TDS packet
+            // counting, so the elapsed-activity totals report 0 — the honest
+            // reading for a freshly started, idle instance. @@PACKET_ERRORS
+            // and @@TOTAL_ERRORS report 0 on a healthy real server too.
+            // @@CONNECTIONS routes to a dedicated runtime expression (it
+            // reflects the live session-allocation count). @@TIMETICKS is the
+            // hardware-invariant microseconds-per-tick constant real reports.
+            case AtAtKeyword.CpuBusy:
+            case AtAtKeyword.Idle:
+            case AtAtKeyword.IoBusy:
+            case AtAtKeyword.PackReceived:
+            case AtAtKeyword.PacketErrors:
+            case AtAtKeyword.PackSent:
+            case AtAtKeyword.TotalErrors:
+            case AtAtKeyword.TotalRead:
+            case AtAtKeyword.TotalWrite:
+                this.Constant = SqlValue.FromInt32(0);
+                return;
+            case AtAtKeyword.TimeTicks:
+                this.Constant = SqlValue.FromInt32(31250);
+                return;
         }
 
         throw new NotSupportedException($"Simulator doesn't recognize {doubleAtPrefixedString}.");

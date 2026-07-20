@@ -171,6 +171,7 @@ internal abstract class Expression
         AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
         DoubleAtPrefixedString doubleAtPrefixedString => doubleAtPrefixedString.Parse() switch
         {
+            AtAtKeyword.Connections => new ConnectionsExpression(),
             AtAtKeyword.Error => new LastErrorExpression(),
             AtAtKeyword.Identity => new LastIdentityExpression(),
             AtAtKeyword.TranCount => new TranCountExpression(context),
