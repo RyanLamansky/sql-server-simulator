@@ -502,6 +502,21 @@ internal sealed class BatchContext
     public TriggerFrame? TriggerFrame;
 
     /// <summary>
+    /// Whether execution-time permission checks apply to statements dispatched
+    /// in this batch. False inside a static module body (procedure / view /
+    /// TVF / scalar-UDF / trigger) — ownership chaining suppresses checks on
+    /// the body's object references (everything is dbo-owned, so all chains are
+    /// unbroken). Dynamic SQL (<c>EXEC('…')</c> / <c>sp_executesql</c>) breaks
+    /// the chain: its <see cref="ProcFrame"/> carries
+    /// <see cref="Parser.ProcFrame.IsDynamicSql"/>, so checks re-engage. The
+    /// <c>dbo</c> bypass is a separate, cheaper short-circuit the enforcement
+    /// helper applies on top of this.
+    /// </summary>
+    public bool EnforcesPermissions =>
+        this.UdfFrame is null && this.TriggerFrame is null
+        && (this.ProcFrame is null || this.ProcFrame.IsDynamicSql);
+
+    /// <summary>
     /// Current grouping-set context — populated by the aggregate executor
     /// during projection of each group, restored to null between groups and
     /// between queries. Non-null surface exposes GROUPING() / GROUPING_ID()

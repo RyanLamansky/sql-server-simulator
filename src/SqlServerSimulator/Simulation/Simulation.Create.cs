@@ -203,6 +203,11 @@ partial class Simulation
         var isLocalTempTable = BatchContext.IsLocalTempName(tableName.Leaf);
         var isGlobalTempTable = BatchContext.IsGlobalTempName(tableName.Leaf);
         var isTempTable = isLocalTempTable || isGlobalTempTable;
+        // CREATE TABLE requires db_ddladmin / db_owner membership (or an
+        // explicit CREATE TABLE grant) for a non-dbo principal — Msg 262.
+        // Temp tables are exempt (anyone may create #temp).
+        if (!isTempTable && !PermissionEnforcement.HasDatabasePermission(context.Batch, "CREATE TABLE"))
+            throw SimulatedSqlException.CreateTablePermissionDenied(context.CurrentDatabase.Name);
         Schema? schema = null;
         var schemaId = Database.DboSchemaId;
         ConcurrentDictionary<string, HeapTable> destination;

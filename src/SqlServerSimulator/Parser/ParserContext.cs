@@ -190,6 +190,18 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// </summary>
     public Dictionary<string, CteBinding>? CteBindings;
 
+    /// <summary>
+    /// Accumulates the real tables / views / TVFs a query reads, so the
+    /// outermost <see cref="Selection.Parse"/> can attach them to the built
+    /// <see cref="Selection.ReferencedSecurables"/> for the execution-time
+    /// SELECT check. Non-null only while a top-level query expression is being
+    /// parsed (nested subqueries / derived tables append to the same list, so
+    /// the top-level plan aggregates every read); module bodies parse with
+    /// their own <see cref="ParserContext"/> and so never leak into a
+    /// caller's list.
+    /// </summary>
+    public List<ReferencedSecurable>? SecurableSink;
+
     public Simulation Simulation => Command.simulation;
 
     /// <summary>

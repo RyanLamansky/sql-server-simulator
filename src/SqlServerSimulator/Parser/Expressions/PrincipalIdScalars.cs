@@ -30,8 +30,12 @@ internal sealed class PrincipalIdLookup : Expression
     {
         if (this.nameArg is null)
         {
-            // SUSER_ID = login id (1); USER_ID = dbo's id (1); DATABASE_PRINCIPAL_ID = dbo's id (1).
-            return SqlValue.FromInt32(1);
+            // SUSER_ID = the fixed login id (1); USER_ID / DATABASE_PRINCIPAL_ID
+            // = the effective database principal (the impersonation-stack top,
+            // or dbo's id 1 for an unimpersonated session).
+            return this.kind == PrincipalIdKind.SUserId
+                ? SqlValue.FromInt32(1)
+                : SqlValue.FromInt32(runtime.Batch.Connection.Security.Effective.DatabasePrincipalId);
         }
         var v = this.nameArg.Run(runtime);
         if (v.IsNull)
@@ -211,14 +215,88 @@ internal sealed class HasPermsByName : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var permission = SqlValue.Null(SqlType.Int32);
-        for (var i = 0; i < this.args.Length; i++)
+        var securableVal = this.args[0].Run(runtime);
+        var classVal = this.args[1].Run(runtime);
+        var permissionVal = this.args[2].Run(runtime);
+        if (permissionVal.IsNull)
+            return SqlValue.Null(SqlType.Int32);
+
+        var connection = runtime.Batch.Connection;
+        // dbo keeps seeing 1 everywhere — preserves the DacFx bacpac-export
+        // gate (HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION') = 1).
+        if (connection.Security.EffectiveIsDbo)
+            return SqlValue.FromInt32(1);
+
+        // A NULL securable_class is an ambiguous "current server or database"
+        // request the simulator can't disambiguate — return NULL (matches the
+        // probed (NULL, NULL, 'CONNECT') → NULL result).
+        if (classVal.IsNull)
+            return SqlValue.Null(SqlType.Int32);
+
+        var permission = permissionVal.CoerceTo(SqlType.NVarchar).AsString;
+        var className = classVal.CoerceTo(SqlType.NVarchar).AsString;
+        var database = runtime.Batch.CurrentDatabase;
+        var principalId = connection.Security.Effective.DatabasePrincipalId;
+
+        byte securableClass;
+        var majorId = 0;
+        var schemaId = 0;
+        Span<char> classBuf = stackalloc char[className.Length];
+        _ = className.AsSpan().ToUpperInvariant(classBuf);
+        switch (classBuf)
         {
-            var v = this.args[i].Run(runtime);
-            if (i == 2)
-                permission = v;
+            case "DATABASE":
+                securableClass = PermissionChecker.ClassDatabase;
+                break;
+            case "OBJECT":
+                if (securableVal.IsNull || !TryResolveObjectByName(database, securableVal.CoerceTo(SqlType.NVarchar).AsString, out majorId, out schemaId))
+                    return SqlValue.Null(SqlType.Int32);
+                securableClass = PermissionChecker.ClassObject;
+                break;
+            case "SCHEMA":
+                if (securableVal.IsNull || !TryResolveSchemaByName(database, securableVal.CoerceTo(SqlType.NVarchar).AsString, out schemaId))
+                    return SqlValue.Null(SqlType.Int32);
+                securableClass = PermissionChecker.ClassSchema;
+                majorId = schemaId;
+                break;
+            default:
+                return SqlValue.Null(SqlType.Int32);
         }
-        return permission.IsNull ? SqlValue.Null(SqlType.Int32) : SqlValue.FromInt32(1);
+
+        return SqlValue.FromInt32(
+            PermissionChecker.IsGranted(database, principalId, permission, securableClass, majorId, schemaId) ? 1 : 0);
+    }
+
+    private static bool TryResolveSchemaByName(Database database, string name, out int schemaId)
+    {
+        var leaf = name.Contains('.', StringComparison.Ordinal) ? name[(name.LastIndexOf('.') + 1)..] : name;
+        if (database.Schemas.TryGetValue(leaf, out var schema))
+        {
+            schemaId = schema.SchemaId;
+            return true;
+        }
+        schemaId = 0;
+        return false;
+    }
+
+    private static bool TryResolveObjectByName(Database database, string name, out int objectId, out int schemaId)
+    {
+        var leaf = name.Contains('.', StringComparison.Ordinal) ? name[(name.LastIndexOf('.') + 1)..] : name;
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var obj in schema.SchemaObjects())
+            {
+                if (BuiltInToken.Comparer.Equals(obj.Name, leaf))
+                {
+                    objectId = obj.ObjectId;
+                    schemaId = obj.SchemaId;
+                    return true;
+                }
+            }
+        }
+        objectId = 0;
+        schemaId = 0;
+        return false;
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
@@ -244,13 +322,6 @@ internal sealed class RoleMemberCheck : Expression
     private readonly Expression roleArg;
     private readonly Expression? principalArg;
     private readonly bool serverScope;
-
-    /// <summary>Fixed database roles other than <c>public</c> / <c>db_owner</c> — dbo is not a member.</summary>
-    private static readonly string[] FixedDatabaseRolesWithoutDbo =
-    [
-        "db_accessadmin", "db_backupoperator", "db_datareader", "db_datawriter",
-        "db_ddladmin", "db_denydatareader", "db_denydatawriter", "db_securityadmin",
-    ];
 
     /// <summary>Fixed server roles other than <c>public</c> — the simulator has no server-role membership.</summary>
     private static readonly string[] FixedServerRolesWithoutPublic =
@@ -289,26 +360,17 @@ internal sealed class RoleMemberCheck : Expression
             return SqlValue.Null(SqlType.Int32);
         }
 
-        if (BuiltInToken.Comparer.Equals(roleName, "db_owner"))
-            return SqlValue.FromInt32(1);
-        foreach (var fixedRole in FixedDatabaseRolesWithoutDbo)
-        {
-            if (BuiltInToken.Comparer.Equals(roleName, fixedRole))
-                return SqlValue.FromInt32(0);
-        }
-
         var database = runtime.Batch.CurrentDatabase;
-        if (database.Principals.TryGetValue(roleName, out var principal)
-            && principal.TypeCode == "R")
+        var effectiveId = runtime.Batch.Connection.Security.Effective.DatabasePrincipalId;
+        // dbo is implicitly a member of db_owner (probe D2) — real reports 1
+        // without a db_owner membership row.
+        if (effectiveId == Database.DboPrincipalId && BuiltInToken.Comparer.Equals(roleName, "db_owner"))
+            return SqlValue.FromInt32(1);
+        if (database.Principals.TryGetValue(roleName, out var principal) && principal.TypeCode == "R")
         {
-            // dbo's principal id is 1; user-created role membership rides
-            // the GRANT-era membership list.
-            foreach (var (roleId, memberId) in database.RoleMembers)
-            {
-                if (roleId == principal.PrincipalId && memberId == 1)
-                    return SqlValue.FromInt32(1);
-            }
-            return SqlValue.FromInt32(0);
+            // Transitive membership of the effective principal (incl. nested
+            // roles) via the permission checker's role closure.
+            return SqlValue.FromInt32(PermissionChecker.IsRoleMember(database, effectiveId, principal) ? 1 : 0);
         }
         return SqlValue.Null(SqlType.Int32);
     }

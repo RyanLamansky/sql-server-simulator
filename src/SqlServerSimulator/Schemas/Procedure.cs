@@ -72,6 +72,15 @@ internal sealed class Procedure(
     /// invoked).
     /// </summary>
     public readonly string BodyText = bodyText;
+
+    /// <summary>
+    /// The module's <c>WITH EXECUTE AS</c> clause captured at CREATE:
+    /// <c>OWNER</c> / <c>SELF</c> / <c>CALLER</c> or a database-user name;
+    /// <c>null</c> when the clause is absent. Pushed as an impersonation frame
+    /// around the body at invocation (OWNER / SELF resolve to dbo, CALLER is a
+    /// no-op).
+    /// </summary>
+    public string? ExecuteAsClause;
 }
 
 /// <summary>

@@ -13,6 +13,7 @@ internal static partial class BuiltInResources
         // Pushdown-aware sys.<view> (see BuiltInResources.CoreObjects.cs::SysP).
         void SysP(string name, HeapColumn[] columns, string[] pushdownColumns, Func<Parser.BatchContext, Database, CatalogFilter, IEnumerable<SqlValue[]>> filtered) =>
             views["sys." + name] = new CatalogView(name, columns, (batch, database) => filtered(batch, database, CatalogFilter.None), filteredRowGenerator: filtered, pushdownColumns: pushdownColumns);
+        var charFour = CharSqlType.Get(4, Collation.Catalog, Coercibility.Implicit);
         // sys.dm_tran_locks: per-Hold rows across every schema-bound
         // SchemaLock, every HeapTable.TableDataLock, and every per-row
         // entry in HeapTable.RowLocks. GRANT entries come from
@@ -144,7 +145,7 @@ internal static partial class BuiltInResources
             new("minor_id", SqlType.Int32, null, false),
             new("grantee_principal_id", SqlType.Int32, null, false),
             new("grantor_principal_id", SqlType.Int32, null, false),
-            new("type", charTwo, 2, false),
+            new("type", charFour, 4, false),
             new("permission_name", nvarchar128Catalog, 128, true),
             new("state", charOne, 1, false),
             new("state_desc", nvarchar60Catalog, 60, true),
@@ -221,7 +222,7 @@ internal static partial class BuiltInResources
             new("minor_id", SqlType.Int32, null, false),
             new("grantee_principal_id", SqlType.Int32, null, false),
             new("grantor_principal_id", SqlType.Int32, null, false),
-            new("type", charTwo, 2, false),
+            new("type", charFour, 4, false),
             new("permission_name", nvarchar128Catalog, 128, true),
             new("state", charOne, 1, false),
             new("state_desc", nvarchar60Catalog, 60, true),
@@ -317,7 +318,6 @@ internal static partial class BuiltInResources
         // carries. server_audits /
         // server_file_audits / cryptographic_providers are server-scoped (the
         // row generator ignores the database). See docs/claude/catalog-views.md.
-        var charFour = CharSqlType.Get(4, Collation.Catalog, Coercibility.Implicit);
         Sys("symmetric_keys",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -558,8 +558,8 @@ internal static partial class BuiltInResources
 
     private static IEnumerable<SqlValue[]> EnumerateSysDatabasePermissions(Parser.BatchContext batch, Database database)
     {
-        var charTwo = SqlType.GetChar(2);
-        var charOne = SqlType.GetChar(1);
+        var typeChar = SqlType.GetChar(4);
+        var stateChar = SqlType.GetChar(1);
         foreach (var perm in database.Permissions)
         {
             var classDesc = perm.Class switch
@@ -585,9 +585,9 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(perm.MinorId),
                 SqlValue.FromInt32(perm.GranteePrincipalId),
                 SqlValue.FromInt32(perm.GrantorPrincipalId),
-                SqlValue.FromChar(charTwo, perm.TypeCode),
+                SqlValue.FromChar(typeChar, perm.TypeCode),
                 SqlValue.FromNVarchar(perm.PermissionName),
-                SqlValue.FromChar(charOne, perm.State),
+                SqlValue.FromChar(stateChar, perm.State),
                 SqlValue.FromNVarchar(stateDesc),
             ];
         }

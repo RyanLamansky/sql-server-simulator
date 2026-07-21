@@ -181,9 +181,54 @@ partial class Simulation
         // Required trailing ; — but the dispatch loop may have already
         // consumed it (statement separators are flexible). If the cursor
         // sits on either ; or end-of-batch, accept; otherwise raise Msg 10713.
-        return context.Token is not (null or Operator { Character: ';' })
-            ? throw SimulatedSqlException.MergeMustBeTerminated()
-            : ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output);
+        if (context.Token is not (null or Operator { Character: ';' }))
+            throw SimulatedSqlException.MergeMustBeTerminated();
+        if (!context.Batch.IsSkipping)
+            CheckMergePermissions(context.Batch, destinationTable, sourceView, whenClauses);
+        return ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output);
+    }
+
+    /// <summary>
+    /// Checks MERGE permissions on the target: SELECT (the ON predicate reads
+    /// it) plus the write permission of each action kind present (INSERT /
+    /// UPDATE / DELETE). Denials surface as Msg 229. The source read is not
+    /// separately checked — a documented gap.
+    /// </summary>
+    private static void CheckMergePermissions(BatchContext batch, HeapTable destinationTable, View? sourceView, IReadOnlyList<WhenClause> whenClauses)
+    {
+        void Check(string permission)
+        {
+            if (sourceView is not null)
+                PermissionEnforcement.CheckView(batch, permission, sourceView);
+            else
+                PermissionEnforcement.CheckTable(batch, permission, destinationTable);
+        }
+
+        Check("SELECT");
+        var insert = false;
+        var update = false;
+        var delete = false;
+        foreach (var clause in whenClauses)
+        {
+            switch (clause.Action)
+            {
+                case MergeActionKind.Insert:
+                    insert = true;
+                    break;
+                case MergeActionKind.Update:
+                    update = true;
+                    break;
+                case MergeActionKind.Delete:
+                    delete = true;
+                    break;
+            }
+        }
+        if (insert)
+            Check("INSERT");
+        if (update)
+            Check("UPDATE");
+        if (delete)
+            Check("DELETE");
     }
 
     /// <summary>

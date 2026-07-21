@@ -33,10 +33,18 @@ partial class Simulation
         if (batch.IsSkipping)
             return;
 
-        var simulation = context.Connection.Simulation;
+        // A restricted principal (impersonated non-dbo user, or an
+        // authenticated login mapped to a non-dbo user) can't cross databases:
+        // Msg 916, session stays in the current database. A dbo / sa session
+        // keeps the unrestricted switch.
+        var connection = context.Connection;
+        if (!connection.Security.EffectiveIsDbo)
+            throw SimulatedSqlException.CannotAccessDatabaseUnderSecurityContext(connection.Security.Effective.LoginName, nameToken.Value);
+
+        var simulation = connection.Simulation;
         if (!simulation.Databases.TryGetValue(nameToken.Value, out var target))
             throw SimulatedSqlException.DatabaseDoesNotExist(nameToken.Value);
 
-        context.Connection.CurrentDatabase = target;
+        connection.CurrentDatabase = target;
     }
 }

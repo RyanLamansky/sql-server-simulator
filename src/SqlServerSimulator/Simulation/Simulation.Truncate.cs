@@ -67,6 +67,15 @@ partial class Simulation
         if (destination is null || !destination.TryGetValue(name.Leaf, out var table))
             throw SimulatedSqlException.CannotTruncateObjectDoesNotExist(name.Leaf);
 
+        // TRUNCATE requires ALTER on the object; denial surfaces as Msg 1088
+        // (its own double-quoted shape), not Msg 229.
+        if (!isLocalTempTable && !isGlobalTempTable && PermissionEnforcement.Applies(batch)
+            && !PermissionChecker.IsGranted(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId,
+                "ALTER", PermissionChecker.ClassObject, table.ObjectId, table.SchemaId))
+        {
+            throw SimulatedSqlException.CannotFindObjectForAlter(name.Leaf);
+        }
+
         // Sch-M on the target for the duration of the statement — waits for
         // any concurrent Sch-S holders to drain before the destructive page-
         // swap and identity reset proceed.

@@ -368,11 +368,13 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var opened = simulation.CreateDbConnection();
         opened.Open();
         opened.InfoMessage += this.OnInfoMessage;
+        var target = opened.CurrentDatabase;
         if (requestedDatabase.Length > 0)
         {
             try
             {
                 opened.ChangeDatabase(requestedDatabase);
+                target = opened.CurrentDatabase;
             }
             catch (SimulatedSqlException)
             {
@@ -381,16 +383,29 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // double quotes) followed by Msg 18456 severity 14, then the
                 // connection closes. The engine's Msg 911 stays the shape for
                 // a mid-session USE; login gets the wrapping pair.
-                writer.WriteErrorOrInfo(Tds.TokenError, 4060, 1, 11, $"Cannot open database \"{requestedDatabase}\" requested by the login. The login failed.", "SIMULATED", "", 1);
-                writer.WriteErrorOrInfo(Tds.TokenError, 18456, 1, 14, $"Login failed for user '{userName}'.", "SIMULATED", "", 1);
-                writer.WriteDone(Tds.DoneError, 0);
-                opened.Dispose();
-                return false;
+                return FailLogin(writer, requestedDatabase, userName, opened);
             }
         }
 
+        // Map the validated login to its database user in the connect-target
+        // database and stamp the session principal (mapped user / guest-in-
+        // master / 4060-refusal per the shared resolution). A refusal writes the
+        // same 4060 + 18456 pair as a missing database.
+        if (!Simulation.TryMapLoginToDatabaseUser(simulation, target, userName, out var principal))
+            return FailLogin(writer, target.Name, userName, opened);
+        opened.Security = Simulation.BuildAuthenticatedSecurityContext(principal, userName);
+
         this.connection = opened;
         return true;
+    }
+
+    private static bool FailLogin(TdsTokenWriter writer, string databaseName, string userName, SimulatedDbConnection opened)
+    {
+        writer.WriteErrorOrInfo(Tds.TokenError, 4060, 1, 11, $"Cannot open database \"{databaseName}\" requested by the login. The login failed.", "SIMULATED", "", 1);
+        writer.WriteErrorOrInfo(Tds.TokenError, 18456, 1, 14, $"Login failed for user '{userName}'.", "SIMULATED", "", 1);
+        writer.WriteDone(Tds.DoneError, 0);
+        opened.Dispose();
+        return false;
     }
 
     private void OnInfoMessage(object? sender, SimulatedInfoMessageEventArgs e)
@@ -790,6 +805,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     {
         var previous = this.connection!;
         var database = previous.Database;
+        var loginName = previous.Security.OriginalLoginName;
         this.transaction = null;
         previous.Dispose();
 
@@ -799,6 +815,12 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         this.pendingInfoMessages.Clear();
         if (!string.Equals(fresh.Database, database, StringComparison.Ordinal))
             fresh.ChangeDatabase(database);
+
+        // Re-stamp the session principal from the original login so a reset
+        // connection keeps its mapped-user identity (the reset preserves the
+        // login, only the session state is cleared).
+        if (Simulation.TryMapLoginToDatabaseUser(simulation, fresh.CurrentDatabase, loginName, out var principal))
+            fresh.Security = Simulation.BuildAuthenticatedSecurityContext(principal, loginName);
 
         this.connection = fresh;
     }

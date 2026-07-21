@@ -44,6 +44,8 @@ partial class Simulation
         }
         if (destinationTable.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);
+        if (!context.Batch.IsSkipping)
+            PermissionEnforcement.CheckObject(context.Batch, "INSERT", destinationTable.ObjectId, destinationTable.SchemaId, destinationTable.Name, destinationName.ImmediateQualifier ?? Database.DefaultSchemaName);
         // Phase 1b: acquire table-IX on the INSERT target (escalates to
         // table-X via TABLOCK*); row-X is taken per inserted row in
         // ProcessHeapInsert.
@@ -64,7 +66,14 @@ partial class Simulation
     /// from <see cref="View.RejectionReason"/>. OUTPUT with a view target
     /// is rejected at the inner site (NotSupportedException).
     /// </summary>
-    private static SimulatedStatementOutcome ProcessViewInsert(View destinationView, ParserContext context, Selection.DmlTopLimit? top) =>
+    private static SimulatedStatementOutcome ProcessViewInsert(View destinationView, ParserContext context, Selection.DmlTopLimit? top)
+    {
+        if (!context.Batch.IsSkipping)
+            PermissionEnforcement.CheckObject(context.Batch, "INSERT", destinationView.ObjectId, destinationView.SchemaId, destinationView.Name, destinationView.Schema.Name);
+        return ProcessViewInsertCore(destinationView, context, top);
+    }
+
+    private static SimulatedStatementOutcome ProcessViewInsertCore(View destinationView, ParserContext context, Selection.DmlTopLimit? top) =>
         HasInsteadOfTrigger(context.Batch, destinationView, TriggerActions.Insert)
             ? ProcessInsteadOfInsertOnView(destinationView, context, top)
             : destinationView.BaseTable is { } baseTable
@@ -545,6 +554,8 @@ partial class Simulation
     private static List<SqlValue[]> ExecuteSelectSource(ParserContext context, int expectedColumnCount)
     {
         var selection = Selection.Parse(context, depth: 0);
+        if (!context.Batch.IsSkipping)
+            PermissionEnforcement.CheckReadSources(context.Batch, selection.ReferencedSecurables);
 
         if (selection.Schema.Length < expectedColumnCount)
             throw SimulatedSqlException.InsertSelectListFewerThanInsertList();

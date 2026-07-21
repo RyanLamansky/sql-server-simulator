@@ -102,6 +102,14 @@ partial class Simulation
         Selection.DmlTopLimit? top,
         View? sourceView = null)
     {
+        if (!context.Batch.IsSkipping)
+        {
+            if (sourceView is not null)
+                PermissionEnforcement.CheckView(context.Batch, "DELETE", sourceView);
+            else
+                PermissionEnforcement.CheckTable(context.Batch, "DELETE", table);
+        }
+
         BooleanExpression? where = null;
         Cursor? positionedCursor = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -224,6 +232,8 @@ partial class Simulation
 
         var table = sources[targetIndex].BackingTable
             ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
+        if (!context.Batch.IsSkipping)
+            PermissionEnforcement.CheckTable(context.Batch, "DELETE", table);
 
         // Alias-form DELETE: table-IX wasn't pre-acquired (target identified
         // post-FROM). Acquire it now; row-X per affected row fires at the

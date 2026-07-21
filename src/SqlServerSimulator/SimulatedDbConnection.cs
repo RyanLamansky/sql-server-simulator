@@ -28,6 +28,18 @@ public sealed class SimulatedDbConnection : DbConnection
     }
 
     /// <summary>
+    /// The session's security identity: original login, base database
+    /// principal, and impersonation stack. Defaults to the dbo-everywhere
+    /// identity (<see cref="SessionSecurityContext.CreateDefault"/>), so an
+    /// unauthenticated in-process connection is indistinguishable from today.
+    /// Restamped at <see cref="Open"/> when the connection string carries a
+    /// <c>User ID</c>, and by the TDS endpoint from the validated login;
+    /// mutated by <c>EXECUTE AS</c> / <c>REVERT</c> and module
+    /// <c>WITH EXECUTE AS</c>. Read by the identity scalars.
+    /// </summary>
+    internal SessionSecurityContext Security = SessionSecurityContext.CreateDefault();
+
+    /// <summary>
     /// Picks the database a fresh connection points its
     /// <see cref="CurrentDatabase"/> at. Three-tier resolution:
     /// <list type="number">
@@ -530,13 +542,69 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal void RaiseInfoMessage(SimulatedInfoMessageEventArgs args) => this.InfoMessage?.Invoke(this, args);
 
+    private string connectionString = "";
+    private string? pendingUserId;
+    private string? pendingPassword;
+    private string? pendingInitialCatalog;
+
     /// <inheritdoc/>
     [AllowNull]
     public override string ConnectionString
     {
-        get => "";
-        set => throw new NotSupportedException("A simulated connection has no connection string; it is bound to its Simulation at creation via Simulation.CreateDbConnection().");
+        get => this.connectionString;
+        set
+        {
+            // SqlConnection forbids mutating the connection string on an open
+            // connection; mirror that. The connection is bound to its
+            // Simulation at creation, so Data Source / Server are ignored — the
+            // parser recognizes only the credential + database keywords that
+            // carry meaning in-process.
+            if (this.state == ConnectionState.Open)
+                throw new InvalidOperationException("Not allowed to change the 'ConnectionString' property. The connection's current state is open.");
+            this.ParseConnectionString(value);
+        }
     }
+
+    /// <summary>
+    /// Minimal <c>SqlConnectionStringBuilder</c>-style parser: splits on
+    /// <c>;</c>, matches keys case-insensitively, and captures the credential +
+    /// initial-catalog keywords that carry in-process meaning
+    /// (<c>User ID</c>/<c>UID</c>, <c>Password</c>/<c>PWD</c>,
+    /// <c>Initial Catalog</c>/<c>Database</c>). Every other keyword (Server,
+    /// Encrypt, Pooling, …) is accepted and ignored — the connection is already
+    /// bound to its Simulation. Values may be wrapped in matching single or
+    /// double quotes.
+    /// </summary>
+    private void ParseConnectionString(string? value)
+    {
+        this.connectionString = value ?? "";
+        this.pendingUserId = null;
+        this.pendingPassword = null;
+        this.pendingInitialCatalog = null;
+        if (string.IsNullOrEmpty(value))
+            return;
+        foreach (var part in value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var equals = part.IndexOf('=', StringComparison.Ordinal);
+            if (equals < 0)
+                continue;
+            var key = part[..equals].Trim();
+            var raw = part[(equals + 1)..].Trim();
+            var unquoted = raw.Length >= 2 && ((raw[0] == '\'' && raw[^1] == '\'') || (raw[0] == '"' && raw[^1] == '"'))
+                ? raw[1..^1]
+                : raw;
+            if (KeyMatches(key, "User ID", "UID"))
+                this.pendingUserId = unquoted;
+            else if (KeyMatches(key, "Password", "PWD"))
+                this.pendingPassword = unquoted;
+            else if (KeyMatches(key, "Initial Catalog", "Database"))
+                this.pendingInitialCatalog = unquoted;
+        }
+    }
+
+    private static bool KeyMatches(string key, string canonical, string alias) =>
+        key.Equals(canonical, StringComparison.OrdinalIgnoreCase)
+        || key.Equals(alias, StringComparison.OrdinalIgnoreCase);
 
     /// <inheritdoc/>
     public override string Database => this.CurrentDatabase.Name;
@@ -575,6 +643,13 @@ public sealed class SimulatedDbConnection : DbConnection
     {
         if (string.IsNullOrWhiteSpace(databaseName))
             throw new ArgumentException("Database cannot be null, the empty string, or string of only whitespace.", nameof(databaseName));
+
+        // A restricted principal (an impersonated non-dbo user, or an
+        // authenticated login mapped to a non-dbo user) can't cross databases —
+        // Msg 916, session stays put. A dbo / sa session (the in-process
+        // default) keeps today's unrestricted switch.
+        if (!this.Security.EffectiveIsDbo)
+            throw SimulatedSqlException.CannotAccessDatabaseUnderSecurityContext(this.Security.Effective.LoginName, databaseName);
 
         if (!this.Simulation.Databases.TryGetValue(databaseName, out var target))
             throw SimulatedSqlException.DatabaseDoesNotExist(databaseName);
@@ -658,7 +733,43 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <inheritdoc/>
     public override void Open()
     {
+        // Connection-string authentication. A User ID validates against the
+        // CREATE LOGIN registry (empty registry accepts anything, mirroring the
+        // TDS endpoint) and stamps the session principal to the login's mapped
+        // database user in the target database; failures raise the Msg 18456 /
+        // 4060 shapes. No User ID keeps exactly today's behavior — the default
+        // dbo identity — with an optional Initial Catalog switch.
+        if (this.pendingUserId is { } userId)
+            this.AuthenticateConnectionStringLogin(userId, this.pendingPassword ?? "", this.pendingInitialCatalog);
+        else if (this.pendingInitialCatalog is { Length: > 0 } catalog)
+            this.ChangeDatabase(catalog);
         this.state = ConnectionState.Open;
+    }
+
+    /// <summary>
+    /// Validates a connection-string login against <see cref="Simulation.Logins"/>,
+    /// resolves the requested (or default) database, maps the login to its
+    /// database user there, and stamps <see cref="Security"/>. Mirrors the TDS
+    /// endpoint's connect flow for the in-process front door.
+    /// </summary>
+    private void AuthenticateConnectionStringLogin(string userId, string password, string? initialCatalog)
+    {
+        if (!this.Simulation.ValidateLoginCredentials(userId, password))
+            throw SimulatedSqlException.LoginFailed(userId);
+
+        var target = this.CurrentDatabase;
+        if (initialCatalog is { Length: > 0 })
+        {
+            if (!this.Simulation.Databases.TryGetValue(initialCatalog, out var requested))
+                throw SimulatedSqlException.CannotOpenDatabaseRequestedByLogin(initialCatalog);
+            target = requested;
+        }
+
+        if (!Simulation.TryMapLoginToDatabaseUser(this.Simulation, target, userId, out var principal))
+            throw SimulatedSqlException.CannotOpenDatabaseRequestedByLogin(target.Name);
+
+        this.CurrentDatabase = target;
+        this.Security = Simulation.BuildAuthenticatedSecurityContext(principal, userId);
     }
 
     /// <inheritdoc/>

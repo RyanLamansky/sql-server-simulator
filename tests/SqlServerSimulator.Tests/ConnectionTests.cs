@@ -68,9 +68,21 @@ public class ConnectionTests
     }
 
     [TestMethod]
-    public void ConnectionStringSetterIsNotSupported()
+    public void ConnectionStringSetterOnOpenConnectionThrows()
     {
         using var connection = new Simulation().CreateDbConnection();
-        _ = Assert.ThrowsExactly<NotSupportedException>(() => connection.ConnectionString = "anything");
+        connection.Open();
+        _ = Assert.ThrowsExactly<InvalidOperationException>(() => connection.ConnectionString = "anything");
+    }
+
+    [TestMethod]
+    public void ConnectionStringRoundTripsAndIsIgnoredWithoutUserId()
+    {
+        using var connection = new Simulation().CreateDbConnection();
+        connection.ConnectionString = "Server=ignored;Encrypt=True";
+        Assert.AreEqual("Server=ignored;Encrypt=True", connection.ConnectionString);
+        connection.Open();
+        // No User ID: identity stays the default dbo, database unchanged.
+        Assert.AreEqual("dbo", connection.CreateCommand("select current_user").ExecuteScalar());
     }
 }

@@ -1151,6 +1151,55 @@ partial class SimulatedSqlException
         new($"Cannot {verb} the login '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 15517: <c>EXECUTE AS USER = 'x'</c> when the
+    /// target database principal doesn't exist, can't be impersonated, or the
+    /// caller lacks IMPERSONATE. The name is double-quoted. Probe-confirmed
+    /// (2026-07-21) — including the quirk that <c>EXECUTE AS USER = 'dbo'</c>
+    /// raises this even for a sysadmin session.
+    /// </summary>
+    internal static SimulatedSqlException CannotExecuteAsDatabasePrincipal(string name) =>
+        new($"Cannot execute as the database principal because the principal \"{name}\" does not exist, this type of principal cannot be impersonated, or you do not have permission.", 15517, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15406: <c>EXECUTE AS LOGIN = 'l'</c> when the
+    /// target server principal doesn't exist, can't be impersonated, or the
+    /// caller lacks IMPERSONATE. The name is double-quoted. Probe-confirmed
+    /// (2026-07-21).
+    /// </summary>
+    internal static SimulatedSqlException CannotExecuteAsServerPrincipal(string name) =>
+        new($"Cannot execute as the server principal because the principal \"{name}\" does not exist, this type of principal cannot be impersonated, or you do not have permission.", 15406, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 916: a session running under a restricted
+    /// security context (an impersonated database user, or an authenticated
+    /// login mapped to a non-<c>dbo</c> user) tried to switch databases via
+    /// <c>USE</c> / <c>ChangeDatabase</c>. The principal name is a login name,
+    /// or the WITHOUT-LOGIN user's <c>S-1-9-3-…</c> SID string. Session stays in
+    /// the current database. Probe-confirmed (2026-07-21): severity 14, state 2.
+    /// </summary>
+    internal static SimulatedSqlException CannotAccessDatabaseUnderSecurityContext(string principalName, string databaseName) =>
+        new($"The server principal \"{principalName}\" is not able to access the database \"{databaseName}\" under the current security context.", 916, 14, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 18456: an in-process connection-string login
+    /// (<c>User ID=</c>) failed to authenticate against the <c>CREATE LOGIN</c>
+    /// registry. Same severity-14 / state-1 shape the TDS endpoint writes
+    /// (which emits the token directly rather than through this factory).
+    /// </summary>
+    internal static SimulatedSqlException LoginFailed(string userName) =>
+        new($"Login failed for user '{userName}'.", 18456, 14, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4060: a login couldn't open the requested
+    /// database (missing, or not accessible to the mapped principal). The
+    /// database name is double-quoted, severity 11. On the wire this is
+    /// followed by a Msg 18456; the in-process front door surfaces the 4060
+    /// alone (single-error divergence documented in <c>permissions.md</c>).
+    /// </summary>
+    internal static SimulatedSqlException CannotOpenDatabaseRequestedByLogin(string databaseName) =>
+        new($"Cannot open database \"{databaseName}\" requested by the login. The login failed.", 4060, 11, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2749: an <c>ALTER COLUMN</c> on an IDENTITY
     /// column tried to change the underlying type to something outside the
     /// integer / decimal-scale-0 family. Probe-confirmed wording against SQL

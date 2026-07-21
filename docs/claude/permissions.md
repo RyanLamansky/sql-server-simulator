@@ -1,8 +1,10 @@
-# Permission statements + principal DDL
+# Permissions: identity, enforcement, and the writer surface
 
-`GRANT` / `REVOKE` / `DENY` parsing plus the principal DDL surface (`CREATE USER` / `CREATE ROLE` / `ALTER ROLE` / `DROP USER` / `DROP ROLE`, and the server-scope `CREATE LOGIN` / `ALTER LOGIN` / `DROP LOGIN`) + three new catalog views.
-Parse-and-store fidelity tier — no enforcement of the actual permissions on subsequent operations.
-The exception is logins: the TDS network endpoint enforces them as connection credentials (see [`tds-endpoint.md`](tds-endpoint.md)).
+`GRANT` / `REVOKE` / `DENY` plus the principal DDL surface (`CREATE USER` / `CREATE ROLE` / `ALTER ROLE` / `DROP USER` / `DROP ROLE`, and the server-scope `CREATE LOGIN` / `ALTER LOGIN` / `DROP LOGIN`) + catalog views.
+**Permissions are enforced**: a non-dbo session's SELECT / INSERT / UPDATE / DELETE / EXECUTE / TRUNCATE(=ALTER) / CREATE TABLE is checked at execution time against its effective principal, with role closure, fixed roles, DENY-beats-GRANT, covering permissions, and ownership chaining.
+**Session identity is real**: a per-connection principal (original login + database user + impersonation stack) drives the identity scalars, `EXECUTE AS` / `REVERT`, module `WITH EXECUTE AS`, connection-string / TDS authentication, and the Msg 916 restricted-principal `USE` gate.
+A session that never authenticates and never runs `EXECUTE AS` is `dbo`, and **dbo bypasses every check** — the enforcement layer short-circuits on `SessionSecurityContext.EffectiveIsDbo` before any allocation, so existing (dbo) consumers see byte-identical behavior.
+Logins are enforced as connection credentials at both front doors (TDS endpoint — see [`tds-endpoint.md`](tds-endpoint.md) — and in-process `User ID=` connection strings).
 
 ## Storage
 
@@ -13,6 +15,9 @@ The exception is logins: the TDS network endpoint enforces them as connection cr
 - `type_desc` (string): `SQL_USER` / `DATABASE_ROLE`
 - `is_fixed_role` (bool)
 - `create_date` / `modify_date`
+- `LoginName` (string?) — the mapped server login from `CREATE USER … FOR LOGIN` (null otherwise); drives login → database-user resolution at connect.
+- `SecurityIdentifierString` (string?) — the deterministic `S-1-9-3-…` SID a `CREATE USER … WITHOUT LOGIN` user reports through `SYSTEM_USER` / Msg 916 (FNV-derived from the name).
+- `EffectiveLoginIdentity` — the `SYSTEM_USER` value while impersonating this user (login ?? SID ?? name).
 
 **`DatabasePermission`** (`src/SqlServerSimulator/DatabasePermission.cs`) carries class + major_id + minor_id + grantee/grantor ids + permission_name + 4-char type code + state (`G`/`W`/`D`/`R`).
 
@@ -31,7 +36,28 @@ Both live on `Database`:
 | 3 | `INFORMATION_SCHEMA` | `S` | false |
 | 4 | `sys` | `S` | false |
 
+Plus the nine fixed database roles at their real ids (`Database.FixedDatabaseRoles`; 16388 is deliberately absent, matching real): 16384 `db_owner`, 16385 `db_accessadmin`, 16386 `db_securityadmin`, 16387 `db_ddladmin`, 16389 `db_backupoperator`, 16390 `db_datareader`, 16391 `db_datawriter`, 16392 `db_denydatareader`, 16393 `db_denydatawriter` — all `type R`, `is_fixed_role`, owned by dbo (owning_principal_id 1, so the DacFx cdc-filter predicate keeps working).
 User principals start at 5 via `Database.AllocatePrincipalId`.
+
+## Session principal & impersonation
+
+`SessionSecurityContext` (`src/SqlServerSimulator/SessionSecurityContext.cs`) lives on `SimulatedDbConnection.Security` (session scope).
+It carries the original login name, a base `SecurityPrincipalFrame` (database-principal id + name + login), and an impersonation stack.
+`Effective` is the top frame (or the base); `EffectiveIsDbo` (principal id == 1) is the "unrestricted, may USE" gate today and the read a future enforcement stage's dbo bypass consumes.
+An unauthenticated in-process connection uses `CreateDefault()` — dbo as login, database user, and original login everywhere — so existing consumers see byte-identical identity output.
+
+**Identity scalars read the effective frame**: `CURRENT_USER` / `SESSION_USER` / `USER` / `USER_NAME()` / `USER_ID()` / `DATABASE_PRINCIPAL_ID()` → the effective database user; `SYSTEM_USER` / `SUSER_SNAME()` / `SUSER_NAME()` → the effective login (or the WITHOUT-LOGIN SID string); `ORIGINAL_LOGIN()` → the session's original login.
+
+**`EXECUTE AS` / `REVERT`** (`Simulation/Simulation.ExecuteAs.cs`, dispatched by peeking the `AS` after `EXEC`/`EXECUTE`; `REVERT` is its own statement).
+- `EXECUTE AS USER = 'x'` pushes x's database-principal frame; `EXECUTE AS USER = 'dbo'` always raises Msg 15517 (probed quirk), as does a missing / non-user target.
+- `EXECUTE AS LOGIN = 'l'` maps l to its database user in the current DB (Msg 15406 on a missing login).
+- `REVERT` pops one frame; a stray REVERT at the base is a silent no-op.
+- Nested impersonation by a non-dbo principal needs a class-4 IMPERSONATE grant on the target (a direct `Database.Permissions` scan — role-closure expansion is deferred).
+- Module `WITH EXECUTE AS {CALLER | SELF | OWNER | 'user'}` is captured on `Procedure.ExecuteAsClause` and pushed/popped around the body in `InvokeProcedure` (OWNER / SELF → dbo, CALLER → no-op).
+  Function / trigger `EXECUTE AS` clauses stay parse-and-discard (runtime honoring deferred).
+
+**Authentication.** A login validates against `Simulation.Logins` (empty registry accepts anything) at TDS connect and at in-process `Open()` when the connection string carries `User ID=`, then maps to a database user via `Simulation.TryMapLoginToDatabaseUser`: an explicit `FOR LOGIN` user in the target DB, else `sa` → dbo, else — for a login that is mapping-managed anywhere — `guest` in `master` or a Msg 4060 refusal, else the **permissive dbo default** (an unmapped login keeps the pre-identity endpoint's any-credentials / full-access behavior; the strict guest/4060 path engages only once a login has a `FOR LOGIN` user).
+`USE` / `ChangeDatabase` under a restricted (non-dbo effective) principal raises Msg 916; the session stays put.
 
 ## Parser
 
@@ -47,11 +73,44 @@ DENY <perm_list> [ON <securable>] TO <principal_list> [AS <grantor>]
 
 - Permission list eats word sequences ending at comma / `ON` / `TO` / `AS` / `WITH`.
   A sequence of bare identifiers fuses into one permission name (e.g. `VIEW ANY COLUMN ENCRYPTION KEY DEFINITION` → single permission).
-- `ON` clause accepts `<name>`, `OBJECT::<name>`, `SCHEMA::<name>`, `DATABASE::<name>`, `TYPE::<name>` via a peek-restore pattern for the `::` operator pair.
-- Grantee names accept either `Name` or `ReservedKeyword` raw text (so `public` — tokenized as `ReservedKeyword.Public` — works without special-casing).
-- `REVOKE GRANT OPTION FOR` removes the W-state row only.
-- `CASCADE` parses-and-discards.
-- `WITH GRANT OPTION` records the W state but doesn't propagate.
+- `ON` clause resolves to a real (class, major_id): a bare or `OBJECT::<name>` name → class 1 + the object's id (and its schema id, for the covering-scope walk); `SCHEMA::<name>` → class 3 + schema id; `USER::<name>` → class 4 + principal id (the IMPERSONATE gate); no `ON` clause / `DATABASE::<name>` → class 0.
+  An unknown securable raises the Msg 15151 object-variant (`Cannot find the object '<name>', because it does not exist or you do not have permission.`).
+  A permission incompatible with the object kind (SELECT on a proc, EXECUTE on a table / view / TVF) raises **Msg 4606**.
+- Grantee names accept either `Name` or `ReservedKeyword` raw text (so `public` works without special-casing).
+- The stored row's grantor is the granting session's **effective principal** (an impersonated grant records the impersonated grantor).
+- `WITH GRANT OPTION` stores a **single `W` row** (not `G`+`W`).
+- `REVOKE GRANT OPTION FOR … [CASCADE]` downgrades `W`→`G` and (with CASCADE) removes the rows the grantee delegated; a plain `REVOKE` of a grantable row that has live delegations, without CASCADE, raises **Msg 4611**.
+  Full `REVOKE … CASCADE` removes the whole delegation subtree (rows whose grantor is in the revoked-from set, transitively via `grantor_principal_id`).
+- `G` and `D` rows coexist for the same triple; a plain REVOKE removes both.
+- A GRANT / DENY / REVOKE targeting `sa` / `dbo` / `sys` / `INFORMATION_SCHEMA` / self silently no-ops and delivers **Msg 4624 on the info-message channel** (`SimulatedDbConnection.InfoMessage`) — not catchable by TRY/CATCH, no row stored.
+- A non-dbo grantor must hold a `W` row for the permission being granted; missing authority surfaces the same Msg 15151 object-variant (permission errors leak as "cannot find the object").
+- `CREATE USER` auto-seeds a CONNECT grant (class 0, type `CO`, grantor dbo, state G).
+
+### Enforcement (execution-time)
+
+`PermissionChecker` (the effective-permission engine) + `PermissionEnforcement` (the dispatch/row-source glue).
+Both short-circuit on `EffectiveIsDbo` before any allocation, and on a static module body (ownership chaining), so a dbo session and any module-internal reference pay nothing.
+
+Algorithm:
+1. **Principal closure** — the effective principal + every role it belongs to transitively (nested roles) + `public` (id 0).
+   Fixed-role memberships live in `Database.RoleMembers` like any role, so the closure folds them in.
+2. **DENY binds first** — an explicit `D` row (or a deny-role: `db_denydatareader` → SELECT, `db_denydatawriter` → IUD) matching the permission or any covering permission at any scope denies, regardless of grants; explicit DENY binds even a `db_owner` member.
+3. **GRANT test** — a `G`/`W` row (or a grant-role) matching the permission or a covering permission at object → schema → database scope.
+   Grant-roles: `db_owner` → everything, `db_datareader` → SELECT, `db_datawriter` → IUD, `db_ddladmin` → DDL (ALTER / CREATE TABLE).
+4. **Covering / scope** — the covering graph is imported from `sys.fn_builtin_permissions` for the OBJECT / SCHEMA / DATABASE classes: OBJECT SELECT ← RECEIVE ← CONTROL, DATABASE CREATE TABLE ← ALTER ← CONTROL, everything else ← CONTROL; each scope's permission maps same-name up (object SELECT → schema SELECT → database SELECT).
+
+Denial is **Msg 229** (`The <PERM> permission was denied on the object '<name>', database '<db>', schema '<schema>'.`), except TRUNCATE (**Msg 1088**, its own double-quoted shape) and CREATE TABLE (**Msg 262**).
+Existence leaks: SELECT on a missing object is plain Msg 208; Msg 229 fires only for existing objects.
+
+Wiring:
+- **SELECT** — each real table / view / TVF read (including nested subqueries and derived tables) is recorded on `Selection.ReferencedSecurables` at parse time (principal-independent, so it rides the cached plan) and checked at execution entry (and on plan-cache replay).
+  A scalar UDF invoked in a query records an EXECUTE securable the same way (checked once per statement, never per row).
+- **INSERT / UPDATE / DELETE / MERGE** — the target's write permission is checked (INSERT / UPDATE / DELETE; MERGE checks the union of its action kinds plus SELECT on the target); `INSERT … SELECT` also checks SELECT on the source's recorded reads.
+- **EXEC proc** / **scalar UDF invocation** — EXECUTE on the module at the call site (the Msg 229 carries the proc's schema-qualified name as its Procedure attribution).
+- **TRUNCATE** — ALTER on the object → Msg 1088.
+- **CREATE TABLE** — the `db_ddladmin` / `db_owner` / explicit-CREATE-TABLE gate → Msg 262 (temp tables exempt).
+- **Ownership chaining** — inside a proc / view / TVF / scalar-UDF / trigger body (`BatchContext.EnforcesPermissions` is false there) all checks are suppressed; dynamic SQL (`EXEC('…')` / `sp_executesql`, whose `ProcFrame.IsDynamicSql` is set) re-enables them.
+  Everything is dbo-owned, so all static chains are unbroken — only the outermost referenced object of the user's statement is checked.
 
 ### Principal DDL
 
@@ -86,9 +145,9 @@ In-process connections never authenticate — login DDL through one is how the r
 
 ## Permission type-code derivation
 
-The shipped 4-char code is the first-letter-of-each-word right-padded with spaces (e.g. `VIEW ANY COLUMN MASTER KEY DEFINITION` → `VACM`).
-**Approximate** — real SQL Server's mapping uses a per-permission lookup that diverges for short names (`SELECT` → `SL`, `UPDATE` → `UP`).
-A polish pass would import the canonical table.
+`Simulation.CanonicalPermissionTypeCode` imports the canonical 4-char `sys.database_permissions.type` codes from `sys.fn_builtin_permissions` for the common OBJECT / SCHEMA / DATABASE / DATABASE_PRINCIPAL permissions (`SELECT` → `SL`, `UPDATE` → `UP`, `EXECUTE` → `EX`, `CONTROL` → `CL`, `IMPERSONATE` → `IM`, `CREATE TABLE` → `CRTB`, …).
+Codes are stored space-padded to 4 chars and the view's `type` column is `char(4)`, matching real's trailing-space-bearing values (`'SL  '`).
+Names outside the imported set (AW's `VIEW ANY COLUMN … DEFINITION` grants) fall back to the first-letter-of-each-word heuristic (`VIEW ANY COLUMN MASTER KEY DEFINITION` → `VACM`), which won't byte-match real for every long name.
 
 `class_desc` / `state_desc` are spelled out per the probe-confirmed enum:
 - `class_desc`: `DATABASE` / `OBJECT_OR_COLUMN` / `SCHEMA` / `DATABASE_PRINCIPAL`
@@ -125,17 +184,23 @@ Registered in `BuiltInResources.Security.cs` via the shared `EmptyCatalogRows`.
 
 | Msg | When |
 |---|---|
-| 15151 | Unknown principal in GRANT/REVOKE/DENY/ALTER ROLE. |
+| 15151 | Unknown principal in GRANT/REVOKE/DENY/ALTER ROLE; unknown securable object / missing grant authority (object-variant `CannotFindObject`). |
 | 15023 | Duplicate `CREATE USER` / `CREATE ROLE` name. |
+| 229 | SELECT / INSERT / UPDATE / DELETE / EXECUTE denied (sev 14 state 5; Procedure attribution on EXEC). |
+| 262 | CREATE TABLE by a principal lacking `db_ddladmin` / `db_owner`. |
+| 1088 | TRUNCATE denied (ALTER on the object) — double-quoted, sev 16 state 7. |
+| 4606 | Permission incompatible with the object kind (SELECT on a proc, EXECUTE on a table / view / TVF). |
+| 4611 | Plain REVOKE of a grantable permission with live delegations, without CASCADE. |
+| 4624 | GRANT / DENY / REVOKE to sa / dbo / sys / INFORMATION_SCHEMA / self — **info channel**, not raised. |
 
-Both probe-confirmed against SQL Server 2025.
+All probe-confirmed against SQL Server 2025.
 
 ## Principal scalars
 
-The simulator doesn't enforce permissions, so these return values that let permission-checking code paths fall through cleanly rather than authoritatively reflecting the (un-modeled) ACL state.
-Probed against SQL Server 2025 (2026-05-11 / 2026-05-22) for shape + return type.
+Probed against SQL Server 2025 for shape + return type.
+The current-principal / id scalars read the session's effective principal; `HAS_PERMS_BY_NAME` / `IS_MEMBER` / `IS_ROLEMEMBER` route through the permission checker (a dbo session keeps its historical `1` / membership answers via the same dbo short-circuit).
 
-**Current-principal placeholders** (parens-less when reserved, parens-bearing otherwise) — all return `'dbo'` since the simulator's only modeled login is the dbo user:
+**Current-principal placeholders** (parens-less when reserved, parens-bearing otherwise) — these now read the session's effective principal (see [Session principal & impersonation](#session-principal--impersonation)); an unauthenticated, unimpersonated session still returns `'dbo'` everywhere:
 - `CURRENT_USER` — reserved keyword, no parens (dispatched directly from `Expression.Parse`'s expression-start switch, NOT through `ResolveBuiltIn`).
 - `SESSION_USER` — same shape, reserved + no parens.
 - `SYSTEM_USER` — same shape, reserved + no parens.
@@ -152,20 +217,21 @@ Probed against SQL Server 2025 (2026-05-11 / 2026-05-22) for shape + return type
 - `DATABASE_PRINCIPAL_ID([name])` — alias of `USER_ID` with the same lookup behavior; real SQL Server exposes both names against the same backing lookup.
 
 **Permission-check placeholders**:
-- `HAS_PERMS_BY_NAME(securable, securable_class, permission [, sub-securable, sub-securable-class])` returns `1` for any non-NULL `permission` argument and NULL for a NULL `permission` — the simulator doesn't enforce permissions, so any check passes.
-  NULL `securable` / `securable_class` are legal and don't affect the result (real reads NULL securable as "the current server or database"; DacFx's bacpac-export gate sends `HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')` and requires 1 — probe-confirmed).
-  Real SQL Server returns 1 / 0 based on the actual grant; the always-1 stance lets code paths gated on this scalar fall through naturally.
-- `IS_MEMBER(group_or_role)` — probe-confirmed 1/0/NULL shape for the dbo session principal: `public` and `db_owner` → 1 (dbo is always a member of both), the other eight fixed database roles → 0, a user-created role → membership per `sys.database_role_members` (dbo's principal id 1), any non-role / unknown name → NULL.
-- `IS_ROLEMEMBER(role [, principal])` — same shape as `IS_MEMBER`.
-  The 2-arg form accepts a principal name; the simulator's single-principal model returns the same result regardless.
-- `IS_SRVROLEMEMBER(role [, login])` — `public` → 1, the other eight fixed server roles → 0 (no server-role membership model), any other name (including database roles) → NULL; NULL → NULL.
-  Probe-confirmed against a non-sysadmin login.
+- `HAS_PERMS_BY_NAME(securable, securable_class, permission [, …])` returns NULL for a NULL `permission`, `1` everywhere for a dbo session (preserving the DacFx bacpac-export gate `HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')` = 1), and otherwise the real checker result (1/0) for a `DATABASE` / `OBJECT` / `SCHEMA` securable_class.
+  A NULL securable_class is the ambiguous "current server or database" request the simulator returns NULL for; an unresolvable OBJECT / SCHEMA securable or an unrecognized class returns NULL.
+- `IS_MEMBER(group_or_role)` — `public` → 1; the effective principal's transitive membership (nested roles + fixed roles via the checker's role closure) → 1/0; dbo → 1 for `db_owner`; any non-role / unknown name → NULL.
+- `IS_ROLEMEMBER(role [, principal])` — same shape as `IS_MEMBER` (the 2-arg named-principal form is not distinguished from the effective principal).
+- `IS_SRVROLEMEMBER(role [, login])` — `public` → 1, the other eight fixed server roles → 0 (no server-role membership model), any other name → NULL; NULL → NULL.
 
 ## Known gaps
 
-- **Server-scope grants** (`GRANT … ON SERVER`), schema-scope grants, column-scope grants — not modeled.
-- **`WITH GRANT OPTION` cascading** — records the W state but doesn't propagate to descendants.
-- **Canonical 4-char permission type codes** — simulator uses a first-letter heuristic; real SQL Server has a per-permission table.
-- **Login-model edges** — login DDL itself is permission-unchecked (anyone can CREATE LOGIN); DISABLE / password policy / lockout not enforced; logins aren't linked to database users (`CREATE USER … FOR LOGIN` still parse-and-discards); no server-role model beyond the fixed `public` row (`ALTER SERVER ROLE` not modeled).
-- **`CREATE USER … FROM EXTERNAL PROVIDER` / `WITH PASSWORD` semantics** — parse-and-discard.
-- **Permission enforcement** — the simulator never checks granted/denied permissions when dispatching subsequent operations.
+- **Column-level grants** (`GRANT SELECT (col) …`, Msg 230), **server-scope grants** (`GRANT … ON SERVER`, server roles beyond `public`, `ALTER SERVER ROLE`), **application roles** — not modeled.
+- **Metadata-visibility filtering** — catalog views (`sys.*` / `INFORMATION_SCHEMA.*`) return every object regardless of the reader's permissions; real hides rows the principal can't see.
+- **General DDL-statement permissions** — only `CREATE TABLE` is gated (Msg 262, via the `db_ddladmin` / `db_owner` fixed-role rule). Other CREATE / ALTER / DROP statements aren't permission-checked.
+- **`db_accessadmin` / `db_securityadmin` / `db_backupoperator`** — membership is tracked and projected, but carries no enforced effect in this bundle.
+- **UPDATE / DELETE additional-read enforcement** — only the write permission on the target is checked. Real also requires SELECT on the target when the statement reads it (probe A2's two-error round trip) and SELECT on any `FROM` / subquery sources of an UPDATE / DELETE; these are not checked (the DML paths don't route their read sources through the securable sink). The `INSERT … SELECT` and MERGE-target-SELECT paths **are** checked.
+- **Scalar UDF in a non-query context** — a UDF invoked in a `SET` / `IF` operand (no active securable sink) is EXECUTE-unchecked; UDFs invoked inside a query are checked.
+- **Guest enable/disable**, **`CREATE USER … FROM EXTERNAL PROVIDER`** + the `WITH` option tail — parse-and-discard.
+- **Login-model edges** — login DDL itself is permission-unchecked; DISABLE / password policy / lockout not enforced.
+- **Delegated-grant authority** is a direct-W-row check (exact securable), not the full covering/scope walk — a non-dbo grantor holding only a wider-scope `W` (schema / database CONTROL) isn't recognized as authorized.
+- **Msg 229 multi-error round trip** — a single denial is raised, not real's paired SELECT-then-write error records.

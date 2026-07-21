@@ -191,6 +191,14 @@ partial class Simulation
         Selection.DmlTopLimit? top,
         View? sourceView = null)
     {
+        if (!context.Batch.IsSkipping)
+        {
+            if (sourceView is not null)
+                PermissionEnforcement.CheckView(context.Batch, "UPDATE", sourceView);
+            else
+                PermissionEnforcement.CheckTable(context.Batch, "UPDATE", table);
+        }
+
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, sourceView);
 
         BooleanExpression? where = null;
@@ -388,6 +396,8 @@ partial class Simulation
 
         var table = sources[targetIndex].BackingTable
             ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
+        if (!context.Batch.IsSkipping)
+            PermissionEnforcement.CheckTable(context.Batch, "UPDATE", table);
 
         // Alias-form UPDATE: table-IX wasn't pre-acquired because the target
         // wasn't yet known. Now that the FROM clause identified it, acquire

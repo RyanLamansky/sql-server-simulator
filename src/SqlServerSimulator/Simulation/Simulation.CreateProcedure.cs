@@ -120,11 +120,12 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         }
 
-        // Optional WITH option-list before AS: RECOMPILE / EXECUTE AS / ENCRYPTION
-        // are parse-and-ignore (we don't model query-planner / security /
-        // encryption semantics). FOR REPLICATION is another parse-and-ignore.
+        // Optional WITH option-list before AS: RECOMPILE / ENCRYPTION / FOR
+        // REPLICATION are parse-and-ignore; EXECUTE AS is captured and applied
+        // as an impersonation frame around the body at invocation.
+        string? executeAsClause = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-            ParseProcedureWithOptions(context);
+            executeAsClause = ParseProcedureWithOptions(context);
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -180,6 +181,7 @@ partial class Simulation
             bodyLineOffset: CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart))
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
+            ExecuteAsClause = executeAsClause,
         };
         schema.Procedures[procName.Leaf] = procedure;
         return true;
@@ -349,13 +351,15 @@ partial class Simulation
 
     /// <summary>
     /// Consumes the optional <c>WITH option [, option ...]</c> clause before
-    /// <c>AS</c>. Accepted options (all parse-and-ignore in the simulator):
-    /// <c>RECOMPILE</c>, <c>ENCRYPTION</c>, <c>EXECUTE AS CALLER|SELF|OWNER|'name'</c>,
-    /// <c>FOR REPLICATION</c>. Cursor on entry: the <c>WITH</c> keyword;
-    /// cursor on exit: the <c>AS</c> keyword.
+    /// <c>AS</c>. <c>RECOMPILE</c> / <c>ENCRYPTION</c> / <c>SCHEMABINDING</c> /
+    /// <c>NATIVE_COMPILATION</c> / <c>FOR REPLICATION</c> parse-and-ignore;
+    /// <c>EXECUTE AS CALLER|SELF|OWNER|'name'</c> is captured and returned (the
+    /// invocation applies it as an impersonation frame). Cursor on entry: the
+    /// <c>WITH</c> keyword; cursor on exit: the <c>AS</c> keyword.
     /// </summary>
-    private static void ParseProcedureWithOptions(ParserContext context)
+    private static string? ParseProcedureWithOptions(ParserContext context)
     {
+        string? executeAsClause = null;
         context.MoveNextRequired();
         while (true)
         {
@@ -374,15 +378,18 @@ partial class Simulation
                     break;
                 case ReservedKeyword { Keyword: Keyword.Execute }:
                 case ReservedKeyword { Keyword: Keyword.Exec }:
-                    // EXECUTE AS <caller> — consume EXECUTE, AS, and the
+                    // EXECUTE AS <caller> — consume EXECUTE, AS, and capture the
                     // following principal token (CALLER / SELF / OWNER / a
-                    // quoted name). The simulator has no principal model;
-                    // the choice has no runtime effect.
+                    // quoted user name) for the invocation-time frame push.
                     if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     context.MoveNextRequired();
-                    if (context.Token is not (Name or Literal))
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    executeAsClause = context.Token switch
+                    {
+                        Name principal => principal.Value,
+                        Literal { Value: { IsNull: false } quoted } => quoted.AsString,
+                        _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                    };
                     context.MoveNextRequired();
                     break;
                 case ReservedKeyword { Keyword: Keyword.For }:
@@ -404,5 +411,6 @@ partial class Simulation
                 break;
             context.MoveNextRequired();
         }
+        return executeAsClause;
     }
 }

@@ -23,10 +23,41 @@ internal sealed class DatabasePrincipal(
     string typeCode,
     string typeDescription,
     bool isFixedRole,
-    DateTime createDate)
+    DateTime createDate,
+    string? loginName = null,
+    string? securityIdentifierString = null)
 {
     public readonly int PrincipalId = principalId;
     public readonly string Name = name;
+
+    /// <summary>
+    /// The server login this database user is mapped to
+    /// (<c>CREATE USER name FOR LOGIN login</c>), or <c>null</c> when the user
+    /// carries no login link (WITHOUT LOGIN users, the fixed principals, and
+    /// the parse-and-discard <c>CREATE USER</c> forms). Drives login →
+    /// database-user resolution at connect time and the
+    /// <c>SYSTEM_USER</c> / <c>SUSER_SNAME()</c> value while impersonating this
+    /// user.
+    /// </summary>
+    public readonly string? LoginName = loginName;
+
+    /// <summary>
+    /// The synthetic <c>S-1-9-3-…</c> security-identifier string a
+    /// <c>CREATE USER name WITHOUT LOGIN</c> user reports through
+    /// <c>SYSTEM_USER</c> / <c>SUSER_SNAME()</c> and the Msg 916 "server
+    /// principal" wording (real SQL Server has no login name for these users,
+    /// only a SID). Deterministically derived from the user name;
+    /// <c>null</c> for every other principal.
+    /// </summary>
+    public readonly string? SecurityIdentifierString = securityIdentifierString;
+
+    /// <summary>
+    /// The identity string a session impersonating this database user reports
+    /// through <c>SYSTEM_USER</c> / <c>SUSER_SNAME()</c>: the mapped login when
+    /// one exists, the synthetic SID for WITHOUT LOGIN users, else the user
+    /// name itself.
+    /// </summary>
+    public string EffectiveLoginIdentity => this.LoginName ?? this.SecurityIdentifierString ?? this.Name;
 
     /// <summary>
     /// One- or two-character <c>sys.database_principals.type</c> code.

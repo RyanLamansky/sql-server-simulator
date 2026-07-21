@@ -872,6 +872,9 @@ public sealed partial class Simulation
             batch.CurrentStatement.UtcNow = DateTime.UtcNow;
             batch.CurrentStatement.StartLine = 1;
             var connection = batch.Connection;
+            // The cached plan is shared across principals; re-run the SELECT
+            // permission check against the replaying session's current principal.
+            PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables);
             var rows = selection.Execute(batch).RowBytes.ToList();
             connection.LastStatementRowCount = rows.Count;
             yield return selection.IsAssignmentOnly
@@ -1590,6 +1593,8 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Select }:
                 {
                     var selection = Selection.Parse(context, 0);
+                    if (!batch.IsSkipping)
+                        PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables);
                     if (selection.IntoTarget is not null)
                     {
                         // SELECT INTO: creates the destination table and
@@ -1708,6 +1713,12 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute }:
                 foreach (var o in ParseExec(batch))
                     yield return o;
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Revert }:
+                RevertStatement(batch);
+                if (!batch.IsSkipping)
+                    connection.LastStatementRowCount = 0;
                 break;
 
             case UnquotedString { ContextualKeyword: ContextualKeyword.Throw }:
@@ -1918,7 +1929,7 @@ public sealed partial class Simulation
                 or Keyword.Return or Keyword.Print or Keyword.RaisError or Keyword.WaitFor
                 or Keyword.Truncate or Keyword.Use or Keyword.Grant or Keyword.Revoke or Keyword.Deny
                 or Keyword.Open or Keyword.Fetch or Keyword.Close or Keyword.Deallocate
-                or Keyword.Exec or Keyword.Execute
+                or Keyword.Exec or Keyword.Execute or Keyword.Revert
         }
         // THROW is a contextual keyword in SQL Server's grammar — added with
         // the TRY/CATCH companion feature in 2012, not in the reserved list.

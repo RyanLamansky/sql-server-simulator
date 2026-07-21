@@ -43,6 +43,13 @@ partial class Simulation
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
             throw SimulatedSqlException.MaximumNestingLevelExceeded();
 
+        // EXECUTE permission is checked at the call site against the caller's
+        // principal; the error's Procedure attribution names the proc (probe-
+        // confirmed). Ownership chaining suppresses the check when the caller
+        // is itself a module body (EnforcesPermissions is false there).
+        PermissionEnforcement.CheckObject(outerBatch, "EXECUTE", procedure.ObjectId, procedure.SchemaId,
+            procedure.Name, procedure.Schema.Name, procedure: $"{procedure.Schema.Name}.{procedure.Name}");
+
         // Bind arguments to parameters. Positional args fill from the left;
         // named args do per-name lookup. Track which parameters are bound
         // so we can apply defaults / raise Msg 201 for unbound required.
@@ -171,12 +178,22 @@ partial class Simulation
         // CommandText, so we skip the dispatch entirely — the proc behaves
         // as if a no-op body ran (default RETURN code 0, no result sets,
         // no output-param mutations).
+        // Module WITH EXECUTE AS: push the impersonation frame around the body
+        // (OWNER / SELF → dbo, CALLER → no-op, a named user → that principal,
+        // Msg 15517 here if missing). The frame is active while the body
+        // materializes below (eager) so its scalars observe the impersonated
+        // identity; it unwinds on body exit — the empty-body branch below and
+        // the non-empty branch's finally each revert to this depth.
+        var savedImpersonationDepth = connection.Security.ImpersonationDepth;
+        PushProcedureExecuteAsFrame(connection, procedure, outerBatch.CurrentDatabase);
+
         var procFrame = new ProcFrame(procedure.Name);
         List<SimulatedStatementOutcome> outcomes;
         BatchContext? innerBatch = null;
         if (string.IsNullOrEmpty(procedure.BodyText))
         {
             outcomes = [];
+            connection.Security.RevertTo(savedImpersonationDepth);
         }
         else
         {
@@ -219,6 +236,10 @@ partial class Simulation
             {
                 connection.NestingLevel--;
                 connection.TextSize = savedTextSize;
+                // Unwind the module's EXECUTE AS frame on body exit (including
+                // a body error), before control and the OUTPUT / return-code
+                // writeback return to the caller's security context.
+                connection.Security.RevertTo(savedImpersonationDepth);
                 // The proc body's PRINT buffer belongs to the inner batch, so
                 // the top-level flush in CreateResultSetsForCommand never sees
                 // it; deliver it here (also on error, matching the real

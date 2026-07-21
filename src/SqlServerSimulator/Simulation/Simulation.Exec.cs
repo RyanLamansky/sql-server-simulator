@@ -61,6 +61,15 @@ partial class Simulation
         var context = batch.Parser;
         context.MoveNextRequired(); // consume EXEC / EXECUTE
 
+        // EXECUTE AS { LOGIN | USER } = 'name' collides with proc invocation at
+        // the EXEC keyword; the AS keyword after EXECUTE disambiguates. It
+        // yields no result sets.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.As })
+        {
+            ExecuteAsStatement(batch);
+            yield break;
+        }
+
         // Optional `@rc = ` return-code capture between EXEC and the proc
         // name. The grammar is `EXEC [@rc = ] proc_name [args]` — probe-
         // confirmed against SQL Server 2025. Peek for `@var =` and consume

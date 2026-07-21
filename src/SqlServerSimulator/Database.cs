@@ -18,6 +18,19 @@ internal sealed class Database
     /// <summary>The schema name an unqualified table reference resolves through.</summary>
     public const string DefaultSchemaName = "dbo";
 
+    /// <summary>
+    /// Principal id of the database-owning <c>dbo</c> user (1, matching real
+    /// SQL Server). The identity the permission layer treats as the
+    /// bypass-everything owner: a session whose effective principal is this id
+    /// short-circuits every check. Seeded in the constructor's fixed-principal
+    /// block and read by <see cref="SessionSecurityContext"/> and the
+    /// principal scalars in place of a scattered literal <c>1</c>.
+    /// </summary>
+    public const int DboPrincipalId = 1;
+
+    /// <summary>Principal id of the <c>guest</c> user (2) — the fallback identity for a mapped login connecting to <c>master</c>.</summary>
+    public const int GuestPrincipalId = 2;
+
     /// <summary>Database name (the key in <see cref="Simulation.Databases"/>).</summary>
     public readonly string Name;
 
@@ -69,7 +82,34 @@ internal sealed class Database
         this.Principals["guest"] = new DatabasePrincipal(2, "guest", "S", "SQL_USER", isFixedRole: false, seedDate);
         this.Principals["INFORMATION_SCHEMA"] = new DatabasePrincipal(3, "INFORMATION_SCHEMA", "S", "SQL_USER", isFixedRole: false, seedDate);
         this.Principals["sys"] = new DatabasePrincipal(4, "sys", "S", "SQL_USER", isFixedRole: false, seedDate);
+        // The nine fixed database roles, with real SQL Server's principal ids
+        // (probe-confirmed 2026-07-21). 16388 is deliberately absent — real
+        // skips it. All type R, is_fixed_role, owned by dbo. Membership is
+        // tracked in RoleMembers like any role; the permission checker reads
+        // the closure and gives db_owner / db_datareader / db_datawriter /
+        // db_ddladmin / db_denydatareader / db_denydatawriter their virtual
+        // capabilities.
+        foreach (var (id, roleName) in FixedDatabaseRoles)
+            this.Principals[roleName] = new DatabasePrincipal(id, roleName, "R", "DATABASE_ROLE", isFixedRole: true, seedDate);
     }
+
+    /// <summary>
+    /// The nine fixed database roles and their real-SQL-Server principal ids.
+    /// Seeded into <see cref="Principals"/> at construction; consulted by the
+    /// permission checker's fixed-role capability rules.
+    /// </summary>
+    public static readonly (int Id, string Name)[] FixedDatabaseRoles =
+    [
+        (16384, "db_owner"),
+        (16385, "db_accessadmin"),
+        (16386, "db_securityadmin"),
+        (16387, "db_ddladmin"),
+        (16389, "db_backupoperator"),
+        (16390, "db_datareader"),
+        (16391, "db_datawriter"),
+        (16392, "db_denydatareader"),
+        (16393, "db_denydatawriter"),
+    ];
 
     /// <summary>
     /// Convenience accessor for the <c>dbo</c> schema's tables — the

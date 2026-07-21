@@ -100,8 +100,15 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
     /// a parameter without a declared default. Msg 8144 when too many args
     /// are supplied.
     /// </exception>
-    public static UserFunctionCall ParseCall(ScalarFunction function, ParserContext context) =>
-        new(function, ParseFunctionArguments(function, context));
+    public static UserFunctionCall ParseCall(ScalarFunction function, ParserContext context)
+    {
+        // A scalar UDF invoked inside a query takes EXECUTE, checked once at
+        // statement execution via the securable sink (never per row). Calls in
+        // non-query contexts (SET / IF operands) have no active sink and stay
+        // unchecked — a documented gap.
+        context.SecurableSink?.Add(new ReferencedSecurable(function.ObjectId, function.SchemaId, function.Name, function.Schema.Name, "EXECUTE"));
+        return new(function, ParseFunctionArguments(function, context));
+    }
 
     /// <summary>
     /// Parses the comma-separated argument list of a <c>schema.fn(...)</c>

@@ -3,18 +3,17 @@ using SqlServerSimulator.Storage;
 namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
-/// Shared resolution for the principal-name scalar functions. The simulator
-/// emulates a single fixed principal — <c>dbo</c> — across all
-/// session/login/db-user surfaces, matching the placeholder approach used
-/// by <see cref="SchemaName"/>'s no-arg form. Real SQL Server's separation
-/// between login and db-user identity isn't modeled; every identity scalar
-/// converges on <c>dbo</c>.
+/// Placeholder identity values for the surfaces the simulator doesn't yet
+/// resolve per-session. <see cref="CurrentLogin"/> (<c>dbo</c>) is the fixed
+/// server-login name a couple of login-lookup scalars still compare against;
+/// the session-aware identity scalars instead read
+/// <c>SimulatedDbConnection.Security</c>. <see cref="CurrentHost"/> /
+/// <see cref="CurrentApplication"/> back the empty-string pool defaults for
+/// <c>HOST_NAME()</c> / <c>APP_NAME()</c>.
 /// </summary>
 internal static class PrincipalPlaceholders
 {
     public const string CurrentLogin = "dbo";
-
-    public const string CurrentUser = "dbo";
 
     public const string CurrentHost = "";
 
@@ -46,7 +45,7 @@ internal sealed class UserName : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         if (this.idArg is null)
-            return SqlValue.FromString(SqlType.SystemName, PrincipalPlaceholders.CurrentUser);
+            return SqlValue.FromString(SqlType.SystemName, runtime.Batch.Connection.Security.Effective.DatabasePrincipalName);
         var idValue = this.idArg.Run(runtime);
         if (idValue.IsNull)
             return SqlValue.Null(SqlType.SystemName);
@@ -90,11 +89,11 @@ internal sealed class SUserName : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         if (this.arg is null)
-            return SqlValue.FromString(SqlType.SystemName, PrincipalPlaceholders.CurrentLogin);
+            return SqlValue.FromString(SqlType.SystemName, runtime.Batch.Connection.Security.Effective.LoginName);
         var argValue = this.arg.Run(runtime);
         return argValue.IsNull
             ? SqlValue.Null(SqlType.SystemName)
-            : SqlValue.FromString(SqlType.SystemName, PrincipalPlaceholders.CurrentLogin);
+            : SqlValue.FromString(SqlType.SystemName, runtime.Batch.Connection.Security.Effective.LoginName);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
@@ -205,7 +204,7 @@ internal sealed class OriginalLogin : Expression
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromString(SqlType.SystemName, PrincipalPlaceholders.CurrentLogin);
+        SqlValue.FromString(SqlType.SystemName, runtime.Batch.Connection.Security.OriginalLoginName);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
@@ -259,20 +258,26 @@ internal sealed class AppName : Expression
 
 /// <summary>
 /// Backs the parens-less identity keywords <c>CURRENT_USER</c>,
-/// <c>SESSION_USER</c>, <c>SYSTEM_USER</c>, and bare <c>USER</c>. All four
-/// converge on the simulator's fixed-principal placeholder
-/// (<see cref="PrincipalPlaceholders.CurrentUser"/>), matching how
-/// <see cref="SchemaName"/>'s no-arg form returns <c>dbo</c>. Result type is
-/// <see cref="SqlType.SystemName"/> (sysname). Wired through
-/// <see cref="Expression.Parse"/>'s reserved-keyword switch rather than
-/// <c>ResolveBuiltIn</c> because the SQL grammar permits no parens.
+/// <c>SESSION_USER</c>, bare <c>USER</c> (the effective database user), and
+/// <c>SYSTEM_USER</c> (the effective login, <c>isLogin</c>). All read the
+/// session's effective security frame; an unimpersonated in-process session
+/// reports <c>dbo</c>. Result type is <see cref="SqlType.SystemName"/> (sysname).
+/// Wired through <see cref="Expression.Parse"/>'s reserved-keyword switch rather
+/// than <c>ResolveBuiltIn</c> because the SQL grammar permits no parens.
 /// </summary>
-internal sealed class CurrentPrincipalKeyword(string keywordText) : Expression
+internal sealed class CurrentPrincipalKeyword(string keywordText, bool isLogin = false) : Expression
 {
     private readonly string keywordText = keywordText;
 
-    public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromString(SqlType.SystemName, PrincipalPlaceholders.CurrentUser);
+    // SYSTEM_USER reports the effective login (like SUSER_SNAME); CURRENT_USER /
+    // SESSION_USER / USER report the effective database user.
+    private readonly bool isLogin = isLogin;
+
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        var effective = runtime.Batch.Connection.Security.Effective;
+        return SqlValue.FromString(SqlType.SystemName, this.isLogin ? effective.LoginName : effective.DatabasePrincipalName);
+    }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 

@@ -95,6 +95,16 @@ internal sealed partial class Selection
     public readonly MultiPartName? IntoTarget;
 
     /// <summary>
+    /// Real tables / views / TVFs this query reads (including those in nested
+    /// subqueries and derived tables), recorded at parse time so the
+    /// execution-time SELECT permission check runs against the current
+    /// principal. Principal-independent, so it rides the cached plan. Null when
+    /// the query reads nothing checkable (constant SELECT, all-system-table).
+    /// Set once by the outermost <see cref="ParseQueryExpression"/>.
+    /// </summary>
+    public List<ReferencedSecurable>? ReferencedSecurables;
+
+    /// <summary>
     /// Pre-computed destination schema (column names + types + nullability
     /// + identity flags) for a <c>SELECT INTO</c> statement; null when
     /// <see cref="IntoTarget"/> is null. Built during projection planning
@@ -337,6 +347,13 @@ internal sealed partial class Selection
     /// </summary>
     private static Selection ParseQueryExpression(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
+        // The outermost query expression owns the securable sink; every nested
+        // subquery / derived table appends to it, so the returned top-level
+        // plan carries the flat set of everything the statement reads.
+        var ownsSecurableSink = context.SecurableSink is null;
+        if (ownsSecurableSink)
+            context.SecurableSink = [];
+
         var combined = ParseUnionExceptChain(context, depth, outerTypeResolver);
 
         // Top-level ORDER BY: applies to the combined result (post-set-op).
@@ -361,6 +378,13 @@ internal sealed partial class Selection
         // (the simulator has nothing to dispatch on a hint against).
         if (context.Token is ReservedKeyword { Keyword: Keyword.Option })
             ParseOptionClause(context);
+
+        if (ownsSecurableSink)
+        {
+            if (context.SecurableSink is { Count: > 0 } sink)
+                combined.ReferencedSecurables = sink;
+            context.SecurableSink = null;
+        }
 
         return combined;
     }
@@ -1329,6 +1353,19 @@ internal sealed partial class Selection
     /// PIVOT / UNPIVOT clause consumes through its own alias and stops at the
     /// next lookahead token).
     /// </summary>
+    /// <summary>
+    /// Records a real table / view / TVF read on the active securable sink for
+    /// the execution-time SELECT permission check. Skips temp tables
+    /// (<c>#foo</c>) — those aren't permission-checked — and no-ops when no sink
+    /// is active (a module body, or a context that isn't tracking reads).
+    /// </summary>
+    private static void RecordSecurableRead(ParserContext context, Schemas.SchemaObject obj, MultiPartName name)
+    {
+        if (context.SecurableSink is not { } sink || name.Leaf.StartsWith('#'))
+            return;
+        sink.Add(new ReferencedSecurable(obj.ObjectId, obj.SchemaId, obj.Name, name.ImmediateQualifier ?? Database.DefaultSchemaName));
+    }
+
     private static FromSource ParseSingleFromSource(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver) =>
         ApplyOptionalPivotUnpivot(context, ParseSingleFromSourceCore(context, depth, outerTypeResolver), outerTypeResolver);
 
@@ -1546,6 +1583,7 @@ internal sealed partial class Selection
                         viewColumnNames[ci] = resolvedView.OutputColumns[ci].Name;
                     var viewAlias = ConsumeOptionalAlias(context);
                     _ = ParseOptionalTableHints(context);
+                    RecordSecurableRead(context, resolvedView, objectName);
                     return new FromSource(
                         qualifier: viewAlias ?? resolvedView.Name,
                         columnNames: viewColumnNames,
@@ -1580,6 +1618,7 @@ internal sealed partial class Selection
                         var outputColumns = function is InlineTableValuedFunction inline
                             ? inline.OutputColumns
                             : ((MultiStatementTableValuedFunction)function).OutputColumns;
+                        RecordSecurableRead(context, function, objectName);
                         var lateralPlan = function is InlineTableValuedFunction inlineTvf
                             ? Selection.ForInlineTvf(inlineTvf, tvfArgs)
                             : Selection.ForMultiStatementTvf((MultiStatementTableValuedFunction)function, tvfArgs);
@@ -1652,6 +1691,7 @@ internal sealed partial class Selection
                 // materialize through a separate path that doesn't expose
                 // RIDs).
                 var heapPlan = context.Batch.AcquireDataLockIfApplicable(heapTable, heapHints, isWrite: false);
+                RecordSecurableRead(context, heapTable, objectName);
                 var heapQualifier = heapAlias ?? objectName.Leaf;
                 var heapRows = temporalRowSource
                     ?? (heapPlan.NoLockReader

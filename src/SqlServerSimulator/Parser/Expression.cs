@@ -199,7 +199,7 @@ internal abstract class Expression
         ReservedKeyword { Keyword: Keyword.Current_Date } => new CurrentTimeFunction(CurrentTimeKind.CurrentDate),
         ReservedKeyword { Keyword: Keyword.Current_User } => new CurrentPrincipalKeyword("CURRENT_USER"),
         ReservedKeyword { Keyword: Keyword.Session_User } => new CurrentPrincipalKeyword("SESSION_USER"),
-        ReservedKeyword { Keyword: Keyword.System_user } => new CurrentPrincipalKeyword("SYSTEM_USER"),
+        ReservedKeyword { Keyword: Keyword.System_user } => new CurrentPrincipalKeyword("SYSTEM_USER", isLogin: true),
         ReservedKeyword { Keyword: Keyword.User } => new CurrentPrincipalKeyword("USER"),
         // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE, and NULLIF are
         // reserved keywords but dispatch as function calls when followed
