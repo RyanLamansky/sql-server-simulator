@@ -41,7 +41,7 @@ partial class Simulation
         context.CurrentDatabase.Permissions.Add(new DatabasePermission(
             PermissionChecker.ClassDatabase, majorId: 0, minorId: 0,
             granteePrincipalId: id, grantorPrincipalId: Database.DboPrincipalId,
-            permissionName: "CONNECT", typeCode: "CO  ", state: "G"));
+            permission: Permission.Connect, state: PermissionState.Grant));
         return true;
     }
 

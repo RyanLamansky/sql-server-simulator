@@ -19,7 +19,10 @@ Logins are enforced as connection credentials at both front doors (TDS endpoint 
 - `SecurityIdentifierString` (string?) — the deterministic `S-1-9-3-…` SID a `CREATE USER … WITHOUT LOGIN` user reports through `SYSTEM_USER` / Msg 916 (FNV-derived from the name).
 - `EffectiveLoginIdentity` — the `SYSTEM_USER` value while impersonating this user (login ?? SID ?? name).
 
-**`DatabasePermission`** (`src/SqlServerSimulator/DatabasePermission.cs`) carries class + major_id + minor_id + grantee/grantor ids + permission_name + 4-char type code + state (`G`/`W`/`D`/`R`).
+**`DatabasePermission`** (`src/SqlServerSimulator/DatabasePermission.cs`) carries class + major_id + minor_id + grantee/grantor ids + a `Permission` enum + a `PermissionState` enum (Grant / GrantWithGrantOption / Deny / Revoke, projecting the `G`/`W`/`D`/`R` state codes).
+Canonical rows draw their `permission_name` and 4-char `type` code from `PermissionCatalog` at projection; off-catalog names (`Permission.Other`) carry their raw text on `PermissionName` and are never matched by a permission check.
+`PermissionChecker` compares the enum throughout (closure walk, DENY precedence, covering/scope walk, read/write/DDL fixed-role virtual grants) — no permission-name string comparison remains on any check path; `HAS_PERMS_BY_NAME` / GRANT parsing resolve the incoming name to the enum once at the boundary via `Permission.Resolve` (a zero-alloc span switch, a `PermissionCatalog` static extension member).
+The catalog surfaces per-enum lookups as extension members (`permission.CanonicalName` / `.CanonicalTypeCode` / `.Category` / `.Covering(class)`, `state.Code` / `.Description`); row-shaped concerns live on `DatabasePermission` itself (`IsFor` securable+permission identity, `DisplayName` / `DisplayTypeCode` projection).
 
 Both live on `Database`:
 - `Database.Principals` — `ConcurrentDictionary<string, DatabasePrincipal>` keyed by name
@@ -145,9 +148,10 @@ In-process connections never authenticate — login DDL through one is how the r
 
 ## Permission type-code derivation
 
-`Simulation.CanonicalPermissionTypeCode` imports the canonical 4-char `sys.database_permissions.type` codes from `sys.fn_builtin_permissions` for the common OBJECT / SCHEMA / DATABASE / DATABASE_PRINCIPAL permissions (`SELECT` → `SL`, `UPDATE` → `UP`, `EXECUTE` → `EX`, `CONTROL` → `CL`, `IMPERSONATE` → `IM`, `CREATE TABLE` → `CRTB`, …).
-Codes are stored space-padded to 4 chars and the view's `type` column is `char(4)`, matching real's trailing-space-bearing values (`'SL  '`).
-Names outside the imported set (AW's `VIEW ANY COLUMN … DEFINITION` grants) fall back to the first-letter-of-each-word heuristic (`VIEW ANY COLUMN MASTER KEY DEFINITION` → `VACM`), which won't byte-match real for every long name.
+`PermissionCatalog` (`src/SqlServerSimulator/Permission.cs`) is the single source of truth: one static table indexed by the `Permission` enum carries each member's canonical name, 4-char `sys.database_permissions.type` code (imported from `sys.fn_builtin_permissions` for the common OBJECT / SCHEMA / DATABASE / DATABASE_PRINCIPAL permissions — `SELECT` → `SL`, `UPDATE` → `UP`, `EXECUTE` → `EX`, `CONTROL` → `CL`, `IMPERSONATE` → `IM`, `CREATE TABLE` → `CRTB`, …), and read/write/DDL category; the covering graph and name→enum resolver live alongside it.
+Codes are projected space-padded to 4 chars and the view's `type` column is `char(4)`, matching real's trailing-space-bearing values (`'SL  '`).
+Names outside the catalog resolve to `Permission.Other` and project their raw stored text plus a first-letter-of-each-word type-code heuristic (`VIEW ANY COLUMN MASTER KEY DEFINITION` → `VACM`), which won't byte-match real for every long name.
+Canonical names project their catalog spelling regardless of the GRANT's casing (real normalizes them the same way).
 
 `class_desc` / `state_desc` are spelled out per the probe-confirmed enum:
 - `class_desc`: `DATABASE` / `OBJECT_OR_COLUMN` / `SCHEMA` / `DATABASE_PRINCIPAL`

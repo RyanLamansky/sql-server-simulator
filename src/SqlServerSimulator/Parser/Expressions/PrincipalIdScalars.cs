@@ -264,7 +264,7 @@ internal sealed class HasPermsByName : Expression
         }
 
         return SqlValue.FromInt32(
-            PermissionChecker.IsGranted(database, principalId, permission, securableClass, majorId, schemaId) ? 1 : 0);
+            PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), securableClass, majorId, schemaId) ? 1 : 0);
     }
 
     private static bool TryResolveSchemaByName(Database database, string name, out int schemaId)

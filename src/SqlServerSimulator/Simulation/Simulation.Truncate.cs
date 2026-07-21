@@ -71,7 +71,7 @@ partial class Simulation
         // (its own double-quoted shape), not Msg 229.
         if (!isLocalTempTable && !isGlobalTempTable && PermissionEnforcement.Applies(batch)
             && !PermissionChecker.IsGranted(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId,
-                "ALTER", PermissionChecker.ClassObject, table.ObjectId, table.SchemaId))
+                Permission.Alter, PermissionChecker.ClassObject, table.ObjectId, table.SchemaId))
         {
             throw SimulatedSqlException.CannotFindObjectForAlter(name.Leaf);
         }

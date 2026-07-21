@@ -109,7 +109,7 @@ partial class Simulation
             if (permission.Class == 4
                 && permission.MajorId == targetPrincipalId
                 && permission.GranteePrincipalId == granteeId
-                && permission.State is "G" or "W")
+                && permission.State is PermissionState.Grant or PermissionState.GrantWithGrantOption)
             {
                 return;
             }

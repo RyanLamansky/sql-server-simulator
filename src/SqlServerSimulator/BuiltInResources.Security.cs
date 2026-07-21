@@ -570,14 +570,6 @@ internal static partial class BuiltInResources
                 4 => "DATABASE_PRINCIPAL",
                 _ => "DATABASE",
             };
-            var stateDesc = perm.State switch
-            {
-                "D" => "DENY",
-                "G" => "GRANT",
-                "R" => "REVOKE",
-                "W" => "GRANT_WITH_GRANT_OPTION",
-                _ => "GRANT",
-            };
             yield return [
                 SqlValue.FromByte(perm.Class),
                 SqlValue.FromNVarchar(classDesc),
@@ -585,10 +577,10 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(perm.MinorId),
                 SqlValue.FromInt32(perm.GranteePrincipalId),
                 SqlValue.FromInt32(perm.GrantorPrincipalId),
-                SqlValue.FromChar(typeChar, perm.TypeCode),
-                SqlValue.FromNVarchar(perm.PermissionName),
-                SqlValue.FromChar(stateChar, perm.State),
-                SqlValue.FromNVarchar(stateDesc),
+                SqlValue.FromChar(typeChar, perm.DisplayTypeCode),
+                SqlValue.FromNVarchar(perm.DisplayName),
+                SqlValue.FromChar(stateChar, perm.State.Code),
+                SqlValue.FromNVarchar(perm.State.Description),
             ];
         }
     }

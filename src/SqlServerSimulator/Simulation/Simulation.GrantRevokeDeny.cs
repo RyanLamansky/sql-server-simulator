@@ -264,13 +264,14 @@ partial class Simulation
     private static void ApplyOnePermission(Database database, PermissionStatementKind kind, bool revokeGrantOptionOnly, bool cascade, bool withGrantOption,
         byte permClass, int permMajorId, string permName, int granteeId, int grantorId)
     {
-        var typeCode = CanonicalPermissionTypeCode(permName);
-        bool Matches(DatabasePermission p, string state) =>
-            p.GranteePrincipalId == granteeId
-            && p.Class == permClass
-            && p.MajorId == permMajorId
-            && p.State == state
-            && database.Collation.Equals(p.PermissionName, permName);
+        var permEnum = Permission.Resolve(permName);
+        // Off-catalog names carry their raw text on the row; canonical rows draw
+        // name / type code from the catalog at projection time.
+        var storedName = permEnum == Permission.Other ? permName : null;
+        bool Matches(DatabasePermission p, PermissionState state) =>
+            p.State == state
+            && p.GranteePrincipalId == granteeId
+            && p.IsFor(permClass, permMajorId, permEnum, permName, database);
 
         switch (kind)
         {
@@ -278,27 +279,27 @@ partial class Simulation
                 // GRANT replaces any prior GRANT / GRANT-WITH-GRANT row for
                 // this triple (a plain GRANT after a WITH GRANT OPTION
                 // downgrades W→G). DENY rows are untouched.
-                _ = database.Permissions.RemoveAll(p => Matches(p, "G") || Matches(p, "W"));
+                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption));
                 database.Permissions.Add(new DatabasePermission(
                     permClass, permMajorId, minorId: 0, granteePrincipalId: granteeId,
-                    grantorPrincipalId: grantorId, permissionName: permName, typeCode: typeCode,
-                    state: withGrantOption ? "W" : "G"));
+                    grantorPrincipalId: grantorId, permission: permEnum,
+                    state: withGrantOption ? PermissionState.GrantWithGrantOption : PermissionState.Grant, permissionName: storedName));
                 break;
 
             case PermissionStatementKind.Deny:
                 // DENY replaces only a prior DENY row; G/W rows coexist with
                 // the D row (the checker gives D precedence).
-                _ = database.Permissions.RemoveAll(p => Matches(p, "D"));
+                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Deny));
                 database.Permissions.Add(new DatabasePermission(
                     permClass, permMajorId, minorId: 0, granteePrincipalId: granteeId,
-                    grantorPrincipalId: grantorId, permissionName: permName, typeCode: typeCode, state: "D"));
+                    grantorPrincipalId: grantorId, permission: permEnum, state: PermissionState.Deny, permissionName: storedName));
                 break;
 
             case PermissionStatementKind.Revoke when revokeGrantOptionOnly:
                 // REVOKE GRANT OPTION FOR: downgrade W→G. With CASCADE, also
                 // remove the rows this grantee delegated. Without CASCADE, a
                 // W row with delegations raises Msg 4611.
-                var wRow = database.Permissions.Find(p => Matches(p, "W"));
+                var wRow = database.Permissions.Find(p => Matches(p, PermissionState.GrantWithGrantOption));
                 if (wRow is null)
                     return;
                 if (HasDelegations(database, granteeId, permClass, permMajorId, permName) && !cascade)
@@ -306,17 +307,17 @@ partial class Simulation
                 _ = database.Permissions.Remove(wRow);
                 database.Permissions.Add(new DatabasePermission(
                     permClass, permMajorId, minorId: 0, granteePrincipalId: granteeId,
-                    grantorPrincipalId: grantorId, permissionName: permName, typeCode: typeCode, state: "G"));
+                    grantorPrincipalId: grantorId, permission: permEnum, state: PermissionState.Grant, permissionName: storedName));
                 if (cascade)
                     CascadeRemoveDelegations(database, granteeId, permClass, permMajorId, permName);
                 break;
 
             default:
                 // Plain REVOKE removes both G/W and D rows for the triple.
-                var grantable = database.Permissions.Find(p => Matches(p, "W"));
+                var grantable = database.Permissions.Find(p => Matches(p, PermissionState.GrantWithGrantOption));
                 if (grantable is not null && HasDelegations(database, granteeId, permClass, permMajorId, permName) && !cascade)
                     throw SimulatedSqlException.RevokeRequiresCascade();
-                _ = database.Permissions.RemoveAll(p => Matches(p, "G") || Matches(p, "W") || Matches(p, "D"));
+                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption) || Matches(p, PermissionState.Deny));
                 if (cascade)
                     CascadeRemoveDelegations(database, granteeId, permClass, permMajorId, permName);
                 break;
@@ -324,12 +325,12 @@ partial class Simulation
     }
 
     /// <summary>Whether <paramref name="granteeId"/> has delegated this permission to anyone (a row whose grantor is this grantee).</summary>
-    private static bool HasDelegations(Database database, int granteeId, byte permClass, int permMajorId, string permName) =>
-        database.Permissions.Exists(p =>
-            p.GrantorPrincipalId == granteeId
-            && p.Class == permClass
-            && p.MajorId == permMajorId
-            && database.Collation.Equals(p.PermissionName, permName));
+    private static bool HasDelegations(Database database, int granteeId, byte permClass, int permMajorId, string permName)
+    {
+        var permEnum = Permission.Resolve(permName);
+        return database.Permissions.Exists(p =>
+            p.GrantorPrincipalId == granteeId && p.IsFor(permClass, permMajorId, permEnum, permName, database));
+    }
 
     /// <summary>
     /// Removes the whole delegation subtree rooted at <paramref name="granteeId"/>:
@@ -337,6 +338,7 @@ partial class Simulation
     /// </summary>
     private static void CascadeRemoveDelegations(Database database, int granteeId, byte permClass, int permMajorId, string permName)
     {
+        var permEnum = Permission.Resolve(permName);
         var frontier = new Queue<int>();
         frontier.Enqueue(granteeId);
         var visited = new HashSet<int> { granteeId };
@@ -344,20 +346,14 @@ partial class Simulation
         {
             var grantor = frontier.Dequeue();
             var delegated = database.Permissions.FindAll(p =>
-                p.GrantorPrincipalId == grantor
-                && p.Class == permClass
-                && p.MajorId == permMajorId
-                && database.Collation.Equals(p.PermissionName, permName));
+                p.GrantorPrincipalId == grantor && p.IsFor(permClass, permMajorId, permEnum, permName, database));
             foreach (var row in delegated)
             {
                 if (visited.Add(row.GranteePrincipalId))
                     frontier.Enqueue(row.GranteePrincipalId);
             }
             _ = database.Permissions.RemoveAll(p =>
-                p.GrantorPrincipalId == grantor
-                && p.Class == permClass
-                && p.MajorId == permMajorId
-                && database.Collation.Equals(p.PermissionName, permName));
+                p.GrantorPrincipalId == grantor && p.IsFor(permClass, permMajorId, permEnum, permName, database));
         }
     }
 
@@ -367,11 +363,11 @@ partial class Simulation
         // A W row for the exact permission on the exact securable is the common
         // case; the checker's covering/scope walk generalizes it (a W CONTROL
         // or a wider-scope W row also authorizes delegation).
+        var permEnum = Permission.Resolve(permName);
         foreach (var row in database.Permissions)
         {
-            if (row.State == "W" && row.GranteePrincipalId == grantorId
-                && row.Class == permClass && row.MajorId == permMajorId
-                && database.Collation.Equals(row.PermissionName, permName))
+            if (row.State == PermissionState.GrantWithGrantOption && row.GranteePrincipalId == grantorId
+                && row.IsFor(permClass, permMajorId, permEnum, permName, database))
             {
                 return true;
             }
@@ -438,64 +434,6 @@ partial class Simulation
         _ => null,
     };
 
-    /// <summary>
-    /// The canonical 4-char <c>sys.database_permissions.type</c> code for a
-    /// permission name (imported from <c>sys.fn_builtin_permissions</c> for the
-    /// OBJECT / SCHEMA / DATABASE / DATABASE_PRINCIPAL classes), falling back to
-    /// the first-letter-of-each-word heuristic for names outside the imported
-    /// set (AW's <c>VIEW ANY COLUMN … DEFINITION</c> grants).
-    /// </summary>
-    internal static string CanonicalPermissionTypeCode(string permissionName)
-    {
-        var trimmed = permissionName.AsSpan().Trim();
-        Span<char> normalized = stackalloc char[trimmed.Length];
-        _ = trimmed.ToUpperInvariant(normalized);
-        return normalized switch
-        {
-            "ALTER" => "AL  ",
-            "CONNECT" => "CO  ",
-            "CONTROL" => "CL  ",
-            "CREATE FUNCTION" => "CRFN",
-            "CREATE PROCEDURE" => "CRPR",
-            "CREATE SEQUENCE" => "CRSO",
-            "CREATE TABLE" => "CRTB",
-            "CREATE VIEW" => "CRVW",
-            "DELETE" => "DL  ",
-            "EXECUTE" => "EX  ",
-            "IMPERSONATE" => "IM  ",
-            "INSERT" => "IN  ",
-            "RECEIVE" => "RC  ",
-            "REFERENCES" => "RF  ",
-            "SELECT" => "SL  ",
-            "TAKE OWNERSHIP" => "TO  ",
-            "UNMASK" => "UMSK",
-            "UPDATE" => "UP  ",
-            "VIEW CHANGE TRACKING" => "VWCT",
-            "VIEW DEFINITION" => "VW  ",
-            _ => DerivePermissionTypeCode(permissionName),
-        };
-    }
-
-    /// <summary>
-    /// First-letter-of-each-word heuristic for permission names outside the
-    /// canonical import set (e.g. <c>VIEW ANY COLUMN MASTER KEY DEFINITION</c>
-    /// → <c>VACM</c>). Right-padded with spaces to 4 chars.
-    /// </summary>
-    private static string DerivePermissionTypeCode(string permissionName)
-    {
-        var words = permissionName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        Span<char> code = stackalloc char[4];
-        var idx = 0;
-        foreach (var w in words)
-        {
-            if (idx >= 4)
-                break;
-            code[idx++] = char.ToUpperInvariant(w[0]);
-        }
-        while (idx < 4)
-            code[idx++] = ' ';
-        return new string(code);
-    }
 }
 
 /// <summary>

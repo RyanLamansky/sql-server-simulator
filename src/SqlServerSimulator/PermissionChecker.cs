@@ -41,7 +41,7 @@ internal static class PermissionEnforcement
         var principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
         foreach (var s in securables)
         {
-            if (!PermissionChecker.IsGranted(database, principalId, s.Permission, PermissionChecker.ClassObject, s.ObjectId, s.SchemaId))
+            if (!PermissionChecker.IsGranted(database, principalId, Permission.Resolve(s.Permission), PermissionChecker.ClassObject, s.ObjectId, s.SchemaId))
                 throw SimulatedSqlException.PermissionDenied(s.Permission.ToUpperInvariant(), s.ObjectName, database.Name, s.SchemaName);
         }
     }
@@ -53,7 +53,7 @@ internal static class PermissionEnforcement
             return;
         var database = batch.CurrentDatabase;
         var principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
-        if (!PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassObject, objectId, schemaId))
+        if (!PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), PermissionChecker.ClassObject, objectId, schemaId))
             throw SimulatedSqlException.PermissionDenied(permission.ToUpperInvariant(), objectName, database.Name, schemaName, procedure);
     }
 
@@ -87,7 +87,7 @@ internal static class PermissionEnforcement
     internal static bool HasDatabasePermission(BatchContext batch, string permission) =>
         !Applies(batch)
         || PermissionChecker.IsGranted(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId,
-            permission, PermissionChecker.ClassDatabase, 0, 0);
+            Permission.Resolve(permission), PermissionChecker.ClassDatabase, 0, 0);
 }
 
 /// <summary>
@@ -129,28 +129,29 @@ internal static class PermissionChecker
     internal const byte ClassSchema = 3;
     internal const byte ClassDatabasePrincipal = 4;
 
-    private const string Control = "CONTROL";
-
-    /// <summary>Whether the effective principal holds <paramref name="permission"/> on the described securable.</summary>
-    internal static bool IsGranted(Database database, int principalId, string permission, byte securableClass, int majorId, int schemaId)
+    /// <summary>Whether the effective principal holds <paramref name="permission"/> on the described securable. An off-catalog (<see cref="Permission.Other"/>) request is never satisfied.</summary>
+    internal static bool IsGranted(Database database, int principalId, Permission permission, byte securableClass, int majorId, int schemaId)
     {
+        if (permission == Permission.Other)
+            return false;
+
         var closure = BuildClosure(database, principalId);
         var satisfiers = BuildSatisfiers(permission, securableClass, majorId, schemaId);
 
         // DENY binds first — explicit D rows, then the deny-roles.
         if (HasMatchingRow(database, closure, satisfiers, deny: true))
             return false;
-        if (IsReadPermission(permission) && closure.Contains(DbDenyDataReader))
+        if (permission.Category == PermissionCategory.Read && closure.Contains(DbDenyDataReader))
             return false;
-        if (IsWritePermission(permission) && closure.Contains(DbDenyDataWriter))
+        if (permission.Category == PermissionCategory.Write && closure.Contains(DbDenyDataWriter))
             return false;
 
         // GRANT test — explicit G/W rows, then the grant-roles.
         return HasMatchingRow(database, closure, satisfiers, deny: false)
             || closure.Contains(DbOwner)
-            || (IsReadPermission(permission) && closure.Contains(DbDataReader))
-            || (IsWritePermission(permission) && closure.Contains(DbDataWriter))
-            || (IsDdlPermission(permission) && closure.Contains(DbDdlAdmin));
+            || (permission.Category == PermissionCategory.Read && closure.Contains(DbDataReader))
+            || (permission.Category == PermissionCategory.Write && closure.Contains(DbDataWriter))
+            || (permission.Category == PermissionCategory.Ddl && closure.Contains(DbDdlAdmin));
     }
 
     /// <summary>Whether the effective principal is a member of <paramref name="role"/> (transitively), or the role is <c>public</c> (everyone).</summary>
@@ -183,20 +184,17 @@ internal static class PermissionChecker
         return closure;
     }
 
-    private static bool HasMatchingRow(Database database, HashSet<int> closure, List<(byte Class, int MajorId, string Permission)> satisfiers, bool deny)
+    private static bool HasMatchingRow(Database database, HashSet<int> closure, List<(byte Class, int MajorId, Permission Permission)> satisfiers, bool deny)
     {
         foreach (var row in database.Permissions)
         {
-            var stateMatches = deny ? row.State == "D" : row.State is "G" or "W";
+            var stateMatches = deny ? row.State == PermissionState.Deny : row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption;
             if (!stateMatches || !closure.Contains(row.GranteePrincipalId))
                 continue;
             foreach (var (cls, majorId, permission) in satisfiers)
             {
-                if (row.Class == cls && row.MajorId == majorId
-                    && string.Equals(row.PermissionName, permission, StringComparison.OrdinalIgnoreCase))
-                {
+                if (row.Class == cls && row.MajorId == majorId && row.Permission == permission)
                     return true;
-                }
             }
         }
         return false;
@@ -208,9 +206,9 @@ internal static class PermissionChecker
     /// plus every covering permission, walked up the object → schema →
     /// database scope chain.
     /// </summary>
-    private static List<(byte Class, int MajorId, string Permission)> BuildSatisfiers(string permission, byte securableClass, int majorId, int schemaId)
+    private static List<(byte Class, int MajorId, Permission Permission)> BuildSatisfiers(Permission permission, byte securableClass, int majorId, int schemaId)
     {
-        var result = new List<(byte, int, string)>();
+        var result = new List<(byte, int, Permission)>();
         switch (securableClass)
         {
             case ClassObject:
@@ -232,47 +230,13 @@ internal static class PermissionChecker
         return result;
     }
 
-    private static void AddScope(List<(byte, int, string)> result, byte cls, int majorId, string permission)
+    private static void AddScope(List<(byte, int, Permission)> result, byte cls, int majorId, Permission permission)
     {
-        var current = permission;
-        while (current is not null)
+        Permission? current = permission;
+        while (current is Permission p)
         {
-            result.Add((cls, majorId, current));
-            current = Covering(cls, current);
+            result.Add((cls, majorId, p));
+            current = p.Covering(cls);
         }
     }
-
-    /// <summary>
-    /// The immediate covering permission for (<paramref name="cls"/>,
-    /// <paramref name="permission"/>) — the permission that, when granted,
-    /// implies this one. Chains to <c>CONTROL</c> for most; the exceptions
-    /// (OBJECT SELECT ← RECEIVE ← CONTROL, DATABASE CREATE TABLE ← ALTER ←
-    /// CONTROL) come straight from <c>sys.fn_builtin_permissions</c>. Returns
-    /// <see langword="null"/> at <c>CONTROL</c> (the top).
-    /// </summary>
-    private static string? Covering(byte cls, string permission)
-    {
-        Span<char> buf = stackalloc char[permission.Length];
-        _ = permission.AsSpan().ToUpperInvariant(buf);
-        return (cls, upper: buf.ToString()) switch
-        {
-            (_, "CONTROL") => null,
-            (ClassObject, "SELECT") => "RECEIVE",
-            (ClassObject, "RECEIVE") => Control,
-            (ClassDatabase, "CREATE TABLE") => "ALTER",
-            _ => Control,
-        };
-    }
-
-    private static bool IsReadPermission(string permission) =>
-        string.Equals(permission, "SELECT", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsWritePermission(string permission) =>
-        permission.Equals("INSERT", StringComparison.OrdinalIgnoreCase)
-        || permission.Equals("UPDATE", StringComparison.OrdinalIgnoreCase)
-        || permission.Equals("DELETE", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsDdlPermission(string permission) =>
-        permission.Equals("ALTER", StringComparison.OrdinalIgnoreCase)
-        || permission.StartsWith("CREATE ", StringComparison.OrdinalIgnoreCase);
 }

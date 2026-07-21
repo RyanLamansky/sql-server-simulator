@@ -1,20 +1,18 @@
 namespace SqlServerSimulator;
 
 /// <summary>
-/// One entry in <see cref="Database.Permissions"/> — a GRANT / REVOKE /
-/// DENY statement that's been parsed and stored but never enforced. The
-/// simulator has no permission model; this exists to round-trip the
-/// information into <c>sys.database_permissions</c>.
+/// One entry in <see cref="Database.Permissions"/> — a stored GRANT / DENY
+/// (WITH GRANT OPTION) row. Canonical permissions store their identity as a
+/// <see cref="SqlServerSimulator.Permission"/> enum and draw their name / type
+/// code from <see cref="PermissionCatalog"/> at projection time; off-catalog
+/// names store <see cref="SqlServerSimulator.Permission.Other"/> plus their raw
+/// text on <see cref="PermissionName"/>.
 /// </summary>
 /// <remarks>
-/// Real SQL Server permission rows carry a <c>class</c> tinyint
-/// distinguishing database-scope (0) from object/column (1), schema (3),
-/// principal (4), etc. AW only emits class-0 GRANT statements, so the
-/// simulator's <see cref="Class"/> + <see cref="MajorId"/> + <see cref="MinorId"/>
-/// triple mirrors the catalog-view shape: class=0, major_id=0,
-/// minor_id=0 for database-scope grants; class=1 + major_id=&lt;object_id&gt;
-/// for object-scope grants (when the parser eventually accepts <c>ON
-/// OBJECT::name</c>).
+/// The <see cref="Class"/> + <see cref="MajorId"/> + <see cref="MinorId"/> triple
+/// mirrors the catalog-view shape: class=0, major_id=0 for database-scope grants;
+/// class=1 + major_id=&lt;object_id&gt; for object-scope; class=3 + schema_id for
+/// schema-scope; class=4 + principal_id for the IMPERSONATE gate.
 /// </remarks>
 internal sealed class DatabasePermission(
     byte @class,
@@ -22,14 +20,13 @@ internal sealed class DatabasePermission(
     int minorId,
     int granteePrincipalId,
     int grantorPrincipalId,
-    string permissionName,
-    string typeCode,
-    string state)
+    Permission permission,
+    PermissionState state,
+    string? permissionName = null)
 {
     /// <summary>
     /// Permission target class: 0=database, 1=object/column, 3=schema,
-    /// 4=database principal. The simulator only populates 0 (and 1 once
-    /// object-scope grants land).
+    /// 4=database principal.
     /// </summary>
     public readonly byte Class = @class;
 
@@ -51,34 +48,70 @@ internal sealed class DatabasePermission(
 
     /// <summary>
     /// <see cref="DatabasePrincipal.PrincipalId"/> of the principal that
-    /// issued the GRANT statement. The simulator has no current-user
-    /// concept; defaults to <c>dbo</c> (id 1).
+    /// issued the GRANT statement (the granting session's effective principal;
+    /// <c>dbo</c> = id 1 for an unimpersonated session).
     /// </summary>
     public readonly int GrantorPrincipalId = grantorPrincipalId;
 
     /// <summary>
-    /// Long-form permission name as parsed from the GRANT statement
-    /// (e.g. <c>VIEW ANY COLUMN ENCRYPTION KEY DEFINITION</c>). Stored
-    /// case-preserved; matched case-insensitively at REVOKE/DENY time.
+    /// The canonical permission, or <see cref="SqlServerSimulator.Permission.Other"/>
+    /// for an off-catalog name carried on <see cref="PermissionName"/>.
     /// </summary>
-    public readonly string PermissionName = permissionName;
+    public readonly Permission Permission = permission;
 
     /// <summary>
-    /// 4-character SQL Server permission type code
-    /// (<c>VWCD</c> for VIEW ANY COLUMN MASTER KEY DEFINITION, etc.).
-    /// Derived from the first letter of each word in <see cref="PermissionName"/>,
-    /// right-padded with spaces — accurate for most spelled-out permission
-    /// names but not all (a small lookup table refinement would be needed
-    /// for exact catalog parity).
+    /// Raw permission text for an <see cref="SqlServerSimulator.Permission.Other"/>
+    /// row (e.g. <c>VIEW ANY COLUMN MASTER KEY DEFINITION</c>), stored
+    /// case-preserved and matched case-insensitively; <see langword="null"/> for a
+    /// canonical row, whose name / type code come from <see cref="PermissionCatalog"/>.
     /// </summary>
-    public readonly string TypeCode = typeCode;
+    public readonly string? PermissionName = permissionName;
 
     /// <summary>
-    /// State code: <c>G</c>=Grant, <c>R</c>=Revoke, <c>D</c>=Deny,
-    /// <c>W</c>=Grant_with_grant. Real SQL Server treats REVOKE as a
-    /// row-deletion rather than a stored state; the simulator keeps the
-    /// REVOKE row so DENY ⇄ GRANT toggling can be observed in
-    /// <c>sys.database_permissions</c> for debugging.
+    /// State: Grant / GrantWithGrantOption / Deny / Revoke. Real SQL Server treats
+    /// REVOKE as a row-deletion; the simulator likewise removes rows on REVOKE and
+    /// keeps only live Grant / GrantWithGrantOption / Deny rows.
     /// </summary>
-    public readonly string State = state;
+    public readonly PermissionState State = state;
+
+    /// <summary>The catalog-view <c>permission_name</c> — the canonical catalog spelling, or the raw stored text for an off-catalog (<see cref="SqlServerSimulator.Permission.Other"/>) name.</summary>
+    public string DisplayName => Permission == Permission.Other ? PermissionName! : Permission.CanonicalName;
+
+    /// <summary>The catalog-view <c>type</c> code — the canonical 4-char code, or the first-letter heuristic for an off-catalog name.</summary>
+    public string DisplayTypeCode => Permission == Permission.Other ? DeriveTypeCode(PermissionName!) : Permission.CanonicalTypeCode;
+
+    /// <summary>
+    /// Whether this row names <paramref name="permission"/> on the
+    /// (<paramref name="securableClass"/>, <paramref name="majorId"/>) securable.
+    /// Enum equality except for <see cref="SqlServerSimulator.Permission.Other"/>,
+    /// where collation name-equality against <paramref name="permissionName"/>
+    /// keeps two distinct off-catalog names from colliding.
+    /// </summary>
+    public bool IsFor(byte securableClass, int majorId, Permission permission, string permissionName, Database database) =>
+        Class == securableClass
+        && MajorId == majorId
+        && Permission == permission
+        && (permission != Permission.Other || database.Collation.Equals(PermissionName, permissionName));
+
+    /// <summary>
+    /// First-letter-of-each-word type-code heuristic for off-catalog permission
+    /// names (e.g. <c>VIEW ANY COLUMN MASTER KEY DEFINITION</c> → <c>VACM</c>),
+    /// right-padded with spaces to 4 chars. Accurate for most spelled-out names
+    /// but won't byte-match real for every long name.
+    /// </summary>
+    private static string DeriveTypeCode(string permissionName)
+    {
+        var words = permissionName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        Span<char> code = stackalloc char[4];
+        var idx = 0;
+        foreach (var w in words)
+        {
+            if (idx >= 4)
+                break;
+            code[idx++] = char.ToUpperInvariant(w[0]);
+        }
+        while (idx < 4)
+            code[idx++] = ' ';
+        return new string(code);
+    }
 }
