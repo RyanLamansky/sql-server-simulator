@@ -32,7 +32,12 @@ internal enum Permission : byte
     Unmask,
     Update,
     ViewChangeTracking,
+    ViewDatabasePerformanceState,
+    ViewDatabaseState,
     ViewDefinition,
+    ViewServerPerformanceState,
+    ViewServerSecurityState,
+    ViewServerState,
 }
 
 /// <summary>
@@ -110,7 +115,12 @@ internal static class PermissionCatalog
         new("UNMASK", "UMSK", PermissionCategory.None),             // Unmask
         new("UPDATE", "UP  ", PermissionCategory.Write),            // Update
         new("VIEW CHANGE TRACKING", "VWCT", PermissionCategory.None), // ViewChangeTracking
+        new("VIEW DATABASE PERFORMANCE STATE", "VDP ", PermissionCategory.None), // ViewDatabasePerformanceState
+        new("VIEW DATABASE STATE", "VWDS", PermissionCategory.None), // ViewDatabaseState
         new("VIEW DEFINITION", "VW  ", PermissionCategory.None),    // ViewDefinition
+        new("VIEW SERVER PERFORMANCE STATE", "VSP ", PermissionCategory.None), // ViewServerPerformanceState
+        new("VIEW SERVER SECURITY STATE", "VSS ", PermissionCategory.None), // ViewServerSecurityState
+        new("VIEW SERVER STATE", "VWSS", PermissionCategory.None),  // ViewServerState
     ];
 
     extension(Permission)
@@ -142,7 +152,12 @@ internal static class PermissionCatalog
                 "UNMASK" => Permission.Unmask,
                 "UPDATE" => Permission.Update,
                 "VIEW CHANGE TRACKING" => Permission.ViewChangeTracking,
+                "VIEW DATABASE PERFORMANCE STATE" => Permission.ViewDatabasePerformanceState,
+                "VIEW DATABASE STATE" => Permission.ViewDatabaseState,
                 "VIEW DEFINITION" => Permission.ViewDefinition,
+                "VIEW SERVER PERFORMANCE STATE" => Permission.ViewServerPerformanceState,
+                "VIEW SERVER SECURITY STATE" => Permission.ViewServerSecurityState,
+                "VIEW SERVER STATE" => Permission.ViewServerState,
                 _ => Permission.Other,
             };
         }
@@ -162,10 +177,12 @@ internal static class PermissionCatalog
         /// <summary>
         /// The immediate covering permission for this permission at
         /// <paramref name="securableClass"/> — the permission that, when granted,
-        /// implies this one — or <see langword="null"/> at the top (<c>CONTROL</c>).
-        /// Chains to <c>CONTROL</c> for most; the class-specific exceptions
-        /// (OBJECT SELECT ← RECEIVE ← CONTROL, DATABASE CREATE TABLE ← ALTER ←
-        /// CONTROL) come straight from <c>sys.fn_builtin_permissions</c>.
+        /// implies this one — or <see langword="null"/> at the top (<c>CONTROL</c>,
+        /// or <c>VIEW SERVER STATE</c> at server scope). Chains to <c>CONTROL</c>
+        /// for most; the class-specific exceptions (OBJECT SELECT ← RECEIVE ←
+        /// CONTROL, DATABASE CREATE TABLE ← ALTER ← CONTROL, the VIEW …STATE
+        /// granular / cross-scope graph) come straight from
+        /// <c>sys.fn_builtin_permissions</c> (probe-confirmed 2026-07-21).
         /// </summary>
         internal Permission? Covering(byte securableClass) => (securableClass, permission) switch
         {
@@ -173,8 +190,51 @@ internal static class PermissionCatalog
             (PermissionChecker.ClassObject, Permission.Select) => Permission.Receive,
             (PermissionChecker.ClassObject, Permission.Receive) => Permission.Control,
             (PermissionChecker.ClassDatabase, Permission.CreateTable) => Permission.Alter,
+            // VIEW SERVER STATE covers the granular server-state permissions; it
+            // is the top of the server-state graph (CONTROL SERVER coverage is
+            // out of scope — sysadmin-only in practice, handled by the bypass).
+            (PermissionChecker.ClassServer, Permission.ViewServerState) => null,
+            (PermissionChecker.ClassServer, Permission.ViewServerPerformanceState) => Permission.ViewServerState,
+            (PermissionChecker.ClassServer, Permission.ViewServerSecurityState) => Permission.ViewServerState,
+            // VIEW DATABASE STATE covers VIEW DATABASE PERFORMANCE STATE at
+            // database scope; the cross-scope server → database satisfaction is
+            // consulted separately against the server registry.
+            (PermissionChecker.ClassDatabase, Permission.ViewDatabasePerformanceState) => Permission.ViewDatabaseState,
             _ => Permission.Control,
         };
+
+        /// <summary>
+        /// This permission's covering chain at <paramref name="securableClass"/> —
+        /// the permission itself, then each broader covering permission up to the
+        /// top (<c>CONTROL</c> / <c>VIEW SERVER STATE</c>). The single covering
+        /// walk shared by the database checker's satisfier build-out
+        /// (<see cref="PermissionChecker"/>) and the server-permission check
+        /// (<see cref="Simulation.HoldsServerPermission"/>).
+        /// </summary>
+        internal IEnumerable<Permission> CoveringChain(byte securableClass)
+        {
+            Permission? current = permission;
+            while (current is Permission p)
+            {
+                yield return p;
+                current = p.Covering(securableClass);
+            }
+        }
+
+        /// <summary>
+        /// Whether this (granted) permission satisfies <paramref name="required"/>
+        /// at <paramref name="securableClass"/> — it is <paramref name="required"/>
+        /// itself or one of its covering permissions.
+        /// </summary>
+        internal bool Covers(Permission required, byte securableClass)
+        {
+            foreach (var p in required.CoveringChain(securableClass))
+            {
+                if (p == permission)
+                    return true;
+            }
+            return false;
+        }
     }
 
     extension(PermissionState state)

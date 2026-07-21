@@ -115,6 +115,33 @@ internal sealed class CatalogView(
     /// principal first.
     /// </summary>
     internal MetadataVisibilityKey? MetadataKey;
+
+    /// <summary>
+    /// How a restricted session's server-state gate treats this DMV;
+    /// <see langword="null"/> for every non-DMV view and the three ungated DMVs
+    /// (<c>sys.dm_os_host_info</c> / <c>sys.fn_helpcollations</c> /
+    /// <c>sys.dm_db_xtp_table_memory_stats</c>). Set once at registration by
+    /// <c>BuiltInResources</c>. A <c>dbo</c> / sysadmin session never consults it —
+    /// the gate short-circuits on <see cref="SessionSecurityContext.EffectiveIsDbo"/>
+    /// first, so existing in-process DMV reads pay one bool read.
+    /// </summary>
+    internal DmvGateKind? DmvGate;
+}
+
+/// <summary>
+/// The server-state gate a restricted session hits when reading a modeled DMV
+/// (probe-confirmed against SQL Server 2025, 2026-07-21).
+/// </summary>
+internal enum DmvGateKind : byte
+{
+    /// <summary>Server-scope DMV — needs <c>VIEW SERVER PERFORMANCE STATE</c> (covered by <c>VIEW SERVER STATE</c>); denial raises Msg 300.</summary>
+    ServerState,
+
+    /// <summary>Database-scope DMV — needs <c>VIEW DATABASE PERFORMANCE STATE</c> at database scope or a covering server permission; denial raises Msg 262.</summary>
+    DatabaseState,
+
+    /// <summary><c>sys.dm_exec_sessions</c> — a restricted session without <c>VIEW SERVER STATE</c> sees only its own session row (a row filter, not a hard denial).</summary>
+    SessionSelfFilter,
 }
 
 /// <summary>

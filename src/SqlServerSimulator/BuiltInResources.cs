@@ -68,6 +68,7 @@ internal static partial class BuiltInResources
         RegisterServerAndDatabases(views);
         RegisterLegacyCompat(views);
         ApplyMetadataVisibility(views);
+        ApplyDmvGating(views);
         return views;
     }
 }

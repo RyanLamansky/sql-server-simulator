@@ -181,10 +181,80 @@ partial class Simulation
         return closure.Contains(roleId);
     }
 
+    /// <summary>
+    /// The server principals a login's grants flow through: the login's own
+    /// server-principal id (when it resolves), every server role it belongs to
+    /// transitively, and <c>public</c> (id 2, which every login carries). The
+    /// closure <see cref="HoldsServerPermission"/> scans <see cref="ServerPermissions"/>
+    /// against. An unresolvable login still carries <c>public</c>.
+    /// </summary>
+    internal HashSet<int> BuildServerPrincipalClosure(string loginName)
+    {
+        var closure = new HashSet<int> { 2 };
+        if (this.TryResolveServerPrincipalId(loginName, out var id))
+            _ = closure.Add(id);
+        bool grew;
+        lock (this.ServerRoleMembers)
+        {
+            do
+            {
+                grew = false;
+                foreach (var (role, member) in this.ServerRoleMembers)
+                {
+                    if (closure.Contains(member) && closure.Add(role))
+                        grew = true;
+                }
+            }
+            while (grew);
+        }
+        return closure;
+    }
+
     /// <summary>Whether the login runs as a <c>sysadmin</c> member — <c>sa</c> always, else transitive <c>sysadmin</c> membership. Maps the login to <c>dbo</c> everywhere.</summary>
     internal bool IsLoginSysadmin(string loginName) =>
         BuiltInToken.Comparer.Equals(loginName, "sa")
         || (this.TryResolveServerPrincipalId(loginName, out var id) && this.IsServerPrincipalInRole(id, SysadminRoleId));
+
+    /// <summary>
+    /// Whether <paramref name="loginName"/> holds <paramref name="permission"/> at
+    /// server scope. The server-scope counterpart to
+    /// <see cref="PermissionChecker.IsGranted"/>: a <c>sysadmin</c> bypass (incl.
+    /// <c>sa</c>; sysadmin logins already map to <c>dbo</c> and never reach a gate,
+    /// so this is belt-and-suspenders), then a DENY-first / GRANT scan over the
+    /// login's <see cref="BuildServerPrincipalClosure">server-principal closure</see>
+    /// with the server-scope covering graph — a stored grant satisfies the request
+    /// when it <c>Covers</c> it (so <c>VIEW SERVER STATE</c> answers a <c>VIEW
+    /// SERVER PERFORMANCE STATE</c> requirement).
+    /// </summary>
+    internal bool HoldsServerPermission(string loginName, Permission permission)
+    {
+        if (this.IsLoginSysadmin(loginName))
+            return true;
+
+        var closure = this.BuildServerPrincipalClosure(loginName);
+        lock (this.ServerPermissions)
+        {
+            // DENY binds first.
+            foreach (var row in this.ServerPermissions)
+            {
+                if (row.State == PermissionState.Deny && closure.Contains(row.GranteeId)
+                    && row.Permission.Covers(permission, PermissionChecker.ClassServer))
+                {
+                    return false;
+                }
+            }
+            foreach (var row in this.ServerPermissions)
+            {
+                if (row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption
+                    && closure.Contains(row.GranteeId)
+                    && row.Permission.Covers(permission, PermissionChecker.ClassServer))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
 
     /// <summary>
     /// Parses <c>CREATE SERVER ROLE name [AUTHORIZATION owner]</c>. Cursor on
@@ -384,4 +454,7 @@ internal sealed class ServerPermission(int granteeId, int grantorId, string perm
     public readonly string PermissionName = permissionName;
     public readonly string TypeCode = typeCode;
     public readonly PermissionState State = state;
+
+    /// <summary>The resolved permission enum (<see cref="Permission.Other"/> for the long tail the state checker never matches), so <see cref="Simulation.HoldsServerPermission"/> compares by enum + covering graph rather than by name.</summary>
+    public readonly Permission Permission = Permission.Resolve(permissionName);
 }

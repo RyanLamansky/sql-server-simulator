@@ -219,6 +219,12 @@ internal static class PermissionChecker
     internal const byte ClassSchema = 3;
     internal const byte ClassDatabasePrincipal = 4;
 
+    // Server-scope permissions (sys.server_permissions.class = 100) live on
+    // Simulation.ServerPermissions, not a Database; Simulation.HoldsServerPermission
+    // walks them, but the covering graph shares this class tag so the VIEW
+    // …STATE server-scope edges resolve through Permission.Covering.
+    internal const byte ClassServer = 100;
+
     /// <summary>Whether the effective principal holds <paramref name="permission"/> on the described securable. An off-catalog (<see cref="Permission.Other"/>) request is never satisfied.</summary>
     internal static bool IsGranted(Database database, int principalId, Permission permission, byte securableClass, int majorId, int schemaId)
     {
@@ -419,11 +425,7 @@ internal static class PermissionChecker
 
     private static void AddScope(List<(byte, int, Permission)> result, byte cls, int majorId, Permission permission)
     {
-        Permission? current = permission;
-        while (current is Permission p)
-        {
+        foreach (var p in permission.CoveringChain(cls))
             result.Add((cls, majorId, p));
-            current = p.Covering(cls);
-        }
     }
 }

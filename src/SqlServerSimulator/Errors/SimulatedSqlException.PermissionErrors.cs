@@ -30,6 +30,25 @@ public sealed partial class SimulatedSqlException
         new($"CREATE TABLE permission denied in database '{databaseName}'.", 262, 14, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 262 for a database-scope DMV read denied by a
+    /// missing <c>VIEW DATABASE PERFORMANCE STATE</c> (or covering) permission.
+    /// Same shape as the CREATE TABLE 262 (severity 14, state 1), with the
+    /// permission name parameterized — probe-confirmed wording. Real also raises a
+    /// trailing Msg 297; the simulator surfaces the single Msg 262.
+    /// </summary>
+    internal static SimulatedSqlException DatabaseStatePermissionDenied(string permission, string databaseName) =>
+        new($"{permission} permission denied in database '{databaseName}'.", 262, 14, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 300 for a server-scope DMV read denied by a missing
+    /// <c>VIEW SERVER PERFORMANCE STATE</c> (or covering <c>VIEW SERVER STATE</c>)
+    /// permission. Severity 14, state 1, probe-confirmed wording. Real also raises
+    /// a trailing Msg 297; the simulator surfaces the single Msg 300.
+    /// </summary>
+    internal static SimulatedSqlException ServerStatePermissionDenied(string permission, string databaseName) =>
+        new($"{permission} permission was denied on object 'server', database '{databaseName}'.", 300, 14, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 262 for a <c>CREATE VIEW</c> / <c>PROCEDURE</c> /
     /// <c>FUNCTION</c> denied by a missing database-scope CREATE-of-that-kind
     /// permission. Severity 14, <strong>state 18</strong>, with the object being

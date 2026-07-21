@@ -184,7 +184,28 @@ Server scope outlives any database, so its registries live on `Simulation`.
 - `CREATE SERVER ROLE x` (→ `Simulation.ServerRoles`, `type R`, `is_fixed 0`), `ALTER SERVER ROLE r { ADD | DROP } MEMBER l` (→ `Simulation.ServerRoleMembers`, works for fixed and custom roles), `DROP SERVER ROLE x` (dropping a fixed role → **Msg 15150**). `SERVER` isn't a reserved keyword, so the CREATE / ALTER / DROP dispatchers match a `Name`-guard case. Errors are the 15151 family: unknown role `Cannot alter the server role '<r>'…`; unknown member `Cannot add the server principal '<l>'…`; unknown grantee login `Cannot find the login '<l>'…`.
 - **sysadmin semantics** (probe6 N3): a sysadmin-member login (incl. `sa`) maps to dbo in every database (see [Authentication](#session-principal--impersonation)); `IsLoginSysadmin` walks the `ServerRoleMembers` closure.
 - **`IS_SRVROLEMEMBER`** now reads the registry: `public` → 1; a sysadmin member → 1 for **every fixed** server role (N2); real membership → 1/0; a non-role name → NULL; the 2-arg form looks up the named login (an unknown named login → NULL).
-- **Server-scope GRANT / DENY / REVOKE** — an ON-less GRANT whose permissions are all recognized SERVER-class names (`CONNECT SQL`, `VIEW SERVER STATE`, …) routes to `ApplyServerScopeGrant`. Legal only when the current database is `master` (**Msg 4621** elsewhere), stored in `Simulation.ServerPermissions` (class 100), type codes from the `ServerPermissionCodes` table (`CONNECT SQL`→`COSQ`, `VIEW SERVER STATE`→`VWSS`, …). `CREATE LOGIN` auto-seeds a `CONNECT SQL` G row (N4b). **Server-scope DENY replaces the prior G row** (N4 — divergent from database scope, where G + D coexist); REVOKE removes the rows. No enforcement hangs off server permissions in this bundle (VIEW SERVER STATE does not gate DMVs) — the value is catalog truth + `IS_SRVROLEMEMBER` + the sysadmin mapping.
+- **Server-scope GRANT / DENY / REVOKE** — an ON-less GRANT whose permissions are all recognized SERVER-class names (`CONNECT SQL`, `VIEW SERVER STATE`, …) routes to `ApplyServerScopeGrant`. Legal only when the current database is `master` (**Msg 4621** elsewhere), stored in `Simulation.ServerPermissions` (class 100), type codes from the `ServerPermissionCodes` table (`CONNECT SQL`→`COSQ`, `VIEW SERVER STATE`→`VWSS`, …). `CREATE LOGIN` auto-seeds a `CONNECT SQL` G row (N4b). **Server-scope DENY replaces the prior G row** (N4 — divergent from database scope, where G + D coexist); REVOKE removes the rows. Beyond catalog truth + `IS_SRVROLEMEMBER` + the sysadmin mapping, the `VIEW …STATE` server permissions **gate the modeled DMVs** — see [DMV server-state gating](#dmv-server-state-gating).
+
+### DMV server-state gating
+
+A restricted session (any non-`dbo` effective principal — a mapped user or `guest`; sysadmin logins map to `dbo` and bypass) reading a modeled DMV is gated by the `VIEW …STATE` permissions (probe-confirmed against SQL Server 2025, 2026-07-21).
+The `VIEW …STATE` permission enum, type codes (`VIEW SERVER STATE`→`VWSS`, `VIEW SERVER PERFORMANCE STATE`→`VSP `, `VIEW SERVER SECURITY STATE`→`VSS `, `VIEW DATABASE STATE`→`VWDS`, `VIEW DATABASE PERFORMANCE STATE`→`VDP `), and covering graph live in `Permission.cs`; the covering edges are: `VIEW SERVER STATE` covers `VIEW SERVER PERFORMANCE STATE` / `VIEW SERVER SECURITY STATE` (server scope), `VIEW DATABASE STATE` covers `VIEW DATABASE PERFORMANCE STATE` (database scope), and cross-scope a covering server permission satisfies the database requirement.
+
+`ServerPermissionChecker.Holds(simulation, login, permission)` is the server-scope counterpart to `PermissionChecker` — sysadmin bypass, then a DENY-first / GRANT scan over the login's server-principal closure (`Simulation.BuildServerPrincipalClosure`: the login's server-principal id + its transitive server-role memberships + `public`) with the server-scope covering graph, over `Simulation.ServerPermissions`.
+It also answers the cross-scope database-state requirement (a database `VIEW …STATE` need met by a covering server permission), so the DMV gate consults one method for both.
+(`CONTROL SERVER` coverage is out of scope — sysadmin-only in practice, folded into the bypass.)
+
+The gate hangs off a per-DMV `CatalogView.DmvGate` descriptor (`DmvGateKind`), set once at registration in `BuiltInResources.DmvGating.cs` (analogous to bundle 2's `MetadataVisibilityKey`), and is applied in `BuiltInResources.ApplyDmvGate` from both `Selection.ForCatalogView` overloads.
+The `dbo` / sysadmin fast path short-circuits on `SessionSecurityContext.EffectiveIsDbo` before any allocation, so existing in-process DMV reads pay one bool read and are byte-identical.
+
+| DMV | Gate | Denial |
+|---|---|---|
+| `sys.dm_tran_locks`, `sys.dm_os_waiting_tasks`, `sys.dm_tran_version_store`, `sys.dm_tran_version_store_space_usage`, `sys.dm_tran_active_snapshot_database_transactions`, `sys.dm_hadr_cluster` | server-scope — `VIEW SERVER PERFORMANCE STATE` (covered by `VIEW SERVER STATE`) | **Msg 300** sev 14 state 1: `VIEW SERVER PERFORMANCE STATE permission was denied on object 'server', database '<db>'.` |
+| `sys.dm_db_partition_stats`, `sys.dm_hadr_database_replica_states` | database-scope — `VIEW DATABASE PERFORMANCE STATE` at db scope, or a covering server permission cross-scope | **Msg 262** sev 14 state 1: `VIEW DATABASE PERFORMANCE STATE permission denied in database '<db>'.` |
+| `sys.dm_exec_sessions` | self-filter — restricted sessions without `VIEW SERVER STATE` see only their own SPID's row (a row filter, not a hard denial) | — |
+| `sys.dm_os_host_info`, `sys.fn_helpcollations`, `sys.dm_db_xtp_table_memory_stats` | ungated (probe: readable by `guest`) | — |
+
+Real also raises a trailing **Msg 297** after the 300 / 262; the simulator surfaces the single 300 / 262.
 
 | Msg | When |
 |---|---|
@@ -240,7 +261,8 @@ Registered in `BuiltInResources.Security.cs` via the shared `EmptyCatalogRows`.
 | 15023 | Duplicate `CREATE USER` / `CREATE ROLE` name. |
 | 15247 | CREATE SEQUENCE / ROLE / USER / SCHEMA by a principal lacking `db_ddladmin` / `db_owner`. |
 | 229 | SELECT / INSERT / UPDATE / DELETE / EXECUTE denied (sev 14 state 5; Procedure attribution on EXEC; UPDATE/DELETE read-implies-SELECT). |
-| 262 | CREATE TABLE (state 1, no attribution) / CREATE VIEW / PROCEDURE / FUNCTION (state 18, object as Procedure attribution) db-scope-permission gate. |
+| 262 | CREATE TABLE (state 1, no attribution) / CREATE VIEW / PROCEDURE / FUNCTION (state 18, object as Procedure attribution) db-scope-permission gate; database-scope DMV read without `VIEW DATABASE PERFORMANCE STATE` (state 1). |
+| 300 | Server-scope DMV read without `VIEW SERVER PERFORMANCE STATE` (sev 14 state 1). |
 | 2760 | CREATE TABLE / VIEW / PROCEDURE / FUNCTION with the db-scope permission but no ALTER on the target schema (double-quoted schema name). |
 | 1088 | TRUNCATE denied (state 7) / ALTER TABLE denied (state 13) — double-quoted object name. |
 | 3701 | DROP TABLE denied — schema ALTER missing (sev 14 state 20, leaf-named). |
@@ -282,7 +304,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 ## Known gaps
 
 - **Column-level grants** (`GRANT SELECT (col) …`, Msg 230), **`GRANT … ON SERVER` / `ON LOGIN::` securables**, **application roles** — not modeled. (Server-scope permission *names* — `CONNECT SQL` / `VIEW SERVER STATE` / … — and server roles now are; see [Server roles + server-scope permissions](#server-roles--server-scope-permissions-simulationsimulationserverrolescs).)
-- **Server-permission enforcement** — server permissions are catalog truth + `IS_SRVROLEMEMBER` input only; nothing hangs off them (VIEW SERVER STATE doesn't gate DMVs).
+- **Server-permission enforcement beyond DMV state gating** — the `VIEW …STATE` permissions gate the modeled DMVs (see [DMV server-state gating](#dmv-server-state-gating)); other server-permission-gated actions (ALTER ANY LOGIN, CONTROL SERVER, …) are largely sysadmin-only already and aren't separately enforced.
 - **DDL statement permissions beyond the gated set** — CREATE TABLE / VIEW / PROCEDURE / FUNCTION / SEQUENCE / ROLE / USER / SCHEMA, ALTER TABLE, DROP TABLE, and DROP USER are gated; other CREATE / ALTER / DROP statements (indexes, triggers, types, sequences-alter, …) aren't. `ALTER` / `CREATE OR ALTER` of an existing module isn't gated (only pure CREATE is).
 - **`db_accessadmin` / `db_securityadmin` / `db_backupoperator`** — membership is tracked and projected, but carries no enforced effect in this bundle (the DDL gates treat `db_owner` / `db_ddladmin` as the "may run any DDL" pair per probe).
 - **Msg 229 multi-error round trip** — when both SELECT and the write permission are missing, a single SELECT-first denial is raised, not real's paired SELECT-then-write error records.
