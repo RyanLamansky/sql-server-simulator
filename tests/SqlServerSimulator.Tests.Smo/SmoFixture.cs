@@ -123,6 +123,10 @@ internal static class SmoFixture
             "INSERT Sales.OrderLines (OrderID, CustomerID) VALUES (1, 1), (2, 2)",
             "INSERT Application.EmployeeRoles (PersonID, RoleName) VALUES (1, 'Manager')",
             "CREATE LOGIN smo WITH PASSWORD = 'smo'",
+            // SMO / SSMS connects as an administrator; sysadmin membership maps
+            // smo to dbo in the target database (an unmapped login would be
+            // refused there — guest is inaccessible in a user database).
+            "ALTER SERVER ROLE sysadmin ADD MEMBER smo",
         ];
 
         using var connection = sim.CreateDbConnection();

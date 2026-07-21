@@ -36,7 +36,11 @@ public sealed class AuthenticationTests
 
     private static async Task AssertLoginSucceeds(SimulatedNetworkListener listener, string user, string password, CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(CredentialConnectionString(listener, user, password));
+        // These tests assert credential acceptance, not database authorization,
+        // so they target master — where guest is accessible — and an
+        // authenticated login with no FOR LOGIN user still opens (as guest). A
+        // user database would refuse the unmapped login (Msg 4060).
+        await using var connection = new SqlConnection(CredentialConnectionString(listener, user, password) + ";Database=master");
         await connection.OpenAsync(cancellationToken);
         await using var command = new SqlCommand("select 1", connection);
         AreEqual(1, await command.ExecuteScalarAsync(cancellationToken));

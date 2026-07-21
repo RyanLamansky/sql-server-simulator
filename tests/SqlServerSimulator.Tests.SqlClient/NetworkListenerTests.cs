@@ -108,8 +108,10 @@ public sealed class NetworkListenerTests
             new SimulatedNetworkListenerOptions { Port = 0, BindAddress = IPAddress.Loopback },
             TestContext.CancellationToken);
 
+        // Target master (guest-accessible) so the unmapped dev login opens as
+        // guest — this test is about interface binding, not authorization.
         await using var connection = new SqlConnection(
-            $"Server=127.0.0.1,{listener.Port};User ID=dev;Password=S3cure!Pass;TrustServerCertificate=True;Pooling=False;Connect Timeout=15");
+            $"Server=127.0.0.1,{listener.Port};Database=master;User ID=dev;Password=S3cure!Pass;TrustServerCertificate=True;Pooling=False;Connect Timeout=15");
         await connection.OpenAsync(TestContext.CancellationToken);
         await using var command = new SqlCommand("select 1", connection);
         AreEqual(1, await command.ExecuteScalarAsync(TestContext.CancellationToken));
@@ -138,7 +140,7 @@ public sealed class NetworkListenerTests
             Assert.Inconclusive("No non-loopback IPv4 interface on this machine.");
 
         await using var connection = new SqlConnection(
-            $"Server={address},{listener.Port};User ID=dev;Password=S3cure!Pass;TrustServerCertificate=True;Pooling=False;Connect Timeout=15");
+            $"Server={address},{listener.Port};Database=master;User ID=dev;Password=S3cure!Pass;TrustServerCertificate=True;Pooling=False;Connect Timeout=15");
         await connection.OpenAsync(TestContext.CancellationToken);
         await using var command = new SqlCommand("select 1", connection);
         AreEqual(1, await command.ExecuteScalarAsync(TestContext.CancellationToken));
@@ -161,7 +163,7 @@ public sealed class NetworkListenerTests
             TestContext.CancellationToken);
 
         await using var connection = new SqlConnection(
-            $"Server={address},{listener.Port};User ID=dev;Password=S3cure!Pass;TrustServerCertificate=True;Pooling=False;Connect Timeout=15");
+            $"Server={address},{listener.Port};Database=master;User ID=dev;Password=S3cure!Pass;TrustServerCertificate=True;Pooling=False;Connect Timeout=15");
         await connection.OpenAsync(TestContext.CancellationToken);
         await using var command = new SqlCommand("select 1", connection);
         AreEqual(1, await command.ExecuteScalarAsync(TestContext.CancellationToken));

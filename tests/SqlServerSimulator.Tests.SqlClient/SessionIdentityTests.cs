@@ -5,9 +5,10 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// Over-the-wire session identity: a validated TDS login runs as its mapped
-/// database user, falls back to <c>guest</c> in <c>master</c>, and is refused
-/// (Msg 4060) on a database it can neither map into nor guest into. The
-/// identity scalars report the mapped user / login accordingly.
+/// database user, runs as <c>guest</c> where guest is accessible (master /
+/// tempdb / msdb), and is refused (Msg 4060) on a database it can neither map
+/// into nor guest into (a user database). The identity scalars report the
+/// mapped user / login accordingly.
 /// </summary>
 [TestClass]
 public sealed class SessionIdentityTests
@@ -42,30 +43,32 @@ public sealed class SessionIdentityTests
     }
 
     [TestMethod]
-    public async Task MappedLogin_ToInaccessibleDatabase_Fails4060()
+    public async Task UnmappedLogin_ToMsdb_LandsAsGuest()
     {
-        var simulation = new Simulation();
-        Wire.ExecInProc(simulation, "create login app with password = 'P@ss1word'; create user mapped for login app");
-        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
-        var ex = await Assert.ThrowsAsync<SqlException>(async () =>
-        {
-            await using var connection = new SqlConnection(Connect(listener, "app", "P@ss1word", ";Database=msdb"));
-            await connection.OpenAsync(TestContext.CancellationToken);
-        });
-        AreEqual(4060, ex.Number);
-    }
-
-    [TestMethod]
-    public async Task UnmappedLogin_ToUserDatabase_StaysDbo()
-    {
-        // A login with no FOR-LOGIN user anywhere keeps the permissive default
-        // (dbo) — the back-compat path the endpoint has always taken.
+        // guest is accessible in msdb (as in master), so an unmapped login runs
+        // as guest there rather than being refused.
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, "create login solo with password = 'P@ss1word'");
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
-        await using var connection = new SqlConnection(Connect(listener, "solo", "P@ss1word"));
+        await using var connection = new SqlConnection(Connect(listener, "solo", "P@ss1word", ";Database=msdb"));
         await connection.OpenAsync(TestContext.CancellationToken);
-        await using var command = new SqlCommand("select current_user + '|' + system_user", connection);
-        AreEqual("dbo|solo", await command.ExecuteScalarAsync(TestContext.CancellationToken));
+        await using var command = new SqlCommand("select db_name() + '|' + current_user + '|' + system_user", connection);
+        AreEqual("msdb|guest|solo", await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    [TestMethod]
+    public async Task UnmappedLogin_ToUserDatabase_Fails4060()
+    {
+        // A login with no FOR LOGIN user, connecting to a user database (where
+        // guest is inaccessible), is refused — no dbo fallback.
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create login solo with password = 'P@ss1word'");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        var ex = await Assert.ThrowsAsync<SqlException>(async () =>
+        {
+            await using var connection = new SqlConnection(Connect(listener, "solo", "P@ss1word"));
+            await connection.OpenAsync(TestContext.CancellationToken);
+        });
+        AreEqual(4060, ex.Number);
     }
 }

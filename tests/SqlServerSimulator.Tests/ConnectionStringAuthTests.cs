@@ -5,9 +5,11 @@ namespace SqlServerSimulator;
 /// <summary>
 /// In-process connection-string authentication: <c>User ID</c> / <c>Password</c>
 /// validate against the <c>CREATE LOGIN</c> registry, and the session principal
-/// is stamped to the login's mapped database user in the target database
-/// (<c>Initial Catalog</c> / <c>Database</c>). An empty registry accepts any
-/// credentials; no <c>User ID</c> keeps the default dbo identity.
+/// is stamped to the login's database user in the target database
+/// (<c>Initial Catalog</c> / <c>Database</c>) via the faithful login→user
+/// mapping — sysadmin→dbo, <c>FOR LOGIN</c>→that user, guest where accessible,
+/// else a Msg 4060 connect refusal. An empty registry is the open dev mode
+/// (any credentials → dbo); no <c>User ID</c> keeps the default dbo identity.
 /// </summary>
 [TestClass]
 public sealed class ConnectionStringAuthTests
@@ -31,12 +33,30 @@ public sealed class ConnectionStringAuthTests
     }
 
     [TestMethod]
-    public void CorrectPassword_Connects()
+    public void SysadminLogin_ConnectsAsDbo()
     {
+        // A validated login that is a sysadmin member maps to dbo everywhere,
+        // overriding any FOR LOGIN mapping.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create login app with password = 'S3cret!Pass'");
+        _ = simulation.ExecuteNonQuery("""
+            create login app with password = 'S3cret!Pass';
+            alter server role sysadmin add member app
+            """);
         using var connection = Authenticate(simulation, "User ID=app;Password=S3cret!Pass");
         AreEqual("dbo|app|app", Identity(connection));
+    }
+
+    [TestMethod]
+    public void UnmappedLogin_ToUserDatabase_Refused4060()
+    {
+        // A validated login with no FOR LOGIN user, connecting to a user
+        // database where guest is inaccessible, is refused — no dbo fallback.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create login solo with password = 'S3cret!Pass'");
+        var connection = simulation.CreateDbConnection();
+        connection.ConnectionString = "User ID=solo;Password=S3cret!Pass";
+        var ex = Throws<SimulatedSqlException>(connection.Open);
+        AreEqual(4060, ex.Number);
     }
 
     [TestMethod]
@@ -61,24 +81,24 @@ public sealed class ConnectionStringAuthTests
     }
 
     [TestMethod]
-    public void MappedLogin_ToMaster_LandsAsGuest()
+    public void UnmappedLogin_ToMaster_LandsAsGuest()
     {
+        // guest is accessible in master, so an unmapped login runs as guest.
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create login app with password = 'P@ss1word'; create user mapped for login app");
+        _ = simulation.ExecuteNonQuery("create login app with password = 'P@ss1word'");
         using var connection = Authenticate(simulation, "User ID=app;Password=P@ss1word;Initial Catalog=master");
         AreEqual("master", connection.CreateCommand("select db_name()").ExecuteScalar());
         AreEqual("guest|app|app", Identity(connection));
     }
 
     [TestMethod]
-    public void MappedLogin_ToInaccessibleDatabase_Raises4060()
+    public void UnmappedLogin_ToMsdb_LandsAsGuest()
     {
+        // guest is accessible in msdb too (aligned with HAS_DBACCESS).
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create login app with password = 'P@ss1word'; create user mapped for login app");
-        var connection = simulation.CreateDbConnection();
-        connection.ConnectionString = "User ID=app;Password=P@ss1word;Initial Catalog=msdb";
-        var ex = Throws<SimulatedSqlException>(connection.Open);
-        AreEqual(4060, ex.Number);
+        _ = simulation.ExecuteNonQuery("create login app with password = 'P@ss1word'");
+        using var connection = Authenticate(simulation, "User ID=app;Password=P@ss1word;Initial Catalog=msdb");
+        AreEqual("guest|app|app", Identity(connection));
     }
 
     [TestMethod]
