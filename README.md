@@ -108,7 +108,8 @@ Coverage is broad; the compact map below is the shape of it, not the full invent
 - **JSON, XML, spatial, full-text DDL.**
   The `JSON_*`/`OPENJSON` family, XML methods and schema collections, the spatial method surface, and full-text catalog/index DDL.
 - **Security.**
-  Logins and users, database and server roles (fixed and custom), and `GRANT`/`DENY`/`REVOKE` enforced at object, schema, and database scope for restricted principals, with `EXECUTE AS` impersonation, module `WITH EXECUTE AS`, and ownership chaining.
+  Logins, users, and database + server roles (fixed and custom), with authenticated logins mapped to their database user the way SQL Server does.
+  `GRANT`/`DENY`/`REVOKE` are enforced for restricted principals at column, object, schema, and database scope — alongside `EXECUTE AS` impersonation, module `WITH EXECUTE AS`, ownership chaining, catalog metadata filtered to a principal's visibility, and `VIEW SERVER STATE`-gated DMVs.
 - **Scale-out shapes.**
   Multiple databases with cross-database reads, linked servers between simulations, and BACPAC import for bootstrapping from a real database.
 
@@ -133,4 +134,5 @@ A few examples:
 - No physical storage - all data lives in memory for the lifetime of the `Simulation`.
   Suited to test runs and bounded workloads, not larger-than-RAM datasets.
 - The network endpoint is meant for development tooling and tests, not untrusted clients.
-  `ListenNetworkAsync` enforces authentication, and `GRANT`/`DENY` authorization applies once a session runs as a restricted principal - but a login with no `CREATE USER ... FOR LOGIN` mapping (and any `sysadmin` member) runs as `dbo` with unrestricted access, and the simulator makes no hardening claims as a security boundary.
+  Authorization is enforced once you configure principals - logins, users, roles, and grants; with none configured a `Simulation` runs open (every connection is `dbo`), and sysadmin members and unauthenticated in-process connections are `dbo` by design.
+  It's an in-memory simulator built for fidelity, not a hardened security boundary - so lean on it to test your access model, not to stand in front of hostile input.
