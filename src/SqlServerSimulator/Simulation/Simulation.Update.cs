@@ -212,17 +212,31 @@ partial class Simulation
             // UPDATE are missing the SELECT denial surfaces (probe M1). A
             // constant-SET UPDATE with no WHERE reads nothing and needs only
             // UPDATE (M1b).
-            if (where is not null || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch))
-            {
-                if (sourceView is not null)
-                    PermissionEnforcement.CheckView(context.Batch, "SELECT", sourceView);
-                else
-                    PermissionEnforcement.CheckTable(context.Batch, "SELECT", table);
-            }
             if (sourceView is not null)
+            {
+                // Views stay object-grain (column-level grants on views aren't
+                // modeled).
+                if (where is not null || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch))
+                    PermissionEnforcement.CheckView(context.Batch, "SELECT", sourceView);
                 PermissionEnforcement.CheckView(context.Batch, "UPDATE", sourceView);
-            else
-                PermissionEnforcement.CheckTable(context.Batch, "UPDATE", table);
+            }
+            else if (PermissionEnforcement.Applies(context.Batch))
+            {
+                // Column-grain: the WHERE + SET-RHS columns require SELECT
+                // (checked first, per probe M1 ordering), each SET-target column
+                // requires UPDATE — first inaccessible column → Msg 230 (or Msg
+                // 229 when the object is wholly inaccessible for that permission).
+                var readColumns = new HashSet<int>();
+                where?.VisitOperandExpressions(op => op.VisitColumnReferences(n => PermissionEnforcement.AddColumnOrdinal(table, n, readColumns)));
+                foreach (var (_, expr) in rawAssignments)
+                    expr.VisitColumnReferences(n => PermissionEnforcement.AddColumnOrdinal(table, n, readColumns));
+                PermissionEnforcement.CheckTableColumns(context.Batch, Permission.Select, table, readColumns);
+
+                var assignedColumns = new HashSet<int>();
+                foreach (var (columnName, _) in rawAssignments)
+                    PermissionEnforcement.AddColumnOrdinal(table, new MultiPartName(columnName), assignedColumns);
+                PermissionEnforcement.CheckTableColumns(context.Batch, Permission.Update, table, assignedColumns);
+            }
         }
 
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();

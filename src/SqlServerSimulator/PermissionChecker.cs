@@ -48,8 +48,15 @@ internal static class PermissionEnforcement
             && !PermissionChecker.HasFullMetadataVisibility(batch.CurrentDatabase, security.Effective.DatabasePrincipalId);
     }
 
-    /// <summary>Checks SELECT on every read securable a <see cref="Parser.Selection"/> recorded; throws Msg 229 on the first denial.</summary>
-    internal static void CheckReadSources(BatchContext batch, List<ReferencedSecurable>? securables)
+    /// <summary>
+    /// Checks the read permission on every securable a <see cref="Parser.Selection"/>
+    /// recorded; throws on the first denial. A base-table SELECT read whose
+    /// column ordinals were tracked (<paramref name="readColumns"/>) is checked
+    /// column-by-column (Msg 230 naming the first inaccessible column, or Msg 229
+    /// when the principal has no access to the object at all); views / TVFs /
+    /// scalar-UDF EXECUTE stay object-grain (Msg 229).
+    /// </summary>
+    internal static void CheckReadSources(BatchContext batch, List<ReferencedSecurable>? securables, Dictionary<int, (Storage.HeapTable Table, HashSet<int> Columns)>? readColumns = null)
     {
         if (securables is null || securables.Count == 0 || !Applies(batch))
             return;
@@ -57,12 +64,93 @@ internal static class PermissionEnforcement
         var principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
         foreach (var s in securables)
         {
-            if (!PermissionChecker.IsGranted(database, principalId, Permission.Resolve(s.Permission), PermissionChecker.ClassObject, s.ObjectId, s.SchemaId))
+            var permission = Permission.Resolve(s.Permission);
+            // Column-grain path: a base-table SELECT read with tracked columns.
+            if (permission == Permission.Select && readColumns is not null && readColumns.TryGetValue(s.ObjectId, out var entry))
+            {
+                CheckColumnReads(database, principalId, Permission.Select, s.ObjectName, s.SchemaName, entry.Table, entry.Columns);
+                continue;
+            }
+            if (!PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassObject, s.ObjectId, s.SchemaId))
                 throw SimulatedSqlException.PermissionDenied(s.Permission.ToUpperInvariant(), s.ObjectName, database.Name, s.SchemaName);
             // A passed EXECUTE check on a scalar UDF invoked in this query memos
             // the object so the per-row invocation seam skips the re-check.
             if (s.Permission.Equals("EXECUTE", StringComparison.OrdinalIgnoreCase))
                 _ = (batch.ExecuteCheckedFunctionIds ??= []).Add(s.ObjectId);
+        }
+    }
+
+    /// <summary>
+    /// Column-level enforcement of <paramref name="permission"/> (SELECT for
+    /// reads, UPDATE for writes) on a base table. When the principal has no
+    /// positive grant reaching the object at all, the object-level check has
+    /// already failed → Msg 229; otherwise each column is checked in ascending
+    /// ordinal order and the first inaccessible one raises Msg 230. An empty
+    /// <paramref name="columns"/> set means the table was touched without naming
+    /// a column (COUNT(*) / SELECT 1), which real checks as every column.
+    /// </summary>
+    private static void CheckColumnReads(Database database, int principalId, Permission permission, string objectName, string schemaName, Storage.HeapTable table, HashSet<int> columns)
+    {
+        // Object-level Msg 229 when the object is inaccessible at object grain
+        // (no grant, or an object / schema / db DENY overriding the grant) AND
+        // the principal holds no column-level grant on it — otherwise the object
+        // is partially accessible and an inaccessible column raises Msg 230.
+        var objectAccessible = PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassObject, table.ObjectId, table.SchemaId);
+        if (!objectAccessible && !PermissionChecker.HasColumnLevelGrant(database, principalId, permission, table.ObjectId))
+            throw SimulatedSqlException.PermissionDenied(permission.CanonicalName, objectName, database.Name, schemaName);
+        var ordinals = columns.Count == 0 ? AllColumnOrdinals(table) : SortedOrdinals(columns);
+        foreach (var ordinal in ordinals)
+        {
+            if (!PermissionChecker.IsColumnGranted(database, principalId, permission, table.ObjectId, table.SchemaId, ordinal))
+                throw SimulatedSqlException.ColumnPermissionDenied(permission.CanonicalName, table.Columns[ordinal - 1].Name, objectName, database.Name, schemaName);
+        }
+    }
+
+    private static IEnumerable<int> AllColumnOrdinals(Storage.HeapTable table)
+    {
+        for (var i = 1; i <= table.Columns.Length; i++)
+            yield return i;
+    }
+
+    private static int[] SortedOrdinals(HashSet<int> columns)
+    {
+        var ordinals = new int[columns.Count];
+        columns.CopyTo(ordinals);
+        Array.Sort(ordinals);
+        return ordinals;
+    }
+
+    /// <summary>
+    /// Column-level enforcement over an explicit ordinal set on a base table (the
+    /// UPDATE / DELETE write and read-implies-SELECT paths, which don't ride a
+    /// <see cref="Parser.Selection"/> plan). No-op for dbo / module bodies; the
+    /// same Msg 229 vs 230 boundary as the query read path.
+    /// </summary>
+    internal static void CheckTableColumns(BatchContext batch, Permission permission, Storage.HeapTable table, HashSet<int> columns)
+    {
+        if (columns.Count == 0 || !Applies(batch))
+            return;
+        var database = batch.CurrentDatabase;
+        var principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
+        CheckColumnReads(database, principalId, permission, table.Name, SchemaNameFor(database, table.SchemaId), table, columns);
+    }
+
+    /// <summary>
+    /// Resolves a column reference's leaf name to its 1-based ordinal on
+    /// <paramref name="table"/> and adds it to <paramref name="set"/>; an
+    /// unresolved name (a correlated / aliased reference the single-table path
+    /// doesn't own) is ignored. The UPDATE / DELETE column-grain paths use this
+    /// to gather the read (WHERE / SET-RHS) and assigned (SET-target) ordinals.
+    /// </summary>
+    internal static void AddColumnOrdinal(Storage.HeapTable table, MultiPartName name, HashSet<int> set)
+    {
+        for (var i = 0; i < table.Columns.Length; i++)
+        {
+            if (BuiltInToken.Equals(table.Columns[i].Name, name.Leaf))
+            {
+                _ = set.Add(i + 1);
+                return;
+            }
         }
     }
 
@@ -232,7 +320,7 @@ internal static class PermissionChecker
             return false;
 
         var closure = BuildClosure(database, principalId);
-        var satisfiers = BuildSatisfiers(permission, securableClass, majorId, schemaId);
+        var satisfiers = BuildSatisfiers(permission, securableClass, majorId, schemaId, columnOrdinal: 0);
 
         // DENY binds first — explicit D rows, then the deny-roles.
         if (HasMatchingRow(database, closure, satisfiers, deny: true))
@@ -248,6 +336,71 @@ internal static class PermissionChecker
             || (permission.Category == PermissionCategory.Read && closure.Contains(DbDataReader))
             || (permission.Category == PermissionCategory.Write && closure.Contains(DbDataWriter))
             || (permission.Category == PermissionCategory.Ddl && closure.Contains(DbDdlAdmin));
+    }
+
+    /// <summary>
+    /// Whether the effective principal may read / write column
+    /// <paramref name="columnOrdinal"/> (1-based, matching
+    /// <c>sys.columns.column_id</c>) of the object, under a column-level grant
+    /// model. Same DENY-first / GRANT precedence as <see cref="IsGranted"/>, but
+    /// a matching row at the column's <c>minor_id</c> also satisfies (grant) or
+    /// binds (deny), alongside the object-level (minor 0), schema, and database
+    /// scopes: a column DENY overrides a table GRANT, and a column GRANT stands
+    /// in for an absent table GRANT (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    internal static bool IsColumnGranted(Database database, int principalId, Permission permission, int objectId, int schemaId, int columnOrdinal)
+    {
+        if (permission == Permission.Other)
+            return false;
+
+        var closure = BuildClosure(database, principalId);
+        var satisfiers = BuildSatisfiers(permission, ClassObject, objectId, schemaId, columnOrdinal);
+
+        // DENY binds first — a column / object / schema / db DENY, then the deny-roles.
+        if (HasMatchingRow(database, closure, satisfiers, deny: true))
+            return false;
+        if (permission.Category == PermissionCategory.Read && closure.Contains(DbDenyDataReader))
+            return false;
+        if (permission.Category == PermissionCategory.Write && closure.Contains(DbDenyDataWriter))
+            return false;
+
+        // GRANT test — a column / object / schema / db G/W row, then the grant-roles.
+        return HasMatchingRow(database, closure, satisfiers, deny: false)
+            || closure.Contains(DbOwner)
+            || (permission.Category == PermissionCategory.Read && closure.Contains(DbDataReader))
+            || (permission.Category == PermissionCategory.Write && closure.Contains(DbDataWriter));
+    }
+
+    /// <summary>
+    /// Whether the effective principal holds a <em>column-level</em> GRANT
+    /// (<c>minor_id &gt; 0</c>) of <paramref name="permission"/> (or a covering
+    /// permission) on the object — grant-side only. Pairs with the object-grain
+    /// <see cref="IsGranted"/> to draw the Msg 229 vs 230 boundary: a column that
+    /// fails <see cref="IsColumnGranted"/> raises the column-level Msg 230 when
+    /// the object is object-grain accessible or carries any column grant
+    /// (partial access), and the object-level Msg 229 when neither holds — no
+    /// grant reaches the object, or an object / schema / database DENY (or a
+    /// deny-role) has nullified the object-grain grant entirely.
+    /// </summary>
+    internal static bool HasColumnLevelGrant(Database database, int principalId, Permission permission, int objectId)
+    {
+        if (permission == Permission.Other)
+            return false;
+
+        var closure = BuildClosure(database, principalId);
+        foreach (var row in database.Permissions)
+        {
+            if (row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption
+                && row.Class == ClassObject
+                && row.MajorId == objectId
+                && row.MinorId != 0
+                && closure.Contains(row.GranteePrincipalId)
+                && row.Permission.Covers(permission, ClassObject))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>Whether the effective principal is a member of <paramref name="role"/> (transitively), or the role is <c>public</c> (everyone).</summary>
@@ -377,16 +530,16 @@ internal static class PermissionChecker
         return closure;
     }
 
-    private static bool HasMatchingRow(Database database, HashSet<int> closure, List<(byte Class, int MajorId, Permission Permission)> satisfiers, bool deny)
+    private static bool HasMatchingRow(Database database, HashSet<int> closure, List<(byte Class, int MajorId, int MinorId, Permission Permission)> satisfiers, bool deny)
     {
         foreach (var row in database.Permissions)
         {
             var stateMatches = deny ? row.State == PermissionState.Deny : row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption;
             if (!stateMatches || !closure.Contains(row.GranteePrincipalId))
                 continue;
-            foreach (var (cls, majorId, permission) in satisfiers)
+            foreach (var (cls, majorId, minorId, permission) in satisfiers)
             {
-                if (row.Class == cls && row.MajorId == majorId && row.Permission == permission)
+                if (row.Class == cls && row.MajorId == majorId && row.MinorId == minorId && row.Permission == permission)
                     return true;
             }
         }
@@ -394,38 +547,46 @@ internal static class PermissionChecker
     }
 
     /// <summary>
-    /// The set of (class, major_id, permission) tuples a G/W (or D) row could
-    /// carry that would satisfy (or deny) the request: the permission itself
-    /// plus every covering permission, walked up the object → schema →
-    /// database scope chain.
+    /// The set of (class, major_id, minor_id, permission) tuples a G/W (or D)
+    /// row could carry that would satisfy (or deny) the request: the permission
+    /// itself plus every covering permission, walked up the object → schema →
+    /// database scope chain. For an object-scope request the object-level rows
+    /// carry <c>minor_id 0</c>; when <paramref name="columnOrdinal"/> is non-zero
+    /// the object scope additionally admits a row at that column's
+    /// <c>minor_id</c> (the column-level grant / deny) — so an object-grain
+    /// request (ordinal 0) is never satisfied by a column-scoped row, and a
+    /// column request is satisfied by either its own column row or the
+    /// all-columns object row.
     /// </summary>
-    private static List<(byte Class, int MajorId, Permission Permission)> BuildSatisfiers(Permission permission, byte securableClass, int majorId, int schemaId)
+    private static List<(byte Class, int MajorId, int MinorId, Permission Permission)> BuildSatisfiers(Permission permission, byte securableClass, int majorId, int schemaId, int columnOrdinal)
     {
-        var result = new List<(byte, int, Permission)>();
+        var result = new List<(byte, int, int, Permission)>();
         switch (securableClass)
         {
             case ClassObject:
-                AddScope(result, ClassObject, majorId, permission);
-                AddScope(result, ClassSchema, schemaId, permission);
-                AddScope(result, ClassDatabase, 0, permission);
+                AddScope(result, ClassObject, majorId, minorId: 0, permission);
+                if (columnOrdinal != 0)
+                    AddScope(result, ClassObject, majorId, columnOrdinal, permission);
+                AddScope(result, ClassSchema, schemaId, minorId: 0, permission);
+                AddScope(result, ClassDatabase, 0, minorId: 0, permission);
                 break;
             case ClassSchema:
-                AddScope(result, ClassSchema, majorId, permission);
-                AddScope(result, ClassDatabase, 0, permission);
+                AddScope(result, ClassSchema, majorId, minorId: 0, permission);
+                AddScope(result, ClassDatabase, 0, minorId: 0, permission);
                 break;
             case ClassDatabasePrincipal:
-                AddScope(result, ClassDatabasePrincipal, majorId, permission);
+                AddScope(result, ClassDatabasePrincipal, majorId, minorId: 0, permission);
                 break;
             default:
-                AddScope(result, ClassDatabase, 0, permission);
+                AddScope(result, ClassDatabase, 0, minorId: 0, permission);
                 break;
         }
         return result;
     }
 
-    private static void AddScope(List<(byte, int, Permission)> result, byte cls, int majorId, Permission permission)
+    private static void AddScope(List<(byte, int, int, Permission)> result, byte cls, int majorId, int minorId, Permission permission)
     {
         foreach (var p in permission.CoveringChain(cls))
-            result.Add((cls, majorId, p));
+            result.Add((cls, majorId, minorId, p));
     }
 }

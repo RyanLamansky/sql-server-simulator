@@ -22,6 +22,47 @@ public sealed partial class SimulatedSqlException
                 number: 229, procedure: procedure, server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 5));
 
     /// <summary>
+    /// Mimics SQL Server error 230: a SELECT / UPDATE (/ REFERENCES) permission
+    /// was denied on a specific <em>column</em> of an object — the column-level
+    /// grant model's denial, naming the first inaccessible column. Severity 14,
+    /// state 1, probe-confirmed wording. Fires only when the principal has
+    /// <em>partial</em> access to the object (a column grant, or a table grant
+    /// with a column DENY); with no access at all the object-level Msg 229 fires
+    /// instead.
+    /// </summary>
+    internal static SimulatedSqlException ColumnPermissionDenied(string permission, string columnName, string objectName, string databaseName, string schemaName) =>
+        new($"The {permission} permission was denied on the column '{columnName}' of the object '{objectName}', database '{databaseName}', schema '{schemaName}'.",
+            new SimulatedError(@class: 14, lineNumber: 0,
+                message: $"The {permission} permission was denied on the column '{columnName}' of the object '{objectName}', database '{databaseName}', schema '{schemaName}'.",
+                number: 230, procedure: "", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 1));
+
+    /// <summary>
+    /// Mimics SQL Server error 4615: a <c>GRANT</c> / <c>DENY</c> / <c>REVOKE</c>
+    /// column list named a column the object doesn't have. Severity 16, state 1,
+    /// probe-confirmed wording (distinct from the query-time Msg 207
+    /// <c>InvalidColumnName</c>).
+    /// </summary>
+    internal static SimulatedSqlException GrantInvalidColumnName(string columnName) =>
+        new($"Invalid column name '{columnName}'.", 4615, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1019: a <c>GRANT</c> / <c>REVOKE</c> named a column
+    /// list both after a permission and after the object name
+    /// (<c>GRANT SELECT (a) ON t (b)</c>). Severity 15, state 1, probe-confirmed
+    /// wording.
+    /// </summary>
+    internal static SimulatedSqlException GrantInvalidColumnListAfterObject() =>
+        new("Invalid column list after object name in GRANT/REVOKE statement.", 1019, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1020: a column list was given for a permission
+    /// whose securable isn't an object (<c>GRANT SELECT ON SCHEMA::s (c)</c>).
+    /// Severity 15, state 1, probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException GrantSubEntityListNotAllowed() =>
+        new("Sub-entity lists (such as column or security expressions) cannot be specified for entity-level permissions.", 1020, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 262: <c>CREATE TABLE</c> attempted by a principal
     /// lacking <c>db_ddladmin</c> / <c>db_owner</c> membership (or an explicit
     /// CREATE TABLE grant). Severity 14, state 1, probe-confirmed wording.

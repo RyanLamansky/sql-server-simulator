@@ -875,7 +875,7 @@ public sealed partial class Simulation
             var connection = batch.Connection;
             // The cached plan is shared across principals; re-run the SELECT
             // permission check against the replaying session's current principal.
-            PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables);
+            PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
             var rows = selection.Execute(batch).RowBytes.ToList();
             connection.LastStatementRowCount = rows.Count;
             yield return selection.IsAssignmentOnly
@@ -1595,7 +1595,7 @@ public sealed partial class Simulation
                 {
                     var selection = Selection.Parse(context, 0);
                     if (!batch.IsSkipping)
-                        PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables);
+                        PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
                     if (selection.IntoTarget is not null)
                     {
                         // SELECT INTO: creates the destination table and

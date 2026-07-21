@@ -105,6 +105,20 @@ internal sealed partial class Selection
     public List<ReferencedSecurable>? ReferencedSecurables;
 
     /// <summary>
+    /// Per base-table <c>object_id</c>, the 1-based column ordinals this query
+    /// reads — the input to the execution-time column-level SELECT check
+    /// (Msg 230 / 229). Recorded at parse time (principal-independent, rides the
+    /// cached plan) from the resolved column references across the projection,
+    /// WHERE, JOIN ON, GROUP BY, HAVING, and ORDER BY of every (sub)query.
+    /// A base table present with an <em>empty</em> ordinal set is read without
+    /// naming a column (<c>COUNT(*)</c> / <c>SELECT 1</c> / <c>EXISTS</c>), which
+    /// real checks as requiring SELECT on every column. Null when the query
+    /// reads no base table (constant SELECT / all-system-table). Set once by the
+    /// outermost <see cref="ParseQueryExpression"/>.
+    /// </summary>
+    public Dictionary<int, (Storage.HeapTable Table, HashSet<int> Columns)>? ReadColumnsByObject;
+
+    /// <summary>
     /// Pre-computed destination schema (column names + types + nullability
     /// + identity flags) for a <c>SELECT INTO</c> statement; null when
     /// <see cref="IntoTarget"/> is null. Built during projection planning
@@ -356,7 +370,10 @@ internal sealed partial class Selection
         // plan carries the flat set of everything the statement reads.
         var ownsSecurableSink = context.SecurableSink is null;
         if (ownsSecurableSink)
+        {
             context.SecurableSink = [];
+            context.ReadColumnSink = [];
+        }
 
         var combined = ParseUnionExceptChain(context, depth, outerTypeResolver);
 
@@ -387,7 +404,10 @@ internal sealed partial class Selection
         {
             if (context.SecurableSink is { Count: > 0 } sink)
                 combined.ReferencedSecurables = sink;
+            if (context.ReadColumnSink is { Count: > 0 } readColumns)
+                combined.ReadColumnsByObject = readColumns;
             context.SecurableSink = null;
+            context.ReadColumnSink = null;
         }
 
         return combined;
@@ -888,7 +908,7 @@ internal sealed partial class Selection
                     if (topExpression is not null && fromClause.OffsetExpression is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, sources);
-                    return BuildSqlProjection(context.Batch, [.. sources], [.. joins], expressions, fromClause, distinct, topExpression, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget);
+                    return BuildSqlProjection(context.Batch, [.. sources], [.. joins], expressions, fromClause, distinct, topExpression, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink);
 
                 // SELECT projection INTO target [FROM ...] — captures the
                 // destination table name. Real SQL Server requires every

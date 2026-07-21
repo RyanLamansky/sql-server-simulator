@@ -46,10 +46,12 @@ partial class Simulation
             }
         }
 
-        // Permission list — comma-separated spelled-out permission names.
-        // Each permission is a sequence of one or more bare identifier tokens;
-        // the sequence ends at a comma, ON, TO, FROM, or AS.
-        var permissions = new List<string>();
+        // Permission list — comma-separated spelled-out permission names, each
+        // optionally followed by a parenthesized column list
+        // (<c>SELECT (a, b)</c>) for the column-level grant forms. Each
+        // permission is a sequence of one or more bare identifier tokens; the
+        // sequence ends at a comma, '(', ON, TO, FROM, or AS.
+        var permissions = new List<(string Name, List<string>? Columns)>();
         var currentTokens = new List<string>();
         while (true)
         {
@@ -62,8 +64,10 @@ partial class Simulation
             }
             if (currentTokens.Count > 0)
             {
-                permissions.Add(string.Join(" ", currentTokens));
+                var permName = string.Join(" ", currentTokens);
                 currentTokens.Clear();
+                var columns = context.Token is Operator { Character: '(' } ? ParsePermissionColumnList(context) : null;
+                permissions.Add((permName, columns));
             }
             if (context.Token is Operator { Character: ',' })
             {
@@ -82,6 +86,7 @@ partial class Simulation
         var securableDisplayName = context.CurrentDatabase.Name;
         MultiPartName? userSecurableName = null;
         MultiPartName? objectSecurableName = null;
+        List<string>? objectColumns = null;
         var hadOnClause = false;
         if (context.Token is ReservedKeyword { Keyword: Keyword.On })
         {
@@ -114,6 +119,11 @@ partial class Simulation
             var securableName = BatchContext.ParseObjectName(context);
             context.MoveNextRequired();
             securableDisplayName = securableName.Leaf;
+            // Column list on the securable (GRANT SELECT ON t (a, b)) — the
+            // alternate placement of the column-level form, applying to every
+            // permission in the statement.
+            if (context.Token is Operator { Character: '(' })
+                objectColumns = ParsePermissionColumnList(context);
             switch (explicitClass)
             {
                 case "DATABASE":
@@ -193,13 +203,14 @@ partial class Simulation
         // is a recognized server permission (CONNECT SQL, VIEW SERVER STATE, …).
         // Legal only in master (Msg 4621 elsewhere); stored at the Simulation
         // level and projected through sys.server_permissions.
-        if (!hadOnClause && permissions.Count > 0 && permissions.TrueForAll(IsServerScopePermission))
+        if (!hadOnClause && permissions.Count > 0 && permissions.TrueForAll(p => p.Columns is null && IsServerScopePermission(p.Name)))
         {
-            ApplyServerScopeGrant(context, kind, permissions, granteeNames);
+            ApplyServerScopeGrant(context, kind, permissions.ConvertAll(p => p.Name), granteeNames);
             return true;
         }
 
         var database = context.CurrentDatabase;
+        SchemaObject? securableObject = null;
 
         // Resolve a USER::x securable to its target principal id (class 4).
         if (userSecurableName is { } targetName)
@@ -220,10 +231,26 @@ partial class Simulation
         {
             if (!TryResolveSecurableObject(context.Batch, objectSecurableName!.Value, out var obj))
                 throw SimulatedSqlException.CannotFindObject(objectSecurableName.Value.Leaf);
+            securableObject = obj;
             permMajorId = obj.ObjectId;
-            foreach (var permName in permissions)
+            foreach (var (permName, _) in permissions)
                 ValidatePermissionAgainstObjectKind(permName, obj.ObjectTypeCode);
         }
+
+        // Fold a securable-placed column list (GRANT SELECT ON t (a, b)) into
+        // every permission. It cannot combine with a per-permission list
+        // (GRANT SELECT (a) ON t (b) is malformed).
+        if (objectColumns is not null)
+        {
+            if (permissions.Exists(p => p.Columns is not null))
+                throw SimulatedSqlException.GrantInvalidColumnListAfterObject();
+            for (var i = 0; i < permissions.Count; i++)
+                permissions[i] = (permissions[i].Name, objectColumns);
+        }
+
+        // A parenthesized column list is legal only on an object-scope grant.
+        if (permClass != PermissionChecker.ClassObject && permissions.Exists(p => p.Columns is not null))
+            throw SimulatedSqlException.GrantSubEntityListNotAllowed();
 
         // Msg 4624: a grant / deny / revoke targeting sa / dbo / sys /
         // INFORMATION_SCHEMA / entity owner / self is a silent no-op delivered
@@ -245,7 +272,7 @@ partial class Simulation
         // "cannot find the object").
         if (!context.Connection.Security.EffectiveIsDbo)
         {
-            foreach (var permName in permissions)
+            foreach (var (permName, _) in permissions)
             {
                 if (!HasGrantAuthority(database, effectivePrincipalId, permName, permClass, permMajorId))
                     throw SimulatedSqlException.CannotFindObject(securableDisplayName);
@@ -256,13 +283,85 @@ partial class Simulation
         {
             if (!database.Principals.TryGetValue(granteeName, out var grantee))
                 throw SimulatedSqlException.CannotFindPrincipal(granteeName);
-            foreach (var permName in permissions)
+            foreach (var (permName, columns) in permissions)
             {
-                ApplyOnePermission(database, kind, revokeGrantOptionOnly, cascade, withGrantOption,
-                    permClass, permMajorId, permName, grantee.PrincipalId, effectivePrincipalId);
+                if (columns is null)
+                {
+                    ApplyOnePermission(database, kind, revokeGrantOptionOnly, cascade, withGrantOption,
+                        permClass, permMajorId, minorId: 0, permName, grantee.PrincipalId, effectivePrincipalId);
+                    continue;
+                }
+                // Column-level grant: one row per named column, minor_id =
+                // 1-based column ordinal (sys.columns.column_id).
+                foreach (var columnName in columns)
+                {
+                    var minorId = ResolveColumnMinorId(securableObject, columnName);
+                    ApplyOnePermission(database, kind, revokeGrantOptionOnly, cascade, withGrantOption,
+                        permClass, permMajorId, minorId, permName, grantee.PrincipalId, effectivePrincipalId);
+                }
             }
         }
         return true;
+    }
+
+    /// <summary>
+    /// Parses a parenthesized column list (<c>(a, b, c)</c>) following a
+    /// permission name. On entry the cursor is on the opening <c>(</c>; on
+    /// return it is on the first token after the closing <c>)</c>. Column names
+    /// are captured raw (resolved to ordinals later, once the securable object
+    /// is known).
+    /// </summary>
+    private static List<string> ParsePermissionColumnList(ParserContext context)
+    {
+        var columns = new List<string>();
+        context.MoveNextRequired();
+        while (true)
+        {
+            var columnName = context.Token switch
+            {
+                Name n => n.Value,
+                ReservedKeyword rk => rk.ToString(),
+                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+            };
+            columns.Add(columnName);
+            context.MoveNextRequired();
+            switch (context.Token)
+            {
+                case Operator { Character: ',' }:
+                    context.MoveNextRequired();
+                    continue;
+                case Operator { Character: ')' }:
+                    context.MoveNextOptional();
+                    return columns;
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Resolves a column name to its 1-based ordinal (<c>sys.columns.column_id</c>,
+    /// the <c>minor_id</c> a column-level grant stores) on the securable object;
+    /// raises Msg 4615 when the object has no such column. Tables and views are
+    /// supported (the only column-bearing securables the grant grammar reaches).
+    /// </summary>
+    private static int ResolveColumnMinorId(SchemaObject? securableObject, string columnName)
+    {
+        var columns = securableObject switch
+        {
+            Storage.HeapTable table => table.Columns,
+            View view => view.OutputColumns,
+            _ => null,
+        };
+        if (columns is not null)
+        {
+            for (var i = 0; i < columns.Length; i++)
+            {
+                if (BuiltInToken.Comparer.Equals(columns[i].Name, columnName))
+                    return i + 1;
+            }
+        }
+        throw SimulatedSqlException.GrantInvalidColumnName(columnName);
     }
 
     /// <summary>
@@ -274,15 +373,21 @@ partial class Simulation
     /// delegations but no CASCADE.
     /// </summary>
     private static void ApplyOnePermission(Database database, PermissionStatementKind kind, bool revokeGrantOptionOnly, bool cascade, bool withGrantOption,
-        byte permClass, int permMajorId, string permName, int granteeId, int grantorId)
+        byte permClass, int permMajorId, int minorId, string permName, int granteeId, int grantorId)
     {
         var permEnum = Permission.Resolve(permName);
         // Off-catalog names carry their raw text on the row; canonical rows draw
         // name / type code from the catalog at projection time.
         var storedName = permEnum == Permission.Other ? permName : null;
+        // A table-level (minor 0) apply matches every minor_id of the permission
+        // for this grantee — so GRANT / REVOKE at object scope subsumes any prior
+        // column-level rows (probe-confirmed); a column-level apply keys on its
+        // own minor_id alone.
+        bool MinorMatches(int rowMinor) => minorId == 0 || rowMinor == minorId;
         bool Matches(DatabasePermission p, PermissionState state) =>
             p.State == state
             && p.GranteePrincipalId == granteeId
+            && MinorMatches(p.MinorId)
             && p.IsFor(permClass, permMajorId, permEnum, permName, database);
 
         switch (kind)
@@ -293,7 +398,7 @@ partial class Simulation
                 // downgrades W→G). DENY rows are untouched.
                 _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption));
                 database.Permissions.Add(new DatabasePermission(
-                    permClass, permMajorId, minorId: 0, granteePrincipalId: granteeId,
+                    permClass, permMajorId, minorId, granteePrincipalId: granteeId,
                     grantorPrincipalId: grantorId, permission: permEnum,
                     state: withGrantOption ? PermissionState.GrantWithGrantOption : PermissionState.Grant, permissionName: storedName));
                 break;
@@ -303,7 +408,7 @@ partial class Simulation
                 // the D row (the checker gives D precedence).
                 _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Deny));
                 database.Permissions.Add(new DatabasePermission(
-                    permClass, permMajorId, minorId: 0, granteePrincipalId: granteeId,
+                    permClass, permMajorId, minorId, granteePrincipalId: granteeId,
                     grantorPrincipalId: grantorId, permission: permEnum, state: PermissionState.Deny, permissionName: storedName));
                 break;
 
@@ -318,7 +423,7 @@ partial class Simulation
                     throw SimulatedSqlException.RevokeRequiresCascade();
                 _ = database.Permissions.Remove(wRow);
                 database.Permissions.Add(new DatabasePermission(
-                    permClass, permMajorId, minorId: 0, granteePrincipalId: granteeId,
+                    permClass, permMajorId, minorId, granteePrincipalId: granteeId,
                     grantorPrincipalId: grantorId, permission: permEnum, state: PermissionState.Grant, permissionName: storedName));
                 if (cascade)
                     CascadeRemoveDelegations(database, granteeId, permClass, permMajorId, permName);

@@ -555,7 +555,7 @@ partial class Simulation
     {
         var selection = Selection.Parse(context, depth: 0);
         if (!context.Batch.IsSkipping)
-            PermissionEnforcement.CheckReadSources(context.Batch, selection.ReferencedSecurables);
+            PermissionEnforcement.CheckReadSources(context.Batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
 
         if (selection.Schema.Length < expectedColumnCount)
             throw SimulatedSqlException.InsertSelectListFewerThanInsertList();

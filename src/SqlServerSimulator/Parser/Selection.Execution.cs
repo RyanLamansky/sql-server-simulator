@@ -217,7 +217,8 @@ internal sealed partial class Selection
         List<WindowExpression> windows,
         Func<MultiPartName, SqlType>? outerTypeResolver,
         bool isAssignmentOnly,
-        MultiPartName? intoTarget)
+        MultiPartName? intoTarget,
+        Dictionary<int, (Storage.HeapTable Table, HashSet<int> Columns)>? readColumnSink)
     {
         if (windows.Count > 0 && (aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null))
             throw new NotSupportedException("Combining window functions with GROUP BY / HAVING / aggregates in the same SELECT isn't modeled. EF Core 10 doesn't emit this shape.");
@@ -262,10 +263,87 @@ internal sealed partial class Selection
 
         SqlType ResolveColumnType(MultiPartName name) => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
 
+        // Column-level read tracking (parse-time, principal-independent): record
+        // every base-table column this query reads into the shared sink so the
+        // execution-time column-level SELECT check (Msg 230 / 229) can run
+        // against the current principal. Pre-seed each base-table source with an
+        // empty ordinal set — a table read that names no column (COUNT(*) /
+        // SELECT 1) then routes through the column path as "all columns". The
+        // projection funnels through RecordingResolver (recording is free — the
+        // schema resolution already visits these references); WHERE / JOIN ON /
+        // GROUP BY / HAVING / ORDER BY / aggregate operands are walked
+        // structurally below. The runtime row closure keeps the non-recording
+        // ResolveColumnType, so this adds nothing to execution.
+        void RecordReadColumn(MultiPartName name)
+        {
+            if (readColumnSink is null)
+                return;
+            // Best-effort, non-throwing resolution: unlike FindSourceColumn this
+            // silently skips an unresolved (correlated / outer) or ambiguous name
+            // rather than raising Msg 207 / 209 — recording must never alter query
+            // semantics. A qualified name binds to its one qualifier-matching
+            // source; an unqualified name binds only on a single match.
+            var matchSource = -1;
+            var matchColumn = -1;
+            var matches = 0;
+            var qualifier = name.ImmediateQualifier;
+            for (var s = 0; s < sources.Length; s++)
+            {
+                if (qualifier is not null && (sources[s].Qualifier is null || !BuiltInToken.Equals(sources[s].Qualifier, qualifier)))
+                    continue;
+                for (var c = 0; c < sources[s].ColumnNames.Length; c++)
+                {
+                    if (BuiltInToken.Equals(sources[s].ColumnNames[c], name.Leaf))
+                    {
+                        matchSource = s;
+                        matchColumn = c;
+                        matches++;
+                    }
+                }
+                if (qualifier is not null)
+                    break;
+            }
+            if (matches != 1 || sources[matchSource].BackingTable is not { } table || table.Name.StartsWith('#'))
+                return;
+            if (!readColumnSink.TryGetValue(table.ObjectId, out var entry))
+                readColumnSink[table.ObjectId] = entry = (table, []);
+            _ = entry.Columns.Add(matchColumn + 1);
+        }
+        SqlType RecordingResolver(MultiPartName name)
+        {
+            RecordReadColumn(name);
+            return ResolveColumnType(name);
+        }
+        if (readColumnSink is not null)
+        {
+            foreach (var source in sources)
+            {
+                if (source.BackingTable is { } table && !table.Name.StartsWith('#'))
+                    _ = readColumnSink.TryAdd(table.ObjectId, (table, []));
+            }
+        }
+
         for (var i = 0; i < expressions.Count; i++)
         {
-            outputSchema[i] = expressions[i].GetSqlType(parseBatch, ResolveColumnType);
+            outputSchema[i] = expressions[i].GetSqlType(parseBatch, readColumnSink is null ? ResolveColumnType : RecordingResolver);
             outputColumnNames[i] = expressions[i].Name;
+        }
+
+        if (readColumnSink is not null)
+        {
+            foreach (var aggregate in aggregates)
+                aggregate.Operand?.VisitColumnReferences(RecordReadColumn);
+            foreach (var window in windows)
+                window.AggregateInfo?.Operand?.VisitColumnReferences(RecordReadColumn);
+            foreach (var excluder in fromClause.Excluders)
+                excluder.VisitOperandExpressions(op => op.VisitColumnReferences(RecordReadColumn));
+            fromClause.Having?.VisitOperandExpressions(op => op.VisitColumnReferences(RecordReadColumn));
+            foreach (var grouping in fromClause.AllGroupingExpressions)
+                grouping.VisitColumnReferences(RecordReadColumn);
+            foreach (var orderItem in orderBy)
+                orderItem.Expr?.VisitColumnReferences(RecordReadColumn);
+            foreach (var join in joins)
+                join.OnPredicate?.VisitOperandExpressions(op => op.VisitColumnReferences(RecordReadColumn));
         }
 
         // Validate ordinal ORDER BY items now that the projection count is

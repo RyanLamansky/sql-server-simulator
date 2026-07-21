@@ -118,18 +118,25 @@ partial class Simulation
             // DELETE reads the target when it has a WHERE clause — real then
             // also requires SELECT, checked first so the SELECT denial surfaces
             // when both SELECT and DELETE are missing (probe M1d). A bare DELETE
-            // with no WHERE reads nothing and needs only DELETE (M1e).
-            if (where is not null)
-            {
-                if (sourceView is not null)
-                    PermissionEnforcement.CheckView(context.Batch, "SELECT", sourceView);
-                else
-                    PermissionEnforcement.CheckTable(context.Batch, "SELECT", table);
-            }
+            // with no WHERE reads nothing and needs only DELETE (M1e). DELETE
+            // itself is not column-grantable, so it stays object-grain; only the
+            // read-implies-SELECT is column-grain on a base table.
             if (sourceView is not null)
+            {
+                if (where is not null)
+                    PermissionEnforcement.CheckView(context.Batch, "SELECT", sourceView);
                 PermissionEnforcement.CheckView(context.Batch, "DELETE", sourceView);
+            }
             else
+            {
+                if (where is not null && PermissionEnforcement.Applies(context.Batch))
+                {
+                    var readColumns = new HashSet<int>();
+                    where.VisitOperandExpressions(op => op.VisitColumnReferences(n => PermissionEnforcement.AddColumnOrdinal(table, n, readColumns)));
+                    PermissionEnforcement.CheckTableColumns(context.Batch, Permission.Select, table, readColumns);
+                }
                 PermissionEnforcement.CheckTable(context.Batch, "DELETE", table);
+            }
         }
 
         var storedColumns = table.StoredColumns;
