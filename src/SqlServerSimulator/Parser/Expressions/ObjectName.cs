@@ -1,3 +1,4 @@
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -58,12 +59,25 @@ internal sealed class ObjectName : Expression
                 return SqlValue.Null(SqlType.SystemName);
         }
 
+        // A restricted principal gets NULL for an id it can't view metadata for
+        // (probe-confirmed), matching sys.objects hiding. Scoped to the current
+        // database — the session principal is a current-DB user, so a cross-DB
+        // lookup passes through unfiltered.
+        var restrict = PermissionEnforcement.MetadataVisibilityApplies(runtime.Batch)
+            && ReferenceEquals(targetDb, runtime.Batch.CurrentDatabase);
+        var principalId = runtime.Batch.Connection.Security.Effective.DatabasePrincipalId;
         foreach (var schema in targetDb.Schemas.Values)
         {
             foreach (var obj in schema.SchemaObjects())
             {
-                if (obj.ObjectId == id)
-                    return SqlValue.FromString(SqlType.SystemName, obj.Name);
+                if (obj.ObjectId != id)
+                    continue;
+                var (governObjectId, governSchemaId) = obj is Trigger trigger
+                    ? (trigger.Parent.ObjectId, trigger.Parent.SchemaId)
+                    : (obj.ObjectId, obj.SchemaId);
+                return restrict && !PermissionChecker.CanViewMetadata(targetDb, principalId, governObjectId, governSchemaId)
+                    ? SqlValue.Null(SqlType.SystemName)
+                    : SqlValue.FromString(SqlType.SystemName, obj.Name);
             }
             foreach (var tableType in schema.TableTypes.Values)
             {

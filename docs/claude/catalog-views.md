@@ -5,6 +5,11 @@ Each `CatalogView` carries a fixed `HeapColumn[]` schema and a `Func<BatchContex
 The FROM-source parser detects catalog views via `BatchContext.TryResolveCatalogView` (case-insensitive on the qualifier, 2-part or `<currentDb>.qualifier.<view>` 3-part), wraps the view in `Selection.ForCatalogView`, and threads it as the `FromSource.LateralPlan` — so each Execute re-runs the generator.
 The `RowEncoder.EncodeRow(HeapColumn[], SqlValue[])` overload bridges the SqlValue-array generator output into the byte stream the FromSource consumes.
 
+**Metadata-visibility filtering (restricted principals).**
+For a genuinely restricted session principal, the object-scoped views (`sys.tables` / `objects` / `columns` / the constraint / index / trigger / parameter / module views, and the `INFORMATION_SCHEMA` object views) surface only rows for objects the principal may view metadata for; `BuiltInResources.ApplyMetadataFilter` wraps each generator's output at the `Selection.ForCatalogView` seam.
+A `dbo` / full-visibility session (including SMO-as-sysadmin) short-circuits before any allocation, so the projections above are byte-identical for them.
+The rule, the exact filtered / unfiltered view lists, and the `OBJECT_ID` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` NULL behavior live in [`permissions.md`](permissions.md#metadata-visibility).
+
 **Materialize-once in joins (perf).**
 A catalog view's row generator takes only `(BatchContext, Database)` — never an outer-row resolver — so it is *provably uncorrelated*: its rows can't depend on an enclosing join row.
 The catalog-view `FromSource` carries `MaterializeOnce = true`, and at the start of each query execution `Selection.Execution.cs`'s `MaterializeUncorrelatedDeferredSources` pass runs each such plan **once**, replacing the deferred `LateralPlan` with a re-enumerable `Rows` list (`FromSource.WithMaterializedRows`).

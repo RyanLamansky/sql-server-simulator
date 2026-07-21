@@ -130,6 +130,22 @@ Wiring:
 - **Ownership chaining** — inside a proc / view / TVF / scalar-UDF / trigger body (`BatchContext.EnforcesPermissions` is false there) all checks are suppressed; dynamic SQL (`EXEC('…')` / `sp_executesql`, whose `ProcFrame.IsDynamicSql` is set) re-enables them.
   Everything is dbo-owned, so all static chains are unbroken — only the outermost referenced object of the user's statement is checked.
 
+### Metadata visibility
+
+A restricted principal sees an object-scoped catalog-view row — and gets a non-NULL `OBJECT_ID` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` result — only for objects it may view metadata for; everything else disappears (probe-confirmed against SQL Server 2025, 2026-07-21).
+`PermissionChecker.CanViewMetadata(database, principalId, objectId, schemaId)` is the rule: the full-visibility bypass, else any *granted* object-applicable permission reaching the object.
+The bypass (sees everything, no filtering) is dbo / a `db_owner` / `db_ddladmin` / `db_securityadmin` member / a holder of `CONTROL` or `VIEW DEFINITION` at database scope (`PermissionChecker.HasFullMetadataVisibility`) — `db_ddladmin` / `db_securityadmin` were probe-confirmed to see everything.
+Otherwise the object is revealed by any `G`/`W` row (any permission, including a column-scope grant via `minor_id`, and `VIEW DEFINITION` which reveals metadata without data access) at object scope, at schema scope, at database scope (restricted to the object-applicable permissions, so the auto-seeded `CONNECT` can't blanket-reveal the catalog), or by the `db_datareader` / `db_datawriter` fixed roles.
+Visibility is **object-grain**: one permission on the object reveals *all* its column / index / parameter / constraint rows, and a trigger's visibility follows its parent table / view.
+DENY does not hide metadata (grant-only scan — an assumption; DENY-hides-metadata was not probed).
+
+The filter is a per-enumeration seam on the catalog-view row generators (`BuiltInResources.ApplyMetadataFilter`, wired into both `Selection.ForCatalogView` overloads), gated by `PermissionEnforcement.MetadataVisibilityApplies(batch)` — a restricted-**session**-principal check that (unlike `Applies`) is NOT suppressed inside a module body, since metadata visibility is a property of the session principal, not the execution frame.
+The dbo / full-visibility fast path short-circuits on the session principal before any allocation, so existing (dbo) and SMO-as-sysadmin consumers pay one bool read and are unaffected.
+Each filtered view carries a `CatalogView.MetadataVisibilityKey` (set once at registration in `BuiltInResources.MetadataVisibility.cs`) naming the row column that governs visibility: the object-id-keyed `sys.*` views key on the row's `object_id` (or `parent_object_id`), the name-keyed `INFORMATION_SCHEMA.*` object views on the owning schema + object name.
+Filtered views: `sys.objects` / `all_objects` / `tables` / `views` / `all_views` / `procedures` / `columns` / `all_columns` / `parameters` / `all_parameters` / `sql_modules` / `all_sql_modules` / `indexes` / `index_columns` / `foreign_keys` / `foreign_key_columns` / `check_constraints` / `default_constraints` / `key_constraints` / `triggers` / `identity_columns` / `computed_columns` / `sequences` / `synonyms`, and `INFORMATION_SCHEMA.TABLES` / `COLUMNS` / `VIEWS` / `ROUTINES` / `PARAMETERS`.
+Deliberately unfiltered (probe-confirmed broadly visible to a restricted principal): `sys.database_principals` / `sys.schemas` / `sys.database_permissions` / `sys.database_role_members` / `sys.types` / `sys.databases`, the server-scope views, and the DMVs.
+Scope limits (noted): filtering engages only for a same-database read (a cross-database catalog read passes through, since the session principal is a current-database user); `db_datareader` slightly over-reveals procedure metadata; column-scope grants (bundle 4, unshipped) are matched by mechanism but not yet produced.
+
 ### Principal DDL
 
 - `CREATE USER name [{FOR | FROM} ...] [WITH ...]` — name + principal_id allocation; `type_code='S'`.
@@ -267,7 +283,6 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 
 - **Column-level grants** (`GRANT SELECT (col) …`, Msg 230), **`GRANT … ON SERVER` / `ON LOGIN::` securables**, **application roles** — not modeled. (Server-scope permission *names* — `CONNECT SQL` / `VIEW SERVER STATE` / … — and server roles now are; see [Server roles + server-scope permissions](#server-roles--server-scope-permissions-simulationsimulationserverrolescs).)
 - **Server-permission enforcement** — server permissions are catalog truth + `IS_SRVROLEMEMBER` input only; nothing hangs off them (VIEW SERVER STATE doesn't gate DMVs).
-- **Metadata-visibility filtering** — catalog views (`sys.*` / `INFORMATION_SCHEMA.*`) return every object regardless of the reader's permissions; real hides rows the principal can't see.
 - **DDL statement permissions beyond the gated set** — CREATE TABLE / VIEW / PROCEDURE / FUNCTION / SEQUENCE / ROLE / USER / SCHEMA, ALTER TABLE, DROP TABLE, and DROP USER are gated; other CREATE / ALTER / DROP statements (indexes, triggers, types, sequences-alter, …) aren't. `ALTER` / `CREATE OR ALTER` of an existing module isn't gated (only pure CREATE is).
 - **`db_accessadmin` / `db_securityadmin` / `db_backupoperator`** — membership is tracked and projected, but carries no enforced effect in this bundle (the DDL gates treat `db_owner` / `db_ddladmin` as the "may run any DDL" pair per probe).
 - **Msg 229 multi-error round trip** — when both SELECT and the write permission are missing, a single SELECT-first denial is raised, not real's paired SELECT-then-write error records.

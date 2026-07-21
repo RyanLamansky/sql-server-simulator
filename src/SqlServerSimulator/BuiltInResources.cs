@@ -67,6 +67,7 @@ internal static partial class BuiltInResources
         RegisterServiceBroker(views);
         RegisterServerAndDatabases(views);
         RegisterLegacyCompat(views);
+        ApplyMetadataVisibility(views);
         return views;
     }
 }

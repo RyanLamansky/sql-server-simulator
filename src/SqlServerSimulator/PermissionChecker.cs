@@ -32,6 +32,22 @@ internal static class PermissionEnforcement
     internal static bool Applies(BatchContext batch) =>
         batch.EnforcesPermissions && !batch.Connection.Security.EffectiveIsDbo;
 
+    /// <summary>
+    /// Whether metadata-visibility filtering applies for this batch: a genuinely
+    /// restricted session principal that lacks the full-visibility bypass. Unlike
+    /// <see cref="Applies"/> this is NOT suppressed inside a module body — metadata
+    /// visibility is a property of the session principal, not the execution frame,
+    /// so it gates on the session principal alone. Short-circuits on
+    /// <see cref="SessionSecurityContext.EffectiveIsDbo"/> before any allocation,
+    /// so a <c>dbo</c> session pays a single bool read.
+    /// </summary>
+    internal static bool MetadataVisibilityApplies(BatchContext batch)
+    {
+        var security = batch.Connection.Security;
+        return !security.EffectiveIsDbo
+            && !PermissionChecker.HasFullMetadataVisibility(batch.CurrentDatabase, security.Effective.DatabasePrincipalId);
+    }
+
     /// <summary>Checks SELECT on every read securable a <see cref="Parser.Selection"/> recorded; throws Msg 229 on the first denial.</summary>
     internal static void CheckReadSources(BatchContext batch, List<ReferencedSecurable>? securables)
     {
@@ -190,6 +206,7 @@ internal static class PermissionChecker
 {
     // Fixed database-role principal ids (real SQL Server convention).
     private const int DbOwner = 16384;
+    private const int DbSecurityAdmin = 16386;
     private const int DbDdlAdmin = 16387;
     private const int DbDataReader = 16390;
     private const int DbDataWriter = 16391;
@@ -241,6 +258,92 @@ internal static class PermissionChecker
     /// <summary>Whether the principal is a (transitive) member of <c>db_owner</c>.</summary>
     internal static bool IsOwner(Database database, int principalId) =>
         BuildClosure(database, principalId).Contains(DbOwner);
+
+    /// <summary>The effective principal + every role it belongs to transitively + <c>public</c> — exposed for the per-enumeration metadata-visibility scan so it builds the closure once.</summary>
+    internal static HashSet<int> BuildPrincipalClosure(Database database, int principalId) =>
+        BuildClosure(database, principalId);
+
+    /// <summary>
+    /// Whether the principal sees every object's metadata regardless of grants:
+    /// a <c>db_owner</c> / <c>db_ddladmin</c> / <c>db_securityadmin</c> member
+    /// (probe-confirmed against SQL Server 2025), or a holder of <c>CONTROL</c> /
+    /// <c>VIEW DEFINITION</c> granted at database scope.
+    /// </summary>
+    internal static bool HasFullMetadataVisibility(Database database, int principalId) =>
+        HasFullMetadataVisibility(database, BuildClosure(database, principalId));
+
+    private static bool HasFullMetadataVisibility(Database database, HashSet<int> closure)
+    {
+        if (closure.Contains(DbOwner) || closure.Contains(DbDdlAdmin) || closure.Contains(DbSecurityAdmin))
+            return true;
+        foreach (var row in database.Permissions)
+        {
+            if (row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption
+                && row.Class == ClassDatabase
+                && row.Permission is Permission.Control or Permission.ViewDefinition
+                && closure.Contains(row.GranteePrincipalId))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether the principal may see the metadata (catalog-view rows,
+    /// <c>OBJECT_ID</c> / <c>OBJECT_NAME</c> / <c>OBJECT_SCHEMA_NAME</c> results)
+    /// of the object with the given id / schema. True under the full-visibility
+    /// bypass (<see cref="HasFullMetadataVisibility(Database,int)"/>), or when the
+    /// principal (or any role in its closure) holds any object-applicable
+    /// permission reaching the object — a direct object-scope grant (any
+    /// permission, any column via <c>minor_id</c>), a schema-scope grant, an
+    /// object-applicable database-scope grant, or the <c>db_datareader</c> /
+    /// <c>db_datawriter</c> fixed roles. DENY does not hide metadata (grant-only
+    /// scan — probe-scoped assumption: metadata-hiding by DENY was not observed).
+    /// </summary>
+    internal static bool CanViewMetadata(Database database, int principalId, int objectId, int schemaId) =>
+        CanViewMetadata(database, BuildClosure(database, principalId), objectId, schemaId);
+
+    internal static bool CanViewMetadata(Database database, HashSet<int> closure, int objectId, int schemaId)
+    {
+        if (HasFullMetadataVisibility(database, closure))
+            return true;
+        foreach (var row in database.Permissions)
+        {
+            if (row.State is not (PermissionState.Grant or PermissionState.GrantWithGrantOption)
+                || !closure.Contains(row.GranteePrincipalId))
+            {
+                continue;
+            }
+            var reveals = row.Class switch
+            {
+                ClassDatabase => RevealsObjectMetadata(row.Permission),
+                ClassObject => row.MajorId == objectId,
+                ClassSchema => row.MajorId == schemaId,
+                _ => false,
+            };
+            if (reveals)
+                return true;
+        }
+        // db_datareader / db_datawriter confer SELECT / IUD on every object,
+        // which reveals its metadata. (A slight over-reveal for procedures,
+        // which those roles can't actually access — accepted for simplicity.)
+        return closure.Contains(DbDataReader) || closure.Contains(DbDataWriter);
+    }
+
+    /// <summary>
+    /// Whether a database-scope grant of this permission reveals every object's
+    /// metadata — the object-applicable permissions do; the connect / create /
+    /// impersonate permissions (notably the <c>CONNECT</c> every user is seeded)
+    /// do not, so they can't blanket-reveal the catalog.
+    /// </summary>
+    private static bool RevealsObjectMetadata(Permission permission) => permission switch
+    {
+        Permission.Connect or Permission.CreateFunction or Permission.CreateProcedure
+            or Permission.CreateSequence or Permission.CreateTable or Permission.CreateView
+            or Permission.Impersonate or Permission.Other => false,
+        _ => true,
+    };
 
     /// <summary>
     /// The effective principal + every role it belongs to transitively +

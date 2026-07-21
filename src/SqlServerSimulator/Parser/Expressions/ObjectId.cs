@@ -78,6 +78,18 @@ internal sealed class ObjectId : Expression
         if (!TryParseObjectName(nameStr, out var parsed))
             return SqlValue.Null(SqlType.Int32);
 
+        // A restricted principal gets NULL for an object it can't view metadata
+        // for (probe-confirmed: OBJECT_ID('dbo.tab_none') = NULL for a user
+        // without a grant), while the resolved id passes through for dbo /
+        // full-visibility sessions. Trigger visibility follows its parent.
+        var restrict = PermissionEnforcement.MetadataVisibilityApplies(runtime.Batch);
+        var principalId = runtime.Batch.Connection.Security.Effective.DatabasePrincipalId;
+        SqlValue GateAs(int resultId, int governObjectId, int governSchemaId) =>
+            !restrict || PermissionChecker.CanViewMetadata(runtime.Batch.CurrentDatabase, principalId, governObjectId, governSchemaId)
+                ? SqlValue.FromInt32(resultId)
+                : SqlValue.Null(SqlType.Int32);
+        SqlValue Gate(int objectId, int schemaId) => GateAs(objectId, objectId, schemaId);
+
         // 'FN' / 'IF' / 'TF' / no filter: try function resolution. With a
         // specific filter the function must match that kind (scalar vs.
         // inline TVF vs. multi-statement TVF); without a filter, any kind
@@ -95,7 +107,7 @@ internal sealed class ObjectId : Expression
                     _ => false,
                 };
                 if (kindMatches)
-                    return SqlValue.FromInt32(function.ObjectId);
+                    return Gate(function.ObjectId, function.SchemaId);
             }
             if (typeFilter is not null)
                 return SqlValue.Null(SqlType.Int32);
@@ -106,7 +118,7 @@ internal sealed class ObjectId : Expression
         if (typeFilter is null || BuiltInToken.Equals(typeFilter, "V"))
         {
             if (runtime.Batch.TryResolveView(parsed, out var view))
-                return SqlValue.FromInt32(view.ObjectId);
+                return Gate(view.ObjectId, view.SchemaId);
             // Registered sys.* / INFORMATION_SCHEMA.* catalog views resolve as
             // system views (type 'V'). Their id is process-stable but not
             // byte-identical to real SQL Server's fixed system-view ids; the
@@ -124,7 +136,7 @@ internal sealed class ObjectId : Expression
         if (typeFilter is null || BuiltInToken.Equals(typeFilter, "P"))
         {
             if (runtime.Batch.TryResolveProcedure(parsed, out var procedure))
-                return SqlValue.FromInt32(procedure.ObjectId);
+                return Gate(procedure.ObjectId, procedure.SchemaId);
             if (typeFilter is not null)
                 return SqlValue.Null(SqlType.Int32);
         }
@@ -134,14 +146,14 @@ internal sealed class ObjectId : Expression
         if (typeFilter is null || BuiltInToken.Equals(typeFilter, "TR"))
         {
             if (runtime.Batch.TryResolveTrigger(parsed, out var trigger))
-                return SqlValue.FromInt32(trigger.ObjectId);
+                return GateAs(trigger.ObjectId, trigger.Parent.ObjectId, trigger.Parent.SchemaId);
             if (typeFilter is not null)
                 return SqlValue.Null(SqlType.Int32);
         }
 
         // 'U' filter or no filter: try table resolution.
         return runtime.Batch.TryResolveTable(parsed, out var table)
-            ? SqlValue.FromInt32(table.ObjectId)
+            ? Gate(table.ObjectId, table.SchemaId)
             : SqlValue.Null(SqlType.Int32);
     }
 

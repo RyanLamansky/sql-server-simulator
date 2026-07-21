@@ -104,6 +104,36 @@ internal sealed class CatalogView(
     /// this set. Non-null exactly when <see cref="FilteredRowGenerator"/> is.
     /// </summary>
     public readonly string[]? PushdownColumns = pushdownColumns;
+
+    /// <summary>
+    /// How a restricted principal's metadata-visibility filter reads this view's
+    /// governing object per row; <see langword="null"/> for views that aren't
+    /// object-scoped (always fully visible to everyone, e.g. <c>sys.schemas</c> /
+    /// <c>sys.types</c> / the principal / permission views). Set once at
+    /// registration by <c>BuiltInResources</c>. A <c>dbo</c> or full-visibility
+    /// session never consults it — the filter short-circuits on the session
+    /// principal first.
+    /// </summary>
+    internal MetadataVisibilityKey? MetadataKey;
+}
+
+/// <summary>
+/// Locates the object a catalog-view row's metadata visibility hinges on. Either
+/// object-id-keyed (<see cref="ObjectIdOrdinal"/> ≥ 0 — the <c>sys.*</c> views,
+/// whose row carries the governing <c>object_id</c> / <c>parent_object_id</c>) or
+/// name-keyed (<see cref="ObjectIdOrdinal"/> &lt; 0 — the <c>INFORMATION_SCHEMA</c>
+/// object views, whose row carries the owning schema + object name instead of an
+/// id).
+/// </summary>
+internal readonly struct MetadataVisibilityKey(int objectIdOrdinal, int schemaNameOrdinal, int objectNameOrdinal)
+{
+    public readonly int ObjectIdOrdinal = objectIdOrdinal;
+
+    public readonly int SchemaNameOrdinal = schemaNameOrdinal;
+
+    public readonly int ObjectNameOrdinal = objectNameOrdinal;
+
+    public bool IsNameKeyed => this.ObjectIdOrdinal < 0;
 }
 
 /// <summary>

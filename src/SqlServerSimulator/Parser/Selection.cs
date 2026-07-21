@@ -225,7 +225,8 @@ internal sealed partial class Selection
             rowSource: (batch, _) =>
             {
                 CatalogPushdownDiagnostics.Sink?.Add($"Scan({view.Name})");
-                return view.RowGenerator(batch, targetDatabase).Select(values => RowEncoder.EncodeRow(view.Columns, values));
+                var rows = BuiltInResources.ApplyMetadataFilter(view, batch, targetDatabase, view.RowGenerator(batch, targetDatabase));
+                return rows.Select(values => RowEncoder.EncodeRow(view.Columns, values));
             });
     }
 
@@ -258,7 +259,8 @@ internal sealed partial class Selection
                 CatalogPushdownDiagnostics.Sink?.Add(
                     value.IsNull ? $"SeekEmpty({view.Name}.{pushdownColumn})" : $"Seek({view.Name}.{pushdownColumn})");
                 var filter = new CatalogFilter(pushdownColumn, value);
-                return filteredGenerator(batch, targetDatabase, filter).Select(values => RowEncoder.EncodeRow(view.Columns, values));
+                var rows = BuiltInResources.ApplyMetadataFilter(view, batch, targetDatabase, filteredGenerator(batch, targetDatabase, filter));
+                return rows.Select(values => RowEncoder.EncodeRow(view.Columns, values));
             });
     }
 
