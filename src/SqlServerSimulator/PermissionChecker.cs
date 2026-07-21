@@ -43,7 +43,32 @@ internal static class PermissionEnforcement
         {
             if (!PermissionChecker.IsGranted(database, principalId, Permission.Resolve(s.Permission), PermissionChecker.ClassObject, s.ObjectId, s.SchemaId))
                 throw SimulatedSqlException.PermissionDenied(s.Permission.ToUpperInvariant(), s.ObjectName, database.Name, s.SchemaName);
+            // A passed EXECUTE check on a scalar UDF invoked in this query memos
+            // the object so the per-row invocation seam skips the re-check.
+            if (s.Permission.Equals("EXECUTE", StringComparison.OrdinalIgnoreCase))
+                _ = (batch.ExecuteCheckedFunctionIds ??= []).Add(s.ObjectId);
         }
+    }
+
+    /// <summary>
+    /// Checks EXECUTE on a scalar UDF at the invocation seam, once per statement
+    /// (memoized on <see cref="BatchContext.ExecuteCheckedFunctionIds"/>). The
+    /// query-context path records its EXECUTE securables through
+    /// <see cref="CheckReadSources"/>, which pre-seeds the memo, so a UDF invoked
+    /// in a SELECT isn't re-checked per row; a UDF invoked in a SET / IF operand
+    /// (no read-source sink) is checked here. Throws Msg 229 on denial.
+    /// </summary>
+    internal static void CheckScalarFunctionExecute(BatchContext batch, Schemas.ScalarFunction function)
+    {
+        if (!Applies(batch))
+            return;
+        var checkedIds = batch.ExecuteCheckedFunctionIds ??= [];
+        if (!checkedIds.Add(function.ObjectId))
+            return;
+        var database = batch.CurrentDatabase;
+        var principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
+        if (!PermissionChecker.IsGranted(database, principalId, Permission.Execute, PermissionChecker.ClassObject, function.ObjectId, function.SchemaId))
+            throw SimulatedSqlException.PermissionDenied("EXECUTE", function.Name, database.Name, function.Schema.Name);
     }
 
     /// <summary>Checks one permission on one object; throws Msg 229 (with optional Procedure attribution) on denial. No-op when checks don't apply.</summary>
@@ -83,11 +108,59 @@ internal static class PermissionEnforcement
         return Database.DefaultSchemaName;
     }
 
+    /// <summary>Whether the effective principal may run any DDL (a <c>db_owner</c> / <c>db_ddladmin</c> member) — the gate for the statements that raise Msg 15247 (CREATE SEQUENCE / ROLE / USER / SCHEMA). True for dbo / module bodies.</summary>
+    internal static bool HasDdlAdminCapability(BatchContext batch) =>
+        !Applies(batch)
+        || PermissionChecker.IsDdlAdminOrOwner(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId);
+
+    /// <summary>Whether the effective principal is a <c>db_owner</c> member (the DROP USER gate). True for dbo / module bodies.</summary>
+    internal static bool IsOwner(BatchContext batch) =>
+        !Applies(batch)
+        || PermissionChecker.IsOwner(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId);
+
     /// <summary>Whether the effective principal holds a database-scope permission (CREATE TABLE gate, CONNECT, etc.). Always true for dbo / module bodies.</summary>
     internal static bool HasDatabasePermission(BatchContext batch, string permission) =>
         !Applies(batch)
         || PermissionChecker.IsGranted(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId,
             Permission.Resolve(permission), PermissionChecker.ClassDatabase, 0, 0);
+
+    /// <summary>
+    /// Whether the effective principal holds ALTER on the given schema (the DDL
+    /// gate for CREATE TABLE / VIEW / PROCEDURE / FUNCTION and DROP TABLE). True
+    /// for dbo / module bodies; satisfied by schema-scope ALTER / CONTROL,
+    /// database-scope ALTER / CONTROL, and the <c>db_ddladmin</c> / <c>db_owner</c>
+    /// fixed roles — but NOT by an object-scope ALTER (probe M5b).
+    /// </summary>
+    internal static bool HasSchemaAlter(BatchContext batch, int schemaId) =>
+        !Applies(batch)
+        || PermissionChecker.IsGranted(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId,
+            Permission.Alter, PermissionChecker.ClassSchema, schemaId, 0);
+
+    /// <summary>
+    /// Whether the effective principal holds ALTER on the given object (the DDL
+    /// gate for ALTER TABLE — object-scope ALTER suffices, probe M5b). True for
+    /// dbo / module bodies.
+    /// </summary>
+    internal static bool HasObjectAlter(BatchContext batch, int objectId, int schemaId) =>
+        !Applies(batch)
+        || PermissionChecker.IsGranted(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId,
+            Permission.Alter, PermissionChecker.ClassObject, objectId, schemaId);
+
+    /// <summary>
+    /// The dual DDL gate for <c>CREATE VIEW</c> / <c>PROCEDURE</c> /
+    /// <c>FUNCTION</c>: the database-scope CREATE-of-that-kind permission (Msg
+    /// 262 state 18, the module carried as Procedure attribution) plus ALTER on
+    /// the target schema (Msg 2760). No-op for dbo / module bodies.
+    /// </summary>
+    internal static void CheckCreateModule(BatchContext batch, string permission, string moduleName, Schema schema)
+    {
+        if (!Applies(batch))
+            return;
+        if (!HasDatabasePermission(batch, permission))
+            throw SimulatedSqlException.CreateModulePermissionDenied(permission, batch.CurrentDatabase.Name, moduleName);
+        if (!HasSchemaAlter(batch, schema.SchemaId))
+            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
+    }
 }
 
 /// <summary>
@@ -157,6 +230,17 @@ internal static class PermissionChecker
     /// <summary>Whether the effective principal is a member of <paramref name="role"/> (transitively), or the role is <c>public</c> (everyone).</summary>
     internal static bool IsRoleMember(Database database, int principalId, DatabasePrincipal role) =>
         role.PrincipalId == 0 || BuildClosure(database, principalId).Contains(role.PrincipalId);
+
+    /// <summary>Whether the principal is a (transitive) member of <c>db_owner</c> or <c>db_ddladmin</c> — the "may run any DDL" gate for the 15247 statements.</summary>
+    internal static bool IsDdlAdminOrOwner(Database database, int principalId)
+    {
+        var closure = BuildClosure(database, principalId);
+        return closure.Contains(DbOwner) || closure.Contains(DbDdlAdmin);
+    }
+
+    /// <summary>Whether the principal is a (transitive) member of <c>db_owner</c>.</summary>
+    internal static bool IsOwner(Database database, int principalId) =>
+        BuildClosure(database, principalId).Contains(DbOwner);
 
     /// <summary>
     /// The effective principal + every role it belongs to transitively +

@@ -41,6 +41,8 @@ partial class Simulation
                 return TryParseAlterRole(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Login }:
                 return TryParseAlterLogin(context);
+            case Name serverWord when serverWord.Value.Equals("SERVER", StringComparison.OrdinalIgnoreCase):
+                return TryParseAlterServerRole(context);
             case ReservedKeyword { Keyword: Keyword.Database }:
                 break;
             default:
@@ -768,7 +770,19 @@ partial class Simulation
         // parser's TryResolveTable then raises the right error code without
         // having acquired anything.
         if (!context.Batch.IsSkipping && context.Batch.TryResolveTable(tableName, out var alterTarget))
+        {
+            // ALTER TABLE needs ALTER on the object (object-scope suffices —
+            // probe M5b); a non-privileged principal gets Msg 1088 state 13.
+            // Temp tables / table variables are session-owned and exempt.
+            if (!alterTarget.IsTableVariable
+                && !BatchContext.IsLocalTempName(alterTarget.Name)
+                && !BatchContext.IsGlobalTempName(alterTarget.Name)
+                && !PermissionEnforcement.HasObjectAlter(context.Batch, alterTarget.ObjectId, alterTarget.SchemaId))
+            {
+                throw SimulatedSqlException.AlterTablePermissionDenied(tableName.Leaf);
+            }
             context.Batch.AcquireStatementLock(alterTarget.SchemaLock, LockMode.SchemaModification);
+        }
 
         // Cursor is on the last name segment; advance to the post-name token.
         context.MoveNextRequired();

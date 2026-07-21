@@ -102,14 +102,6 @@ partial class Simulation
         Selection.DmlTopLimit? top,
         View? sourceView = null)
     {
-        if (!context.Batch.IsSkipping)
-        {
-            if (sourceView is not null)
-                PermissionEnforcement.CheckView(context.Batch, "DELETE", sourceView);
-            else
-                PermissionEnforcement.CheckTable(context.Batch, "DELETE", table);
-        }
-
         BooleanExpression? where = null;
         Cursor? positionedCursor = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -119,6 +111,25 @@ partial class Simulation
                 positionedCursor = ParseWhereCurrentOf(context, table);
             else
                 where = BooleanExpression.Parse(context);
+        }
+
+        if (!context.Batch.IsSkipping)
+        {
+            // DELETE reads the target when it has a WHERE clause — real then
+            // also requires SELECT, checked first so the SELECT denial surfaces
+            // when both SELECT and DELETE are missing (probe M1d). A bare DELETE
+            // with no WHERE reads nothing and needs only DELETE (M1e).
+            if (where is not null)
+            {
+                if (sourceView is not null)
+                    PermissionEnforcement.CheckView(context.Batch, "SELECT", sourceView);
+                else
+                    PermissionEnforcement.CheckTable(context.Batch, "SELECT", table);
+            }
+            if (sourceView is not null)
+                PermissionEnforcement.CheckView(context.Batch, "DELETE", sourceView);
+            else
+                PermissionEnforcement.CheckTable(context.Batch, "DELETE", table);
         }
 
         var storedColumns = table.StoredColumns;
@@ -233,7 +244,13 @@ partial class Simulation
         var table = sources[targetIndex].BackingTable
             ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
         if (!context.Batch.IsSkipping)
+        {
+            // A joined DELETE reads every FROM source (target + join sources);
+            // real requires SELECT on each, checked before the DELETE write
+            // permission (probe M2).
+            CheckJoinedReadSources(context.Batch, sources, targetIndex);
             PermissionEnforcement.CheckTable(context.Batch, "DELETE", table);
+        }
 
         // Alias-form DELETE: table-IX wasn't pre-acquired (target identified
         // post-FROM). Acquire it now; row-X per affected row fires at the

@@ -186,6 +186,25 @@ public sealed class AuthenticationTests
         AreEqual("simulated", await command.ExecuteScalarAsync(TestContext.CancellationToken));
     }
 
+    // A login added to the sysadmin fixed server role maps to dbo in every
+    // database over the real client path — regardless of any FOR LOGIN user
+    // mapping (probe6 N3). Verified through Microsoft.Data.SqlClient's TDS
+    // authentication, not just the in-process connection-string path.
+    [TestMethod]
+    public async Task SysadminLogin_MapsToDboOverTds()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "CREATE LOGIN boss WITH PASSWORD = 'S3cret!Pass'");
+        // An explicit non-dbo user mapping that sysadmin membership overrides.
+        Wire.ExecInProc(simulation, "CREATE USER bossuser FOR LOGIN boss");
+        Wire.ExecInProc(simulation, "ALTER SERVER ROLE sysadmin ADD MEMBER boss");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = new SqlConnection(CredentialConnectionString(listener, "boss", "S3cret!Pass"));
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await using var command = new SqlCommand("select current_user", connection);
+        AreEqual("dbo", await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
     [TestMethod]
     public async Task SecondLogin_BothEnforced()
     {

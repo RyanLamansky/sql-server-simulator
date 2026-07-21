@@ -37,6 +37,17 @@ partial class Simulation
     /// </summary>
     internal static bool TryMapLoginToDatabaseUser(Simulation simulation, Database target, string loginName, out DatabasePrincipal principal)
     {
+        // A sysadmin-member login (sa, or any login added to the sysadmin fixed
+        // server role) resolves to dbo in every database, overriding any
+        // explicit FOR LOGIN user mapping — full owner identity everywhere
+        // (probe6 N3). The dbo effective principal then bypasses every check,
+        // including explicit DENY (N3b).
+        if (simulation.IsLoginSysadmin(loginName))
+        {
+            principal = target.Principals["dbo"];
+            return true;
+        }
+
         foreach (var candidate in target.Principals.Values)
         {
             if (candidate.LoginName is { } linked && target.Collation.Equals(linked, loginName))

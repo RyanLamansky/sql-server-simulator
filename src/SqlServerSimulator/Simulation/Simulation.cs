@@ -402,18 +402,19 @@ public sealed partial class Simulation
     internal readonly ConcurrentDictionary<string, ServerLogin> Logins = new(BuiltInToken.Comparer);
 
     /// <summary>
-    /// Per-Simulation monotonic counter for server-principal ids. Each
-    /// <c>CREATE LOGIN</c> claims a fresh id via
-    /// <see cref="AllocatePrincipalId"/>; the counter is seeded at 2 so the
-    /// first allocation returns 3 — ids 1 and 2 are reserved for the synthetic
-    /// <c>sa</c> / <c>public</c> rows <c>sys.server_principals</c> projects.
+    /// Per-Simulation monotonic counter for user server-principal ids (created
+    /// logins + custom server roles). Seeded at 257 so the first allocation
+    /// returns 258 — ids 1 / 2 are the synthetic <c>sa</c> / <c>public</c> rows,
+    /// 3–20 are the fixed server roles (<see cref="FixedServerRoles"/>), and real
+    /// SQL Server allocates user server principals past that reserved block
+    /// (observed 258+).
     /// </summary>
-    private int nextPrincipalId = 2;
+    private int nextPrincipalId = 257;
 
     /// <summary>
     /// Allocates the next server-principal id for a freshly-created
-    /// <see cref="ServerLogin"/>. <c>ALTER LOGIN</c> preserves the existing id
-    /// rather than allocating a new one.
+    /// <see cref="ServerLogin"/> or custom server role. <c>ALTER LOGIN</c>
+    /// preserves the existing id rather than allocating a new one.
     /// </summary>
     internal int AllocatePrincipalId() => Interlocked.Increment(ref this.nextPrincipalId);
 

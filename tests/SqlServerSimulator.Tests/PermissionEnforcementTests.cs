@@ -123,7 +123,9 @@ public sealed class PermissionEnforcementTests
     public void Delete_Granted_Succeeds()
     {
         var sim = Seeded();
-        _ = sim.ExecuteNonQuery("grant delete on object::dbo.t to u");
+        // A DELETE with a WHERE clause reads the target, so SELECT is required
+        // alongside DELETE (probe M1d).
+        _ = sim.ExecuteNonQuery("grant delete on object::dbo.t to u; grant select on object::dbo.t to u");
         _ = sim.ExecuteNonQuery("execute as user = 'u'; delete dbo.t where id = 1");
         AreEqual(1, sim.ExecuteScalar("select count(*) from dbo.t"));
     }

@@ -35,6 +35,15 @@ internal abstract class UserDefinedFunction(
     public readonly UdfParameter[] Parameters = parameters;
 
     /// <summary>
+    /// The module's <c>WITH EXECUTE AS { CALLER | SELF | OWNER | 'user' }</c>
+    /// clause, or <see langword="null"/> for the default (CALLER). Captured at
+    /// CREATE FUNCTION time and pushed/popped as an impersonation frame around
+    /// the body at invocation — OWNER / SELF resolve to <c>dbo</c>, CALLER is a
+    /// no-op, a named user pushes that database principal.
+    /// </summary>
+    public string? ExecuteAsClause;
+
+    /// <summary>
     /// Raw source text of the body. For scalars: the text between the outer
     /// <c>BEGIN</c> and <c>END</c> (exclusive of both). For inline TVFs: the
     /// SELECT-statement text between <c>AS RETURN [(</c> and the trailing

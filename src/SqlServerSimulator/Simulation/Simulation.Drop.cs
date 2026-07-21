@@ -50,6 +50,8 @@ partial class Simulation
                 return TryParseDropRole(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Login }:
                 return TryParseDropLogin(context);
+            case Name serverWord when serverWord.Value.Equals("SERVER", StringComparison.OrdinalIgnoreCase):
+                return TryParseDropServerRole(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return Simulation.TryParseDropFullText(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:
@@ -420,6 +422,11 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropTableDoesNotExist(name.ToString());
         }
+        // DROP TABLE needs ALTER on the schema (object-scope ALTER is
+        // insufficient — probe M5b); a non-privileged principal gets Msg 3701
+        // sev 14 state 20. Temp tables are session-owned and exempt.
+        if (!isTempTable && !PermissionEnforcement.HasSchemaAlter(context.Batch, removedTable.SchemaId))
+            throw SimulatedSqlException.DropTablePermissionDenied(name.Leaf);
         // Sch-M on the target table for the duration of the statement.
         // Waits for any concurrent Sch-S holders (readers / writers) to drain
         // before we proceed; honors the connection's @@LOCK_TIMEOUT so a

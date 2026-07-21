@@ -226,18 +226,17 @@ internal static partial class BuiltInResources
             new("permission_name", nvarchar128Catalog, 128, true),
             new("state", charOne, 1, false),
             new("state_desc", nvarchar60Catalog, 60, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], EnumerateSysServerPermissions);
 
-        // sys.server_role_members: server-role membership. No server-role
-        // membership is modeled, so the view is always empty. SMO's Login
-        // scripting INNER JOINs it (server_principals → server_role_members)
-        // to enumerate a login's fixed-server-role memberships; an empty result
-        // scripts no ALTER SERVER ROLE … ADD MEMBER statements.
+        // sys.server_role_members: server-role membership, projected over
+        // Simulation.ServerRoleMembers (ALTER SERVER ROLE … ADD/DROP MEMBER).
+        // SMO's Login scripting INNER JOINs it (server_principals →
+        // server_role_members) to enumerate fixed-server-role memberships.
         Sys("server_role_members",
         [
             new("role_principal_id", SqlType.Int32, null, false),
             new("member_principal_id", SqlType.Int32, null, false),
-        ], static (_, _) => EmptyCatalogRows);
+        ], EnumerateSysServerRoleMembers);
 
         // sys.asymmetric_keys / sys.certificates / sys.credentials: encryption
         // key objects aren't modeled, so all three are always empty. The full
@@ -621,79 +620,114 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// Projects <c>sys.server_principals</c> over the per-Simulation login
-    /// registry plus the two synthetic fixed rows (<c>sa</c> = principal_id 1,
-    /// <c>public</c> = principal_id 2). Rows emit in principal_id order.
+    /// Projects <c>sys.server_principals</c> over the synthetic fixed rows
+    /// (<c>sa</c> = 1, <c>public</c> = 2, the fixed server roles 3–20) plus the
+    /// per-Simulation login registry and custom server roles. Rows emit in
+    /// principal_id order.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysServerPrincipals(Parser.BatchContext batch, Database database)
     {
         var simulation = batch.Connection.Simulation;
         var charOne = SqlType.GetChar(1);
         var falseBit = SqlValue.FromBoolean(false);
+        var trueBit = SqlValue.FromBoolean(true);
         var sqlLogin = SqlValue.FromNVarchar("SQL_LOGIN");
+        var serverRole = SqlValue.FromNVarchar("SERVER_ROLE");
         var loginType = SqlValue.FromChar(charOne, "S");
+        var roleType = SqlValue.FromChar(charOne, "R");
         var nullCredentialId = SqlValue.Null(SqlType.Int32);
         var nullOwningId = SqlValue.Null(SqlType.Int32);
+        var dboOwningId = SqlValue.FromInt32(1);
         var master = SqlValue.FromSystemName("master");
         var usEnglish = SqlValue.FromSystemName("us_english");
+        var nullName = SqlValue.Null(SqlType.SystemName);
         var nullTenant = SqlValue.Null(SqlType.UniqueIdentifier);
         var zeroTenant = SqlValue.FromGuid(Guid.Empty);
         var seedDate = SqlValue.FromDateTime(simulation.SeedDate);
 
+        List<(int Id, SqlValue[] Row)> rows = [];
+
         // sa: the fixed SQL-authentication login, principal_id 1.
-        yield return [
-            SqlValue.FromSystemName("sa"),
-            SqlValue.FromInt32(1),
-            SqlValue.FromVarbinary([0x01]),
-            loginType,
-            sqlLogin,
-            falseBit,
-            seedDate,
-            seedDate,
-            master,
-            usEnglish,
-            nullCredentialId,
-            nullOwningId,
-            falseBit,
-            nullTenant,
-        ];
+        rows.Add((1, [
+            SqlValue.FromSystemName("sa"), SqlValue.FromInt32(1), SqlValue.FromVarbinary([0x01]),
+            loginType, sqlLogin, falseBit, seedDate, seedDate, master, usEnglish,
+            nullCredentialId, nullOwningId, falseBit, nullTenant,
+        ]));
 
-        // public: the fixed server role, principal_id 2. owning_principal_id
-        // points at sa (1); is_fixed_role is 0 (probe-confirmed).
-        yield return [
-            SqlValue.FromSystemName("public"),
-            SqlValue.FromInt32(2),
-            SqlValue.FromVarbinary([0x02]),
-            SqlValue.FromChar(charOne, "R"),
-            SqlValue.FromNVarchar("SERVER_ROLE"),
-            falseBit,
-            seedDate,
-            seedDate,
-            SqlValue.Null(SqlType.SystemName),
-            SqlValue.Null(SqlType.SystemName),
-            nullCredentialId,
-            SqlValue.FromInt32(1),
-            falseBit,
-            nullTenant,
-        ];
+        // public + the 18 fixed server roles (type R, owning_principal_id 1).
+        // public's is_fixed_role is 0 (probe-confirmed quirk); the rest are 1.
+        rows.Add((2, [
+            SqlValue.FromSystemName("public"), SqlValue.FromInt32(2), SqlValue.FromVarbinary([0x02]),
+            roleType, serverRole, falseBit, seedDate, seedDate, nullName, nullName,
+            nullCredentialId, dboOwningId, falseBit, nullTenant,
+        ]));
+        foreach (var (id, name) in Simulation.FixedServerRoles)
+        {
+            rows.Add((id, [
+                SqlValue.FromSystemName(name), SqlValue.FromInt32(id), SqlValue.FromVarbinary([(byte)id]),
+                roleType, serverRole, falseBit, seedDate, seedDate, nullName, nullName,
+                nullCredentialId, dboOwningId, trueBit, nullTenant,
+            ]));
+        }
 
-        foreach (var login in simulation.Logins.Values.OrderBy(l => l.PrincipalId))
+        foreach (var login in simulation.Logins.Values)
+        {
+            rows.Add((login.PrincipalId, [
+                SqlValue.FromSystemName(login.Name), SqlValue.FromInt32(login.PrincipalId), SqlValue.FromVarbinary(DeriveLoginSid(login.Name)),
+                loginType, sqlLogin, falseBit, SqlValue.FromDateTime(login.CreateDate), SqlValue.FromDateTime(login.PasswordLastSetTime),
+                master, usEnglish, nullCredentialId, nullOwningId, falseBit, zeroTenant,
+            ]));
+        }
+
+        foreach (var role in simulation.ServerRoles.Values)
+        {
+            rows.Add((role.PrincipalId, [
+                SqlValue.FromSystemName(role.Name), SqlValue.FromInt32(role.PrincipalId), SqlValue.FromVarbinary(DeriveLoginSid(role.Name)),
+                roleType, serverRole, falseBit, SqlValue.FromDateTime(role.CreateDate), SqlValue.FromDateTime(role.CreateDate),
+                nullName, nullName, nullCredentialId, dboOwningId, falseBit, zeroTenant,
+            ]));
+        }
+
+        foreach (var (_, row) in rows.OrderBy(r => r.Id))
+            yield return row;
+    }
+
+    /// <summary>Projects <c>sys.server_role_members</c> over <see cref="Simulation.ServerRoleMembers"/>.</summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysServerRoleMembers(Parser.BatchContext batch, Database database)
+    {
+        (int RoleId, int MemberId)[] snapshot;
+        var members = batch.Connection.Simulation.ServerRoleMembers;
+        lock (members)
+            snapshot = [.. members];
+        foreach (var (roleId, memberId) in snapshot)
+            yield return [SqlValue.FromInt32(roleId), SqlValue.FromInt32(memberId)];
+    }
+
+    /// <summary>Projects <c>sys.server_permissions</c> over <see cref="Simulation.ServerPermissions"/> (class 100 / class_desc SERVER / major 0).</summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysServerPermissions(Parser.BatchContext batch, Database database)
+    {
+        var typeChar = SqlType.GetChar(4);
+        var stateChar = SqlType.GetChar(1);
+        var classDesc = SqlValue.FromNVarchar("SERVER");
+        var serverClass = SqlValue.FromByte(100);
+        var zeroMajor = SqlValue.FromInt32(0);
+        ServerPermission[] snapshot;
+        var permissions = batch.Connection.Simulation.ServerPermissions;
+        lock (permissions)
+            snapshot = [.. permissions];
+        foreach (var perm in snapshot)
         {
             yield return [
-                SqlValue.FromSystemName(login.Name),
-                SqlValue.FromInt32(login.PrincipalId),
-                SqlValue.FromVarbinary(DeriveLoginSid(login.Name)),
-                loginType,
-                sqlLogin,
-                falseBit,
-                SqlValue.FromDateTime(login.CreateDate),
-                SqlValue.FromDateTime(login.PasswordLastSetTime),
-                master,
-                usEnglish,
-                nullCredentialId,
-                nullOwningId,
-                falseBit,
-                zeroTenant,
+                serverClass,
+                classDesc,
+                zeroMajor,
+                zeroMajor,
+                SqlValue.FromInt32(perm.GranteeId),
+                SqlValue.FromInt32(perm.GrantorId),
+                SqlValue.FromChar(typeChar, perm.TypeCode),
+                SqlValue.FromNVarchar(perm.PermissionName),
+                SqlValue.FromChar(stateChar, perm.State.Code),
+                SqlValue.FromNVarchar(perm.State.Description),
             ];
         }
     }

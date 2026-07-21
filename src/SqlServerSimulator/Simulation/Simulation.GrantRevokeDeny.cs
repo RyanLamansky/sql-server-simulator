@@ -82,8 +82,10 @@ partial class Simulation
         var securableDisplayName = context.CurrentDatabase.Name;
         MultiPartName? userSecurableName = null;
         MultiPartName? objectSecurableName = null;
+        var hadOnClause = false;
         if (context.Token is ReservedKeyword { Keyword: Keyword.On })
         {
+            hadOnClause = true;
             context.MoveNextRequired();
             var classWord = context.Token switch
             {
@@ -186,6 +188,16 @@ partial class Simulation
 
         if (context.Batch.IsSkipping)
             return true;
+
+        // Server-scope GRANT / DENY / REVOKE: no ON clause and every permission
+        // is a recognized server permission (CONNECT SQL, VIEW SERVER STATE, …).
+        // Legal only in master (Msg 4621 elsewhere); stored at the Simulation
+        // level and projected through sys.server_permissions.
+        if (!hadOnClause && permissions.Count > 0 && permissions.TrueForAll(IsServerScopePermission))
+        {
+            ApplyServerScopeGrant(context, kind, permissions, granteeNames);
+            return true;
+        }
 
         var database = context.CurrentDatabase;
 
@@ -357,19 +369,40 @@ partial class Simulation
         }
     }
 
-    /// <summary>Whether a non-dbo grantor holds a WITH GRANT OPTION (W) row that authorizes granting <paramref name="permName"/> on the securable (directly or via a covering W row at a wider scope).</summary>
+    /// <summary>
+    /// Whether a non-dbo grantor holds a WITH GRANT OPTION (W) row that
+    /// authorizes granting <paramref name="permName"/> on the securable. A W row
+    /// on the <em>same</em> securable for the requested permission or any
+    /// permission that covers it authorizes (CONTROL-W on the object may GRANT
+    /// SELECT on it — probe M9). A <em>wider-scope</em> W row does NOT (schema
+    /// SELECT-W does not authorize an object-scope grant — probe M9b), so the
+    /// covering walk stays within (<paramref name="permClass"/>,
+    /// <paramref name="permMajorId"/>).
+    /// </summary>
     private static bool HasGrantAuthority(Database database, int grantorId, string permName, byte permClass, int permMajorId)
     {
-        // A W row for the exact permission on the exact securable is the common
-        // case; the checker's covering/scope walk generalizes it (a W CONTROL
-        // or a wider-scope W row also authorizes delegation).
-        var permEnum = Permission.Resolve(permName);
+        var requested = Permission.Resolve(permName);
         foreach (var row in database.Permissions)
         {
-            if (row.State == PermissionState.GrantWithGrantOption && row.GranteePrincipalId == grantorId
-                && row.IsFor(permClass, permMajorId, permEnum, permName, database))
+            if (row.State != PermissionState.GrantWithGrantOption || row.GranteePrincipalId != grantorId
+                || row.Class != permClass || row.MajorId != permMajorId)
             {
-                return true;
+                continue;
+            }
+            // Off-catalog names match only their own stored text; catalog names
+            // additionally match any covering permission on the same securable.
+            if (requested == Permission.Other)
+            {
+                if (row.IsFor(permClass, permMajorId, requested, permName, database))
+                    return true;
+                continue;
+            }
+            Permission? current = requested;
+            while (current is Permission p)
+            {
+                if (row.Permission == p)
+                    return true;
+                current = p.Covering(permClass);
             }
         }
         return false;

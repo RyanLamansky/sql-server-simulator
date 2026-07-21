@@ -149,6 +149,12 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        // DDL gate on pure CREATE: db-scope CREATE PROCEDURE + ALTER on the
+        // target schema (Msg 262 state 18 / Msg 2760). ALTER / CREATE OR ALTER
+        // of an existing proc isn't gated here (out of the probed scope).
+        if (!isAlter && !createOrAlter)
+            PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE PROCEDURE", procName.Leaf, schema);
+
         var existed = schema.Procedures.TryGetValue(procName.Leaf, out var existing);
 
         // CREATE-only (no OR ALTER) collides with any existing object of the

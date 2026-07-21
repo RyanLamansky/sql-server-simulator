@@ -142,6 +142,10 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        // DDL gate: db-scope CREATE VIEW + ALTER on the target schema (Msg 262
+        // state 18 with the view as Procedure attribution, else Msg 2760).
+        PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE VIEW", viewName.Leaf, schema);
+
         // Reject collisions across the shared object-name namespace.
         if (schema.HasNameInSharedNamespace(viewName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(viewName.Leaf);

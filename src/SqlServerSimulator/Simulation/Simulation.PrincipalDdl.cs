@@ -29,6 +29,10 @@ partial class Simulation
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
+        // CREATE USER isn't a modeled named permission — a non-privileged
+        // principal gets Msg 15247 (probe M3).
+        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch))
+            throw SimulatedSqlException.UserDoesNotHavePermission();
         if (context.CurrentDatabase.Principals.ContainsKey(name))
             throw SimulatedSqlException.PrincipalAlreadyExists(name);
         var id = context.CurrentDatabase.AllocatePrincipalId();
@@ -124,6 +128,10 @@ partial class Simulation
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
+        // CREATE ROLE isn't a modeled named permission — Msg 15247 for a
+        // non-privileged principal (probe M3).
+        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch))
+            throw SimulatedSqlException.UserDoesNotHavePermission();
         if (context.CurrentDatabase.Principals.ContainsKey(name))
             throw SimulatedSqlException.PrincipalAlreadyExists(name);
         var id = context.CurrentDatabase.AllocatePrincipalId();
@@ -197,7 +205,7 @@ partial class Simulation
     /// principal dict (rather than the per-schema object dict that the
     /// generic <c>DROP &lt;target&gt;</c> path handles).
     /// </summary>
-    internal static bool TryParseDropUser(ParserContext context)
+    internal static bool TryParseDropUser(ParserContext context, bool isRole = false)
     {
         context.MoveNextRequired();
         var ifExists = false;
@@ -214,6 +222,11 @@ partial class Simulation
         context.MoveNextOptional();
         if (context.Batch.IsSkipping)
             return true;
+        // DROP USER needs db_owner (no ALTER ANY USER model) — a non-privileged
+        // principal gets Msg 15151 (probe B). DROP ROLE isn't gated here (its
+        // distinct 15151 wording is out of the probed scope).
+        if (!isRole && !PermissionEnforcement.IsOwner(context.Batch))
+            throw SimulatedSqlException.DropUserPermissionDenied(name);
         if (!context.CurrentDatabase.Principals.TryRemove(name, out var removed))
         {
             return ifExists ? true : throw SimulatedSqlException.CannotFindPrincipal(name);
@@ -228,7 +241,7 @@ partial class Simulation
     /// Parses <c>DROP ROLE [IF EXISTS] name</c>. Same shape as
     /// <see cref="TryParseDropUser"/>; the principal dict is shared.
     /// </summary>
-    internal static bool TryParseDropRole(ParserContext context) => TryParseDropUser(context);
+    internal static bool TryParseDropRole(ParserContext context) => TryParseDropUser(context, isRole: true);
 
     /// <summary>
     /// Consumes tokens through end-of-batch or the next <c>;</c> /

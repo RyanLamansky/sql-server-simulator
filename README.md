@@ -107,6 +107,8 @@ Coverage is broad; the compact map below is the shape of it, not the full invent
   A `sys.*` / `INFORMATION_SCHEMA.*` catalog broad enough to satisfy SSMS, SMO, and DacFx; temporal tables; `SERVERPROPERTY` and friends as true `sql_variant`.
 - **JSON, XML, spatial, full-text DDL.**
   The `JSON_*`/`OPENJSON` family, XML methods and schema collections, the spatial method surface, and full-text catalog/index DDL.
+- **Security.**
+  Logins and users, database and server roles (fixed and custom), and `GRANT`/`DENY`/`REVOKE` enforced at object, schema, and database scope for restricted principals, with `EXECUTE AS` impersonation, module `WITH EXECUTE AS`, and ownership chaining.
 - **Scale-out shapes.**
   Multiple databases with cross-database reads, linked servers between simulations, and BACPAC import for bootstrapping from a real database.
 
@@ -130,4 +132,5 @@ A few examples:
 
 - No physical storage - all data lives in memory for the lifetime of the `Simulation`.
   Suited to test runs and bounded workloads, not larger-than-RAM datasets.
-- The network endpoint is meant for development tooling and tests, not untrusted clients: `ListenNetworkAsync` enforces authentication, but there is no authorization model - every login that connects has unrestricted access to every database.
+- The network endpoint is meant for development tooling and tests, not untrusted clients.
+  `ListenNetworkAsync` enforces authentication, and `GRANT`/`DENY` authorization applies once a session runs as a restricted principal - but a login with no `CREATE USER ... FOR LOGIN` mapping (and any `sysadmin` member) runs as `dbo` with unrestricted access, and the simulator makes no hardening claims as a security boundary.

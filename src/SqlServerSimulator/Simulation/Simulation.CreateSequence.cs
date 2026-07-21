@@ -132,6 +132,11 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        // CREATE SEQUENCE isn't a modeled named permission — Msg 15247 for a
+        // non-privileged principal (probe M3).
+        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch))
+            throw SimulatedSqlException.UserDoesNotHavePermission();
+
         if (!context.Batch.TryResolveSchema(sequenceName, out var schema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(sequenceName.Count >= 2 ? sequenceName.ImmediateQualifier! : Database.DefaultSchemaName);
 

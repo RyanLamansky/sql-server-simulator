@@ -122,4 +122,13 @@ internal sealed class Trigger(
     /// ON parent</c>). Probe-confirmed.
     /// </summary>
     public bool IsDisabled;
+
+    /// <summary>
+    /// The trigger's <c>WITH EXECUTE AS { CALLER | SELF | OWNER | 'user' }</c>
+    /// clause, or <see langword="null"/> for the default (CALLER). Captured at
+    /// CREATE TRIGGER time and pushed/popped as an impersonation frame around
+    /// the body at each fire — OWNER / SELF resolve to <c>dbo</c>, CALLER is a
+    /// no-op, a named user runs the body as that database principal.
+    /// </summary>
+    public string? ExecuteAsClause;
 }

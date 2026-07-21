@@ -191,14 +191,6 @@ partial class Simulation
         Selection.DmlTopLimit? top,
         View? sourceView = null)
     {
-        if (!context.Batch.IsSkipping)
-        {
-            if (sourceView is not null)
-                PermissionEnforcement.CheckView(context.Batch, "UPDATE", sourceView);
-            else
-                PermissionEnforcement.CheckTable(context.Batch, "UPDATE", table);
-        }
-
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, sourceView);
 
         BooleanExpression? where = null;
@@ -210,6 +202,27 @@ partial class Simulation
                 positionedCursor = ParseWhereCurrentOf(context, table, [.. rawAssignments.Select(a => a.ColumnName)]);
             else
                 where = BooleanExpression.Parse(context);
+        }
+
+        if (!context.Batch.IsSkipping)
+        {
+            // UPDATE reads the target when it has a WHERE clause or a SET
+            // expression that references a target column — real then also
+            // requires SELECT, checked first so that when both SELECT and
+            // UPDATE are missing the SELECT denial surfaces (probe M1). A
+            // constant-SET UPDATE with no WHERE reads nothing and needs only
+            // UPDATE (M1b).
+            if (where is not null || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch))
+            {
+                if (sourceView is not null)
+                    PermissionEnforcement.CheckView(context.Batch, "SELECT", sourceView);
+                else
+                    PermissionEnforcement.CheckTable(context.Batch, "SELECT", table);
+            }
+            if (sourceView is not null)
+                PermissionEnforcement.CheckView(context.Batch, "UPDATE", sourceView);
+            else
+                PermissionEnforcement.CheckTable(context.Batch, "UPDATE", table);
         }
 
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
@@ -397,7 +410,14 @@ partial class Simulation
         var table = sources[targetIndex].BackingTable
             ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
         if (!context.Batch.IsSkipping)
+        {
+            // A joined UPDATE reads every FROM source (target + join sources);
+            // real requires SELECT on each, checked before the UPDATE write
+            // permission (probe M2). Additional-source reads inside a WHERE
+            // subquery route through the standard Selection read-source sink.
+            CheckJoinedReadSources(context.Batch, sources, targetIndex);
             PermissionEnforcement.CheckTable(context.Batch, "UPDATE", table);
+        }
 
         // Alias-form UPDATE: table-IX wasn't pre-acquired because the target
         // wasn't yet known. Now that the FROM clause identified it, acquire
@@ -820,6 +840,66 @@ partial class Simulation
             assignments.Add((columnOrdinal, expr));
         }
         return assignments;
+    }
+
+    /// <summary>
+    /// SELECT-checks every FROM source of a joined UPDATE / DELETE that is
+    /// backed by a real table (the target and each join source) — real requires
+    /// SELECT on each read source (probe M2). Derived-table / view sources with
+    /// no backing table are skipped (their inner reads route through the
+    /// standard <see cref="Parser.Selection"/> read-source sink).
+    /// </summary>
+    private static void CheckJoinedReadSources(BatchContext batch, FromSource[] sources, int targetIndex)
+    {
+        // Non-target join sources first, then the target — real surfaces the
+        // additional-source SELECT denial ahead of the target's (probe M2,
+        // reconfirmed against the reference: a joined UPDATE with neither
+        // target nor source SELECT granted denies the source).
+        for (var i = 0; i < sources.Length; i++)
+        {
+            if (i != targetIndex && sources[i].BackingTable is { } backing)
+                PermissionEnforcement.CheckTable(batch, "SELECT", backing);
+        }
+        if (sources[targetIndex].BackingTable is { } target)
+            PermissionEnforcement.CheckTable(batch, "SELECT", target);
+    }
+
+    /// <summary>
+    /// Whether any SET-list right-hand side references a column (i.e. the UPDATE
+    /// reads the target). Detected by resolving each expression's static type
+    /// with a probe resolver that flips a flag on the first column lookup;
+    /// constants / parameters never touch the resolver. A resolution failure is
+    /// treated conservatively as a read (the real execution surfaces the true
+    /// error). Drives the read-implies-SELECT permission gate (probe M1c).
+    /// </summary>
+    private static bool AnySetExpressionReadsColumn(
+        List<(string ColumnName, Expression Expr)> rawAssignments, HeapTable table, BatchContext batch)
+    {
+        var readsColumn = false;
+        SqlType Resolve(MultiPartName name)
+        {
+            readsColumn = true;
+            foreach (var column in table.Columns)
+            {
+                if (batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf))
+                    return column.Type;
+            }
+            return SqlType.Int32;
+        }
+        foreach (var (_, expr) in rawAssignments)
+        {
+            try
+            {
+                _ = expr.GetSqlType(batch, Resolve);
+            }
+            catch (SimulatedSqlException)
+            {
+                return true;
+            }
+            if (readsColumn)
+                return true;
+        }
+        return false;
     }
 
     /// <summary>

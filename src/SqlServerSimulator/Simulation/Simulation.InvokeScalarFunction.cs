@@ -42,6 +42,11 @@ partial class Simulation
         bool[] isDefault)
     {
         var connection = outerBatch.Connection;
+        // EXECUTE-permission check at the invocation seam: once per statement,
+        // covering the non-query (SET / IF operand) contexts the read-source
+        // sink doesn't reach. Query-context invocations were pre-memoized by
+        // CheckReadSources so they aren't re-checked per row.
+        PermissionEnforcement.CheckScalarFunctionExecute(outerBatch, function);
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
             throw SimulatedSqlException.MaximumNestingLevelExceeded();
 
@@ -84,6 +89,11 @@ partial class Simulation
         // procedure) — so this frame leaves the exception unresolved.
         var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true };
         connection.NestingLevel++;
+        // Module WITH EXECUTE AS: push the impersonation frame around the body
+        // (OWNER / SELF → dbo, CALLER → no-op, a named user → that principal),
+        // so the body's identity scalars observe the impersonated principal.
+        var savedImpersonationDepth = connection.Security.ImpersonationDepth;
+        PushModuleExecuteAsFrame(connection, function.ExecuteAsClause, outerBatch.CurrentDatabase);
         try
         {
             var parser = innerBatch.Parser;
@@ -98,6 +108,7 @@ partial class Simulation
         finally
         {
             connection.NestingLevel--;
+            connection.Security.RevertTo(savedImpersonationDepth);
         }
 
         return udfFrame.ReturnedValue;

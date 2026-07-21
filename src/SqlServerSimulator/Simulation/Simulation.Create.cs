@@ -40,6 +40,8 @@ partial class Simulation
                 return TryParseCreateRole(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Login }:
                 return TryParseCreateLogin(context);
+            case Name serverWord when serverWord.Value.Equals("SERVER", StringComparison.OrdinalIgnoreCase):
+                return TryParseCreateServerRole(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return Simulation.TryParseCreateFullText(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:
@@ -229,6 +231,11 @@ partial class Simulation
             // for any CREATE TABLE that targets either, with the "does not
             // exist or you do not have permission" framing — probe-confirmed.
             if (schema.SchemaId is Database.SysSchemaId or Database.InformationSchemaId)
+                throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
+            // CREATE TABLE also needs ALTER on the target schema — with the
+            // db-scope CREATE TABLE permission granted but no schema ALTER, real
+            // raises Msg 2760 (probe M4).
+            if (!PermissionEnforcement.HasSchemaAlter(context.Batch, schema.SchemaId))
                 throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
             destination = schema.HeapTables;
             schemaId = schema.SchemaId;
@@ -662,7 +669,10 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var qualifiedTypeName = BatchContext.ParseObjectName(context);
         var typeName = (Name)context.Token;
-        context.MoveNextRequired();
+        // Optional: a no-argument type (int / bigint / …) may be the final token
+        // of an ALTER TABLE ADD (end of batch) — the length / nullability /
+        // constraint tail below is all optional, so tolerate EOB here.
+        context.MoveNextOptional();
 
         int? declaredMaxLength = null;
         int? declaredScale = null;

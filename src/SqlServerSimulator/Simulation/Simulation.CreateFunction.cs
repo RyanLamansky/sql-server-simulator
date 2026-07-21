@@ -196,6 +196,11 @@ partial class Simulation
         if (context.Batch.IsSkipping || !hasResolvedColumns)
             return true;
 
+        // DDL gate: db-scope CREATE FUNCTION + ALTER on the target schema
+        // (Msg 262 state 18 with the function as Procedure attribution, else
+        // Msg 2760).
+        PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
+
         if (schema.HasNameInSharedNamespace(functionName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(functionName.Leaf);
 
@@ -234,6 +239,7 @@ partial class Simulation
         // skips the body); SCHEMABINDING / ENCRYPTION / EXECUTE AS parse-and-
         // discard. Multiple options separate by commas.
         var returnsNullOnNullInput = false;
+        string? executeAsClause = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
             context.MoveNextRequired();
@@ -259,14 +265,18 @@ partial class Simulation
                         break;
                     case ReservedKeyword { Keyword: Keyword.Execute }:
                     case ReservedKeyword { Keyword: Keyword.Exec }:
-                        // EXECUTE AS <caller> — consume EXECUTE, AS, and the
-                        // following principal token (CALLER / SELF / OWNER /
-                        // a quoted name). No principal model in the simulator.
+                        // EXECUTE AS <caller> — consume EXECUTE, AS, and capture
+                        // the following principal token (CALLER / SELF / OWNER /
+                        // a quoted name) for the invocation-time frame push.
                         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         context.MoveNextRequired();
-                        if (context.Token is not (Name or Literal))
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        executeAsClause = context.Token switch
+                        {
+                            Name principal => principal.Value,
+                            Literal { Value: { IsNull: false } quoted } => quoted.AsString,
+                            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                        };
                         context.MoveNextRequired();
                         break;
                     default:
@@ -335,6 +345,11 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        // DDL gate: db-scope CREATE FUNCTION + ALTER on the target schema
+        // (Msg 262 state 18 with the function as Procedure attribution, else
+        // Msg 2760).
+        PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
+
         if (schema.HasNameInSharedNamespace(functionName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(functionName.Leaf);
 
@@ -350,6 +365,7 @@ partial class Simulation
             createDate: context.Batch.CurrentStatement.UtcNow)
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter: false, createOrAlter: false),
+            ExecuteAsClause = executeAsClause,
         };
         schema.Functions[functionName.Leaf] = function;
         return true;
@@ -409,6 +425,11 @@ partial class Simulation
 
         if (context.Batch.IsSkipping)
             return true;
+
+        // DDL gate: db-scope CREATE FUNCTION + ALTER on the target schema
+        // (Msg 262 state 18 with the function as Procedure attribution, else
+        // Msg 2760).
+        PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
 
         if (schema.HasNameInSharedNamespace(functionName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(functionName.Leaf);

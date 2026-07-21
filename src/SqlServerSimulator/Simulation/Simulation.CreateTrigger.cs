@@ -62,6 +62,42 @@ partial class Simulation
 
         context.MoveNextRequired();
 
+        // Optional WITH option list, which precedes the timing in real SQL
+        // Server's grammar (ON table [WITH options] { FOR | AFTER | INSTEAD OF }).
+        // ENCRYPTION parses-and-ignores; EXECUTE AS is captured for the per-fire
+        // frame push. Comma-separated; ends at the timing keyword.
+        string? executeAsClause = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        {
+            context.MoveNextRequired();
+            while (true)
+            {
+                switch (context.Token)
+                {
+                    case ReservedKeyword { Keyword: Keyword.Execute or Keyword.Exec }:
+                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        context.MoveNextRequired();
+                        executeAsClause = context.Token switch
+                        {
+                            Name principal => principal.Value,
+                            Literal { Value: { IsNull: false } quoted } => quoted.AsString,
+                            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                        };
+                        context.MoveNextRequired();
+                        break;
+                    case UnquotedString { ContextualKeyword: ContextualKeyword.Encryption }:
+                        context.MoveNextRequired();
+                        break;
+                    default:
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                }
+                if (context.Token is not Operator { Character: ',' })
+                    break;
+                context.MoveNextRequired();
+            }
+        }
+
         // Timing: AFTER (contextual) / FOR (reserved synonym) / INSTEAD OF
         // (contextual + reserved). INSTEAD OF replaces the DML on the
         // parent with the trigger body; AFTER fires post-heap-write.
@@ -97,16 +133,6 @@ partial class Simulation
             if (context.Token is not Operator { Character: ',' })
                 break;
             context.MoveNextRequired();
-        }
-
-        // Optional WITH option list (parse-and-ignore: ENCRYPTION,
-        // EXECUTE AS, APPEND, NOT FOR REPLICATION). For now just skip
-        // tokens until AS, matching the lax stance the simulator takes
-        // for proc body options.
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-        {
-            while (context.Token is not (null or ReservedKeyword { Keyword: Keyword.As }))
-                context.MoveNextRequired();
         }
 
         // NOT FOR REPLICATION before AS is also valid (parse-and-ignore).
@@ -214,6 +240,7 @@ partial class Simulation
             bodyLineOffset: CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart))
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
+            ExecuteAsClause = executeAsClause,
         };
         triggerSchema.Triggers[triggerName.Leaf] = trigger;
         return true;

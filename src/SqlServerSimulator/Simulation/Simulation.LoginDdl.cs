@@ -37,9 +37,14 @@ partial class Simulation
             throw SimulatedSqlException.PasswordEncryptionInvalidValue();
         var simulation = context.Batch.Connection.Simulation;
         var utcNow = context.Batch.CurrentStatement.UtcNow;
-        return simulation.Logins.TryAdd(name, new ServerLogin(simulation.AllocatePrincipalId(), name, PasswordHash.EncryptLegacy(password), utcNow, utcNow))
-            ? true
-            : throw SimulatedSqlException.ServerPrincipalAlreadyExists(name);
+        var login = new ServerLogin(simulation.AllocatePrincipalId(), name, PasswordHash.EncryptLegacy(password), utcNow, utcNow);
+        if (!simulation.Logins.TryAdd(name, login))
+            throw SimulatedSqlException.ServerPrincipalAlreadyExists(name);
+        // CREATE LOGIN auto-seeds a server-scope CONNECT SQL grant (class 100,
+        // grantor sa) — probe6 N4b.
+        lock (simulation.ServerPermissions)
+            simulation.ServerPermissions.Add(new ServerPermission(login.PrincipalId, 1, "CONNECT SQL", "COSQ", PermissionState.Grant));
+        return true;
     }
 
     /// <summary>

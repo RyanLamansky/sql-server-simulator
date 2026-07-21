@@ -12,10 +12,13 @@ namespace SqlServerSimulator;
 public sealed class ServerPrincipalCatalogViewTests
 {
     [TestMethod]
-    public void FreshSimulation_HasOnlySaAndPublic()
+    public void FreshSimulation_HasSaPublicAndFixedServerRoles()
     {
         var sim = new Simulation();
-        AreEqual(2, sim.ExecuteScalar("select count(*) from sys.server_principals"));
+        // sa (1) + public (2) + the 18 fixed server roles (ids 3–20).
+        AreEqual(20, sim.ExecuteScalar("select count(*) from sys.server_principals"));
+        AreEqual("sysadmin", sim.ExecuteScalar("select name from sys.server_principals where principal_id = 3"));
+        IsTrue((bool)sim.ExecuteScalar("select is_fixed_role from sys.server_principals where name = 'sysadmin'")!);
 
         AreEqual("sa", sim.ExecuteScalar("select name from sys.server_principals where principal_id = 1"));
         AreEqual("SQL_LOGIN", sim.ExecuteScalar("select type_desc from sys.server_principals where principal_id = 1"));
@@ -31,11 +34,12 @@ public sealed class ServerPrincipalCatalogViewTests
     }
 
     [TestMethod]
-    public void CreateLogin_AddsRowWithPrincipalIdThree()
+    public void CreateLogin_AddsRowWithPrincipalIdInUserRange()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create login app_login with password = 'P@ssw0rd1'");
-        AreEqual(3, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'app_login'"));
+        // User server principals start at 258 (ids 3–20 are the fixed roles).
+        AreEqual(258, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'app_login'"));
         AreEqual("SQL_LOGIN", sim.ExecuteScalar("select type_desc from sys.server_principals where name = 'app_login'"));
         AreEqual("master", sim.ExecuteScalar("select default_database_name from sys.server_principals where name = 'app_login'"));
         AreEqual("us_english", sim.ExecuteScalar("select default_language_name from sys.server_principals where name = 'app_login'"));
@@ -48,8 +52,8 @@ public sealed class ServerPrincipalCatalogViewTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create login login_a with password = 'P@ssw0rd1'; create login login_b with password = 'P@ssw0rd2'");
-        AreEqual(3, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'login_a'"));
-        AreEqual(4, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'login_b'"));
+        AreEqual(258, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'login_a'"));
+        AreEqual(259, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'login_b'"));
         var sidA = Convert.ToHexString((byte[])sim.ExecuteScalar("select sid from sys.server_principals where name = 'login_a'")!);
         var sidB = Convert.ToHexString((byte[])sim.ExecuteScalar("select sid from sys.server_principals where name = 'login_b'")!);
         AreNotEqual(sidA, sidB);

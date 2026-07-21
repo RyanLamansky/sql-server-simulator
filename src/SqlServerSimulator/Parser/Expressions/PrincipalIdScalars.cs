@@ -323,13 +323,6 @@ internal sealed class RoleMemberCheck : Expression
     private readonly Expression? principalArg;
     private readonly bool serverScope;
 
-    /// <summary>Fixed server roles other than <c>public</c> — the simulator has no server-role membership.</summary>
-    private static readonly string[] FixedServerRolesWithoutPublic =
-    [
-        "bulkadmin", "dbcreator", "diskadmin", "processadmin",
-        "securityadmin", "serveradmin", "setupadmin", "sysadmin",
-    ];
-
     public RoleMemberCheck(ParserContext context, bool serverScope)
     {
         this.serverScope = serverScope;
@@ -352,12 +345,28 @@ internal sealed class RoleMemberCheck : Expression
             return SqlValue.FromInt32(1);
         if (this.serverScope)
         {
-            foreach (var fixedRole in FixedServerRolesWithoutPublic)
+            var simulation = runtime.Batch.Connection.Simulation;
+            // A non-role name → NULL.
+            if (!simulation.TryResolveServerRole(roleName, out var roleId, out var isFixed))
+                return SqlValue.Null(SqlType.Int32);
+            // The login checked: the 2-arg named login, else the session's
+            // effective login. A named login that doesn't exist → NULL.
+            string loginName;
+            if (this.principalArg is not null)
             {
-                if (BuiltInToken.Comparer.Equals(roleName, fixedRole))
-                    return SqlValue.FromInt32(0);
+                loginName = this.principalArg.Run(runtime).CoerceTo(SqlType.NVarchar).AsString;
+                if (!BuiltInToken.Comparer.Equals(loginName, "sa") && !simulation.TryResolveServerPrincipalId(loginName, out _))
+                    return SqlValue.Null(SqlType.Int32);
             }
-            return SqlValue.Null(SqlType.Int32);
+            else
+            {
+                loginName = runtime.Batch.Connection.Security.Effective.LoginName;
+            }
+            // A sysadmin-member login reports 1 for every fixed server role
+            // (probe6 N2); otherwise real registry membership.
+            var isMember = (isFixed && simulation.IsLoginSysadmin(loginName))
+                || (simulation.TryResolveServerPrincipalId(loginName, out var loginId) && simulation.IsServerPrincipalInRole(loginId, roleId));
+            return SqlValue.FromInt32(isMember ? 1 : 0);
         }
 
         var database = runtime.Batch.CurrentDatabase;

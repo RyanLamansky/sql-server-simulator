@@ -517,6 +517,17 @@ internal sealed class BatchContext
         && (this.ProcFrame is null || this.ProcFrame.IsDynamicSql);
 
     /// <summary>
+    /// Object ids of scalar UDFs whose EXECUTE permission has already been
+    /// checked (and passed) in this batch — the once-per-statement memo shared
+    /// by the query-context read-source check
+    /// (<see cref="PermissionEnforcement.CheckReadSources"/>) and the
+    /// non-query invocation-seam check (<c>Simulation.InvokeScalarFunction</c>),
+    /// so a UDF invoked in a query isn't re-checked per row and a UDF invoked in
+    /// a SET / IF operand is still checked once. Allocated lazily on first use.
+    /// </summary>
+    public HashSet<int>? ExecuteCheckedFunctionIds;
+
+    /// <summary>
     /// Current grouping-set context — populated by the aggregate executor
     /// during projection of each group, restored to null between groups and
     /// between queries. Non-null surface exposes GROUPING() / GROUPING_ID()

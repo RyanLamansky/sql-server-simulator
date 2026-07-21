@@ -169,10 +169,15 @@ partial class Simulation
             connection.LastStatementRowCount = affectedRowCount;
 
             var triggerFrame = new TriggerFrame(trigger, insertedPseudo, deletedPseudo);
+            var savedImpersonationDepth = connection.Security.ImpersonationDepth;
             try
             {
                 connection.NestingLevel++;
                 connection.TriggerNestLevel++;
+                // Module WITH EXECUTE AS: run the body as the impersonated
+                // principal (OWNER / SELF → dbo, CALLER → no-op, named user →
+                // that principal); unwound in the finally below.
+                PushModuleExecuteAsFrame(connection, trigger.ExecuteAsClause, connection.CurrentDatabase);
                 if (!string.IsNullOrEmpty(trigger.BodyText))
                 {
                     using var bodyCommand = new SimulatedDbCommand(this, connection);
@@ -200,6 +205,7 @@ partial class Simulation
             {
                 connection.NestingLevel--;
                 connection.TriggerNestLevel--;
+                connection.Security.RevertTo(savedImpersonationDepth);
                 _ = connection.FiringTriggerIds.Remove(trigger.ObjectId);
             }
         }
