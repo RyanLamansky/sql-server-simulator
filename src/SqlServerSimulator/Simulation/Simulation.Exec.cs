@@ -124,6 +124,7 @@ partial class Simulation
             "sp_addextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Add),
             "sp_addlinkedserver" => InvokeSpAddLinkedServer(batch),
             "sp_addlinkedsrvlogin" or "sp_droplinkedsrvlogin" or "sp_serveroption" => InvokeSpLinkedServerNoOp(batch),
+            "sp_datatype_info_100" => InvokeSpDatatypeInfo100(batch),
             "sp_dropextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Drop),
             "sp_dropserver" => InvokeSpDropServer(batch),
             "sp_executesql" => ParseSpExecuteSql(batch, returnCodeVar),

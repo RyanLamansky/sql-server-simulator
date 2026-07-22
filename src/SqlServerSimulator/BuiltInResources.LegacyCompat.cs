@@ -54,6 +54,10 @@ internal static partial class BuiltInResources
         // it (`exec ..sp_tablecollations_100 N'[schema].[table]'`) to read the
         // destination columns' TDS collation structures before streaming rows.
         "sp_tablecollations_100",
+        // sp_datatype_info_100: the ODBC SQLGetTypeInfo backing proc — ODBC
+        // Driver 18 / JDBC call it on connect to learn each type's
+        // precision/scale, so temporal parameters bind at the right scale.
+        "sp_datatype_info_100",
     ];
 
     /// <summary>
