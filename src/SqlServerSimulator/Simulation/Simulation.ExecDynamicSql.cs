@@ -298,10 +298,7 @@ partial class Simulation
     /// </summary>
     private static (SqlType Type, int? DeclaredMaxLength) ParseSpExecuteSqlParamType(ParserContext context)
     {
-        if (context.Token is not Name)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        var qualifiedTypeName = BatchContext.ParseObjectName(context);
-        var typeName = (Name)context.Token;
+        var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
         context.MoveNextOptional();
 
         int? declaredMaxLength = null;

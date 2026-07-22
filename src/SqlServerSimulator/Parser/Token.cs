@@ -6,9 +6,11 @@
 abstract class Token
 {
     /// <summary>
-    /// The original SQL command that contains this token.
+    /// The original SQL command that contains this token. Exposed to the
+    /// tokens namespace so <see cref="Tokens.SynonymTypeName"/> can span
+    /// several adjacent word tokens over the shared source.
     /// </summary>
-    private readonly string command;
+    internal readonly string command;
 
     /// <summary>
     /// Start offset of this token in the owning command's source string.

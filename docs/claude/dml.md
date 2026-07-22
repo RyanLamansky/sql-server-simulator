@@ -59,6 +59,10 @@ Probe-confirmed semantics (SQL Server 2025):
   `ResolveDmlTopCap` is always called when a limit is present (even at zero candidates) so the value errors fire regardless of match count.
 - **INSERT TOP** caps the inserted-row count across `VALUES` (multiple tuples), `SELECT`, and `EXEC` sources — applied to the buffered `sourceRows` list in `ProcessHeapInsert` (and the view / INSTEAD OF paths).
 
+## `INSERT INTO t DEFAULT VALUES`
+Inserts a single row with every column defaulted.
+`ProcessHeapInsert` clears the destination-column list and feeds one empty source tuple, so every column flows through the default / identity-allocation / implicit-NULL path — a NOT NULL column with no default hits the same constraint error an explicit all-defaults insert would (probe-confirmed).
+
 ## `rowversion` (legacy synonym `timestamp`)
 8-byte big-endian database-scoped monotonic counter; advances on every INSERT into a rowversion-bearing table and every UPDATE affecting one.
 Storage type name surfaces as `timestamp` in `information_schema` regardless of declaration.

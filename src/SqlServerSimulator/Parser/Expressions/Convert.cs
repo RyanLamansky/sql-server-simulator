@@ -41,8 +41,9 @@ internal sealed class ConvertExpression : Expression
 
         // ResolveBuiltIn delivers context.Token already past the opening
         // paren — sitting on the first argument (the type name).
-        if (context.Token is not Name typeName)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var typeName = TypeNameSynonyms.TryFoldMultiWordType(context)
+            ?? context.Token as Name
+            ?? throw SimulatedSqlException.SyntaxErrorNear(context);
         (this.targetType, this.targetMaxLength) = Cast.ParseTargetTypeSpec(context, typeName);
 
         if (context.Token is not Operator { Character: ',' })

@@ -23,12 +23,23 @@ internal sealed class Substring : Expression
     public Substring(ParserContext context)
     {
         this.source = Parse(context);
-        if (context.Token is not Tokens.Operator { Character: ',' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        ExpectArgumentSeparator(context);
         this.start = Parse(context.MoveNextRequiredReturnSelf());
-        if (context.Token is not Tokens.Operator { Character: ',' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        ExpectArgumentSeparator(context);
         this.length = Parse(context.MoveNextRequiredReturnSelf());
+    }
+
+    // A comma separates SUBSTRING's arguments; the ANSI `SUBSTRING(x FROM a
+    // FOR b)` form isn't T-SQL, so a reserved keyword here (FROM / FOR) is
+    // rejected with Msg 156 (probe-confirmed against SQL Server 2025), other
+    // tokens with the generic Msg 102.
+    private static void ExpectArgumentSeparator(ParserContext context)
+    {
+        if (context.Token is Tokens.Operator { Character: ',' })
+            return;
+        throw context.Token is Tokens.ReservedKeyword keyword
+            ? SimulatedSqlException.SyntaxErrorNearKeyword(keyword)
+            : SimulatedSqlException.SyntaxErrorNear(context);
     }
 
     public override SqlValue Run(RuntimeContext runtime)

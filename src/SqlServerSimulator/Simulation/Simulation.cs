@@ -1594,6 +1594,19 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Select }:
                 {
                     var selection = Selection.Parse(context, 0);
+                    // A value literal left dangling after a complete SELECT is
+                    // always unconsumed trailing input — real SQL Server raises
+                    // Msg 102 rather than silently ignoring it (the non-T-SQL
+                    // `SELECT id FROM t LIMIT 2` parses `LIMIT` as the source's
+                    // alias and leaves `2` dangling). A well-formed SELECT never
+                    // ends on a numeric / string literal, so only those tokens
+                    // are rejected here; a leftover identifier (a legitimately
+                    // ignored trailing alias on a parenthesized join group) or
+                    // other token is left to the generic end-of-dispatch
+                    // normalizer, avoiding a broad — and risky — trailing-token
+                    // audit of every statement parser.
+                    if (context.Token is Numeric or Literal)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
                     if (!batch.IsSkipping)
                         PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
                     if (selection.IntoTarget is not null)

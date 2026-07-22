@@ -96,13 +96,17 @@ public sealed class AlterTableColumnTests
             """, 2744);
 
     [TestMethod]
-    public void AddColumn_OptionalColumnKeyword_Accepted()
-        => AreEqual(2, new Simulation().ExecuteScalar("""
+    public void AddColumn_ColumnKeyword_RejectedMsg156()
+    {
+        // `ALTER TABLE … ADD` takes no COLUMN keyword (unlike DROP COLUMN /
+        // ALTER COLUMN) — real SQL Server 2025 rejects it with Msg 156 near
+        // COLUMN.
+        var ex = new Simulation().AssertSqlError("""
             create table t (id int not null primary key);
-            insert t values (1), (2);
-            alter table t add column note nvarchar(50);
-            select count(*) from t where note is null
-            """));
+            alter table t add column note nvarchar(50)
+            """, 156);
+        Assert.Contains("column", ex.Message);
+    }
 
     [TestMethod]
     public void AddMultipleColumns_CommaList_AllAdded()

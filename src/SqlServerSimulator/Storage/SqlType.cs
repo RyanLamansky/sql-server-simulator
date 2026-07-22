@@ -731,7 +731,8 @@ internal abstract partial class SqlType
 
         // decimal(p, s) and numeric(p, s) — same backing type, parsed
         // identically. Defaults match SQL Server: precision 18, scale 0.
-        if ((resolvedName == 7 && upper.SequenceEqual("DECIMAL")) || (resolvedName == 7 && upper.SequenceEqual("NUMERIC")))
+        // `dec` is the ANSI synonym for `decimal`.
+        if ((resolvedName == 3 && upper.SequenceEqual("DEC")) || (resolvedName == 7 && (upper.SequenceEqual("DECIMAL") || upper.SequenceEqual("NUMERIC"))))
         {
             var precision = declaredMaxLength ?? 18;
             var scale = declaredScale ?? 0;
@@ -747,7 +748,7 @@ internal abstract partial class SqlType
         // because (a) IsFixedLength is true (so the generic "no width allowed"
         // path would reject the parameter) and (b) SQL Server picks different
         // defaults by context: 1 in column declarations, 30 in CAST.
-        if (resolvedName == 4 && upper.SequenceEqual("CHAR"))
+        if ((resolvedName == 4 && upper.SequenceEqual("CHAR")) || (resolvedName == 9 && upper.SequenceEqual("CHARACTER")))
             return ResolveFixedString(declaredMaxLength, columnName, name.LineNumber, max: 8000, isNvarcharCousin: false, "char", GetChar);
         if (resolvedName == 5 && upper.SequenceEqual("NCHAR"))
             return ResolveFixedString(declaredMaxLength, columnName, name.LineNumber, max: 4000, isNvarcharCousin: true, "nchar", GetNChar);
@@ -953,6 +954,7 @@ internal abstract partial class SqlType
         },
         7 => upper switch
         {
+            "INTEGER" => Int32,
             "SYSNAME" => SystemName,
             "TINYINT" => TinyInt,
             "VARCHAR" => Varchar,

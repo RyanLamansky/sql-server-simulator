@@ -176,3 +176,10 @@ Unknown styles raise Msg 281 with `"float"` or `"real"` in the wording.
 Style 1 and 2 hex parsing requires an even number of digits and rejects any non-hex character; both failure paths raise **Msg 8114**, swallowed by `TRY_CONVERT` to NULL.
 Empty source / empty payload round-trip cleanly.
 Unknown styles raise Msg 281 with `"varbinary"` (output direction) or `"varchar"`/`"nvarchar"` (input direction).
+
+## Type-name synonyms
+Every type-name position (`CAST` / `CONVERT` / `DECLARE` / column & parameter declarations / `sp_executesql` / `OPENJSON`) accepts SQL Server's ANSI synonym set, mapped to its base type.
+Single-word synonyms resolve inside `SqlType.GetByName` (so they reach every site, including the `CREATE TYPE FROM` / `CREATE SEQUENCE AS` positions): `integer` → int, `dec` → decimal, `character` → char (`rowversion` → timestamp already shipped).
+Multi-word synonyms are folded by `TypeNameSynonyms` (a `SynonymTypeName` leaf whose `Span` is the canonical name, spanning the source words for line attribution): `double precision` → float, `character varying` / `char varying` → varchar, `national character` / `national char` → nchar, `national character varying` / `national char varying` → nvarchar, `binary varying` → varbinary, `national text` → ntext.
+The leading word may be a reserved keyword (`double`, `national`) or an identifier (`character`, `char`, `binary`), so the fold runs ahead of a site's "type name must be an identifier" guard.
+Default lengths follow the base type's own context rules (bare `character varying` → varchar(1) in a column, varchar(30) in a CAST) — the synonym only rewrites the name.

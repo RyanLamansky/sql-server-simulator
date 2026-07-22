@@ -73,6 +73,22 @@ internal static class StringScalars
             ? sourceType
             : VarcharSqlType.Get(0, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
 
+    /// <summary>
+    /// Resolves the trim-character set for the two-argument <c>LTRIM</c> /
+    /// <c>RTRIM</c> forms. A missing second argument defaults to a single
+    /// space (the legacy one-argument behavior). A supplied set is evaluated
+    /// to its characters; a NULL argument returns <see langword="null"/> to
+    /// signal a NULL result (probe-confirmed against SQL Server 2025). The
+    /// characters form a set, not a substring.
+    /// </summary>
+    public static char[]? ResolveTrimCharacters(Expression? trimChars, RuntimeContext runtime)
+    {
+        if (trimChars is null)
+            return [' '];
+        var value = trimChars.Run(runtime);
+        return value.IsNull ? null : value.AsString.ToCharArray();
+    }
+
     private static bool IsCoerceableToVarchar(SqlType type) =>
         SqlType.IsIntegerCategory(type)
             || type is DecimalSqlType

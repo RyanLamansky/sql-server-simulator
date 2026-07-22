@@ -72,6 +72,15 @@ The application is **parse-time and NOT gated on skip-mode**, matching SQL Serve
 - **Dynamic SQL** (`EXEC('…')` / `sp_executesql`, marked by `ProcFrame.IsDynamicSql`) flips **only its own batch** — the session is unaffected (`@@OPTIONS & 256` unchanged afterward).
 - **Procedure / function / trigger bodies ignore the `SET` entirely** (SQL Server's "ignored in a stored procedure" rule) — neither the body's own reading nor the session changes.
 
+## Trailing-token tightening
+
+The per-statement dispatch normalizer advances one token past a parser that stopped on its last-consumed token (many statement parsers rely on this), so a lone *unexpected* trailing token after a statement was silently swallowed — `SELECT id FROM t LIMIT 2` parsed `LIMIT` as the source's alias and the normalizer dropped the dangling `2`.
+A general "any unconsumed trailing token → Msg 102" rule proved too invasive (dozens of statement parsers legitimately end on a last-consumed token; the parenthesized-join FROM form leaves its alias dangling).
+The narrow fix: a completed top-level SELECT that left the cursor on a **value literal** (`Numeric` / `Literal`) — which a well-formed SELECT never does — raises Msg 102, matching real for `SELECT … LIMIT n` and `SELECT … OFFSET n` (both Msg 102 without an ORDER BY on real).
+An identifier or other token still routes through the normalizer, so the alias-swallow over-permissiveness (`SELECT 1 xyz 2` parsing as two columns) remains a known latent gap outside this bundle's scope.
+
+`ALTER TABLE … ADD COLUMN c TYPE` is rejected with **Msg 156** near COLUMN (unlike `DROP COLUMN` / `ALTER COLUMN`, the ADD form names the column directly) — a prior "COLUMN is optional here" note was based on a mistaken probe; the live reference rejects it.
+
 ## Divergences
 
 - **Per-object creation-time QI capture is NOT modeled.**

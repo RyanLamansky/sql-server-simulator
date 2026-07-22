@@ -288,13 +288,31 @@ partial class Simulation
         if (output is not null && context.Token is ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute })
             throw SimulatedSqlException.OutputClauseNotAllowedInInsertExec();
 
-        var sourceRows = context.Token switch
+        List<SqlValue[]> sourceRows;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
         {
-            ReservedKeyword { Keyword: Keyword.Values } => EvaluateValuesTuples(context),
-            ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns.Length),
-            ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns.Length),
-            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-        };
+            // `INSERT INTO t DEFAULT VALUES` — one row with every column
+            // defaulted. Clearing the destination list routes every column
+            // through the default / identity-allocation / implicit-NULL path
+            // below, so a NOT NULL column with no default hits the same
+            // constraint error an explicit all-defaults insert would.
+            context.MoveNextRequired();
+            if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+            destinationColumns = [];
+            sourceRows = [[]];
+        }
+        else
+        {
+            sourceRows = context.Token switch
+            {
+                ReservedKeyword { Keyword: Keyword.Values } => EvaluateValuesTuples(context),
+                ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns.Length),
+                ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns.Length),
+                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+            };
+        }
 
         ApplyDmlTopCap(top, sourceRows, context.Batch);
 

@@ -105,8 +105,23 @@ internal abstract class Expression
         var tightness = BinaryTightness(context.Token);
         while (tightness >= minTightness && tightness > 0)
         {
-            var op = ((Operator)context.Token!).Character;
+            var opToken = (Operator)context.Token!;
+            var op = opToken.Character;
             var opTightness = tightness;
+            // `||` is the ANSI concat operator (two adjacent pipes) — same
+            // precedence / associativity as `+`, distinct runtime semantics
+            // (Concatenate). Detect it before the single `|` is consumed as
+            // bitwise-OR: peek one token and require it be an immediately
+            // adjacent second pipe.
+            var isConcat = false;
+            if (op == '|')
+            {
+                var checkpoint = context.SaveCheckpoint();
+                if (context.GetNextOptional() is Operator { Character: '|' } secondPipe && secondPipe.StartIndex == opToken.EndIndex)
+                    isConcat = true;
+                else
+                    context.RestoreCheckpoint(checkpoint);
+            }
             var right = ParsePrimary(context.MoveNextRequiredReturnSelf());
             var nextTightness = BinaryTightness(context.Token);
             while (nextTightness > opTightness)
@@ -114,7 +129,7 @@ internal abstract class Expression
                 right = ParseBinaryContinuation(right, opTightness + 1, context);
                 nextTightness = BinaryTightness(context.Token);
             }
-            left = TwoSidedExpression.FromCompoundOp(op, left, right);
+            left = isConcat ? new Concatenate(left, right) : TwoSidedExpression.FromCompoundOp(op, left, right);
             tightness = BinaryTightness(context.Token);
         }
         return left;
@@ -835,6 +850,7 @@ internal abstract class Expression
                 "COUNT" => AggregateExpression.Parse(context, AggregateKind.Count),
                 "DB_ID" => new DbId(context),
                 "FLOOR" => new Floor(context),
+                "LEAST" => new GreatestLeast(context, isLeast: true),
                 "LOG10" => new Log10(context),
                 "LOWER" => new Lower(context),
                 "LTRIM" => new LeftTrim(context),
@@ -898,6 +914,7 @@ internal abstract class Expression
                 "DATEDIFF" => new DateDiff.Standard(context),
                 "DATENAME" => new DateName(context),
                 "DATEPART" => new DatePart(context),
+                "GREATEST" => new GreatestLeast(context, isLeast: false),
                 "GROUPING" => new Grouping(context),
                 "PATINDEX" => new PatIndex(context),
                 "SUSER_ID" => new PrincipalIdLookup(context, PrincipalIdKind.SUserId),

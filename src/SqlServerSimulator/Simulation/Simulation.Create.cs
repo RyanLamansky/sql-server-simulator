@@ -67,6 +67,11 @@ partial class Simulation
         }
 
         context.MoveNextRequired();
+        // A reserved keyword where the table name belongs is always a syntax
+        // error — notably `CREATE TABLE IF NOT EXISTS`, which SQL Server rejects
+        // with Msg 156 near IF (the `IF NOT EXISTS` guard clause isn't T-SQL).
+        if (context.Token is ReservedKeyword tableNameKeyword)
+            throw SimulatedSqlException.SyntaxErrorNearKeyword(tableNameKeyword);
         if (context.Token is not Name)
             return false;
         var tableName = BatchContext.ParseObjectName(context);
@@ -665,10 +670,7 @@ partial class Simulation
             return;
         }
 
-        if (context.Token is not Name)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        var qualifiedTypeName = BatchContext.ParseObjectName(context);
-        var typeName = (Name)context.Token;
+        var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
         // Optional: a no-argument type (int / bigint / …) may be the final token
         // of an ALTER TABLE ADD (end of batch) — the length / nullability /
         // constraint tail below is all optional, so tolerate EOB here.
@@ -771,13 +773,24 @@ partial class Simulation
                     identity = ParseIdentitySpec(context, columnName.Value);
                     continue;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Generated } when generatedAs == GeneratedAlwaysAsRow.None:
-                    if (isTableVariable || isTableType || pendingPeriod is null)
+                    if (isTableVariable || isTableType)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Always })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
+                    // Only `GENERATED ALWAYS AS ROW {START|END}` is modeled. A
+                    // different follow-on (notably `IDENTITY`, the ANSI identity
+                    // form SQL Server doesn't accept) errors on that keyword —
+                    // Msg 156 near IDENTITY, matching real, which parses through
+                    // AS before rejecting.
                     if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Row })
+                    {
+                        throw context.Token is ReservedKeyword notRow
+                            ? SimulatedSqlException.SyntaxErrorNearKeyword(notRow)
+                            : SimulatedSqlException.SyntaxErrorNear(context);
+                    }
+                    if (pendingPeriod is null)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     generatedAs = context.GetNextRequired() switch
                     {

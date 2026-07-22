@@ -2294,6 +2294,24 @@ internal sealed partial class Selection
             }
             combined = next;
         }
+
+        // Legacy `GROUP BY <cols> WITH ROLLUP` / `WITH CUBE` modifier —
+        // equivalent to `GROUP BY ROLLUP(<cols>)` / `CUBE(<cols>)`. It applies
+        // over the full (simple) column list, so the Cartesian product above is
+        // a single set whose members are those columns; expand it in place.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        {
+            var modifierToken = context.GetNextRequired();
+            var columns = combined.Count == 1 ? combined[0] : [.. combined.SelectMany(static s => s)];
+            combined = modifierToken switch
+            {
+                UnquotedString { ContextualKeyword: ContextualKeyword.Rollup } => RollupExpansion(columns),
+                UnquotedString { ContextualKeyword: ContextualKeyword.Cube } => CubeExpansion(columns),
+                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+            };
+            context.MoveNextOptional();
+        }
+
         foreach (var set in combined)
             fromClause.GroupingSets.Add([.. set]);
 
@@ -2310,6 +2328,40 @@ internal sealed partial class Selection
                     fromClause.AllGroupingExpressions.Add(expr);
             }
         }
+    }
+
+    /// <summary>
+    /// Grouping-set expansion for <c>WITH ROLLUP</c>: the full column list, then
+    /// each successively-shorter prefix, down to the empty (grand-total) set.
+    /// </summary>
+    private static List<List<Expression>> RollupExpansion(List<Expression> columns)
+    {
+        var sets = new List<List<Expression>>(columns.Count + 1);
+        for (var k = columns.Count; k > 0; k--)
+            sets.Add(columns[..k]);
+        sets.Add([]);
+        return sets;
+    }
+
+    /// <summary>
+    /// Grouping-set expansion for <c>WITH CUBE</c>: every subset of the column
+    /// list (all <c>2^N</c> combinations), matching <c>CUBE(...)</c>.
+    /// </summary>
+    private static List<List<Expression>> CubeExpansion(List<Expression> columns)
+    {
+        var count = 1 << columns.Count;
+        var sets = new List<List<Expression>>(count);
+        for (var mask = count - 1; mask >= 0; mask--)
+        {
+            var set = new List<Expression>(System.Numerics.BitOperations.PopCount((uint)mask));
+            for (var b = 0; b < columns.Count; b++)
+            {
+                if ((mask & (1 << b)) != 0)
+                    set.Add(columns[b]);
+            }
+            sets.Add(set);
+        }
+        return sets;
     }
 
     /// <summary>

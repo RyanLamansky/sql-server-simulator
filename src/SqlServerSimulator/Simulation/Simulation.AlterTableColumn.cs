@@ -38,11 +38,12 @@ partial class Simulation
     /// </remarks>
     private static bool ParseAddColumns(ParserContext context, MultiPartName tableName)
     {
-        // Optional COLUMN keyword (probe-confirmed real SQL Server accepts
-        // both `ADD col TYPE` and `ADD COLUMN col TYPE`). COLUMN is a reserved
-        // keyword in the simulator's grammar.
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Column })
-            context.MoveNextRequired();
+        // `ALTER TABLE … ADD` takes no COLUMN keyword — unlike `DROP COLUMN` /
+        // `ALTER COLUMN`, the ADD form names the column directly. Real SQL
+        // Server rejects `ADD COLUMN c TYPE` with Msg 156 near COLUMN
+        // (probe-confirmed against SQL Server 2025).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Column } columnKeyword)
+            throw SimulatedSqlException.SyntaxErrorNearKeyword(columnKeyword);
 
         var heapColumns = new List<HeapColumn?>();
         var explicitNull = new List<bool>();

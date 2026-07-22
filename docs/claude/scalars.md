@@ -169,6 +169,24 @@ The projection-schema result type for `LEN` is always `int`; the other functions
 `REPLACE` runs the coerce per argument with the matching argument index in the Msg 8116 wording.
 `CHARINDEX`'s **haystack** (arg 2) coerces (`CHARINDEX('2', 12345) = 2`); the **needle** (arg 1) and **start** (arg 3) stay strict-int / strict-string respectively, matching real's Msg 8116 rejection.
 
+## ANSI string-syntax alternatives: `||` / `TRIM([side] chars FROM x)` / 2-arg `LTRIM`/`RTRIM` / `GREATEST` / `LEAST`
+Alternate / ANSI forms SQL Server 2025 accepts, each probed against the live reference.
+
+- **`||` concatenation** (`Parser/Expressions/Concatenate.cs`, hooked in `Expression.ParseBinaryContinuation` as two adjacent `|` tokens).
+  Distinct from `+`: `||` is *always* concatenation and implicitly converts a non-string operand to string (`'a' || 1` → `'a1'`, whereas `'a' + 1` raises Msg 245).
+  Same precedence / left-associativity as `+` (`'a' || 'b' + 'c'` → `'abc'`).
+  NULL yields NULL (default `CONCAT_NULL_YIELDS_NULL ON`); result is `nvarchar` when either operand is a national string, else `varchar`.
+  Requires at least one string operand and both operands concat-compatible (numeric except `bit`, money, date/time, uniqueidentifier); two non-strings (`1 || 2`), a `binary`, or a `bit` raise **Msg 402** "incompatible in the concat operator".
+- **ANSI `TRIM`** (`Parser/Expressions/Trim.cs`) now parses `TRIM([ [LEADING|TRAILING|BOTH] chars FROM ] x)` alongside the legacy `TRIM(x)`.
+  The trim characters form a *set*, not a substring: `TRIM('ab' FROM 'abxba')` → `'x'`.
+  A side keyword makes `chars FROM` mandatory — `TRIM(LEADING FROM x)` → **Msg 156** near FROM.
+  NULL `chars` or source yields NULL; an empty set removes nothing.
+- **2-arg `LTRIM(x, chars)` / `RTRIM(x, chars)`** (SQL Server 2022+) strip any of the set's characters from the one side; NULL `chars` yields NULL.
+  The 1-arg forms keep their space-only behavior.
+- **`GREATEST` / `LEAST`** (`Parser/Expressions/GreatestLeast.cs`, `isLeast` flag) — horizontal max / min.
+  All arguments promote to the single highest-precedence result type (`SqlType.Promote`), NULLs are skipped, and the result is NULL only when every argument is NULL.
+  `GREATEST(1.5, 2)` → `2` as `numeric`; `GREATEST('a','b',3)` → Msg 245 (the int-promoted set can't parse `'a'`), matching real.
+
 ## EF.Functions-driven string scalars: `PATINDEX` / `STUFF` / `QUOTENAME` / `REPLICATE` / `SPACE` / `FORMAT`
 Bundle that fills out the raw-SQL string surface that EF's `FromSqlInterpolated` and `DefaultValueSql` workloads commonly reach.
 None of these are exposed as `EF.Functions.X` LINQ extensions; coverage targets raw-SQL paths.

@@ -288,10 +288,7 @@ internal sealed partial class Selection
             var columnName = columnNameToken.Value;
 
             context.MoveNextRequired();
-            if (context.Token is not Name)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            var qualifiedTypeName = BatchContext.ParseObjectName(context);
-            var typeNameToken = (Name)context.Token;
+            var (qualifiedTypeName, typeNameToken) = TypeNameSynonyms.ReadTypeName(context);
             context.MoveNextRequired();
 
             int? declaredMaxLength = null;

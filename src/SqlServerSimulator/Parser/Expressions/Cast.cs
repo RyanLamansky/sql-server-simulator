@@ -40,7 +40,10 @@ internal sealed class Cast : Expression
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        var typeName = context.GetNextRequired<Name>();
+        context.MoveNextRequired();
+        var typeName = TypeNameSynonyms.TryFoldMultiWordType(context)
+            ?? context.Token as Name
+            ?? throw SimulatedSqlException.SyntaxErrorNear(context);
         (this.targetType, this.targetMaxLength) = ParseTargetTypeSpec(context, typeName);
 
         if (context.Token is not Operator { Character: ')' })

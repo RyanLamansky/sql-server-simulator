@@ -74,6 +74,7 @@ Sort keys decode only the ORDER BY columns off each row (`ComputeTopLevelOrderKe
 
 `FromClause.GroupingSets: List<Expression[]>` holds the flat grouping-set list — simple `GROUP BY a, b` parses as `[[a, b]]`, `GROUP BY ROLLUP(a, b)` as `[[a, b], [a], []]`, `GROUP BY CUBE(a, b)` as the 2^N power-set entries, `GROUP BY GROUPING SETS((a, b), (a), ())` verbatim.
 Mixed forms (`GROUP BY a, ROLLUP(b, c)`) Cartesian-combine each top-level item's fragments at parse time.
+The legacy `GROUP BY <cols> WITH ROLLUP` / `WITH CUBE` modifier is equivalent to `GROUP BY ROLLUP(<cols>)` / `CUBE(<cols>)` — after the column list parses to its single Cartesian set, `RollupExpansion` / `CubeExpansion` re-expand it in place (probe-confirmed the row output matches the function forms).
 `FromClause.AllGroupingExpressions` is the union (first-seen order) used by GROUPING() validation.
 
 The aggregate executor (`Selection.Execution.Aggregate.cs`) **buffers** WHERE-filtered rows once (snapshotting each tuple because `EnumerateJoinedRows` reuses a single shared array in-place) then iterates each grouping set, partitioning the buffer per set's columns and accumulating fresh aggregators per group.
