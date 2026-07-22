@@ -12,10 +12,42 @@ internal sealed class Value : Expression
     /// </summary>
     public readonly SqlValue Constant;
 
-    /// <summary>Bare <c>NULL</c> literal — typed as <see cref="SqlType.Int32"/>; SQL Server has no truly untyped NULL, so we pick a default type.</summary>
-    public Value() => this.Constant = SqlValue.Null(SqlType.Int32);
+    /// <summary>
+    /// Significant-digit count when this is a non-negative <b>integer</b>
+    /// literal (<c>0</c> otherwise). Lets the promotion sites size the literal
+    /// as <c>numeric(digit_count, 0)</c> when it meets a decimal partner — see
+    /// <see cref="Tokens.Numeric.IntegerLiteralDigitCount"/> and
+    /// <see cref="Expression.IntegerLiteralDigits"/>.
+    /// </summary>
+    internal readonly int IntegerLiteralDigitCount;
+
+    /// <summary>
+    /// True only for the bare <c>NULL</c> keyword (the parameterless ctor): an
+    /// untyped NULL that yields to any typed operand in <c>COALESCE</c> /
+    /// <c>ISNULL</c> / <c>CASE</c> / <c>IIF</c> / set-op promotion rather than
+    /// forcing its <see cref="SqlType.Int32"/> placeholder onto the result.
+    /// A typed NULL (<c>CAST(NULL AS …)</c>, <c>@@REMSERVER</c>) is not flagged.
+    /// </summary>
+    internal readonly bool IsUntypedNull;
+
+    /// <summary>Bare <c>NULL</c> literal — typed as <see cref="SqlType.Int32"/>; SQL Server has no truly untyped NULL, so we pick a default type that yields to any typed sibling in promotion.</summary>
+    public Value()
+    {
+        this.Constant = SqlValue.Null(SqlType.Int32);
+        this.IsUntypedNull = true;
+    }
 
     public Value(SqlValue value) => this.Constant = value;
+
+    /// <summary>
+    /// Integer-literal ctor carrying the token's significant-digit count for
+    /// decimal-arithmetic sizing (see <see cref="IntegerLiteralDigitCount"/>).
+    /// </summary>
+    public Value(SqlValue value, int integerLiteralDigitCount)
+    {
+        this.Constant = value;
+        this.IntegerLiteralDigitCount = integerLiteralDigitCount;
+    }
 
     public Value(DoubleAtPrefixedString doubleAtPrefixedString)
     {

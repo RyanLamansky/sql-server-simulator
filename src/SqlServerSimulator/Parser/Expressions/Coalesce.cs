@@ -40,13 +40,15 @@ internal sealed class Coalesce : Expression
         return value; // all NULL — return the last (typed-NULL) result
     }
 
+    // Untyped-NULL arguments yield to the typed arguments (so
+    // `COALESCE(NULL, 'z')` is varchar, not the int that a bare NULL's
+    // placeholder type would poison the promote with) and integer-literal
+    // arguments size by digit count against a decimal sibling — both handled
+    // by the shared PromoteValueArms seam.
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var t = this.arguments[0].GetSqlType(batch, resolveColumnType);
-        for (var i = 1; i < this.arguments.Length; i++)
-            t = SqlType.Promote(t, this.arguments[i].GetSqlType(batch, resolveColumnType));
-        this.cachedResultType = t;
-        return t;
+        this.cachedResultType = PromoteValueArms(this.arguments, batch, resolveColumnType);
+        return this.cachedResultType;
     }
 
     internal override string DebugDisplay() => $"COALESCE({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";

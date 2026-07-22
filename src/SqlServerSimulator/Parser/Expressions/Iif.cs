@@ -65,13 +65,13 @@ internal sealed class Iif : Expression
         return this.cachedResultType is { } target && !picked.IsNull && picked.Type != target ? picked.CoerceTo(target) : picked;
     }
 
+    // Shares CASE's branch-type unification: an untyped-NULL arm yields to the
+    // typed arm (`IIF(c, NULL, 'x')` → varchar) and an integer-literal arm
+    // sizes by digit count against a decimal sibling — via PromoteValueArms.
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var t = SqlType.Promote(
-            this.trueValue.GetSqlType(batch, resolveColumnType),
-            this.falseValue.GetSqlType(batch, resolveColumnType));
-        this.cachedResultType = t;
-        return t;
+        this.cachedResultType = PromoteValueArms([this.trueValue, this.falseValue], batch, resolveColumnType);
+        return this.cachedResultType;
     }
 
     internal override string DebugDisplay() => $"IIF(..., {this.trueValue.DebugDisplay()}, {this.falseValue.DebugDisplay()})";

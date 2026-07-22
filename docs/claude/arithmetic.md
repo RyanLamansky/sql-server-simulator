@@ -37,6 +37,25 @@ Pure integer-pair, pure money-pair, and float-involving arithmetic skip the deci
 
 `SqlType.Promote` (joint-envelope, `scale = max(s1, s2); precision = min(38, max(p1-s1, p2-s2) + scale)`) stays the right rule for non-arithmetic uses.
 
+### Integer literals size by digit count against a decimal
+SQL Server types an integer **literal** as `numeric(digit_count, 0)` — not `int`'s fixed precision 10 — when it is unified with a decimal/numeric partner, so `10.0/3` is `numeric(8, 6)`, not `numeric(14, 12)` (the `3` contributes `(1, 0)`; `10.0/CAST(3 AS int)` keeps `(14, 12)` since a non-literal `int` stays `(10, 0)`).
+The rule is literal-specific and pervasive — it fires across `/ * + -`, `CASE`, `COALESCE` / `IIF`, and set ops — but only when the partner is decimal-category: `3 + 4` and `SELECT 1 UNION SELECT 2` stay `int`, and a money/float partner ignores the digit count (`$10.00/3` stays `money`).
+`digit_count` is the significant-decimal-digit count with leading zeros excluded and a floor of 1 (`3`→1, `30`→2, `007`→1, `1234567890`→10); a negated integer literal stays a digit-count literal (`10.0/-3` matches `10.0/3` at `numeric(8, 6)`), and each literal keeps its own count through a fold (`CASE … 1 … 100 … 2.5` → `numeric(4, 1)`).
+The literal never carries this sizing in a pure-integer context — an arithmetic *result* (`3 * 2`) is a plain `int`, so `10.0/(3*2)` is `numeric(14, 12)`.
+The `Tokenizer`'s `Numeric` token records the count on the integer-literal branches; `Expression.IntegerLiteralDigits` reads it (seeing through parentheses, unary minus, and the projection-alias wrapper), and the promotion sites (`TwoSidedExpression` arithmetic, `SqlType.PromoteBranches` for `CASE`/`COALESCE`/`IIF`, and `Selection.CombineSetOps`) substitute `numeric(digit_count, 0)` for the literal's type when its partner is decimal.
+Static (`GetSqlType`) and runtime (`Run`) stay in parity: arithmetic coerces the runtime literal *value* to `numeric(digit_count, 0)` at the node so `DecimalArithmetic` derives the same result type the schema does, and `CASE`/`COALESCE`/set ops coerce each value to the cached/combined result type.
+
+### Unary minus preserves the operand's type
+Unary minus is a dedicated `Negate` node, not `0 - x` — negating through a subtraction against a typed `int` zero would inflate an exact-numeric's precision by one (the additive `+1`) and re-type integers against `(10, 0)`.
+`Negate` preserves the operand's own precision/scale/family (`-1.1` → `numeric(2, 1)`, `-CAST(1.5 AS decimal(5, 3))` → `decimal(5, 3)`, `-CAST(1 AS bigint)` → `bigint`, `-$1.00` → `money`, `-CAST(1 AS real)` → `real`), widens the unsigned `tinyint` to `smallint` (negation needs a signed type), and raises Msg 8117 for `bit`.
+The *value* is still computed via the shared `0 - x` arithmetic (so string coercion, date rejection, NULL propagation, and overflow all match the subtraction path), then re-boxed to the preserved type; only the five diverging cases (decimal / real / smallint / tinyint / bit) override the additive result — money / smallmoney / float / int / bigint the additive path already types correctly.
+
+### Untyped NULL yields to a typed operand
+A bare `NULL` keyword is typed `int` as a placeholder (SQL Server has no truly untyped NULL), but that placeholder must not win a joint promotion: `COALESCE(NULL, 'z')` and `ISNULL(NULL, 'z')` are `varchar` (returning `'z'`), not `int` — the latter previously raised "Conversion failed when converting the varchar value 'z' to data type int."
+The bare-`NULL` `Value` carries an `IsUntypedNull` flag (distinct from a typed NULL like `@@REMSERVER` or `CAST(NULL AS varchar)`); `COALESCE` / `ISNULL` / `CASE` / `IIF` skip untyped-NULL arms in `SqlType.PromoteBranches` (via `Expression.PromoteValueArms`), so an untyped NULL yields to any typed sibling.
+A NULL with no typed sibling still resolves to `int` (`SELECT NULL` stays `int`), matching real.
+`ISNULL` fixes the result to its first argument's type but yields when that argument is an untyped NULL; it never joint-promotes, so no digit-count sizing applies there (`ISNULL(1, 2.5)` stays `int`).
+
 ## String / binary width algebra
 
 String and binary literals type at their **exact value width**, and that width flows through the combining operators to COLMETADATA / `GetColumnSchema().ColumnSize` — a bare `'included'` advertises `varchar(8)`, not the `varchar(8000)` container it once did (probed against SQL Server 2025; sqlcmd was rendering absurdly wide columns off the container width).
@@ -90,4 +109,3 @@ If a future length-0 crash vector surfaces, prefer per-scalar retyping over the 
 ### Residual divergences (deliberate)
 - `@@VERSION` and the built-in message scalars stay container-class (`nvarchar(4000)`), not real's exact `nvarchar(300)` — retyping built-ins is deliberately out of scope (see the rejected flip).
 - `TRANSLATE` projects `nvarchar` container even for a `varchar` input (a pre-existing family divergence — it coerces to nvarchar internally); real keeps the `varchar` family.
-- `COALESCE(NULL, 'literal')` types as `int` (bare `NULL` is `Int32`, which poisons the promote), where real gives the string type — a pre-existing bare-NULL-typing quirk orthogonal to width.

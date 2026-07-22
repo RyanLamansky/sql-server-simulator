@@ -58,7 +58,10 @@ internal abstract class TwoSidedExpression : Expression
         // depth-1 arithmetic) has a non-chain left operand: evaluate directly
         // with no allocation, exactly as the former recursive form did.
         if (this.left is not TwoSidedExpression)
-            return Run(this.left.Run(runtime), this.right.Run(runtime));
+        {
+            var (fastLeft, fastRight) = AdjustLiteralOperands(this.left, this.right, this.left.Run(runtime), this.right.Run(runtime));
+            return Run(fastLeft, fastRight);
+        }
 
         // Deeper left-leaning chain (a op b op c op …, the shape
         // ParseBinaryContinuation builds): walk the spine iteratively so a long
@@ -78,7 +81,12 @@ internal abstract class TwoSidedExpression : Expression
         for (var i = spine.Count - 1; i >= 0; i--)
         {
             var current = spine[i];
-            accumulated = current.Run(accumulated, current.right.Run(runtime));
+            // Only the leftmost leaf (first fold step) can be an integer
+            // literal; once folded, the accumulator is an arithmetic result, so
+            // later steps pass a null left expression to the literal adjuster.
+            var leftExpr = i == spine.Count - 1 ? node : null;
+            var (adjustedLeft, adjustedRight) = AdjustLiteralOperands(leftExpr, current.right, accumulated, current.right.Run(runtime));
+            accumulated = current.Run(adjustedLeft, adjustedRight);
         }
         return accumulated;
     }
@@ -115,7 +123,10 @@ internal abstract class TwoSidedExpression : Expression
     private SqlType CombineType(SqlType leftType, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var rightType = this.right.GetSqlType(batch, resolveColumnType);
-        var result = SqlType.PromoteForArithmetic(leftType, rightType, this.Operator);
+        var result = SqlType.PromoteForArithmetic(
+            ArithmeticOperandType(this.left, leftType, rightType),
+            ArithmeticOperandType(this.right, rightType, leftType),
+            this.Operator);
         if (result.Category == SqlTypeCategory.String
             && leftType.Category == SqlTypeCategory.String
             && rightType.Category == SqlTypeCategory.String)
@@ -129,6 +140,51 @@ internal abstract class TwoSidedExpression : Expression
             result = result.WithCollation(resolved.Collation, resolved.Coercibility);
         }
         return result;
+    }
+
+    /// <summary>
+    /// The type an operand contributes to per-operator arithmetic promotion: a
+    /// non-negative integer literal (bare, negated, or parenthesized) meeting a
+    /// <b>decimal</b> partner is sized <c>numeric(digit_count, 0)</c> instead of
+    /// <c>int</c>'s fixed <c>(10, 0)</c> — SQL Server's literal-specific rule
+    /// (<c>10.0/3</c> → <c>numeric(8, 6)</c> vs <c>10.0/CAST(3 AS int)</c> →
+    /// <c>numeric(14, 12)</c>). Non-literal operands and pure-integer pairs
+    /// (<c>3 + 4</c>) are unchanged.
+    /// </summary>
+    private static SqlType ArithmeticOperandType(Expression operand, SqlType operandType, SqlType partnerType)
+    {
+        var digits = Expression.IntegerLiteralDigits(operand);
+        return digits > 0 && partnerType.Category == SqlTypeCategory.Decimal
+            ? SqlType.GetDecimal(digits, 0)
+            : operandType;
+    }
+
+    /// <summary>
+    /// Runtime counterpart of <see cref="ArithmeticOperandType"/>: coerces an
+    /// integer-literal operand's value to <c>numeric(digit_count, 0)</c> when
+    /// its partner is a decimal, so the runtime <see cref="DecimalArithmetic"/>
+    /// derives the same result type the static <see cref="CombineType"/> path
+    /// does (required parity — the row encoder rejects a mismatch). A
+    /// <paramref name="leftExpr"/> of <see langword="null"/> marks a left
+    /// operand that is an arithmetic result (never a literal).
+    /// </summary>
+    private static (SqlValue Left, SqlValue Right) AdjustLiteralOperands(Expression? leftExpr, Expression rightExpr, SqlValue left, SqlValue right)
+    {
+        var leftCategory = left.Type.Category;
+        if (leftExpr is not null
+            && right.Type.Category == SqlTypeCategory.Decimal
+            && Expression.IntegerLiteralDigits(leftExpr) is int leftDigits and > 0
+            && !left.IsNull)
+        {
+            left = left.CoerceTo(SqlType.GetDecimal(leftDigits, 0));
+        }
+        if (leftCategory == SqlTypeCategory.Decimal
+            && Expression.IntegerLiteralDigits(rightExpr) is int rightDigits and > 0
+            && !right.IsNull)
+        {
+            right = right.CoerceTo(SqlType.GetDecimal(rightDigits, 0));
+        }
+        return (left, right);
     }
 
     /// <summary>

@@ -95,30 +95,17 @@ internal sealed class CaseExpression : Expression
         return this.elseBranch is null ? SqlValue.Null(this.cachedResultType ?? SqlType.Int32) : this.elseBranch.Run(runtime);
     }
 
+    // THEN / ELSE branches share one result type. An untyped NULL branch is
+    // typeless in SQL Server's resolution — it yields to the typed branches
+    // rather than forcing its placeholder int type onto the whole expression
+    // (`CASE WHEN … THEN 'x' ELSE NULL END` is nvarchar, not int) — and an
+    // integer-literal branch sizes by digit count against a decimal sibling
+    // (`CASE … 1 … 2.5` → numeric(2, 1)). Both rules live in PromoteValueArms.
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        SqlType? t = null;
-        foreach (var then in this.thens)
-            t = CombineArmType(t, then, batch, resolveColumnType);
-        if (this.elseBranch is not null)
-            t = CombineArmType(t, this.elseBranch, batch, resolveColumnType);
-        // Every branch is a bare NULL literal (or the CASE has an implicit
-        // ELSE NULL only) — fall back to the untyped-NULL placeholder type.
-        this.cachedResultType = t ?? SqlType.Int32;
+        var arms = this.elseBranch is null ? this.thens : [.. this.thens, this.elseBranch];
+        this.cachedResultType = PromoteValueArms(arms, batch, resolveColumnType);
         return this.cachedResultType;
-    }
-
-    // A bare NULL literal is typeless in SQL Server's CASE result-type
-    // resolution: it yields to the typed branches rather than forcing the
-    // literal's placeholder int type onto the whole expression. So
-    // `CASE WHEN … THEN 'x' ELSE NULL END` is nvarchar, not int. Only when
-    // every branch is an untyped NULL does the placeholder type stand.
-    private static SqlType? CombineArmType(SqlType? acc, Expression arm, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
-    {
-        if (arm is Value { Constant.IsNull: true })
-            return acc;
-        var armType = arm.GetSqlType(batch, resolveColumnType);
-        return acc is null ? armType : SqlType.Promote(acc, armType);
     }
 
     internal override string DebugDisplay() => "CASE ...";

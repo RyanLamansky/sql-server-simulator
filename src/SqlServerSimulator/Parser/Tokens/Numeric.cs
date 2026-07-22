@@ -19,6 +19,20 @@ internal sealed class Numeric : Token
 {
     public readonly SqlValue Value;
 
+    /// <summary>
+    /// Significant-decimal-digit count when this token is a non-negative
+    /// <b>integer</b> literal (<c>int</c> / <c>bigint</c> branch), <c>0</c> for
+    /// decimal / scientific literals. SQL Server types an integer literal as
+    /// <c>numeric(digit_count, 0)</c> — not <c>int</c>'s fixed precision 10 —
+    /// when it is unified with a decimal/numeric partner in arithmetic /
+    /// <c>CASE</c> / set-op promotion (probe-confirmed against SQL Server 2025:
+    /// <c>10.0/3</c> → <c>numeric(8, 6)</c>, i.e. the <c>3</c> contributes
+    /// <c>(1, 0)</c>). A non-literal <c>int</c> (<c>CAST(3 AS int)</c>, a column)
+    /// keeps <c>(10, 0)</c>. Consumed by the promotion sites via
+    /// <see cref="Expression.IntegerLiteralDigits"/>.
+    /// </summary>
+    public readonly int IntegerLiteralDigitCount;
+
     public Numeric(string command, int index, int length) : base(command, index, length)
     {
         var number = base.Source;
@@ -52,6 +66,10 @@ internal sealed class Numeric : Token
             return;
         }
 
+        // Significant-digit count (leading zeros excluded, floored to 1) — the
+        // precision an integer literal contributes when unified with a decimal.
+        this.IntegerLiteralDigitCount = Math.Max(1, number.TrimStart('0').Length);
+
         if (int.TryParse(number, out var int32))
         {
             this.Value = SqlValue.FromInt32(int32);
@@ -66,6 +84,11 @@ internal sealed class Numeric : Token
             this.Value = SqlValue.FromInt64(int64);
             return;
         }
+
+        // 20-38-digit integer literal — already a scale-0 decimal whose
+        // declared precision equals its digit count, so no separate literal
+        // annotation is needed (the decimal path sees the right precision).
+        this.IntegerLiteralDigitCount = 0;
 
         if (decimal.TryParse(number, NumberStyles.Integer, CultureInfo.InvariantCulture, out var bigDec))
         {

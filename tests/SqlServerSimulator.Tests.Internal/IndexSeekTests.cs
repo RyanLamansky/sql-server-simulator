@@ -78,9 +78,9 @@ public sealed class IndexSeekTests
     [TestMethod]
     public void NegativeLiteralEquality_Seeks()
     {
-        // `-1` parses as `0 - 1` (a TwoSidedExpression), not a folded literal,
-        // so the stable-value test must recurse into the arithmetic node to keep
-        // it sargable — otherwise a negative-key equality silently full-scans.
+        // `-1` parses as a `Negate` node wrapping the literal, not a folded
+        // literal, so the stable-value test must recurse through the unary minus
+        // to keep it sargable — otherwise a negative-key equality full-scans.
         var (trace, rows) = Run(
             "create table t (id int not null primary key, val int not null); insert t values (-1, 5), (2, 50), (3, 500)",
             "select val from t where id = -1");

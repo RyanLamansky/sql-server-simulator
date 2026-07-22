@@ -47,9 +47,28 @@ internal sealed partial class Selection
         if (right.IntoTarget is not null)
             throw SimulatedSqlException.SyntaxErrorNearKeyword("into");
 
+        // Per-column type unification. An integer-literal branch is sized
+        // numeric(digit_count, 0) against a decimal partner — the same
+        // literal-specific rule arithmetic / CASE apply (SELECT 1 UNION
+        // SELECT 2.5 → numeric(2, 1)). A column stays a literal (its wider
+        // digit count carried forward) only while BOTH branches are integer
+        // literals, so a later decimal branch in a nested set-op still sizes it.
         var combinedSchema = new SqlType[left.Schema.Length];
+        var leftDigits = left.ColumnIntegerLiteralDigits;
+        var rightDigits = right.ColumnIntegerLiteralDigits;
+        int[]? combinedDigits = null;
         for (var i = 0; i < combinedSchema.Length; i++)
-            combinedSchema[i] = SqlType.Promote(left.Schema[i], right.Schema[i]);
+        {
+            var leftDigit = leftDigits is null ? 0 : leftDigits[i];
+            var rightDigit = rightDigits is null ? 0 : rightDigits[i];
+            var leftType = left.Schema[i];
+            var rightType = right.Schema[i];
+            var effectiveLeft = leftDigit > 0 && rightType.Category == SqlTypeCategory.Decimal ? SqlType.GetDecimal(leftDigit, 0) : leftType;
+            var effectiveRight = rightDigit > 0 && leftType.Category == SqlTypeCategory.Decimal ? SqlType.GetDecimal(rightDigit, 0) : rightType;
+            combinedSchema[i] = SqlType.Promote(effectiveLeft, effectiveRight);
+            if (leftDigit > 0 && rightDigit > 0)
+                (combinedDigits ??= new int[combinedSchema.Length])[i] = Math.Max(leftDigit, rightDigit);
+        }
 
         // Result column names come from the first (leftmost) branch.
         var combinedNames = left.ColumnNames;
@@ -82,7 +101,28 @@ internal sealed partial class Selection
             SetOpKind.Intersect => IntersectRows(left, right, combinedSchema, batch, outerResolver),
             SetOpKind.Except => ExceptRows(left, right, combinedSchema, batch, outerResolver),
             _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
-        }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema);
+        }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema)
+        {
+            ColumnIntegerLiteralDigits = combinedDigits,
+        };
+    }
+
+    /// <summary>
+    /// Per-column integer-literal significant-digit counts for a projection
+    /// list — the annotation set-op unification reads to size a literal against
+    /// a decimal branch. Returns <see langword="null"/> when no column is an
+    /// integer literal (the common case), so most plans carry no extra array.
+    /// </summary>
+    internal static int[]? LiteralDigitsOf(IReadOnlyList<Expression> expressions)
+    {
+        int[]? digits = null;
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            var count = Expression.IntegerLiteralDigits(expressions[i]);
+            if (count > 0)
+                (digits ??= new int[expressions.Count])[i] = count;
+        }
+        return digits;
     }
 
     /// <summary>

@@ -52,6 +52,41 @@ internal abstract partial class SqlType
         };
 
     /// <summary>
+    /// Joint-envelope common type for a set of value branches (CASE / COALESCE /
+    /// IIF / set-op columns), applying the two literal-sizing rules SQL Server
+    /// uses across all of them: an untyped-NULL branch contributes nothing (it
+    /// yields to any typed sibling; all-NULL falls back to <see cref="Int32"/>),
+    /// and a non-negative integer-literal branch is sized
+    /// <c>numeric(digit_count, 0)</c> when the set contains a decimal branch
+    /// (probe-confirmed: <c>CASE … 1 … 2.5</c> → <c>numeric(2, 1)</c>,
+    /// <c>SELECT 1 UNION SELECT 2.5</c> → <c>numeric(2, 1)</c>). Each branch is
+    /// <c>(type, integerLiteralDigits)</c>; a digit count of <c>0</c> marks a
+    /// non-literal. Callers pre-filter untyped NULLs out of the span.
+    /// </summary>
+    public static SqlType PromoteBranches(ReadOnlySpan<(SqlType Type, int IntegerLiteralDigits)> branches)
+    {
+        var hasDecimal = false;
+        foreach (var branch in branches)
+        {
+            if (branch.Type.Category == SqlTypeCategory.Decimal)
+            {
+                hasDecimal = true;
+                break;
+            }
+        }
+
+        SqlType? accumulated = null;
+        foreach (var branch in branches)
+        {
+            var effective = hasDecimal && branch.IntegerLiteralDigits > 0
+                ? GetDecimal(branch.IntegerLiteralDigits, 0)
+                : branch.Type;
+            accumulated = accumulated is null ? effective : Promote(accumulated, effective);
+        }
+        return accumulated ?? Int32;
+    }
+
+    /// <summary>
     /// rowversion participates in comparison with the binary family — chiefly
     /// to support EF Core's optimistic-concurrency <c>WHERE [RowVersion] = @p</c>
     /// pattern, where <c>@p</c> binds as <c>varbinary</c>. Cross-binary

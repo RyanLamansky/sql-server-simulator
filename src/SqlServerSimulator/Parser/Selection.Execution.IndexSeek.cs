@@ -1635,6 +1635,7 @@ internal sealed partial class Selection
             VariableReference => true,
             Reference reference => allowCorrelatedColumnValue && FindSourceColumn([source], reference.ReferencedName).SourceIndex < 0,
             TwoSidedExpression arithmetic => arithmetic.BothOperandsMatch(operand => IsStableValueSide(operand, source, allowCorrelatedColumnValue)),
+            Negate negate => IsStableValueSide(negate.Operand, source, allowCorrelatedColumnValue),
             _ => false,
         };
     }

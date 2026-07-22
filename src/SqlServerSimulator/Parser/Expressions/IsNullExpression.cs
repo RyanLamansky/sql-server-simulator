@@ -40,9 +40,16 @@ internal sealed class IsNullExpression : Expression
         return this.cachedResultType is { } target && fallback.Type != target ? fallback.CoerceTo(target) : fallback;
     }
 
+    // ISNULL fixes the result to the FIRST argument's type — but an untyped
+    // NULL first argument yields to the replacement's type (`ISNULL(NULL, 'z')`
+    // is varchar, matching real, not the int a bare NULL's placeholder would
+    // force). ISNULL does not joint-promote, so no digit-count sizing applies
+    // (`ISNULL(1, 2.5)` stays int).
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var t = this.check.GetSqlType(batch, resolveColumnType);
+        var t = IsUntypedNullLiteral(this.check)
+            ? this.replacement.GetSqlType(batch, resolveColumnType)
+            : this.check.GetSqlType(batch, resolveColumnType);
         this.cachedResultType = t;
         return t;
     }

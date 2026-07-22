@@ -198,14 +198,15 @@ internal abstract class Expression
     {
         // Leading unary operators bind to the following primary (not the whole
         // binary chain); the surrounding ParseBinaryContinuation then folds in
-        // any looser operators. `-2 + 3` therefore parses as `(0 - 2) + 3`
-        // (left-associative, value 1) rather than `0 - (2 + 3)`. Unary `~`
-        // (SQL Server's tightest operator) re-homes onto the leftmost leaf of
-        // a unary-minus operand via BitwiseNot.Create so `~ -1` stays sane.
+        // any looser operators. `-2 + 3` therefore parses as `(-2) + 3`
+        // (left-associative, value 1) rather than `-(2 + 3)`. Unary minus is a
+        // dedicated Negate node (not `0 - x`) so it preserves the operand's
+        // numeric precision/scale and keeps a negated integer literal a
+        // digit-count literal for decimal-arithmetic sizing.
         return context.Token switch
         {
             Operator { Character: '+' } => ParsePrimary(context.MoveNextRequiredReturnSelf()),
-            Operator { Character: '-' } => new Subtract(new Value(Storage.SqlValue.FromInt32(0)), ParsePrimary(context.MoveNextRequiredReturnSelf())),
+            Operator { Character: '-' } => new Negate(ParsePrimary(context.MoveNextRequiredReturnSelf())),
             Operator { Character: '~' } => BitwiseNot.Create(ParsePrimary(context.MoveNextRequiredReturnSelf())),
             _ => ParsePostfix(ParseLeadingAtom(context), context),
         };
@@ -220,7 +221,7 @@ internal abstract class Expression
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static Expression ParseLeadingAtom(ParserContext context) => context.Token switch
     {
-        Numeric number => new Value(number.Value),
+        Numeric number => new Value(number.Value, number.IntegerLiteralDigitCount),
         Literal literal => new Value(literal.Value),
         AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
         DoubleAtPrefixedString doubleAtPrefixedString => doubleAtPrefixedString.Parse() switch
@@ -696,6 +697,61 @@ internal abstract class Expression
         Value v => v.Constant.IsNull,
         _ => false,
     };
+
+    /// <summary>
+    /// Significant-digit count when <paramref name="expression"/> is (or wraps,
+    /// through parentheses or unary minus) a non-negative integer literal —
+    /// e.g. <c>3</c>, <c>-3</c>, <c>-(3)</c>, <c>- -3</c> all report <c>1</c>;
+    /// <c>0</c> for anything that isn't a literal (a column, <c>CAST(3 AS int)</c>,
+    /// <c>3 + 4</c>). A negated integer literal stays a signed integer literal
+    /// in SQL Server's decimal-arithmetic sizing (probe-confirmed:
+    /// <c>10.0/-3</c> → <c>numeric(8, 6)</c>, same as <c>10.0/3</c>). The
+    /// promotion sites size such an operand as <c>numeric(digit_count, 0)</c>
+    /// when it meets a decimal partner.
+    /// </summary>
+    internal static int IntegerLiteralDigits(Expression expression) => expression switch
+    {
+        Value v => v.IntegerLiteralDigitCount,
+        Parenthesized p => IntegerLiteralDigits(p.Wrapped),
+        Negate n => IntegerLiteralDigits(n.Operand),
+        NamedExpression named => IntegerLiteralDigits(named.Inner),
+        _ => 0,
+    };
+
+    /// <summary>
+    /// True when <paramref name="expression"/> is (or wraps, through
+    /// parentheses) the bare untyped <c>NULL</c> keyword. Distinct from
+    /// <see cref="IsBareNullLiteral"/>: this excludes a typed NULL constant
+    /// (<c>@@REMSERVER</c>). Used by the common-type promotion sites so an
+    /// untyped NULL yields to any typed sibling rather than forcing its
+    /// placeholder <see cref="SqlType.Int32"/> onto the result.
+    /// </summary>
+    internal static bool IsUntypedNullLiteral(Expression expression) => expression switch
+    {
+        Parenthesized p => IsUntypedNullLiteral(p.Wrapped),
+        Value v => v.IsUntypedNull,
+        _ => false,
+    };
+
+    /// <summary>
+    /// Joint-envelope common type across a set of value arms — the shared
+    /// promotion seam for <c>CASE</c> / <c>COALESCE</c> / <c>IIF</c>. Untyped
+    /// NULL arms yield to their typed siblings (all-NULL → <see cref="SqlType.Int32"/>),
+    /// and integer-literal arms are sized by digit count against a decimal
+    /// sibling. See <see cref="SqlType.PromoteBranches"/>.
+    /// </summary>
+    internal static SqlType PromoteValueArms(ReadOnlySpan<Expression> arms, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var branches = new (SqlType, int)[arms.Length];
+        var count = 0;
+        foreach (var arm in arms)
+        {
+            if (IsUntypedNullLiteral(arm))
+                continue;
+            branches[count++] = (arm.GetSqlType(batch, resolveColumnType), IntegerLiteralDigits(arm));
+        }
+        return SqlType.PromoteBranches(branches.AsSpan(0, count));
+    }
 
     /// <summary>
     /// Visits every <see cref="Reference"/> node in this expression's tree,

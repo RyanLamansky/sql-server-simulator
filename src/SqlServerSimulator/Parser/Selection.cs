@@ -187,6 +187,17 @@ internal sealed partial class Selection
     /// </summary>
     internal bool[]? ColumnNullability;
 
+    /// <summary>
+    /// Per-column significant-digit count for projection columns that are
+    /// non-negative integer literals (<c>0</c> for non-literal columns); null
+    /// when no column is an integer literal. Lets set-op column-type unification
+    /// size a literal as <c>numeric(digit_count, 0)</c> against a decimal branch
+    /// (<c>SELECT 1 UNION SELECT 2.5</c> → <c>numeric(2, 1)</c>), and propagates
+    /// through nested set-ops. Set post-construction by the projection builders
+    /// and <see cref="CombineSetOps"/>.
+    /// </summary>
+    internal int[]? ColumnIntegerLiteralDigits;
+
     private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>>? rowSource;
 
     /// <summary>
@@ -2885,6 +2896,7 @@ internal sealed partial class Selection
             : null)
         {
             ProjectionExpressions = [.. expressions],
+            ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions),
         };
     }
 

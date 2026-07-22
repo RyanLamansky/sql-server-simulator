@@ -469,6 +469,7 @@ internal sealed partial class Selection
             selection.CursorOrderBy = orderBy;
         selection.ColumnNullability = columnNullability;
         selection.ProjectionExpressions = [.. expressions];
+        selection.ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions);
         selection.MultipleFromSources = sources.Length > 1;
         selection.AutoElementName = sources.Length == 1 ? sources[0].Qualifier : null;
         return selection;
