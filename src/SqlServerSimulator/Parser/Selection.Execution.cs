@@ -468,6 +468,8 @@ internal sealed partial class Selection
         if (updatabilityProfile is not null)
             selection.CursorOrderBy = orderBy;
         selection.ColumnNullability = columnNullability;
+        selection.ProjectionExpressions = [.. expressions];
+        selection.MultipleFromSources = sources.Length > 1;
         return selection;
     }
 

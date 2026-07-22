@@ -87,5 +87,63 @@ Lax-mode invalid JSON → 0; strict-mode invalid JSON → Msg 13609.
 Wraps `JsonDocument.Parse` in try/catch: NULL input → NULL, non-string input → 0 (real SQL Server raises Msg 8116 — the simulator's lax disposition is harmless for the CHECK-constraint use case), valid JSON object/array/scalar → 1, parse-fail → 0.
 The 2-arg shape (`VALUE | ARRAY | OBJECT | SCALAR` modifier) isn't modeled — DACFx-emitted CHECK constraints (`isjson([col])<>0`) only use the 1-arg form.
 
-Not emitted by EF / not modeled: `FOR JSON PATH`/`AUTO`.
-Reachable only via raw SQL.
+## `FOR JSON` result serialization
+
+The trailing `FOR JSON { PATH | AUTO } [, ROOT[('name')]] [, INCLUDE_NULL_VALUES] [, WITHOUT_ARRAY_WRAPPER]` clause on a SELECT serializes the whole result set to a single JSON string.
+Parsed in `Selection.ParseOptionalForJson` (called from `ParseQueryExpression` in the slot `FOR XML` / `FOR BROWSE` occupy — after ORDER BY / OFFSET-FETCH, before OPTION); implemented in `Selection.ForJson.cs`.
+A non-JSON `FOR` clause (`FOR XML` / `FOR BROWSE`) is left in place for the downstream Msg 102, so FOR XML stays unmodeled.
+Not emitted by EF — reachable only via raw SQL.
+
+The wrapper replaces the result schema with a single `nvarchar(max)` column named `JSON_F52E2B61-18A1-11d1-B105-00805F49916B` and yields **one row** carrying the whole string.
+Real SQL Server chunks the string across multiple ~2033-char rows; the simulator returns it whole (consumers concatenate, and most read it whole) — a documented approximation.
+An **empty input rowset yields zero output rows**, so a scalar subquery `(SELECT … FOR JSON …)` returns SQL NULL (probe-confirmed, matching real).
+A `FOR JSON` Selection is marked (`Selection.ForJson`) so an enclosing `FOR JSON` serializer embeds its result as **raw JSON**, not a re-escaped string — the same role `JSON_QUERY` plays for the JSON_* builders.
+The serializer is deterministic from the query, so it rides the plan cache.
+
+### PATH mode (fully modeled)
+
+Each row is a JSON object; each column is a key (its alias / name) in select order.
+Dotted aliases nest to arbitrary depth (`x.id` / `x.a` → `{"x":{"id":…,"a":…}}`).
+The nesting tree enforces SQL Server's contiguity rule: an object's properties must be consecutive in the select list — a duplicate leaf, a leaf name reused as an object prefix, or an object reopened after another object intervened all raise **Msg 13601** naming the offending column alias.
+A column with no name / alias raises **Msg 13605**.
+Rows are wrapped in `[ … ]` unless `WITHOUT_ARRAY_WRAPPER`.
+A nested object whose leaves are all omitted (NULL under omit-NULL) is dropped entirely; the top-level per-row object always emits (an all-NULL row is `{}`).
+
+### AUTO mode
+
+Flat single-source select: same shape as PATH but column names are literal keys (dots are **not** split — `[x.y]` → `{"x.y":…}`).
+A **join** nests each secondary table as a sub-array keyed by its table/alias name; that row-collapsing is **deferred** — AUTO over a multi-source query raises `NotSupportedException` (PATH covers the same cases and is the priority).
+See [`backlog.md`](backlog.md).
+
+### Options
+
+`ROOT('name')` wraps the output in `{"name": <output>}`; `ROOT` with no parens uses `"root"`; `ROOT('')` is a valid empty key.
+`INCLUDE_NULL_VALUES` emits `"key":null` for NULL columns (the default omits them — the opposite of `JSON_OBJECT`'s `NULL ON NULL`).
+`WITHOUT_ARRAY_WRAPPER` drops the `[ ]`; multiple rows become comma-separated objects with no wrapper (`{"id":1},{"id":2}` — intentionally not valid JSON, mirroring real).
+`ROOT` combined with `WITHOUT_ARRAY_WRAPPER` raises **Msg 13620**.
+
+### Value formatting (probed verbatim against SQL Server 2025)
+
+FOR JSON's own formatter (`AppendForJsonValue`) — it diverges from the JSON_* builders' `JsonValueRender` in three probed ways, so it is **not** shared:
+
+| type | JSON |
+|---|---|
+| int / bigint / smallint / tinyint | bare number (`5`) |
+| decimal / numeric | bare, declared scale preserved (`1.50`) |
+| money / smallmoney | bare, 4 decimals (`12.3400`) |
+| float | scientific, 15 fraction digits, signed 3-digit exponent (`1.500000000000000e+000`) |
+| real | scientific, 7 fraction digits, signed 3-digit exponent (`1.5000000e+000`) |
+| bit | `true` / `false` |
+| date | `"yyyy-MM-dd"` |
+| datetime / smalldatetime | `"yyyy-MM-ddTHH:mm:ss[.fff]"` |
+| datetime2 / time / datetimeoffset | ISO at declared precision, `datetimeoffset` keeps `+HH:mm` |
+| uniqueidentifier | uppercase, quoted |
+| binary / varbinary | base64, quoted (`0x0102FF` → `"AQL/"`) |
+| sql_variant | formats its inner value |
+| char / nchar / varchar / nvarchar / text / xml / other | quoted, JSON-escaped |
+
+The date/time types **drop an all-zero fractional second** (`…T00:00:00`, not `…T00:00:00.000`) while keeping the interior/trailing zeros of a non-zero fraction (`.100`, not `.1`).
+Unlike the JSON_* builders (which emit .NET `G15` / `G7` for float / real — a documented quirk), FOR JSON matches real's scientific notation exactly.
+
+String escaping: `"` → `\"`, `\` → `\\`, **`/` → `\/`** (SQL Server escapes forward slash — the JSON_* builders do not), `\b` `\t` `\n` `\f` `\r`, other control chars < 0x20 → lowercase `\uXXXX`; chars ≥ 0x20 including non-ASCII stay verbatim.
+Nested FOR JSON / `JSON_QUERY` / `JSON_OBJECT` / `JSON_ARRAY` columns embed as raw JSON (detected at compile time by `ColumnProducesRawJson`, unwrapping alias / parenthesis / scalar-subquery wrappers).

@@ -43,19 +43,23 @@ Remaining phases, roughly in value order:
   Possible lever if paged drains ever matter: recognize index-supplied order in the `OFFSET/FETCH` path (real's plan shape) to skip the sort and bound the scan.
   Perf polish, not a fidelity gap.
 
-### Result-set serialization: `FOR JSON` / `FOR XML`
+### Result-set serialization: `FOR XML`
 
 The JSON/XML *functions* (OPENJSON / JSON_VALUE / JSON_QUERY / JSON_MODIFY / JSON_OBJECT / JSON_ARRAY / etc.; the XML type + XQuery-subset methods — see [`json.md`](json.md), [`xml.md`](xml.md)) all ship.
-Not modeled: the result-set **serialization** clauses that collapse a whole SELECT into one JSON/XML string.
 
-- **`FOR JSON` (PATH / AUTO, `ROOT('name')`, `WITHOUT_ARRAY_WRAPPER`, `INCLUDE_NULL_VALUES`)** — currently **Msg 102** at parse.
-  Serializes the projected rows into a JSON array (or single object) with column names as keys; PATH honors dotted aliases as nesting, AUTO nests by table.
+**`FOR JSON` ships** — PATH (fully, incl. dotted-alias nesting + all four options), AUTO flat, the probed value-formatting/escaping table, raw-embedding of nested FOR JSON / JSON_QUERY, Msg 13601 / 13605 / 13620.
+See [`json.md`](json.md#for-json-result-serialization).
+Two deferrals within it, both low-demand:
+- **AUTO join-nesting** (nesting a secondary table as a sub-array) — raises `NotSupportedException`; PATH covers the same cases.
+- **One-row chunking** — real chunks the string across ~2033-char rows; the simulator returns it whole.
+
+Still not modeled: the **XML** serialization clause.
+
 - **`FOR XML` (RAW / AUTO / PATH('elem') / EXPLICIT, `ELEMENTS`, `ROOT`)** — currently **Msg 102** at parse.
   Serializes rows into an XML fragment; the shape depends on the mode.
-
-Deferred as out-of-scope of the round-2 syntax-alternatives sweep: these are substantial serialization engines (a JSON/XML row-encoder with mode-specific nesting rules), not syntax variants.
-They plug in as a post-projection `SELECT`-tail transform once built — the parser already reaches the `FOR` position (it currently raises Msg 102 there).
-Weight the pick by real EF/tooling demand: EF Core doesn't emit either clause, so demand is app-code-driven.
+  A substantial serialization engine (an XML row-encoder with mode-specific nesting rules), not a syntax variant.
+  Plugs in as a post-projection `SELECT`-tail transform where FOR JSON already hooks (`Selection.ParseOptionalForJson` leaves a non-JSON `FOR` clause for the downstream Msg 102).
+  Weight the pick by real tooling demand: EF Core doesn't emit it, so demand is app-code-driven.
 
 ### Built-in functions
 

@@ -46,4 +46,29 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException JsonObjectNullKey() =>
         new("User error : Name parameter value in 'json_object' cannot be null", 13638, 16, 1);
+
+    /// <summary>
+    /// Msg 13601: two columns in a <c>FOR JSON PATH</c> projection resolve to
+    /// the same JSON document path — a duplicate leaf, a leaf whose name is
+    /// also used as an object prefix, or an object reopened after another
+    /// object intervened (paths for one object must be contiguous). Probe-
+    /// confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForJsonPropertyConflict(string property) =>
+        new($"Property '{property}' cannot be generated in JSON output due to a conflict with another column name or alias. FOR JSON PATH requires that the column expressions are ordered based on the JSON document paths specified in the column aliases.", 13601, 16, 1);
+
+    /// <summary>
+    /// Msg 13605: a <c>FOR JSON</c> projection contains a column expression
+    /// with no name or alias. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForJsonColumnWithoutName() =>
+        new("Column expressions and data sources without names or aliases cannot be formatted as JSON text using FOR JSON clause. Add alias to the unnamed column or table.", 13605, 16, 1);
+
+    /// <summary>
+    /// Msg 13620: <c>FOR JSON</c> can't combine <c>ROOT</c> with
+    /// <c>WITHOUT_ARRAY_WRAPPER</c>. Probe-confirmed wording against
+    /// SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForJsonRootWithoutWrapperConflict() =>
+        new("ROOT option and WITHOUT_ARRAY_WRAPPER option cannot be used together in FOR JSON. Remove one of these options.", 13620, 16, 1);
 }

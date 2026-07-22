@@ -25,9 +25,16 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class ScalarSubqueryExpression(Selection inner) : Expression
 {
+    /// <summary>
+    /// The wrapped single-column SELECT plan. Exposed so an enclosing FOR JSON
+    /// serializer can detect a nested FOR JSON subquery and embed its result as
+    /// raw JSON (via <c>Selection.ForJson</c>).
+    /// </summary>
+    internal readonly Selection Inner = inner;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var resultSet = inner.Execute(runtime.Batch, runtime.ResolveColumn);
+        var resultSet = this.Inner.Execute(runtime.Batch, runtime.ResolveColumn);
         using var enumerator = resultSet.RowBytes.GetEnumerator();
         if (!enumerator.MoveNext())
             return SqlValue.Null(resultSet.Schema[0]);
@@ -37,7 +44,7 @@ internal sealed class ScalarSubqueryExpression(Selection inner) : Expression
             : RowDecoder.DecodeColumn(resultSet.Schema, firstRow, 0);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => inner.Schema[0];
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Inner.Schema[0];
 
     internal override string DebugDisplay() => "(SELECT ...)";
 }

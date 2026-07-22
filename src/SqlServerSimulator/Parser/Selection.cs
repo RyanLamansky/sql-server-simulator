@@ -393,6 +393,12 @@ internal sealed partial class Selection
             combined = ApplyTopLevelOrderBy(combined, orderBy, topLevelTail.OffsetExpression, topLevelTail.FetchExpression);
         }
 
+        // Trailing FOR JSON { PATH | AUTO } [, options]: wraps the combined
+        // result in a single-column JSON-string serializer. Sits where FOR XML
+        // / FOR BROWSE do (after ORDER BY / OFFSET-FETCH, before OPTION); a
+        // non-JSON FOR clause is left in place for the downstream Msg 102.
+        combined = ParseOptionalForJson(context, combined);
+
         // OPTION (hint [, …]) — statement-level hint clause. Parsed as a
         // closed-list per Selection.Hints.cs; MAXRECURSION applies to in-
         // scope recursive CTEs, everything else recognized is discarded
@@ -804,6 +810,14 @@ internal sealed partial class Selection
                 case ReservedKeyword { Keyword: Keyword.Where }:
                     break;
 
+                // A trailing FOR (JSON / XML / BROWSE) after an aliased final
+                // projection element on a FROM-less SELECT reaches this pre-
+                // expression switch via the alias-continue; end the projection
+                // so ParseQueryExpression can handle FOR JSON (or leave any
+                // other FOR clause for the downstream Msg 102).
+                case ReservedKeyword { Keyword: Keyword.For }:
+                    goto ExitWhileTokenLoop;
+
                 case ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf or Keyword.Case or Keyword.Current_Timestamp or Keyword.Current_Date or Keyword.Current_User or Keyword.Session_User or Keyword.System_user or Keyword.User }:
                     // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE, NULLIF are
                     // reserved keywords but valid as function-call heads
@@ -1020,6 +1034,12 @@ internal sealed partial class Selection
                 // Set-op keywords terminate a branch parse so the outer
                 // driver (ParseQueryExpression) can chain branches.
                 case ReservedKeyword { Keyword: Keyword.Union or Keyword.Intersect or Keyword.Except or Keyword.Option }:
+                    goto ExitWhileTokenLoop;
+
+                // A trailing FOR (JSON / XML / BROWSE) on a FROM-less SELECT
+                // ends the projection; ParseQueryExpression handles FOR JSON and
+                // leaves any other FOR clause for the downstream Msg 102.
+                case ReservedKeyword { Keyword: Keyword.For }:
                     goto ExitWhileTokenLoop;
 
                 // WITH at the projection-element-end position can only mean a
@@ -2848,7 +2868,10 @@ internal sealed partial class Selection
         // dest columns with literal-derived nullability and no identity.
         destColumnSchema: intoTarget is { } target
             ? ComputeIntoDestSchema(target, expressions, schema, columnNames, [], [])
-            : null);
+            : null)
+        {
+            ProjectionExpressions = [.. expressions],
+        };
     }
 
     /// <summary>
