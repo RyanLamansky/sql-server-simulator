@@ -112,10 +112,14 @@ internal sealed partial class TdsSession
         var ccopt = AsInt(parameters, 5);
 
         var prepHandle = this.nextCursorPrepHandle++;
-        this.preparedCursors[prepHandle] = new PreparedCursor(statement, ParseDeclarationNames(declaration));
+        var prepared = new PreparedCursor(statement, ParseDeclarationNames(declaration));
+        this.preparedCursors[prepHandle] = prepared;
 
+        // The value params (boundStart 7+) arrive positional/unnamed from native
+        // ODBC / OLE DB drivers; name them from the prepared declaration, the
+        // same mapping sp_cursorexecute applies on the re-execute path.
         var extraReturns = new List<(ushort Ordinal, string Name, object? Value)> { (0, parameters[0].Name, prepHandle) };
-        this.OpenAndAnnounce(request, writer, moreRequests, statement, scrollopt, ccopt, cursorOrdinal: 1, scrollOrdinal: 4, ccOrdinal: 5, rowcountOrdinal: 6, boundStart: 7, extraReturns);
+        this.OpenAndAnnounce(request, writer, moreRequests, statement, scrollopt, ccopt, cursorOrdinal: 1, scrollOrdinal: 4, ccOrdinal: 5, rowcountOrdinal: 6, boundStart: 7, extraReturns, preparedNames: prepared.ParameterNames);
     }
 
     // ---- sp_cursorexecute -------------------------------------------------
@@ -497,20 +501,8 @@ internal sealed partial class TdsSession
         _ => (FetchDirection.Next, 0),
     };
 
-    private static List<TdsRpcParameter> BindTail(List<TdsRpcParameter> parameters, int start, List<string>? preparedNames)
-    {
-        var bound = new List<TdsRpcParameter>();
-        for (var i = start; i < parameters.Count; i++)
-        {
-            var parameter = parameters[i];
-            if (parameter.Name.Length == 0 && preparedNames is not null && i - start < preparedNames.Count)
-                parameter = new TdsRpcParameter(preparedNames[i - start], parameter.IsOutput, parameter.DbType, parameter.Value, parameter.Size, parameter.Precision, parameter.Scale);
-
-            bound.Add(parameter);
-        }
-
-        return bound;
-    }
+    private static List<TdsRpcParameter> BindTail(List<TdsRpcParameter> parameters, int start, List<string>? preparedNames) =>
+        NameUnnamedParameters(parameters, start, preparedNames ?? []);
 
     private static void WriteInvalidHandle(TdsTokenWriter writer, string proc, int handle)
     {

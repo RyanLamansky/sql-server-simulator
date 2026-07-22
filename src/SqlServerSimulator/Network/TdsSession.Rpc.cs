@@ -133,16 +133,7 @@ internal sealed partial class TdsSession
                         break;
                     }
 
-                    var bound = new List<TdsRpcParameter>();
-                    for (var i = 1; i < request.Parameters.Count; i++)
-                    {
-                        var parameter = request.Parameters[i];
-                        if (parameter.Name.Length == 0 && i - 1 < prepared.ParameterNames.Count)
-                            parameter = new TdsRpcParameter(prepared.ParameterNames[i - 1], parameter.IsOutput, parameter.DbType, parameter.Value, parameter.Size, parameter.Precision, parameter.Scale);
-
-                        bound.Add(parameter);
-                    }
-
+                    var bound = NameUnnamedParameters(request.Parameters, 1, prepared.ParameterNames);
                     await this.ExecuteStatementRpcAsync(prepared.Statement, bound, handleReturn: null, writer, moreRequests, cancellationToken).ConfigureAwait(false);
                     break;
                 }
@@ -151,8 +142,12 @@ internal sealed partial class TdsSession
                 {
                     var handleName = request.Parameters[0].Name;
                     var handle = this.StorePreparedStatement(ParameterText(request.Parameters, 2), ParameterText(request.Parameters, 1));
-                    var bound = request.Parameters.Skip(3).ToList();
-                    await this.ExecuteStatementRpcAsync(this.preparedStatements[handle].Statement, bound, (handleName, handle), writer, moreRequests, cancellationToken).ConfigureAwait(false);
+                    var prepared = this.preparedStatements[handle];
+                    // The value params (index 3+) arrive positional/unnamed from
+                    // native ODBC / OLE DB (name=''); name them from the prepared
+                    // declaration so `@P1` binds, the same mapping sp_execute uses.
+                    var bound = NameUnnamedParameters(request.Parameters, 3, prepared.ParameterNames);
+                    await this.ExecuteStatementRpcAsync(prepared.Statement, bound, (handleName, handle), writer, moreRequests, cancellationToken).ConfigureAwait(false);
                     break;
                 }
 
@@ -321,6 +316,30 @@ internal sealed partial class TdsSession
         var handle = ++this.nextPreparedHandle;
         this.preparedStatements[handle] = new PreparedStatement(statement, ParseDeclarationNames(declaration));
         return handle;
+    }
+
+    /// <summary>
+    /// Names each unnamed positional parameter from <paramref name="skip"/>
+    /// onward using the prepared statement's declared parameter names, in
+    /// order. Native ODBC / OLE DB drivers send prepared-statement value
+    /// parameters positionally (name=''); SqlClient names its own, so this
+    /// mapping is what lets both bind. Already-named parameters and any beyond
+    /// the declared count pass through unchanged. Shared by sp_execute and
+    /// sp_prepexec.
+    /// </summary>
+    internal static List<TdsRpcParameter> NameUnnamedParameters(List<TdsRpcParameter> parameters, int skip, List<string> names)
+    {
+        var bound = new List<TdsRpcParameter>(Math.Max(0, parameters.Count - skip));
+        for (var i = skip; i < parameters.Count; i++)
+        {
+            var parameter = parameters[i];
+            if (parameter.Name.Length == 0 && i - skip < names.Count)
+                parameter = new TdsRpcParameter(names[i - skip], parameter.IsOutput, parameter.DbType, parameter.Value, parameter.Size, parameter.Precision, parameter.Scale);
+
+            bound.Add(parameter);
+        }
+
+        return bound;
     }
 
     private static string ParameterText(List<TdsRpcParameter> parameters, int index) =>

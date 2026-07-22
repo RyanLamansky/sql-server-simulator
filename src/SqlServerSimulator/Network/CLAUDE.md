@@ -49,9 +49,10 @@ These notes are the local implementation contracts.
 - **Token writer contract**: `TdsTokenWriter` buffers synchronously; `FlushAsync(final: false)` after every row keeps memory bounded to max(row, packet).
   Only the final flush sets EOM.
   Tokens may legally split across packet boundaries.
-- **Codec conventions**: nullable wire variants everywhere (INTN/BITN/FLTN/MONEYN/DECIMALN/GUIDN).
+- **Codec conventions**: nullable columns use the N-variant wire form (INTN/BITN/FLTN/MONEYN/DATETIMN/DECIMALN/GUIDN); a **NOT NULL fixed-width column carries the FIXEDLENTYPE token instead** (INT1/INT2/INT4/INT8/BIT/FLT4/FLT8/MONEY4/MONEY/DATETIM4/DATETIME — `WriteTypeInfo(…, notNull)` via `TryFixedLenToken`), matching real byte-for-byte (the old always-N-variant form desynced native ODBC, which reads a `0x26` value as length-prefixed).
   COLMETADATA fNullable comes from `SimulatedQueryResult.ColumnNullability` (populated by the single-source no-join SELECT projection via `Expression.ResultIsNullable`; null = claim all-nullable).
-  **Flag and value form must agree**: for the INTN/BITN/FLTN/MONEYN/DATETIMN families, fNullable=0 makes SqlClient read the ROW value raw at the declared width — `WriteRow` routes those columns through `WriteRawFixedValue` (no length prefix); the other BYTELEN families (date/time/datetime2/datetimeoffset, DECIMALN, GUIDN) and USHORTLEN/PLP keep prefixes regardless.
+  **Token, flag, and value form must agree**: for those fixed-width families, fNullable=0 emits the FIXEDLENTYPE token (no max-length byte) and makes the reader take the ROW value raw at the declared width — `WriteRow` routes those columns through `WriteRawFixedValue` (no length prefix); the other BYTELEN families (date/time/datetime2/datetimeoffset, DECIMALN, GUIDN) have no FIXEDLENTYPE token, so they keep the N-variant + prefix regardless, as do USHORTLEN/PLP.
+  RETURNVALUE always uses the N-variant (output params are nullable — `WriteReturnValue` passes `notNull: false`).
   Load-bearing for DacFx bacpac export (BCP data-file layout follows the wire's fNullable; the loader follows model.xml — they must match).
   PLP is written known-length (total + one chunk + terminator) but must be *read* in both known- and unknown-length (0x…FE) chunked forms — SqlClient streams large params with the latter.
 - **`sql_variant` (0x62)**: a result-column type (`SqlVariantSqlType`), keyed off the per-cell `value.Type` inner (not the schema type) in `WriteValue`.

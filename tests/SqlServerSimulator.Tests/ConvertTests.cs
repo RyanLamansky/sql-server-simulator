@@ -139,7 +139,7 @@ public sealed class ConvertTests
     [DataRow("try_convert(tinyint, '300')")]          // Msg 244
     [DataRow("try_convert(int, '99999999999')")]      // Msg 248
     [DataRow("try_convert(uniqueidentifier, 'bad')")] // Msg 8169
-    [DataRow("try_convert(tinyint, 300)")]            // Msg 8115 (overflow)
+    [DataRow("try_convert(tinyint, 300)")]            // Msg 220 (integer narrowing overflow)
     [DataRow("try_convert(int, 'x', 1)")]             // ignored style + failure → NULL
     public void TryConvert_ConversionFailure_ReturnsNull(string expression) =>
         IsInstanceOfType<DBNull>(ExecuteScalar($"select {expression}"));

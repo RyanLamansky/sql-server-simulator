@@ -193,6 +193,18 @@ internal sealed class Cast : Expression
         }
         catch (OverflowException)
         {
+            // A tinyint/smallint/int source overflowing tinyint or smallint
+            // reports Msg 220 with the source value embedded — real's %ld slot
+            // holds it (probe-confirmed against SQL Server 2025, 2026-07-22).
+            // A bigint source (value could exceed the 32-bit slot) and every
+            // other narrowing keep the generic Msg 8115.
+            if (targetType is TinyIntSqlType or SmallIntSqlType
+                && SqlType.IsIntegerCategory(sourceType) && sourceType != SqlType.BigInt)
+            {
+                var formatted = value.CoerceTo(SqlType.BigInt).AsInt64.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                throw SimulatedSqlException.ArithmeticOverflowForDataType(targetType.SqlServerName, formatted);
+            }
+
             throw SimulatedSqlException.ArithmeticOverflow(targetType.ToString()!);
         }
 
@@ -286,7 +298,8 @@ internal sealed class Cast : Expression
     /// the caller still sees genuine programming errors.
     /// </summary>
     internal static bool IsConversionFailure(int number) => number is
-        241    // ConversionFailedDateTimeFromString
+        220    // ArithmeticOverflowForDataType (integer → tinyint/smallint)
+        or 241 // ConversionFailedDateTimeFromString
         or 242 // ConversionToDateTimeOutOfRange
         or 244 // OverflowConvertingNarrowInt (INT1/INT2)
         or 245 // ConversionFailedFromString

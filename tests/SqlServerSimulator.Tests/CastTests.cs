@@ -23,8 +23,26 @@ public sealed class CastTests
         IsInstanceOfType<DBNull>(ExecuteScalar("select cast(null as int)"));
 
     [TestMethod]
-    public void Cast_NarrowingOverflow_RaisesArithmeticOverflow()
-        => Contains("Arithmetic overflow", AssertSqlError("select cast(300 as tinyint)", 8115).Message);
+    [DataRow("select cast(300 as tinyint)", "tinyint", "300")]
+    [DataRow("select cast(99999 as smallint)", "smallint", "99999")]
+    [DataRow("select cast(-1 as tinyint)", "tinyint", "-1")]
+    [DataRow("select convert(tinyint, 300)", "tinyint", "300")]
+    [DataRow("select cast(cast(70000 as int) as smallint)", "smallint", "70000")]
+    public void Cast_IntegerNarrowingOverflow_RaisesMsg220WithValue(string sql, string type, string value) =>
+        AreEqual($"Arithmetic overflow error for data type {type}, value = {value}.", AssertSqlError(sql, 220).Message);
+
+    [TestMethod]
+    // bigint source can exceed real's 32-bit %ld slot, so it keeps the generic
+    // Msg 8115; likewise a wider (int) target and a non-integer (decimal) source.
+    [DataRow("select cast(cast(300 as bigint) as tinyint)")]
+    [DataRow("select cast(9999999999 as int)")]
+    [DataRow("select cast(300.0 as tinyint)")]
+    public void Cast_NonIntegerNarrowNarrowingOverflow_RaisesMsg8115(string sql) =>
+        Contains("Arithmetic overflow", AssertSqlError(sql, 8115).Message);
+
+    [TestMethod]
+    public void TryCast_IntegerNarrowingOverflow_ReturnsNull() =>
+        IsInstanceOfType<DBNull>(ExecuteScalar("select try_cast(300 as tinyint)"));
 
     [TestMethod]
     [DataRow("cast('42' as int)", 42)]

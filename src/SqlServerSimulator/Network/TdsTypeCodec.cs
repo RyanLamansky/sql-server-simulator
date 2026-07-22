@@ -9,9 +9,10 @@ namespace SqlServerSimulator.Network;
 /// <summary>
 /// Translates result-set schemas and values into the TDS wire encoding:
 /// COLMETADATA TYPE_INFO per column and the per-cell value bytes of ROW
-/// tokens. Nullable wire variants are used throughout (INTN, BITN, FLTN,
-/// MONEYN, DATETIMN, DECIMALN, GUIDN), which SqlClient accepts for
-/// non-nullable data as well.
+/// tokens. Nullable columns use the N-variant wire form (INTN, BITN, FLTN,
+/// MONEYN, DATETIMN, DECIMALN, GUIDN); a NOT NULL column of a fixed-width
+/// family carries the FIXEDLENTYPE token instead (INT4, BIT, MONEY, DATETIME,
+/// …) with its ROW value written raw, matching real byte-for-byte.
 /// </summary>
 internal static class TdsTypeCodec
 {
@@ -30,8 +31,10 @@ internal static class TdsTypeCodec
 
     /// <summary>
     /// <paramref name="columnNullability"/> feeds each column's fNullable
-    /// flag (first flags byte 0x09 nullable / 0x08 not); null claims every
-    /// column nullable. NOT NULL flags are load-bearing for DacFx bacpac
+    /// flag (first flags byte 0x09 nullable / 0x08 not) and selects the type
+    /// token for fixed-width families — NOT NULL emits the FIXEDLENTYPE token
+    /// (INT4 / BIT / MONEY / DATETIME / …), nullable the N-variant; null claims
+    /// every column nullable. NOT NULL flags are load-bearing for DacFx bacpac
     /// export — its BCP data files drop the per-value length prefix on
     /// fixed-width columns whose result metadata says NOT NULL, and the
     /// bacpac loader decodes per the model.xml declaration, so a false
@@ -46,9 +49,10 @@ internal static class TdsTypeCodec
         {
             var type = schema[i];
             writer.WriteUInt32(type is RowVersionSqlType ? 0x50u : 0u);
-            writer.WriteByte(columnNullability is null || columnNullability[i] ? (byte)0x09 : (byte)0x08);
+            var notNull = columnNullability is not null && !columnNullability[i];
+            writer.WriteByte(notNull ? (byte)0x08 : (byte)0x09);
             writer.WriteByte(0);
-            WriteTypeInfo(writer, type);
+            WriteTypeInfo(writer, type, notNull);
             writer.WriteBVarchar(columnNames[i]);
         }
 
@@ -71,22 +75,54 @@ internal static class TdsTypeCodec
     }
 
     /// <summary>
-    /// The BYTELEN wire families whose ROW values drop the length prefix
-    /// once the column's COLMETADATA claims NOT NULL — SqlClient reads
-    /// INTN / BITN / FLTN / MONEYN / DATETIMN values raw at the declared
-    /// width for non-nullable columns (probe-confirmed against SqlClient
-    /// 6.1: a length-prefixed value there desyncs the stream). The other
-    /// BYTELEN families (date / time / datetime2 / datetimeoffset,
-    /// DECIMALN, GUIDN) and every USHORTLEN / PLP form keep their prefixes
-    /// regardless of the nullability flag. Must stay aligned with the
-    /// fNullable flag <see cref="WriteColMetadata"/> emits — both read the
-    /// same per-column nullability array.
+    /// The fixed-width wire families whose NOT NULL COLMETADATA carries the
+    /// FIXEDLENTYPE token (INT1 / INT2 / INT4 / INT8 / BIT / FLT4 / FLT8 /
+    /// MONEY4 / MONEY / DATETIM4 / DATETIME) rather than the nullable N-variant,
+    /// and whose ROW value is therefore written raw at the declared width — real
+    /// sends exactly this form (probe-captured against SQL Server 2025), and it
+    /// keeps COLMETADATA and ROW consistent (a FIXEDLENTYPE value carries no
+    /// length prefix). The other BYTELEN families (date / time / datetime2 /
+    /// datetimeoffset, DECIMALN, GUIDN) and every USHORTLEN / PLP form have no
+    /// FIXEDLENTYPE token, so they keep the N-variant plus length prefix
+    /// regardless of the nullability flag. Must stay aligned with the fNullable
+    /// flag <see cref="WriteColMetadata"/> emits and the token
+    /// <see cref="TryFixedLenToken"/> selects — all three read the same
+    /// per-column nullability array.
     /// </summary>
     private static bool IsRawWhenNotNull(SqlType type) => type
         is TinyIntSqlType or SmallIntSqlType or Int32SqlType or BigIntSqlType
         or BitSqlType or RealSqlType or FloatSqlType
         or SmallMoneySqlType or MoneySqlType
         or DateTimeSqlType or SmallDateTimeSqlType;
+
+    /// <summary>
+    /// Maps an <see cref="IsRawWhenNotNull"/> family to its FIXEDLENTYPE
+    /// COLMETADATA token — the byte real emits for a NOT NULL column of that
+    /// type (probe-captured against SQL Server 2025, 2026-07-22). A FIXEDLENTYPE
+    /// token is a single byte with no trailing max-length byte. Returns false
+    /// for every other type (those keep their nullable N-variant token
+    /// unconditionally).
+    /// </summary>
+    private static bool TryFixedLenToken(SqlType type, out byte token)
+    {
+        token = type switch
+        {
+            TinyIntSqlType => 0x30,        // INT1
+            SmallIntSqlType => 0x34,       // INT2
+            Int32SqlType => 0x38,          // INT4
+            BigIntSqlType => 0x7F,         // INT8
+            BitSqlType => 0x32,            // BIT
+            RealSqlType => 0x3B,           // FLT4
+            FloatSqlType => 0x3E,          // FLT8
+            SmallMoneySqlType => 0x7A,     // MONEY4
+            MoneySqlType => 0x3C,          // MONEY
+            SmallDateTimeSqlType => 0x3A,  // DATETIM4
+            DateTimeSqlType => 0x3D,       // DATETIME
+            _ => 0,
+        };
+
+        return token != 0;
+    }
 
     /// <summary>
     /// Writes one cell of an <see cref="IsRawWhenNotNull"/> family as raw
@@ -191,13 +227,26 @@ internal static class TdsTypeCodec
         writer.WriteByte(0x09);
         writer.WriteByte(0);
 
-        WriteTypeInfo(writer, wireType);
+        // Output parameters are nullable — real sends the N-variant token in a
+        // RETURNVALUE regardless of the value, so the fixed-token path is off.
+        WriteTypeInfo(writer, wireType, notNull: false);
         WriteValue(writer, wireType, sqlValue);
         writer.LeaveComposite();
     }
 
-    private static void WriteTypeInfo(TdsTokenWriter writer, SqlType type)
+    private static void WriteTypeInfo(TdsTokenWriter writer, SqlType type, bool notNull)
     {
+        // A NOT NULL fixed-width column carries the FIXEDLENTYPE token (single
+        // byte, no max-length byte), matching real — the N-variant token below
+        // is the nullable-only form. The paired ROW value is written raw (see
+        // WriteRawFixedValue); COLMETADATA and ROW must agree on which token
+        // family a column uses, so both read the same per-column nullability.
+        if (notNull && TryFixedLenToken(type, out var fixedToken))
+        {
+            writer.WriteByte(fixedToken);
+            return;
+        }
+
         switch (type)
         {
             case TinyIntSqlType:

@@ -48,6 +48,38 @@ public sealed class ColumnNullabilityWireTests
     }
 
     [TestMethod]
+    public async Task NotNullFixedWidthColumns_ReadOverWire_WithFixedLenTokens()
+    {
+        // A NOT NULL fixed-width column now carries the FIXEDLENTYPE token
+        // (INT4 / INT8 / BIT / MONEY / DATETIME) and a raw ROW value, matching
+        // real. SqlClient must still read every value and see NOT NULL metadata.
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, """
+            create table t (
+                i int not null, b bigint not null, f bit not null,
+                m money not null, d datetime not null);
+            insert t values (5, 9000000000, 1, 12.34, '2020-01-02 03:04:05')
+            """);
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("select i, b, f, m, d from t", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        var columns = reader.GetColumnSchema();
+        for (var i = 0; i < 5; i++)
+            IsFalse(columns[i].AllowDBNull, columns[i].ColumnName);
+
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual(5, reader.GetInt32(0));
+        AreEqual(9000000000L, reader.GetInt64(1));
+        IsTrue(reader.GetBoolean(2));
+        AreEqual(12.34m, reader.GetDecimal(3));
+        AreEqual(new DateTime(2020, 1, 2, 3, 4, 5), reader.GetDateTime(4));
+        IsFalse(await reader.ReadAsync(TestContext.CancellationToken));
+    }
+
+    [TestMethod]
     public async Task JoinedSelect_FallsBackToAllNullable()
     {
         var simulation = new Simulation();
