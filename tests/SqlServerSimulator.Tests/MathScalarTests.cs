@@ -222,4 +222,52 @@ public sealed class MathScalarTests
 
         IsFalse(reader.Read());
     }
+
+    // --- CEILING / FLOOR result type: precision preserved, scale dropped to 0
+    // (probe-confirmed against SQL Server 2025, 2026-07-22). The simulator
+    // reports "numeric" for every decimal family (documented divergence). ---
+
+    [TestMethod]
+    [DataRow("ceiling(1.1)", 2, 0)]
+    [DataRow("ceiling(123.456)", 6, 0)]
+    [DataRow("floor(cast(-1.1 as decimal(2,1)))", 2, 0)]
+    [DataRow("ceiling(cast(1 as decimal(38,10)))", 38, 0)]
+    [DataRow("floor(cast(1 as decimal(18,4)))", 18, 0)]
+    public void CeilingFloor_DecimalResult_PrecisionPreservedScaleZero(string expr, int precision, int scale)
+    {
+        AreEqual("numeric", ExecuteScalar($"select sql_variant_property(cast({expr} as sql_variant), 'BaseType')"));
+        AreEqual(precision, ExecuteScalar($"select sql_variant_property(cast({expr} as sql_variant), 'Precision')"));
+        AreEqual(scale, ExecuteScalar($"select sql_variant_property(cast({expr} as sql_variant), 'Scale')"));
+    }
+
+    [TestMethod]
+    public void CeilingFloor_IntegerValues()
+    {
+        AreEqual(2m, ExecuteScalar("select ceiling(1.1)"));
+        AreEqual(-2m, ExecuteScalar("select floor(-1.1)"));
+        AreEqual(124m, ExecuteScalar("select ceiling(123.456)"));
+    }
+
+    // --- POWER result type: exact-numeric base widens precision to 38 keeping
+    // its scale; int / bigint / float base keep their family (probe-confirmed
+    // 2026-07-22: POWER(2.0, 10) → numeric(38, 1) value 1024). ---
+
+    [TestMethod]
+    public void Power_DecimalBase_Widens_To_Precision38()
+    {
+        AreEqual("numeric", ExecuteScalar("select sql_variant_property(cast(power(2.0, 10) as sql_variant), 'BaseType')"));
+        AreEqual(38, ExecuteScalar("select sql_variant_property(cast(power(2.0, 10) as sql_variant), 'Precision')"));
+        AreEqual(1, ExecuteScalar("select sql_variant_property(cast(power(2.0, 10) as sql_variant), 'Scale')"));
+        AreEqual(2, ExecuteScalar("select sql_variant_property(cast(power(2.00, 10) as sql_variant), 'Scale')"));
+        AreEqual(3, ExecuteScalar("select sql_variant_property(cast(power(cast(2 as decimal(5,3)), 10) as sql_variant), 'Scale')"));
+        AreEqual(1024m, ExecuteScalar("select power(2.0, 10)"));
+    }
+
+    [TestMethod]
+    public void Power_IntAndFloatBase_KeepFamily()
+    {
+        AreEqual("int", ExecuteScalar("select sql_variant_property(cast(power(2, 10) as sql_variant), 'BaseType')"));
+        AreEqual("float", ExecuteScalar("select sql_variant_property(cast(power(cast(2 as float), 10) as sql_variant), 'BaseType')"));
+        AreEqual("money", ExecuteScalar("select sql_variant_property(cast(power(cast(2 as money), 10) as sql_variant), 'BaseType')"));
+    }
 }

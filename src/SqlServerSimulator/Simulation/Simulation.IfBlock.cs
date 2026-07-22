@@ -62,7 +62,7 @@ partial class Simulation
         try
         {
             batch.SkipModeFlag = thenSkip;
-            foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false))
+            foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
                 yield return o;
 
             hadElse = context.Token is ReservedKeyword { Keyword: Keyword.Else };
@@ -77,7 +77,7 @@ partial class Simulation
                 batch.SkipModeFlag = wasSkipModeFlag
                     || condResult
                     || batch.LoopControl != LoopControl.None;
-                foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false))
+                foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
                     yield return o;
             }
         }
@@ -163,7 +163,7 @@ partial class Simulation
                 // WHILE itself in skip mode — never iterate. Skip-dispatch the
                 // body once to advance the cursor.
                 batch.SkipModeFlag = true;
-                foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false))
+                foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
                     yield return o;
             }
             else
@@ -195,7 +195,7 @@ partial class Simulation
                         batch.SkipModeFlag = true;
                         try
                         {
-                            foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false))
+                            foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
                                 yield return o;
                         }
                         finally
@@ -205,7 +205,7 @@ partial class Simulation
                         break;
                     }
 
-                    foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false))
+                    foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
                         yield return o;
 
                     // RETURN propagates through WHILE (unlike BREAK / CONTINUE

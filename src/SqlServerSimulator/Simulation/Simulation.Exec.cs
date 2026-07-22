@@ -56,50 +56,57 @@ partial class Simulation
     /// unknown parameter names (Msg 201).
     /// </para>
     /// </remarks>
-    private IEnumerable<SimulatedStatementOutcome> ParseExec(BatchContext batch)
+    private IEnumerable<SimulatedStatementOutcome> ParseExec(BatchContext batch, bool implicitExec = false)
     {
         var context = batch.Parser;
-        context.MoveNextRequired(); // consume EXEC / EXECUTE
-
-        // EXECUTE AS { LOGIN | USER } = 'name' collides with proc invocation at
-        // the EXEC keyword; the AS keyword after EXECUTE disambiguates. It
-        // yields no result sets.
-        if (context.Token is ReservedKeyword { Keyword: Keyword.As })
-        {
-            ExecuteAsStatement(batch);
-            yield break;
-        }
 
         // Optional `@rc = ` return-code capture between EXEC and the proc
-        // name. The grammar is `EXEC [@rc = ] proc_name [args]` — probe-
-        // confirmed against SQL Server 2025. Peek for `@var =` and consume
-        // both tokens when present; the dynamic-SQL form `EXEC (@sql)`
-        // doesn't accept a return-code variable.
+        // name. Only the explicit-EXEC form carries it — the bare implicit-EXEC
+        // form (a batch's first statement being just `proc [args]`) has no
+        // leading keyword and no return-code capture.
         string? returnCodeVar = null;
-        if (context.Token is AtPrefixedString rcCandidate)
+        if (!implicitExec)
         {
-            var checkpoint = context.SaveCheckpoint();
-            context.MoveNextRequired();
-            if (context.Token is Operator { Character: '=' })
-            {
-                returnCodeVar = rcCandidate.Value;
-                context.MoveNextRequired();
-            }
-            else
-            {
-                context.RestoreCheckpoint(checkpoint);
-            }
-        }
+            context.MoveNextRequired(); // consume EXEC / EXECUTE
 
-        // EXEC (<string-expr>) — dynamic-SQL form. The expression's value
-        // is re-tokenized as a fresh batch inside its own child
-        // BatchContext (so outer @vars aren't visible, matching probed
-        // behavior).
-        if (context.Token is Operator { Character: '(' })
-        {
-            foreach (var outcome in ParseExecDynamicSql(batch, returnCodeVar))
-                yield return outcome;
-            yield break;
+            // EXECUTE AS { LOGIN | USER } = 'name' collides with proc invocation at
+            // the EXEC keyword; the AS keyword after EXECUTE disambiguates. It
+            // yields no result sets.
+            if (context.Token is ReservedKeyword { Keyword: Keyword.As })
+            {
+                ExecuteAsStatement(batch);
+                yield break;
+            }
+
+            // The grammar is `EXEC [@rc = ] proc_name [args]` — probe-confirmed
+            // against SQL Server 2025. Peek for `@var =` and consume both tokens
+            // when present; the dynamic-SQL form `EXEC (@sql)` doesn't accept a
+            // return-code variable.
+            if (context.Token is AtPrefixedString rcCandidate)
+            {
+                var checkpoint = context.SaveCheckpoint();
+                context.MoveNextRequired();
+                if (context.Token is Operator { Character: '=' })
+                {
+                    returnCodeVar = rcCandidate.Value;
+                    context.MoveNextRequired();
+                }
+                else
+                {
+                    context.RestoreCheckpoint(checkpoint);
+                }
+            }
+
+            // EXEC (<string-expr>) — dynamic-SQL form. The expression's value
+            // is re-tokenized as a fresh batch inside its own child
+            // BatchContext (so outer @vars aren't visible, matching probed
+            // behavior).
+            if (context.Token is Operator { Character: '(' })
+            {
+                foreach (var outcome in ParseExecDynamicSql(batch, returnCodeVar))
+                    yield return outcome;
+                yield break;
+            }
         }
 
         // A leading `.` opens a name whose db/schema positions are omitted

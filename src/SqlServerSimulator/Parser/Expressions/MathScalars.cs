@@ -33,6 +33,43 @@ internal static class MathScalars
         : input;
 
     /// <summary>
+    /// Result type for <c>CEILING</c> / <c>FLOOR</c>: the input's post-widen
+    /// type, except an exact-numeric (<c>decimal</c> / <c>numeric</c>) input
+    /// keeps its precision but drops to scale 0 — the result is integer-valued.
+    /// Probe-confirmed against SQL Server 2025 (2026-07-22):
+    /// <c>CEILING(1.1)</c> → <c>numeric(2, 0)</c>,
+    /// <c>CEILING(123.456)</c> → <c>numeric(6, 0)</c>,
+    /// <c>CEILING(CAST(1 AS decimal(38,10)))</c> → <c>decimal(38, 0)</c>;
+    /// <c>money</c> stays <c>money</c>, <c>float</c> stays <c>float</c>,
+    /// <c>int</c> stays <c>int</c>. (The simulator has no <c>numeric</c>-vs-
+    /// <c>decimal</c> name distinction — it reports <c>decimal</c> either way;
+    /// only the precision / scale are matched.)
+    /// </summary>
+    public static SqlType FloorCeilingResult(SqlType input)
+    {
+        var widened = WidenForResult(input);
+        return widened is DecimalSqlType d ? SqlType.GetDecimal(d.precision, 0) : widened;
+    }
+
+    /// <summary>
+    /// Result type for <c>POWER</c>: the base's post-widen type, except an
+    /// exact-numeric (<c>decimal</c> / <c>numeric</c>) base widens its
+    /// precision to 38 while keeping its scale — so the result can hold the
+    /// exponentiated magnitude. Probe-confirmed against SQL Server 2025
+    /// (2026-07-22): <c>POWER(2.0, 10)</c> → <c>numeric(38, 1)</c>,
+    /// <c>POWER(2.00, 10)</c> → <c>numeric(38, 2)</c>,
+    /// <c>POWER(CAST(2 AS decimal(5,3)), 10)</c> → <c>decimal(38, 3)</c>;
+    /// <c>money</c> stays <c>money</c>, <c>int</c> stays <c>int</c>,
+    /// <c>bigint</c> stays <c>bigint</c> (<c>tinyint</c> / <c>smallint</c>
+    /// widen to <c>int</c>), and a <c>float</c> / <c>real</c> base → <c>float</c>.
+    /// </summary>
+    public static SqlType PowerResult(SqlType baseType)
+    {
+        var widened = WidenForResult(baseType);
+        return widened is DecimalSqlType d ? SqlType.GetDecimal(38, d.scale) : widened;
+    }
+
+    /// <summary>
     /// Applies SQL Server's implicit string-to-float cast for math scalar
     /// inputs. String operands route through
     /// <see cref="SqlValue.CoerceTo"/> targeting <c>float</c> (Msg 8114

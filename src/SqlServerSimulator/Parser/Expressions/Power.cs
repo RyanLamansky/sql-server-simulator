@@ -6,7 +6,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// SQL <c>POWER(base, exponent)</c>: result type is the (post-widen) type
 /// of <c>base</c> regardless of <c>exponent</c>'s type — probe-confirmed
 /// against SQL Server 2025 (2026-05-09): <c>POWER(int, float) → int</c>
-/// (with truncation toward zero) and <c>POWER(decimal, int) → decimal</c>.
+/// (with truncation toward zero). An exact-numeric base widens its precision
+/// to 38 while keeping its scale so the exponentiated magnitude fits
+/// (probe-confirmed 2026-07-22): <c>POWER(2.0, 10) → numeric(38, 1)</c> —
+/// see <see cref="MathScalars.PowerResult"/>.
 /// String operands on either side implicit-cast to <c>float</c> via
 /// <see cref="MathScalars.CoerceImplicit"/> (probe-confirmed 2026-05-22:
 /// <c>POWER('2', 3) → float</c>, <c>POWER(2, '3') → int</c> — the first
@@ -31,7 +34,7 @@ internal sealed class Power : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var b = MathScalars.CoerceImplicit(this.baseExpr.Run(runtime));
-        var resultType = MathScalars.WidenForResult(b.Type);
+        var resultType = MathScalars.PowerResult(b.Type);
         if (b.IsNull) return SqlValue.Null(resultType);
         var e = MathScalars.CoerceImplicit(this.exponent.Run(runtime));
         if (e.IsNull) return SqlValue.Null(resultType);
@@ -64,7 +67,7 @@ internal sealed class Power : Expression
             : SqlValue.FromInt32((int)raw);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
-        => MathScalars.WidenForResult(this.baseExpr.GetSqlType(batch, resolveColumnType));
+        => MathScalars.PowerResult(this.baseExpr.GetSqlType(batch, resolveColumnType));
 
     internal override string DebugDisplay() => $"POWER({this.baseExpr.DebugDisplay()}, {this.exponent.DebugDisplay()})";
 }

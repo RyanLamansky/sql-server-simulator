@@ -129,7 +129,8 @@ Probe-confirmed wire shape 2026-07-15.
 
 Dispatch (`TdsSession.Rpc.cs`):
 
-- **sp_executesql** (ProcID 10 or by name): first param is the statement, second the declaration string (redundant for binding and dropped), the rest become `SimulatedDbParameter`s on a Text command — the engine's `SeedVariables` path binds them by name, with typed NULLs via `DbType`.
+- **sp_executesql** (ProcID 10 or by name): first param is the statement, second the declaration string, the rest become `SimulatedDbParameter`s on a Text command — the engine's `SeedVariables` path binds them by name, with typed NULLs via `DbType`.
+  **Any unnamed value params (index 2+, name='') are named positionally from the declaration** (index 1) via the shared `NameUnnamedParameters` helper, the same mapping `sp_prepexec` / `sp_execute` use — mssql-jdbc's `PreparedStatement` sends its value params positionally, so without this every prepared query failed with Msg 137 "Must declare the scalar variable "@P0"."; SqlClient names its own, so its oracle never caught the gap (`SpExecuteSqlUnnamedParameterTests`).
   Decimal scale rides the CLR decimal value (the engine ignores `DbParameter.Precision/Scale` by design).
 - **Prepared statements**: `sp_prepexec` (13) stores statement + declaration-parsed parameter names in a per-session handle map, executes, and returns the handle via RETURNVALUE; `sp_execute` (12) looks up the handle (miss → Msg 8179); **both name any unnamed wire params positionally from the stored declaration order** (the shared `NameUnnamedParameters` helper) — native ODBC / OLE DB drivers send prepared value params positionally with an empty name (name=''), so without this they fail with Msg 137 "Must declare the scalar variable"; SqlClient names its own, which is why its oracle never caught the gap (`PrepExecUnnamedParameterTests`).
   `sp_prepare` (11) stores without executing; `sp_unprepare` (15) removes.

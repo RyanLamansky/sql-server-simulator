@@ -14,7 +14,7 @@ internal sealed class Ceiling(ParserContext context) : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var v = MathScalars.CoerceImplicit(this.source.Run(runtime));
-        var resultType = MathScalars.WidenForResult(v.Type);
+        var resultType = MathScalars.FloorCeilingResult(v.Type);
         return v.IsNull ? SqlValue.Null(resultType) : resultType.Category switch
         {
             SqlTypeCategory.Integer => MathScalars.PromoteInteger(resultType, MathScalars.AsLong(v)),
@@ -25,7 +25,7 @@ internal sealed class Ceiling(ParserContext context) : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
-        => MathScalars.WidenForResult(this.source.GetSqlType(batch, resolveColumnType));
+        => MathScalars.FloorCeilingResult(this.source.GetSqlType(batch, resolveColumnType));
 
     internal override string DebugDisplay() => $"CEILING({this.source.DebugDisplay()})";
 }

@@ -109,7 +109,14 @@ internal sealed partial class TdsSession
             case Tds.ProcIdExecuteSql:
                 {
                     var statement = ParameterText(request.Parameters, 0);
-                    var bound = request.Parameters.Skip(request.Parameters.Count >= 2 ? 2 : 1).ToList();
+                    // Value params (index 2+) arrive positional/unnamed (name='')
+                    // from native drivers like mssql-jdbc's PreparedStatement;
+                    // name them from the declaration (index 1) so `@P0` binds, the
+                    // same mapping sp_execute / sp_prepexec use. SqlClient names
+                    // its own sp_executesql params, so they pass through unchanged.
+                    var bound = request.Parameters.Count >= 2
+                        ? NameUnnamedParameters(request.Parameters, 2, ParseDeclarationNames(ParameterText(request.Parameters, 1)))
+                        : [.. request.Parameters.Skip(1)];
                     await this.ExecuteStatementRpcAsync(statement, bound, handleReturn: null, writer, moreRequests, cancellationToken).ConfigureAwait(false);
                     break;
                 }

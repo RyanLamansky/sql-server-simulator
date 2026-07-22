@@ -24,6 +24,16 @@ Four consumers route through it so a new statement keyword is added in exactly o
 This is why semicolon-less statement sequences work for the full set, e.g. `select 1\nexec xp_msver`, `declare @x int\nuse master`, `if 1=1 select 1\nfetch c`.
 Before unification these predicates had drifted (EXEC/EXECUTE missing from several), so SSMS's semicolon-less AlwaysOn probe died with Msg 102.
 
+# Implicit `EXECUTE` (bare procedure call)
+
+A statement that is a bare object name — optionally followed by an argument list — is an implicit `EXECUTE`, matching real SQL Server: `sp_datatype_info_100 0, 3` runs identically to `EXEC sp_datatype_info_100 0, 3`.
+This is the form mssql-jdbc's `getTypeInfo` sends (no `EXEC` keyword), which previously died with `Incorrect syntax near 'sp_datatype_info_100'`.
+The restriction is strict — probe-confirmed against SQL Server 2025 (2026-07-22): the bare form is accepted **only as the literal first statement of a batch**.
+Anywhere else it is Msg 102: after a prior statement (`SELECT 1; sp_who`), and even after a leading empty statement (`; sp_who`).
+The dispatch loop carries an `atBatchStart` flag (`DispatchStatementsUntil` → `DispatchOneStatement` → `DispatchOneStatementCore`) that starts true for a top-level batch (`endKeyword is null` — never inside a `BEGIN…END` block) and clears on the first `;` or dispatched statement.
+When it is still set and the leading token is a bare `Name` (not a reserved statement keyword — those match their own switch arms first), the statement routes through `ParseExec(batch, implicitExec: true)`, which skips the EXEC-keyword consume, the `EXECUTE AS` / `@rc =` capture, and the dynamic-SQL `(…)` branches and starts directly at the proc-name parse — so RPC and text execution stay identical.
+Positional args (`a, b`), named args (`@p = v`), and no-arg (`sp_who`) all work; an unknown bare name raises the normal proc-not-found (Msg 2812), not Msg 102.
+
 # Reserved keywords as identifiers
 
 The tokenizer classifies a bare word as a `ReservedKeyword` iff it matches a `Parser/Keyword.cs` enum member (`UnquotedString.CheckReserved`), and reserved words can't stand in as identifiers — `SELECT 1 AS from` / `c.user` raise **Msg 156**.

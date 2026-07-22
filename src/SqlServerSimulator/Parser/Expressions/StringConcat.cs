@@ -76,13 +76,20 @@ internal sealed class StringConcat : Expression
     {
         var anyNational = false;
         var anyMax = false;
+        var width = 0;
+        var separatorWidth = 0;
         for (var i = 0; i < this.arguments.Length; i++)
         {
             var type = this.arguments[i].GetSqlType(batch, resolveColumnType);
             anyNational |= IsNationalString(type);
             anyMax |= IsMaxForm(type);
+            var argumentWidth = IsBareNullLiteral(this.arguments[i]) ? 0 : ArgumentWidth(type);
+            if (this.kind == StringConcatKind.ConcatWs && i == 0)
+                separatorWidth = argumentWidth;
+            else
+                width += argumentWidth;
         }
-        return ResolveResultType(anyNational, anyMax);
+        return ResolveResultType(anyNational, anyMax, width + SeparatorTotal(separatorWidth), batch);
     }
 
     public override SqlValue Run(RuntimeContext runtime)
@@ -97,13 +104,20 @@ internal sealed class StringConcat : Expression
         var values = new SqlValue[this.arguments.Length];
         var anyNational = false;
         var anyMax = false;
+        var width = 0;
+        var separatorWidth = 0;
         for (var i = 0; i < this.arguments.Length; i++)
         {
             values[i] = this.arguments[i].Run(runtime);
             anyNational |= IsNationalString(values[i].Type);
             anyMax |= IsMaxForm(values[i].Type);
+            var argumentWidth = IsBareNullLiteral(this.arguments[i]) ? 0 : ArgumentWidth(values[i].Type);
+            if (this.kind == StringConcatKind.ConcatWs && i == 0)
+                separatorWidth = argumentWidth;
+            else
+                width += argumentWidth;
         }
-        var resultType = ResolveResultType(anyNational, anyMax);
+        var resultType = ResolveResultType(anyNational, anyMax, width + SeparatorTotal(separatorWidth), runtime.Batch);
 
         if (this.kind == StringConcatKind.Concat)
         {
@@ -163,14 +177,61 @@ internal sealed class StringConcat : Expression
 
     /// <summary>
     /// National family wins <c>nvarchar</c> over <c>varchar</c>; a MAX input
-    /// widens the chosen family to its MAX form. The non-MAX forms keep the
-    /// length-0 "size from value" types (their pre-existing container-width
-    /// wire shape).
+    /// widens the chosen family to its MAX form. Otherwise the result is a
+    /// bounded <c>varchar(width)</c> / <c>nvarchar(width)</c> — the sum of the
+    /// per-argument widths (capped at 8000 / 4000, floored at 1) SQL Server
+    /// projects for the described result (probe-confirmed 2026-07-22:
+    /// <c>CONCAT('a',1,NULL,'b')</c> → <c>varchar(14)</c>,
+    /// <c>CONCAT_WS('-','a','b','c')</c> → <c>varchar(5)</c>).
     /// </summary>
-    private static SqlType ResolveResultType(bool anyNational, bool anyMax) =>
-        anyNational
-            ? (anyMax ? SqlType.NVarcharMax : SqlType.NVarchar)
-            : (anyMax ? SqlType.VarcharMax : SqlType.Varchar);
+    private static SqlType ResolveResultType(bool anyNational, bool anyMax, int width, BatchContext batch) =>
+        anyMax
+            ? (anyNational ? SqlType.NVarcharMax : SqlType.VarcharMax)
+            : StringScalars.SizedResultType(anyNational ? SqlType.NVarchar : SqlType.Varchar, width, batch);
+
+    /// <summary>
+    /// The separators' total contribution to a CONCAT_WS width: one separator
+    /// between each pair of value arguments (value count = argument count − 1,
+    /// so separator count = argument count − 2). Zero for CONCAT, which has no
+    /// separator argument.
+    /// </summary>
+    private int SeparatorTotal(int separatorWidth) =>
+        this.kind == StringConcatKind.ConcatWs ? separatorWidth * Math.Max(0, this.arguments.Length - 2) : 0;
+
+    /// <summary>
+    /// The maximum string width a single CONCAT / CONCAT_WS argument of
+    /// <paramref name="type"/> contributes to the result length — probe-confirmed
+    /// against SQL Server 2025 (2026-07-22). A string type contributes its
+    /// declared length; the fixed-width types contribute their documented
+    /// implicit-conversion maxima (bit 1, tinyint 4, smallint 6, int 12,
+    /// bigint 24, real / float 23, money / smallmoney 40, decimal / numeric 41,
+    /// date / time / datetime / datetimeoffset / uniqueidentifier 40).
+    /// MAX-form arguments never drive the width — they route through
+    /// <see cref="IsMaxForm"/> and force a MAX result. A bare untyped NULL
+    /// literal contributes 0 (the caller special-cases it via
+    /// <see cref="Expression.IsBareNullLiteral"/>).
+    /// </summary>
+    private static int ArgumentWidth(SqlType type) => type switch
+    {
+        VarcharSqlType v => v.length,
+        NVarcharSqlType nv => nv.length,
+        CharSqlType c => c.length,
+        NCharSqlType nc => nc.length,
+        _ when type == SqlType.Bit => 1,
+        _ when type == SqlType.TinyInt => 4,
+        _ when type == SqlType.SmallInt => 6,
+        _ when type == SqlType.Int32 => 12,
+        _ when type == SqlType.BigInt => 24,
+        _ => type.Category switch
+        {
+            SqlTypeCategory.Approximate => 23,
+            SqlTypeCategory.Decimal => 41,
+            SqlTypeCategory.DateTime => 40,
+            SqlTypeCategory.Money => 40,
+            SqlTypeCategory.UniqueIdentifier => 40,
+            _ => 8000,
+        },
+    };
 
     private static string LowercaseName(StringConcatKind kind) => kind switch
     {

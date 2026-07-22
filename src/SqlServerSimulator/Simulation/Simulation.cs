@@ -1103,6 +1103,13 @@ public sealed partial class Simulation
     {
         var context = batch.Parser;
         var requireSemicolonBeforeCte = false;
+        // A bare object name is an implicit EXECUTE only as the literal first
+        // statement of a batch (probe-confirmed against SQL Server 2025:
+        // `sp_who` works, `SELECT 1; sp_who` and even a leading `;sp_who` raise
+        // Msg 102). Only top-level batches (endKeyword is null) qualify — never
+        // a BEGIN…END block's first statement; a leading `;` or any dispatched
+        // statement clears it.
+        var atBatchStart = endKeyword is null;
         // BEGIN...END block dispatch (endKeyword=End) bumps BlockDepth so the
         // must-be-first-statement check on CREATE/ALTER
         // PROCEDURE / FUNCTION / VIEW / TRIGGER / SCHEMA rejects them inside
@@ -1148,14 +1155,16 @@ public sealed partial class Simulation
                 if (context.Token is Operator { Character: ';' })
                 {
                     requireSemicolonBeforeCte = false;
+                    atBatchStart = false;
                     context.MoveNextOptional();
                     continue;
                 }
 
                 var statementStartIndex = context.Token.StartIndex;
-                foreach (var outcome in DispatchOneStatement(batch, requireSemicolonBeforeCte))
+                foreach (var outcome in DispatchOneStatement(batch, requireSemicolonBeforeCte, atBatchStart))
                     yield return outcome;
                 requireSemicolonBeforeCte = true;
+                atBatchStart = false;
                 batch.HasDispatchedStatement = true;
 
                 // Non-progress guard: a statement dispatch that consumed zero
@@ -1193,7 +1202,7 @@ public sealed partial class Simulation
     /// for cursor-advance + name resolution, but no result reaches the
     /// client) and the <c>LastStatementRowCount</c> update is skipped.
     /// </summary>
-    private IEnumerable<SimulatedStatementOutcome> DispatchOneStatement(BatchContext batch, bool requireSemicolonBeforeCte)
+    private IEnumerable<SimulatedStatementOutcome> DispatchOneStatement(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
     {
         // Snapshot the statement-start line before parser advance — used as
         // ERROR_LINE() default when an error fires inside this statement.
@@ -1252,7 +1261,7 @@ public sealed partial class Simulation
         {
             try
             {
-                outcomes = [.. DispatchOneStatementCore(batch, requireSemicolonBeforeCte)];
+                outcomes = [.. DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart)];
             }
             catch (SimulatedSqlException ex)
             {
@@ -1509,7 +1518,7 @@ public sealed partial class Simulation
     private static bool IsBatchAbortingNameResolution(SimulatedSqlException ex)
         => ex.Number is 195 or 207 or 208 or 209 or 4104 or 4121;
 
-    private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool requireSemicolonBeforeCte)
+    private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
     {
         var context = batch.Parser;
         var connection = context.Connection;
@@ -1906,6 +1915,17 @@ public sealed partial class Simulation
                 if (!batch.IsSkipping)
                     connection.LastStatementRowCount = 0;
                 break;
+
+            // Bare object name at batch start → implicit EXECUTE (the form
+            // mssql-jdbc's `getTypeInfo` sends: `sp_datatype_info_100 0, 3`
+            // with no EXEC keyword). Routed through the same EXEC path so RPC
+            // and text execution stay identical. Anywhere but the first
+            // statement, a leading identifier stays Msg 102 (real's rule).
+            case Name when atBatchStart:
+                foreach (var o in ParseExec(batch, implicitExec: true))
+                    yield return o;
+                break;
+
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }

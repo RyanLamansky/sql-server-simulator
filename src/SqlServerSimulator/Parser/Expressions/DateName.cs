@@ -13,7 +13,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <c>Sunday</c>...<c>Saturday</c> (en-US, matching SQL Server's default
 /// language). Every other part is the same integer
 /// <see cref="DatePart.Run"/> would compute, formatted via
-/// <see cref="CultureInfo.InvariantCulture"/>.
+/// <see cref="CultureInfo.InvariantCulture"/>. The projected result type is
+/// a fixed <c>nvarchar(30)</c> — probe-confirmed against SQL Server 2025
+/// (2026-07-22): <c>DATENAME(month, …)</c> describes as <c>nvarchar(30)</c>
+/// regardless of the part.
 /// </summary>
 /// <remarks>
 /// Probe-confirmed against SQL Server 2025 (2026-05-22):
@@ -24,6 +27,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class DateName : Expression
 {
+    private static readonly NVarcharSqlType ResultType = NVarcharSqlType.Get(30, Collation.Baseline, Coercibility.CoercibleDefault);
+
     private static readonly string[] MonthNames =
     [
         "January", "February", "March", "April", "May", "June",
@@ -54,17 +59,17 @@ internal sealed class DateName : Expression
     {
         var value = DatePartKinds.CoerceDateArgumentImplicit(this.source.Run(runtime));
         if (value.IsNull)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(ResultType);
         DatePartKinds.RequireCompatible(this.kind, this.keywordText, value.Type, "datename");
         return this.kind switch
         {
-            DatePartKind.Month => SqlValue.FromNVarchar(MonthNames[DatePartKinds.Extract(this.kind, value) - 1]),
-            DatePartKind.Weekday => SqlValue.FromNVarchar(DayOfWeekNames[DatePartKinds.Extract(this.kind, value) - 1]),
-            _ => SqlValue.FromNVarchar(DatePartKinds.Extract(this.kind, value).ToString(CultureInfo.InvariantCulture)),
+            DatePartKind.Month => SqlValue.FromNVarchar(ResultType, MonthNames[DatePartKinds.Extract(this.kind, value) - 1]),
+            DatePartKind.Weekday => SqlValue.FromNVarchar(ResultType, DayOfWeekNames[DatePartKinds.Extract(this.kind, value) - 1]),
+            _ => SqlValue.FromNVarchar(ResultType, DatePartKinds.Extract(this.kind, value).ToString(CultureInfo.InvariantCulture)),
         };
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
 
     internal override string DebugDisplay() => $"DATENAME({this.keywordText}, {this.source.DebugDisplay()})";
 }

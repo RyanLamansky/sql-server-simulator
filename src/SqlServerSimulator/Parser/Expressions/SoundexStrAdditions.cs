@@ -138,7 +138,12 @@ internal sealed class Difference : Expression
 /// fixed-width numeric-to-string conversion. Default length is 10;
 /// default decimals is 0 (rounds, not truncates). Negative or
 /// excessive numbers that don't fit in <c>length</c> render as a
-/// string of <c>*</c> characters. NULL input returns NULL.
+/// string of <c>*</c> characters. NULL input returns NULL. The projected
+/// result type is <c>varchar(length)</c> — the <c>length</c> argument
+/// (default 10) capped at 8000 and floored at 1 when it is a constant,
+/// else the <c>varchar(8000)</c> container. Probe-confirmed against SQL
+/// Server 2025 (2026-07-22): <c>STR(3.14159, 6, 2)</c> → <c>varchar(6)</c>,
+/// <c>STR(x)</c> → <c>varchar(10)</c>, a variable length → <c>varchar(8000)</c>.
 /// </summary>
 internal sealed class Str : Expression
 {
@@ -161,9 +166,12 @@ internal sealed class Str : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
+        // Project the same bounded varchar type GetSqlType reports so the
+        // value's declared width matches the result-set schema.
+        var resultType = (VarcharSqlType)StringScalars.SizedResultType(SqlType.Varchar, this.ProjectedLength(), runtime.Batch);
         var v = this.numArg.Run(runtime);
         if (v.IsNull)
-            return SqlValue.Null(SqlType.Varchar);
+            return SqlValue.Null(resultType);
         var num = v.CoerceTo(SqlType.Float).AsDouble;
         var length = this.lengthArg is null ? 10 : this.lengthArg.Run(runtime).CoerceTo(SqlType.Int32).AsInt32;
         var decimals = this.decimalsArg is null ? 0 : this.decimalsArg.Run(runtime).CoerceTo(SqlType.Int32).AsInt32;
@@ -174,11 +182,38 @@ internal sealed class Str : Expression
         var formatted = Math.Round(num, decimals, MidpointRounding.AwayFromZero)
             .ToString("F" + decimals.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
         return formatted.Length > length
-            ? SqlValue.FromVarchar(new string('*', length))
-            : SqlValue.FromVarchar(formatted.PadLeft(length));
+            ? SqlValue.FromVarchar(resultType, new string('*', length))
+            : SqlValue.FromVarchar(resultType, formatted.PadLeft(length));
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        StringScalars.SizedResultType(SqlType.Varchar, this.ProjectedLength(), batch);
+
+    /// <summary>
+    /// The projected result width: 10 with no <c>length</c> argument, the
+    /// constant integer value of a literal <c>length</c> (later clamped to
+    /// 1..8000 by <see cref="StringScalars.SizedResultType"/>), or 8000 for a
+    /// non-constant length (matching real's <c>varchar(8000)</c> container).
+    /// </summary>
+    private int ProjectedLength()
+    {
+        if (this.lengthArg is null)
+            return 10;
+        if (this.lengthArg is Value { Constant: { IsNull: false } constant }
+            && (SqlType.IsIntegerCategory(constant.Type) || constant.Type is DecimalSqlType || SqlType.IsMoneyCategory(constant.Type)))
+        {
+            try
+            {
+                return constant.CoerceTo(SqlType.Int32).AsInt32;
+            }
+            catch (OverflowException)
+            {
+                return 8000;
+            }
+        }
+
+        return 8000;
+    }
 
     internal override string DebugDisplay() => $"STR({this.numArg.DebugDisplay()})";
 }

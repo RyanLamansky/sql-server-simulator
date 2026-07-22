@@ -5,7 +5,9 @@
 EF emits all from `Math.X` LINQ; `Math.Truncate(x)` → `ROUND(x, 0, 1)`; `Math.Atan2` → `ATN2`.
 
 **Type-widening rule** (shared across `ABS`/`FLOOR`/`CEILING`/`ROUND`/`SIGN`/`POWER`'s first arg): `tinyint`/`smallint` → `int`; `smallmoney` → `money`; `real`/`bit` → `float` (sic — bit widens to float, not int); everything else preserves.
-`POWER` returns the post-widen type of the *first* arg regardless of exponent — `POWER(int, float) → int` with truncation toward zero.
+`FLOOR`/`CEILING` add one specialization to that rule (`MathScalars.FloorCeilingResult`): an exact-numeric input keeps its precision but drops to **scale 0** (the result is integer-valued), so `CEILING(1.1)` → `numeric(2, 0)` value `2`, `CEILING(CAST(1 AS decimal(38,10)))` → `decimal(38, 0)` — probe-confirmed against SQL Server 2025 (2026-07-22); `money` stays `money`, `float` stays `float`, `int` stays `int`.
+`POWER` returns the post-widen type of the *first* arg regardless of exponent — `POWER(int, float) → int` with truncation toward zero — but an exact-numeric base widens its precision to **38** while keeping its scale (`MathScalars.PowerResult`), so `POWER(2.0, 10)` → `numeric(38, 1)` value `1024` (the pre-fix `decimal(2, 1)` couldn't hold it), `POWER(CAST(2 AS decimal(5,3)), 10)` → `decimal(38, 3)`; `money` base stays `money`, `float`/`real` → `float`.
+(The simulator has one decimal family — it reports `numeric` for a variant's `BaseType` even where real would say `decimal`; only precision/scale are matched, not the `numeric`-vs-`decimal` name.)
 `SQRT`/`LOG`/`EXP`/`LOG10` always return float.
 
 **Implicit string coercion** (full math family — `ABS`/`FLOOR`/`CEILING`/`SIGN`/`SQRT`/`DEGREES`/`RADIANS`/`POWER`/`ROUND`/`LOG`/`LOG10`/`EXP`/`SQUARE`/`SIN`/`COS`/`TAN`/`ASIN`/`ACOS`/`ATAN`/`ATN2`/`COT`): string operands route through `MathScalars.CoerceImplicit` → `CoerceTo(SqlType.Float)`.
@@ -31,7 +33,7 @@ Decimal arm uses a 28-digit `DecimalPi` constant in evaluation order `(input * 1
 
 ## Additional date scalars: `DATENAME` / `DATETRUNC` / `SWITCHOFFSET` / `TODATETIMEOFFSET` / `DATE_BUCKET` / `CURRENT_DATE`
 
-- **`DATENAME(part, date)`** — sibling of `DATEPART` but returns the localized string for the matched part (`'January'` / `'Sunday'` / `'12'` / etc.) as `nvarchar`.
+- **`DATENAME(part, date)`** — sibling of `DATEPART` but returns the localized string for the matched part (`'January'` / `'Sunday'` / `'12'` / etc.) as a fixed **`nvarchar(30)`** regardless of the part (probe-confirmed against SQL Server 2025, 2026-07-22 — the earlier length-0 `nvarchar` container described as `nvarchar(4000)`).
   Reuses `DATEPART`'s keyword tables for part validation and per-type compatibility (same Msg 9810 rejection set).
   Localized names follow .NET's `CultureInfo.InvariantCulture` — month names in English, weekday names in English, numeric parts as base-10 strings.
 - **`DATETRUNC(part, date)`** (`Parser/Expressions/DateTimeAdjustments.cs`) — floor to start of the named part.
@@ -89,6 +91,9 @@ Surfaces as `ReservedKeyword { Keyword: Keyword.Current_Timestamp }`, dispatched
 ## Variadic string concat: `CONCAT` / `CONCAT_WS`
 Both stringify each arg via CAST-to-varchar/nvarchar, **skip NULL args** (don't propagate), and **never return NULL** — all-NULL input → `''`.
 Result is `nvarchar` if any arg has a national-string type, else `varchar`; **any MAX-typed arg (`varchar(max)` / `nvarchar(max)` / `text` / `ntext`) widens the result to the MAX form** (`SqlType.NVarcharMax` / `SqlType.VarcharMax`), probe-confirmed against SQL Server 2025, so a concatenation past 32,767 chars streams as PLP over the wire instead of overflowing the bounded length prefix.
+**Non-MAX result width** is the **sum of the per-argument widths** (`StringConcat.ArgumentWidth`), capped at 8000 (`varchar`) / 4000 (`nvarchar`) and floored at 1 — not the length-0 container (which described as `varchar(8000)`).
+Each argument contributes its string-conversion maximum, probe-confirmed against SQL Server 2025 (2026-07-22): a string type its declared length; `bit` 1, `tinyint` 4, `smallint` 6, `int` 12, `bigint` 24, `real`/`float` 23, `money`/`smallmoney` 40, `decimal`/`numeric` 41 (fixed, precision-independent), `date`/`time`/`datetime`/`datetimeoffset`/`uniqueidentifier` 40; a **bare untyped `NULL` literal contributes 0** (a typed `CAST(NULL AS int)` contributes its type width — the distinction rides `Expression.IsBareNullLiteral`).
+So `CONCAT('a',1,NULL,'b')` → `varchar(14)`, `CONCAT(N'a',1)` → `nvarchar(13)`, and `CONCAT_WS` adds one separator width between each value pair (`CONCAT_WS('-','a','b','c')` → `varchar(5)`).
 Arg-count rules → Msg 189: `CONCAT` requires 2-254 args; `CONCAT_WS` requires 3-254 (separator + ≥2 values).
 
 `CONCAT_WS` quirks: NULL separator silently degrades to empty string (NOT NULL propagation despite docs); NULL values skipped entirely (no double separators); `concat_ws(sep, single_value)` → Msg 189 (refuses no-op stringify).
@@ -261,7 +266,7 @@ A value held in a variable could reach it; the failure is a clean abort, just no
   Defaults: length 10, decimals 0 (rounds half-away-from-zero, doesn't truncate).
   Overflow (formatted value exceeds `length`) returns a string of `*` characters of length `length`.
   NULL → NULL.
-  Always projects `varchar`.
+  Projects `varchar(length)` — the `length` argument (default 10) clamped to 1..8000 when it is a constant, else the `varchar(8000)` container (probe-confirmed against SQL Server 2025, 2026-07-22: `STR(3.14159, 6, 2)` → `varchar(6)`, a variable length → `varchar(8000)`); the earlier length-0 container described as `varchar(8000)` for every call.
 - **`TRANSLATE(input, chars, translations)`** (`Parser/Expressions/StringScalarAdditions.cs`) — character-by-character substitution.
   The `chars` and `translations` arguments must have equal length; mismatch raises Msg 9819 via a dedicated `TranslateUnequalChars` factory.
   NULL on any operand → NULL.
