@@ -63,6 +63,7 @@ Csprojs carry only per-project content.
 No separate `dotnet format` pass — it catches nothing build doesn't.
 CI matrix: Debug + Release.
 `obj/` permission errors mean building outside the dev container; `rm -rf obj/ bin/` clears them.
+Line endings are LF everywhere: `.gitattributes` `eol=lf` forces an LF working tree on Windows and Linux alike, and `.editorconfig` `end_of_line = lf` makes IDE0055 enforce it — so a CRLF checkout fails the formatter, and the fix is `git add --renormalize .` (not disabling the rule).
 
 A full build + test cycle runs 20–30s; single-test filter (`--filter "FullyQualifiedName~Foo"`) stays fast.
 Still cheap enough to treat `dotnet test` as a verifier between micro-edits, not a checkpoint.
@@ -185,8 +186,6 @@ Field rosters live in the source XML docs; this captures only identity + load-be
   Sentences continuing a bullet item go on their own lines indented to the bullet's text column.
   Never split inside code fences, tables, headings, or link/inline-code spans; abbreviations (`e.g.`, `i.e.`, `vs.`) and dotted values (`17.0.4065.4`, `sys.tables`) are not sentence ends.
 - **No temporal words in code comments** — "currently", "now", "yet", "new" age badly.
-- **No comments inside expression chains** — IDE0055 fails on comments in ternary chains or between `=>` and body.
-  Restructure or hoist to XML doc.
 - **Fields over auto-properties on non-public types** (SSS001 generalized).
 - **No internal `<see cref>` in public-API XML docs** — a cref to an internal type dangles in consumer IntelliSense and implies stability for a name we're free to rename; state the contract in prose (`"an unrecognized collation name raises ArgumentException"`, not a cref to internal `Collation.IsRecognized`).
 - **No conversation-scratch framing in code/docs/commits** — "Camp A/B", "this bundle", "Stage 1/2", "as we discussed" mean nothing to a future reader; describe behavior/motivation absolutely, cross-reference a sibling by the behavior it names, not the work-stage.
