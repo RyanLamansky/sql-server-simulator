@@ -56,6 +56,8 @@ partial class Simulation
                 return Simulation.TryParseDropFullText(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:
                 return Simulation.TryParseDropXml(context);
+            case Name synonymWord when synonymWord.Value.Equals("SYNONYM", StringComparison.OrdinalIgnoreCase):
+                return TryParseDropSynonym(context);
         }
 
         var targetKind = context.Token switch

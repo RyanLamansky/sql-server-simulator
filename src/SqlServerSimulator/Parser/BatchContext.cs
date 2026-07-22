@@ -1572,6 +1572,13 @@ internal sealed class BatchContext
             return true;
         }
 
+        // Synonym redirect: `FROM syn` where `syn FOR t` resolves through to
+        // the base table (recursing so a schema-qualified base routes too).
+        // A synonym whose base is a view returns false here and is picked up
+        // by the caller's TryResolveView, which applies the same redirect.
+        if (schema.Synonyms.TryGetValue(name.Leaf, out var tableSynonym))
+            return this.TryResolveTable(tableSynonym.BaseObject, out table);
+
         // Bare 1-part also falls through to system tables when the default
         // schema doesn't hold the table — same shared-instance reasoning,
         // no Sch-S acquire.
@@ -1682,10 +1689,14 @@ internal sealed class BatchContext
     public bool TryResolveView(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out View? view)
     {
         view = null;
-        if (!this.TryResolveSchema(name, out var schema)
-            || !schema.Views.TryGetValue(name.Leaf, out view))
-        {
+        if (!this.TryResolveSchema(name, out var schema))
             return false;
+        if (!schema.Views.TryGetValue(name.Leaf, out view))
+        {
+            // Synonym redirect for a synonym whose base is a view (see
+            // TryResolveTable for the table-base case).
+            return schema.Synonyms.TryGetValue(name.Leaf, out var viewSynonym)
+                && this.TryResolveView(viewSynonym.BaseObject, out view);
         }
         this.AcquireStatementLock(view.SchemaLock, LockMode.SchemaStability);
         _ = this.DependencySink?.Views.Add(view);

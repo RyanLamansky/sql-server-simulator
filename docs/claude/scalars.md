@@ -297,6 +297,25 @@ Non-integer input raises **Msg 8116** (`ArgumentDataTypeInvalidForBitFunction`).
 - **`RIGHT_SHIFT(num, n)`** — **logical** right shift (high bits zero-filled, probe-confirmed against SQL Server 2025 — diverges from C#'s `>>` on signed types which is arithmetic).
   Result type preserves input.
 
+### `<<` / `>>` shift operators
+
+The `<<` / `>>` binary operators desugar to the same `BitShift` class as `LEFT_SHIFT` / `RIGHT_SHIFT` — probe-confirmed (2026-07-21) that operator and function are byte-identical (`5 << 1` = `LEFT_SHIFT(5, 1)` = 10; `0x05 << 1` = `0x0A`; `5 << -1` = 2 reverses direction; binary operand → varbinary).
+Tokenized as two adjacent `<` / `>` operators (the tokenizer emits single-char operators), the shift is recognized in `Expression.ParseBinaryContinuation` via a doubled-adjacent peek (`IsAdjacentDoubledOperator`), mirroring the `||`-concat detection — a lone `<` / `>` stays a comparison for the boolean layer.
+**Precedence sits at the `+ - & | ^` level** (below `* / %`), left-associative: `2 * 3 << 1` = 12, `4 | 1 << 2` = 20, `5 << 1 + 1` = 11 (all probe-confirmed).
+The shared `BitShift` class only accepts integer operands (binary-operand and negative-shift full fidelity remain a pre-existing function gap — the corpus exercises integer positive shifts only).
+
+## `HASHBYTES(algorithm, input)`
+
+Cryptographic hash → `varbinary(8000)` (`Parser/Expressions/HashBytes.cs`), backed by the .NET BCL.
+Probe-confirmed against SQL Server 2025 (2026-07-21):
+
+- **Accepted algorithms (case-insensitive):** `MD5`, `MD4`, `SHA` / `SHA1` (identical output), `SHA2_256`, `SHA2_512`.
+  The removed `MD2` and any unrecognized name yield a **NULL result** (not an error).
+  `MD4` isn't in the BCL, so it's hand-rolled (RFC 1320); every other algorithm routes to the framework.
+- **Input** must be a character or binary type: `char`/`varchar`/`text` encode CP1252, `nchar`/`nvarchar`/`ntext` UTF-16LE, binary verbatim (so `HASHBYTES('SHA2_256','x')` == `HASHBYTES('SHA2_256',0x78)`).
+  A non-character / non-binary argument (int, numeric, untyped `NULL` literal) raises **Msg 8116** (`InvalidArgumentDataType`, "…of hashbytes function"); a typed-but-NULL string / binary yields a NULL result.
+- Divergence: the bare `NULL` literal is typed `int` in the simulator, so `HASHBYTES(alg, NULL)` reports the type word `int` where real reports `NULL` — both error, non-corpus edge.
+
 ### Unary `~` (bitwise NOT)
 
 `~` (`Parser/Expressions/BitwiseNot.cs`) is the one's-complement prefix operator — tokenized as an `Operator` and parsed in `Expression.Parse`'s pre-primary switch alongside unary `+` / `-`.

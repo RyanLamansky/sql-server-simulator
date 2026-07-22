@@ -50,6 +50,8 @@ partial class Simulation
                 return Simulation.TryParseCreatePrimaryXml(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Spatial }:
                 return Simulation.TryParseCreateSpatial(context);
+            case Name synonymWord when synonymWord.Value.Equals("SYNONYM", StringComparison.OrdinalIgnoreCase):
+                return TryParseCreateSynonym(context);
             case ReservedKeyword { Keyword: Keyword.Or }:
                 // CREATE OR ALTER {PROCEDURE|TRIGGER} — modern upsert syntax.
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Alter })
@@ -85,7 +87,8 @@ partial class Simulation
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)>();
         var pendingPeriod = new List<(string StartCol, string EndCol)>();
         var pendingForeignKeys = new List<PendingForeignKey>();
-        if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys))
+        var pendingIndexes = new List<PendingInlineIndex>();
+        if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes))
             return false;
 
         // Optional trailing placement and option clauses, in any order:
@@ -311,6 +314,8 @@ partial class Simulation
         {
             if (pendingForeignKeys.Count > 0)
                 ResolveForeignKeys(heapTable, pendingForeignKeys, context);
+            if (pendingIndexes.Count > 0)
+                AddInlineIndexes(context, heapTable, schema?.Name ?? Database.DefaultSchemaName, pendingIndexes);
         }
         catch
         {
@@ -517,7 +522,8 @@ partial class Simulation
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<(string StartCol, string EndCol)>? pendingPeriod = null,
-        List<PendingForeignKey>? pendingForeignKeys = null)
+        List<PendingForeignKey>? pendingForeignKeys = null,
+        List<PendingInlineIndex>? pendingIndexes = null)
     {
         var identityCount = 0;
         // Parallel to heapColumns: true when the user wrote an explicit
@@ -551,6 +557,16 @@ partial class Simulation
                 continue;
             }
 
+            // Table-level inline index: `INDEX name [CLUSTERED | NONCLUSTERED]
+            // (col [ASC | DESC], …)`. Only accepted in CREATE TABLE (where
+            // pendingIndexes is supplied); table variables / table types leave
+            // it to the column path, which rejects the INDEX keyword.
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Index } && pendingIndexes is not null)
+            {
+                pendingIndexes.Add(ParseTableLevelInlineIndex(context));
+                continue;
+            }
+
             // Table-level PERIOD FOR SYSTEM_TIME (startCol, endCol). Only
             // legal inside CREATE TABLE; DECLARE @t TABLE and CREATE TYPE …
             // AS TABLE reject (probe-confirmed: real SQL Server's grammar
@@ -580,7 +596,7 @@ partial class Simulation
                 continue;
             }
 
-            ParseOneColumnIntoLists(context, tableName, isTableVariable, isTableType, heapColumns, explicitNull, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, ref identityCount);
+            ParseOneColumnIntoLists(context, tableName, isTableVariable, isTableType, heapColumns, explicitNull, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, ref identityCount, pendingIndexes);
         } while (context.Token is Operator { Character: ',' });
 
         // Table-level PK promotion: probe-confirmed against SQL Server 2025
@@ -640,7 +656,8 @@ partial class Simulation
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<(string StartCol, string EndCol)>? pendingPeriod,
         List<PendingForeignKey>? pendingForeignKeys,
-        ref int identityCount)
+        ref int identityCount,
+        List<PendingInlineIndex>? pendingIndexes = null)
     {
         if (context.Token is not Name columnName)
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -876,6 +893,15 @@ partial class Simulation
                         default:
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                     }
+                case ReservedKeyword { Keyword: Keyword.Index } when pendingIndexes is not null:
+                    // Column-level inline index: `INDEX name [CLUSTERED |
+                    // NONCLUSTERED]` — a single-column index on this column.
+                    if (context.GetNextRequired() is not Name indexNameToken)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    context.MoveNextOptional();
+                    var columnIndexClustered = ParseOptionalIndexClustering(context);
+                    pendingIndexes.Add(new PendingInlineIndex(indexNameToken.Value, columnIndexClustered, [(columnName.Value, false)]));
+                    continue;
                 case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } when inlineKeyKind is null:
                     (inlineKeyKind, inlineKeyClustered) = ParseInlineKeyKindAndModifiers(context);
                     continue;
@@ -1716,6 +1742,64 @@ partial class Simulation
         string[] ReferencedColumnNames,
         ReferentialAction DeleteAction,
         ReferentialAction UpdateAction);
+
+    /// <summary>
+    /// One inline index declared in a CREATE TABLE — the table-level
+    /// <c>INDEX name (cols)</c> or the column-level <c>col type INDEX name</c>
+    /// form. Columns are captured by name and resolved to the built table
+    /// after the column list is complete (see <c>AddInlineIndexes</c>).
+    /// </summary>
+    internal sealed record PendingInlineIndex(
+        string Name,
+        bool IsClustered,
+        (string ColumnName, bool IsDescending)[] Columns);
+
+    /// <summary>
+    /// Parses a table-level inline index element <c>INDEX name [CLUSTERED |
+    /// NONCLUSTERED] (col [ASC | DESC], …)</c>. Cursor on entry: the
+    /// <c>INDEX</c> keyword; on exit: the trailing comma / closing paren of
+    /// the table's column-element list.
+    /// </summary>
+    private static PendingInlineIndex ParseTableLevelInlineIndex(ParserContext context)
+    {
+        if (context.GetNextRequired() is not Name indexName)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var isClustered = ParseOptionalIndexClustering(context);
+        if (context.Token is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var columns = new List<(string, bool)>();
+        do
+        {
+            if (context.GetNextRequired() is not Name keyColumn)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var isDescending = false;
+            context.MoveNextRequired();
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Asc or Keyword.Desc } order)
+            {
+                isDescending = order.Keyword == Keyword.Desc;
+                context.MoveNextRequired();
+            }
+            columns.Add((keyColumn.Value, isDescending));
+        } while (context.Token is Operator { Character: ',' });
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        return new PendingInlineIndex(indexName.Value, isClustered, [.. columns]);
+    }
+
+    /// <summary>
+    /// Consumes an optional <c>CLUSTERED</c> / <c>NONCLUSTERED</c> modifier,
+    /// returning true for <c>CLUSTERED</c>. Advances past the modifier when
+    /// present; leaves the cursor unchanged otherwise.
+    /// </summary>
+    private static bool ParseOptionalIndexClustering(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Clustered or Keyword.NonClustered } modifier)
+            return false;
+        context.MoveNextRequired();
+        return modifier.Keyword == Keyword.Clustered;
+    }
 
     private static string AutoConstraintName(string tableName, KeyConstraintKind kind, int[] fullOrdinals, IReadOnlyList<HeapColumn> heapColumns)
     {

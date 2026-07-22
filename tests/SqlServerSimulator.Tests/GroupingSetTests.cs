@@ -344,4 +344,29 @@ public sealed class GroupingSetTests
         AreEqual(("east", 325), rows[0]);
         AreEqual(("west", 500), rows[1]);
     }
+
+    [TestMethod]
+    public void GroupByEmptyParens_ProducesSingleGrandTotalRow()
+    {
+        // `GROUP BY ()` is the empty grouping set — one group over all rows,
+        // the bare-parenthesis equivalent of `GROUPING SETS(())`.
+        using var conn = SeededSales();
+        AreEqual(825, conn.CreateCommand("select sum(amount) from sales group by ()").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void GroupByEmptyParens_CountsAllRows()
+    {
+        using var conn = SeededSales();
+        AreEqual(6, conn.CreateCommand("select count(*) from sales group by ()").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void GroupByParenthesizedColumn_StillGroupsByThatColumn()
+    {
+        // `GROUP BY (region)` is a parenthesized grouping key, not the empty
+        // set — must still fold rows per region.
+        using var conn = SeededSales();
+        AreEqual(2, conn.CreateCommand("select count(*) from (select region from sales group by (region)) g").ExecuteScalar());
+    }
 }

@@ -338,4 +338,27 @@ public sealed class SyntaxAlternativesTests
     [TestMethod]
     public void OdbcFnNativeName_PassesThrough()
         => AreEqual(5, new Simulation().ExecuteScalar("select {fn ABS(-5)}"));
+
+    // ----- A boolean predicate in the select list (a value context) -----
+    // Real SQL Server reports Msg 156 near the predicate keyword, not the
+    // generic Msg 102 (probe-confirmed 2026-07-21).
+
+    [TestMethod]
+    public void BarePredicate_LikeInSelectList_RaisesMsg156()
+    {
+        var ex = new Simulation().AssertSqlError("select 'a' LIKE '[a-z]'", 156);
+        Assert.Contains("near the keyword 'LIKE'", ex.Message);
+    }
+
+    [TestMethod]
+    public void BarePredicate_InInSelectList_RaisesMsg156()
+        => new Simulation().AssertSqlError("select 5 IN (1, 2)", 156);
+
+    [TestMethod]
+    public void BarePredicate_IsNullInSelectList_RaisesMsg156()
+        => new Simulation().AssertSqlError("select 5 IS NULL", 156);
+
+    [TestMethod]
+    public void BarePredicate_BetweenInSelectList_RaisesMsg156()
+        => new Simulation().AssertSqlError("select 5 BETWEEN 1 AND 2", 156);
 }

@@ -213,6 +213,58 @@ partial class Simulation
         return true;
     }
 
+    /// <summary>
+    /// Builds the indexes declared inline in a CREATE TABLE (the table-level
+    /// <c>INDEX ix (cols)</c> and column-level <c>col type INDEX ix</c> forms)
+    /// against the freshly-created <paramref name="table"/>. Each maps to the
+    /// same <see cref="StoredIndex"/> the standalone CREATE INDEX builds
+    /// (catalog metadata + seek acceleration); the inline grammar exposes no
+    /// UNIQUE / INCLUDE / filter forms, so those stay defaulted.
+    /// </summary>
+    private static void AddInlineIndexes(ParserContext context, HeapTable table, string schemaName, List<PendingInlineIndex> pendingIndexes)
+    {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        var qualifiedTableName = $"{schemaName}.{table.Name}";
+        foreach (var pending in pendingIndexes)
+        {
+            foreach (var existing in table.Indexes)
+            {
+                if (collation.Equals(existing.Name, pending.Name))
+                    throw SimulatedSqlException.IndexAlreadyExists(pending.Name, qualifiedTableName);
+            }
+            foreach (var kc in table.KeyConstraints)
+            {
+                if (collation.Equals(kc.Name, pending.Name))
+                    throw SimulatedSqlException.IndexAlreadyExists(pending.Name, qualifiedTableName);
+            }
+            if (pending.IsClustered)
+            {
+                var existingClustered =
+                    table.KeyConstraints.FirstOrDefault(k => k.IsClustered)?.Name
+                    ?? table.Indexes.FirstOrDefault(ix => ix.IsClustered)?.Name;
+                if (existingClustered is not null)
+                    throw SimulatedSqlException.MoreThanOneClusteredIndex(table.Name, existingClustered);
+            }
+
+            var keyColumns = new IndexKeyColumn[pending.Columns.Length];
+            for (var i = 0; i < pending.Columns.Length; i++)
+            {
+                var fullOrdinal = ResolveColumnOrdinal(collation, table, pending.Columns[i].ColumnName);
+                keyColumns[i] = new IndexKeyColumn(table.StorageOrdinals[fullOrdinal], fullOrdinal, pending.Columns[i].IsDescending);
+            }
+            table.Indexes.Add(new StoredIndex(
+                pending.Name,
+                context.CurrentDatabase.AllocateObjectId(),
+                isUnique: false,
+                pending.IsClustered,
+                keyColumns,
+                [],
+                [],
+                filter: null,
+                filterDefinition: null));
+        }
+    }
+
     private static int ResolveColumnOrdinal(Collation collation, HeapTable table, string columnName)
     {
         for (var i = 0; i < table.Columns.Length; i++)

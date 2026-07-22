@@ -99,7 +99,8 @@ The legacy `GROUP BY <cols> WITH ROLLUP` / `WITH CUBE` modifier is equivalent to
 
 The aggregate executor (`Selection.Execution.Aggregate.cs`) **buffers** WHERE-filtered rows once (snapshotting each tuple because `EnumerateJoinedRows` reuses a single shared array in-place) then iterates each grouping set, partitioning the buffer per set's columns and accumulating fresh aggregators per group.
 The projection's column resolver returns typed NULL for columns that aren't in the current set but appear in another set's columns — that's the subtotal/total-row semantic.
-Without GROUP BY the executor synthesizes a single empty grouping set `[[]]` and runs one implicit group; same code path covers `GROUPING SETS(())`.
+Without GROUP BY the executor synthesizes a single empty grouping set `[[]]` and runs one implicit group; same code path covers `GROUPING SETS(())` and the bare **`GROUP BY ()`** form (the empty grouping set = grand total over all rows, one aggregate row).
+`ParseGroupByItem` distinguishes `GROUP BY ()` (a `(` immediately followed by `)` → the empty fragment `[[]]`) from `GROUP BY (expr)` (a parenthesized grouping key) via a checkpoint peek.
 TOP / OFFSET / FETCH apply to the concatenated stream across all grouping sets.
 
 **GROUP BY a scalar expression** (e.g. `GROUP BY MONTH(d)`) projects and orders correctly: a column buried inside a grouping expression resolves against the group's first-seen **representative row** (`GroupState.Representative`) — within a non-empty group every grouping expression is constant, so any row yields the right value for a projection / HAVING / ORDER BY item that's functionally determined by the grouping (`SELECT MONTH(d) … GROUP BY MONTH(d)`, `MONTH(d) + 1`, etc.).

@@ -595,6 +595,10 @@ partial class Simulation
 
         if (onOff == Keyword.On)
         {
+            // A table with no identity column can't be an IDENTITY_INSERT
+            // target — Msg 8106 (probe-confirmed against SQL Server 2025).
+            if (heapTable.IdentityOrdinal < 0)
+                throw SimulatedSqlException.TableHasNoIdentityForSet(heapTable.Name);
             if (context.Connection.IdentityInsertTable is string held && !context.Batch.CurrentDatabase.Collation.Equals(held, heapTable.Name))
                 throw SimulatedSqlException.IdentityInsertAlreadyOn(held, heapTable.Name);
             context.Connection.IdentityInsertTable = heapTable.Name;

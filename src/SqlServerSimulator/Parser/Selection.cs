@@ -1036,6 +1036,15 @@ internal sealed partial class Selection
                 // to the generic Msg 102 below).
                 case ReservedKeyword statementStart when depth == 0 && Simulation.IsStatementBoundary(statementStart):
                     goto ExitWhileTokenLoop;
+
+                // A boolean-predicate keyword directly after a complete
+                // select-list value means the user wrote a predicate where a
+                // projected value was expected (`SELECT 'a' LIKE '…'`). Real
+                // SQL Server reports Msg 156 near the keyword, not the generic
+                // Msg 102 (probe-confirmed 2026-07-21 for LIKE / IN / IS /
+                // BETWEEN against SQL Server 2025).
+                case ReservedKeyword { Keyword: Keyword.Like or Keyword.In or Keyword.Is or Keyword.Between } predicateKeyword:
+                    throw SimulatedSqlException.SyntaxErrorNearKeyword(predicateKeyword);
             }
 
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -2598,6 +2607,20 @@ internal sealed partial class Selection
                         return fragments;
                     }
             }
+        }
+        // `GROUP BY ()` — the empty grouping set (grand total over all rows),
+        // the bare-parenthesis equivalent of `GROUPING SETS(())`. Distinguished
+        // from `GROUP BY (expr)` (a parenthesized grouping key) by the `)`
+        // immediately following the `(`.
+        if (context.Token is Operator { Character: '(' })
+        {
+            var checkpoint = context.SaveCheckpoint();
+            if (context.GetNextRequired() is Operator { Character: ')' })
+            {
+                context.MoveNextOptional();
+                return [[]];
+            }
+            context.RestoreCheckpoint(checkpoint);
         }
         return [[Expression.Parse(context)]];
     }

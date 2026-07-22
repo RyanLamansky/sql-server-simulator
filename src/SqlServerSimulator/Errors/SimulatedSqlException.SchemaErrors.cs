@@ -138,6 +138,15 @@ partial class SimulatedSqlException
         new($"Cannot drop the table '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
 
     /// <summary>
+    /// Mimics SQL Server error 3701 with the <c>synonym</c> wording variant:
+    /// <c>DROP SYNONYM</c> targeted a name that doesn't exist (and
+    /// <c>IF EXISTS</c> was absent). Probe-confirmed verbatim against SQL
+    /// Server 2025 (2026-07-21).
+    /// </summary>
+    internal static SimulatedSqlException CannotDropSynonymDoesNotExist(string name) =>
+        new($"Cannot drop the synonym '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
+
+    /// <summary>
     /// Mimics SQL Server error 3701 with the <c>function</c> wording variant:
     /// <c>DROP FUNCTION</c> targeted a name that doesn't exist. Real SQL Server
     /// reuses Msg 3701 (Class 11, State 5) across DROP TABLE / DROP FUNCTION /
@@ -478,6 +487,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException IdentityInsertAlreadyOn(string heldTable, string requestedTable) =>
         new($"IDENTITY_INSERT is already ON for table '{heldTable}'. Cannot perform SET operation for table '{requestedTable}'.", 8107, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8106: <c>SET IDENTITY_INSERT &lt;table&gt; ON</c>
+    /// targeted a table with no identity column — probe-confirmed verbatim
+    /// against SQL Server 2025 (2026-07-21).
+    /// </summary>
+    internal static SimulatedSqlException TableHasNoIdentityForSet(string tableName) =>
+        new($"Table '{tableName}' does not have the identity property. Cannot perform SET operation.", 8106, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 8147: a column cannot be both <c>IDENTITY</c>

@@ -85,6 +85,9 @@ The session-state scalars (`@@IDENTITY`, `SCOPE_IDENTITY()`) read from `Simulate
 All three name-arg scalars accept a 1-/2-/3-part dotted runtime string via the same `TryParseObjectName` helper `OBJECT_ID` uses.
 Result type is `numeric(38, 0)` matching real SQL Server's projection (covers tinyint/smallint/int/bigint columns uniformly).
 
+`SET IDENTITY_INSERT <table> ON | OFF` (`Simulation.Set.cs`) sets / clears `SimulatedDbConnection.IdentityInsertTable`.
+ON validates the target: a table with no identity column raises **Msg 8106** (`TableHasNoIdentityForSet`, "Table 't' does not have the identity property. Cannot perform SET operation."); a second table while one is already held raises **Msg 8107** (`IdentityInsertAlreadyOn`) — both probe-confirmed against SQL Server 2025 (2026-07-21).
+
 ## `@@ROWCOUNT` / `ROWCOUNT_BIG()`
 Both expose the row count of the most-recently-completed statement on the session via `SimulatedDbConnection.LastStatementRowCount`.
 `@@ROWCOUNT` projects as `int`; `ROWCOUNT_BIG()` (`Parser/Expressions/TransactionScalarFunctions.cs`) is its `bigint` sibling — same source, wider projection.

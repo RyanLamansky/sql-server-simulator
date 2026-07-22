@@ -52,6 +52,20 @@ Routes through `Simulation.Drop.cs` alongside DROP TABLE / VIEW / FUNCTION / PRO
   The simulator's `FirstSchemaResident` walks `Schema.SchemaObjects()` first (heap tables / views / functions / procedures / sequences / triggers) and falls through to `Schema.TableTypes` (which occupies the separate type namespace); it names the table (or first-found object) rather than a constraint, since auto-named constraints aren't tracked as standalone `SchemaObject`s.
   Same Msg / wording prefix as the probe; the specific object-name suffix is a minor fidelity gap.
 
+## Synonyms (`CREATE SYNONYM` / `DROP SYNONYM`)
+
+`CREATE SYNONYM [schema.]name FOR base_object` (`Simulation.Synonym.cs`) stores a name indirection in the schema's `Synonyms` dict (a lightweight `Synonym` = name + the base `MultiPartName` as written).
+`SYNONYM` isn't a reserved keyword — the CREATE / DROP dispatchers match it as an identifier (`Name … Equals("SYNONYM")`), like `CREATE SERVER ROLE`.
+
+Resolution: `BatchContext.TryResolveTable` / `TryResolveView` redirect a FROM-source reference to a synonym onto its base — a synonym-to-table base resolves through `TryResolveTable` (recursing so a schema-qualified base routes), a synonym-to-view base through `TryResolveView`.
+So `SELECT * FROM syn` (and column projection / WHERE through it) reads `syn FOR t` names; probe-confirmed against SQL Server 2025 (2026-07-21).
+
+- **Name collision** (existing table / view / … or another synonym) → **Msg 2714** (`ThereIsAlreadyAnObject`).
+- **DROP SYNONYM [IF EXISTS] name** removes the entry; a missing target without `IF EXISTS` → **Msg 3701 State 5** (`CannotDropSynonymDoesNotExist`, "Cannot drop the synonym '<n>', because it does not exist or you do not have permission.").
+
+**Scope landed / deferred:** FROM-source table / view resolution + the DDL ship.
+Deferred (documented on `Synonym`): catalog projection (`sys.synonyms` / `sys.objects`), `OBJECT_ID('syn')`, synonym targets for EXEC / scalar-function / sequence references, cross-database bases, and the reverse name collision (creating a table over an existing synonym name doesn't raise 2714 — synonyms aren't in `SchemaObjects()`).
+
 ## ALTER SCHEMA TRANSFER
 `ALTER SCHEMA <dest> TRANSFER [(OBJECT|TYPE)::] <source>.<obj>` moves a single object from one schema to another.
 Routes through `Simulation.Alter.cs`'s `TryParseAlterSchemaTransfer`.

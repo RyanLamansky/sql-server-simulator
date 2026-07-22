@@ -56,6 +56,7 @@ internal sealed class Schema
         this.XmlSchemaCollections = new(collation);
         this.Sequences = new(collation);
         this.Triggers = new(collation);
+        this.Synonyms = new(collation);
     }
 
     public readonly ConcurrentDictionary<string, HeapTable> HeapTables;
@@ -144,6 +145,17 @@ internal sealed class Schema
     /// of truth (ENABLE / DISABLE / DROP all operate on it).
     /// </summary>
     public readonly ConcurrentDictionary<string, Trigger> Triggers;
+
+    /// <summary>
+    /// Synonyms hosted by this schema. Created via <c>CREATE SYNONYM
+    /// [schema.]name FOR base</c>, resolved at FROM-source binding time by
+    /// redirecting a reference to the synonym onto its base table / view
+    /// (see <see cref="Synonym"/>). Shares the object-name namespace with
+    /// tables / views / … for the CREATE-collision check (Msg 2714); the
+    /// reverse collision (creating a table over an existing synonym name) and
+    /// catalog projection are not modeled.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, Synonym> Synonyms;
 
     /// <summary>
     /// Yields every <see cref="SchemaObject"/> in this schema's

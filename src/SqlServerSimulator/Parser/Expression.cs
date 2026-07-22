@@ -74,17 +74,44 @@ internal abstract class Expression
 
     /// <summary>
     /// The binding tightness of a left-associative binary operator: <c>* / %</c>
-    /// bind tighter (2) than <c>+ - &amp; | ^</c> (1); every other token is a
-    /// non-operator terminator (0). This is SQL Server's arithmetic/bitwise
-    /// operator precedence (multiplicative above additive), the sole distinction
-    /// the precedence-climbing loop needs.
+    /// bind tighter (2) than <c>+ - &amp; | ^</c> and the <c>&lt;&lt;</c> /
+    /// <c>&gt;&gt;</c> shifts (1); every other token is a non-operator
+    /// terminator (0). This is SQL Server's arithmetic/bitwise operator
+    /// precedence (multiplicative above additive; shifts share the additive
+    /// level, probe-confirmed <c>2 * 3 &lt;&lt; 1</c> = 12, <c>4 | 1 &lt;&lt; 2</c>
+    /// = 20 — a flat left-associative <c>+ - &amp; | ^ &lt;&lt; &gt;&gt;</c>
+    /// level), the sole distinction the precedence-climbing loop needs. Takes
+    /// the context (not the bare token) so <c>&lt;&lt;</c> / <c>&gt;&gt;</c> —
+    /// tokenized as two adjacent <c>&lt;</c> / <c>&gt;</c> operators — resolve
+    /// via a doubled-adjacent peek, leaving a lone <c>&lt;</c> / <c>&gt;</c>
+    /// (comparison) as a terminator for the boolean layer.
     /// </summary>
-    private static int BinaryTightness(Token? token) => token switch
+    private static int BinaryTightness(ParserContext context) => context.Token switch
     {
         Operator { Character: '*' or '/' or '%' } => 2,
         Operator { Character: '+' or '-' or '&' or '|' or '^' } => 1,
+        Operator { Character: '<' or '>' } when IsAdjacentDoubledOperator(context) => 1,
         _ => 0,
     };
+
+    /// <summary>
+    /// True when the current <c>&lt;</c> / <c>&gt;</c> operator token is
+    /// immediately followed by an adjacent identical operator — the
+    /// two-character <c>&lt;&lt;</c> / <c>&gt;&gt;</c> shift form. Peeks the
+    /// next token and restores, leaving the cursor on the first operator
+    /// (mirrors the <c>||</c> concat detection); adjacency (second token's
+    /// start == first token's end) keeps a whitespace-separated pair out.
+    /// </summary>
+    private static bool IsAdjacentDoubledOperator(ParserContext context)
+    {
+        var first = (Operator)context.Token!;
+        var checkpoint = context.SaveCheckpoint();
+        var doubled = context.GetNextOptional() is Operator second
+            && second.Character == first.Character
+            && second.StartIndex == first.EndIndex;
+        context.RestoreCheckpoint(checkpoint);
+        return doubled;
+    }
 
     /// <summary>
     /// Iterative precedence-climbing over the left-associative binary
@@ -102,7 +129,7 @@ internal abstract class Expression
     /// </summary>
     private static Expression ParseBinaryContinuation(Expression left, int minTightness, ParserContext context)
     {
-        var tightness = BinaryTightness(context.Token);
+        var tightness = BinaryTightness(context);
         while (tightness >= minTightness && tightness > 0)
         {
             var opToken = (Operator)context.Token!;
@@ -114,6 +141,11 @@ internal abstract class Expression
             // bitwise-OR: peek one token and require it be an immediately
             // adjacent second pipe.
             var isConcat = false;
+            // `<<` / `>>` shift: a `<` / `>` reaching this loop is a confirmed
+            // doubled-adjacent operator (BinaryTightness gates that). Consume
+            // the second character (leaving the cursor on it, like the `||`
+            // path) so MoveNext below reaches the right operand.
+            var shiftLeft = (bool?)null;
             if (op == '|')
             {
                 var checkpoint = context.SaveCheckpoint();
@@ -122,15 +154,22 @@ internal abstract class Expression
                 else
                     context.RestoreCheckpoint(checkpoint);
             }
+            else if (op is '<' or '>')
+            {
+                context.MoveNextRequired();
+                shiftLeft = op == '<';
+            }
             var right = ParsePrimary(context.MoveNextRequiredReturnSelf());
-            var nextTightness = BinaryTightness(context.Token);
+            var nextTightness = BinaryTightness(context);
             while (nextTightness > opTightness)
             {
                 right = ParseBinaryContinuation(right, opTightness + 1, context);
-                nextTightness = BinaryTightness(context.Token);
+                nextTightness = BinaryTightness(context);
             }
-            left = isConcat ? new Concatenate(left, right) : TwoSidedExpression.FromCompoundOp(op, left, right);
-            tightness = BinaryTightness(context.Token);
+            left = isConcat ? new Concatenate(left, right)
+                : shiftLeft is bool isLeftShift ? new BitShift(isLeftShift, left, right)
+                : TwoSidedExpression.FromCompoundOp(op, left, right);
+            tightness = BinaryTightness(context);
         }
         return left;
     }
@@ -1014,6 +1053,7 @@ internal abstract class Expression
                 "DATETRUNC" => new DateTrunc(context),
                 "FILE_IDEX" => new FileId(context, extended: true),
                 "FILE_NAME" => new FileNameLookup(context),
+                "HASHBYTES" => new HashBytes(context),
                 "HOST_NAME" => new HostName(context),
                 "INDEX_COL" => new IndexCol(context),
                 "ISNUMERIC" => new IsNumeric(context),

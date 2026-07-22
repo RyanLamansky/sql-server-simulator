@@ -169,4 +169,37 @@ public class CreateTableTests
             create table dup (a int)
             """, 2714, "There is already an object named 'dup' in the database.");
     }
+
+    [TestMethod]
+    public void InlineTableLevelIndex_CreatesIndexVisibleInSysIndexes()
+        => Assert.AreEqual("ix", new Simulation().ExecuteScalar("""
+            create table zz (id int, INDEX ix (id));
+            select name from sys.indexes where object_id = object_id('zz') and name = 'ix'
+            """));
+
+    [TestMethod]
+    public void InlineColumnLevelIndex_Nonclustered_CreatesIndex()
+        => Assert.AreEqual("ix", new Simulation().ExecuteScalar("""
+            create table zz (id int, name varchar(10) INDEX ix NONCLUSTERED);
+            select name from sys.indexes where object_id = object_id('zz') and name = 'ix'
+            """));
+
+    [TestMethod]
+    public void InlineColumnLevelIndex_AlongsidePrimaryKey_BothCreated()
+        => Assert.AreEqual(2, new Simulation().ExecuteScalar("""
+            create table zz (id int primary key nonclustered, a int INDEX ixa);
+            select count(*) from sys.indexes where object_id = object_id('zz') and name is not null
+            """));
+
+    [TestMethod]
+    public void InlineTableLevelIndex_MultiColumn_CreatesIndexOverBothKeys()
+        => Assert.AreEqual(2, new Simulation().ExecuteScalar("""
+            create table zz (a int, b int, INDEX ix (a, b desc));
+            select count(*) from sys.index_columns where object_id = object_id('zz')
+                and index_id = (select index_id from sys.indexes where object_id = object_id('zz') and name = 'ix')
+            """));
+
+    [TestMethod]
+    public void InlineIndex_UnknownColumn_RaisesAndRollsBack()
+        => new Simulation().AssertSqlError("create table zz (id int, INDEX ix (nope))", 1911);
 }

@@ -153,4 +153,47 @@ public sealed class BitManipulationTests
         => new Simulation().AssertSqlError(
             "select ~'a'", 8117,
             "Operand data type varchar is invalid for '~' operator.");
+
+    // The `<<` / `>>` shift operators share the LEFT_SHIFT / RIGHT_SHIFT
+    // engine (probe-confirmed identical to the functions against SQL Server
+    // 2025, 2026-07-21). Precedence sits at the `+ - & | ^` level, below
+    // `* / %`, left-associative.
+
+    [TestMethod]
+    public void LeftShiftOperator_FiveByOne_Returns10()
+        => AreEqual(10, new Simulation().ExecuteScalar("select 5 << 1"));
+
+    [TestMethod]
+    public void RightShiftOperator_TwentyByTwo_Returns5()
+        => AreEqual(5, new Simulation().ExecuteScalar("select 20 >> 2"));
+
+    // (5 << 1) + 1 = 11 — `<<` binds tighter than `+`.
+    [TestMethod]
+    public void ShiftOperator_BindsTighterThanAddition()
+        => AreEqual(11, new Simulation().ExecuteScalar("select 5 << 1 + 1"));
+
+    // (4 | 1) << 2 = 20 — `|` and `<<` are the same precedence, left to right.
+    [TestMethod]
+    public void ShiftOperator_SharesLevelWithBitwiseOr_LeftAssociative()
+        => AreEqual(20, new Simulation().ExecuteScalar("select 4 | 1 << 2"));
+
+    // (2 * 3) << 1 = 12 — `*` binds tighter than `<<`.
+    [TestMethod]
+    public void ShiftOperator_MultiplicationBindsTighter()
+        => AreEqual(12, new Simulation().ExecuteScalar("select 2 * 3 << 1"));
+
+    [TestMethod]
+    public void LeftShiftOperator_Bigint_StaysBigint()
+        => AreEqual(10L, new Simulation().ExecuteScalar("select cast(5 as bigint) << 1"));
+
+    [TestMethod]
+    public void LeftShiftOperator_ShiftBeyondWidth_ReturnsZero()
+        => AreEqual(0, new Simulation().ExecuteScalar("select 5 << 33"));
+
+    // A lone `<` remains a comparison operator (not a shift) — `a < 30`
+    // filters, proving the doubled-adjacent gate leaves comparisons alone.
+    [TestMethod]
+    public void Comparison_LessThan_StillParsesAsBoolean()
+        => AreEqual(2, new Simulation().ExecuteScalar(
+            "create table s (a int); insert s values (10),(20),(50); select count(*) from s where a < 30"));
 }

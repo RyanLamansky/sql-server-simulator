@@ -306,4 +306,24 @@ public sealed class IdentityTests
             "select is_not_for_replication from sys.identity_columns where object_id = object_id('t')")!);
         AreEqual(0, sim.ExecuteScalar("select COLUMNPROPERTY(object_id('t'), 'id', 'IsIdNotForRepl')"));
     }
+
+    [TestMethod]
+    public void SetIdentityInsertOn_TableWithoutIdentity_RaisesMsg8106()
+    {
+        var ex = new Simulation().AssertSqlError("""
+            create table t (id int not null primary key, x int);
+            set identity_insert t on
+            """, 8106);
+        Assert.Contains("does not have the identity property", ex.Message);
+    }
+
+    [TestMethod]
+    public void SetIdentityInsertOn_TableWithIdentity_Succeeds()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (id int identity(1,1) primary key, x int);
+            set identity_insert t on;
+            insert t (id, x) values (5, 10);
+            set identity_insert t off;
+            select count(*) from t
+            """));
 }

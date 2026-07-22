@@ -29,6 +29,21 @@ The `WITH (...)` clause is parsed parens-balanced and discarded — none of `FIL
 The trailing `ON <filegroup>` placement clause (e.g. `ON [PRIMARY]`) is also parsed and discarded — no filegroup model.
 The same two trailers are accepted on inline `CONSTRAINT … PRIMARY KEY | UNIQUE` clauses inside CREATE TABLE and on `ALTER TABLE … ADD CONSTRAINT … PRIMARY KEY | UNIQUE (cols)`, plus `) ON [PRIMARY] [TEXTIMAGE_ON [PRIMARY]]` at the end of CREATE TABLE — the full SSMS-scripting verbosity surface.
 
+### Inline indexes in CREATE TABLE
+
+Both inline-index forms are accepted inside CREATE TABLE (probe-confirmed against SQL Server 2025, 2026-07-21):
+
+```sql
+CREATE TABLE t (id int, INDEX ix (id));                             -- table-level
+CREATE TABLE t (id int, name varchar(10) INDEX ix NONCLUSTERED);    -- column-level (single column)
+CREATE TABLE t (id int PRIMARY KEY NONCLUSTERED, a int INDEX ixa);  -- alongside a PK
+```
+
+The parser collects each into a `PendingInlineIndex` (name, `CLUSTERED`/`NONCLUSTERED`, key columns) — the table-level form in `ParseColumnList` (`ParseTableLevelInlineIndex`), the column-level form as an `INDEX` case in the per-column constraint loop.
+After the `HeapTable` is built, `AddInlineIndexes` (`Simulation.CreateIndex.cs`) resolves the columns and appends the same `Index` a standalone CREATE INDEX would (catalog metadata + seek acceleration; no UNIQUE / INCLUDE / filter — the inline grammar exposes none).
+Column resolution, name-collision (Msg 2714 / 1911 wording via `IndexAlreadyExists` / `IndexColumnMissing`), and one-clustered-per-table (Msg 1902) run inside the CREATE TABLE atomic block, so a bad inline index rolls the table back.
+Inline indexes are **CREATE TABLE only** — table variables / table types leave the `INDEX` keyword to the column path, which rejects it.
+
 ## Equality-seek acceleration
 
 The acceleration structure is `HeapSeekCache` (`Parser/HeapSeekCache.cs`) — a per-`Heap` index attached through a `ConditionalWeakTable<Heap, HeapSeekCache>` and reached via `HeapSeekCache.For(heap)`.

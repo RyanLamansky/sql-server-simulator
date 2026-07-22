@@ -223,6 +223,23 @@ internal sealed class BitShift : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
+    /// <summary>
+    /// Operator form of the shift: the <c>&lt;&lt;</c> / <c>&gt;&gt;</c>
+    /// binary operators desugar to this over two already-parsed operands.
+    /// Probe-confirmed against SQL Server 2025 that operator and function
+    /// share identical semantics (<c>5 &lt;&lt; 1</c> = <c>LEFT_SHIFT(5, 1)</c>,
+    /// binary → varbinary, negative-shift reversal), so both share this class;
+    /// the function-name error wording stays <c>LeftShift</c> / <c>RightShift</c>
+    /// to match the operator diagnostic real emits.
+    /// </summary>
+    public BitShift(bool isLeftShift, Expression numArg, Expression shiftArg)
+    {
+        this.isLeftShift = isLeftShift;
+        this.functionName = isLeftShift ? "left_shift" : "right_shift";
+        this.numArg = numArg;
+        this.shiftArg = shiftArg;
+    }
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var v = this.numArg.Run(runtime);
