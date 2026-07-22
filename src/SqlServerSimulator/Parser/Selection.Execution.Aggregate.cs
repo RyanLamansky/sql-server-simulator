@@ -34,12 +34,12 @@ internal sealed partial class Selection
         string[] outputColumnNames,
         List<OrderBySpec> orderByItems,
         List<AggregateExpression> aggregates,
-        int? topCount,
+        TopSpec top,
         int? offsetCount,
         int? fetchCount,
         BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
-        if (topCount == 0)
+        if (top.Count == 0 && top.Percent is null)
             return [];
         var memo = new SourceColumnMemo();
 
@@ -307,7 +307,7 @@ internal sealed partial class Selection
             output.Sort((a, b) => CompareOrderKeys(a.OrderKeys, b.OrderKeys, orderByItems));
 
         IEnumerable<(SqlValue[] OrderKeys, SqlValue[] Row)> limited = output;
-        if (topCount is { } topLimit)
+        if (ComputeTopCap(output, o => o.OrderKeys, orderByItems, top, fetchCount: null) is { } topLimit)
             limited = limited.Take(topLimit);
         if (offsetCount is { } offset && offset > 0)
             limited = limited.Skip(offset);

@@ -223,6 +223,15 @@ internal abstract class Expression
         UnquotedString { ContextualKeyword: ContextualKeyword.Next } nextToken => (Expression?)TryParseNextValueForOrFallback(context) ?? new Reference(nextToken),
         Name name => new Reference(name),
         Operator { Character: '(' } => ParseGroupedExpression(context),
+        // ODBC escape sequence: {d '…'} / {t '…'} / {ts '…'} / {guid '…'} typed
+        // literals and {fn NAME(…)} the scalar-function escape.
+        Operator { Character: '{' } => ParseOdbcEscape(context),
+        // A reserved keyword can't lead an expression (the valid keyword-headed
+        // forms — NULL / CASE / LEFT / CONVERT / CURRENT_* / … — are matched
+        // above). Real SQL Server reports these as Msg 156 ("near the keyword")
+        // rather than the generic Msg 102, e.g. the `(WHERE …)` inside an
+        // unsupported `COUNT(*) FILTER (WHERE …)`.
+        ReservedKeyword reservedAtom => throw SimulatedSqlException.SyntaxErrorNearKeyword(reservedAtom),
         _ => throw SimulatedSqlException.SyntaxErrorNear(context)
     };
 
@@ -793,6 +802,80 @@ internal abstract class Expression
             context.NestingDepth -= cost;
         }
     }
+
+    /// <summary>
+    /// Parses an ODBC escape sequence (cursor on the opening <c>{</c>), leaving
+    /// the cursor on the closing <c>}</c>:
+    /// <list type="bullet">
+    /// <item><c>{d '…'}</c> / <c>{ts '…'}</c> → a <c>datetime</c> literal;
+    /// <c>{t '…'}</c> → a <c>datetime</c> on the current date (matching real
+    /// SQL Server's time-escape semantics); <c>{guid '…'}</c> →
+    /// <c>uniqueidentifier</c>.</item>
+    /// <item><c>{fn NAME(args)}</c> → the mapped built-in scalar function
+    /// (ODBC-specific names like <c>UCASE</c>/<c>LCASE</c>/<c>LENGTH</c> are
+    /// renamed to their T-SQL equivalents; names already matching a T-SQL
+    /// built-in pass through).</item>
+    /// </list>
+    /// </summary>
+    private static Expression ParseOdbcEscape(ParserContext context)
+    {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        if (context.GetNextRequired() is not Name escapeToken)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var escape = escapeToken.Value;
+
+        if (collation.Equals(escape, "fn"))
+        {
+            if (context.GetNextRequired() is not Name functionNameToken)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var reference = new Reference(MapOdbcFunctionName(functionNameToken.Value, collation));
+            if (context.GetNextRequired() is not Operator { Character: '(' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            var call = ParseCallArguments(reference, context);
+            return context.GetNextRequired() is not Operator { Character: '}' }
+                ? throw SimulatedSqlException.SyntaxErrorNear(context)
+                : call;
+        }
+
+        // Typed-literal escapes: the payload is a single string literal.
+        var targetType =
+            collation.Equals(escape, "d") || collation.Equals(escape, "ts") || collation.Equals(escape, "t") ? (SqlType)SqlType.DateTime
+            : collation.Equals(escape, "guid") ? SqlType.UniqueIdentifier
+            : throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Literal literal)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var value = Expressions.Cast.ApplyCoercion(literal.Value, targetType, null);
+        // The {t} time escape resolves to the current date plus the given time
+        // (probe-confirmed against SQL Server 2025); a plain datetime coercion
+        // of a time-only string lands on 1900-01-01, so re-home it onto today.
+        if (collation.Equals(escape, "t") && !value.IsNull)
+            value = Storage.SqlValue.FromDateTime(DateTime.UtcNow.Date + value.AsDateTime.TimeOfDay);
+        return context.GetNextRequired() is not Operator { Character: '}' }
+            ? throw SimulatedSqlException.SyntaxErrorNear(context)
+            : new Value(value);
+    }
+
+    /// <summary>
+    /// Maps an ODBC <c>{fn NAME}</c> scalar-function name to its T-SQL
+    /// equivalent. Only the ODBC-distinct spellings are renamed; a name that is
+    /// already a T-SQL built-in (CONCAT, LEFT, CEILING, …) passes through
+    /// unchanged and resolves normally. ODBC functions with no same-arity T-SQL
+    /// rename (DAYOFWEEK / HOUR / MOD / TRUNCATE / CURDATE / …) are left
+    /// unmapped and fall to the normal not-a-built-in path.
+    /// </summary>
+    private static string MapOdbcFunctionName(string name, Collation collation) =>
+        collation.Equals(name, "UCASE") ? "UPPER"
+        : collation.Equals(name, "LCASE") ? "LOWER"
+        : collation.Equals(name, "LENGTH") ? "LEN"
+        : collation.Equals(name, "LOCATE") ? "CHARINDEX"
+        : collation.Equals(name, "REPEAT") ? "REPLICATE"
+        : collation.Equals(name, "IFNULL") ? "ISNULL"
+        : collation.Equals(name, "INSERT") ? "STUFF"
+        : collation.Equals(name, "NOW") ? "GETDATE"
+        : collation.Equals(name, "ATAN2") ? "ATN2"
+        : collation.Equals(name, "DAYOFMONTH") ? "DAY"
+        : name;
 
     private static Expression ResolveBuiltIn(string name, ParserContext context)
     {

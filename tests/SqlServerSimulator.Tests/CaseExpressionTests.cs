@@ -163,9 +163,10 @@ public sealed class CaseExpressionTests
     [TestMethod]
     public void Case_EmptyNoWhen_RaisesSyntaxError()
     {
-        // `case end` has no WHEN clauses; SQL Server raises Msg 156 near `end`.
+        // `case end` has no WHEN clauses; SQL Server raises Msg 156 near the
+        // reserved keyword `end` (probe-confirmed against SQL Server 2025).
         var ex = Throws<DbException>(() => _ = new Simulation().ExecuteScalar("select case end"));
-        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        AreEqual("156", ex.Data["HelpLink.EvtID"]);
     }
 
     [TestMethod]

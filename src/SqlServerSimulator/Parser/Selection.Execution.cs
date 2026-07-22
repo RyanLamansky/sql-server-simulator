@@ -213,6 +213,8 @@ internal sealed partial class Selection
         FromClause fromClause,
         bool distinct,
         Expression? topExpression,
+        bool topPercent,
+        bool topWithTies,
         List<AggregateExpression> aggregates,
         List<WindowExpression> windows,
         Func<MultiPartName, SqlType>? outerTypeResolver,
@@ -258,6 +260,8 @@ internal sealed partial class Selection
         }
 
         var orderBy = fromClause.OrderBy;
+        if (topWithTies && orderBy.Count == 0)
+            throw SimulatedSqlException.TopWithTiesRequiresOrderBy();
         var outputSchema = new SqlType[expressions.Count];
         var outputColumnNames = new string[expressions.Count];
 
@@ -435,7 +439,11 @@ internal sealed partial class Selection
                 // parameters, and this closure replays across executions of a
                 // plan-cached SELECT (EF's Skip/Take shape), so the values
                 // must come from the EXECUTING batch, not the parse.
-                var topCount = ResolveRowCountLimit(topExpression, RowLimitKind.Top, batch);
+                var top = topExpression is null
+                    ? default
+                    : topPercent
+                        ? new TopSpec(null, ResolveTopPercentValue(topExpression, batch), topWithTies)
+                        : new TopSpec(ResolveRowCountLimit(topExpression, RowLimitKind.Top, batch), null, topWithTies);
                 var offsetCount = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, batch);
                 var fetchCount = ResolveRowCountLimit(fetchExpression, RowLimitKind.Fetch, batch);
                 // Materialize provably-uncorrelated catalog-view sources once
@@ -445,10 +453,10 @@ internal sealed partial class Selection
                 // hash path can key them. Correlated sources are left untouched.
                 var execSources = MaterializeUncorrelatedDeferredSources(sources, batch);
                 return aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
-                    ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, topCount, offsetCount, fetchCount, batch, outerResolver)
+                    ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, top, offsetCount, fetchCount, batch, outerResolver)
                     : windows.Count > 0
-                        ? ProjectWindowedRows(execSources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
-                        : ProjectSqlRows(execSources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver);
+                        ? ProjectWindowedRows(execSources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
+                        : ProjectSqlRows(execSources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, batch, outerResolver);
             },
             isAssignmentOnly,
             intoTarget,
@@ -570,7 +578,7 @@ internal sealed partial class Selection
         string[] outputColumnNames,
         List<OrderBySpec> orderBy,
         bool distinct,
-        int? topCount,
+        TopSpec top,
         int? offsetCount,
         int? fetchCount,
         BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
@@ -578,23 +586,21 @@ internal sealed partial class Selection
         // ORDER BY elimination: when the sort matches a NOT-NULL leading-key
         // column, enumerate the source in key order and stream (no buffer + sort).
         // Residual WHERE and projection preserve order; OFFSET / FETCH / TOP then
-        // read only the rows they need.
-        // Parenthesized join groups fold through the group-aware nested-loop
-        // path; the flat left-deep index-seek / ordered-scan optimizations
-        // assume one source per join level, so bypass them when a group is present.
+        // read only the rows they need. TOP PERCENT / WITH TIES need the full
+        // buffered rowcount / ORDER BY keys, so they skip the streaming paths.
         var hasJoinGroup = ContainsJoinGroup(joins);
-        if (!hasJoinGroup && !distinct && orderBy.Count > 0
+        if (!hasJoinGroup && !distinct && !top.RequiresBuffering && orderBy.Count > 0
             && TryApplyOrderedScan(sources, joins, orderBy, excluders, batch, outerResolver, out var orderedSources))
         {
-            return ProjectStreaming(orderedSources, joins, expressions, excluders, topCount, offsetCount, fetchCount, batch, outerResolver);
+            return ProjectStreaming(orderedSources, joins, expressions, excluders, top.Count, offsetCount, fetchCount, batch, outerResolver);
         }
 
         if (!hasJoinGroup)
             sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
         sources = NarrowLeftmostJoinSource(sources, excluders, batch, outerResolver);
-        return !distinct && orderBy.Count == 0
-            ? ProjectStreaming(sources, joins, expressions, excluders, topCount, offsetCount, fetchCount, batch, outerResolver)
-            : ProjectBuffered(sources, joins, expressions, excluders, outputColumnNames, orderBy, distinct, topCount, offsetCount, fetchCount, batch, outerResolver);
+        return !distinct && orderBy.Count == 0 && !top.RequiresBuffering
+            ? ProjectStreaming(sources, joins, expressions, excluders, top.Count, offsetCount, fetchCount, batch, outerResolver)
+            : ProjectBuffered(sources, joins, expressions, excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, batch, outerResolver);
     }
 
     /// <summary>
@@ -672,7 +678,7 @@ internal sealed partial class Selection
         string[] outputColumnNames,
         List<OrderBySpec> orderBy,
         bool distinct,
-        int? topCount,
+        TopSpec top,
         int? offsetCount,
         int? fetchCount,
         BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
@@ -723,10 +729,12 @@ internal sealed partial class Selection
         if (orderBy.Count > 0)
             materialized.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
 
+        var cap = ComputeTopCap(materialized, item => item.Keys, orderBy, top, fetchCount);
+
         IEnumerable<(SqlValue[] Projected, SqlValue[] Keys)> windowed = materialized;
         if (offsetCount is { } offset && offset > 0)
             windowed = windowed.Skip(offset);
-        if ((topCount ?? fetchCount) is { } limit)
+        if (cap is { } limit)
             windowed = windowed.Take(limit);
 
         foreach (var (projected, _) in windowed)

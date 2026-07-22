@@ -297,9 +297,12 @@ partial class Simulation
     /// </summary>
     private static bool ParseAddDefaultConstraint(ParserContext context, MultiPartName tableName, string? explicitName)
     {
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        // The DEFAULT value's parentheses are optional — real SQL Server
+        // accepts both `DEFAULT (0) FOR col` and the bare `DEFAULT 0 FOR col`.
         context.MoveNextRequired();
+        var parenthesized = context.Token is Operator { Character: '(' };
+        if (parenthesized)
+            context.MoveNextRequired();
         var expressionStart = context.Token!.StartIndex;
         // Mark the expression body as a DEFAULT clause so NEWSEQUENTIALID()'s
         // grammar gate accepts it (parity with the inline-DEFAULT path in
@@ -309,10 +312,23 @@ partial class Simulation
         Expression expression;
         try { expression = Expression.Parse(context); }
         finally { context.InDefaultClause = false; }
-        if (context.Token is not Operator { Character: ')' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        var definition = $"({context.SourceTextFrom(expressionStart)})";
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.For })
+        string definition;
+        if (parenthesized)
+        {
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            definition = $"({context.SourceTextFrom(expressionStart)})";
+            context.MoveNextRequired();
+        }
+        else
+        {
+            // Expression.Parse leaves the cursor on the token after the value
+            // (the FOR keyword); SourceTextFrom slices to that token, so it
+            // captures exactly the value text. Wrap it to mirror the stored
+            // parenthesized definition.
+            definition = $"({context.SourceTextFrom(expressionStart)})";
+        }
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.For })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.GetNextRequired() is not Name columnNameToken)
             throw SimulatedSqlException.SyntaxErrorNear(context);

@@ -1676,10 +1676,13 @@ public sealed partial class Simulation
                     yield return outcome;
                 }
                 // Real SQL Server requires `;` after MERGE (Msg 10713) —
-                // the only statement family with a mandatory terminator.
-                // Check before normalization so the cursor is still on the
-                // parser's lookahead position. The check runs even in skip
-                // mode — the grammar requirement is independent of execution.
+                // the only statement family with a mandatory terminator, and it
+                // fires even when MERGE is the last statement in the batch
+                // (probe-confirmed against SQL Server 2025: a bare MERGE with no
+                // trailing `;` at end-of-batch still raises 10713). Check before
+                // normalization so the cursor is still on the parser's lookahead
+                // position. The check runs even in skip mode — the grammar
+                // requirement is independent of execution.
                 if (context.Token is not Operator { Character: ';' })
                     throw SimulatedSqlException.MergeMustBeTerminated();
                 break;

@@ -589,4 +589,50 @@ public sealed class CreateIndexTests
               add constraint [df_aac_id] default (newsequentialid()) for [id];
             select count(*) from [appdict].[adminactionconfiguration]
             """));
+
+    // ----- One clustered index per table (Msg 1902) -----
+
+    [TestMethod]
+    public void CreateClusteredIndex_WhenPrimaryKeyAlreadyClustered_RaisesMsg1902()
+    {
+        var ex = new Simulation().AssertSqlError("""
+            create table t (id int not null primary key, a int);
+            create clustered index ix on t (a)
+            """, 1902);
+        Assert.Contains("more than one clustered index", ex.Message);
+    }
+
+    [TestMethod]
+    public void CreateSecondClusteredIndex_RaisesMsg1902()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (id int not null, a int);
+            create clustered index ix1 on t (id);
+            create clustered index ix2 on t (a)
+            """, 1902);
+
+    [TestMethod]
+    public void CreateNonclusteredIndex_AlongsidePrimaryKey_Succeeds()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create table t (id int not null primary key, a int);
+            create index ix on t (a);
+            select count(*) from t
+            """));
+
+    // ----- Deprecated two-part DROP INDEX table.index form -----
+
+    [TestMethod]
+    public void DropIndex_TwoPartForm_DropsExistingIndex()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create table t (id int not null, a int);
+            create index ix on t (a);
+            drop index t.ix;
+            select count(*) from sys.indexes where name = 'ix'
+            """));
+
+    [TestMethod]
+    public void DropIndex_TwoPartForm_MissingIndex_RaisesMsg3701()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (id int not null, a int);
+            drop index t.nope
+            """, 3701);
 }

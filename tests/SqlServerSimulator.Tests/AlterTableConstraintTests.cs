@@ -364,4 +364,27 @@ public sealed class AlterTableConstraintTests
         AreEqual("df_b", sim.ExecuteScalar("select name from sys.default_constraints where parent_column_id = 3"));
     }
 
+    // ----- ADD CONSTRAINT DEFAULT with the value parentheses omitted -----
+
+    [TestMethod]
+    public void AddDefaultConstraint_BareValueWithoutParens_AppliesOnInsert()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int not null primary key, b int);
+            alter table t add constraint df1 default 0 for b;
+            insert t (id) values (1)
+            """);
+        AreEqual(0, sim.ExecuteScalar("select b from t where id = 1"));
+        AreEqual("df1", sim.ExecuteScalar("select name from sys.default_constraints where parent_object_id = object_id('t')"));
+    }
+
+    [TestMethod]
+    public void AddDefaultConstraint_BareValueAndParenthesizedValue_Equivalent()
+        => AreEqual(7, new Simulation().ExecuteScalar("""
+            create table t (id int not null primary key, b int);
+            alter table t add constraint df1 default (7) for b;
+            insert t (id) values (1);
+            select b from t where id = 1
+            """));
 }

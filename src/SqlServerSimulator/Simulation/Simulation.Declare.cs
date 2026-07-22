@@ -126,7 +126,10 @@ partial class Simulation
     {
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
 
-        context.MoveNextRequired();
+        // Optional: a scalar declaration with no length spec and no initializer
+        // may end the batch (`DECLARE @x int`), so the token after the type
+        // name is not required.
+        context.MoveNextOptional();
         int? declaredMaxLength = null;
         int? declaredScale = null;
         if (context.Token is Operator { Character: '(' })
@@ -153,7 +156,9 @@ partial class Simulation
                     throw SimulatedSqlException.SyntaxErrorNear(context);
             }
 
-            context.MoveNextRequired();
+            // A sized declaration with no initializer may also end the batch
+            // (`DECLARE @x varchar(20)`).
+            context.MoveNextOptional();
         }
 
         var (resolved, maxLength, _) = ResolveTypeReference(

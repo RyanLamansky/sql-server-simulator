@@ -15,7 +15,13 @@ CREATE [UNIQUE] [CLUSTERED | NONCLUSTERED] INDEX name
     [ON <filegroup>];
 
 DROP INDEX [IF EXISTS] name ON table [, name ON table [, …]];
+DROP INDEX [IF EXISTS] table.name [, table.name [, …]];   -- deprecated two-part form
 ```
+
+The deprecated `DROP INDEX table.index` form (also `schema.table.index`) is accepted: the rightmost segment names the index, the remaining left segments name the table.
+A missing index still raises **Msg 3701** through the same path as the `name ON table` form; the parser branches on whether an `ON` follows the first parsed object name.
+
+**One clustered index per table**: `CREATE CLUSTERED INDEX` on a table that already carries a clustered index — a clustered PRIMARY KEY / UNIQUE constraint (a default PK is clustered) or a prior clustered index — raises **Msg 1902** (`Cannot create more than one clustered index on table 't'. Drop the existing clustered index '…' before creating another.`), naming the existing clustered index.
 
 The simulator has no B-tree storage, so an index never constrains inserts (UNIQUE aside) and isn't a stored ordered structure.
 UNIQUE indexes participate in INSERT / UPDATE / MERGE enforcement alongside `KeyConstraint`.

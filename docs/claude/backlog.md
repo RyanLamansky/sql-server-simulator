@@ -43,6 +43,20 @@ Remaining phases, roughly in value order:
   Possible lever if paged drains ever matter: recognize index-supplied order in the `OFFSET/FETCH` path (real's plan shape) to skip the sort and bound the scan.
   Perf polish, not a fidelity gap.
 
+### Result-set serialization: `FOR JSON` / `FOR XML`
+
+The JSON/XML *functions* (OPENJSON / JSON_VALUE / JSON_QUERY / JSON_MODIFY / JSON_OBJECT / JSON_ARRAY / etc.; the XML type + XQuery-subset methods — see [`json.md`](json.md), [`xml.md`](xml.md)) all ship.
+Not modeled: the result-set **serialization** clauses that collapse a whole SELECT into one JSON/XML string.
+
+- **`FOR JSON` (PATH / AUTO, `ROOT('name')`, `WITHOUT_ARRAY_WRAPPER`, `INCLUDE_NULL_VALUES`)** — currently **Msg 102** at parse.
+  Serializes the projected rows into a JSON array (or single object) with column names as keys; PATH honors dotted aliases as nesting, AUTO nests by table.
+- **`FOR XML` (RAW / AUTO / PATH('elem') / EXPLICIT, `ELEMENTS`, `ROOT`)** — currently **Msg 102** at parse.
+  Serializes rows into an XML fragment; the shape depends on the mode.
+
+Deferred as out-of-scope of the round-2 syntax-alternatives sweep: these are substantial serialization engines (a JSON/XML row-encoder with mode-specific nesting rules), not syntax variants.
+They plug in as a post-projection `SELECT`-tail transform once built — the parser already reaches the `FOR` position (it currently raises Msg 102 there).
+Weight the pick by real EF/tooling demand: EF Core doesn't emit either clause, so demand is app-code-driven.
+
 ### Built-in functions
 
 Captured from a Microsoft Learn category-by-category audit (cross-checked against `Parser/Expression.cs::ResolveBuiltIn`, `Parser/AtAtKeyword.cs` + `Value.cs`, `Parser/Expressions/AggregateExpression.cs`, `Parser/Expressions/WindowExpression.cs`, and the FROM-source rowset dispatch in `Parser/Selection.{OpenJson,StringSplit,ListExtendedProperty}.cs`).

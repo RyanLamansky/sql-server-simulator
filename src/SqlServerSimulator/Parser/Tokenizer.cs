@@ -59,7 +59,10 @@ static class Tokenizer
             '-' => ParseMinusOrComment(command, ref index),
             '/' => ParseForwardSlashOrComment(command, ref index),
             '[' => ParseBracketDelimitedIdentifier(command, ref index),
-            '+' or '*' or '%' or '(' or ')' or ',' or '.' or ';' or ':' or '=' or '&' or '|' or '^' or '~' or '>' or '<' or '!' => new Operator(command, index++),
+            // '{' and '}' delimit ODBC escape sequences ({d '…'}, {fn F(…)}, …);
+            // they carry no other meaning in T-SQL. Tokenized as single-char
+            // operators and consumed by Expression.ParseOdbcEscape.
+            '+' or '*' or '%' or '(' or ')' or ',' or '.' or ';' or ':' or '=' or '&' or '|' or '^' or '~' or '>' or '<' or '!' or '{' or '}' => new Operator(command, index++),
             '$' when IsDollarAction(command, index) => ParseDollarAction(command, ref index),
             '$' or '¢' or '£' or '¥' or '฿' or (>= '₠' and <= '₱') => ParseCurrencyLiteral(command, ref index),
             // Non-ASCII BMP letters (fullwidth, accented, Greek, CJK, ...) start identifiers on real SQL Server — probe-confirmed against SQL Server 2025.

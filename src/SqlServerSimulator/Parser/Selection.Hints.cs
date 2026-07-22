@@ -644,4 +644,36 @@ internal sealed partial class Selection
             }
         }
     }
+
+    /// <summary>
+    /// Consumes an optional <c>TABLESAMPLE [SYSTEM] (n [PERCENT | ROWS])
+    /// [REPEATABLE (seed)]</c> clause on a FROM source when present, leaving the
+    /// cursor at the next un-consumed lookahead token (a no-op otherwise).
+    /// The sample is <b>discarded</b>: the simulator returns every row, a
+    /// deterministic approximation of SQL Server's nondeterministic random
+    /// sample (which the wire contract permits — a sample is any subset).
+    /// </summary>
+    private static void ParseOptionalTableSample(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.TableSample })
+            return;
+        var collation = context.Batch.CurrentDatabase.Collation;
+        context.MoveNextRequired();
+        // Optional SYSTEM sampling-method identifier (contextual).
+        if (context.Token is Name method && collation.Equals(method.Value, "SYSTEM"))
+            context.MoveNextRequired();
+        if (context.Token is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        SkipBalancedParens(context);
+        context.MoveNextOptional();
+        // Optional REPEATABLE (seed).
+        if (context.Token is Name repeatable && collation.Equals(repeatable.Value, "REPEATABLE"))
+        {
+            context.MoveNextRequired();
+            if (context.Token is not Operator { Character: '(' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            SkipBalancedParens(context);
+            context.MoveNextOptional();
+        }
+    }
 }

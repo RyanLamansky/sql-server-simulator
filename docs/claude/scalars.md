@@ -639,3 +639,18 @@ Probe-confirmed against SQL Server 2025 (2026-07-20).
   Zero arguments; any argument raises **Msg 174** (`The get_filestream_transaction_context function requires 0 argument(s).` — lowercase function name).
 
 The untyped-NULL-literal argument diagnostic (real raises Msg 8116 for `CERTENCODED(NULL)` because an untyped `NULL` literal has no type) is not modeled — the simulator's untyped `NULL` literal carries `Type=Int32`, so it flows through as a valid int argument and returns NULL.
+
+## ODBC escape sequences: `{d}` / `{t}` / `{ts}` / `{guid}` / `{fn}`
+
+The tokenizer emits `{` and `}` as single-char operators (no other T-SQL meaning); `Expression.ParseOdbcEscape` consumes the escape in expression position.
+
+- **`{d 'yyyy-mm-dd'}`** and **`{ts 'yyyy-mm-dd hh:mm:ss'}`** → a `datetime` literal (the string coerced via `Cast.ApplyCoercion`); a date-only string lands at midnight.
+- **`{t 'hh:mm:ss'}`** → a `datetime` on the **current date** at the given time — matching SQL Server 2025's time-escape semantics (probe-confirmed: `{t '12:00:00'}` returns today 12:00, not 1900-01-01).
+  A plain datetime coercion of a time-only string lands on 1900-01-01, so the parse re-homes the time onto `DateTime.UtcNow.Date`.
+- **`{guid '…'}`** → a `uniqueidentifier` literal.
+- **`{fn NAME(args)}`** → the mapped built-in scalar function, parsed as a normal call.
+  ODBC-distinct names are renamed to their T-SQL equivalents: `UCASE`→`UPPER`, `LCASE`→`LOWER`, `LENGTH`→`LEN`, `LOCATE`→`CHARINDEX`, `REPEAT`→`REPLICATE`, `IFNULL`→`ISNULL`, `INSERT`→`STUFF`, `NOW`→`GETDATE`, `ATAN2`→`ATN2`, `DAYOFMONTH`→`DAY` (`MapOdbcFunctionName`).
+  A name already matching a T-SQL built-in (`CONCAT`, `LEFT`, `CEILING`, `ABS`, …) passes through unchanged.
+
+**Known gap**: the ODBC `{fn}` functions with no same-arity T-SQL rename — `MOD` (→ `%`), `TRUNCATE` (→ `ROUND(x, y, 1)`), `CURDATE` / `CURTIME`, `DAYOFWEEK` / `DAYOFYEAR` / `HOUR` / `MINUTE` / `SECOND` / `WEEK` / `QUARTER` (→ `DATEPART(part, x)`), `USER` / `DATABASE`, the ODBC `CONVERT(val, SQL_type)` — are left unmapped (they fall to the normal not-a-built-in path).
+The `{oj … LEFT OUTER JOIN …}` outer-join escape (a FROM-clause construct, not expression position) is likewise not modeled.

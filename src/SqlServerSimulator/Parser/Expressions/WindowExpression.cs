@@ -73,9 +73,11 @@ internal sealed class WindowExpression : Expression
 {
     public readonly WindowKind Kind;
 
-    public readonly Expression[] PartitionBy;
+    // Settable so a bare `OVER w` reference can be patched with its named-window
+    // definition once the trailing WINDOW clause is parsed (see ApplyNamedWindow).
+    public Expression[] PartitionBy;
 
-    public readonly OrderBySpec[] OrderBy;
+    public OrderBySpec[] OrderBy;
 
     /// <summary>
     /// For <see cref="WindowKind.Aggregate"/>, the wrapped aggregate
@@ -139,7 +141,7 @@ internal sealed class WindowExpression : Expression
     /// so this field stays null for those kinds and the executor short-
     /// circuits on Kind alone.
     /// </summary>
-    public readonly FrameSpec? Frame;
+    public FrameSpec? Frame;
 
 
     private WindowExpression(
@@ -497,12 +499,48 @@ internal sealed class WindowExpression : Expression
         if (aggCollector is not null && aggCollector.Count > 0 && ReferenceEquals(aggCollector[^1], aggregate))
             aggCollector.RemoveAt(aggCollector.Count - 1);
 
-        if (context.GetNextRequired() is not Operator { Character: '(' })
+        // Bare `OVER w` — a named-window reference (SQL Server 2022+). The
+        // definition parses later (WINDOW clause after HAVING), so register the
+        // window spec-less and record it for resolution. Leave the cursor on the
+        // name token, matching the closing-`)` lookahead contract.
+        var afterOver = context.GetNextRequired();
+        if (afterOver is Name windowName)
+        {
+            var namedWindow = new WindowExpression(WindowKind.Aggregate, [], [], aggregate);
+            context.PendingNamedWindows.Add((namedWindow, windowName.Value));
+            return Register(context, namedWindow);
+        }
+        if (afterOver is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
-        var partitionBy = ParseOptionalPartitionBy(context);
+        var body = ParseWindowBody(context);
 
+        return context.Token is not Operator { Character: ')' }
+            ? throw SimulatedSqlException.SyntaxErrorNear(context)
+            : Register(context, new WindowExpression(WindowKind.Aggregate, body.PartitionBy, body.OrderBy, aggregate, frame: body.Frame));
+    }
+
+    /// <summary>
+    /// A parsed window body — the <c>PARTITION BY</c> / <c>ORDER BY</c> / frame
+    /// triple shared by an inline <c>OVER (…)</c> and a named
+    /// <c>WINDOW w AS (…)</c> definition.
+    /// </summary>
+    internal readonly struct WindowBody(Expression[] partitionBy, OrderBySpec[] orderBy, FrameSpec? frame)
+    {
+        public readonly Expression[] PartitionBy = partitionBy;
+        public readonly OrderBySpec[] OrderBy = orderBy;
+        public readonly FrameSpec? Frame = frame;
+    }
+
+    /// <summary>
+    /// Parses the interior of an <c>OVER ( … )</c> / <c>WINDOW w AS ( … )</c>
+    /// clause — <c>[PARTITION BY …] [ORDER BY …] [frame]</c>. Entered with the
+    /// cursor on the first body token; leaves it on the closing <c>)</c>.
+    /// </summary>
+    internal static WindowBody ParseWindowBody(ParserContext context)
+    {
+        var partitionBy = ParseOptionalPartitionBy(context);
         var orderBy = Array.Empty<OrderBySpec>();
         if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
         {
@@ -510,12 +548,19 @@ internal sealed class WindowExpression : Expression
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             orderBy = ParseOrderByList(context);
         }
-
         var frame = ParseOptionalFrameSpec(context, orderByPresent: orderBy.Length > 0);
+        return new WindowBody(partitionBy, orderBy, frame);
+    }
 
-        return context.Token is not Operator { Character: ')' }
-            ? throw SimulatedSqlException.SyntaxErrorNear(context)
-            : Register(context, new WindowExpression(WindowKind.Aggregate, partitionBy, orderBy, aggregate, frame: frame));
+    /// <summary>
+    /// Patches a spec-less <c>OVER w</c> window with its resolved named-window
+    /// definition.
+    /// </summary>
+    public void ApplyNamedWindow(WindowBody body)
+    {
+        this.PartitionBy = body.PartitionBy;
+        this.OrderBy = body.OrderBy;
+        this.Frame = body.Frame;
     }
 
     /// <summary>

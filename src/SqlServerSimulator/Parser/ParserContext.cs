@@ -133,6 +133,24 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public List<Expressions.WindowExpression>? WindowCollector;
 
     /// <summary>
+    /// Named-window definitions from a trailing <c>WINDOW w AS (…)</c> clause,
+    /// keyed by window name. Populated when the clause is parsed (after HAVING);
+    /// consumed to resolve bare <c>OVER w</c> references. Query-block scoped in
+    /// practice: resolved and cleared at the block's projection build. (A
+    /// WINDOW clause nested in a subquery of the same statement is a known
+    /// limitation of the shared context list.)
+    /// </summary>
+    public readonly Dictionary<string, Expressions.WindowExpression.WindowBody> NamedWindowDefinitions = [];
+
+    /// <summary>
+    /// Bare <c>OVER w</c> references awaiting resolution against
+    /// <see cref="NamedWindowDefinitions"/> — the definition parses after the
+    /// projection that references it, so the window is registered spec-less and
+    /// patched once the WINDOW clause is read.
+    /// </summary>
+    public readonly List<(Expressions.WindowExpression Window, string Name)> PendingNamedWindows = [];
+
+    /// <summary>
     /// When false, registering a <see cref="Expressions.WindowExpression"/>
     /// raises Msg 4108 (`"Windowed functions can only appear in the SELECT
     /// or ORDER BY clauses."`). Default true; the Selection parser flips it

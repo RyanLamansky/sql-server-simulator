@@ -168,6 +168,18 @@ partial class Simulation
                 throw SimulatedSqlException.IndexAlreadyExists(indexName, qualifiedTableName);
         }
 
+        // A table can carry at most one clustered index — a clustered PK/UQ
+        // constraint or a prior CREATE CLUSTERED INDEX. Msg 1902 names the
+        // existing one (a default PK is clustered).
+        if (isClustered)
+        {
+            var existingClustered =
+                table.KeyConstraints.FirstOrDefault(k => k.IsClustered)?.Name
+                ?? table.Indexes.FirstOrDefault(ix => ix.IsClustered)?.Name;
+            if (existingClustered is not null)
+                throw SimulatedSqlException.MoreThanOneClusteredIndex(table.Name, existingClustered);
+        }
+
         var resolvedKeyColumns = new IndexKeyColumn[keyColumns.Count];
         for (var i = 0; i < keyColumns.Count; i++)
         {

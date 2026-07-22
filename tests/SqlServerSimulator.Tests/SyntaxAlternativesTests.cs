@@ -196,4 +196,146 @@ public sealed class SyntaxAlternativesTests
     [TestMethod]
     public void GeneratedAlwaysAsIdentity_RaisesMsg156()
         => _ = new Simulation().AssertSqlError("create table zz (id int generated always as identity)", 156);
+
+    // ----- DECLARE ending a batch (no initializer) -----
+
+    [TestMethod]
+    public void Declare_BareTypeAtEndOfBatch_Succeeds()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("declare @x int; select @x"));
+
+    [TestMethod]
+    public void Declare_AsKeywordAtEndOfBatch_Succeeds()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("declare @x as int; select @x"));
+
+    [TestMethod]
+    public void Declare_SizedTypeAtEndOfBatch_Succeeds()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("declare @x varchar(20); select @x"));
+
+    // ----- Bucket A: TOP n PERCENT / WITH TIES -----
+
+    private const string ThreeRowFixture =
+        "create table t (id int not null primary key, a int); insert t values (1,10),(2,30),(3,50);";
+
+    [TestMethod]
+    public void TopPercent_TenPercentOfThree_ReturnsOneRow()
+        => AreEqual(1, new Simulation().ExecuteScalar(
+            ThreeRowFixture + "select count(*) from (select top 10 percent id from t) z"));
+
+    [TestMethod]
+    public void TopPercent_ThirtyFourPercentOfThree_CeilsToTwoRows()
+        => AreEqual(2, new Simulation().ExecuteScalar(
+            ThreeRowFixture + "select count(*) from (select top 34 percent id from t) z"));
+
+    [TestMethod]
+    public void TopPercent_ZeroPercent_ReturnsNoRows()
+        => AreEqual(0, new Simulation().ExecuteScalar(
+            ThreeRowFixture + "select count(*) from (select top 0 percent id from t) z"));
+
+    [TestMethod]
+    public void TopPercent_OverHundred_RaisesMsg1031()
+        => _ = new Simulation().AssertSqlError(ThreeRowFixture + "select top 150 percent id from t", 1031);
+
+    [TestMethod]
+    public void TopWithTies_IncludesTiedBoundaryRows()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(
+            "create table t (id int not null primary key, a int); insert t values (1,10),(2,10),(3,50);");
+        // TOP 1 WITH TIES ORDER BY a — rows 1 and 2 both tie at a = 10.
+        AreEqual(2, sim.ExecuteScalar("select count(*) from (select top 1 with ties id from t order by a) z"));
+    }
+
+    [TestMethod]
+    public void TopWithTies_WithoutOrderBy_RaisesMsg1062()
+        => _ = new Simulation().AssertSqlError(ThreeRowFixture + "select top 2 with ties id from t", 1062);
+
+    // ----- Bucket A: WINDOW named-window clause (SQL Server 2022+) -----
+
+    [TestMethod]
+    public void NamedWindow_OverW_ResolvesToRunningSum()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(ThreeRowFixture);
+        // SUM(a) OVER (ORDER BY id) — running total: 10, 40, 90.
+        AreEqual(90, sim.ExecuteScalar(
+            "select max(s) from (select sum(a) over w as s from t window w as (order by id)) z"));
+    }
+
+    [TestMethod]
+    public void NamedWindow_Undefined_RaisesMsg5362()
+        => _ = new Simulation().AssertSqlError(ThreeRowFixture + "select sum(a) over w from t", 5362);
+
+    /// <summary>
+    /// WINDOW is not reserved: it stays a valid identifier outside the clause.
+    /// </summary>
+    [TestMethod]
+    public void Window_IsContextual_UsableAsColumnName()
+        => AreEqual(1, new Simulation().ExecuteScalar("select window from (select 1 as window) z"));
+
+    [TestMethod]
+    public void Window_IsContextual_UsableAsTableAlias()
+        => AreEqual(3, new Simulation().ExecuteScalar(ThreeRowFixture + "select count(*) from t window"));
+
+    // ----- Bucket B: aggregate FILTER clause is unsupported (Msg 156) -----
+
+    [TestMethod]
+    public void AggregateFilterClause_RaisesMsg156()
+        => _ = new Simulation().AssertSqlError(ThreeRowFixture + "select count(*) filter (where a > 0) over () from t", 156);
+
+    // ----- Bucket A: TABLESAMPLE (approximate: returns all rows) -----
+
+    [TestMethod]
+    public void TableSample_Percent_Accepted()
+        => AreEqual(3, new Simulation().ExecuteScalar(ThreeRowFixture + "select count(*) from t tablesample (50 percent)"));
+
+    [TestMethod]
+    public void TableSample_SystemRowsRepeatable_Accepted()
+        => AreEqual(3, new Simulation().ExecuteScalar(
+            ThreeRowFixture + "select count(*) from t tablesample system (2 rows) repeatable (5)"));
+
+    // ----- Bucket A: ODBC escape sequences -----
+
+    [TestMethod]
+    public void OdbcDateEscape_YieldsDatetimeMidnight()
+        => AreEqual("2020-01-01 00:00:00.000", new Simulation().ExecuteScalar("select convert(varchar(30), {d '2020-01-01'}, 121)"));
+
+    [TestMethod]
+    public void OdbcTimestampEscape_YieldsDatetime()
+        => AreEqual("2020-01-01 12:00:00.000", new Simulation().ExecuteScalar("select convert(varchar(30), {ts '2020-01-01 12:00:00'}, 121)"));
+
+    /// <summary>
+    /// The {t} escape resolves to today's date at the given time (matching
+    /// SQL Server); assert the time portion and the date-is-today invariant.
+    /// </summary>
+    [TestMethod]
+    public void OdbcTimeEscape_UsesCurrentDate()
+        => AreEqual("12:00:00", new Simulation().ExecuteScalar("select convert(varchar(8), cast({t '12:00:00'} as time), 108)"));
+
+    [TestMethod]
+    public void OdbcTimeEscape_DateIsToday()
+        => AreEqual(0, new Simulation().ExecuteScalar("select datediff(day, cast({t '12:00:00'} as date), cast(getdate() as date))"));
+
+    [TestMethod]
+    public void OdbcGuidEscape_YieldsUniqueIdentifier()
+        => AreEqual("6F9619FF-8B86-D011-B42D-00C04FC964FF", new Simulation().ExecuteScalar("select cast({guid '6F9619FF-8B86-D011-B42D-00C04FC964FF'} as varchar(50))"));
+
+    [TestMethod]
+    public void OdbcFnUcase_MapsToUpper()
+        => AreEqual("ABC", new Simulation().ExecuteScalar("select {fn UCASE('abc')}"));
+
+    [TestMethod]
+    public void OdbcFnLcase_MapsToLower()
+        => AreEqual("abc", new Simulation().ExecuteScalar("select {fn LCASE('ABC')}"));
+
+    [TestMethod]
+    public void OdbcFnLength_MapsToLen()
+        => AreEqual(3, new Simulation().ExecuteScalar("select {fn LENGTH('abc')}"));
+
+    [TestMethod]
+    public void OdbcFnConcat_PassesThroughToTSqlConcat()
+        => AreEqual("ab", new Simulation().ExecuteScalar("select {fn CONCAT('a','b')}"));
+
+    [TestMethod]
+    public void OdbcFnNativeName_PassesThrough()
+        => AreEqual(5, new Simulation().ExecuteScalar("select {fn ABS(-5)}"));
 }

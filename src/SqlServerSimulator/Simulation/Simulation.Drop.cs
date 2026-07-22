@@ -497,21 +497,49 @@ partial class Simulation
 
         while (true)
         {
-            if (context.Token is not Name)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            var indexName = ((Name)context.Token).Value;
-            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextRequired();
-            var tableName = BatchContext.ParseObjectName(context);
+            var firstName = BatchContext.ParseObjectName(context);
+            context.MoveNextOptional();
+            string indexName;
+            MultiPartName tableName;
+            if (context.Token is ReservedKeyword { Keyword: Keyword.On })
+            {
+                // Standard `index_name ON table` form.
+                indexName = firstName.Leaf;
+                context.MoveNextRequired();
+                tableName = BatchContext.ParseObjectName(context);
+                context.MoveNextOptional();
+            }
+            else
+            {
+                // Deprecated `table.index` (also `schema.table.index`) form,
+                // accepted by real SQL Server: the rightmost segment names the
+                // index, the remaining left segments name the table. A missing
+                // index still raises Msg 3701 through DropOneIndex.
+                if (firstName.Count < 2)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                indexName = firstName.Leaf;
+                tableName = WithoutLeaf(firstName);
+            }
             DropOneIndex(context, indexName, tableName, ifExists);
 
-            context.MoveNextOptional();
             if (context.Token is not Operator { Character: ',' })
                 break;
             context.MoveNextRequired();
         }
         return true;
+    }
+
+    /// <summary>
+    /// Builds the table-name portion of a deprecated <c>DROP INDEX
+    /// table.index</c> reference by dropping the rightmost (index-name)
+    /// segment.
+    /// </summary>
+    private static MultiPartName WithoutLeaf(MultiPartName name)
+    {
+        var result = new MultiPartName(name[0]);
+        for (var i = 1; i < name.Count - 1; i++)
+            result = result.WithAddedPart(name[i]);
+        return result;
     }
 
     /// <summary>

@@ -103,6 +103,21 @@ partial class SimulatedSqlException
         new("A TOP or FETCH clause contains an invalid value.", 1014, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 1062 — <c>TOP N WITH TIES</c> used without a
+    /// corresponding ORDER BY clause. Wording verbatim.
+    /// </summary>
+    internal static SimulatedSqlException TopWithTiesRequiresOrderBy() =>
+        new("The TOP N WITH TIES clause is not allowed without a corresponding ORDER BY clause.", 1062, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 5362 — a bare <c>OVER w</c> reference named a
+    /// window with no matching <c>WINDOW w AS (…)</c> definition. Wording
+    /// verbatim (SQL Server 2022+), Level 15 State 3.
+    /// </summary>
+    internal static SimulatedSqlException WindowIsUndefined(string windowName) =>
+        new($"Window '{windowName}' is undefined.", 5362, 15, 3);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 153 — fired when a FETCH clause appears
     /// without a preceding OFFSET (FETCH alone is invalid; OFFSET must
     /// always come first). Wording verbatim from the probed server.

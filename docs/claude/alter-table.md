@@ -28,8 +28,10 @@ FOREIGN KEY (col [, ...]) REFERENCES parent [(col [, ...])]
             [ON DELETE NO ACTION | CASCADE | SET NULL | SET DEFAULT]
             [ON UPDATE NO ACTION | CASCADE | SET NULL | SET DEFAULT]
 CHECK (predicate)
-DEFAULT (expression) FOR column
+DEFAULT expression FOR column        -- value parentheses optional
 ```
+
+The DEFAULT value's parentheses are optional (probe-confirmed): both `ADD CONSTRAINT df DEFAULT (0) FOR b` and the bare `ADD CONSTRAINT df DEFAULT 0 FOR b` are accepted, bind the default to the column, and store an equivalent parenthesized definition; inserts that omit the column pick it up.
 
 Single constraint per `ADD` — comma-separated multi-constraint ADD raises `NotSupportedException`.
 Anonymous ADD (no `CONSTRAINT name`) auto-generates a name with the same FNV-1a-based scheme as CREATE TABLE inline: `PK__<t8>__<hex>` / `UQ__<t8>__<hex>` / `FK__<t8>__<col8>__<hex>` / `CK__<t8>__<hex>` / `DF__<t8>__<col8>__<hex>`.

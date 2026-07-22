@@ -31,7 +31,7 @@ internal sealed partial class Selection
         string[] outputColumnNames,
         List<OrderBySpec> orderBy,
         bool distinct,
-        int? topCount,
+        TopSpec top,
         int? offsetCount,
         int? fetchCount,
         List<WindowExpression> windows,
@@ -566,10 +566,12 @@ internal sealed partial class Selection
         if (orderBy.Count > 0)
             materialized.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
 
+        var cap = ComputeTopCap(materialized, item => item.Keys, orderBy, top, fetchCount);
+
         IEnumerable<(SqlValue[] Projected, SqlValue[] Keys)> windowed = materialized;
         if (offsetCount is { } offset && offset > 0)
             windowed = windowed.Skip(offset);
-        if ((topCount ?? fetchCount) is { } limit)
+        if (cap is { } limit)
             windowed = windowed.Take(limit);
 
         foreach (var (projected, _) in windowed)

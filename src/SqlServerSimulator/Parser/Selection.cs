@@ -596,6 +596,61 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Resolves a <c>TOP (n) PERCENT</c> value: numeric, coerced to float and
+    /// validated to <c>[0, 100]</c> (Msg 1031; NULL → Msg 1014). Returns the
+    /// percentage; the row cap (<c>ceil(count × pct / 100)</c>) is applied once
+    /// the buffered rowcount is known. Mirrors <see cref="ResolveDmlTopCap"/>'s
+    /// percent branch.
+    /// </summary>
+    private static double ResolveTopPercentValue(Expression expression, BatchContext batch)
+    {
+        var resolved = expression.Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
+        var pct = resolved.IsNull
+            ? throw SimulatedSqlException.TopClauseInvalidValue()
+            : resolved.CoerceTo(SqlType.Float).AsDouble;
+        return pct is < 0 or > 100
+            ? throw SimulatedSqlException.TopPercentOutOfRange()
+            : pct;
+    }
+
+    /// <summary>
+    /// The resolved SELECT <c>TOP</c> row cap: an integer count, a percentage
+    /// (<see cref="Percent"/> non-null), and whether <c>WITH TIES</c> extends
+    /// the cap to include rows tying the boundary row's ORDER BY key. Built
+    /// per execution (the count/percent expression may carry variables) and
+    /// applied by the buffered projection paths.
+    /// </summary>
+    private readonly struct TopSpec(int? count, double? percent, bool withTies)
+    {
+        public readonly int? Count = count;
+        public readonly double? Percent = percent;
+        public readonly bool WithTies = withTies;
+
+        /// <summary>True when a PERCENT or WITH TIES cap needs the buffered path.</summary>
+        public bool RequiresBuffering => this.Percent is not null || this.WithTies;
+    }
+
+    /// <summary>
+    /// Computes the effective row cap for a buffered, ORDER-BY-sorted result,
+    /// honoring <c>TOP n</c>, <c>TOP n PERCENT</c> (ceil of the total count),
+    /// and <c>WITH TIES</c> (extends the cap while the ORDER BY keys equal the
+    /// boundary row's). Returns <c>null</c> for "no cap" — when neither TOP nor
+    /// <paramref name="fetchCount"/> applies.
+    /// </summary>
+    private static int? ComputeTopCap<T>(List<T> rows, Func<T, SqlValue[]> keysOf, List<OrderBySpec> orderBy, TopSpec top, int? fetchCount)
+    {
+        var cap = top.Percent is { } pct
+            ? (int)Math.Ceiling(rows.Count * pct / 100.0)
+            : top.Count ?? fetchCount;
+        if (cap is not { } c || !top.WithTies || orderBy.Count == 0 || c <= 0 || c >= rows.Count)
+            return cap;
+        var boundary = keysOf(rows[c - 1]);
+        while (c < rows.Count && CompareOrderKeys(keysOf(rows[c]), boundary, orderBy) == 0)
+            c++;
+        return c;
+    }
+
+    /// <summary>
     /// A parsed <c>TOP (expr) [PERCENT]</c> limit on an UPDATE / DELETE /
     /// INSERT statement. Unlike SELECT's <c>TOP</c>, the DML grammar requires
     /// the parentheses — the legacy bare form (<c>UPDATE TOP 2 …</c>) is a
@@ -668,6 +723,8 @@ internal sealed partial class Selection
     {
         var distinct = false;
         Expression? topExpression = null;
+        var topPercent = false;
+        var topWithTies = false;
 
         var firstToken = context.GetNextRequired();
 
@@ -696,7 +753,31 @@ internal sealed partial class Selection
             // swallowing the star and failing near the next token; ParsePrimary
             // stops before any binary operator, leaving `*` for the select list.
             topExpression = Expression.ParsePrimary(context.MoveNextRequiredReturnSelf());
-            _ = ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch);
+            // `TOP n PERCENT` — cap becomes ceil(n% × rowcount). PERCENT is a
+            // reserved keyword.
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Percent })
+            {
+                topPercent = true;
+                context.MoveNextRequired();
+            }
+            // `TOP n WITH TIES` — includes rows tying the last ORDER BY value.
+            // TIES is a contextual identifier (SQL Server doesn't reserve it).
+            if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+            {
+                if (context.GetNextRequired() is not Name tiesToken
+                    || !context.Batch.CurrentDatabase.Collation.Equals(tiesToken.Value, "TIES"))
+                {
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                }
+                topWithTies = true;
+                context.MoveNextRequired();
+            }
+            // Parse-time validation of the count / percent literal, mirroring
+            // SQL Server's compile-time rejection.
+            if (topPercent)
+                _ = ResolveTopPercentValue(topExpression, context.Batch);
+            else
+                _ = ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch);
         }
 
         List<Expression> expressions = [];
@@ -908,7 +989,7 @@ internal sealed partial class Selection
                     if (topExpression is not null && fromClause.OffsetExpression is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, sources);
-                    return BuildSqlProjection(context.Batch, [.. sources], [.. joins], expressions, fromClause, distinct, topExpression, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink);
+                    return BuildSqlProjection(context.Batch, [.. sources], [.. joins], expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink);
 
                 // SELECT projection INTO target [FROM ...] — captures the
                 // destination table name. Real SQL Server requires every
@@ -963,11 +1044,17 @@ internal sealed partial class Selection
 
         if (topExpression is not null && fromClause.OffsetExpression is not null)
             throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
+        if (topWithTies && fromClause.OrderBy.Count == 0)
+            throw SimulatedSqlException.TopWithTiesRequiresOrderBy();
         // The FROM-less path bakes its projection values at parse time and
         // never plan-caches (BuildSynthesizedSqlRow disqualifies the batch),
         // so its counts resolve here once, exactly as its projection does.
+        // The synthesized shape yields at most one row, so PERCENT collapses to
+        // "1 row when pct > 0, else none".
         return BuildSynthesizedSqlRow(context.Batch, expressions, fromClause.Excluders, fromClause.OrderBy,
-            ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch),
+            topPercent
+                ? (topExpression is not null && ResolveTopPercentValue(topExpression, context.Batch) > 0 ? 1 : 0)
+                : ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch),
             ResolveRowCountLimit(fromClause.OffsetExpression, RowLimitKind.Offset, context.Batch),
             ResolveRowCountLimit(fromClause.FetchExpression, RowLimitKind.Fetch, context.Batch),
             ResolveAssignmentMode(expressions), intoTarget);
@@ -1707,6 +1794,7 @@ internal sealed partial class Selection
                 var heapAlias = temporalRowSource is null
                     ? ConsumeOptionalAlias(context)
                     : ConsumeOptionalAliasAtCurrent(context);
+                ParseOptionalTableSample(context);
                 var heapHints = ParseOptionalTableHints(context);
                 ValidateIndexHintArguments(context.Batch.CurrentDatabase.Collation, heapHints, heapTable, $"{objectName.ImmediateQualifier ?? Database.DefaultSchemaName}.{heapTable.Name}");
                 // Phase 1b: acquire table-level IS/IX/S/X (based on hints +
@@ -2129,8 +2217,9 @@ internal sealed partial class Selection
             return alias;
         }
         // Bare-Name alias form (without the AS keyword): "FROM t a JOIN ..."
-        // SQL Server accepts this as an alias.
-        if (nextToken is Name aliasName)
+        // SQL Server accepts this as an alias — except a `WINDOW <name> AS (`
+        // clause head, which is not an alias (WINDOW is otherwise a valid alias).
+        if (nextToken is Name aliasName && !IsWindowClauseAhead(context))
         {
             context.MoveNextOptional();
             return aliasName.Value;
@@ -2154,7 +2243,7 @@ internal sealed partial class Selection
             context.MoveNextOptional();
             return alias;
         }
-        if (context.Token is Name aliasName)
+        if (context.Token is Name aliasName && !IsWindowClauseAhead(context))
         {
             context.MoveNextOptional();
             return aliasName.Value;
@@ -2230,6 +2319,14 @@ internal sealed partial class Selection
             context.RejectNextValueFor = savedRejectNextValueFor;
         }
 
+        // Optional trailing WINDOW clause (SQL Server 2022+), between HAVING and
+        // ORDER BY: `WINDOW name AS (<over-body>) [, name AS (…)]*`. Defines
+        // named windows that bare `OVER w` projection references resolve to.
+        // WINDOW is contextual (usable as an identifier / table alias), so it is
+        // recognized here only in the clause shape (`WINDOW <name> AS (`).
+        if (IsWindowClauseAhead(context))
+            ParseWindowClause(context);
+
         // Skip ORDER BY when this branch is part of a set-op chain — the
         // top-level driver consumes it after combining branches and applies
         // the sort to the combined result. Per SQL Server, per-branch
@@ -2251,6 +2348,76 @@ internal sealed partial class Selection
             }
             ConsumeOffsetFetch(context, fromClause);
         }
+
+        // All `OVER w` references (projection and ORDER BY) and the WINDOW
+        // definitions are now parsed — bind each pending reference.
+        ResolvePendingNamedWindows(context);
+    }
+
+    /// <summary>
+    /// Returns true when the cursor sits on a <c>WINDOW &lt;name&gt; AS (</c>
+    /// clause head (SQL Server 2022+). WINDOW is contextual — it may equally be
+    /// a table alias or column name — so it counts as the clause only in that
+    /// exact shape. Leaves the cursor unchanged.
+    /// </summary>
+    private static bool IsWindowClauseAhead(ParserContext context)
+    {
+        if (context.Token is not Name windowToken
+            || !context.Batch.CurrentDatabase.Collation.Equals(windowToken.Value, "WINDOW"))
+        {
+            return false;
+        }
+        var checkpoint = context.SaveCheckpoint();
+        var nameToken = context.GetNextOptional();
+        var asToken = context.GetNextOptional();
+        var parenToken = context.GetNextOptional();
+        context.RestoreCheckpoint(checkpoint);
+        return nameToken is Name
+            && asToken is ReservedKeyword { Keyword: Keyword.As }
+            && parenToken is Operator { Character: '(' };
+    }
+
+    /// <summary>
+    /// Parses a <c>WINDOW name AS (&lt;over-body&gt;) [, …]</c> clause (cursor
+    /// on the WINDOW identifier) into <see cref="ParserContext.NamedWindowDefinitions"/>.
+    /// Leaves the cursor on the next un-consumed lookahead token.
+    /// </summary>
+    private static void ParseWindowClause(ParserContext context)
+    {
+        do
+        {
+            if (context.GetNextRequired() is not Name nameToken)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.GetNextRequired() is not Operator { Character: '(' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            var body = Expressions.WindowExpression.ParseWindowBody(context);
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.NamedWindowDefinitions[nameToken.Value] = body;
+            context.MoveNextOptional();
+        } while (context.Token is Operator { Character: ',' });
+    }
+
+    /// <summary>
+    /// Binds each pending bare <c>OVER w</c> reference to its named-window
+    /// definition, then clears the query-block's pending / definition state.
+    /// An unresolved name raises Msg 5362 ("Window 'w' is undefined.").
+    /// </summary>
+    private static void ResolvePendingNamedWindows(ParserContext context)
+    {
+        if (context.PendingNamedWindows.Count == 0)
+            return;
+        foreach (var (window, name) in context.PendingNamedWindows)
+        {
+            if (!context.NamedWindowDefinitions.TryGetValue(name, out var body))
+                throw SimulatedSqlException.WindowIsUndefined(name);
+            window.ApplyNamedWindow(body);
+        }
+        context.PendingNamedWindows.Clear();
+        context.NamedWindowDefinitions.Clear();
     }
 
     /// <summary>

@@ -951,6 +951,16 @@ partial class SimulatedSqlException
         new($"The operation failed because an index or statistics with name '{indexName}' already exists on table '{qualifiedTableName}'.", 1913, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 1902: a <c>CREATE CLUSTERED INDEX</c> targeted a
+    /// table that already carries a clustered index (a clustered PRIMARY KEY /
+    /// UNIQUE constraint or a prior clustered index). Probe-confirmed verbatim
+    /// against SQL Server 2025 — unqualified table name, names the existing
+    /// clustered index, Level 16 State 3.
+    /// </summary>
+    internal static SimulatedSqlException MoreThanOneClusteredIndex(string tableName, string existingClusteredName) =>
+        new($"Cannot create more than one clustered index on table '{tableName}'. Drop the existing clustered index '{existingClusteredName}' before creating another.", 1902, 16, 3);
+
+    /// <summary>
     /// Mimics SQL Server error 1088: <c>CREATE INDEX</c> (or any
     /// catalog-scoped reference) named a target object that doesn't exist.
     /// Distinct from Msg 208 (which surfaces from DML) — Msg 1088 is the

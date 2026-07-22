@@ -59,6 +59,26 @@
 - TOP + OFFSET → **Msg 10741**.
 - Counts resolve at parse time (constants, parameters, arithmetic).
 
+## `TOP n [PERCENT] [WITH TIES]`
+- `TOP n` — the plain integer row cap; streams when no ORDER BY / DISTINCT, else applied after the buffered sort.
+- `TOP n PERCENT` — the cap is `ceil(rowcount × n / 100)` (probe-confirmed against SQL Server 2025).
+  The percent value must resolve to a numeric in `[0, 100]` — outside → **Msg 1031**, NULL → **Msg 1014**.
+  PERCENT forces the buffered path (the total rowcount must be known).
+- `TOP n WITH TIES` — after the cap, additionally emits every following row whose ORDER BY key equals the boundary row's.
+  Requires an ORDER BY (else **Msg 1062**); also forces the buffered path.
+- Both flags ride the existing TOP parse (`topPercent` / `topWithTies` on the projection build) and are honored by the buffered, windowed, and aggregate projection paths via `ComputeTopCap`.
+
+## `WINDOW w AS (…)` named-window clause (SQL Server 2022+)
+- A trailing `WINDOW name AS (<over-body>) [, …]` clause (between HAVING and ORDER BY) defines named windows a bare `OVER w` resolves to.
+- `OVER w` registers spec-less at parse (the definition follows the projection) and is patched once the WINDOW clause is read; an undefined name → **Msg 5362**.
+- WINDOW is **contextual** (still a valid identifier / table alias) — recognized as the clause only in the `WINDOW <name> AS (` shape via lookahead.
+- **Deferred**: the partial-inheritance form `OVER (w ORDER BY …)` (real SQL Server accepts it) is not modeled — it stays Msg 102, as does real's own rejection of empty `OVER (w)`.
+  Named windows are resolved per top-level query block; a WINDOW clause nested in a subquery of the same statement is a known limitation of the shared parse-context list.
+
+## `TABLESAMPLE`
+- `TABLESAMPLE [SYSTEM] (n PERCENT | n ROWS) [REPEATABLE (seed)]` on a FROM source parses and is **discarded** — the query returns every row.
+- SQL Server's sample is nondeterministic (any subset is a valid wire result), so returning all rows is a documented deterministic approximation; the win is accepting the syntax.
+
 ## Result drain / ORDER BY representation
 The FROM-bearing SELECT projection paths — streaming, buffered (ORDER BY / DISTINCT), windowed, and aggregate — all yield already-projected `SqlValue[]` rows, so `SimulatedSqlResultSet` serves the reader and TDS cursors directly with no encode-then-re-decode round-trip (see the `SimulatedSqlResultSet` doc + [`data-reader.md`](data-reader.md)).
 **ORDER BY on a single SELECT sorts those projected `SqlValue[]` rows** (`ProjectBuffered.materialized.Sort`), so ordered drains ride the same decoded-once fast path as unordered ones; the only ordered-vs-unordered cost is the inherent buffer + per-row key computation + `List.Sort`, not a decode round-trip, and peak retained memory is effectively unchanged (measured within 0.2% on a 150k-row wide drain).

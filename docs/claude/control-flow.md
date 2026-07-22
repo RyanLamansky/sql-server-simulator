@@ -16,6 +16,7 @@ Assignment coercion routes through `Cast.ApplyCoercion` so the slot's declared t
 
 **Errors**: Msg 137 use-before-declare (existing factory); Msg 134 duplicate DECLARE (also fires for parameter+DECLARE collision); Msg 141 mixed assignment + retrieval; standard CAST errors propagate from coercion (Msg 245, Msg 8115, etc.).
 `DECLARE @v INT NOT NULL` and `DECLARE @v INT = DEFAULT` raise Msg 102 / 156 respectively (DECLARE doesn't accept column-style constraints — falls out of grammar mismatch).
+The optional `AS` before the type (`DECLARE @v AS INT`) is accepted, and an initializer-less DECLARE may end the batch (`DECLARE @x int`, `DECLARE @x varchar(20)`) — the type-spec parse tolerates end-of-input rather than requiring a following token.
 
 **Output-parameter write-back**: at end of batch, the dispatch walks the parameter list and copies each `InputOutput` / `Output` direction parameter's final slot value back to `DbParameter.Value`.
 Mirrors SqlClient's round-trip behavior for hand-rolled scripts that mutate parameters.
