@@ -52,6 +52,15 @@ internal sealed partial class Selection
     public readonly string[] ColumnNames;
 
     /// <summary>
+    /// The exposed name (alias, else table name) of the single FROM source,
+    /// captured for <c>FOR XML AUTO</c>, which names each row element after
+    /// its owning table. Null when the query has no single named source
+    /// (set-op chains, join shapes); <c>FOR XML AUTO</c> over such a shape
+    /// falls back to the multi-source rejection.
+    /// </summary>
+    internal string? AutoElementName;
+
+    /// <summary>
     /// True when this plan internally bakes an ORDER BY clause into its
     /// row pipeline. Set-op chaining inspects this on the first branch:
     /// per SQL Server, a per-branch ORDER BY is illegal when a set
@@ -398,6 +407,11 @@ internal sealed partial class Selection
         // / FOR BROWSE do (after ORDER BY / OFFSET-FETCH, before OPTION); a
         // non-JSON FOR clause is left in place for the downstream Msg 102.
         combined = ParseOptionalForJson(context, combined);
+
+        // Trailing FOR XML { RAW | AUTO | PATH } [, ELEMENTS …] [, ROOT …]:
+        // wraps the result in a single-column xml serializer. Sits in the same
+        // slot; a non-XML FOR clause is left in place for the downstream Msg 102.
+        combined = ParseOptionalForXml(context, combined);
 
         // OPTION (hint [, …]) — statement-level hint clause. Parsed as a
         // closed-list per Selection.Hints.cs; MAXRECURSION applies to in-

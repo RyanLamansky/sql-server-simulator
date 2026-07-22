@@ -53,13 +53,15 @@ Two deferrals within it, both low-demand:
 - **AUTO join-nesting** (nesting a secondary table as a sub-array) — raises `NotSupportedException`; PATH covers the same cases.
 - **One-row chunking** — real chunks the string across ~2033-char rows; the simulator returns it whole.
 
-Still not modeled: the **XML** serialization clause.
+**`FOR XML` ships** — RAW / AUTO (flat) / PATH (fully: `@attr` / element / `parent/child` nesting / `text()` / `data()` / unnamed-as-text / `PATH('')` row-tag omission / same-name concatenation), the `ELEMENTS [XSINIL|ABSENT]` and `ROOT[('name')]` options, the probed value-formatting (bit → `1`/`0`, scientific float, ISO dates, base64 binary, uppercase GUID) + position-dependent escaping table, NULL handling, empty-rowset → NULL, and Msg 6809 / 6864 / 6852 / 6861 / 6829 / 6830.
+See [`xml.md`](xml.md#for-xml-result-serialization).
 
-- **`FOR XML` (RAW / AUTO / PATH('elem') / EXPLICIT, `ELEMENTS`, `ROOT`)** — currently **Msg 102** at parse.
-  Serializes rows into an XML fragment; the shape depends on the mode.
-  A substantial serialization engine (an XML row-encoder with mode-specific nesting rules), not a syntax variant.
-  Plugs in as a post-projection `SELECT`-tail transform where FOR JSON already hooks (`Selection.ParseOptionalForJson` leaves a non-JSON `FOR` clause for the downstream Msg 102).
-  Weight the pick by real tooling demand: EF Core doesn't emit it, so demand is app-code-driven.
+Deferrals within it (each raises `NotSupportedException` naming the feature, or the noted Msg):
+- **EXPLICIT mode** — the universal-table format; complex, rarely hand-authored.
+- **`TYPE` option** — typed-xml node embedding (nested `(SELECT … FOR XML …, TYPE)` embeds as raw child nodes rather than escaped text); the untyped escaped-text nesting is real's default and ships.
+- **AUTO join-nesting** — nesting a secondary table under the first; PATH covers the same cases.
+- **`BINARY BASE64`/`HEX`, `XMLSCHEMA`, `WITH NAMESPACES`** options, and the exotic PATH node functions beyond `text()`/`data()` (`comment()`, `processing-instruction()`, `node()`, `*`, `@*`).
+- **One-row chunking** — real chunks the string across ~2033-char rows; the simulator returns it whole (shared with FOR JSON).
 
 ### Built-in functions
 

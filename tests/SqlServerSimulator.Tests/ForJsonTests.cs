@@ -209,10 +209,6 @@ public class ForJsonTests
         => _ = new Simulation().AssertSqlError(Fixture + "select id from t for json path, root('r'), without_array_wrapper", 13620);
 
     [TestMethod]
-    public void ForXml_StaysUnsupported_Msg102()
-        => _ = new Simulation().AssertSqlError(Fixture + "select id from t for xml path", 102);
-
-    [TestMethod]
     public void AutoJoinNesting_Deferred_Throws()
         => _ = Throws<NotSupportedException>(
             () => new Simulation().ExecuteScalar(Fixture + "select t.id, u.a from t join u on u.id=t.id for json auto"));

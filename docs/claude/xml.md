@@ -106,11 +106,54 @@ NULL argument → Msg 8116.
 The three-argument namespace-filtering form → `NotSupportedException`.
 DacFx's bacpac export calls this per user collection while scripting `sys.xml_schema_collections`.
 
+## FOR XML result serialization
+
+`Parser/Selection.ForXml.cs` — the trailing `FOR XML { RAW[('elem')] | AUTO | PATH[('row')] } [, ELEMENTS [XSINIL|ABSENT]] [, ROOT[('name')]]` clause, parsed in the same `SELECT`-tail slot as FOR JSON (`Selection.ParseOptionalForXml` runs right after `ParseOptionalForJson`; a non-XML `FOR` restores the cursor for the downstream Msg 102).
+Mirrors the FOR JSON shape: a trailing-clause parser + a `StringBuilder` serializer over `SqlValue` rows.
+The result is a single row, one column named `XML_F52E2B61-18A1-11d1-B105-00805F49916B`, typed `xml`.
+An **empty input rowset yields NULL** (zero result rows), matching real.
+Real chunks large XML across ~2033-char rows; the simulator returns the whole fragment in one row (documented approximation, shared with FOR JSON).
+
+### Modes
+
+- **RAW** — one `<row …/>` per row, attribute-centric by default; `RAW('elem')` renames the row element.
+  `RAW, ELEMENTS` switches to element-centric (`<row><col>v</col></row>`).
+  An unnamed column raises **Msg 6809**; a binary column raises **Msg 6829** (needs the unmodeled BINARY BASE64 option).
+- **AUTO** — flat single-source only: the row element is named after the table/alias (`<t id="1"/>`), attribute-centric or `ELEMENTS`; unnamed column → Msg 6809, binary column → **Msg 6830**.
+  Join-nesting (a secondary table nested under the first) raises `NotSupportedException` (use PATH).
+- **PATH** — always element-centric; the column alias drives node placement (compiled once into a shared per-row element template, `ForXmlElement`):
+  - `[@x]` → attribute `x` on the row element; `[name]` → child element; `[parent/child]` → nested elements at arbitrary depth (contiguous same-prefix steps share the parent).
+  - `[text()]` / an **unnamed** column → the row element's text content; `[data()]` → text content, but adjacent `data()` atomic values are space-separated (`10 30 50`) where `text()` concatenates (`123`).
+  - Consecutive same-name element columns concatenate their text into one element (`[x],[x]` → `<x>1020</x>`).
+  - `PATH('')` suppresses the row wrapper (bare elements at document level); an attribute column under `PATH('')` raises **Msg 6864**.
+  - An attribute column after a non-attribute sibling at the same level raises **Msg 6852**.
+
+### Options
+
+- `ELEMENTS` → element-centric (RAW/AUTO; a no-op on always-element-centric PATH).
+  `ELEMENTS XSINIL` → NULL columns emit `<col xsi:nil="true"/>` and the `xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"` declaration is hoisted to the `ROOT` element when present, else repeated on each top-level element (each row wrapper, or each bare element under `PATH('')`).
+  `ELEMENTS ABSENT` (default) → NULL elements omitted; NULL attributes are always omitted.
+- `ROOT` → wrap in `<root>…</root>` (default name `root`); `ROOT('rows')` renames; `ROOT('')` raises **Msg 6861**.
+
+### Value formatting + escaping (probe-confirmed, SQL Server 2025)
+
+Numeric/date formatting matches FOR JSON (scientific `float`/`real`, the all-zero-fraction drop) **except** `bit` → `1`/`0` (not `true`/`false`), `uniqueidentifier` uppercases, `binary`/`varbinary` base64-encodes (PATH only — RAW/AUTO raise 6829/6830), and values are XML-escaped rather than JSON-escaped.
+Escaping is position-dependent:
+
+| position | escaped |
+|---|---|
+| element text | `&`→`&amp;`, `<`→`&lt;`, `>`→`&gt;`, CR→`&#x0D;` (`"` and `'` stay literal) |
+| attribute value | the above plus `"`→`&quot;`, tab→`&#x09;`, LF→`&#x0A;` (`'` stays literal) |
+
+### Deferrals
+
+EXPLICIT mode, the `TYPE` option (typed-node embedding — the untyped escaped-text nesting is real's default and works), AUTO join-nesting, `BINARY BASE64`/`HEX` / `XMLSCHEMA` / `WITH NAMESPACES`, and PATH node functions beyond `text()`/`data()` (`comment()`, `processing-instruction()`, `node()`, `*`, `@*`) all raise `NotSupportedException` (or the noted Msg).
+See [`backlog.md`](backlog.md).
+
 ## Known gaps
 
 - **`.modify()`** XML-DML (`insert` / `replace value of` / `delete`) + its `UPDATE … SET` statement integration.
 - **XQuery features beyond the path subset** the evaluator models (FLWOR, comparison / boolean / arithmetic operators, value predicates like `[@x="1"]`, element constructors).
 - **XSD validation** against `xml(schema_collection)` bindings.
-- **`FOR XML`** query-output clause.
 - **`ALTER XML SCHEMA COLLECTION ADD`** — incremental schema additions.
 - **`SELECTIVE XML INDEX`** variant (SQL Server 2014+).
