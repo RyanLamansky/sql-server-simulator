@@ -218,7 +218,7 @@ Probed against SQL Server 2025 (2026-05-12).
   The optional `[@rc = ]` between EXEC and the proc name captures the return code into a caller variable — probe-confirmed position (NOT `@rc = EXEC ...` at statement start).
 - **Argument forms**: positional / named (`@p = value`) / mixed positional-then-named.
   Once any named arg appears, every following arg must also be named (Msg 119).
-  Each argument value must be a literal (numeric / string / NULL), an `@variable` (with optional `OUTPUT`/`OUT` suffix), or the `DEFAULT` keyword — probe-confirmed: arithmetic expressions like `EXEC p @x - 1` raise Msg 102 at parse.
+  Each argument value must be a literal (numeric / string / NULL), a **bare identifier** (unquoted or bracketed — a legacy T-SQL form SQL Server treats as a string constant of the identifier's verbatim, case-preserved text; how Alembic / SSMS pass `sp_rename`'s new-name argument, `EXEC sp_rename 'books.title', headline, 'COLUMN'`), an `@variable` (with optional `OUTPUT`/`OUT` suffix), or the `DEFAULT` keyword — probe-confirmed: arithmetic expressions like `EXEC p @x - 1` raise Msg 102 at parse.
 - **Unqualified names work**: `EXEC p1` resolves to `dbo.p1` (probe-confirmed; matches view-routing relaxation).
 - **EXEC missing proc** → **Msg 2812** (`"Could not find stored procedure 'X'."`) — distinct error from Msg 208 / 3701; State 62 verbatim.
 - **EXEC in expression position** (`SELECT EXEC p`) → Msg 156 via the standard non-statement-start path.

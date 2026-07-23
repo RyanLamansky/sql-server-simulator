@@ -355,6 +355,23 @@ Remaining quirk: a decimal-declared sequence's inner reports BaseType `numeric` 
     `@sp_name` / `@sp_owner` are LIKE patterns; rows sort by (`PROCEDURE_OWNER`, `PROCEDURE_NAME`).
     The simulator has no system-procedure catalog, so — unlike real, which also lists the ~1600 `sys` procs — only user procedures (each schema's `Procedures`) are projected.
   All three reachable unqualified or `sys.`-qualified from any current database.
+- **`sp_rename`** system procedure (`Simulation.Rename.cs`, dispatched like `sp_tables`): the object / column / index rename schema-migration tools (Alembic's `rename_table` / `alter_column`, SSMS) emit.
+  Signature `sp_rename @objname, @newname [, @objtype]`; positional and named (`@objname=` / `@newname=` / `@objtype=`) arguments both bind, reachable via `EXEC` **and** the name-form RPC (the RPC re-synthesizes an `EXEC`, so one dispatch arm serves both).
+  Mutates catalog state and buffers the sev-10 **Msg 15477** "Caution: Changing any part of an object name could break scripts and stored procedures." info message (delivered through the `InfoMessage` / PRINT path, never thrown); the proc returns 0.
+  All message wording / numbers / severities probe-confirmed against SQL Server 2025 (2026-07-23).
+  - **`@objtype` NULL / omitted** renames a table (or object): the resolved leaf moves within its `Schema.HeapTables` and `SchemaObject.Name` updates in place (object identity / `object_id` preserved, matching real).
+    A missing object → **Msg 15225** (`No item by the name of '<objname>' … given that @itemtype was input as '(null)'`); a `@newname` colliding anywhere in the shared object namespace → **Msg 15335** (`… already in use as a object name …` — the ungrammatical "a object" matched verbatim).
+  - **`@objtype` = COLUMN** (case-insensitive) renames a column of `[schema.]table.column`: `HeapColumn.Name` updates in place (storage is by ordinal — no row re-encode).
+    A duplicate column name → **Msg 15335** (kind `COLUMN`).
+  - **`@objtype` = INDEX** renames an index of `[schema.]table.index`: `Index.Name` updates in place (surfaces through `sys.indexes`).
+    A duplicate index name → **Msg 15335** (kind `INDEX`).
+  - A missing parent table or missing column / index (the COLUMN / INDEX paths) → **Msg 15248** (`Either the parameter @objname is ambiguous or the claimed @objtype (<type>) is wrong`).
+  - `@newname` is used **verbatim** as the new leaf — real does not parse it as a multi-part name.
+  - Every rename kind **bumps `Simulation.SchemaVersion`** so cached plans that resolved the old name re-parse.
+  - Any raised error is attributed to `sp_rename` (`ERROR_PROCEDURE()` / `SqlException.Procedure`).
+  - **Divergences.** Other `@objtype` values (USERDATATYPE / STATISTICS / DATABASE / …) raise `NotSupportedException` naming the unmodeled type — real distinguishes Msg 15248 (recognized-but-not-found) from Msg 15249 (unrecognized) there.
+    The rename mutates catalog state directly, not through the undo log, so a `ROLLBACK` does **not** revert it (real's sp_rename is transactional).
+    `#temp` tables aren't special-cased: their current-database resolution miss surfaces Msg 15225, which matches real (real also resolves `@objname` in the current database, so a bare `#t` isn't found).
 - **`SCHEMA_ID([name])`** scalar: no-arg returns `Database.DboSchemaId` (=1) — the simulator's "caller default schema" (no user model means dbo is universal).
   With an arg, returns the schema's id or NULL.
 - **Legacy SQL-Server-2000 compatibility views** (`BuiltInResources.LegacyCompat.cs`): `sysobjects` / `sysusers` and `sys.system_objects`, the surface SSMS's Database-Properties dialog reaches.

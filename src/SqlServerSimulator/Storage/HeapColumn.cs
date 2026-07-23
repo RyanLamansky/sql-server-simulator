@@ -19,7 +19,10 @@ namespace SqlServerSimulator.Storage;
 [DebuggerDisplay("{DebugDisplay(),nq}")]
 internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null, Expression? defaultExpression = null, Expression? computedExpression = null, bool isPersisted = false, GeneratedAlwaysAsRow generatedAs = GeneratedAlwaysAsRow.None, bool isHidden = false, string? collation = null, string? computedDefinition = null, bool isRowGuidCol = false)
 {
-    public readonly string Name = name;
+    // Mutable: EXEC sp_rename (COLUMN rename) reassigns the name in place. Storage
+    // is by ordinal, so no row re-encode is needed — but the rename path bumps the
+    // schema version so cached plans referencing the old name re-resolve.
+    public string Name = name;
 
     public readonly SqlType Type = type;
 

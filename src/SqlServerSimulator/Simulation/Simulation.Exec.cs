@@ -139,6 +139,7 @@ partial class Simulation
             "sp_getapplock" => InvokeSpGetAppLock(batch, returnCodeVar),
             "sp_pkeys" => InvokeSpPkeys(batch),
             "sp_releaseapplock" => InvokeSpReleaseAppLock(batch, returnCodeVar),
+            "sp_rename" => InvokeSpRename(batch),
             "sp_set_session_context" => InvokeSpSetSessionContext(batch),
             "sp_statistics_100" => InvokeSpStatistics100(batch),
             "sp_stored_procedures" => InvokeSpStoredProcedures(batch),
@@ -333,6 +334,16 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Null }:
                 if (negate) throw SimulatedSqlException.SyntaxErrorNear(context);
                 literalValue = SqlValue.Null(SqlType.Int32);
+                break;
+            // A bare identifier in EXEC argument position is a legacy T-SQL
+            // form: SQL Server treats it as a string constant of the
+            // identifier's verbatim (case-preserved) text. Alembic / SSMS emit
+            // sp_rename's new-name argument this way (`EXEC sp_rename
+            // 'books.title', headline, 'COLUMN'`). Probe-confirmed 2026-07-23.
+            case Name identifier when !negate:
+                literalValue = SqlValue.FromVarchar(
+                    VarcharSqlType.Get(identifier.Value.Length, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault),
+                    identifier.Value);
                 break;
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);

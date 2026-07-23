@@ -46,7 +46,9 @@ internal sealed class Index(
     BooleanExpression? filter,
     string? filterDefinition)
 {
-    public readonly string Name = name;
+    // Mutable: EXEC sp_rename (INDEX rename) reassigns the name in place; the
+    // index keeps its identity and surfaces the new name through sys.indexes.
+    public string Name = name;
 
     public readonly int ObjectId = objectId;
 

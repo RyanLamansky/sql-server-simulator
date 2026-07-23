@@ -1271,4 +1271,40 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException XmlSchemaCollectionNotInMetadata(string collectionName) =>
         new($"Collection specified does not exist in metadata : '{collectionName}'", 6314, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15225: <c>sp_rename</c> could not find the
+    /// object to rename (the table / object path, i.e. a NULL <c>@objtype</c>).
+    /// Severity 11, state 1, probe-confirmed wording against SQL Server 2025
+    /// (2026-07-23) — <paramref name="itemType"/> renders <c>(null)</c> when
+    /// <c>@objtype</c> was omitted, else the supplied type verbatim. Attributed
+    /// to <c>sp_rename</c> so <c>ERROR_PROCEDURE()</c> / <c>SqlException.Procedure</c>
+    /// match real.
+    /// </summary>
+    internal static SimulatedSqlException RenameItemNotFound(string objectName, string databaseName, string itemType) =>
+        RenameError($"No item by the name of '{objectName}' could be found in the current database '{databaseName}', given that @itemtype was input as '{itemType}'.", 15225);
+
+    /// <summary>
+    /// Mimics SQL Server error 15248: <c>sp_rename</c>'s <c>@objname</c> is
+    /// ambiguous or the supplied <c>@objtype</c> is wrong — the path real takes
+    /// when a COLUMN / INDEX target can't be resolved (missing parent table, or
+    /// no such column / index on an existing table). Severity 11, state 1,
+    /// probe-confirmed wording (SQL Server 2025, 2026-07-23).
+    /// </summary>
+    internal static SimulatedSqlException RenameAmbiguousOrWrongType(string objectType) =>
+        RenameError($"Either the parameter @objname is ambiguous or the claimed @objtype ({objectType}) is wrong.", 15248);
+
+    /// <summary>
+    /// Mimics SQL Server error 15335: <c>sp_rename</c>'s <c>@newname</c> already
+    /// exists — <paramref name="kind"/> is <c>COLUMN</c> / <c>INDEX</c> for those
+    /// paths and the ungrammatical <c>object</c> for the table / object path
+    /// (matched verbatim against real: "already in use as a object name").
+    /// Severity 11, state 1, probe-confirmed wording (SQL Server 2025,
+    /// 2026-07-23).
+    /// </summary>
+    internal static SimulatedSqlException RenameDuplicateName(string newName, string kind) =>
+        RenameError($"Error: The new name '{newName}' is already in use as a {kind} name and would cause a duplicate that is not permitted.", 15335);
+
+    private static SimulatedSqlException RenameError(string message, int number) =>
+        new(message, new SimulatedError(@class: 11, lineNumber: 0, message, number, procedure: "sp_rename", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 1));
 }

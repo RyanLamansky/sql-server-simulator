@@ -32,7 +32,11 @@ namespace SqlServerSimulator.Schemas;
 /// </remarks>
 internal abstract class SchemaObject(string name, int objectId, int schemaId, DateTime createDate)
 {
-    public readonly string Name = name;
+    // Mutable: EXEC sp_rename (table / object rename) reassigns the leaf name
+    // in place while keeping the object identity (and ObjectId) stable, matching
+    // SQL Server's rename-preserves-object_id semantic. Every other site treats
+    // it as effectively immutable.
+    public string Name = name;
     public readonly int ObjectId = objectId;
 
     /// <summary>

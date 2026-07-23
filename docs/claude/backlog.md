@@ -78,7 +78,7 @@ Blocked on a larger unmodeled parent feature (shipping a function here implies t
 - **Ad-hoc data sources** — OPENROWSET (file/bulk + provider rowsets); OPENDATASOURCE (the inline four-part-name form; `OPENQUERY` ships — see [`linked-servers.md`](linked-servers.md)); OPENXML (pre-`OPENJSON` XML rowset, still hit in legacy code).
   Probed 2026-07-21: real *parses* `OPENROWSET('MSDASQL', …)` then errors on disabled ad-hoc access (**Msg 7222**) and `OPENROWSET(BULK 'file', SINGLE_CLOB)` on the missing file (**Msg 4860**); the simulator doesn't parse the FROM-source form at all (Msg 102). Ad-hoc / external data access is a feature, not a syntax tweak — the parse-then-runtime-error shape depends on the whole external-data model.
 
-- **System stored procedures** (`sp_*` family) — `sp_help` / `sp_helptext` / `sp_columns` / `sp_tables` / `sp_pkeys` / `sp_rename` / etc.: formatted-metadata / management procs invoked via `EXEC sp_name`.
+- **System stored procedures** (`sp_*` family) — `sp_help` / `sp_helptext` / `sp_columns` / etc.: formatted-metadata / management procs invoked via `EXEC sp_name` (`sp_tables` / `sp_columns_100` / `sp_pkeys` / `sp_rename` ship — see [`catalog-views.md`](catalog-views.md)).
   Probed 2026-07-21: `EXEC sp_help 't'` runs on real (multi-result-set formatted output); the simulator has no such proc registered → **Msg 2812** ("Could not find stored procedure 'sp_help'.").
   A broad surface — each proc is its own result-shape contract over the catalog views. Ships piecemeal by popularity, not as a bundle.
 
