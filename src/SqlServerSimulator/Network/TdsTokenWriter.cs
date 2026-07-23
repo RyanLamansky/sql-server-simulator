@@ -241,23 +241,28 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     /// ENVCHANGE for transaction lifecycle: begin carries the new 8-byte
     /// transaction descriptor; commit and rollback carry empty values.
     /// </summary>
-    public void WriteEnvChangeTransaction(byte type, ulong newDescriptor)
+    public void WriteEnvChangeTransaction(byte type, ulong descriptor)
     {
+        // A transaction ENVCHANGE always carries the 8-byte descriptor: BEGIN
+        // in the new-value field (the transaction being opened), COMMIT /
+        // ROLLBACK in the old-value field (the one being ended) — matching real
+        // SQL Server byte-for-byte (captured 2026-07-23). The old stunted len-3
+        // commit / rollback form (no descriptor) desynced ODBC Driver 18's
+        // manual-commit mode, which pairs the descriptor across begin/end.
         this.WriteByte(Tds.TokenEnvChange);
+        this.WriteUInt16(1 + 1 + 8 + 1);
+        this.WriteByte(type);
         if (type == Tds.EnvBeginTransaction)
         {
-            this.WriteUInt16(1 + 1 + 8 + 1);
-            this.WriteByte(type);
             this.WriteByte(8);
-            this.WriteUInt64(newDescriptor);
+            this.WriteUInt64(descriptor);
             this.WriteByte(0);
         }
         else
         {
-            this.WriteUInt16(3);
-            this.WriteByte(type);
             this.WriteByte(0);
-            this.WriteByte(0);
+            this.WriteByte(8);
+            this.WriteUInt64(descriptor);
         }
     }
 

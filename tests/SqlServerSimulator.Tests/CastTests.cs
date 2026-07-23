@@ -23,6 +23,30 @@ public sealed class CastTests
         IsInstanceOfType<DBNull>(ExecuteScalar("select cast(null as int)"));
 
     [TestMethod]
+    [DataRow("cast(cast(1.5 as float) as decimal(9,2))")]   // float -> decimal
+    [DataRow("cast(cast(1.5 as real) as decimal(9,2))")]    // real  -> decimal
+    public void FloatFamily_ToDecimal_IsAllowed(string expression) =>
+        AreEqual(1.5m, ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    public void FloatValue_AssignedToDecimalColumn_Coerces()
+    {
+        // ODBC / pyodbc binds a Python float parameter as float, so SQLAlchemy's
+        // insert of a decimal value lands as a float-to-decimal assignment —
+        // permitted (implicit), not the Msg 529 explicit-conversion rejection.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (d decimal(9,2))");
+        _ = sim.ExecuteNonQuery("insert t values (cast(91.5 as float))");
+        AreEqual(91.5m, sim.ExecuteScalar("select d from t"));
+    }
+
+    [TestMethod]
+    public void FloatToDecimal_OutOfRange_RaisesMsg8115() =>
+        // Past .NET decimal's range: the conversion overflows to Msg 8115,
+        // matching real's arithmetic-overflow error rather than succeeding.
+        _ = new Simulation().AssertSqlError("select cast(cast(1e30 as float) as decimal(9,2))", 8115);
+
+    [TestMethod]
     [DataRow("select cast(300 as tinyint)", "tinyint", "300")]
     [DataRow("select cast(99999 as smallint)", "smallint", "99999")]
     [DataRow("select cast(-1 as tinyint)", "tinyint", "-1")]

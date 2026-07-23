@@ -908,6 +908,15 @@ internal readonly partial struct SqlValue
         _ when SqlType.IsIntegerCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(AsInt64Widened(this), target)),
         DecimalSqlType => FromDecimal(target, RoundAndOverflowCheck(this.AsDecimal, target)),
         _ when SqlType.IsMoneyCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(this.AsMoney, target)),
+        // float / real → decimal is a permitted conversion (implicit and
+        // explicit), not the Msg 529 rejection: an out-of-range magnitude
+        // raises Msg 8115 arithmetic overflow. real converts from its own
+        // 4-byte value (not widened to double first) so the decimal keeps the
+        // ~7-significant-digit representation real does. Probe-confirmed
+        // against SQL Server 2025 (2026-07-23; ODBC / pyodbc binds a Python
+        // float parameter as float, so SQLAlchemy's decimal inserts land here).
+        _ when this.Type == SqlType.Float => FromDecimal(target, RoundAndOverflowCheck(FloatToDecimalChecked(this.AsDouble), target)),
+        _ when this.Type == SqlType.Real => FromDecimal(target, RoundAndOverflowCheck(FloatToDecimalChecked(this.AsSingle), target)),
         // varbinary / binary → decimal / numeric is disallowed: SQL Server
         // raises Msg 8114 ("Error converting data type varbinary to numeric.")
         // rather than the Msg 529 explicit-conversion rejection used elsewhere.
@@ -915,6 +924,36 @@ internal readonly partial struct SqlValue
         VarbinarySqlType or BinarySqlType => throw SimulatedSqlException.ConvertingDataTypeError(this.Type, "numeric"),
         _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
     };
+
+    /// <summary>
+    /// float (double) / real (single) → decimal with the .NET out-of-range
+    /// <see cref="OverflowException"/> mapped to SQL Server's Msg 8115
+    /// arithmetic overflow (NaN / ±Infinity / magnitude past decimal's range).
+    /// The overload keeps real's narrower conversion distinct from float's.
+    /// </summary>
+    private static decimal FloatToDecimalChecked(double value)
+    {
+        try
+        {
+            return (decimal)value;
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.ArithmeticOverflowToNumeric();
+        }
+    }
+
+    private static decimal FloatToDecimalChecked(float value)
+    {
+        try
+        {
+            return (decimal)value;
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.ArithmeticOverflowToNumeric();
+        }
+    }
 
     private SqlValue CoerceFromDecimal(SqlType target)
     {

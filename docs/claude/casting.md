@@ -15,6 +15,12 @@ Per-source-category rule applied after `SqlValue.CoerceTo`:
 
 **CAST/CONVERT context defaults missing length to 30** for `varchar`/`nvarchar`/`varbinary` (column-context default is 1).
 
+## `float`/`real` → `decimal`/`numeric`
+
+A permitted conversion (implicit and explicit), **not** the Msg 529 explicit-conversion rejection — `CoerceToDecimal` converts through .NET `decimal` (rounding half-away-from-zero to the target scale; `real` converts from its own 4-byte value, keeping the ~7-significant-digit representation real does).
+An out-of-range magnitude (NaN / ±Infinity / past `decimal`'s range, or more integer digits than the target holds) raises Msg 8115 arithmetic overflow.
+Load-bearing for ODBC / pyodbc callers, which bind a Python/CLR `float` parameter as `float`: a decimal-column insert (e.g. SQLAlchemy's) arrives as a float-to-decimal assignment, which previously hit the wrong Msg 529 path.
+
 ## `PARSE` / `TRY_PARSE` (culture-aware conversion)
 
 `PARSE(string AS type [USING culture])` / `TRY_PARSE(...)` — culture-aware Convert.NET surface (`Parser/Expressions/ParseFunction.cs`).
