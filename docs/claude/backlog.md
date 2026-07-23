@@ -109,6 +109,14 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   Closing the gap toward real's numbers requires slimming the function-argument recursion frame (`ResolveBuiltIn` + per-function ctors are on the live path).
   Low demand — generated SQL rarely nests past tens; both outcomes are graceful.
   CASE/IIF nesting (cap 10, Msg 125) already matches real exactly.
+- **Result-set `fNullable` inference — remaining long tail** — the projection nullability that drives the COLMETADATA `fNullable` flag (see `Expression.ResultIsNullable`) covers the structural cases: direct refs, literals, ISNULL, CASE, and (added in the go-mssqldb pass, 2026-07-23) CONCAT / CONCAT_WS (always NOT NULL), IIF (both-arm rule), and VALUES row-constructor columns (OR over rows).
+  Still over-claiming nullable vs real: (1) **per-function** signatures — `CEILING` / `FLOOR` / `ROUND` / `SIGN` / `GETDATE` project NOT NULL on real while `ABS` / `POWER` / `SQUARE` / `NEWID` / `RAND` stay nullable, an idiosyncratic per-builtin table with no clean rule; (2) **`@@`-variable** nullability (`@@ROWCOUNT` / `@@SPID` are NOT NULL on real); (3) **string `+` concatenation** of two non-null operands (real projects NOT NULL, but the resolver has no `BatchContext` to distinguish string-vs-arithmetic `+` — `1+1` stays nullable on real, so it can't blanket-propagate); (4) **constant-fold** cases where real eliminates a null arm — `NULLIF(1,2)`, no-ELSE `CASE WHEN <constant> …`, all-constant `COALESCE(NULL,5)` (realistic `COALESCE(agg,0)` already matches: nullable on both).
+  All are metadata-only over-claims (nullable is the safe direction); low demand, no clean rule.
+- **Integer arithmetic overflow not raised** — `2147483647 + 1` wraps to `-2147483648` on the simulator; real raises Msg 8115 (arithmetic overflow converting to int).
+  A faithful fix means overflow-checking every int/bigint `+`/`-`/`*` on the hot arithmetic path; deferred as a broad change against a rarely-hit case.
+- **Runtime-error streaming shape** — a per-row runtime error (`SELECT 10/0`, arithmetic overflow) is emitted by real *after* COLMETADATA, so a streaming client surfaces it while draining rows; the simulator raises it at execute-time before any COLMETADATA, so the client sees it from the initial execute call.
+  Message / number / class match; only the wire position differs.
+  Deferred — deep change to statement execution ordering, low practical impact.
 - **Trailing-space MIN/MAX representative** — for a group of values differing only in trailing spaces (sort-equal under SQL Server), MIN/MAX returns a different byte-variant than the live server's scan-order representative.
   Surfaced by the AdventureWorks crosscheck on synthetic XML data (`vJobCandidateEducation._max_Edu_Loc_CountryRegion`).
   Needs trailing-space-insensitive compare + SQL Server's unspecified MAX-tie scan-order.

@@ -2109,9 +2109,21 @@ internal sealed partial class Selection
             schema[c] = colType;
         }
 
+        // Per-column nullability = OR across every row's cell: a VALUES column
+        // is NOT NULL only when no row supplies a nullable expression there, so
+        // `(VALUES('a'),('b')) v(n)` reports n NOT NULL while `(VALUES(1),(NULL))`
+        // stays nullable (probe-confirmed against SQL Server 2025; the outer
+        // single-source projection surfaces it as the COLMETADATA fNullable flag
+        // go-mssqldb / tedious expose). A correlated cell reference resolves
+        // nullable — its outer-column nullability isn't threaded here.
         var columns = new HeapColumn[arity];
         for (var c = 0; c < arity; c++)
-            columns[c] = new HeapColumn(columnNames[c], schema[c], maxLength: null, nullable: true);
+        {
+            var nullable = false;
+            for (var i = 0; i < tuples.Count && !nullable; i++)
+                nullable = tuples[i][c].ResultIsNullable(static _ => true);
+            columns[c] = new HeapColumn(columnNames[c], schema[c], maxLength: null, nullable: nullable);
+        }
 
         return new FromSource(
             qualifier: alias,

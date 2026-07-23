@@ -92,6 +92,13 @@ internal sealed class StringConcat : Expression
         return ResolveResultType(anyNational, anyMax, width + SeparatorTotal(separatorWidth), batch);
     }
 
+    // CONCAT / CONCAT_WS never return NULL — NULL arguments are skipped and an
+    // all-NULL input yields the empty string (a NULL CONCAT_WS separator degrades
+    // to empty too), so the result-set metadata reports the column NOT NULL
+    // regardless of operand nullability (probe-confirmed against SQL Server 2025;
+    // exposed by go-mssqldb / tedious COLMETADATA fNullable).
+    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => false;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         // Resolve result type from runtime argument types: any national-string

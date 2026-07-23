@@ -74,6 +74,17 @@ internal sealed class Iif : Expression
         return this.cachedResultType;
     }
 
+    // IIF desugars to a searched CASE, so it inherits CASE's metadata rule: the
+    // result is NOT NULL only when both value arms are non-null (probe-confirmed
+    // against SQL Server 2025; exposed by go-mssqldb / tedious COLMETADATA
+    // fNullable). A compile-time-constant condition that SQL Server folds to
+    // eliminate the null arm (e.g. `IIF(1>2, CAST(NULL AS int), 2)` → NOT NULL)
+    // is not reproduced — the same degenerate constant-fold gap as a no-ELSE
+    // `CASE WHEN <constant> …`.
+    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) =>
+        this.trueValue.ResultIsNullable(resolveColumnNullable)
+        || this.falseValue.ResultIsNullable(resolveColumnNullable);
+
     internal override bool ResultReportsNumeric =>
         this.trueValue.ResultReportsNumeric || this.falseValue.ResultReportsNumeric;
 

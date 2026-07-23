@@ -667,16 +667,24 @@ internal abstract class Expression
     /// project as nullable (always YES). Aggregates include COUNT, which
     /// real SQL Server projects as NULL allowed despite the runtime
     /// guarantee that COUNT never returns NULL.</item>
-    /// <item>ISNULL(x, y) is non-null iff EITHER operand is non-null.</item>
-    /// <item>CASE WHEN ... END is non-null iff every THEN/ELSE branch is
-    /// non-null (no-ELSE counts as implicit ELSE NULL).</item>
+    /// <item>ISNULL(x, y) is non-null iff EITHER operand is non-null. COALESCE
+    /// differs — it stays nullable whenever any argument is a non-constant
+    /// nullable expression (the classic ISNULL-vs-COALESCE metadata quirk), so
+    /// it keeps the always-nullable default.</item>
+    /// <item>CASE WHEN ... END / IIF are non-null iff every THEN/ELSE (value)
+    /// branch is non-null (no-ELSE counts as implicit ELSE NULL).</item>
+    /// <item>CONCAT / CONCAT_WS are always non-null (NULL args are skipped, an
+    /// all-NULL input yields the empty string).</item>
+    /// <item>A VALUES row-constructor column is non-null iff no row supplies a
+    /// nullable cell there.</item>
     /// </list>
-    /// String <c>+</c> concatenation also projects as non-null when both
-    /// operands are non-null in real SQL Server, but the simulator can't
-    /// easily distinguish string-vs-arithmetic <c>+</c> at static analysis
-    /// time (the dispatch is runtime per operand SqlValue.Type) so it
-    /// conservatively reads as nullable — a minor fidelity gap with no
-    /// practical impact since staging tables rarely rely on NOT NULL.
+    /// Two known constant-fold gaps: a CASE / IIF whose condition SQL Server
+    /// folds to a constant to eliminate the null arm reads as nullable here, and
+    /// string <c>+</c> concatenation projects as non-null in real when both
+    /// operands are non-null but the simulator can't distinguish string-vs-
+    /// arithmetic <c>+</c> at static analysis time (the dispatch is runtime per
+    /// operand SqlValue.Type). Both are minor — CONCAT is the idiomatic
+    /// concat form, and staging tables rarely rely on NOT NULL.
     /// </summary>
     internal virtual bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => true;
 

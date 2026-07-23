@@ -72,6 +72,58 @@ public sealed class ColumnNullabilityWireTests
     }
 
     [TestMethod]
+    public async Task ConcatAndIif_ProjectProbeConfirmedNullability()
+    {
+        // CONCAT / CONCAT_WS never return NULL (NULL args skipped, all-NULL →
+        // empty string) so they project NOT NULL regardless of operand
+        // nullability; IIF inherits CASE's rule (NOT NULL iff both value arms
+        // are non-null). Probe-confirmed against SQL Server 2025 and surfaced by
+        // go-mssqldb / tedious COLMETADATA fNullable (the sim previously
+        // over-claimed all four nullable).
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("""
+            select
+                concat('a', 'b'),
+                concat('a', null),
+                concat_ws(',', 'a', null),
+                iif(1 > 2, 'x', 'y'),
+                iif(1 > 2, 'x', null)
+            """, connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        var columns = reader.GetColumnSchema();
+        IsFalse(columns[0].AllowDBNull);  // CONCAT of non-null literals
+        IsFalse(columns[1].AllowDBNull);  // CONCAT with a NULL arg is still NOT NULL
+        IsFalse(columns[2].AllowDBNull);  // CONCAT_WS is NOT NULL
+        IsFalse(columns[3].AllowDBNull);  // IIF, both value arms non-null
+        IsTrue(columns[4].AllowDBNull);   // IIF, a NULL value arm → nullable
+    }
+
+    [TestMethod]
+    public async Task ValuesConstructorColumn_NullableIsOrOverRows()
+    {
+        // A VALUES row-constructor column projects NOT NULL iff no row supplies
+        // a nullable cell there, and nullable as soon as one row does — the
+        // single derived source flows through the per-column inference. Probe-
+        // confirmed against SQL Server 2025.
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        await using (var allNonNull = new SqlCommand(
+            "select n from (values('a'), ('b')) v(n)", connection))
+        await using (var reader = await allNonNull.ExecuteReaderAsync(TestContext.CancellationToken))
+            IsFalse(reader.GetColumnSchema()[0].AllowDBNull);
+
+        await using (var oneNull = new SqlCommand(
+            "select c from (values(1), (cast(null as int))) v(c)", connection))
+        await using (var reader = await oneNull.ExecuteReaderAsync(TestContext.CancellationToken))
+            IsTrue(reader.GetColumnSchema()[0].AllowDBNull);
+    }
+
+    [TestMethod]
     public async Task NotNullFixedWidthColumns_ReadOverWire_WithFixedLenTokens()
     {
         // A NOT NULL fixed-width column now carries the FIXEDLENTYPE token
