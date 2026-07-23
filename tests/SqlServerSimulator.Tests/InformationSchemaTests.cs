@@ -472,4 +472,194 @@ public sealed class InformationSchemaTests
     public void InformationSchema_WrongDatabaseQualifier_Msg208()
         => new Simulation().AssertSqlError(
             "select count(*) from baddb.INFORMATION_SCHEMA.TABLES", 208);
+
+    // ---- constraint catalog completeness (SQLAlchemy schema reflection) ----
+    // Fixture: rp(id PK), rc(cid IDENTITY(5,3) PK, rid FK→rp.id ON DELETE
+    // CASCADE, note DEFAULT 'x'). Values probe-confirmed against SQL Server
+    // 2025 (2026-07-23).
+
+    private static Simulation ReflectionFixture()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table rp (id int not null primary key);
+            create table rc (
+                cid int identity(5, 3) not null primary key,
+                rid int null,
+                note varchar(20) default 'x',
+                constraint fk_rc foreign key (rid) references rp(id) on delete cascade);
+            """);
+        return sim;
+    }
+
+    // sys.identity_columns.is_identity is bit NOT NULL and always 1; seed /
+    // increment carry the declared IDENTITY(seed, increment).
+    [TestMethod]
+    public void IdentityColumns_IsIdentity_AlwaysOne_WithSeed()
+    {
+        var sim = ReflectionFixture();
+        using var reader = sim.ExecuteReader(
+            "select is_identity, seed_value, increment_value from sys.identity_columns where object_id = object_id('rc')");
+        IsTrue(reader.Read());
+        IsTrue(reader.GetBoolean(0));          // is_identity
+        AreEqual(5, reader.GetValue(1));       // seed_value (sql_variant inner int)
+        AreEqual(3, reader.GetValue(2));       // increment_value
+        IsFalse(reader.Read());
+    }
+
+    // sys.default_constraints surfaces the bound column_id + the parenthesized
+    // default text. A string literal wraps in a single paren pair ('x' → ('x'),
+    // matching real; the simulator does not re-normalize numeric literals to
+    // real's double-paren form — a pre-existing documented quirk).
+    [TestMethod]
+    public void DefaultConstraints_Definition_And_ParentColumnId()
+    {
+        var sim = ReflectionFixture();
+        using var reader = sim.ExecuteReader(
+            "select definition, parent_column_id from sys.default_constraints where parent_object_id = object_id('rc')");
+        IsTrue(reader.Read());
+        AreEqual("('x')", reader.GetString(0));  // note default
+        AreEqual(3, reader.GetInt32(1));         // note is column_id 3
+        IsFalse(reader.Read());
+    }
+
+    // INFORMATION_SCHEMA.TABLE_CONSTRAINTS: rc carries a PRIMARY KEY + a
+    // FOREIGN KEY; IS_DEFERRABLE / INITIALLY_DEFERRED are constant 'NO'.
+    [TestMethod]
+    public void TableConstraints_PrimaryKeyAndForeignKey()
+    {
+        var sim = ReflectionFixture();
+        using var reader = sim.ExecuteReader("""
+            select CONSTRAINT_TYPE, IS_DEFERRABLE, INITIALLY_DEFERRED
+            from INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+            where TABLE_NAME = 'rc' order by CONSTRAINT_TYPE
+            """);
+        var types = new List<string>();
+        while (reader.Read())
+        {
+            types.Add(reader.GetString(0));
+            AreEqual("NO", reader.GetString(1));
+            AreEqual("NO", reader.GetString(2));
+        }
+        CollectionAssert.AreEqual(new[] { "FOREIGN KEY", "PRIMARY KEY" }, types);
+    }
+
+    [TestMethod]
+    public void TableConstraints_CatalogAndSchema()
+        => AreEqual("simulated", ReflectionFixture().ExecuteScalar("""
+            select CONSTRAINT_CATALOG from INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+            where CONSTRAINT_NAME = 'fk_rc'
+            """));
+
+    // The PK constraint name follows the auto-name shape PK__<table8>__<hex>.
+    [TestMethod]
+    public void TableConstraints_PrimaryKeyName_HasPkShape()
+    {
+        var name = (string)ReflectionFixture().ExecuteScalar("""
+            select CONSTRAINT_NAME from INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+            where TABLE_NAME = 'rp' and CONSTRAINT_TYPE = 'PRIMARY KEY'
+            """)!;
+        StartsWith("PK__", name);
+    }
+
+    // INFORMATION_SCHEMA.KEY_COLUMN_USAGE: the FK row names the child column at
+    // ORDINAL_POSITION 1; there is no POSITION_IN_UNIQUE_CONSTRAINT column
+    // (real SQL Server omits it).
+    [TestMethod]
+    public void KeyColumnUsage_ForeignKeyChildColumn()
+    {
+        var sim = ReflectionFixture();
+        using var reader = sim.ExecuteReader("""
+            select COLUMN_NAME, ORDINAL_POSITION from INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+            where CONSTRAINT_NAME = 'fk_rc'
+            """);
+        IsTrue(reader.Read());
+        AreEqual("rid", reader.GetString(0));
+        AreEqual(1, reader.GetInt32(1));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void KeyColumnUsage_NoPositionInUniqueConstraintColumn()
+        => ReflectionFixture().AssertSqlError("""
+            select POSITION_IN_UNIQUE_CONSTRAINT from INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+            """, 207);
+
+    [TestMethod]
+    public void KeyColumnUsage_PrimaryKeyColumn()
+    {
+        var sim = ReflectionFixture();
+        using var reader = sim.ExecuteReader("""
+            select kcu.COLUMN_NAME
+            from INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+            join INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+              on tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+            where kcu.TABLE_NAME = 'rc' and tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+            """);
+        IsTrue(reader.Read());
+        AreEqual("cid", reader.GetString(0));
+        IsFalse(reader.Read());
+    }
+
+    // INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS: the FK's referenced PK name,
+    // MATCH_OPTION 'SIMPLE', and the ISO spaced rule wording.
+    [TestMethod]
+    public void ReferentialConstraints_ReferencedPkAndCascade()
+    {
+        var sim = ReflectionFixture();
+        using var reader = sim.ExecuteReader("""
+            select UNIQUE_CONSTRAINT_NAME, MATCH_OPTION, UPDATE_RULE, DELETE_RULE
+            from INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS
+            where CONSTRAINT_NAME = 'fk_rc'
+            """);
+        IsTrue(reader.Read());
+        StartsWith("PK__", reader.GetString(0));  // referenced PK on rp
+        AreEqual("SIMPLE", reader.GetString(1));
+        AreEqual("NO ACTION", reader.GetString(2));
+        AreEqual("CASCADE", reader.GetString(3));
+        IsFalse(reader.Read());
+    }
+
+    // Composite PK: KEY_COLUMN_USAGE emits one row per key column in order.
+    [TestMethod]
+    public void KeyColumnUsage_CompositePrimaryKey_OrdinalOneAndTwo()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(
+            "create table cp (a int not null, b int not null, primary key (a, b))");
+        using var reader = sim.ExecuteReader("""
+            select COLUMN_NAME, ORDINAL_POSITION from INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+            where TABLE_NAME = 'cp' order by ORDINAL_POSITION
+            """);
+        var rows = new List<(string, int)>();
+        while (reader.Read()) rows.Add((reader.GetString(0), reader.GetInt32(1)));
+        CollectionAssert.AreEqual(new[] { ("a", 1), ("b", 2) }, rows);
+    }
+
+    // Multi-column FK: KEY_COLUMN_USAGE lists both child columns; the
+    // referenced composite PK resolves in REFERENTIAL_CONSTRAINTS.
+    [TestMethod]
+    public void MultiColumnForeignKey_KcuAndReferentialConstraints()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table mp (a int not null, b int not null, constraint pk_mp primary key (a, b));
+            create table mc (
+                id int not null primary key, ra int not null, rb int not null,
+                constraint fk_mc foreign key (ra, rb) references mp(a, b));
+            """);
+        using (var reader = sim.ExecuteReader("""
+            select COLUMN_NAME, ORDINAL_POSITION from INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+            where CONSTRAINT_NAME = 'fk_mc' order by ORDINAL_POSITION
+            """))
+        {
+            var rows = new List<(string, int)>();
+            while (reader.Read()) rows.Add((reader.GetString(0), reader.GetInt32(1)));
+            CollectionAssert.AreEqual(new[] { ("ra", 1), ("rb", 2) }, rows);
+        }
+        AreEqual("pk_mp", sim.ExecuteScalar("""
+            select UNIQUE_CONSTRAINT_NAME from INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS
+            where CONSTRAINT_NAME = 'fk_mc'
+            """));
+    }
 }

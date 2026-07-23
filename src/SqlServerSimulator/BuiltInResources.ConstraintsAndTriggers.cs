@@ -161,6 +161,65 @@ internal static partial class BuiltInResources
         ], (batch, database) =>
             EnumerateInformationSchemaDomains(batch, database, tableTypeDataType));
 
+        // INFORMATION_SCHEMA.TABLE_CONSTRAINTS: one row per PRIMARY KEY /
+        // UNIQUE / FOREIGN KEY / CHECK constraint in the current database.
+        // Probe-confirmed 9-column shape (SQL Server 2025): CONSTRAINT_TYPE is
+        // varchar(11) ('PRIMARY KEY' / 'UNIQUE' / 'FOREIGN KEY' / 'CHECK'),
+        // IS_DEFERRABLE / INITIALLY_DEFERRED are constant 'NO' (SQL Server has
+        // no deferrable constraints). CATALOG = database name, SCHEMA = the
+        // object's schema. SQLAlchemy's get_pk_constraint reads it.
+        Iso("TABLE_CONSTRAINTS",
+        [
+            new("CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_NAME", SqlType.SystemName, 128, false),
+            new("TABLE_CATALOG", SqlType.SystemName, 128, true),
+            new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
+            new("TABLE_NAME", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_TYPE", SqlType.Varchar, 11, true),
+            new("IS_DEFERRABLE", SqlType.Varchar, 2, false),
+            new("INITIALLY_DEFERRED", SqlType.Varchar, 2, false),
+        ], EnumerateInformationSchemaTableConstraints);
+
+        // INFORMATION_SCHEMA.KEY_COLUMN_USAGE: one row per column participating
+        // in a PRIMARY KEY / UNIQUE / FOREIGN KEY constraint, in key order.
+        // Probe-confirmed 8-column shape (SQL Server 2025) — real SQL Server's
+        // view does NOT include the ISO-standard POSITION_IN_UNIQUE_CONSTRAINT
+        // column (referencing it raises Msg 207), so it is deliberately omitted.
+        // For a FK the row names the child (constrained) column. SQLAlchemy's
+        // get_pk_constraint / get_foreign_keys read it.
+        Iso("KEY_COLUMN_USAGE",
+        [
+            new("CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_NAME", SqlType.SystemName, 128, false),
+            new("TABLE_CATALOG", SqlType.SystemName, 128, true),
+            new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
+            new("TABLE_NAME", SqlType.SystemName, 128, false),
+            new("COLUMN_NAME", SqlType.SystemName, 128, true),
+            new("ORDINAL_POSITION", SqlType.Int32, null, false),
+        ], EnumerateInformationSchemaKeyColumnUsage);
+
+        // INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS: one row per FOREIGN KEY.
+        // Probe-confirmed 9-column shape (SQL Server 2025). UNIQUE_CONSTRAINT_NAME
+        // is the referenced PK / UNIQUE constraint's name; MATCH_OPTION is the
+        // constant 'SIMPLE'; UPDATE_RULE / DELETE_RULE use ISO wording with a
+        // space ('NO ACTION' / 'CASCADE' / 'SET NULL' / 'SET DEFAULT') — distinct
+        // from sys.foreign_keys' underscore desc form. SQLAlchemy's
+        // get_foreign_keys reads it.
+        Iso("REFERENTIAL_CONSTRAINTS",
+        [
+            new("CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_NAME", SqlType.SystemName, 128, false),
+            new("UNIQUE_CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
+            new("UNIQUE_CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
+            new("UNIQUE_CONSTRAINT_NAME", SqlType.SystemName, 128, true),
+            new("MATCH_OPTION", SqlType.Varchar, 7, true),
+            new("UPDATE_RULE", SqlType.Varchar, 11, true),
+            new("DELETE_RULE", SqlType.Varchar, 11, true),
+        ], EnumerateInformationSchemaReferentialConstraints);
+
         // sys.check_constraints: probe-confirmed 13-column shape (a subset
         // of sys.objects + the check-specific columns). Used by EF Migrations'
         // model snapshot and tooling that introspects existing CHECK rules.
@@ -774,4 +833,179 @@ internal static partial class BuiltInResources
             }
         }
     }
+
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.TABLE_CONSTRAINTS</c>: one row per
+    /// PRIMARY KEY / UNIQUE (<see cref="HeapTable.KeyConstraints"/>), FOREIGN
+    /// KEY (<see cref="HeapTable.OutgoingForeignKeys"/>), and CHECK
+    /// (<see cref="HeapTable.CheckConstraints"/>) constraint — the same
+    /// domain-object traversal the <c>sys.key_constraints</c> /
+    /// <c>sys.foreign_keys</c> / <c>sys.check_constraints</c> generators use.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaTableConstraints(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var catalog = SqlValue.FromSystemName(database.Name);
+        var primaryKey = SqlValue.FromVarchar("PRIMARY KEY");
+        var unique = SqlValue.FromVarchar("UNIQUE");
+        var foreignKey = SqlValue.FromVarchar("FOREIGN KEY");
+        var check = SqlValue.FromVarchar("CHECK");
+        var no = SqlValue.FromVarchar("NO");
+        foreach (var schema in database.Schemas.Values)
+        {
+            var schemaName = SqlValue.FromSystemName(schema.Name);
+            foreach (var table in schema.HeapTables.Values)
+            {
+                var tableName = SqlValue.FromSystemName(table.Name);
+                SqlValue[] Row(string constraintName, SqlValue constraintType) =>
+                [
+                    catalog,
+                    schemaName,
+                    SqlValue.FromSystemName(constraintName),
+                    catalog,
+                    schemaName,
+                    tableName,
+                    constraintType,
+                    no,
+                    no,
+                ];
+                foreach (var key in table.KeyConstraints.OrderBy(k => k.ObjectId))
+                    yield return Row(key.Name, key.Kind == KeyConstraintKind.PrimaryKey ? primaryKey : unique);
+                foreach (var fk in table.OutgoingForeignKeys.OrderBy(f => f.ObjectId))
+                    yield return Row(fk.Name, foreignKey);
+                foreach (var ck in table.CheckConstraints.OrderBy(c => c.ObjectId))
+                    yield return Row(ck.Name, check);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.KEY_COLUMN_USAGE</c>: one row per column
+    /// participating in a PRIMARY KEY / UNIQUE / FOREIGN KEY constraint, in key
+    /// order (<c>ORDINAL_POSITION</c> 1..N). CHECK constraints don't appear.
+    /// PK / UNIQUE key columns resolve through <see cref="StorageOrdinalToColumnId"/>
+    /// (the shared storage-ordinal → column_id authority); FK child columns use
+    /// the full ordinals <see cref="ForeignKey.ChildColumnOrdinals"/> carries.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaKeyColumnUsage(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var catalog = SqlValue.FromSystemName(database.Name);
+        foreach (var schema in database.Schemas.Values)
+        {
+            var schemaName = SqlValue.FromSystemName(schema.Name);
+            foreach (var table in schema.HeapTables.Values)
+            {
+                var tableName = SqlValue.FromSystemName(table.Name);
+                SqlValue[] Row(string constraintName, string columnName, int ordinal) =>
+                [
+                    catalog,
+                    schemaName,
+                    SqlValue.FromSystemName(constraintName),
+                    catalog,
+                    schemaName,
+                    tableName,
+                    SqlValue.FromSystemName(columnName),
+                    SqlValue.FromInt32(ordinal),
+                ];
+                foreach (var key in table.KeyConstraints.OrderBy(k => k.ObjectId))
+                {
+                    for (var i = 0; i < key.StorageOrdinals.Length; i++)
+                    {
+                        var columnId = StorageOrdinalToColumnId(table, key.StorageOrdinals[i]);
+                        yield return Row(key.Name, table.Columns[columnId - 1].Name, i + 1);
+                    }
+                }
+                foreach (var fk in table.OutgoingForeignKeys.OrderBy(f => f.ObjectId))
+                {
+                    for (var i = 0; i < fk.ChildColumnOrdinals.Length; i++)
+                        yield return Row(fk.Name, table.Columns[fk.ChildColumnOrdinals[i]].Name, i + 1);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS</c>: one row per
+    /// FOREIGN KEY. <c>UNIQUE_CONSTRAINT_NAME</c> resolves to the PRIMARY KEY /
+    /// UNIQUE constraint on the referenced table whose column set matches the
+    /// FK's referenced columns; <c>UPDATE_RULE</c> / <c>DELETE_RULE</c> map the
+    /// FK's referential actions to the ISO spaced wording.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaReferentialConstraints(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var catalog = SqlValue.FromSystemName(database.Name);
+        var simple = SqlValue.FromVarchar("SIMPLE");
+        var nullName = SqlValue.Null(SqlType.SystemName);
+        foreach (var schema in database.Schemas.Values)
+        {
+            var schemaName = SqlValue.FromSystemName(schema.Name);
+            foreach (var table in schema.HeapTables.Values)
+            {
+                foreach (var fk in table.OutgoingForeignKeys.OrderBy(f => f.ObjectId))
+                {
+                    var referencedSchema = SchemaNameForTable(database, fk.ReferencedTable);
+                    var uniqueName = ResolveReferencedKeyName(fk);
+                    yield return [
+                        catalog,
+                        schemaName,
+                        SqlValue.FromSystemName(fk.Name),
+                        catalog,
+                        SqlValue.FromSystemName(referencedSchema),
+                        uniqueName is null ? nullName : SqlValue.FromSystemName(uniqueName),
+                        simple,
+                        SqlValue.FromVarchar(ReferentialActionRule(fk.UpdateAction)),
+                        SqlValue.FromVarchar(ReferentialActionRule(fk.DeleteAction)),
+                    ];
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The name of the PRIMARY KEY / UNIQUE constraint on <paramref name="fk"/>'s
+    /// referenced table whose column set equals the FK's referenced columns, or
+    /// <c>null</c> when none matches (a referenced UNIQUE index the simulator
+    /// doesn't surface as a constraint).
+    /// </summary>
+    private static string? ResolveReferencedKeyName(ForeignKey fk)
+    {
+        var referenced = fk.ReferencedTable;
+        var wanted = fk.ReferencedColumnOrdinals.OrderBy(o => o).ToArray();
+        foreach (var key in referenced.KeyConstraints)
+        {
+            if (key.StorageOrdinals.Length != wanted.Length)
+                continue;
+            var keyFull = key.StorageOrdinals.Select(o => StorageOrdinalToColumnId(referenced, o) - 1).OrderBy(o => o);
+            if (keyFull.SequenceEqual(wanted))
+                return key.Name;
+        }
+        return null;
+    }
+
+    private static string SchemaNameForTable(Database database, HeapTable table)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            if (schema.SchemaId == table.SchemaId)
+                return schema.Name;
+        }
+        return Database.DefaultSchemaName;
+    }
+
+    /// <summary>
+    /// Maps a <see cref="ReferentialAction"/> to the ISO
+    /// <c>REFERENTIAL_CONSTRAINTS.UPDATE_RULE</c> / <c>DELETE_RULE</c> wording
+    /// (spaced), distinct from <see cref="ReferentialActionDescription"/>'s
+    /// underscore <c>sys.foreign_keys</c> desc form.
+    /// </summary>
+    private static string ReferentialActionRule(ReferentialAction action) => action switch
+    {
+        ReferentialAction.NoAction => "NO ACTION",
+        ReferentialAction.Cascade => "CASCADE",
+        ReferentialAction.SetNull => "SET NULL",
+        ReferentialAction.SetDefault => "SET DEFAULT",
+        _ => "NO ACTION",
+    };
 }

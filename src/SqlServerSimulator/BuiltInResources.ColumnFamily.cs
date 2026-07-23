@@ -142,6 +142,10 @@ internal static partial class BuiltInResources
         // column query reads seed_value / increment_value /
         // is_not_for_replication. last_value tracks the identity high-water
         // mark (NULL, as a NULL sql_variant, before the first insert).
+        // is_identity is bit NOT NULL and always 1 — every row in this view
+        // is, by definition, an identity column (probe-confirmed SQL Server
+        // 2025; appended here after the load-bearing subset, name-addressable).
+        // SQLAlchemy's get_columns LEFT JOINs this view and reads is_identity.
         Sys("identity_columns",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -151,6 +155,7 @@ internal static partial class BuiltInResources
             new("increment_value", SqlType.SqlVariant, null, true),
             new("last_value", SqlType.SqlVariant, null, true),
             new("is_not_for_replication", SqlType.Bit, null, true),
+            new("is_identity", SqlType.Bit, null, false),
         ], EnumerateIdentityColumns);
 
         // sys.column_encryption_keys / sys.sensitivity_classifications: Always
@@ -371,6 +376,7 @@ internal static partial class BuiltInResources
     {
         _ = batch;
         var falseBit = SqlValue.FromBoolean(false);
+        var trueBit = SqlValue.FromBoolean(true);
         var nullLast = SqlValue.Null(SqlType.SqlVariant);
         foreach (var schema in database.Schemas.Values)
         {
@@ -390,6 +396,7 @@ internal static partial class BuiltInResources
                         IdentityVariant(identity.Increment, col.Type),
                         identity.Snapshot() is { } last ? IdentityVariant(last, col.Type) : nullLast,
                         SqlValue.FromBoolean(identity.NotForReplication),
+                        trueBit,
                     ];
                 }
             }
@@ -416,6 +423,7 @@ internal static partial class BuiltInResources
                         IdentityVariant(identity.Increment, col.Type),
                         nullLast,
                         falseBit,
+                        trueBit,
                     ];
                 }
             }
