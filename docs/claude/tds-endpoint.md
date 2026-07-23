@@ -137,6 +137,9 @@ Dispatch (`TdsSession.Rpc.cs`):
   `sp_cursorprepexec` names its cursor value params the same way (`BindTail` → `NameUnnamedParameters`).
   Handles are per-session state, dropped on pooled-connection reset — SqlClient re-prepares transparently.
 - **Direct proc invocation** (nonzero name): `CommandType.StoredProcedure` with a synthesized `ReturnValue`-direction parameter, so the proc's `RETURN n` lands in the RETURNSTATUS token.
+  **Unnamed value params (name='') bind to the proc's declared parameters by position**, an empty name yielding a positional `ProcArgument` (null Name), a supplied name binding by name — the same positional/named split `EXEC p 5, 6` vs `EXEC p @a=5` takes.
+  Native DB-Library clients (pymssql / FreeTDS, legacy PHP mssql) send every RPC parameter positionally with an empty name, so without this any `callproc` with ≥1 argument failed with Msg 201 "expects parameter '@x', which was not supplied"; SqlClient / ODBC / JDBC name their proc params, which is why those oracles never caught the gap.
+  The output-slot writeback key falls back to the parameter ordinal when the name is empty so two positional OUTPUT params don't collide on the shared empty name (`StoredProcedureTests.CommandType_StoredProcedure_UnnamedParameters_BindPositionally`; DB-Library's positional shape surfaces in-process as an empty `SimulatedDbParameter.ParameterName`, which — mirroring ADO.NET — reads back as the empty string, never null).
 - **Response shape**: per statement outcome DONEINPROC (0xFF, always `DONE_MORE` since trailing tokens follow), then RETURNSTATUS, RETURNVALUE per output parameter (name-matched by the client; values re-encoded via `DbType` → `SqlType.GetByDbType` + `ConvertParameter`), then DONEPROC final.
   Errors: ERROR token(s) + DONEPROC with `DONE_ERROR`.
 - Output-parameter writeback happens when the engine's outcome enumerator is fully drained — the streaming loop always drains, which is what makes RETURNVALUE correct.
@@ -408,6 +411,8 @@ A real build number is load-bearing for SSMS's per-build client feature gates (A
   The common streaming-bound drain interrupts promptly between rows.
   A single in-flight DML statement likewise runs to completion before the abort is observed (no interior row-loop cancellation), so it isn't rolled back the way real's mid-statement abort would; multi-statement batches abort at the statement boundary correctly.
 - SPID in packet headers truncates to 16 bits.
+- **TDS 7.1–7.4 clients connect** (the LOGINACK always answers 7.4, or 8.0 under strict); **TDS 7.0** (SQL Server 7.0 / 1998, `tds_version=7.0` in FreeTDS/pymssql) is **not modeled** — its divergent pre-modern-PRELOGIN handshake makes the session close early ("Unexpected EOF" client-side) rather than complete.
+  Real SQL Server 2025 still accepts 7.0, so matching it would mean implementing a 27-year-old handshake variant no modern client (SqlClient, JDBC, ODBC 18, pymssql-default) ever requests and the managed oracle can't exercise; deferred as a legacy-protocol edge with no fidelity payoff short of full support.
 
 ## Mid-stream attention (cancel)
 

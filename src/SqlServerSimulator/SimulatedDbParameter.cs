@@ -83,8 +83,18 @@ public sealed class SimulatedDbParameter : DbParameter
     public override bool IsNullable { get; set; }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Mirrors ADO.NET: an unset or null-assigned name reads back as the empty
+    /// string, never null. Native DB-Library RPC callers (pymssql / FreeTDS)
+    /// send unnamed positional procedure parameters, which surface here as the
+    /// empty name and bind by position.
+    /// </remarks>
     [AllowNull]
-    public override string ParameterName { get; set; }
+    public override string ParameterName
+    {
+        get => field ?? string.Empty;
+        set => field = value ?? string.Empty;
+    }
 
     /// <summary>
     /// EF Core's SQL Server type mappings set this on string parameters with

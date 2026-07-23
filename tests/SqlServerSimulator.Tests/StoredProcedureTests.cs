@@ -357,6 +357,38 @@ public sealed class StoredProcedureTests
     }
 
     [TestMethod]
+    public void CommandType_StoredProcedure_UnnamedParameters_BindPositionally()
+    {
+        // Native DB-Library RPC callers (pymssql / FreeTDS) send procedure
+        // arguments positionally with empty names — probe-confirmed against the
+        // reference over the wire that real binds them to the declared
+        // parameters by position, including OUTPUT write-back. Empty ParameterName
+        // is the in-process equivalent of that wire shape.
+        using var connection = Open();
+        _ = connection.CreateCommand("create procedure dbo.p @x int, @out int output as set @out = @x + 1; return @x + 2").ExecuteNonQuery();
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandType = CommandType.StoredProcedure;
+        cmd.CommandText = "dbo.p";
+        var pIn = cmd.CreateParameter();
+        pIn.DbType = DbType.Int32;
+        pIn.Value = 5;
+        _ = cmd.Parameters.Add(pIn);
+        var pOut = cmd.CreateParameter();
+        pOut.DbType = DbType.Int32;
+        pOut.Direction = ParameterDirection.Output;
+        _ = cmd.Parameters.Add(pOut);
+        var pRc = cmd.CreateParameter();
+        pRc.DbType = DbType.Int32;
+        pRc.Direction = ParameterDirection.ReturnValue;
+        _ = cmd.Parameters.Add(pRc);
+
+        _ = cmd.ExecuteNonQuery();
+        AreEqual(6, pOut.Value);   // @out = @x + 1, bound by position
+        AreEqual(7, pRc.Value);    // return @x + 2
+    }
+
+    [TestMethod]
     public void Dynamic_Sql_EXEC_StringLiteral()
     {
         using var connection = Open();

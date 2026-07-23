@@ -936,8 +936,9 @@ public sealed partial class Simulation
         // its writeback happens after the call completes.
         var arguments = new List<ProcArgument>();
         var returnValueWriteback = (DbParameter?)null;
-        foreach (DbParameter parameter in command.Parameters)
+        for (var argumentIndex = 0; argumentIndex < command.Parameters.Count; argumentIndex++)
         {
+            var parameter = command.Parameters[argumentIndex];
             if (parameter.Direction is ParameterDirection.ReturnValue)
             {
                 returnValueWriteback = parameter;
@@ -945,6 +946,14 @@ public sealed partial class Simulation
             }
 
             var pname = parameter.ParameterName.StartsWith('@') ? parameter.ParameterName[1..] : parameter.ParameterName;
+
+            // Native DB-Lib RPC (pymssql / FreeTDS and other DB-Library
+            // clients) sends procedure arguments positionally with empty
+            // names; an empty name binds by position (null ProcArgument name),
+            // a supplied name binds by name — the same positional/named split
+            // EXEC's arguments take. The output-slot dictionary key falls back
+            // to the ordinal when the name is empty so writeback stays unique.
+            var argumentName = pname.Length == 0 ? null : pname;
 
             // Table-valued parameters are already materialized into the batch's
             // TableVariables by the BatchContext ctor (the Structured-parameter
@@ -954,7 +963,7 @@ public sealed partial class Simulation
                 && BatchContext.IsTableValuedParameterValue(structured)
                 && batch.TableVariables.TryGetValue(pname, out var tvpClone))
             {
-                arguments.Add(new ProcArgument(pname, isDefault: false, value: SqlValue.Null(SqlType.Int32), outputSlot: null, tableValue: tvpClone));
+                arguments.Add(new ProcArgument(argumentName, isDefault: false, value: SqlValue.Null(SqlType.Int32), outputSlot: null, tableValue: tvpClone));
                 continue;
             }
 
@@ -988,9 +997,9 @@ public sealed partial class Simulation
             if (parameter.Direction is ParameterDirection.Output or ParameterDirection.InputOutput)
             {
                 outputSlot = new VariableSlot(dbType, declaredMaxLength: null, value, parameter);
-                batch.Variables[pname] = outputSlot;
+                batch.Variables[OutputSlotKey(argumentIndex, pname)] = outputSlot;
             }
-            arguments.Add(new ProcArgument(pname, isDefault: false, value, outputSlot));
+            arguments.Add(new ProcArgument(argumentName, isDefault: false, value, outputSlot));
         }
 
         // ReturnValue slot: lives in the outer batch's Variables under an
@@ -1007,13 +1016,16 @@ public sealed partial class Simulation
             yield return outcome;
 
         // Output param writeback: the per-argument OutputSlot.Value was
-        // updated by InvokeProcedure. Copy back to each DbParameter.Value.
-        foreach (DbParameter parameter in command.Parameters)
+        // updated by InvokeProcedure. Copy back to each DbParameter.Value. The
+        // slot key must match the binding side — position-derived for the
+        // empty-named positional (DB-Lib) params, name-derived otherwise.
+        for (var argumentIndex = 0; argumentIndex < command.Parameters.Count; argumentIndex++)
         {
+            var parameter = command.Parameters[argumentIndex];
             if (parameter.Direction is ParameterDirection.Output or ParameterDirection.InputOutput)
             {
                 var pname = parameter.ParameterName.StartsWith('@') ? parameter.ParameterName[1..] : parameter.ParameterName;
-                if (batch.Variables.TryGetValue(pname, out var slot))
+                if (batch.Variables.TryGetValue(OutputSlotKey(argumentIndex, pname), out var slot))
                 {
                     var value = TextSizeCursor.Apply(slot.Value, slot.DeclaredType, batch.Connection.TextSize);
                     if (parameter is SimulatedDbParameter simulated)
@@ -1026,6 +1038,13 @@ public sealed partial class Simulation
         // ReturnValue writeback: the .rc slot was written by InvokeProcedure.
         if (returnValueWriteback is not null && batch.Variables.TryGetValue(".rc", out var rcSlot))
             returnValueWriteback.Value = rcSlot.Value.IsNull ? DBNull.Value : rcSlot.Value.ToObject();
+
+        // Output-slot key: the declared name for a named argument, else an
+        // ordinal-derived sentinel (positional DB-Lib params share the empty
+        // name, so keying by name alone would collide). Leading-dot sentinels
+        // can't collide with a real @-variable name.
+        static string OutputSlotKey(int argumentIndex, string parameterName) =>
+            parameterName.Length == 0 ? ".pos" + argumentIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) : parameterName;
     }
 
     /// <summary>
