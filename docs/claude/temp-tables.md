@@ -30,6 +30,11 @@ Lifecycle, cross-conn isolation, and Msg 208 from other sessions all probe-confi
   `UndoLog` (re-shaped to a polymorphic `UndoEntry` hierarchy) records `TempTableCreation` and `TempTableRemoval` entries alongside the existing slot-mutation kinds.
 - **Persists across batches** in the same connection; **invisible to other connections** (Msg 208).
   Two sessions can independently hold a `#foo` of the same name — real SQL Server mangles internally; the simulator achieves the same effect by giving each connection its own dict (user-visible names stay un-mangled).
+- **Module-scoped lifetime**: a `#foo` created inside a stored procedure, trigger, or dynamic-SQL (`EXEC('…')` / `sp_executesql`) body is dropped when that module exits, not left on the session — a following statement sees Msg 208, and a re-entrant call (the same proc invoked twice on one connection, or tedious's `execSql` re-running a `create table #t` through `sp_executesql`) re-creates the name without a Msg 2714 collision.
+  A session-level `#foo` (created outside any module) persists until the session ends; module-created temps stay visible to nested modules down the call stack during execution.
+  Probe-confirmed against SQL Server 2025 (2026-07-23) for procs, triggers, `EXEC('…')`, and `SELECT … INTO #t`.
+  Mechanism: the body's `BatchContext` records the temps it created (`RegisterScopedTempTable`, gated by `ScopesTempTables` = has a proc / trigger frame, or the RPC ad-hoc-statement `ForceTempTableScope`), and each module-body dispatch drops them in its `finally` (`DropScopedTempTables`) — so it runs on a body error too.
+  The RPC `sp_executesql` / `sp_execute` / `sp_prepexec` path (which builds a top-level command rather than a dynamic-SQL frame) opts in via `SimulatedDbCommand.ScopeTempTablesToBatch`, dropped in `CreateResultSetsForCommand`'s finally.
 - **Bare `#`** is a valid temp-table name (one-char `#`).
   Identity / SCOPE_IDENTITY work identically to regular tables.
   CTE prefix, JOINs across multiple `#`-tables, all queries against `#foo` flow through the same Selection / Insert / Update / Delete / Merge machinery via `TryResolveTable`.

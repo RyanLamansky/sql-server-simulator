@@ -26,6 +26,34 @@ public sealed class RpcSmokeTests
     }
 
     [TestMethod]
+    public async Task ParameterizedTempTable_CreatedPerRpc_DropsAtScopeExit()
+    {
+        // A parameterized command arrives as sp_executesql, which SQL Server
+        // runs in a nested scope: a #temp it creates is dropped when the RPC
+        // returns. Without that, the second invocation on the pooled connection
+        // would collide with Msg 2714 (the tedious `execSql` case, which routes
+        // every statement through sp_executesql).
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        for (var i = 0; i < 2; i++)
+        {
+            await using var command = new SqlCommand(
+                "create table #t (id int); insert #t values (@v); select count(*) from #t", connection);
+            _ = command.Parameters.AddWithValue("@v", i);
+            AreEqual(1, await command.ExecuteScalarAsync(TestContext.CancellationToken));
+        }
+
+        // The temp table did not leak onto the session between RPCs — a
+        // session-scope (unparameterized batch) read no longer finds it.
+        await using var probe = new SqlCommand("select count(*) from #t", connection);
+        var ex = await Assert.ThrowsExactlyAsync<SqlException>(
+            async () => await probe.ExecuteScalarAsync(TestContext.CancellationToken));
+        AreEqual(208, ex.Number);
+    }
+
+    [TestMethod]
     public async Task ParameterizedInsertAndReadBack_StringParameter()
     {
         var simulation = new Simulation();

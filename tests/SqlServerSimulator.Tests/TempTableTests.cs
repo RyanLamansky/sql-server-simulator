@@ -383,4 +383,86 @@ public sealed class TempTableTests
         Exec(other, "truncate table ##t");
         AreEqual(0, CountRows(owner, "##t"));
     }
+
+    // Module-scoped temp-table lifetime: a local #temp created inside a
+    // procedure / trigger / dynamic-SQL body is dropped when that module
+    // exits, not left on the session. Probe-confirmed against SQL Server 2025
+    // (2026-07-23) — a following statement sees Msg 208, and a re-entrant call
+    // re-creates the name without a Msg 2714 collision. Visibility down the
+    // call stack (a nested module sees an enclosing module's temp) is
+    // preserved.
+
+    [TestMethod]
+    public void ProcCreatedTemp_NotVisibleAfterProcReturns()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        Exec(conn, "create procedure dbo.p as begin create table #pt (a int); insert #pt values (1); end");
+        Exec(conn, "exec dbo.p");
+        var ex = Throws<DbException>(() => Exec(conn, "select * from #pt"));
+        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void ProcCreatingTemp_CalledTwice_NoCollision()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        Exec(conn, "create procedure dbo.p as begin create table #pt (a int); insert #pt values (1); select count(*) from #pt; end");
+        Exec(conn, "exec dbo.p");
+        // Without module scoping the second call would raise Msg 2714 (the
+        // first call's #pt lingering on the session).
+        AreEqual(1, conn.CreateCommand("exec dbo.p").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ProcSelectIntoTemp_NotVisibleAfterProcReturns()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        Exec(conn, "create procedure dbo.p as begin select 1 a into #si; end");
+        Exec(conn, "exec dbo.p");
+        var ex = Throws<DbException>(() => Exec(conn, "select * from #si"));
+        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void NestedProc_SeesEnclosingProcTemp_ThenBothDropAtExit()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        Exec(conn, "create procedure dbo.inner_p as begin select count(*) from #outer; end");
+        Exec(conn, "create procedure dbo.outer_p as begin create table #outer (a int); insert #outer values (1), (2); exec dbo.inner_p; end");
+        // The nested proc sees the enclosing proc's temp during execution.
+        AreEqual(2, conn.CreateCommand("exec dbo.outer_p").ExecuteScalar());
+        // After the outer proc returns the session no longer sees it.
+        var ex = Throws<DbException>(() => Exec(conn, "select * from #outer"));
+        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void DynamicSqlCreatedTemp_NotVisibleAfterExec()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        Exec(conn, "exec ('create table #e (a int); insert #e values (5)')");
+        var ex = Throws<DbException>(() => Exec(conn, "select * from #e"));
+        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void TriggerCreatedTemp_NotVisibleAfterTriggerFires()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        Exec(conn, "create table dbo.t (id int)");
+        Exec(conn, "create trigger dbo.tr on dbo.t after insert as begin create table #trg (a int); insert #trg values (1); end");
+        Exec(conn, "insert dbo.t values (10)");
+        var ex = Throws<DbException>(() => Exec(conn, "select * from #trg"));
+        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void SessionCreatedTemp_PersistsAcrossStatements()
+    {
+        // The module-scoping change must not affect session-level temps.
+        using var conn = new Simulation().CreateOpenConnection();
+        Exec(conn, "create table #s (a int)");
+        Exec(conn, "insert #s values (1), (2)");
+        AreEqual(2, CountRows(conn, "#s"));
+    }
 }

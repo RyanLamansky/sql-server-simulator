@@ -373,6 +373,11 @@ partial class Simulation
         finally
         {
             connection.NestingLevel--;
+            // A temp table created by the dynamic batch is dropped when it
+            // returns (SQL Server's module-scoped lifetime — so re-running the
+            // same `create table #t` through sp_executesql, as tedious does,
+            // doesn't collide with Msg 2714).
+            innerBatch.DropScopedTempTables();
         }
 
         // Copy any pre-declared variable's final value back to the caller's

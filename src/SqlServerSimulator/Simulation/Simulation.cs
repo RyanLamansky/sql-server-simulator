@@ -733,7 +733,7 @@ public sealed partial class Simulation
         if (cacheKey is not null)
             _ = Interlocked.Increment(ref this.PlanCacheMisses);
 
-        var batch = new BatchContext(command) { ContinueOnError = continueOnError };
+        var batch = new BatchContext(command) { ContinueOnError = continueOnError, ForceTempTableScope = command.ScopeTempTablesToBatch };
         // Stash the prepared cache-key components on the batch so the SELECT
         // arm can promote inline (the iterator's post-foreach code is
         // unreachable when the consumer disposes the reader without draining
@@ -760,6 +760,10 @@ public sealed partial class Simulation
             // and disposes) — otherwise PRINT / sev-≤10 RAISERROR output that
             // fired before the first SELECT silently vanishes.
             batch.FlushPrintMessages();
+            // An RPC ad-hoc statement (sp_executesql / sp_execute / sp_prepexec)
+            // runs in a nested scope, so temp tables it created are dropped when
+            // it finishes — the tedious `execSql` re-run-without-Msg-2714 case.
+            batch.DropScopedTempTables();
             // LOCAL cursors + cursor variables are frame-scoped: implicitly
             // deallocated when the batch ends (GLOBAL cursors persist on the
             // connection). Releases any SCROLL_LOCKS locks the deallocated

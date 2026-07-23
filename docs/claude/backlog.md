@@ -96,10 +96,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 - **Per-object creation-time `QUOTED_IDENTIFIER` capture not modeled** — real SQL Server stamps procedures / views / triggers / tables with the QI setting in effect at CREATE (`sys.sql_modules.uses_quoted_identifier`, `OBJECTPROPERTY(id, 'IsQuotedIdentOn')`) and executes bodies under the captured setting; the simulator re-parses bodies under the executing session's current setting.
   See [`grammar.md`](grammar.md).
   Rare legacy-pattern impact.
-- **Temp tables created inside dynamic SQL not scoped to the dynamic batch** — real drops a `#temp` created inside an `sp_executesql` / `EXEC('…')` call when that dynamic batch returns (a following statement sees Msg 208); the simulator's temp tables are flat session state (`Connection.TempTables`), so a dynamic-SQL-created `#temp` persists for the session.
-  Surfaced by the tedious/Node driver, whose `execSql` runs every statement through `sp_executesql` (2026-07-23 shakedown).
-  Lenient direction (real-valid code still runs on the sim); a fix means tracking each temp table's creating batch and dropping it at dynamic-batch exit — an engine change, not endpoint-local.
-  See [`temp-tables.md`](temp-tables.md), [`tds-endpoint.md`](tds-endpoint.md).
 - **Skip-mode deferred name resolution — DML target tables not placeholder-continued** — the skip-mode parse-continuation fix (2026-07-17) substitutes placeholder metadata for a missing *FROM-clause table* or *schema-qualified function* so an un-taken branch parses to completion and is discarded whole (killing the orphaned-`ELSE` cascade — see [`control-flow.md`](control-flow.md)).
   A missing **DML target table** (INSERT / UPDATE / DELETE / MERGE) still resolves inline and throws Msg 208, caught by the residual object-name swallow whose flat recovery scan can orphan a trailing `ELSE` / `END` when the throw fires before the statement's own body is consumed.
   Probe-confirmed real SQL Server defers these (`IF 1=0 INSERT INTO missing SELECT * FROM other; SELECT 'after'` → `after`; the ELSE form runs the ELSE).

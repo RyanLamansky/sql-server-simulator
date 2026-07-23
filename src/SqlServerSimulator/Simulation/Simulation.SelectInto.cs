@@ -61,6 +61,10 @@ partial class Simulation
             destTable.OwnerConnection = batch.Connection;
         if (!destination.TryAdd(leaf, destTable))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
+        // A local temp created via SELECT INTO inside a module body is dropped
+        // when that module exits (probe-confirmed, same as CREATE TABLE #t).
+        if (isLocalTemp)
+            batch.RegisterScopedTempTable(leaf);
 
         // Temp-table SELECT INTO participates in transactional CREATE undo —
         // probe-confirmed that ROLLBACK undoes both local and global temp-table

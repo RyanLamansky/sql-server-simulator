@@ -186,6 +186,12 @@ internal sealed partial class TdsSession
 #pragma warning disable CA2100 // This IS a SQL endpoint: the statement is the client's query by design.
         command.CommandText = statement;
 #pragma warning restore CA2100
+        // SQL Server runs an sp_executesql / sp_execute / sp_prepexec statement
+        // in a nested scope, so a #temp it creates is dropped when it returns —
+        // without this, tedious (whose execSql routes every statement through
+        // sp_executesql) leaks temp tables across calls and a re-run
+        // `create table #t` collides with Msg 2714.
+        command.ScopeTempTablesToBatch = true;
 
         var outputs = new List<(int Ordinal, TdsRpcParameter Wire, SimulatedDbParameter Bound)>();
         for (var i = 0; i < boundParameters.Count; i++)

@@ -289,6 +289,11 @@ partial class Simulation
             heapTable.OwnerConnection = context.Batch.Connection;
         if (!destination.TryAdd(heapTable.Name, heapTable))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
+        // A local temp created inside a module body (proc / trigger / dynamic
+        // SQL) is dropped when that module exits; register it so the body's
+        // finally drops it.
+        if (isLocalTempTable)
+            context.Batch.RegisterScopedTempTable(heapTable.Name);
 
         if (historyTableName is { } historyName && historyDestination is not null && historySchema is not null)
         {

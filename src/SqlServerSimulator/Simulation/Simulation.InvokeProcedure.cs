@@ -236,6 +236,10 @@ partial class Simulation
             {
                 connection.NestingLevel--;
                 connection.TextSize = savedTextSize;
+                // Local temp tables the body created are dropped at proc exit
+                // (SQL Server's module-scoped lifetime — so a re-entrant call
+                // re-creates them without a Msg 2714 collision).
+                innerBatch.DropScopedTempTables();
                 // Unwind the module's EXECUTE AS frame on body exit (including
                 // a body error), before control and the OUTPUT / return-code
                 // writeback return to the caller's security context.

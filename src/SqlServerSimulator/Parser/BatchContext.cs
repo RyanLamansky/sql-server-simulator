@@ -517,6 +517,64 @@ internal sealed class BatchContext
         && (this.ProcFrame is null || this.ProcFrame.IsDynamicSql);
 
     /// <summary>
+    /// Leaf names (<c>#foo</c>) of local temp tables created while this batch's
+    /// body executed. Non-null only for a module body — a procedure, trigger,
+    /// or dynamic-SQL (<c>EXEC</c> / <c>sp_executesql</c>) scope — where SQL
+    /// Server drops a locally-created temp table when the module exits.
+    /// <see cref="DropScopedTempTables"/> in the body-dispatch finally drops
+    /// them; the session batch leaves this null and its temp tables live until
+    /// the session ends (or an explicit <c>DROP</c>).
+    /// </summary>
+    public List<string>? ScopedTempTableNames;
+
+    /// <summary>
+    /// Set on the top-level batch of an RPC <c>sp_executesql</c> / <c>sp_execute</c>
+    /// / <c>sp_prepexec</c> statement (see
+    /// <see cref="SimulatedDbCommand.ScopeTempTablesToBatch"/>): SQL Server runs
+    /// that ad-hoc statement in a nested scope, so its temp tables are dropped
+    /// when it finishes even though there's no proc / trigger / dynamic-SQL
+    /// frame object.
+    /// </summary>
+    public bool ForceTempTableScope;
+
+    /// <summary>
+    /// True when this batch is a module body — a procedure, trigger, or
+    /// dynamic-SQL scope (or an RPC ad-hoc-statement scope,
+    /// <see cref="ForceTempTableScope"/>) — whose locally-created <c>#temp</c>
+    /// tables are dropped at module exit (SQL Server's module-scoped temp-table
+    /// lifetime).
+    /// </summary>
+    public bool ScopesTempTables => this.ProcFrame is not null || this.TriggerFrame is not null || this.ForceTempTableScope;
+
+    /// <summary>
+    /// Records a local temp table created during this module body so
+    /// <see cref="DropScopedTempTables"/> drops it at module exit. A no-op for
+    /// the session batch, whose temp tables persist for the session.
+    /// </summary>
+    public void RegisterScopedTempTable(string leaf)
+    {
+        if (this.ScopesTempTables)
+            (this.ScopedTempTableNames ??= []).Add(leaf);
+    }
+
+    /// <summary>
+    /// Drops the local temp tables this module body created, matching SQL
+    /// Server's module-scoped lifetime: a statement after the module sees Msg
+    /// 208, and a re-entrant call (the same proc invoked twice on one
+    /// connection, or tedious's <c>execSql</c> re-running a
+    /// <c>create table #t</c> through <c>sp_executesql</c>) re-creates the name
+    /// without a Msg 2714 collision. Called from the proc / trigger /
+    /// dynamic-SQL body-dispatch finally, so it runs on a body error too.
+    /// </summary>
+    public void DropScopedTempTables()
+    {
+        if (this.ScopedTempTableNames is not { } names)
+            return;
+        foreach (var name in names)
+            _ = this.Connection.TempTables.TryRemove(name, out _);
+    }
+
+    /// <summary>
     /// Object ids of scalar UDFs whose EXECUTE permission has already been
     /// checked (and passed) in this batch — the once-per-statement memo shared
     /// by the query-context read-source check

@@ -170,6 +170,7 @@ partial class Simulation
 
             var triggerFrame = new TriggerFrame(trigger, insertedPseudo, deletedPseudo);
             var savedImpersonationDepth = connection.Security.ImpersonationDepth;
+            BatchContext? innerBatch = null;
             try
             {
                 connection.NestingLevel++;
@@ -184,7 +185,7 @@ partial class Simulation
 #pragma warning disable CA2100 // trigger.BodyText is the simulator's own captured body span
                     bodyCommand.CommandText = trigger.BodyText;
 #pragma warning restore CA2100
-                    var innerBatch = new BatchContext(bodyCommand, triggerFrame)
+                    innerBatch = new BatchContext(bodyCommand, triggerFrame)
                     {
                         // Trigger-body errors report a CREATE-relative line and
                         // carry the trigger's UNQUALIFIED name (probe-confirmed:
@@ -205,6 +206,10 @@ partial class Simulation
             {
                 connection.NestingLevel--;
                 connection.TriggerNestLevel--;
+                // Local temp tables the trigger body created are dropped at
+                // trigger exit (probe-confirmed Msg 208 afterward — module-
+                // scoped lifetime, same as procs / dynamic SQL).
+                innerBatch?.DropScopedTempTables();
                 connection.Security.RevertTo(savedImpersonationDepth);
                 _ = connection.FiringTriggerIds.Remove(trigger.ObjectId);
             }

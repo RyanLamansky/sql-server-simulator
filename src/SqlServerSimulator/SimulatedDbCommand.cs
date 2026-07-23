@@ -18,6 +18,17 @@ public sealed class SimulatedDbCommand : DbCommand
 {
     internal readonly Simulation simulation;
 
+    /// <summary>
+    /// When set, local temp tables (<c>#foo</c>) created while this command's
+    /// batch runs are dropped when it finishes — the module-scoped temp-table
+    /// lifetime a dynamic-SQL scope has. Set by the TDS endpoint's RPC
+    /// <c>sp_executesql</c> / <c>sp_execute</c> / <c>sp_prepexec</c> handler,
+    /// which executes an ad-hoc statement that SQL Server runs in a nested
+    /// scope; a normal session command leaves it false so its temp tables
+    /// persist for the session.
+    /// </summary>
+    internal bool ScopeTempTablesToBatch;
+
     internal SimulatedDbCommand(Simulation simulation, SimulatedDbConnection connection)
     {
         this.simulation = simulation;
