@@ -178,6 +178,10 @@ internal sealed class AggregateExpression : Expression
         _ => throw new InvalidOperationException($"Unknown aggregate kind {this.Kind}."),
     };
 
+    // SUM / AVG / MIN / MAX preserve the operand's decimal-vs-numeric name; the other
+    // kinds have non-decimal results the projection-time gate filters out.
+    internal override bool ResultReportsNumeric => this.Operand?.ResultReportsNumeric ?? false;
+
     /// <summary>
     /// Maps <c>SUM</c>'s operand type to its result type per SQL Server's
     /// rules: integer family widens to <see cref="SqlType.Int32"/> for

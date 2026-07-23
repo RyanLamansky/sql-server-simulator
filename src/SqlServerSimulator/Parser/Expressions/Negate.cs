@@ -70,6 +70,8 @@ internal sealed class Negate(Expression operand) : Expression
     internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) =>
         this.Operand.ResultIsNullable(resolveColumnNullable);
 
+    internal override bool ResultReportsNumeric => this.Operand.ResultReportsNumeric;
+
     internal override void VisitColumnReferences(Action<MultiPartName> visit) =>
         this.Operand.VisitColumnReferences(visit);
 

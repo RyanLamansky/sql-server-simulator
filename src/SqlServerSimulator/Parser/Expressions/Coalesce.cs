@@ -51,5 +51,18 @@ internal sealed class Coalesce : Expression
         return this.cachedResultType;
     }
 
+    internal override bool ResultReportsNumeric
+    {
+        get
+        {
+            foreach (var argument in this.arguments)
+            {
+                if (argument.ResultReportsNumeric)
+                    return true;
+            }
+            return false;
+        }
+    }
+
     internal override string DebugDisplay() => $"COALESCE({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";
 }

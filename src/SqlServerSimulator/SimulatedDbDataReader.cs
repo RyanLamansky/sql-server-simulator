@@ -184,7 +184,18 @@ public sealed class SimulatedDbDataReader : DbDataReader
     }
 
     /// <inheritdoc/>
-    public override string GetDataTypeName(int ordinal) => CurrentSchema[ordinal].SqlServerName;
+    /// <remarks>
+    /// A <c>decimal(p, s)</c> column projected from a numeric-named source
+    /// (a decimal/numeric literal, <c>CAST … AS numeric</c>, or arithmetic /
+    /// function carrying one) reports <c>numeric</c> — SQL Server's own type
+    /// name for that origin; the two share one storage type, so the
+    /// distinction is carried as result metadata (<c>ColumnReportsNumeric</c>),
+    /// not on the <see cref="SqlType"/>.
+    /// </remarks>
+    public override string GetDataTypeName(int ordinal) =>
+        this.currentResult?.ColumnReportsNumeric is { } reportsNumeric && ordinal < reportsNumeric.Length && reportsNumeric[ordinal]
+            ? "numeric"
+            : CurrentSchema[ordinal].SqlServerName;
 
     /// <summary>
     /// Mirrors SqlClient's polymorphic <c>GetDateTime</c>: a <c>date</c> column

@@ -127,6 +127,22 @@ internal sealed class CaseExpression : Expression
         return this.elseBranch is null || this.elseBranch.ResultIsNullable(resolveColumnNullable);
     }
 
+    // Numeric-named if any value arm (a THEN or the ELSE) is — the same arm
+    // set the result-type promotion walks; the WHEN conditions don't produce
+    // the result value.
+    internal override bool ResultReportsNumeric
+    {
+        get
+        {
+            foreach (var then in this.thens)
+            {
+                if (then.ResultReportsNumeric)
+                    return true;
+            }
+            return this.elseBranch is not null && this.elseBranch.ResultReportsNumeric;
+        }
+    }
+
     /// <summary>
     /// Parses a CASE expression. Entered with
     /// <see cref="ParserContext.Token"/> on the <c>CASE</c> keyword;

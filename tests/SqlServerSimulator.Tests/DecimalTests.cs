@@ -132,7 +132,11 @@ public sealed class DecimalTests
         using var reader = connection.CreateCommand(
             "select s.region, s.amount, s.amount * 100.0 / (select sum(s0.amount) from sales as s0 where s0.region = s.region) from sales as s")
             .ExecuteReader();
-        AreEqual("decimal", reader.GetDataTypeName(2));
+        // The `* 100.0` numeric literal makes the result numeric-named, so
+        // SQL Server reports the numeric type name (probe-confirmed:
+        // numeric(38, 24)); only the name differs from decimal, storage is
+        // identical.
+        AreEqual("numeric", reader.GetDataTypeName(2));
         var pcts = new List<(string Region, decimal Amount, decimal Pct)>();
         while (reader.Read())
             pcts.Add((reader.GetString(0), reader.GetDecimal(1), reader.GetDecimal(2)));

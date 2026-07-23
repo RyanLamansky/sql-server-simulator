@@ -39,6 +39,8 @@ internal sealed class Degrees(ParserContext context) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         => ResolveResultType(this.source.GetSqlType(batch, resolveColumnType));
 
+    internal override bool ResultReportsNumeric => this.source.ResultReportsNumeric;
+
     private static SqlType ResolveResultType(SqlType input) =>
         input is DecimalSqlType d
             ? SqlType.GetDecimal(38, d.scale > 18 ? d.scale : 18)

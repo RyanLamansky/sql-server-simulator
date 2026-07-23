@@ -49,12 +49,16 @@ internal sealed class Numeric : Token
         {
             // Decimal literal — derive precision and scale by counting
             // significant digits. SQL Server's rule: precision is the total
-            // significant-digit count (leading zeros excluded), scale is the
-            // digit count after the decimal point. <c>0.5</c> has precision 1
-            // and scale 1; <c>100.5</c> has precision 4 and scale 1.
+            // significant-digit count (an integer part of exactly <c>0</c>
+            // contributes nothing), scale is the digit count after the decimal
+            // point, and precision floors at 1. <c>0.5</c> has precision 1 and
+            // scale 1; <c>0.05</c> has precision 2 and scale 2; <c>100.5</c>
+            // has precision 4 and scale 1 (probe-confirmed against SQL Server
+            // 2025). The floor applies to the summed precision, not the integer
+            // part alone — otherwise <c>0.1</c> would over-count to (2, 1).
             var integerPart = number[..dotIndex].TrimStart('0').Length;
             var fractionalPart = number.Length - dotIndex - 1;
-            var precision = Math.Max(1, integerPart) + fractionalPart;
+            var precision = Math.Max(1, integerPart + fractionalPart);
             // A literal carrying more than 38 significant digits exceeds the
             // numeric type's maximum precision — SQL Server reports Msg 1007
             // rather than letting it reach the type factory.

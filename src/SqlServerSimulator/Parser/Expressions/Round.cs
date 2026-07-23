@@ -67,6 +67,8 @@ internal sealed class Round : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         => MathScalars.WidenForResult(this.value.GetSqlType(batch, resolveColumnType));
 
+    internal override bool ResultReportsNumeric => this.value.ResultReportsNumeric;
+
     internal override string DebugDisplay() => $"ROUND({this.value.DebugDisplay()}, {this.length.DebugDisplay()})";
 
     /// <remarks>

@@ -18,10 +18,16 @@ namespace SqlServerSimulator;
 /// <item>An <b>untyped NULL</b> yields to any typed operand in
 /// <c>COALESCE</c> / <c>ISNULL</c> / <c>CASE</c> / <c>IIF</c> promotion rather
 /// than forcing its placeholder <c>int</c> type onto the result.</item>
+/// <item>A <b>decimal literal</b>'s precision counts significant digits with
+/// an integer part of exactly <c>0</c> contributing nothing, floored at 1
+/// (<c>0.1</c> → <c>(1, 1)</c>, <c>0.05</c> → <c>(2, 2)</c>), and a literal
+/// may omit the leading integer digit (<c>.5</c> = <c>0.5</c> →
+/// <c>(1, 1)</c>).</item>
 /// </list>
-/// The reported decimal type name stays <c>decimal</c> (real reports
-/// <c>numeric</c>) — a deliberately separate follow-up — so these assert
-/// precision/scale/value, not the name.
+/// These assert precision/scale/value via <c>INFORMATION_SCHEMA</c> (the
+/// storage type name is always <c>decimal</c> there, regardless of the
+/// reported numeric-vs-decimal name — that name is asserted separately in
+/// <see cref="DecimalTypeNameTests"/>).
 /// </summary>
 [TestClass]
 public sealed class LiteralTypePromotionTests
@@ -116,6 +122,42 @@ public sealed class LiteralTypePromotionTests
         // All-integer union stays int.
         AreEqual(("int", 10, 0), ColumnType("select 1 as v into t union select 2 union select 250"));
     }
+
+    // ---- decimal-literal precision: leading-zero + leading-dot forms ----
+
+    [TestMethod]
+    [DataRow("0.1", 1, 1)]      // integer part 0 contributes nothing
+    [DataRow("0.5", 1, 1)]
+    [DataRow("0.05", 2, 2)]
+    [DataRow("0.00", 2, 2)]
+    [DataRow("0.10", 2, 2)]     // written trailing zero still counts
+    [DataRow("1.5", 2, 1)]      // significant leading digit counts
+    [DataRow("12.5", 3, 1)]
+    [DataRow("10.05", 4, 2)]
+    [DataRow("100.0", 4, 1)]
+    public void DecimalLiteral_Precision_LeadingZeroNotCounted(string expr, int precision, int scale) =>
+        AssertDecimal(expr, precision, scale);
+
+    [TestMethod]
+    [DataRow(".5", 1, 1)]
+    [DataRow(".05", 2, 2)]
+    [DataRow(".123", 3, 3)]
+    public void DecimalLiteral_LeadingDot_ParsesAsFractional(string expr, int precision, int scale) =>
+        AssertDecimal(expr, precision, scale);
+
+    [TestMethod]
+    public void DecimalLiteral_LeadingDot_ValueMatches()
+    {
+        AreEqual(0.5m, ExecuteScalar("select .5"));
+        AreEqual(0.05m, ExecuteScalar("select .05"));
+        AreEqual(0.123m, ExecuteScalar("select .123"));
+    }
+
+    [TestMethod]
+    [DataRow("select .")]        // bare dot is not a numeric literal
+    [DataRow("select 1..2")]     // a second dot doesn't extend the literal
+    public void MalformedDotNumeric_RaisesSyntaxError(string command) =>
+        _ = AssertSqlError(command, 102);
 
     // ---- #2b: unary minus preserves the operand's type ----
 

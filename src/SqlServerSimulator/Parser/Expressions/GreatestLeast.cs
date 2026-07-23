@@ -47,6 +47,19 @@ internal sealed class GreatestLeast : Expression
         return t;
     }
 
+    internal override bool ResultReportsNumeric
+    {
+        get
+        {
+            foreach (var argument in this.arguments)
+            {
+                if (argument.ResultReportsNumeric)
+                    return true;
+            }
+            return false;
+        }
+    }
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         // Result type resolves from the runtime argument types (promoted) —

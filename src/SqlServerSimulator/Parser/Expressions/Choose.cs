@@ -54,5 +54,18 @@ internal sealed class Choose : Expression
         return t;
     }
 
+    internal override bool ResultReportsNumeric
+    {
+        get
+        {
+            foreach (var value in this.values)
+            {
+                if (value.ResultReportsNumeric)
+                    return true;
+            }
+            return false;
+        }
+    }
+
     internal override string DebugDisplay() => $"CHOOSE({this.indexExpr.DebugDisplay()}, ...{this.values.Length} values)";
 }

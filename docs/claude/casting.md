@@ -183,3 +183,7 @@ Single-word synonyms resolve inside `SqlType.GetByName` (so they reach every sit
 Multi-word synonyms are folded by `TypeNameSynonyms` (a `SynonymTypeName` leaf whose `Span` is the canonical name, spanning the source words for line attribution): `double precision` → float, `character varying` / `char varying` → varchar, `national character` / `national char` → nchar, `national character varying` / `national char varying` → nvarchar, `binary varying` → varbinary, `national text` → ntext.
 The leading word may be a reserved keyword (`double`, `national`) or an identifier (`character`, `char`, `binary`), so the fold runs ahead of a site's "type name must be an identifier" guard.
 Default lengths follow the base type's own context rules (bare `character varying` → varchar(1) in a column, varchar(30) in a CAST) — the synonym only rewrites the name.
+
+## `CAST`/`CONVERT … AS numeric` vs `AS decimal` reported name
+`decimal(p, s)` and `numeric(p, s)` resolve to the same storage type, but the source keyword decides the *reported* result-column type name: `CAST(1.5 AS numeric(6,2))` reports `numeric`, `CAST(1.5 AS decimal(6,2))` reports `decimal` (probe-confirmed).
+`Cast` / `ConvertExpression` capture this at parse (`Cast.ReportsNumeric` on the raw type-name token — `dec` folds to decimal-named, `numeric` is the only numeric name) and surface it through `Expression.ResultReportsNumeric`; the propagation rule and the storage-equality constraint that keeps this metadata-only live in [`arithmetic.md`](arithmetic.md#numeric-vs-decimal-reported-type-name).

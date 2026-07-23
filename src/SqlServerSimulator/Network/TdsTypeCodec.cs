@@ -40,7 +40,7 @@ internal static class TdsTypeCodec
     /// bacpac loader decodes per the model.xml declaration, so a false
     /// nullable claim here misaligns every exported row.
     /// </summary>
-    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability)
+    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability, bool[]? columnReportsNumeric = null)
     {
         writer.EnterComposite();
         writer.WriteByte(Tds.TokenColMetadata);
@@ -52,7 +52,8 @@ internal static class TdsTypeCodec
             var notNull = columnNullability is not null && !columnNullability[i];
             writer.WriteByte(notNull ? (byte)0x08 : (byte)0x09);
             writer.WriteByte(0);
-            WriteTypeInfo(writer, type, notNull);
+            var reportsNumeric = columnReportsNumeric is not null && columnReportsNumeric[i];
+            WriteTypeInfo(writer, type, notNull, reportsNumeric);
             writer.WriteBVarchar(columnNames[i]);
         }
 
@@ -234,7 +235,7 @@ internal static class TdsTypeCodec
         writer.LeaveComposite();
     }
 
-    private static void WriteTypeInfo(TdsTokenWriter writer, SqlType type, bool notNull)
+    private static void WriteTypeInfo(TdsTokenWriter writer, SqlType type, bool notNull, bool reportsNumeric = false)
     {
         // A NOT NULL fixed-width column carries the FIXEDLENTYPE token (single
         // byte, no max-length byte), matching real — the N-variant token below
@@ -286,7 +287,11 @@ internal static class TdsTypeCodec
                 writer.WriteByte(8);
                 break;
             case DecimalSqlType d:
-                writer.WriteByte(0x6A);
+                // NUMERICN (0x6C) vs DECIMALN (0x6A): identical wire body, but
+                // the token drives the reported type name (JDBC
+                // getColumnTypeName). A numeric-named projection column emits
+                // NUMERICN; both store identically. RETURNVALUE keeps DECIMALN.
+                writer.WriteByte(reportsNumeric ? (byte)0x6C : (byte)0x6A);
                 writer.WriteByte((byte)(MagnitudeBytes(d.precision) + 1));
                 writer.WriteByte(d.precision);
                 writer.WriteByte(d.scale);

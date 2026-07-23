@@ -41,5 +41,8 @@ internal sealed class NullIf : Expression
         return t;
     }
 
+    // NULLIF(a, b) returns a (or NULL), so the result carries a's name.
+    internal override bool ResultReportsNumeric => this.a.ResultReportsNumeric;
+
     internal override string DebugDisplay() => $"NULLIF({this.a.DebugDisplay()}, {this.b.DebugDisplay()})";
 }

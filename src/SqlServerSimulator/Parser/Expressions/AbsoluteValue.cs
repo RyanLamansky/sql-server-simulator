@@ -44,6 +44,8 @@ internal sealed class AbsoluteValue(ParserContext context) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         => MathScalars.WidenForResult(this.source.GetSqlType(batch, resolveColumnType));
 
+    internal override bool ResultReportsNumeric => this.source.ResultReportsNumeric;
+
     /// <remarks>
     /// .NET's <c>Math.Abs(long)</c> throws <c>OverflowException</c> on
     /// <c>long.MinValue</c>; for an int-result widening, the long-form

@@ -74,5 +74,8 @@ internal sealed class Iif : Expression
         return this.cachedResultType;
     }
 
+    internal override bool ResultReportsNumeric =>
+        this.trueValue.ResultReportsNumeric || this.falseValue.ResultReportsNumeric;
+
     internal override string DebugDisplay() => $"IIF(..., {this.trueValue.DebugDisplay()}, {this.falseValue.DebugDisplay()})";
 }

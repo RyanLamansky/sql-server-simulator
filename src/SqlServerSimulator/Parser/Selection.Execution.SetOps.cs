@@ -56,7 +56,10 @@ internal sealed partial class Selection
         var combinedSchema = new SqlType[left.Schema.Length];
         var leftDigits = left.ColumnIntegerLiteralDigits;
         var rightDigits = right.ColumnIntegerLiteralDigits;
+        var leftReportsNumeric = left.ColumnReportsNumeric;
+        var rightReportsNumeric = right.ColumnReportsNumeric;
         int[]? combinedDigits = null;
+        bool[]? combinedReportsNumeric = null;
         for (var i = 0; i < combinedSchema.Length; i++)
         {
             var leftDigit = leftDigits is null ? 0 : leftDigits[i];
@@ -68,6 +71,11 @@ internal sealed partial class Selection
             combinedSchema[i] = SqlType.Promote(effectiveLeft, effectiveRight);
             if (leftDigit > 0 && rightDigit > 0)
                 (combinedDigits ??= new int[combinedSchema.Length])[i] = Math.Max(leftDigit, rightDigit);
+            // A set-op result column is numeric-named when either branch's
+            // column is (and the unified type is decimal) — SELECT 10.0 UNION
+            // SELECT 20.0 reports numeric, matching each branch's literal.
+            if (combinedSchema[i] is DecimalSqlType && ((leftReportsNumeric is not null && leftReportsNumeric[i]) || (rightReportsNumeric is not null && rightReportsNumeric[i])))
+                (combinedReportsNumeric ??= new bool[combinedSchema.Length])[i] = true;
         }
 
         // Result column names come from the first (leftmost) branch.
@@ -104,6 +112,7 @@ internal sealed partial class Selection
         }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema)
         {
             ColumnIntegerLiteralDigits = combinedDigits,
+            ColumnReportsNumeric = combinedReportsNumeric,
         };
     }
 

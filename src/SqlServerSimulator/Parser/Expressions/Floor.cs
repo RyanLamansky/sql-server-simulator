@@ -29,5 +29,7 @@ internal sealed class Floor(ParserContext context) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         => MathScalars.FloorCeilingResult(this.source.GetSqlType(batch, resolveColumnType));
 
+    internal override bool ResultReportsNumeric => this.source.ResultReportsNumeric;
+
     internal override string DebugDisplay() => $"FLOOR({this.source.DebugDisplay()})";
 }

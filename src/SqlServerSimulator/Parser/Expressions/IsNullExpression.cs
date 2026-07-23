@@ -61,4 +61,7 @@ internal sealed class IsNullExpression : Expression
     internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) =>
         this.check.ResultIsNullable(resolveColumnNullable)
         && this.replacement.ResultIsNullable(resolveColumnNullable);
+
+    internal override bool ResultReportsNumeric =>
+        this.check.ResultReportsNumeric || this.replacement.ResultReportsNumeric;
 }

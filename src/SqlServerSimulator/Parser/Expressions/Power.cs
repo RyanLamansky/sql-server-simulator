@@ -69,5 +69,9 @@ internal sealed class Power : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         => MathScalars.PowerResult(this.baseExpr.GetSqlType(batch, resolveColumnType));
 
+    // POWER's result takes the base's type, so it carries the base's name
+    // (the exponent doesn't contribute): POWER(2.0, 10) → numeric.
+    internal override bool ResultReportsNumeric => this.baseExpr.ResultReportsNumeric;
+
     internal override string DebugDisplay() => $"POWER({this.baseExpr.DebugDisplay()}, {this.exponent.DebugDisplay()})";
 }

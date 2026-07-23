@@ -470,6 +470,7 @@ internal sealed partial class Selection
         selection.ColumnNullability = columnNullability;
         selection.ProjectionExpressions = [.. expressions];
         selection.ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions);
+        selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
         selection.MultipleFromSources = sources.Length > 1;
         selection.AutoElementName = sources.Length == 1 ? sources[0].Qualifier : null;
         return selection;
@@ -504,6 +505,26 @@ internal sealed partial class Selection
         for (var i = 0; i < expressions.Count; i++)
             nullability[i] = expressions[i].ResultIsNullable(ResolveNullable);
         return nullability;
+    }
+
+    /// <summary>
+    /// Per-projection-column decimal-vs-numeric reported type name for
+    /// result-set metadata. A column reports <c>numeric</c> only when its
+    /// result is <c>decimal</c>-family AND the expression carries a
+    /// numeric-named source (see <see cref="Expression.ResultReportsNumeric"/>);
+    /// returns null when no column qualifies (the common case), so most plans
+    /// carry no extra array. The two names share one <see cref="SqlType"/>, so
+    /// this stays projection-time metadata and never influences storage.
+    /// </summary>
+    private static bool[]? ColumnReportsNumericOf(List<Expression> expressions, SqlType[] schema)
+    {
+        bool[]? reportsNumeric = null;
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            if (schema[i] is DecimalSqlType && expressions[i].ResultReportsNumeric)
+                (reportsNumeric ??= new bool[expressions.Count])[i] = true;
+        }
+        return reportsNumeric;
     }
 
     /// <summary>

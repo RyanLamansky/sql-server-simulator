@@ -198,6 +198,17 @@ internal sealed partial class Selection
     /// </summary>
     internal int[]? ColumnIntegerLiteralDigits;
 
+    /// <summary>
+    /// Per-column decimal-vs-numeric reported type name for projection columns; true =
+    /// report the <c>numeric</c> type name rather than <c>decimal</c>, null
+    /// when no decimal column is numeric-named. Flows to the result set's
+    /// <see cref="SimulatedQueryResult.ColumnReportsNumeric"/> so the reader /
+    /// wire type-name path reports it. Set post-construction by the projection
+    /// builders and <see cref="CombineSetOps"/> — see
+    /// <c>Expression.ResultReportsNumeric</c> for the propagation rule.
+    /// </summary>
+    internal bool[]? ColumnReportsNumeric;
+
     private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>>? rowSource;
 
     /// <summary>
@@ -358,8 +369,8 @@ internal sealed partial class Selection
     /// </summary>
     public SimulatedSqlResultSet Execute(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver = null) =>
         this.valueRowSource is { } values
-            ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver)) { ColumnNullability = this.ColumnNullability }
-            : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability };
+            ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric }
+            : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric };
 
     /// <summary>
     /// Creates a <see cref="Selection"/> from a series of tokens. Follows the
@@ -2897,6 +2908,7 @@ internal sealed partial class Selection
         {
             ProjectionExpressions = [.. expressions],
             ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions),
+            ColumnReportsNumeric = ColumnReportsNumericOf(expressions, schema),
         };
     }
 

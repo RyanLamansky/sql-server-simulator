@@ -681,6 +681,27 @@ internal abstract class Expression
     internal virtual bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => true;
 
     /// <summary>
+    /// True when this expression's result — <b>if</b> it is decimal-family —
+    /// is one SQL Server reports under the <c>numeric</c> type name rather than
+    /// <c>decimal</c> (JDBC <c>getColumnTypeName</c> / the TDS COLMETADATA
+    /// DECIMALN-vs-NUMERICN token). The two names store identically
+    /// (<c>decimal(5, 2)</c> and <c>numeric(5, 2)</c> are the same
+    /// <see cref="SqlType"/>), so this is projection-time metadata only, never
+    /// part of type identity — the row encoder's stored-type equality would
+    /// reject inserts otherwise. Sources of the numeric name: a
+    /// decimal/numeric literal (all are numeric-named), a
+    /// <c>CAST</c>/<c>CONVERT … AS numeric</c>, and any arithmetic or
+    /// decimal-returning function that carries a numeric-named operand. A
+    /// bare <c>decimal</c> keyword, integer operands, and — until declared
+    /// per-column reported names are modeled — a decimal-typed column do NOT force it
+    /// (probe-confirmed against SQL Server 2025: <c>10.0 + 1</c> → numeric,
+    /// <c>d + 1</c> → decimal, <c>SUM(d)</c> → decimal). Callers gate on the
+    /// result actually being <see cref="DecimalSqlType"/>; the flag is
+    /// meaningless for non-decimal results and defaults to <see langword="false"/>.
+    /// </summary>
+    internal virtual bool ResultReportsNumeric => false;
+
+    /// <summary>
     /// Returns true when <paramref name="expression"/> is a bare <c>NULL</c>
     /// literal at the syntactic level — that is, the keyword <c>NULL</c>
     /// optionally wrapped in any number of parentheses. A typed NULL like

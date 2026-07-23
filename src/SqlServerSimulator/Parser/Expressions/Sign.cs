@@ -28,5 +28,7 @@ internal sealed class Sign(ParserContext context) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         => MathScalars.WidenForResult(this.source.GetSqlType(batch, resolveColumnType));
 
+    internal override bool ResultReportsNumeric => this.source.ResultReportsNumeric;
+
     internal override string DebugDisplay() => $"SIGN({this.source.DebugDisplay()})";
 }

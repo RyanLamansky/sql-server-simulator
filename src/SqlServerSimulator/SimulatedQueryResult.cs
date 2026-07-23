@@ -34,6 +34,19 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     public bool[]? ColumnNullability;
 
     /// <summary>
+    /// Per-column decimal-family name parallel to <see cref="Schema"/>;
+    /// <see langword="true"/> = report the <c>numeric</c> type name rather than
+    /// <c>decimal</c> (JDBC <c>getColumnTypeName</c> / the TDS COLMETADATA
+    /// NUMERICN token / the in-process <c>GetDataTypeName</c>). Null means every
+    /// decimal column reports <c>decimal</c> — the common case, so most plans
+    /// carry no extra array. Meaningful only where <see cref="Schema"/> is
+    /// <c>decimal</c>; the two names share one <see cref="SqlType"/>, so
+    /// this stays metadata-only and never reaches storage / type identity.
+    /// Populated by the SELECT projection via <c>Expression.ResultReportsNumeric</c>.
+    /// </summary>
+    public bool[]? ColumnReportsNumeric;
+
+    /// <summary>
     /// The session's <c>SET TEXTSIZE</c> byte cap in effect when this result
     /// was produced; <c>-1</c> = unlimited. Stamped by the dispatch loop at
     /// statement materialization so a later-read result truncates under the

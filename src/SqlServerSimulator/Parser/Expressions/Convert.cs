@@ -34,6 +34,7 @@ internal sealed class ConvertExpression : Expression
     private readonly SqlType targetType;
     private readonly int? targetMaxLength;
     private readonly bool tryMode;
+    private readonly bool targetReportsNumeric;
 
     public ConvertExpression(ParserContext context, bool tryMode)
     {
@@ -44,6 +45,7 @@ internal sealed class ConvertExpression : Expression
         var typeName = TypeNameSynonyms.TryFoldMultiWordType(context)
             ?? context.Token as Name
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+        this.targetReportsNumeric = Cast.ReportsNumeric(typeName);
         (this.targetType, this.targetMaxLength) = Cast.ParseTargetTypeSpec(context, typeName);
 
         if (context.Token is not Operator { Character: ',' })
@@ -128,6 +130,8 @@ internal sealed class ConvertExpression : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
         Cast.ResultStringType(this.targetType, this.source.GetSqlType(batch, resolveColumnType), batch.CurrentDatabase.Collation) ?? this.targetType;
+
+    internal override bool ResultReportsNumeric => this.targetReportsNumeric;
 
     internal override string DebugDisplay() =>
         this.style is null

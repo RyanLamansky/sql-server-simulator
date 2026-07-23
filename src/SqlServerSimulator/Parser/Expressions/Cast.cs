@@ -32,6 +32,7 @@ internal sealed class Cast : Expression
     private readonly SqlType targetType;
     private readonly int? targetMaxLength;
     private readonly bool tryMode;
+    private readonly bool targetReportsNumeric;
 
     public Cast(ParserContext context, bool tryMode = false)
     {
@@ -44,11 +45,24 @@ internal sealed class Cast : Expression
         var typeName = TypeNameSynonyms.TryFoldMultiWordType(context)
             ?? context.Token as Name
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+        this.targetReportsNumeric = ReportsNumeric(typeName);
         (this.targetType, this.targetMaxLength) = ParseTargetTypeSpec(context, typeName);
 
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
+
+    /// <summary>
+    /// True when the CAST/CONVERT target type name is named <c>numeric</c>
+    /// rather than <c>decimal</c> (or its <c>dec</c> synonym) — the one input
+    /// that makes the decimal-family result report the <c>numeric</c> type
+    /// name at projection time. The two names are the same
+    /// <see cref="SqlType"/>, so this is captured from the source token, not
+    /// the resolved type. There is no numeric-named synonym, so an exact
+    /// match on the bare word suffices.
+    /// </summary>
+    internal static bool ReportsNumeric(Name typeName) =>
+        typeName.Span.Equals("numeric", StringComparison.OrdinalIgnoreCase);
 
     public override SqlValue Run(RuntimeContext runtime)
     {
@@ -69,6 +83,8 @@ internal sealed class Cast : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
         ResultStringType(this.targetType, this.source.GetSqlType(batch, resolveColumnType), batch.CurrentDatabase.Collation) ?? this.targetType;
+
+    internal override bool ResultReportsNumeric => this.targetReportsNumeric;
 
     /// <summary>
     /// Collation of a CAST/CONVERT result whose target is a character type.

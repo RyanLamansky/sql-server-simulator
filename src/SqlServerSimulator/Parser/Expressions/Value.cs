@@ -141,4 +141,9 @@ internal sealed class Value : Expression
     internal override bool IsRowIndependent => true;
 
     internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => this.Constant.IsNull;
+
+    // A decimal-typed Value is always a decimal/numeric literal (constant @@
+    // keywords never land on decimal, and parameters are separate expression
+    // classes), and every such literal is numeric-named.
+    internal override bool ResultReportsNumeric => this.Constant.Type is DecimalSqlType;
 }

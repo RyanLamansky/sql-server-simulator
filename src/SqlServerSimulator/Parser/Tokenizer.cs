@@ -51,6 +51,10 @@ static class Tokenizer
             '_' or (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') => ParseUnquotedStringOrReservedKeyword(command, ref index),
             '0' when index + 1 < command.Length && (command[index + 1] == 'x' || command[index + 1] == 'X') => ParseHexLiteral(command, ref index),
             >= '0' and <= '9' => ParseNumeric(command, ref index),
+            // A '.' immediately followed by a digit begins a decimal literal
+            // with no leading integer part (<c>.5</c> = <c>0.5</c>); a bare '.'
+            // (dotted-name separator) falls through to the operator case below.
+            '.' when index + 1 < command.Length && command[index + 1] is >= '0' and <= '9' => ParseNumeric(command, ref index),
             '\'' => ParseStringLiteral(command, ref index, activeCollation),
             '"' when quotedIdentifiers => ParseQuoteDelimitedIdentifier(command, ref index),
             '"' => ParseDoubleQuotedStringLiteral(command, ref index, activeCollation),
@@ -133,10 +137,11 @@ static class Tokenizer
 
     /// <summary>
     /// Parses a SQL numeric literal — integer (<c>123</c>), decimal-with-
-    /// fractional-part (<c>123.456</c>), or scientific (<c>1.5e2</c>,
-    /// <c>1E+10</c>). The starting digit is at <paramref name="index"/>;
-    /// scanning advances through fractional and exponent parts only when the
-    /// next character actually fits the grammar, so a digit followed by a
+    /// fractional-part (<c>123.456</c>), leading-dot fractional (<c>.5</c> =
+    /// <c>0.5</c>), or scientific (<c>1.5e2</c>, <c>1E+10</c>). The starting
+    /// digit — or leading <c>.</c> — is at <paramref name="index"/>; scanning
+    /// advances through fractional and exponent parts only when the next
+    /// character actually fits the grammar, so a digit followed by a
     /// non-numeric <c>.</c> (e.g. <c>1.alias</c>) leaves the dot for the
     /// outer expression parser. The token's typed value is computed inside
     /// <see cref="Numeric"/>'s constructor.
@@ -144,17 +149,31 @@ static class Tokenizer
     private static Numeric ParseNumeric(string command, ref int index)
     {
         var start = index;
-        while (++index < command.Length && command[index] is >= '0' and <= '9')
-        {
-        }
 
-        // Fractional part: '.' followed by at least one digit. A bare '.'
-        // belongs to the surrounding expression (e.g. dotted-name reference).
-        if (index + 1 < command.Length && command[index] == '.' && command[index + 1] is >= '0' and <= '9')
+        // Leading-dot form (.5): the dispatch guard already confirmed a digit
+        // follows, so consume the '.' and the fractional digits, and skip the
+        // integer-part / fractional-part scans below (there is no integer part
+        // and a second '.' is not part of this literal).
+        if (command[index] == '.')
         {
             index++;
             while (index < command.Length && command[index] is >= '0' and <= '9')
                 index++;
+        }
+        else
+        {
+            while (++index < command.Length && command[index] is >= '0' and <= '9')
+            {
+            }
+
+            // Fractional part: '.' followed by at least one digit. A bare '.'
+            // belongs to the surrounding expression (e.g. dotted-name reference).
+            if (index + 1 < command.Length && command[index] == '.' && command[index + 1] is >= '0' and <= '9')
+            {
+                index++;
+                while (index < command.Length && command[index] is >= '0' and <= '9')
+                    index++;
+            }
         }
 
         // Exponent: 'e'/'E' followed by optional sign and at least one digit.

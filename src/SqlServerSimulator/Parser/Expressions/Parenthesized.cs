@@ -25,4 +25,6 @@ internal sealed class Parenthesized(Expression wrapped) : Expression
     internal override Expression? PureConversionOperand => this.Wrapped;
 
     internal override bool IsRowIndependent => this.Wrapped.IsRowIndependent;
+
+    internal override bool ResultReportsNumeric => this.Wrapped.ResultReportsNumeric;
 }
