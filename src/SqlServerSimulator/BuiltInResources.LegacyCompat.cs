@@ -58,6 +58,21 @@ internal static partial class BuiltInResources
         // Driver 18 / JDBC call it on connect to learn each type's
         // precision/scale, so temporal parameters bind at the right scale.
         "sp_datatype_info_100",
+        // sp_tables / sp_columns_100: the ODBC SQLTables / SQLColumns backing
+        // procs — JDBC's DatabaseMetaData.getTables / getColumns (Hibernate
+        // schema validation, generic tooling) call them on connect to
+        // enumerate the live catalog. Unlike sp_datatype_info_100's static
+        // type table, these project the current database's schema objects.
+        "sp_tables",
+        "sp_columns_100",
+        // sp_pkeys / sp_statistics_100 / sp_stored_procedures: the ODBC
+        // SQLPrimaryKeys / SQLStatistics / SQLProcedures backing procs — JDBC's
+        // DatabaseMetaData.getPrimaryKeys / getIndexInfo / getProcedures call
+        // them to enumerate the current database's keys, indexes, and stored
+        // procedures.
+        "sp_pkeys",
+        "sp_statistics_100",
+        "sp_stored_procedures",
     ];
 
     /// <summary>

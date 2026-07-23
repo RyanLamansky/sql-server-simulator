@@ -61,17 +61,33 @@ public sealed class CatalogViewTests
     }
 
     [TestMethod]
-    public void SysSchemas_ListsBuiltInSchemas()
+    public void SysSchemas_ListsThirteenFixedSchemas()
     {
+        // Real SQL Server ships thirteen fixed schemas in every database:
+        // dbo / guest / INFORMATION_SCHEMA / sys plus one per fixed database
+        // role. Probe-confirmed rows (schema_id == principal_id) against
+        // SQL Server 2025; JDBC's DatabaseMetaData.getSchemas reads these.
         using var reader = new Simulation().ExecuteReader(
-            "select schema_id, name from sys.schemas order by schema_id");
-        var rows = new List<(int Id, string Name)>();
+            "select schema_id, name, principal_id from sys.schemas order by schema_id");
+        var rows = new List<(int Id, string Name, int Principal)>();
         while (reader.Read())
-            rows.Add((reader.GetInt32(0), reader.GetString(1)));
-        CollectionAssert.AreEquivalent(
-            new[] { (1, "dbo"), (3, "INFORMATION_SCHEMA"), (4, "sys") },
+            rows.Add((reader.GetInt32(0), reader.GetString(1), reader.GetInt32(2)));
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                (1, "dbo", 1), (2, "guest", 2), (3, "INFORMATION_SCHEMA", 3), (4, "sys", 4),
+                (16384, "db_owner", 16384), (16385, "db_accessadmin", 16385),
+                (16386, "db_securityadmin", 16386), (16387, "db_ddladmin", 16387),
+                (16389, "db_backupoperator", 16389), (16390, "db_datareader", 16390),
+                (16391, "db_datawriter", 16391), (16392, "db_denydatareader", 16392),
+                (16393, "db_denydatawriter", 16393),
+            },
             rows);
     }
+
+    [TestMethod]
+    public void SysSchemas_CountIsThirteen()
+        => AreEqual(13, new Simulation().ExecuteScalar("select count(*) from sys.schemas"));
 
     [TestMethod]
     public void SysSchemas_IncludesUserSchemas()
@@ -81,13 +97,13 @@ public sealed class CatalogViewTests
             """));
 
     [TestMethod]
-    public void SysSchemas_PrincipalIdIsNull()
-    {
-        using var reader = new Simulation().ExecuteReader(
-            "select principal_id from sys.schemas where name = 'dbo'");
-        IsTrue(reader.Read());
-        IsTrue(reader.IsDBNull(0));
-    }
+    public void SysSchemas_UserSchemaOwnedByDbo()
+        // A user schema (schema_id 5) is owned by dbo (principal_id 1),
+        // probe-confirmed against SQL Server 2025.
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create schema audit;
+            select principal_id from sys.schemas where name = 'audit'
+            """));
 
     [TestMethod]
     public void SysTables_EmptyByDefault()
@@ -294,12 +310,12 @@ public sealed class CatalogViewTests
     public void SysSchemas_DropSchemaNotModeled()
     {
         // Sanity: DROP SCHEMA isn't modeled (existing limitation). Schemas
-        // can only be added; sys / dbo / INFORMATION_SCHEMA are always there.
+        // can only be added; the thirteen fixed schemas are always there.
         using var conn = new Simulation().CreateDbConnection();
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "select count(*) from sys.schemas";
-        AreEqual(3, cmd.ExecuteScalar());
+        AreEqual(13, cmd.ExecuteScalar());
     }
 
     [TestMethod]

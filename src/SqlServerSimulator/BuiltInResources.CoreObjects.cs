@@ -15,19 +15,36 @@ internal static partial class BuiltInResources
         // lists the view columns a WHERE equality may push into `filtered`.
         void SysP(string name, HeapColumn[] columns, string[] pushdownColumns, Func<Parser.BatchContext, Database, CatalogFilter, IEnumerable<SqlValue[]>> filtered) =>
             views["sys." + name] = new CatalogView(name, columns, (batch, database) => filtered(batch, database, CatalogFilter.None), filteredRowGenerator: filtered, pushdownColumns: pushdownColumns);
-        // sys.schemas: (name sysname, schema_id int, principal_id int null)
+        // sys.schemas: (name sysname, schema_id int, principal_id int null).
+        // Real SQL Server ships thirteen fixed schemas in every database — dbo,
+        // guest, INFORMATION_SCHEMA, sys, plus one per fixed database role
+        // (db_owner … db_denydatawriter). The simulator only materializes dbo /
+        // INFORMATION_SCHEMA / sys as object-hosting Schema instances; guest and
+        // the nine role-named schemas exist purely for catalog fidelity, so they
+        // are injected here rather than backing them with empty Schema objects.
+        // principal_id matches real (probe-confirmed 2026-07-23): every fixed
+        // schema is owned by the like-named/like-id principal, so
+        // principal_id = schema_id for schema_id ≤ 4 or ≥ 16384; user schemas
+        // (ids 5..16383) are owned by dbo, so principal_id = 1.
         Sys("schemas",
         [
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
         ], (batch, database) =>
-            database.Schemas.Values.OrderBy(s => s.SchemaId).Select(s => new SqlValue[]
+        {
+            var rows = new List<SqlValue[]>();
+            foreach (var s in database.Schemas.Values)
+                rows.Add(SchemaRow(s.Name, s.SchemaId));
+            foreach (var (name, id) in FixedCatalogOnlySchemas)
             {
-                SqlValue.FromSystemName(s.Name),
-                SqlValue.FromInt32(s.SchemaId),
-                SqlValue.Null(SqlType.Int32),
-            }));
+                if (!database.Schemas.ContainsKey(name))
+                    rows.Add(SchemaRow(name, id));
+            }
+
+            rows.Sort((a, b) => a[1].AsInt32.CompareTo(b[1].AsInt32));
+            return rows;
+        });
 
         // sys.tables: object_id / name / schema_id / type / type_desc /
         // create_date / modify_date / is_ms_shipped + temporal_type /
@@ -672,6 +689,25 @@ internal static partial class BuiltInResources
             }
         }
     }
+
+    // The fixed schemas real SQL Server ships that the simulator does not
+    // materialize as object-hosting Schema instances (dbo / INFORMATION_SCHEMA /
+    // sys are materialized). guest and the nine fixed-database-role schemas
+    // carry schema_id = principal_id = the role's id (probe-confirmed against
+    // sys.schemas on SQL Server 2025). 16388 is deliberately absent, mirroring
+    // the fixed-role id gap in Database.FixedDatabaseRoles.
+    private static readonly (string Name, int Id)[] FixedCatalogOnlySchemas =
+        [("guest", 2), .. Database.FixedDatabaseRoles.Select(r => (r.Name, r.Id))];
+
+    // One sys.schemas row: principal_id follows real's ownership convention —
+    // fixed schemas (ids ≤ 4 or ≥ 16384) are owned by the like-id principal;
+    // user schemas (5..16383) are owned by dbo (principal_id 1).
+    private static SqlValue[] SchemaRow(string name, int schemaId) =>
+    [
+        SqlValue.FromSystemName(name),
+        SqlValue.FromInt32(schemaId),
+        SqlValue.FromInt32(schemaId is >= 5 and < 16384 ? Database.DboSchemaId : schemaId),
+    ];
 
     /// <summary>
     /// Computes the <c>sys.columns.max_length / precision / scale</c> triple
