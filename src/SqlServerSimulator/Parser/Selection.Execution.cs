@@ -478,13 +478,17 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Per-projection-column nullability for result-set metadata (the TDS
-    /// COLMETADATA fNullable flag). Computed only for the single-source
-    /// no-join shape, where <see cref="Expression.ResultIsNullable"/>'s
-    /// rules (direct refs preserve base-column nullability, expressions
-    /// nullable) match SQL Server's result metadata; joined shapes return
-    /// null and the wire falls back to claiming every column nullable —
-    /// outer joins NULL-fill the inner side, so base-column nullability
-    /// alone would over-claim NOT NULL there. Load-bearing for DacFx bacpac
+    /// COLMETADATA fNullable flag). Computed for the no-join shape with at
+    /// most one source, where <see cref="Expression.ResultIsNullable"/>'s
+    /// rules (direct refs preserve base-column nullability, literals NOT NULL,
+    /// other expressions nullable) match SQL Server's result metadata; joined
+    /// or multi-source shapes return null and the wire falls back to claiming
+    /// every column nullable — outer joins NULL-fill the inner side, so
+    /// base-column nullability alone would over-claim NOT NULL there. The
+    /// zero-source (FROM-less) case is included so a bare literal projection
+    /// reports NOT NULL like real (<c>select 1</c> → <c>Int</c>, not
+    /// <c>IntN</c>); a column reference can't appear without a source, so the
+    /// resolver is never consulted there. Load-bearing for DacFx bacpac
     /// export: its BCP data-file layout drops the per-value length prefix
     /// on fixed-width columns whose wire metadata says NOT NULL, and the
     /// bacpac loader reads the file per the model.xml declaration — the two
@@ -492,7 +496,7 @@ internal sealed partial class Selection
     /// </summary>
     private static bool[]? ComputeColumnNullability(List<Expression> expressions, FromSource[] sources, JoinSpec[] joins)
     {
-        if (sources.Length != 1 || joins.Length != 0)
+        if (sources.Length > 1 || joins.Length != 0)
             return null;
 
         bool ResolveNullable(MultiPartName name)

@@ -2909,6 +2909,12 @@ internal sealed partial class Selection
             ProjectionExpressions = [.. expressions],
             ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions),
             ColumnReportsNumeric = ColumnReportsNumericOf(expressions, schema),
+            // A FROM-less projection has no sources, so column nullability is
+            // the per-expression rule alone (literals NOT NULL, other
+            // expressions nullable) — matching real's result metadata
+            // (`select 1` → Int, not IntN). The resolver is never consulted
+            // (no column can appear without a source).
+            ColumnNullability = ComputeColumnNullability(expressions, [], []),
         };
     }
 

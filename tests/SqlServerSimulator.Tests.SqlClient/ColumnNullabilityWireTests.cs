@@ -48,6 +48,30 @@ public sealed class ColumnNullabilityWireTests
     }
 
     [TestMethod]
+    public async Task FromlessSelect_LiteralsNotNull_ExpressionsNullable()
+    {
+        // A FROM-less projection carries per-expression nullability like real:
+        // a bare literal is NOT NULL (`select 1` → INT4 token, not INTN),
+        // while a CAST, arithmetic, or the NULL literal claims nullable. The
+        // FROM-less path bakes its row at parse and didn't set the metadata,
+        // so it over-claimed every column nullable; pymssql/JDBC's coarse type
+        // codes hid it, and tedious's token-name metadata surfaced it.
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("select 1, 'x', 1.5, cast(1 as int), 1 + 2, null", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        var columns = reader.GetColumnSchema();
+        IsFalse(columns[0].AllowDBNull);  // int literal
+        IsFalse(columns[1].AllowDBNull);  // varchar literal
+        IsFalse(columns[2].AllowDBNull);  // numeric literal
+        IsTrue(columns[3].AllowDBNull);   // CAST claims nullable
+        IsTrue(columns[4].AllowDBNull);   // arithmetic claims nullable
+        IsTrue(columns[5].AllowDBNull);   // untyped NULL literal
+    }
+
+    [TestMethod]
     public async Task NotNullFixedWidthColumns_ReadOverWire_WithFixedLenTokens()
     {
         // A NOT NULL fixed-width column now carries the FIXEDLENTYPE token
