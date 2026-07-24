@@ -36,6 +36,32 @@ partial class SimulatedSqlException
         new("Only one expression can be specified in the select list when the subquery is not introduced with EXISTS.", 116, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 8120 — a column in the SELECT list of an
+    /// aggregate query (any aggregate, GROUP BY, or HAVING is present) that is
+    /// neither inside an aggregate nor a GROUP BY item. The name is
+    /// source-qualified (<c>t.b</c>), matching the two-part <c>%.*ls.%.*ls</c>
+    /// template. SQL Server is strict here — no functional-dependency
+    /// relaxation — and binds it at parse time, before any row is read.
+    /// </summary>
+    internal static SimulatedSqlException ColumnNotInGroupByForSelect(string qualifiedColumn) =>
+        new($"Column '{qualifiedColumn}' is invalid in the select list because it is not contained in either an aggregate function or the GROUP BY clause.", 8120, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 8121 — the HAVING-clause counterpart to
+    /// <see cref="ColumnNotInGroupByForSelect"/>.
+    /// </summary>
+    internal static SimulatedSqlException ColumnNotInGroupByForHaving(string qualifiedColumn) =>
+        new($"Column '{qualifiedColumn}' is invalid in the HAVING clause because it is not contained in either an aggregate function or the GROUP BY clause.", 8121, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 8127 — the ORDER BY counterpart to
+    /// <see cref="ColumnNotInGroupByForSelect"/>. This message double-quotes the
+    /// column name where the SELECT / HAVING forms single-quote it.
+    /// </summary>
+    internal static SimulatedSqlException ColumnNotInGroupByForOrderBy(string qualifiedColumn) =>
+        new($"Column \"{qualifiedColumn}\" is invalid in the ORDER BY clause because it is not contained in either an aggregate function or the GROUP BY clause.", 8127, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 8161 — raised when an argument to
     /// <c>GROUPING()</c> or <c>GROUPING_ID()</c> doesn't match any
     /// expression in the surrounding query's GROUP BY clause (or when the

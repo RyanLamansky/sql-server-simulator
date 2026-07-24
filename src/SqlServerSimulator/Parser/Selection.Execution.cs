@@ -75,6 +75,102 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Enforces the GROUP BY containment rule (Msg 8120 / 8121 / 8127): outside
+    /// an aggregate, a column reference must resolve to a bare GROUP BY column.
+    /// <see cref="Expression.VisitColumnReferences"/> already skips
+    /// aggregate-internal columns (an <see cref="AggregateExpression"/> doesn't
+    /// visit its operand), so it yields exactly the bare, non-aggregated
+    /// references. Columns that appear only <em>inside</em> a compound GROUP BY
+    /// expression (<c>GROUP BY a+b</c>) are the conservative seam: SQL Server
+    /// licenses <c>SELECT a+b</c> but rejects a bare <c>SELECT a</c>, and
+    /// telling those apart needs sub-expression structural matching we don't do,
+    /// so such a reference is left unflagged rather than risk a false positive on
+    /// the valid <c>SELECT (a+b)*2</c> shape. A reference to a column absent from
+    /// GROUP BY entirely is unambiguously invalid and raised. A reference that
+    /// doesn't resolve against these sources (correlated / outer) is not this
+    /// query's grouping concern.
+    /// </summary>
+    private static void ValidateGroupByReferences(FromSource[] sources, List<Expression> expressions, List<OrderBySpec> orderBy, string[] outputColumnNames, FromClause fromClause)
+    {
+        var groupedBare = new HashSet<(int Source, int Column)>();
+        var groupedComponent = new HashSet<(int Source, int Column)>();
+        foreach (var grouping in fromClause.AllGroupingExpressions)
+        {
+            if (grouping is Reference bare)
+            {
+                if (TryResolveSourceColumn(sources, bare.ReferencedName) is { } id)
+                    _ = groupedBare.Add(id);
+            }
+            else
+            {
+                grouping.VisitColumnReferences(name =>
+                {
+                    if (TryResolveSourceColumn(sources, name) is { } id)
+                        _ = groupedComponent.Add(id);
+                });
+            }
+        }
+
+        void Check(MultiPartName name, Func<string, SimulatedSqlException> error)
+        {
+            if (TryResolveSourceColumn(sources, name) is not { } id
+                || groupedBare.Contains(id) || groupedComponent.Contains(id))
+            {
+                return;
+            }
+
+            var source = sources[id.Source];
+            var column = source.ColumnNames[id.Column];
+            throw error(source.Qualifier is { } qualifier ? $"{qualifier}.{column}" : column);
+        }
+
+        foreach (var expression in expressions)
+            expression.VisitColumnReferences(name => Check(name, SimulatedSqlException.ColumnNotInGroupByForSelect));
+
+        fromClause.Having?.VisitOperandExpressions(op =>
+            op.VisitColumnReferences(name => Check(name, SimulatedSqlException.ColumnNotInGroupByForHaving)));
+
+        foreach (var item in orderBy)
+        {
+            item.Expr?.VisitColumnReferences(name =>
+            {
+                // ORDER BY resolves an unqualified SELECT-output alias before a
+                // source column — an alias names an already-validated projection,
+                // so it can't be an ungrouped-column violation here.
+                if (name.ImmediateQualifier is null)
+                {
+                    foreach (var outputName in outputColumnNames)
+                    {
+                        if (BuiltInToken.Equals(outputName, name.Leaf))
+                            return;
+                    }
+                }
+
+                Check(name, SimulatedSqlException.ColumnNotInGroupByForOrderBy);
+            });
+        }
+    }
+
+    /// <summary>
+    /// Best-effort local resolution for GROUP BY validation: the resolved
+    /// (source, column) pair, or null when the name is correlated / outer /
+    /// unresolved (or ambiguous — which would already have failed type
+    /// resolution). Never raises: recording a diagnostic must not itself throw.
+    /// </summary>
+    private static (int Source, int Column)? TryResolveSourceColumn(FromSource[] sources, MultiPartName name)
+    {
+        try
+        {
+            var (source, column) = FindSourceColumn(sources, name);
+            return source < 0 ? null : (source, column);
+        }
+        catch (SimulatedSqlException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Static type-resolution counterpart to <see cref="FindSourceColumn"/>:
     /// returns the column's declared type if it resolves locally across
     /// sources; falls through to <paramref name="outerTypeResolver"/> if
@@ -391,6 +487,15 @@ internal sealed partial class Selection
             if (keyType.IsLob)
                 throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
         }
+
+        // Msg 8120 / 8121 / 8127: in an aggregate query (any aggregate, GROUP
+        // BY, or HAVING present) every column referenced outside an aggregate
+        // must be a GROUP BY column. SQL Server is strict — no
+        // functional-dependency relaxation, a PK-grouped table doesn't license
+        // its other columns — and binds this at parse time, before any row is
+        // read, so it runs here on the cached plan build.
+        if (aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null)
+            ValidateGroupByReferences(sources, expressions, orderBy, outputColumnNames, fromClause);
 
         var offsetExpression = fromClause.OffsetExpression;
         var fetchExpression = fromClause.FetchExpression;
