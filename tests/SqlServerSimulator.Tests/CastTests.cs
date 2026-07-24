@@ -162,6 +162,15 @@ public sealed class CastTests
     [DataRow("cast('20260504' as date)", "2026-05-04")]
     [DataRow("cast('2026-05-04T13:45:30' as date)", "2026-05-04")]
     [DataRow("cast(N'2026-05-04' as date)", "2026-05-04")]
+    // Year-first with a slash / dot separator: unambiguous (4-digit year leads)
+    // and accepted by real SQL Server's default parse. The `.dates()` /
+    // `.datetimes()` date-truncation an ORM emits builds these (Django over
+    // mssql-django) — a plain-`-`-only parser rejected them (Msg 241).
+    [DataRow("cast('2026/05/04' as date)", "2026-05-04")]
+    [DataRow("cast('2026/5/4' as date)", "2026-05-04")]
+    [DataRow("cast('2026.05.04' as date)", "2026-05-04")]
+    [DataRow("cast('2026/01/01' as datetime2)", "2026-01-01")]
+    [DataRow("convert(datetime2, '2026/06/15')", "2026-06-15")]
     public void Cast_StringToDate(string expression, string expectedIso)
     {
         var dt = IsInstanceOfType<DateTime>(ExecuteScalar($"select {expression}"));

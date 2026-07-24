@@ -750,12 +750,18 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 var affected = outcome.RecordsAffected;
                 hasOutcome = outcomes.MoveNext();
                 var status = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
-                if (affected >= 0)
+                // SET NOCOUNT ON suppresses the rows-affected count: the DONE
+                // omits DONE_COUNT so an ODBC/pyodbc driver skips this DML result
+                // and advances to a trailing SELECT SCOPE_IDENTITY() (the
+                // mssql-django identity pattern — without this it stalls on the
+                // INSERT's rowcount). Matches real SQL Server.
+                var suppressCount = this.connection!.NoCount;
+                if (affected >= 0 && !suppressCount)
                     status |= Tds.DoneCount;
 
                 if ((status & Tds.DoneMore) == 0)
                     this.WriteDatabaseChangeIfAny(writer);
-                writer.WriteDoneToken(effectiveDoneToken, status, Math.Max(affected, 0));
+                writer.WriteDoneToken(effectiveDoneToken, status, suppressCount ? 0 : Math.Max(affected, 0));
             }
         }
 

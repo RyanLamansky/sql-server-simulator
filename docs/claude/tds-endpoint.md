@@ -61,6 +61,7 @@ The session maps 1:1 onto a `SimulatedDbConnection`; execution flows through `Si
 
 - **SQLBatch** (type 1): ALL_HEADERS skipped via its leading length DWORD; UCS-2 text executed on the session connection.
   Per result set: COLMETADATA + ROW stream + DONE (`DONE_COUNT` + `DONE_MORE` when more outcomes follow); per non-query statement: DONE with `DONE_COUNT` only when `RecordsAffected >= 0`.
+  **`SET NOCOUNT ON`** (session flag `SimulatedDbConnection.NoCount`) suppresses that `DONE_COUNT` on the non-query DML DONE — so an ODBC/pyodbc driver skips the DML's rowcount result and advances to a trailing `SELECT SCOPE_IDENTITY()` (the mssql-django / Django identity pattern; without it the driver stalls on the INSERT's rowcount and never reaches the SELECT), and SqlClient's `ExecuteNonQuery` returns -1.
   Zero outcomes → single final DONE.
   Batch-level statements use `0xFD DONE`; statements inside an **`EXEC('…')` / sp_executesql dynamic-SQL scope use DONEINPROC** — see [Dynamic-SQL exec scope](#dynamic-sql-exec-scope-doneinprocdoneproc) below.
 - **Errors**: `SimulatedSqlException.Errors` map field-for-field onto ERROR tokens (number/state/class/message/server/procedure/line) + DONE with `DONE_ERROR`; the session survives and keeps serving.

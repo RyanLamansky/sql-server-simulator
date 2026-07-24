@@ -124,6 +124,18 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool FmtOnly;
 
     /// <summary>
+    /// Session-scoped <c>NOCOUNT</c> setting: while <see langword="true"/>
+    /// (toggled by top-level <c>SET NOCOUNT ON|OFF</c>, default off) a
+    /// statement's rows-affected count is suppressed — the TDS DONE token omits
+    /// the <c>DONE_COUNT</c> flag. Load-bearing for the ubiquitous
+    /// <c>SET NOCOUNT ON; INSERT …; SELECT SCOPE_IDENTITY()</c> identity-retrieval
+    /// pattern (mssql-django, and any ODBC/pyodbc data layer): without the count
+    /// suppressed the driver stalls on the INSERT's rowcount result instead of
+    /// advancing to the trailing SELECT (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    internal bool NoCount;
+
+    /// <summary>
     /// Session-scoped <c>QUOTED_IDENTIFIER</c> setting: <see langword="true"/>
     /// (the default, matching SqlClient connections — probe-confirmed
     /// <c>@@OPTIONS &amp; 256</c> is set on a fresh session) tokenizes

@@ -43,6 +43,25 @@ Remaining phases, roughly in value order:
   Possible lever if paged drains ever matter: recognize index-supplied order in the `OFFSET/FETCH` path (real's plan shape) to skip the sort and bound the scan.
   Perf polish, not a fidelity gap.
 
+### Django ORM test-suite shakedown — surfaced gaps
+
+Running Django 5.1's own ORM test apps over the wire (mssql-django 1.7 / pyodbc) against the endpoint is a high-yield real-application oracle (harness: reuse the `simulated` DB via a creation-backend override, `other` alias as a `TEST MIRROR`, incremental failing-SQL logger).
+Fixed from the first pass: `SET NOCOUNT ON` count suppression (blocked every identity insert — see [`control-flow.md`](control-flow.md) / the DONE-token contract) and year-first slash/dot date parsing (`.dates()`/`.datetimes()` truncation — see [`casting.md`](casting.md)).
+Remaining surfaced gaps, roughly in breadth order:
+
+- **`INSERT … VALUES (DEFAULT)` — the `DEFAULT` keyword as a VALUES element** → Msg 156.
+  Real substitutes the target column's DEFAULT constraint value (or NULL when none); the simulator's INSERT value parser (`EvaluateValuesTuples` / the shared `ParseValuesTuples`) only accepts value expressions.
+  Needs a DEFAULT sentinel recognized in INSERT-VALUES position (not the FROM-clause VALUES constructor) that the per-row encode loop resolves via the same default-application path omitted columns use.
+  Django 5.0+ `db_default` (the `field_defaults` app); also emitted in the `#django_returning_insert` temp-table returning path.
+- **`REGEXP_LIKE(expr, pattern [, flags])`** — SQL Server 2025's regex builtin, emitted `dbo.REGEXP_LIKE(...)` by mssql-django for `__regex` / `__iregex` lookups → Msg 4121 (function not found).
+  Net-new builtin; a .NET-`Regex`-backed scalar is the natural implementation.
+- **Boolean-expression `=` comparison** — `WHERE (a < %s) = (b < %s)` (comparing two predicate results) → Msg 4145.
+  Django emits it for boolean-field/`ExpressionWrapper(Q())` comparisons; real accepts it.
+- **`GREATEST` / `LEAST` over aggregates via the `(VALUES …) AS _LEAST(value)` derived-table emulation** → Msg 207 (the nested VALUES-with-aggregate column doesn't resolve).
+  mssql-django's `Greatest`/`Least` shape over aggregate arguments.
+- **Niche**: a date column in a `LIKE` predicate → Msg 206 (operand type clash, needs the implicit date→varchar cast real applies); a `$`-bearing unquoted alias (`crafted_alia$`) → Msg 102 (the identifier tokenizer rejects `$`, which SQL Server permits).
+- **Pre-existing, not Django-specific**: default-path string→date parsing is language-neutral, so a locale-ambiguous `M/d/y` numeric date (`'1/2/3'`) raises Msg 241 where real's `us_english` reads it mdy — the deliberate "language-neutral only" stance (see [`casting.md`](casting.md)); and `get_or_create`'s expected IntegrityErrors warrant a check that savepoint rollback after a constraint error inside an atomic block leaves the session clean.
+
 ### Result-set serialization: `FOR XML`
 
 The JSON/XML *functions* (OPENJSON / JSON_VALUE / JSON_QUERY / JSON_MODIFY / JSON_OBJECT / JSON_ARRAY / etc.; the XML type + XQuery-subset methods — see [`json.md`](json.md), [`xml.md`](xml.md)) all ship.

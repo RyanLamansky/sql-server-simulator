@@ -36,6 +36,15 @@ internal readonly partial struct SqlValue
     [
         "yyyy-MM-dd",
         "yyyyMMdd",
+        // Year-first with a slash or dot separator: unambiguous (the 4-digit
+        // year leads, so no mdy/dmy locale assumption) and accepted by real
+        // SQL Server's default CAST/CONVERT. Fixes an ORM's `.dates()` /
+        // `.datetimes()` date-truncation, which builds `yyyy/MM/dd` strings and
+        // converts them to datetime2 (Django over mssql-django; date-only, so
+        // this shared array is the reach — ParseDateTime2 / ParseDate /
+        // TryParseLegacyDateTime all fall back to it).
+        "yyyy/M/d",
+        "yyyy.M.d",
     ];
 
     private static readonly string[] dateAsDateTimeFormats =

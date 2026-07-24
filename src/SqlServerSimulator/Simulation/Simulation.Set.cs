@@ -136,6 +136,17 @@ partial class Simulation
             context.Connection.FmtOnly = fmtOnOff == Keyword.On;
         }
 
+        // NOCOUNT carries semantic effect: while ON, a statement's DONE token
+        // omits the rows-affected count (DONE_COUNT), so an ODBC / pyodbc driver
+        // advances past an INSERT's rowcount to a trailing SELECT SCOPE_IDENTITY()
+        // — the identity-retrieval pattern mssql-django and most SQL-Server data
+        // layers emit. Session-scoped like FMTONLY, gated on !IsSkipping.
+        if (firstName.Equals("NOCOUNT", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping
+            && context.Token is ReservedKeyword { Keyword: var nocountOnOff })
+        {
+            context.Connection.NoCount = nocountOnOff == Keyword.On;
+        }
+
         // CONTEXT_INFO carries semantic effect: store the binary value,
         // right-padded / truncated to exactly 128 bytes (SQL Server's
         // fixed buffer), surfaced by CONTEXT_INFO(). The literal-binary form

@@ -146,6 +146,10 @@ Two style classes:
 
 **Known leniency divergences** (simulator accepts more than the live server, low-value edges): the 2-digit-vs-4-digit-year with/without-century restriction isn't enforced (`CONVERT(datetime, '04/05/03', 101)` succeeds; live rejects), and a `T`-separated time is accepted under general styles (live reserves `T` for 126/127, raising out-of-range otherwise).
 
+**Default (no-style) path** (`SqlValue.Parse.cs` — `ParseDateTime2` / `ParseDate` / `TryParseLegacyDateTime`, distinct from the with-style parser above): a `CAST`/`CONVERT` to a date/time target with **no style argument** routes through a deliberately restrictive **language-neutral** exact-format parser, not the flexible culture-based one.
+Accepted: ISO `yyyy-MM-dd` / `yyyyMMdd`, ISO with `T`/space time and 1-7 fractional digits, and — since the Django shakedown — **year-first slash / dot** forms `yyyy/M/d` / `yyyy.M.d` (unambiguous: the 4-digit year leads, so no mdy/dmy assumption; the `.dates()`/`.datetimes()` truncation an ORM emits builds these).
+Locale-ordered numeric forms the with-style *general* parser accepts (`M/d/y` mdy like `'1/2/3'`) are **not** accepted here and raise Msg 241 — the language-neutral stance means the no-style path is stricter than an explicit style-0 CONVERT (a modeled divergence from real, which treats them identically under `us_english`).
+
 **Money → string** (`SqlValue.CoerceMoneyToStringWithStyle`):
 
 | Style | Format | Example |
