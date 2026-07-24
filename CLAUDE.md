@@ -25,6 +25,11 @@ EF Core trusts the simulator end-to-end (`*.Tests.EFCore` is the regression orac
 Beyond that floor, priority is broad coverage weighted by popularity (user wins) × ease (thoroughness wins).
 The living [`docs/claude/backlog.md`](docs/claude/backlog.md) — missing features, fidelity gaps, design choices, exclusions — is ordered by that weighting non-authoritatively; read it before new feature work or pitching a built-in.
 
+**Nothing is permanently out of scope.**
+Every gap is a *not yet*: scope statements in this file and under `docs/claude/` are descriptive snapshots of what's built, never decisions to exclude.
+Two people work on this, so the picking-of-battles is a cost ordering, not a boundary — read an unbuilt feature as queued, not closed.
+The rare genuinely-settled call is marked **settled — don't re-pitch** and carries its reason; absent that marker, anything is fair game.
+
 ## Feature-bundle workflow
 
 1. **Probe.**
@@ -190,6 +195,11 @@ Field rosters live in the source XML docs; this captures only identity + load-be
 - **No internal `<see cref>` in public-API XML docs** — a cref to an internal type dangles in consumer IntelliSense and implies stability for a name we're free to rename; state the contract in prose (`"an unrecognized collation name raises ArgumentException"`, not a cref to internal `Collation.IsRecognized`).
 - **No conversation-scratch framing in code/docs/commits** — "Camp A/B", "this bundle", "Stage 1/2", "as we discussed" mean nothing to a future reader; describe behavior/motivation absolutely, cross-reference a sibling by the behavior it names, not the work-stage.
   Pre-existing repo terms (e.g. transactions' "Bundle 1/2") are load-bearing — leave them.
+- **Gap vocabulary: a gap is "not built yet", never "out of scope".**
+  `deliberate` / `intentional` may describe *how shipped behavior works* — an approximation, shortcut, or divergence chosen on purpose — but never *whether a gap closes*; attach those words to a shape, not to an absence.
+  Skip the justifying clause too ("real rejects it anyway", "no consumer reads it"): it explains low priority but reads as closed.
+  Only a call that genuinely shouldn't be revisited says **settled — don't re-pitch** with its reason.
+  Heading vocabulary in `docs/claude/`: **Not modeled yet** for absences, **Divergences** for shipped-but-not-byte-identical, and real's-own-error rejections fold into the feature's modeled description rather than any gap list.
 - **AssemblyHooks**: each test project's `AssemblyHooks.cs` has a `static [TestClass] [AssemblyInitialize]` warming shared init once before the parallel run.
   Without it, the first test batch races to init hot shared state and serializes on contention.
   The analyzer-tests' Roslyn-cache warm-up is the worst case (~3x slowdown); the pattern generalizes to any expensive first-touch shared resource.
@@ -209,15 +219,28 @@ Field rosters live in the source XML docs; this captures only identity + load-be
 
 The `*.Tests` and `*.Tests.EFCore` suites are the authoritative behavior contract.
 The [Feature reference](#feature-reference) index maps every modeled area to its deep-dive — **presence there means it's modeled**; read the linked doc on demand when working in that area.
-The two small subsections below are inline-only notes with no deep-dive.
+The two subsections before it are cross-cutting notes belonging to no single feature.
 
 ### EF Core adapter coverage
 `UseSqlServerSimulator(...)` covers seven SqlParameter-downcast pairs: `DateOnly→date`, `DateTime→date`, `DateTime→smalldatetime`, `TimeOnly→time(N)`, `TimeSpan→time(N)`, `decimal→money`, `decimal→smallmoney`.
 Without the adapter these throw at SaveChanges.
 MAX-string family flows through plain `UseSqlServer`.
 
-### `text` / `ntext` / `image` restrictions
-Comparison (Msg 402), ORDER BY/DISTINCT (Msg 306), and aggregates (Msg 8117 from MAX/MIN) all enforced.
+### Faithful rejections
+
+Raising real SQL Server's own error **is** modeled behavior.
+These are coverage, not gaps: accepting the statement instead would regress fidelity, and the simulator accepting what real rejects is the more dangerous divergence direction (see the over-permissive section of [`backlog.md`](docs/claude/backlog.md)).
+
+- `text` / `ntext` / `image` in comparison (Msg 402), ORDER BY / DISTINCT (Msg 306), and aggregates (Msg 8117 from MAX/MIN).
+- `RANGE BETWEEN <N> PRECEDING/FOLLOWING` numeric-offset → **Msg 4194** (real's licensed-feature rejection); `ROWS` numeric-offset ships.
+  Default frame with ORDER BY = `RANGE UNBOUNDED PRECEDING TO CURRENT ROW`; without it, whole partition — and LAST_VALUE matches real's default-frame semantic.
+- Table-variable named constraints / FKs → **Msg 102** (real's `DECLARE @t TABLE` grammar restriction); multi-variable DECLARE with a table variable, mixed scalar+table DECLARE, and `SET IDENTITY_INSERT @t ON` reject the same way.
+  Column features (IDENTITY / UNIQUE / inline + table-level CHECK / computed / rowversion) all ship — see [`table-variables.md`](docs/claude/table-variables.md).
+- `CREATE SCHEMA sys` / `INFORMATION_SCHEMA` and `CREATE TABLE sys.*` / `INFORMATION_SCHEMA.*` → **Msg 2760** (real's permission framing); the schemas exist as catalog-view hosts.
+- `ALTER COLUMN` of an IDENTITY column to a non-integer type → **Msg 2749**; of a period column → **Msg 13599** — see [`alter-table.md`](docs/claude/alter-table.md).
+
+Faithful rejections also appear inline throughout the [Feature reference](#feature-reference) (`SELECT … LIMIT n` → Msg 102, `ALTER TABLE … ADD COLUMN` → Msg 156, the indexed-view Msg 1939/1940/1941 gates); this subsection is only for the ones with no feature-doc home.
+Distinguish them from a *gap* that happens to raise: `CONTAINS` / `FREETEXT` raise `NotSupportedException` because the search pipeline is unbuilt, which is a not-yet, not a faithful rejection.
 
 ### Feature reference
 
@@ -271,7 +294,11 @@ Each entry below is a trigger: read the linked file on demand when working in th
 - **Linked servers** (`Simulation.AddRemoteSimulation`, `sp_addlinkedserver` / `sp_dropserver`, four-part FROM routing through the remote's ADO.NET pipeline, `OPENQUERY(server,'query')` ad-hoc pass-through + compile-time schema discovery, `sys.servers`) → [`linked-servers.md`](docs/claude/linked-servers.md).
 - **TDS network endpoint** (`Simulation.ListenLocalAsync` (loopback) / `Simulation.ListenNetworkAsync` (all interfaces, requires a registered login) → `SimulatedNetworkListener`, both with `SimulatedNetworkListenerOptions` overloads (port + caller-owned TLS certificate + network-only single-interface `BindAddress`); real SqlClient over loopback TCP+TLS; SQLBatch/RPC/TM/BulkLoad (`SqlBulkCopy`); legacy `text`/`ntext`/`image` result columns + `image` RPC input params in the in-band textptr wire form; TVP (`0xF3` `SqlDbType.Structured`) RPC params via the shared `TdsColumnDecoder`; `sp_cursor*` API-server-cursor RPC family; mid-stream attention (cancel / `CommandTimeout`) via a carry-forward concurrent read → `DONE_ATTN` ack + probed XACT_ABORT tx semantics; MARS (`MultipleActiveResultSets=True`) via an SMP demux/mux over one shared connection with serialized cooperative multiplexing + per-session attention; TDS 8.0 `Encrypt=Strict` (TLS-first, ALPN `tds/8.0`, client pins the exposed `SimulatedNetworkListener.ServerCertificate` since SqlClient ignores `TrustServerCertificate` in strict mode); credential enforcement via the `CREATE LOGIN` registry, Msg 18456 on mismatch; EF via plain `UseSqlServer`; oracles = `*.Tests.SqlClient` + `*.Tests.Smo`, the real-SMO consumer oracle) → [`tds-endpoint.md`](docs/claude/tds-endpoint.md).
 
-## Not modeled
+## Not modeled yet
+
+Status, not decision.
+Everything here is unbuilt for cost reasons and is fair game to pick up — [`backlog.md`](docs/claude/backlog.md) carries the weighting and the prospective view of the same ground.
+Entries that raise a *real* SQL Server error deliberately are **not** here; they're coverage, under [Faithful rejections](#faithful-rejections).
 
 - **Key-range locks** — sole remaining phase 4+ deferral.
   See [`locking.md`](docs/claude/locking.md) for what does ship (full 8-mode matrix, SNAPSHOT/RCSI, DMVs, Msg 1205/1222/3952/3960).
@@ -286,12 +313,8 @@ Each entry below is a trigger: read the linked file on demand when working in th
   `SET @v`, `IDENTITY_INSERT`, `NOCOUNT`, `LOCK_TIMEOUT`, `TEXTSIZE` (client-boundary LOB truncation — see [`scalars.md`](docs/claude/scalars.md)), `TRANSACTION ISOLATION LEVEL`, `QUOTED_IDENTIFIER` (and `ANSI_DEFAULTS`'s QI component) carry semantic effect.
 - **`ALTER DATABASE … SET` / `COLLATE`** — see [`database-options.md`](docs/claude/database-options.md).
   Most options parse-and-discard; `COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT` are load-bearing.
-- `RANGE BETWEEN <N> PRECEDING/FOLLOWING` numeric-offset — Msg 4194 (real's licensed-feature rejection).
-  `ROWS` numeric-offset ships.
-  Default frame with ORDER BY = `RANGE UNBOUNDED PRECEDING TO CURRENT ROW`; without it, whole partition.
-  LAST_VALUE matches real's default-frame semantic.
 - Recursive-part feature restrictions (Msg 460 / 461 / 462 / 467 / 465) — silently accepted with possibly-wrong semantics.
-  Apps exercising these hit rejection on real SQL Server too.
+  Low urgency (real rejects these outright, so an app hitting one is already broken there), but it's the over-permissive direction — worth closing when the CTE binder is next open.
 - `LEN(ntext)` raising Msg 8116; legacy `READTEXT` / `WRITETEXT` / `UPDATETEXT`.
 - **MERGE gaps**: CTE-precedes-MERGE bare-name form and `MERGE INTO <updatable view>` both ship (the latter at full parity with UPDATE/INSERT/DELETE-through-view).
   `MERGE … OUTPUT` through a view → `NotSupportedException` (view-column projection through `INSERTED`/`DELETED` deferred).
@@ -299,23 +322,17 @@ Each entry below is a trigger: read the linked file on demand when working in th
 - `UNIQUE` on a *non-persisted* computed column (PK/UNIQUE on `PERSISTED` ships).
   Msg 4936 determinism gate for PERSISTED computed columns not enforced.
 - Heap allocation tracking (flat page list, no IAM/PFS).
-- **Table-variable named constraints / FKs** — Msg 102 (real's `DECLARE @t TABLE` grammar restriction).
-  Multi-variable DECLARE with a table variable, mixed scalar+table DECLARE, `SET IDENTITY_INSERT @t ON` also reject.
-  Column features (IDENTITY / UNIQUE / inline + table-level CHECK / computed / rowversion) all ship — see [`table-variables.md`](docs/claude/table-variables.md).
 - **`CREATE SCHEMA AUTHORIZATION`** — `NotSupportedException` (no principal model on schemas).
   `DROP SCHEMA` + `ALTER SCHEMA TRANSFER` ship — see [`schemas.md`](docs/claude/schemas.md).
 - **`CREATE SCHEMA <schema_element>` greedy form** — dispatches trailing CREATE/GRANT as their own statements, not part of the CREATE SCHEMA.
   Same end state for the common idiom; mismatched-grammar trailers raise.
-- **`CREATE SCHEMA sys` / `INFORMATION_SCHEMA`** + **`CREATE TABLE sys.*` / `INFORMATION_SCHEMA.*`** — both raise Msg 2760 (real's permission framing).
-  The schemas exist as catalog-view hosts.
 - T-SQL `GOTO` / labels — `IF` / `WHILE` / `BREAK` / `CONTINUE` / `RETURN` ship; unconditional jumps don't.
 - **Programmable-object top-level gaps**: CLR functions, logon triggers, INSTEAD OF UPDATE/DELETE on non-updatable views, JOIN-view single-base UPDATE/DELETE, OUTPUT through views, multi-source alias-form UPDATE/DELETE through views (Msg 4405).
   Natively-compiled + CLR procedures ship at parser-fidelity only (ATOMIC boundary → session isolation; CLR bodies parse but `EXEC` no-ops).
   See [`programmable.md`](docs/claude/programmable.md).
 - **PRINT semantic gaps** — Msg 1046 subquery-in-operand not raised; non-string formatting uses `CoerceTo(varchar(8000))` not PRINT style 0; 8000/4000-byte truncation not enforced.
   The `InfoMessage` surface ships (`SimulatedDbConnection.InfoMessage`).
-- **`ALTER TABLE` out-of-scope**: DROP PERIOD FOR SYSTEM_TIME, REBUILD, SWITCH PARTITION, `ALTER COLUMN ADD/DROP {PERSISTED|MASKED|ROWGUIDCOL|SPARSE}`, multi-constraint ADD.
-  (ALTER COLUMN of IDENTITY to non-integer → Msg 2749; of a period column → Msg 13599.)
+- **`ALTER TABLE` shapes not built**: DROP PERIOD FOR SYSTEM_TIME, REBUILD, SWITCH PARTITION, `ALTER COLUMN ADD/DROP {PERSISTED|MASKED|ROWGUIDCOL|SPARSE}`, multi-constraint ADD.
   Modeled shapes in [`alter-table.md`](docs/claude/alter-table.md).
 - **`hierarchyid` OrdPath tiers beyond ±~5000** — the wide 6-byte tiers (ordinals ≥ 5200 / ≤ -4169) aren't in the encoder/decoder table; `Parse`/`ToString` of one raises `NotSupportedException`, but storage/BACPAC round-trip such bytes opaquely.
   Everything else (OrdPath storage, byte-identical `CAST … AS varbinary` both directions, TDS UDT wire, `DATALENGTH`, memcmp ordering, dotted forms, negatives to -4168) ships.

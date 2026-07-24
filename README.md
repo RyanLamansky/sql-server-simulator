@@ -126,8 +126,7 @@ A few examples:
   Cross-database reads work; issue `USE <db>` to switch first for writes.
 - `BEGIN DISTRIBUTED TRANSACTION`, `BEGIN TRANSACTION ... WITH MARK`, `GOTO`/labels.
 - `CREATE ASSEMBLY` and CLR functions; logon triggers; natively-compiled procedures beyond parser fidelity.
-- `RANGE BETWEEN <N> PRECEDING/FOLLOWING` numeric-offset windows (`ROWS` numeric-offset ships).
-- A few `ALTER TABLE` shapes: `DROP PERIOD FOR SYSTEM_TIME`, `REBUILD`, `SWITCH PARTITION`, identity-type changes.
+- A few `ALTER TABLE` shapes: `DROP PERIOD FOR SYSTEM_TIME`, `REBUILD`, `SWITCH PARTITION`.
 
 ## Limitations
 

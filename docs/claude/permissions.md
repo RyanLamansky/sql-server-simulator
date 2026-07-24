@@ -132,7 +132,7 @@ Wiring:
   - **CREATE SEQUENCE / ROLE / USER / SCHEMA** — not modeled as a named permission → Msg 15247 (real's CREATE SCHEMA also raises a trailing Msg 2759, omitted).
   - **ALTER TABLE** — object-scope ALTER (object-ALTER suffices) → Msg 1088 **state 13** (leaf-named).
   - **DROP TABLE** — schema-scope ALTER (object-ALTER is insufficient) → Msg 3701 **sev 14 state 20** (leaf-named).
-  - **DROP USER** — `db_owner` only (no ALTER ANY USER model) → Msg 15151. DROP ROLE isn't gated (distinct wording out of scope).
+  - **DROP USER** — `db_owner` only (no ALTER ANY USER model) → Msg 15151. DROP ROLE isn't gated (its distinct wording is unprobed).
 - **Ownership chaining** — inside a proc / view / TVF / scalar-UDF / trigger body (`BatchContext.EnforcesPermissions` is false there) all checks are suppressed; dynamic SQL (`EXEC('…')` / `sp_executesql`, whose `ProcFrame.IsDynamicSql` is set) re-enables them.
   Everything is dbo-owned, so all static chains are unbroken — only the outermost referenced object of the user's statement is checked.
 
@@ -233,7 +233,7 @@ The `VIEW …STATE` permission enum, type codes (`VIEW SERVER STATE`→`VWSS`, `
 
 `ServerPermissionChecker.Holds(simulation, login, permission)` is the server-scope counterpart to `PermissionChecker` — sysadmin bypass, then a DENY-first / GRANT scan over the login's server-principal closure (`Simulation.BuildServerPrincipalClosure`: the login's server-principal id + its transitive server-role memberships + `public`) with the server-scope covering graph, over `Simulation.ServerPermissions`.
 It also answers the cross-scope database-state requirement (a database `VIEW …STATE` need met by a covering server permission), so the DMV gate consults one method for both.
-(`CONTROL SERVER` coverage is out of scope — sysadmin-only in practice, folded into the bypass.)
+(`CONTROL SERVER` isn't modeled separately — sysadmin-only in practice, so it's folded into the bypass.)
 
 The gate hangs off a per-DMV `CatalogView.DmvGate` descriptor (`DmvGateKind`), set once at registration in `BuiltInResources.DmvGating.cs` (analogous to bundle 2's `MetadataVisibilityKey`), and is applied in `BuiltInResources.ApplyDmvGate` from both `Selection.ForCatalogView` overloads.
 The `dbo` / sysadmin fast path short-circuits on `SessionSecurityContext.EffectiveIsDbo` before any allocation, so existing in-process DMV reads pay one bool read and are byte-identical.

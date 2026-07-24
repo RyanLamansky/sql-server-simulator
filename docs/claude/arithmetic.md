@@ -120,6 +120,6 @@ Considered and rejected (2026-07-16, during the length-0 max-scalar audit — th
 Rejected because (a) the acute silent-kill is already neutralized generically by `TdsTypeCodec.BoundedWireLength`, which converts a residual bounded-column overflow into a caught `InvalidDataException` (clean session end, not a silent transport death), and (b) every genuinely-MAX length-0 scalar was retyped per-scalar (`SqlType.NVarcharMax` / `VarcharMax` / `VarbinaryMax`: JSON_QUERY/MODIFY/OBJECT/ARRAY, STRING_ESCAPE, CONCAT/CONCAT_WS max-propagation, TRANSLATE max-propagation, COMPRESS/DECOMPRESS) or capped to a safe bound (JSON_VALUE 4000 → NULL, FORMATMESSAGE 2047, STRING_AGG Msg 9829 at 8000 bytes).
 If a future length-0 crash vector surfaces, prefer per-scalar retyping over the blanket flip.
 
-### Residual divergences (deliberate)
-- `@@VERSION` and the built-in message scalars stay container-class (`nvarchar(4000)`), not real's exact `nvarchar(300)` — retyping built-ins is deliberately out of scope (see the rejected flip).
+### Residual divergences
+- `@@VERSION` and the built-in message scalars stay container-class (`nvarchar(4000)`), not real's exact `nvarchar(300)` — retyping the built-in catalog *wholesale* to real's exact widths was weighed and rejected as broad churn (see the rejected flip); per-scalar retyping stays the route when a specific width is shown to matter.
 - `TRANSLATE` projects `nvarchar` container even for a `varchar` input (a pre-existing family divergence — it coerces to nvarchar internally); real keeps the `varchar` family.

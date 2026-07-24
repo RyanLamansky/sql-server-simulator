@@ -93,7 +93,7 @@ An unknown catalog name or unrecognized property returns NULL; property names ar
 ## Known gaps
 
 - **Query-time text search** — tokenizer / stemmer / inverted-index pipeline.
-  Out of scope.
+  The largest single build here; nothing about it is precluded.
 - **`ALTER FULLTEXT CATALOG` / `INDEX`** (REORGANIZE / REBUILD / START/STOP POPULATION / ADD/DROP column) — `NotSupportedException` at parse.
 - **Filesystem-placement semantics** (`ON FILEGROUP` / `IN PATH`) — parse-and-discard.
 - **`sys.fulltext_document_types` / `sys.fulltext_stoplists`** — shipped empty (the stoplist registry is inert since only the system stoplist is modeled).

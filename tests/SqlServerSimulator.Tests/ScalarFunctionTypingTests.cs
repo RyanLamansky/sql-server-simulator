@@ -112,7 +112,7 @@ public sealed class ScalarFunctionTypingTests
     public void Charindex_IntegerHaystack_ImplicitCoercesToVarchar() =>
         AreEqual(2, ExecuteScalar("select charindex('2', cast(12345 as int))"));
 
-    // Note: LEN(text) / LEN(ntext) Msg 8116 — the existing CLAUDE.md "Not modeled"
+    // Note: LEN(text) / LEN(ntext) Msg 8116 — the CLAUDE.md "Not modeled yet"
     // entry covers this. The simulator's IsStringCategory treats text/ntext as
     // strings so they slip past the LEN gate and return a length. Adding a
     // dedicated reject-list there is a separate bundle; this test exercises

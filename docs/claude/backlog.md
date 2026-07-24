@@ -19,7 +19,7 @@ When an item ships:
 Per project convention, probe the live SQL Server 2025 reference instance before encoding "matches SQL Server" behavior.
 
 This file is the home for net-new non-function feature proposals too.
-CLAUDE.md's **Not modeled** section is the complementary *descriptive* map (what currently raises `NotSupportedException` / Msg, so the surface isn't over-promised); this list is the *prospective* one.
+CLAUDE.md's **Not modeled yet** section is the complementary *descriptive* map (what raises `NotSupportedException` / Msg today, so the surface isn't over-promised); this list is the *prospective* one.
 An item can appear in both with opposite intent.
 
 ## Missing features
