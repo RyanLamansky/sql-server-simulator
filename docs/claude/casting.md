@@ -10,7 +10,7 @@ Per-source-category rule applied after `SqlValue.CoerceTo`:
 - `decimal`/`numeric` source → Msg 8115 with "numeric" wording (distinct from int/bigint's "expression" wording).
 - `money`/`smallmoney` → Msg 234 (`"There is insufficient result space to convert a money value to <target>."` — "money" regardless of source variant).
 - `float`/`real` → Msg 232 with formatted source value (F6).
-- `uniqueidentifier`: pre-CoerceTo branch (Msg 8170 char/varchar, Msg 8115 nchar/nvarchar).
+- `uniqueidentifier`: pre-CoerceTo branch (Msg 8170 char/varchar, Msg 8115 nchar/nvarchar) — fires only for a *bounded* target under 36 chars; a MAX target (length sentinel -1) has unbounded width and holds the 36-char dashed form, so the check guards `max is >= 0 and < 36` (a plain `< 36` treated the sentinel as too-narrow and wrongly raised Msg 8115 on `CAST(newid() AS nvarchar(max))` — tiberius-surfaced).
 - `datetimeoffset → varchar` too narrow: real SQL Server raises Msg 241; simulator silently truncates (niche).
 
 **CAST/CONVERT context defaults missing length to 30** for `varchar`/`nvarchar`/`varbinary` (column-context default is 1).
@@ -57,7 +57,8 @@ Both directions are in `SqlValue.CoerceTo` (style 0, the default CAST form):
 
 - **`varbinary`/`binary` → `varchar`/`nvarchar`** reinterprets each byte through the target's encoding (CP1252 for varchar/char, UTF-16 LE for nvarchar/nchar).
   Probe-confirmed 2026-05-22: `CAST(0x414243 AS varchar(10))` → `'ABC'`.
-  `image` deliberately stays rejected to match real SQL Server's Msg 8116 on `LEN(image)` etc.
+  `image` source is rejected: the explicit CAST `image → varchar/nvarchar/char/nchar` raises **Msg 529** (`"Explicit conversion from data type image to <target> is not allowed."`, tiberius-surfaced 2026-07-23 — previously fell to a generic Msg 50000 "No coercion implemented"), while the implicit-coerce path (`LEN(image)` etc.) raises Msg 8116.
+  The Msg 529 target renders the `(max)` suffix for a MAX target but drops a bounded declared length to the root name (`nvarchar(max)` vs `nvarchar`) — real's rendering, matched by `FamilyRootName`'s MAX-form arms.
 - **`varchar`/`char`/`nvarchar`/`nchar` → `varbinary`/`binary`** encodes the string with the source's natural encoding (CP1252 for varchar/char/sysname, UTF-16 LE for nvarchar/nchar/ntext/text).
   `varbinary(N)` receives the raw bytes and the CAST-level path truncates to N.
   `binary(N)` routes through `FromBinary` for zero-pad-or-truncate.

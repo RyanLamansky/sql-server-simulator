@@ -571,6 +571,14 @@ partial class SimulatedSqlException
         DateTime2SqlType => "datetime2",
         TimeSqlType => "time",
         DateTimeOffsetSqlType => "datetimeoffset",
+        // A MAX-form var type renders with its "(max)" suffix in these messages
+        // (e.g. Msg 529 "Explicit conversion from data type image to
+        // nvarchar(max) is not allowed") while a bounded length is dropped to
+        // the root name — probe-confirmed against SQL Server 2025 across
+        // nvarchar(10)/(max), varchar, varbinary.
+        VarcharSqlType { length: SqlType.MaxLengthSentinel } => "varchar(max)",
+        NVarcharSqlType { length: SqlType.MaxLengthSentinel } => "nvarchar(max)",
+        VarbinarySqlType { length: SqlType.MaxLengthSentinel } => "varbinary(max)",
         VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType
             or VarbinarySqlType or BinarySqlType or DecimalSqlType => type.SqlServerName,
         _ => type.ToString()!,

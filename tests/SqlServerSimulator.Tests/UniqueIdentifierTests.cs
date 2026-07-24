@@ -73,6 +73,18 @@ public sealed class UniqueIdentifierTests
         => AssertSqlMessage($"select cast(cast('{Sample}' as uniqueidentifier) as nvarchar(35))",
             "Arithmetic overflow error converting expression to data type nvarchar.");
 
+    // A MAX-length target has unbounded width, so it holds the 36-char dashed
+    // form rather than tripping the too-narrow Msg 8115/8170 — the length
+    // sentinel (-1) must stay out of the "< 36" check. Regression for a
+    // tiberius-surfaced bug where nvarchar(max) wrongly raised Msg 8115.
+    [TestMethod]
+    public void Cast_UniqueIdentifierToVarcharMax_EmitsUppercaseDashedForm()
+        => AreEqual(Sample, ExecuteScalar($"select cast(cast('{Sample}' as uniqueidentifier) as varchar(max))"));
+
+    [TestMethod]
+    public void Cast_UniqueIdentifierToNVarcharMax_EmitsUppercaseDashedForm()
+        => AreEqual(Sample, ExecuteScalar($"select cast(cast('{Sample}' as uniqueidentifier) as nvarchar(max))"));
+
     // Length check is value-conditional: NULL doesn't fire either Msg 8170 or 8115.
     [TestMethod]
     public void Cast_NullUniqueIdentifierToTooNarrowVarchar_PassesThroughAsDBNull()

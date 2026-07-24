@@ -419,6 +419,22 @@ public sealed class CastTests
         AssertSqlMessage($"select cast(cast('{seed}' as {sourceType}) as int)", $"Explicit conversion from data type {sourceType} to int is not allowed.");
     }
 
+    // image → any string family is a disallowed explicit conversion (Msg 529),
+    // not a byte reinterpretation like varbinary → string. The target renders
+    // with its "(max)" suffix for the MAX form but drops a bounded declared
+    // length to the root name — probe-confirmed against SQL Server 2025 and
+    // surfaced by tiberius (the sim previously raised a generic Msg 50000
+    // "No coercion implemented").
+    [TestMethod]
+    [DataRow("nvarchar(max)", "nvarchar(max)")]
+    [DataRow("varchar(max)", "varchar(max)")]
+    [DataRow("nvarchar(10)", "nvarchar")]
+    [DataRow("varchar(20)", "varchar")]
+    [DataRow("char(5)", "char")]
+    public void Cast_ImageToString_RaisesMsg529(string targetType, string rendered)
+        => AssertSqlMessage($"select cast(cast(0x01 as image) as {targetType})",
+            $"Explicit conversion from data type image to {rendered} is not allowed.");
+
     [TestMethod]
     [DataRow("cast('hello world' as varchar(5))", "hello")]
     [DataRow("cast(N'hello world' as nvarchar(5))", "hello")]

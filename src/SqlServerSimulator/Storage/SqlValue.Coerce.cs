@@ -100,6 +100,16 @@ internal readonly partial struct SqlValue
         if (this.Type is VarbinarySqlType or BinarySqlType && SqlType.IsStringCategory(target))
             return this.CoerceBinaryToStringWithStyle(target, 0);
 
+        // image → string: real disallows the explicit CAST outright (Msg 529)
+        // rather than reinterpreting bytes the way varbinary does — image is
+        // the always-LOB binary type with no defined text conversion. Probe-
+        // confirmed 2026-07-23 via tiberius: CAST(CAST(0x01 AS image) AS
+        // varchar(max) / nvarchar(max)) → Msg 529 (the implicit-coerce path
+        // through LEN / LOWER is a separate Msg 8116). Without this the crossing
+        // fell to the generic "No coercion implemented" NotSupportedException.
+        if (this.Type is ImageSqlType && SqlType.IsStringCategory(target))
+            throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target);
+
         // varbinary / binary → integer family (bit/tinyint/smallint/int/bigint):
         // big-endian, left-truncate to the target width (keep the rightmost
         // bytes), zero-fill the high bytes when the source is shorter, then

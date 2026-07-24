@@ -189,11 +189,14 @@ internal sealed class Cast : Expression
         // Msg 8170 with its dedicated text; nchar/nvarchar use the generic
         // arithmetic-overflow Msg 8115 (verified against SQL Server 2025: the
         // message names "nvarchar" for both nchar and nvarchar targets).
-        // NULLs pass through silently.
+        // NULLs pass through silently. A MAX target (length sentinel -1) has
+        // unbounded width, so it always holds the 36-char form — the `>= 0`
+        // guard keeps it out of the too-narrow branch (a plain `< 36` treats
+        // the -1 sentinel as narrower than 36 and wrongly raises Msg 8115).
         if (!value.IsNull
             && value.Type == SqlType.UniqueIdentifier
             && targetMaxLength is int max
-            && max < 36)
+            && max is >= 0 and < 36)
         {
             if (targetType is VarcharSqlType or CharSqlType)
                 throw SimulatedSqlException.InsufficientResultSpaceForUniqueIdentifier();
