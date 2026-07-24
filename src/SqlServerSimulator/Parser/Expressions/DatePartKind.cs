@@ -358,11 +358,11 @@ internal static class DatePartKinds
     /// day / year). Without this, the bigint-to-int narrowing would leak a
     /// raw <see cref="OverflowException"/>.
     /// </summary>
-    public static int CoerceCount(SqlValue number, SqlType targetType)
+    public static long CoerceCount(SqlValue number, SqlType targetType)
     {
         try
         {
-            return number.CoerceTo(SqlType.Int32).AsInt32;
+            return number.CoerceTo(SqlType.BigInt).AsInt64;
         }
         catch (OverflowException)
         {
@@ -376,7 +376,7 @@ internal static class DatePartKinds
     /// Out-of-range output raises Msg 517. Caller must have already validated
     /// compatibility via <see cref="RequireCompatible"/>.
     /// </summary>
-    public static SqlValue Add(DatePartKind kind, SqlValue value, int n)
+    public static SqlValue Add(DatePartKind kind, SqlValue value, long n)
     {
         try
         {
@@ -407,24 +407,30 @@ internal static class DatePartKinds
         }
     }
 
-    private static SqlValue AddToDate(SqlValue value, DatePartKind kind, int n)
+    private static SqlValue AddToDate(SqlValue value, DatePartKind kind, long n)
     {
         var date = value.AsDate;
+        // Year / month / quarter feed DateOnly's int-typed adders; day / week
+        // feed DateOnly.AddDays(int). An interval too large for int can only
+        // overflow the date's range, so the checked int-narrowing surfaces the
+        // same Msg 517 as an out-of-range DateOnly result (Add re-wraps both).
         var added = kind switch
         {
-            DatePartKind.Year => date.AddYears(n),
-            DatePartKind.Quarter => date.AddMonths(checked(n * 3)),
-            DatePartKind.Month => date.AddMonths(n),
-            DatePartKind.DayOfYear or DatePartKind.Day or DatePartKind.Weekday => date.AddDays(n),
-            DatePartKind.Week or DatePartKind.IsoWeek => date.AddDays(checked(n * 7)),
+            DatePartKind.Year => date.AddYears(checked((int)n)),
+            DatePartKind.Quarter => date.AddMonths(checked((int)(n * 3))),
+            DatePartKind.Month => date.AddMonths(checked((int)n)),
+            DatePartKind.DayOfYear or DatePartKind.Day or DatePartKind.Weekday => date.AddDays(checked((int)n)),
+            DatePartKind.Week or DatePartKind.IsoWeek => date.AddDays(checked((int)(n * 7))),
             _ => throw new NotSupportedException($"DATEADD({kind}) on date isn't implemented."),
         };
         return SqlValue.FromDate(added);
     }
 
-    private static SqlValue AddToTime(SqlValue value, DatePartKind kind, int n)
+    private static SqlValue AddToTime(SqlValue value, DatePartKind kind, long n)
     {
-        var ticks = value.AsTime.Ticks + (kind switch
+        // checked so an interval overflowing the 100-ns tick range raises
+        // Msg 517 via Add's catch rather than silently wrapping.
+        var ticks = checked(value.AsTime.Ticks + (kind switch
         {
             DatePartKind.Hour => n * TimeSpan.TicksPerHour,
             DatePartKind.Minute => n * TimeSpan.TicksPerMinute,
@@ -433,40 +439,40 @@ internal static class DatePartKinds
             DatePartKind.Microsecond => n * 10L,
             DatePartKind.Nanosecond => n / 100L,
             _ => throw new NotSupportedException($"DATEADD({kind}) on time isn't implemented."),
-        });
+        }));
         return ticks is < 0 or >= TimeSpan.TicksPerDay
             ? throw SimulatedSqlException.DateAddOverflow("time")
             : SqlValue.FromTime(value.Type, new TimeSpan(ticks));
     }
 
-    private static DateTime AddToDateTime(DateTime input, DatePartKind kind, int n) => kind switch
+    private static DateTime AddToDateTime(DateTime input, DatePartKind kind, long n) => kind switch
     {
-        DatePartKind.Year => input.AddYears(n),
-        DatePartKind.Quarter => input.AddMonths(checked(n * 3)),
-        DatePartKind.Month => input.AddMonths(n),
+        DatePartKind.Year => input.AddYears(checked((int)n)),
+        DatePartKind.Quarter => input.AddMonths(checked((int)(n * 3))),
+        DatePartKind.Month => input.AddMonths(checked((int)n)),
         DatePartKind.DayOfYear or DatePartKind.Day or DatePartKind.Weekday => input.AddDays(n),
         DatePartKind.Week or DatePartKind.IsoWeek => input.AddDays(checked(n * 7)),
         DatePartKind.Hour => input.AddHours(n),
         DatePartKind.Minute => input.AddMinutes(n),
         DatePartKind.Second => input.AddSeconds(n),
         DatePartKind.Millisecond => input.AddMilliseconds(n),
-        DatePartKind.Microsecond => input.AddTicks(n * 10L),
+        DatePartKind.Microsecond => input.AddTicks(checked(n * 10L)),
         DatePartKind.Nanosecond => input.AddTicks(n / 100L),
         _ => throw new NotSupportedException($"DATEADD({kind}) on datetime isn't implemented."),
     };
 
-    private static DateTimeOffset AddToDateTimeOffset(DateTimeOffset input, DatePartKind kind, int n) => kind switch
+    private static DateTimeOffset AddToDateTimeOffset(DateTimeOffset input, DatePartKind kind, long n) => kind switch
     {
-        DatePartKind.Year => input.AddYears(n),
-        DatePartKind.Quarter => input.AddMonths(checked(n * 3)),
-        DatePartKind.Month => input.AddMonths(n),
+        DatePartKind.Year => input.AddYears(checked((int)n)),
+        DatePartKind.Quarter => input.AddMonths(checked((int)(n * 3))),
+        DatePartKind.Month => input.AddMonths(checked((int)n)),
         DatePartKind.DayOfYear or DatePartKind.Day or DatePartKind.Weekday => input.AddDays(n),
         DatePartKind.Week or DatePartKind.IsoWeek => input.AddDays(checked(n * 7)),
         DatePartKind.Hour => input.AddHours(n),
         DatePartKind.Minute => input.AddMinutes(n),
         DatePartKind.Second => input.AddSeconds(n),
         DatePartKind.Millisecond => input.AddMilliseconds(n),
-        DatePartKind.Microsecond => input.AddTicks(n * 10L),
+        DatePartKind.Microsecond => input.AddTicks(checked(n * 10L)),
         DatePartKind.Nanosecond => input.AddTicks(n / 100L),
         DatePartKind.TzOffset => input.ToOffset(input.Offset + TimeSpan.FromMinutes(n)),
         _ => throw new NotSupportedException($"DATEADD({kind}) on datetimeoffset isn't implemented."),

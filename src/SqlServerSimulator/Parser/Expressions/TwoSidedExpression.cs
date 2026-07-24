@@ -221,17 +221,31 @@ internal abstract class TwoSidedExpression : Expression
         if (left.Type is SqlVariantSqlType || right.Type is SqlVariantSqlType)
             _ = SqlType.PromoteForArithmetic(left.Type, right.Type, op);
 
-        if (left.Type.Category == SqlTypeCategory.Integer && right.Type.Category == SqlTypeCategory.String && op is not '&' and not '|' and not '^')
+        // A string operand paired with a numeric one converts to that numeric
+        // type — SQL Server's low string-precedence rule (probe-confirmed 2025:
+        // `decimal - '0.4'`, `'3' * float`, `money + '2.5'` all coerce, and the
+        // result carries the numeric partner's type). Two exceptions: bit +
+        // string raises Msg 402 / 8117 (BitWithStringArithmetic), and modulo
+        // against a non-integer numeric (decimal / money / float) is Msg 402
+        // "incompatible in the modulo operator" even though + - * / coerce.
+        // Bitwise operators (& | ^) aren't string-coercible and fall through to
+        // the unsupported-pair error below.
+        var leftIsString = left.Type.Category == SqlTypeCategory.String;
+        var rightIsString = right.Type.Category == SqlTypeCategory.String;
+        if (op is not '&' and not '|' and not '^' && leftIsString != rightIsString)
         {
-            if (left.Type == SqlType.Bit)
-                throw BitWithStringArithmetic(left.Type, right.Type, op);
-            right = right.IsNull ? SqlValue.Null(left.Type) : right.CoerceTo(left.Type);
-        }
-        else if (left.Type.Category == SqlTypeCategory.String && right.Type.Category == SqlTypeCategory.Integer && op is not '&' and not '|' and not '^')
-        {
-            if (right.Type == SqlType.Bit)
-                throw BitWithStringArithmetic(left.Type, right.Type, op);
-            left = left.IsNull ? SqlValue.Null(right.Type) : left.CoerceTo(right.Type);
+            var numericType = leftIsString ? right.Type : left.Type;
+            if (IsStringCoercibleNumericCategory(numericType.Category))
+            {
+                if (numericType == SqlType.Bit)
+                    throw BitWithStringArithmetic(left.Type, right.Type, op);
+                if (op == '%' && numericType.Category != SqlTypeCategory.Integer)
+                    throw SimulatedSqlException.IncompatibleDataTypesInOperator(left.Type, right.Type, OperatorWord(op));
+                if (leftIsString)
+                    left = left.IsNull ? SqlValue.Null(numericType) : left.CoerceTo(numericType);
+                else
+                    right = right.IsNull ? SqlValue.Null(numericType) : right.CoerceTo(numericType);
+            }
         }
 
         // Binary ↔ integer: the binary operand converts to the integer side's
@@ -277,6 +291,15 @@ internal abstract class TwoSidedExpression : Expression
             _ => throw UnsupportedNumericPair(left, right, op),
         };
     }
+
+    /// <summary>
+    /// True for the numeric categories a string operand implicitly converts to
+    /// in arithmetic (integer / decimal / money / float-real). String vs
+    /// date-time / uniqueidentifier / binary aren't arithmetic-coercible and
+    /// surface as the unsupported-pair error instead.
+    /// </summary>
+    private static bool IsStringCoercibleNumericCategory(SqlTypeCategory category) =>
+        category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate;
 
     private static SimulatedSqlException BitWithStringArithmetic(SqlType left, SqlType right, char op) =>
         op is '*' or '/'

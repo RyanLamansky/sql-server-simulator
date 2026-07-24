@@ -410,6 +410,16 @@ internal abstract partial class SqlType
         if (a.Category == SqlTypeCategory.Approximate || b.Category == SqlTypeCategory.Approximate)
             return Promote(a, b);
 
+        // A string operand adopts the other side's decimal type so the
+        // per-operator formula below sees a uniform decimal pair (SQL Server
+        // converts the low-precedence string to the numeric partner's type;
+        // runtime coercion mirrors this in TwoSidedExpression). Integer / money
+        // string pairings resolve through the joint-envelope Promote below.
+        if (a.Category == SqlTypeCategory.String && b is DecimalSqlType)
+            a = b;
+        else if (b.Category == SqlTypeCategory.String && a is DecimalSqlType)
+            b = a;
+
         // Decimal-involving cases: the per-operator formula applies. Money
         // and integer canonicalize to their decimal equivalent so the
         // formula sees a uniform (precision, scale) pair on both sides.

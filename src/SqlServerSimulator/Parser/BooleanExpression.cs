@@ -1400,8 +1400,16 @@ internal abstract class BooleanExpression
             if (l.IsNull || r.IsNull)
                 return null;
 
-            if (l.Type.Category != SqlTypeCategory.String || r.Type.Category != SqlTypeCategory.String)
-                throw SimulatedSqlException.OperandTypeClash(l.Type, r.Type);
+            // A non-string operand is implicitly converted to varchar, matching
+            // real SQL Server (probe-confirmed: int / decimal / float / date /
+            // datetime / uniqueidentifier / bit all LIKE-match their default
+            // string form — `[pub_date] LIKE '2024%'` is what an ORM emits).
+            // CoerceTo raises the appropriate conversion error for a type with
+            // no varchar representation.
+            if (l.Type.Category != SqlTypeCategory.String)
+                l = l.CoerceTo(SqlType.Varchar);
+            if (r.Type.Category != SqlTypeCategory.String)
+                r = r.CoerceTo(SqlType.Varchar);
 
             char? escapeChar = null;
             if (this.escape is not null)

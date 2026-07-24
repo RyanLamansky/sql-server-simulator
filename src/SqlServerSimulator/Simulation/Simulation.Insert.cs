@@ -268,15 +268,6 @@ partial class Simulation
                     : [.. destinationTable.Columns.Where(c => c.Computed is null && c.Type != SqlType.RowVersion && c.GeneratedAs == GeneratedAlwaysAsRow.None)];
         }
 
-        if (identityColumn is not null)
-        {
-            var identityListed = destinationColumns.Any(c => ReferenceEquals(c, identityColumn));
-            if (identityListed && !identityInsertOn)
-                throw SimulatedSqlException.CannotInsertExplicitIdentity(destinationTable.Name);
-            if (!identityListed && identityInsertOn)
-                throw SimulatedSqlException.ExplicitIdentityRequired(destinationTable.Name);
-        }
-
         if (destinationView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             throw new NotSupportedException($"INSERT … OUTPUT through a view ('{destinationView.Schema.Name}.{destinationView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
 
@@ -288,8 +279,36 @@ partial class Simulation
         if (output is not null && context.Token is ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute })
             throw SimulatedSqlException.OutputClauseNotAllowedInInsertExec();
 
+        // A VALUES source is parsed up front (before evaluation and before the
+        // identity diagnostics) so per-cell DEFAULT keywords — legal only
+        // inside INSERT … VALUES — are visible: an identity column receiving
+        // DEFAULT raises Msg 339, and non-identity DEFAULT cells resolve to the
+        // column default in the row-encode loop. SELECT / EXEC / DEFAULT VALUES
+        // sources carry no DEFAULT keyword, so this stays null for them.
+        var valueTuples = context.Token is ReservedKeyword { Keyword: Keyword.Values }
+            ? ParseValuesTuples(context, allowDefault: true)
+            : null;
+
+        if (identityColumn is not null)
+        {
+            var identityListed = destinationColumns.Any(c => ReferenceEquals(c, identityColumn));
+            // DEFAULT (per Msg 339's wording, also NULL) as an explicit identity
+            // value is rejected before the IDENTITY_INSERT gate — probe-confirmed
+            // to fire with IDENTITY_INSERT both ON and OFF.
+            if (identityListed && valueTuples is not null && TupleColumnIsDefault(valueTuples, destinationColumns, identityColumn))
+                throw SimulatedSqlException.DefaultOrNullNotAllowedForIdentity();
+            if (identityListed && !identityInsertOn)
+                throw SimulatedSqlException.CannotInsertExplicitIdentity(destinationTable.Name);
+            if (!identityListed && identityInsertOn)
+                throw SimulatedSqlException.ExplicitIdentityRequired(destinationTable.Name);
+        }
+
         List<SqlValue[]> sourceRows;
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
+        if (valueTuples is not null)
+        {
+            sourceRows = EvaluateParsedTuples(valueTuples, context.Batch);
+        }
+        else if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
         {
             // `INSERT INTO t DEFAULT VALUES` — one row with every column
             // defaulted. Clearing the destination list routes every column
@@ -307,7 +326,6 @@ partial class Simulation
         {
             sourceRows = context.Token switch
             {
-                ReservedKeyword { Keyword: Keyword.Values } => EvaluateValuesTuples(context),
                 ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns.Length),
                 ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns.Length),
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
@@ -315,13 +333,19 @@ partial class Simulation
         }
 
         ApplyDmlTopCap(top, sourceRows, context.Batch);
+        // Keep the parsed tuples aligned 1:1 with sourceRows so per-cell DEFAULT
+        // lookup by row index stays valid — TOP trims from the tail, matching
+        // ApplyDmlTopCap's tail removal on sourceRows.
+        if (valueTuples is not null && valueTuples.Count > sourceRows.Count)
+            valueTuples.RemoveRange(sourceRows.Count, valueTuples.Count - sourceRows.Count);
 
         decimal? lastIdentityValue = null;
         var outputRows = output is null ? null : new List<byte[]>(sourceRows.Count);
         var hasInsertTriggers = !insteadOfActive && HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Insert);
         var triggerRows = (hasInsertTriggers || insteadOfActive) ? new List<SqlValue[]>(sourceRows.Count) : null;
-        foreach (var sourceRow in sourceRows)
+        for (var rowIndex = 0; rowIndex < sourceRows.Count; rowIndex++)
         {
+            var sourceRow = sourceRows[rowIndex];
             // Per-row stamp bump for DEFAULT-clause expression evaluation
             // below — NEXT VALUE FOR in a DEFAULT advances per row inserted
             // (probe-confirmed against SQL Server 2025). VALUES tuples were
@@ -367,6 +391,19 @@ partial class Simulation
                         ordinal = j;
                         break;
                     }
+                }
+
+                // A DEFAULT keyword in this VALUES cell resolves exactly like an
+                // omitted column: the column's DEFAULT constraint value, or NULL
+                // when it has none (a NOT NULL no-default column then trips the
+                // NULL check below with Msg 515). Identity + DEFAULT was already
+                // rejected upstream with Msg 339, so it never reaches here.
+                if (valueTuples is not null && i < valueTuples[rowIndex].Length && valueTuples[rowIndex][i] is Parser.Expressions.DefaultValueExpression)
+                {
+                    rowValues[ordinal] = targetColumn.Default is { } columnDefault
+                        ? CoerceForInsert(columnDefault.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch)), targetColumn.Type)
+                        : SqlValue.Null(targetColumn.Type);
+                    continue;
                 }
 
                 var source = sourceRow[i];
@@ -542,22 +579,65 @@ partial class Simulation
     /// <see cref="SimulatedSqlException.InvalidColumnName(string)"/>.
     /// </summary>
     private static List<SqlValue[]> EvaluateValuesTuples(ParserContext context)
+        => EvaluateParsedTuples(ParseValuesTuples(context), context.Batch);
+
+    /// <summary>
+    /// Evaluates already-parsed <c>VALUES</c> tuples to <see cref="SqlValue"/>
+    /// rows. A <see cref="Parser.Expressions.DefaultValueExpression"/> cell (a
+    /// <c>DEFAULT</c> keyword, only produced when <c>ParseValuesTuples</c> is
+    /// called with <c>allowDefault: true</c>) carries no value of its own; it
+    /// gets a throwaway NULL placeholder here — the INSERT row encoder detects
+    /// the sentinel by position and resolves it against the target column's
+    /// default before this placeholder is ever read.
+    /// </summary>
+    private static List<SqlValue[]> EvaluateParsedTuples(List<Expression[]> tuples, BatchContext batch)
     {
-        var tuples = ParseValuesTuples(context);
-        var runtime = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch);
+        var runtime = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch);
         var rows = new List<SqlValue[]>(tuples.Count);
         foreach (var tuple in tuples)
         {
             // Per-row stamp bump so NEXT VALUE FOR advances on the next
             // tuple (and dedupes across multiple NEXT VALUE FOR instances
             // within one tuple). See BatchContext.CurrentRowStamp.
-            context.Batch.BumpRowStamp();
+            batch.BumpRowStamp();
             var values = new SqlValue[tuple.Length];
             for (var i = 0; i < tuple.Length; i++)
-                values[i] = tuple[i].Run(runtime);
+            {
+                values[i] = tuple[i] is Parser.Expressions.DefaultValueExpression
+                    ? SqlValue.Null(SqlType.Int32)
+                    : tuple[i].Run(runtime);
+            }
             rows.Add(values);
         }
         return rows;
+    }
+
+    /// <summary>
+    /// Reports whether any parsed <c>VALUES</c> tuple supplies the
+    /// <c>DEFAULT</c> keyword in the position mapped to
+    /// <paramref name="column"/> (identified by reference in
+    /// <paramref name="destinationColumns"/>). Used to raise Msg 339 when an
+    /// identity column receives an explicit <c>DEFAULT</c>.
+    /// </summary>
+    private static bool TupleColumnIsDefault(List<Expression[]> tuples, HeapColumn[] destinationColumns, HeapColumn column)
+    {
+        var position = -1;
+        for (var i = 0; i < destinationColumns.Length; i++)
+        {
+            if (ReferenceEquals(destinationColumns[i], column))
+            {
+                position = i;
+                break;
+            }
+        }
+        if (position < 0)
+            return false;
+        foreach (var tuple in tuples)
+        {
+            if (position < tuple.Length && tuple[position] is Parser.Expressions.DefaultValueExpression)
+                return true;
+        }
+        return false;
     }
 
     /// <summary>

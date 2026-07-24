@@ -56,10 +56,11 @@ Result types: `DATEPART` → int; `DATEADD` preserves input type; `DATEDIFF` →
 
 `DATEPART`/`DATEADD` enforce per-type keyword compatibility: `date` accepts only date parts; `time(N)` only time parts; `datetime`/`smalldatetime`/`datetime2(N)` accept both; `datetimeoffset(N)` adds `tzoffset`.
 Wrong combination → Msg 9810.
-`DATEADD` overflow → Msg 517.
+`DATEADD`'s interval count is `bigint` (`DatePartKinds.CoerceCount` → `CoerceTo(BigInt)`) — real accepts an interval exceeding int32 (`DATEADD(second, 2147483648, …)` lands in 2092); only an interval that pushes the *result* past the target type's range raises **Msg 517** (the `Add`/`checked` narrowing re-wraps it).
 `DATEPART(weekday)` uses default `DATEFIRST 7` (Sunday=1); changing `DATEFIRST` not modeled.
 
 **Implicit operand coercion** (date argument, all three functions): string operands route through `DatePartKinds.CoerceDateArgumentImplicit` → `CoerceTo(datetime2(7))`; integer operands → `CoerceTo(datetime)` (days-since-1900-01-01).
+`ParseDateTime2` also accepts a **bare time-of-day string** (`HH:mm[:ss[.fffffff]]`, anchored to 1900-01-01), so `DATEDIFF(second, '11:15:00', <time>)` / `DATEPART(microsecond, '11:15:00')` coerce like real (a Django DurationField/TimeField pattern) rather than raising Msg 241.
 Probe-confirmed against SQL Server 2025 (2026-05-22): `DATEPART(year, 0) = 1900`, `DATEADD(day, 1, 0) = 1900-01-02`, `DATEDIFF(day, 0, '2024-01-31') = 45320`.
 `DATEADD`'s offset (second) arg stays strict-int — string offsets raise Msg 9810 ("Argument data type varchar is invalid for argument 2 of dateadd function") just like real SQL Server.
 Minor projection-schema quirk: real SQL Server reports `DATEADD(day, 1, '2024-01-15')` as `datetime`; the simulator reports it as `datetime2(7)` (the convention from `DATEDIFF`'s existing string path).
@@ -114,7 +115,9 @@ Bare NULL dominates in practice; typed-null-int is a rare hand-written shape EF 
 **Result-type fidelity**: `char(N) + char(M)` → `char(N+M)` (capped at 8000); `nchar` analogous; mixed `char + nchar` → `nchar`.
 Variable-length pairs and mixed fixed/variable → length-bearing `varchar(N+M)` / `nvarchar(N+M)` (capped at 8000/4000).
 LOB and unspecified-length operands fall back to the unspecified form.
-`Subtract`/`Multiply`/etc. on string operands → `NotSupportedException` (real SQL Server: Msg 402 / Msg 8117).
+A string operand paired with a **numeric** one in `+` `-` `*` `/` implicitly converts to that numeric type (SQL Server's low string-precedence rule — `decimal - '0.4'` → `10.10`, `'3' * float` → float, result carries the numeric partner's type; `TwoSidedExpression.IntegerArithmetic` + `SqlType.PromoteForArithmetic`). Two exceptions: `bit + string` → Msg 402/8117, and modulo (`%`) against a non-integer numeric → Msg 402 ("incompatible in the modulo operator") even though `+ - * /` coerce. A non-numeric string surfaces its target's conversion error (Msg 8114 / 245 / 235). String-vs-string / string-vs-non-numeric arithmetic → the unsupported-pair error.
+
+`REGEXP_LIKE` is deliberately **not** modeled: SQL Server 2025 ships it as a native *reserved predicate* (`WHERE REGEXP_LIKE(col, pattern)`), and `dbo.REGEXP_LIKE(...)` — the schema-qualified scalar form mssql-django emits for Django `__regex` lookups — exists on real *only* when mssql-django's regex **CLR assembly** is installed (the simulator doesn't model CLR, so it authentically lacks it; `dbo.REGEXP_LIKE(...)` fails on both the simulator and a real server without that assembly).
 
 ## Date-construction scalars: `*FROMPARTS` family + `EOMONTH`
 Six builders (`DATE`/`DATETIME`/`DATETIME2`/`DATETIMEOFFSET`/`SMALLDATETIME`/`TIME` + `FROMPARTS`).

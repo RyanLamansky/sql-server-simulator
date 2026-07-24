@@ -51,6 +51,16 @@ partial class SimulatedSqlException
         WithLine(new($"Unclosed quotation mark after the character string '{body}'.", 105, 15, 1), lineNumber);
 
     /// <summary>
+    /// Mimics SQL Server error 339: an <c>INSERT</c> supplied the <c>DEFAULT</c>
+    /// keyword (the message also covers <c>NULL</c>) as the value for an
+    /// identity column. Probe-confirmed (SQL Server 2025) that this fires with
+    /// <c>SET IDENTITY_INSERT</c> both ON and OFF and preempts the
+    /// IDENTITY_INSERT gate (Msg 544).
+    /// </summary>
+    internal static SimulatedSqlException DefaultOrNullNotAllowedForIdentity() =>
+        new("DEFAULT or NULL are not allowed as explicit identity values.", 339, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 8631: expression parsing consumed the thread's
     /// stack down to the runtime's safety threshold. Real SQL Server raises
     /// this from an actual stack probe (probe-confirmed 2026-07-15: a

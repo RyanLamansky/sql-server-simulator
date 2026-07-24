@@ -69,6 +69,7 @@ internal readonly partial struct SqlValue
     private static DateTime ParseDateTime2(string value) =>
         DateTime.TryParseExact(value, dateTime2Formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt) ? dt
         : DateOnly.TryParseExact(value, dateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d.ToDateTime(TimeOnly.MinValue)
+        : TimeSpan.TryParseExact(value, timeFormats, CultureInfo.InvariantCulture, out var ts) && ts.Ticks is >= 0 and < TimeSpan.TicksPerDay ? DateTimeSqlType.BaseDate.Add(ts)
         : throw SimulatedSqlException.ConversionFailedDateTimeFromString();
 
     /// <summary>

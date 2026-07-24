@@ -1709,7 +1709,16 @@ partial class Simulation
     /// the table-value-constructor derived table (<c>(VALUES …) alias(cols)</c>)
     /// parsed in <see cref="Selection"/>.
     /// </summary>
-    internal static List<Expression[]> ParseValuesTuples(ParserContext context)
+    /// <remarks>
+    /// <paramref name="allowDefault"/> is set only by the INSERT VALUES path:
+    /// when true, a bare <c>DEFAULT</c> keyword in a tuple position yields the
+    /// <see cref="Parser.Expressions.DefaultValueExpression"/> sentinel (the
+    /// INSERT encoder resolves it per target column). The FROM-clause
+    /// table-value constructor leaves it false, so <c>DEFAULT</c> there falls
+    /// through to <see cref="Expression.Parse"/> and raises Msg 156 — matching
+    /// SQL Server, which permits <c>DEFAULT</c> only inside <c>INSERT … VALUES</c>.
+    /// </remarks>
+    internal static List<Expression[]> ParseValuesTuples(ParserContext context, bool allowDefault = false)
     {
         var tuples = new List<Expression[]>();
         do
@@ -1723,7 +1732,15 @@ partial class Simulation
                 context.MoveNextRequired();
                 if (context.Token is Operator { Character: ',' or ')' })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                values.Add(Expression.Parse(context));
+                if (allowDefault && context.Token is ReservedKeyword { Keyword: Keyword.Default })
+                {
+                    values.Add(Parser.Expressions.DefaultValueExpression.Instance);
+                    context.MoveNextRequired();
+                }
+                else
+                {
+                    values.Add(Expression.Parse(context));
+                }
                 if (context.Token is Operator { Character: ')' })
                     break;
                 if (context.Token is not Operator { Character: ',' })

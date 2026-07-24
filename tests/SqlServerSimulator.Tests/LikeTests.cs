@@ -133,12 +133,17 @@ public class LikeTests
     }
 
     [TestMethod]
-    public void NonStringSubject_RaisesOperandTypeClash()
-    {
-        // int↔string implicit conversion isn't implemented here; CAST required.
-        var ex = new Simulation().AssertSqlError("select 1 where 123 like '1%'", 206);
-        Assert.Contains("Operand type clash", ex.Message);
-    }
+    // A non-string LIKE operand is implicitly converted to varchar, matching
+    // real SQL Server (probe-confirmed 2026-07-24: numeric / temporal / guid /
+    // bit all LIKE-match their default string form). An ORM relies on this for
+    // `<date column> LIKE '2024%'`.
+    [DataRow("123 like '1%'", 1)]        // int → "123"
+    [DataRow("123 like '9%'", 0)]
+    [DataRow("cast(12.5 as decimal(4,1)) like '12%'", 1)]  // decimal → "12.5"
+    [DataRow("cast('2024-03-15' as date) like '2024%'", 1)]  // date → ISO "2024-03-15"
+    [DataRow("cast(1 as bit) like '1'", 1)]
+    public void NonStringSubject_ImplicitlyConvertsToVarchar(string predicate, int expectedRows)
+        => Assert.AreEqual(expectedRows, new Simulation().ExecuteScalar<int>($"select count(*) from (select 1 x) t where {predicate}"));
 
     [TestMethod]
     public void LikeAgainstColumn_FiltersRows()

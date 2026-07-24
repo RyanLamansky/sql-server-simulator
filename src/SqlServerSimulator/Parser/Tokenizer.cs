@@ -95,7 +95,11 @@ static class Tokenizer
     /// </summary>
     private static bool IsIdentifierBodyChar(char c) =>
         char.IsLetterOrDigit(c)
-        || c == '_'
+        // SQL Server allows @, $, #, _ after the first character of a regular
+        // identifier (a leading @ / # is dispatched separately as a variable /
+        // temp name; these only apply mid-identifier). ORMs emit crafted aliases
+        // like `crafted_alia$` (Django's annotations tests).
+        || c is '_' or '$' or '#' or '@'
         || char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.NonSpacingMark;
 
     private static Token ParseUnquotedStringOrReservedKeyword(string command, ref int index)

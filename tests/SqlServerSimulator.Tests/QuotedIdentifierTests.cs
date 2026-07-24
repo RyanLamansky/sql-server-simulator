@@ -274,4 +274,16 @@ public sealed class QuotedIdentifierTests
         var ex = Throws<SimulatedSqlException>(() => Scalar(connection, "select \"abc\""));
         AreEqual(207, ex.Number);
     }
+
+    [TestMethod]
+    // SQL Server allows @, $, # (and _) after the first char of a regular
+    // unquoted identifier. ORMs emit crafted aliases like `crafted_alia$`
+    // (Django's annotations tests) — probe-confirmed these tokenize + resolve.
+    [DataRow("crafted_alia$")]
+    [DataRow("col$1")]
+    [DataRow("a#b")]
+    [DataRow("x@y")]
+    public void UnquotedIdentifier_AllowsAtDollarHashInBody(string alias)
+        => AreEqual(7, new Simulation().ExecuteScalar<int>(
+            $"select {alias}.n from (select 7 as n) as {alias}"));
 }
