@@ -182,8 +182,46 @@ internal sealed class Cast : Expression
     /// finally enforces the narrow-string rules described in
     /// <see cref="EnforceTargetMaxLength"/>.
     /// </summary>
+    /// <summary>
+    /// Whether an explicit <c>CAST</c> / <c>CONVERT</c> out of a legacy LOB type
+    /// is one real SQL Server refuses outright with Msg 529 — the payload's
+    /// parseability never enters into it, so <c>CAST(&lt;text '5'&gt; AS int)</c>
+    /// is rejected as firmly as a non-numeric one. The two LOB families have
+    /// different allow-lists (probe-confirmed 2026-07-24):
+    /// <list type="bullet">
+    /// <item><c>text</c> / <c>ntext</c> convert only within the string family —
+    /// <c>char</c> / <c>nchar</c> / <c>varchar</c> / <c>nvarchar</c> /
+    /// <c>text</c> / <c>ntext</c> / <c>xml</c>. Since <c>xml</c> is
+    /// string-category here, the category test is the whole allow-list;
+    /// <c>int</c>, <c>bigint</c>, <c>decimal</c>, <c>float</c>, <c>money</c>,
+    /// <c>bit</c>, <c>date</c>, <c>datetime</c>, <c>uniqueidentifier</c>,
+    /// <c>varbinary</c> and <c>sql_variant</c> all raise 529.</item>
+    /// <item><c>image</c> converts only within the binary family —
+    /// <c>varbinary</c> / <c>binary</c> / <c>image</c>. Notably <c>xml</c> and
+    /// <c>sql_variant</c> raise 529 from <c>image</c> even though <c>xml</c> is
+    /// reachable from <c>text</c>.</item>
+    /// </list>
+    /// <c>TRY_CAST</c> / <c>TRY_CONVERT</c> raise it too rather than returning
+    /// NULL — 529 is an illegal conversion, not a conversion failure, and is
+    /// deliberately absent from <see cref="IsConversionFailure"/>.
+    /// </summary>
+    /// <remarks>
+    /// This sits on the explicit-CAST seam on purpose. The <em>implicit</em>
+    /// path answers with a different error entirely (Msg 206 operand-type clash
+    /// for <c>textcol = 5</c>, Msg 402 for <c>textcol = 'x'</c>), so gating
+    /// inside the shared <c>SqlValue.CoerceTo</c> would trade one divergence
+    /// for another.
+    /// </remarks>
+    private static bool IsRejectedLegacyLobConversion(SqlType source, SqlType target) =>
+        source == SqlType.Text || source == SqlType.NText
+            ? !SqlType.IsStringCategory(target)
+            : source == SqlType.Image && target is not (VarbinarySqlType or BinarySqlType or ImageSqlType);
+
     internal static SqlValue ApplyCoercion(SqlValue value, SqlType targetType, int? targetMaxLength)
     {
+        if (IsRejectedLegacyLobConversion(value.Type, targetType))
+            throw SimulatedSqlException.ExplicitConversionNotAllowed(value.Type, targetType);
+
         // uniqueidentifier → too-narrow string: SQL Server raises a target-
         // specific error rather than silently truncating. char/varchar use
         // Msg 8170 with its dedicated text; nchar/nvarchar use the generic

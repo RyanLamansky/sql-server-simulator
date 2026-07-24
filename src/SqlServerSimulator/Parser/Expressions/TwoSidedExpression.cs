@@ -285,7 +285,7 @@ internal abstract class TwoSidedExpression : Expression
                 SqlTypeCategory.Approximate => ApproximateArithmetic(left, right, op),
                 SqlTypeCategory.Decimal => DecimalArithmetic(left, right, op),
                 SqlTypeCategory.Money => MoneyArithmetic(left, right, op),
-                SqlTypeCategory.Integer => PureIntegerArithmetic(left, right, compute),
+                SqlTypeCategory.Integer => PureIntegerArithmetic(left, right, op, compute),
                 _ => throw UnsupportedNumericPair(left, right, op),
             },
             _ => throw UnsupportedNumericPair(left, right, op),
@@ -322,16 +322,46 @@ internal abstract class TwoSidedExpression : Expression
     /// callback in <c>long</c> arithmetic, and narrows the result back to
     /// the common type. NULL propagates.
     /// </summary>
-    private static SqlValue PureIntegerArithmetic(SqlValue left, SqlValue right, Func<long, long, long> compute)
+    private static SqlValue PureIntegerArithmetic(SqlValue left, SqlValue right, char op, Func<long, long, long> compute)
     {
         var common = SqlType.Promote(left.Type, right.Type);
         if (left.IsNull || right.IsNull)
             return SqlValue.Null(common);
 
-        long result;
+        // SQL Server forms the quotient for % as well as /, so <type minimum>
+        // % -1 overflows exactly like <type minimum> / -1 even though the
+        // mathematical remainder is 0 (probe-confirmed 2026-07-24 for smallint,
+        // int and bigint; -5 % -1 and <min> % 1 both compute normally). The
+        // long-width computation below hides the narrow-type cases from the
+        // checked narrowing — the remainder is in range — so they need this
+        // guard. bigint would trap in the CLR anyway; this covers it uniformly.
+        if (op is '/' or '%'
+            && SignedMinimum(common) is long minimum
+            && ToInt64(right) == -1
+            && ToInt64(left) == minimum)
+        {
+            throw SimulatedSqlException.ArithmeticOverflow(common.ToString()!);
+        }
+
+        // SQL Server keeps the narrow type through arithmetic rather than
+        // widening, so a result outside the operand width is an overflow, not
+        // a wrap. Probe-confirmed 2026-07-24: cast(255 as tinyint) + cast(1 as
+        // tinyint), cast(32767 as smallint) + cast(1 as smallint),
+        // cast(2147483647 as int) + cast(1 as int) and the bigint equivalent
+        // all raise Msg 8115 naming that same narrow type, while a mixed pair
+        // promotes first and doesn't overflow (int + bigint = bigint). The
+        // checked narrowing below covers tinyint / smallint / int; bigint-width
+        // overflow is caught by the checked arithmetic in the caller's compute
+        // lambda (Add / Subtract / Multiply), and long.MinValue / -1 traps in
+        // the CLR on its own.
         try
         {
-            result = compute(ToInt64(left), ToInt64(right));
+            var result = compute(ToInt64(left), ToInt64(right));
+            return common == SqlType.Bit ? SqlValue.FromBoolean(result != 0)
+                : common == SqlType.TinyInt ? SqlValue.FromByte(checked((byte)result))
+                : common == SqlType.SmallInt ? SqlValue.FromInt16(checked((short)result))
+                : common == SqlType.Int32 ? SqlValue.FromInt32(checked((int)result))
+                : SqlValue.FromInt64(result);
         }
         catch (DivideByZeroException)
         {
@@ -339,12 +369,22 @@ internal abstract class TwoSidedExpression : Expression
             // method never divide, so the catch is specific to those two.
             throw SimulatedSqlException.DivideByZero();
         }
-        return common == SqlType.Bit ? SqlValue.FromBoolean(result != 0)
-            : common == SqlType.TinyInt ? SqlValue.FromByte((byte)result)
-            : common == SqlType.SmallInt ? SqlValue.FromInt16((short)result)
-            : common == SqlType.Int32 ? SqlValue.FromInt32((int)result)
-            : SqlValue.FromInt64(result);
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.ArithmeticOverflow(common.ToString()!);
+        }
     }
+
+    /// <summary>
+    /// The most negative value a signed integer <see cref="SqlType"/> holds,
+    /// or null for the types with no negative range (bit / tinyint), which
+    /// therefore can't reach the <c>/ -1</c> overflow.
+    /// </summary>
+    private static long? SignedMinimum(SqlType type) =>
+        type == SqlType.SmallInt ? short.MinValue
+        : type == SqlType.Int32 ? int.MinValue
+        : type == SqlType.BigInt ? long.MinValue
+        : null;
 
     private static NotSupportedException UnsupportedNumericPair(SqlValue left, SqlValue right, char op) =>
         new($"Operator '{op}' currently supports only integer operands; got {left.Type} and {right.Type}.");

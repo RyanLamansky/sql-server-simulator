@@ -118,6 +118,12 @@ Low priority / niche — simulatable (as placeholder constants or a small model)
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
+- **`bit` arithmetic accepted where real rejects it** — the simulator computes `bit + bit` / `- ` / `*` / `/` and hands back a bit (`PureIntegerArithmetic`'s `common == SqlType.Bit` arm); real refuses the same-type pair outright.
+  Probe-confirmed 2026-07-24: `+` / `-` → **Msg 402** (`"The data types bit and bit are incompatible in the add operator."`), `*` / `/` → **Msg 8117** (`"Operand data type bit is invalid for multiply operator."`), and `SUM(bit)` → **Msg 8117** (`"Operand data type bit is invalid for sum operator."`).
+  A mixed `bit + int` promotes and computes normally (→ 2) on both sides, so only the same-type pair diverges.
+  The over-permissive direction, and small — a type-pair gate ahead of the arithmetic plus one `SumAggregator` dispatch arm.
+  Surfaced while adding the integer-overflow checks and held out of that bundle to keep it scoped; `BitWithStringArithmetic` is the existing precedent for the message split.
+  Home: `TwoSidedExpression.PureIntegerArithmetic`.
 - **Per-object creation-time `QUOTED_IDENTIFIER` capture not modeled** — real SQL Server stamps procedures / views / triggers / tables with the QI setting in effect at CREATE (`sys.sql_modules.uses_quoted_identifier`, `OBJECTPROPERTY(id, 'IsQuotedIdentOn')`) and executes bodies under the captured setting; the simulator re-parses bodies under the executing session's current setting.
   See [`grammar.md`](grammar.md).
   Rare legacy-pattern impact.
@@ -137,11 +143,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 - **Result-set `fNullable` inference — remaining long tail** — the projection nullability that drives the COLMETADATA `fNullable` flag (see `Expression.ResultIsNullable`) covers the structural cases: direct refs, literals, ISNULL, CASE, and (added in the go-mssqldb pass, 2026-07-23) CONCAT / CONCAT_WS (always NOT NULL), IIF (both-arm rule), and VALUES row-constructor columns (OR over rows).
   Still over-claiming nullable vs real: (1) **per-function** signatures — `CEILING` / `FLOOR` / `ROUND` / `SIGN` / `GETDATE` project NOT NULL on real while `ABS` / `POWER` / `SQUARE` / `NEWID` / `RAND` stay nullable, an idiosyncratic per-builtin table with no clean rule; (2) **`@@`-variable** nullability (`@@ROWCOUNT` / `@@SPID` are NOT NULL on real); (3) **string `+` concatenation** of two non-null operands (real projects NOT NULL, but the resolver has no `BatchContext` to distinguish string-vs-arithmetic `+` — `1+1` stays nullable on real, so it can't blanket-propagate); (4) **constant-fold** cases where real eliminates a null arm — `NULLIF(1,2)`, no-ELSE `CASE WHEN <constant> …`, all-constant `COALESCE(NULL,5)` (realistic `COALESCE(agg,0)` already matches: nullable on both).
   All are metadata-only over-claims (nullable is the safe direction); low demand, no clean rule.
-- **`text` / `ntext` → non-string explicit CAST not rejected** — real disallows `CAST(<text/ntext> AS int / decimal / date / …)` outright with **Msg 529** (`"Explicit conversion from data type text to int is not allowed."`), even for a parseable value like `'5'`; the simulator treats `text`/`ntext` as string-category and routes through the string-parse path (returns the parsed value, or Msg 245 on a non-parseable string).
-  Sibling of the `image → string` Msg 529 rejection (shipped) — but a distinct code path, since `text`/`ntext` are string-category and legitimately convert to `varchar`/`nvarchar`; the fix must intercept the non-string target before the parse paths in `SqlValue.CoerceTo`.
-  Probe-confirmed 2026-07-23 via tiberius; niche (LOB-to-scalar casts are rare).
-- **Integer arithmetic overflow not raised** — `2147483647 + 1` wraps to `-2147483648` on the simulator; real raises Msg 8115 (arithmetic overflow converting to int).
-  A faithful fix means overflow-checking every int/bigint `+`/`-`/`*` on the hot arithmetic path; deferred as a broad change against a rarely-hit case.
 - **Runtime-error streaming shape** — a per-row runtime error (`SELECT 10/0`, arithmetic overflow) is emitted by real *after* COLMETADATA, so a streaming client surfaces it while draining rows; the simulator raises it at execute-time before any COLMETADATA, so the client sees it from the initial execute call.
   Message / number / class match; only the wire position differs.
   Deferred — deep change to statement execution ordering, low practical impact.

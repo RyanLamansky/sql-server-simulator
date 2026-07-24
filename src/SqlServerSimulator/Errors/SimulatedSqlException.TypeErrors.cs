@@ -9,7 +9,12 @@ partial class SimulatedSqlException
     /// expression into a narrower numeric data type.
     /// </summary>
     /// <param name="targetType">The destination type's display name (e.g. <c>tinyint</c>).</param>
-    internal static SimulatedSqlException ArithmeticOverflow(string targetType) => new($"Arithmetic overflow error converting expression to data type {targetType}.", 8115, 16, 8);
+    /// <remarks>
+    /// State 2, probe-confirmed 2026-07-24 against both reachable paths: integer
+    /// arithmetic overflow (<c>cast(2147483647 as int) + cast(1 as int)</c>) and
+    /// conversion overflow (<c>cast(@i as datetime)</c> past the range).
+    /// </remarks>
+    internal static SimulatedSqlException ArithmeticOverflow(string targetType) => new($"Arithmetic overflow error converting expression to data type {targetType}.", 8115, 16, 2);
 
     /// <summary>
     /// Mimics SQL Server error 8117: an arithmetic operator was used with a

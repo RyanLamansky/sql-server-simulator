@@ -11,7 +11,7 @@ internal sealed class Add : TwoSidedExpression
             ? StringConcatenation(left, right)
             : left.Type is VarbinarySqlType or BinarySqlType && right.Type is VarbinarySqlType or BinarySqlType
                 ? BinaryConcatenation(left, right)
-                : AdditiveArithmetic(left, right, '+', "add", static (a, b) => a + b);
+                : AdditiveArithmetic(left, right, '+', "add", static (a, b) => checked(a + b));
 
     /// <summary>
     /// Binary <c>+</c> binary concatenation: the two byte payloads are joined

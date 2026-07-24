@@ -22,6 +22,22 @@ Every other operator errors, matching SQL Server: `- % & | ^` → **Msg 402** (`
 
 `BuildSynthesizedSqlRow` (FROM-less SELECT) runs each expression first (surfacing runtime-only errors with operator-name wording), then `GetSqlType` for schema, then bridges any mismatch via `CoerceTo` — required for mixed-type CASE/Coalesce without a FROM clause.
 
+## Integer arithmetic overflow
+SQL Server keeps the narrow integer type through arithmetic instead of widening, so a result outside the operand width raises **Msg 8115 St 2** (`"Arithmetic overflow error converting expression to data type {type}."`) rather than wrapping.
+Probe-confirmed 2026-07-24 across `+ - * / %`, unary minus and `ABS`, for `tinyint` / `smallint` / `int` / `bigint` alike — `cast(255 as tinyint) + cast(1 as tinyint)` raises naming `tinyint`, not `int`.
+A mixed-width pair promotes first and so doesn't overflow at all: `int + bigint` → bigint, `smallint + int` → int.
+
+`PureIntegerArithmetic` computes in `long` and narrows back with `checked`, funnelling `OverflowException` into the Msg 8115 factory.
+The `bigint` width is covered by `checked` inside the `Add` / `Subtract` / `Multiply` compute lambdas — which is why those read `checked(a + b)` rather than `a + b`, since the narrowing can't see an overflow that already happened at `long` width.
+Bitwise `& | ^` can't leave the operand width, so they never trip it.
+
+`<type minimum> / -1` **and `<type minimum> % -1`** both overflow: SQL Server forms the quotient for `%` too, even though the mathematical remainder is 0 (probe-confirmed for smallint / int / bigint; `-5 % -1` and `<min> % 1` compute normally).
+The `long`-width computation hides the narrow cases from the checked narrowing — the remainder is in range — so `PureIntegerArithmetic` guards them explicitly via `SignedMinimum`.
+
+Aggregates were already covered before this landed: `SumAggregator.LongSum.Wrap` and `NumericAggregator` raise the same 8115, so `SUM(int)` past int range errors rather than wrapping — the realistic way to hit this, and the reason the per-row wrap was a wrong-answer divergence rather than a cosmetic one.
+The checked path's cost is below measurement noise (300k-row arithmetic scan: 94–140 ms run-to-run on checked and unchecked builds alike, minima 95.3 vs 94.2 ms).
+Oracle: `IntegerArithmeticOverflowTests`.
+
 ## Decimal arithmetic precision / scale
 Per-operator decimal scale rules differ from the joint-envelope rule used for non-arithmetic uses (comparison / COALESCE / set ops):
 - `+` / `-`: `p = max(p1-s1, p2-s2) + max(s1, s2) + 1`, `s = max(s1, s2)`

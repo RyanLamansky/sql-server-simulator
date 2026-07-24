@@ -87,6 +87,23 @@ Helpers: `VarbinaryToInteger` / `VarbinaryToMoneyUnits` / `EncodeIntegerToBinary
 `binary(N)` targets carry their length on the `BinarySqlType`; `varbinary(N)` targets carry it on the `VarbinarySqlType` (length ≤ 0 — unspecified / MAX — keeps native width).
 Arithmetic/bitwise/comparison with a binary operand routes through these same paths — see [`arithmetic.md`](arithmetic.md)'s *Binary operand promotion*.
 
+## Legacy LOB explicit conversions (`text` / `ntext` / `image`)
+An explicit `CAST` / `CONVERT` out of a legacy LOB type is gated by **source family**, and the payload's parseability never enters into it — `CAST(<text '5'> AS int)` is refused as firmly as a non-numeric one would be.
+Probe-confirmed 2026-07-24; **Msg 529 St 1**, `"Explicit conversion from data type {source} to {target} is not allowed."`, with bare family-root names on both sides (`decimal`, not `decimal(10,2)`).
+
+- `text` / `ntext` convert only **within the string family** — `char` / `nchar` / `varchar` / `nvarchar` / `text` / `ntext` / `xml`.
+  `xml` is string-category in the simulator's type model, so `SqlType.IsStringCategory` *is* the whole allow-list.
+  `int` / `bigint` / `decimal` / `float` / `money` / `bit` / `date` / `datetime` / `uniqueidentifier` / `varbinary` / `sql_variant` all raise 529.
+- `image` converts only **within the binary family** — `varbinary` / `binary` / `image`.
+  Note the asymmetry: `xml` and `sql_variant` raise 529 from `image` even though `xml` is reachable from `text`.
+  (`image` → string was already rejected a layer down in `SqlValue.CoerceTo`; the explicit path now answers from the same gate as the rest.)
+
+`TRY_CAST` / `TRY_CONVERT` raise it rather than returning NULL — 529 is an *illegal conversion*, not a conversion failure (see the swallow set below).
+
+The gate is `Cast.IsRejectedLegacyLobConversion`, checked at the top of `Cast.ApplyCoercion` (the shared CAST/CONVERT seam) and deliberately **not** inside `SqlValue.CoerceTo`, because the *implicit* path answers differently: `textcol = 5` → **Msg 206** (`"Operand type clash: text is incompatible with tinyint"`), `textcol = 'x'` → **Msg 402**.
+Gating in the shared coercion would trade one divergence for another.
+Oracle: `LegacyLobCastTests`.
+
 ## `TRY_CAST` / `TRY_CONVERT`
 Wrap regular CAST/CONVERT in try/catch that swallows documented "conversion failed" error numbers (returning typed NULL) while letting structural errors propagate.
 
