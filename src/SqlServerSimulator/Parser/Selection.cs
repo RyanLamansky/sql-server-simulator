@@ -2515,7 +2515,34 @@ internal sealed partial class Selection
         do
         {
             context.MoveNextRequired();
-            itemContributions.Add(ParseGroupByItem(context));
+
+            // Per-item binding rules, bracketed around this item's parse so one
+            // offending expression fails the statement even beside a valid one
+            // (probe-confirmed 2026-07-24: `GROUP BY a, GETDATE()` raises even
+            // though `a` is fine). Msg 144 takes precedence over Msg 164 — a
+            // correlated-subquery item reports 144 despite referencing a local
+            // column. See ParserContext.AggregatesParsed for why this counts at
+            // parse time instead of walking the finished expression.
+            var aggregatesBefore = context.AggregatesParsed;
+            var subqueriesBefore = context.SubqueriesParsed;
+            var columnsBefore = context.ColumnReferencesParsed;
+
+            var contribution = ParseGroupByItem(context);
+            itemContributions.Add(contribution);
+
+            if (context.AggregatesParsed > aggregatesBefore || context.SubqueriesParsed > subqueriesBefore)
+                throw SimulatedSqlException.AggregateOrSubqueryInGroupBy();
+
+            // The empty grouping set contributes no expression at all, so there
+            // is nothing for Msg 164 to require a column of. Probe-confirmed
+            // legal on real 2026-07-24: `GROUP BY ()`, `GROUPING SETS (())`,
+            // `GROUPING SETS ((a),())` and `GROUP BY (), a` all return rows.
+            var contributesAnExpression = false;
+            foreach (var fragment in contribution)
+                contributesAnExpression |= fragment.Length > 0;
+
+            if (contributesAnExpression && context.ColumnReferencesParsed == columnsBefore)
+                throw SimulatedSqlException.GroupByExpressionHasNoLocalColumn();
         } while (context.Token is Operator { Character: ',' });
 
         // Cartesian product of per-item contributions: each combination of

@@ -324,6 +324,7 @@ internal abstract class BooleanExpression
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextOptional();
         }
+        context.SubqueriesParsed++;
         return new ExistsExpression(inner);
     }
 
@@ -547,6 +548,7 @@ internal abstract class BooleanExpression
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextOptional();
+            context.SubqueriesParsed++;
             return new InSubqueryExpression(left, inner, negated);
         }
 

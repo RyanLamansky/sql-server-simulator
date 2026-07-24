@@ -36,6 +36,39 @@ partial class SimulatedSqlException
         new("Only one expression can be specified in the select list when the subquery is not introduced with EXISTS.", 116, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 130 — an aggregate whose argument expression
+    /// contains another aggregate or a subquery at any depth
+    /// (<c>SUM(MAX(a))</c>, <c>MAX(CASE WHEN EXISTS(…) THEN a END)</c>).
+    /// A <em>windowed</em> aggregate over an aggregate is legal and must not
+    /// reach this (<c>SUM(SUM(b)) OVER ()</c> returns a value on real).
+    /// Class 15 — a bind-time error, unlike the class-16 Msg 8120 family.
+    /// </summary>
+    internal static SimulatedSqlException AggregateOnAggregateOrSubquery() =>
+        new("Cannot perform an aggregate function on an expression containing an aggregate or a subquery.", 130, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 144 — an aggregate or subquery appears in a
+    /// GROUP BY list expression (<c>GROUP BY MAX(a)</c>,
+    /// <c>GROUP BY (SELECT …)</c>). Takes precedence over
+    /// <see cref="GroupByExpressionHasNoLocalColumn"/>: a correlated subquery
+    /// grouping item reports this even though it does reference a local column.
+    /// </summary>
+    internal static SimulatedSqlException AggregateOrSubqueryInGroupBy() =>
+        new("Cannot use an aggregate or a subquery in an expression used for the group by list of a GROUP BY clause.", 144, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 164 — a GROUP BY item that references no column
+    /// of the current query's own sources (<c>GROUP BY 1</c>,
+    /// <c>GROUP BY GETDATE()</c>, <c>GROUP BY @v</c>, or an item naming only an
+    /// outer reference). The rule is purely about column presence, not
+    /// determinism: <c>GROUP BY a + DATEPART(year, GETDATE())</c> is legal
+    /// because it contains <c>a</c>. Checked per item, so one offending
+    /// expression fails the statement even beside a valid one.
+    /// </summary>
+    internal static SimulatedSqlException GroupByExpressionHasNoLocalColumn() =>
+        new("Each GROUP BY expression must contain at least one column that is not an outer reference.", 164, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 8120 — a column in the SELECT list of an
     /// aggregate query (any aggregate, GROUP BY, or HAVING is present) that is
     /// neither inside an aggregate nor a GROUP BY item. The name is

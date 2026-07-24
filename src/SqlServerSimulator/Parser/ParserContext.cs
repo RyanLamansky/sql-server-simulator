@@ -124,6 +124,49 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public List<Expressions.AggregateExpression>? AggregateCollector;
 
     /// <summary>
+    /// Monotonic parse-time occurrence counters, bumped once per node of the
+    /// named kind as the parser builds expressions. Bracketing a sub-parse
+    /// (snapshot before, compare after) answers "did this expression contain an
+    /// aggregate / subquery / column reference?" without walking the finished
+    /// tree — which matters because only a minority of the 170-odd
+    /// <see cref="Expression"/> subclasses override
+    /// <see cref="Expression.VisitColumnReferences"/>, so a tree walk silently
+    /// misses containers like <c>CASE</c> and most scalar function calls.
+    /// Counting at construction is complete by construction instead.
+    /// <para>Consumed by the aggregate-binding rules: Msg 130 (aggregate over an
+    /// aggregate or subquery), Msg 144 (aggregate / subquery in a GROUP BY
+    /// item) and Msg 164 (GROUP BY item with no column of its own). Deltas are
+    /// only meaningful across a single sub-parse on one context — never read the
+    /// absolute values.</para>
+    /// <para>These deliberately do <b>not</b> reset per statement: every consumer
+    /// compares two snapshots taken around the same parse, so only the
+    /// difference is load-bearing, and a shared monotonic counter avoids any
+    /// save/restore discipline at nested-SELECT boundaries.</para>
+    /// </summary>
+    public int AggregatesParsed;
+
+    /// <inheritdoc cref="AggregatesParsed"/>
+    public int SubqueriesParsed;
+
+    /// <summary>
+    /// Column references parsed, net of function names. A bare name is built as
+    /// a <see cref="Expressions.Reference"/> before the parser knows whether a
+    /// <c>(</c> follows, so <c>GETDATE()</c> starts life looking exactly like a
+    /// column; <c>Expression.ParseCallArguments</c> — the single funnel for
+    /// every <c>&lt;reference&gt;(</c> shape — decrements on entry to cancel
+    /// that. The delta across a sub-parse is therefore the count of *genuine*
+    /// column references, which is what Msg 164 needs.
+    /// </summary>
+    /// <remarks>
+    /// An <em>outer</em> column reference counts the same as a local one, so a
+    /// grouping item naming only an outer column (<c>GROUP BY o.a</c> inside a
+    /// correlated subquery) stays accepted where real raises Msg 164. That
+    /// residual is the permissive direction and matches the pre-existing
+    /// behavior; closing it needs source-resolution, not a parse-time count.
+    /// </remarks>
+    public int ColumnReferencesParsed;
+
+    /// <summary>
     /// When non-null, every <see cref="Expressions.WindowExpression"/>
     /// constructor registers itself here. Scoped by Selection.Parse around
     /// projection parsing — the executor needs the list to detect the

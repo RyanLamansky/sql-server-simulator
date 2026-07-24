@@ -259,9 +259,9 @@ internal abstract class Expression
         // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE, and NULLIF are
         // reserved keywords but dispatch as function calls when followed
         // by '(' — the postfix loop hands the call shape off to ResolveBuiltIn.
-        ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf } reserved => new Reference(reserved.ToString()),
-        UnquotedString { ContextualKeyword: ContextualKeyword.Next } nextToken => (Expression?)TryParseNextValueForOrFallback(context) ?? new Reference(nextToken),
-        Name name => new Reference(name),
+        ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf } reserved => Counted(context, new Reference(reserved.ToString())),
+        UnquotedString { ContextualKeyword: ContextualKeyword.Next } nextToken => (Expression?)TryParseNextValueForOrFallback(context) ?? Counted(context, new Reference(nextToken)),
+        Name name => Counted(context, new Reference(name)),
         Operator { Character: '(' } => ParseGroupedExpression(context),
         // ODBC escape sequence: {d '…'} / {t '…'} / {ts '…'} / {guid '…'} typed
         // literals and {fn NAME(…)} the scalar-function escape.
@@ -492,6 +492,11 @@ internal abstract class Expression
     /// </summary>
     private static Expression ParseCallArguments(Reference reference, ParserContext context)
     {
+        // The name that got us here was counted as a column reference on the way
+        // in (the parser can't know a `(` follows until now); un-count it so
+        // ParserContext.ColumnReferencesParsed nets genuine columns only.
+        context.ColumnReferencesParsed--;
+
         context.NestingDepth += FunctionCallNestingCost;
         if (context.NestingDepth > MaxNestingDepth)
             throw SimulatedSqlException.StatementNestedTooDeeply();
@@ -710,6 +715,18 @@ internal abstract class Expression
     internal virtual bool ResultReportsNumeric => false;
 
     /// <summary>
+    /// Records a freshly-built <see cref="Reference"/> against
+    /// <see cref="ParserContext.ColumnReferencesParsed"/> and returns it, so the
+    /// counting stays a one-token change at each construction site inside the
+    /// primary-expression switch.
+    /// </summary>
+    private static Reference Counted(ParserContext context, Reference reference)
+    {
+        context.ColumnReferencesParsed++;
+        return reference;
+    }
+
+    /// <summary>
     /// Returns true when <paramref name="expression"/> is a bare <c>NULL</c>
     /// literal at the syntactic level — that is, the keyword <c>NULL</c>
     /// optionally wrapped in any number of parentheses. A typed NULL like
@@ -912,6 +929,7 @@ internal abstract class Expression
             if (isSubquery)
             {
                 var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+                context.SubqueriesParsed++;
                 return inner.Schema.Length != 1
                     ? throw SimulatedSqlException.SubqueryNotIntroducedWithExists()
                     : context.Token is not Operator { Character: ')' }
@@ -952,7 +970,7 @@ internal abstract class Expression
         {
             if (context.GetNextRequired() is not Name functionNameToken)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            var reference = new Reference(MapOdbcFunctionName(functionNameToken.Value, collation));
+            var reference = Counted(context, new Reference(MapOdbcFunctionName(functionNameToken.Value, collation)));
             if (context.GetNextRequired() is not Operator { Character: '(' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();

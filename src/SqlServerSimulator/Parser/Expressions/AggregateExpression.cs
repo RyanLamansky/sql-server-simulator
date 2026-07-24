@@ -99,7 +99,10 @@ internal sealed class AggregateExpression : Expression
     /// SQL Server's lowercase function name for this aggregate kind, used in
     /// error messages that quote the offending function (Msg 10757, etc.).
     /// </summary>
-    internal string LowerName => this.Kind switch
+    internal string LowerName => LowerNameOf(this.Kind);
+
+    /// <inheritdoc cref="LowerName"/>
+    internal static string LowerNameOf(AggregateKind kind) => kind switch
     {
         AggregateKind.Count => "count",
         AggregateKind.CountBig => "count_big",
@@ -116,7 +119,7 @@ internal sealed class AggregateExpression : Expression
         AggregateKind.ApproxCountDistinct => "approx_count_distinct",
         AggregateKind.JsonArrayAgg => "json_arrayagg",
         AggregateKind.JsonObjectAgg => "json_objectagg",
-        _ => throw new InvalidOperationException($"Unknown aggregate kind {this.Kind}."),
+        _ => throw new InvalidOperationException($"Unknown aggregate kind {kind}."),
     };
 
     /// <summary>
@@ -148,8 +151,32 @@ internal sealed class AggregateExpression : Expression
     /// </summary>
     private static AggregateExpression Register(ParserContext context, AggregateExpression expression)
     {
+        context.AggregatesParsed++;
         context.AggregateCollector?.Add(expression);
         return expression;
+    }
+
+    /// <summary>
+    /// Enforces the two operand rules real SQL Server binds at parse time,
+    /// given the counter snapshot taken immediately before the operand parse:
+    /// <list type="bullet">
+    /// <item><b>Msg 130</b> when the operand contained an aggregate or a
+    /// subquery at any depth. Detected from the parse-time counters rather than
+    /// a tree walk — see <see cref="ParserContext.AggregatesParsed"/>.</item>
+    /// <item><b>Msg 8117</b> when the operand is the bare untyped <c>NULL</c>
+    /// keyword (<c>COUNT_BIG(NULL)</c>, which is what mssql-django's empty
+    /// <c>filter=</c> aggregate degrades to). A <em>typed</em> NULL is fine:
+    /// <c>COUNT_BIG(CAST(NULL AS int))</c> returns 0 on real.</item>
+    /// </list>
+    /// Probe-confirmed 2026-07-24. STRING_AGG's untyped-NULL rejection is a
+    /// different message (Msg 8116, the argument form) and isn't covered here.
+    /// </summary>
+    private static void ValidateOperand(ParserContext context, AggregateKind kind, Expression operand, int aggregatesBefore, int subqueriesBefore)
+    {
+        if (context.AggregatesParsed > aggregatesBefore || context.SubqueriesParsed > subqueriesBefore)
+            throw SimulatedSqlException.AggregateOnAggregateOrSubquery();
+        if (kind != AggregateKind.StringAgg && IsUntypedNullLiteral(operand))
+            throw SimulatedSqlException.OperandDataTypeNullInvalid(LowerNameOf(kind));
     }
 
     /// <summary>
@@ -266,13 +293,19 @@ internal sealed class AggregateExpression : Expression
         if (kind == AggregateKind.ApproxCountDistinct)
             distinct = true;
 
+        var aggregatesBefore = context.AggregatesParsed;
+        var subqueriesBefore = context.SubqueriesParsed;
         var operand = Expression.Parse(context);
+        ValidateOperand(context, kind, operand, aggregatesBefore, subqueriesBefore);
         return Register(context, new AggregateExpression(kind, operand, distinct, separator: null));
     }
 
     private static AggregateExpression ParseStringAgg(ParserContext context)
     {
+        var aggregatesBefore = context.AggregatesParsed;
+        var subqueriesBefore = context.SubqueriesParsed;
         var operand = Expression.Parse(context);
+        ValidateOperand(context, AggregateKind.StringAgg, operand, aggregatesBefore, subqueriesBefore);
         if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();

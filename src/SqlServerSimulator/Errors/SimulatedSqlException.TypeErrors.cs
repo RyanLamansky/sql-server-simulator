@@ -27,6 +27,17 @@ partial class SimulatedSqlException
         new($"Operand data type {FamilyRootName(operand)} is invalid for {operatorName} operator.", 8117, 16, 1);
 
     /// <summary>
+    /// The untyped-<c>NULL</c> variant of <see cref="OperandDataTypeInvalid"/>:
+    /// an aggregate whose operand is the bare <c>NULL</c> keyword reports the
+    /// literal type name <c>NULL</c>, which no <see cref="SqlType"/> models (the
+    /// simulator resolves a bare NULL to a placeholder <see cref="SqlType.Int32"/>).
+    /// Probe-confirmed 2026-07-24 for count / count_big / sum / avg / max / min /
+    /// stdev / checksum_agg.
+    /// </summary>
+    internal static SimulatedSqlException OperandDataTypeNullInvalid(string operatorName) =>
+        new($"Operand data type NULL is invalid for {operatorName} operator.", 8117, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2715: an unknown type name appears in a column
     /// declaration (CREATE TABLE / DECLARE / parameter list). The CAST/CONVERT
     /// path uses a separate error (Msg 243); see <see cref="CannotFindDataTypeInCast"/>.

@@ -90,6 +90,42 @@ Sort keys decode only the ORDER BY columns off each row (`ComputeTopLevelOrderKe
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT)` / `COUNT_BIG`, `SUM` / `AVG`, `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`.
 `AVG(int)` truncates; `AVG(decimal(p,s))` widens to `decimal(38, max(s,6))`.
 
+## Aggregate / GROUP BY binding rules
+
+Four rules SQL Server binds at parse time, all in the over-permissive direction before they landed (an app query would work on the simulator and break on real).
+Probe-confirmed 2026-07-24; oracle `AggregateBindingRuleTests`.
+
+- **Msg 130 Cls 15 St 1** — `"Cannot perform an aggregate function on an expression containing an aggregate or a subquery."`
+  Fires when an aggregate's *own argument* contains another aggregate or a subquery at any depth: `SUM(MAX(a))`, `SUM(a + MAX(b))`, `MAX(CASE WHEN EXISTS(…) THEN a END)`, `MAX((SELECT 1))`, and the correlated form.
+  A subquery elsewhere — HAVING, projection, WHERE — is untouched.
+  A **windowed** aggregate over an aggregate is legal on real (`SUM(SUM(b)) OVER ()` returns a value); the simulator doesn't parse that shape at all yet, so it can't reach this check — see [`backlog.md`](backlog.md).
+- **Msg 8117 Cls 16 St 1** — `"Operand data type NULL is invalid for {aggregate} operator."`
+  A bare untyped `NULL` operand, for count / count_big / sum / avg / max / min / stdev / checksum_agg.
+  A *typed* NULL is fine (`COUNT_BIG(CAST(NULL AS int))` → 0).
+  `STRING_AGG(NULL, ',')` uses a different message (Msg 8116, the argument form) and isn't covered.
+- **Msg 144 Cls 15 St 1** — `"Cannot use an aggregate or a subquery in an expression used for the group by list of a GROUP BY clause."`
+  Takes precedence over Msg 164: a correlated-subquery grouping item reports 144 even though it does reference a local column.
+- **Msg 164 Cls 15 St 1** — `"Each GROUP BY expression must contain at least one column that is not an outer reference."`
+  Checked **per item**, so `GROUP BY a, GETDATE()` fails despite `a` being valid.
+  The rule is purely about column presence, **not determinism** — `GROUP BY a + DATEPART(year, GETDATE())` and even a `NEWID()`-derived expression are legal because they contain `a`, while `GROUP BY 1` / `'x'` / `@v` / `GETDATE()` / `RAND()` are not.
+  (`GROUP BY 1` is a constant, not an ordinal; SQL Server has no ordinal GROUP BY.)
+  The empty grouping set is exempt — `GROUP BY ()`, `GROUPING SETS (())`, `GROUPING SETS ((a),())` and `GROUP BY (), a` all return rows on real, and contribute no expression for the rule to apply to.
+
+### Why these count at parse time
+
+All four detect "does this sub-expression contain an aggregate / subquery / column?" from monotonic counters on `ParserContext` (`AggregatesParsed` / `SubqueriesParsed` / `ColumnReferencesParsed`), snapshotted before a sub-parse and compared after — **not** by walking the finished expression tree.
+
+A tree walk was tried first and is unsound here: only 16 of the ~170 `Expression` subclasses override `VisitColumnReferences`, and `CASE` and the scalar function calls are not among them.
+Demonstrated by `GROUP BY DATEADD(year, 1, a)`, where the walk cannot see `a` — so a walk-based Msg 164 would reject a perfectly legal query, the *worst* failure direction for this work.
+Counting at construction is complete by construction instead.
+
+The one wrinkle: a bare name is built as a `Reference` before the parser knows whether `(` follows, so `GETDATE()` briefly looks like a column.
+`Expression.ParseCallArguments` — the single funnel for every `<reference>(` shape — decrements on entry to cancel that, leaving a net count of genuine column references.
+
+Residual (permissive, matching prior behavior): an *outer* column reference counts like a local one, so a grouping item naming only an outer column inside a correlated subquery stays accepted where real raises Msg 164.
+Closing that needs source resolution, not a parse-time count.
+Also, `STRING_AGG`'s `WITHIN GROUP (ORDER BY …)` and the JSON aggregates' key expression are parsed *after* the aggregate registers, so an aggregate or subquery hidden there escapes the Msg 130 bracket.
+
 ## GROUP BY extensions
 
 `FromClause.GroupingSets: List<Expression[]>` holds the flat grouping-set list — simple `GROUP BY a, b` parses as `[[a, b]]`, `GROUP BY ROLLUP(a, b)` as `[[a, b], [a], []]`, `GROUP BY CUBE(a, b)` as the 2^N power-set entries, `GROUP BY GROUPING SETS((a, b), (a), ())` verbatim.
