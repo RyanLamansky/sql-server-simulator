@@ -45,7 +45,7 @@ Remaining phases, roughly in value order:
 
 ### Django ORM test-suite shakedown — surfaced gaps
 
-Running Django 5.1's own ORM test apps over the wire (mssql-django 1.7 / pyodbc) against the endpoint is a high-yield real-application oracle (harness: reuse the `simulated` DB via a creation-backend override, `other` alias as a `TEST MIRROR`, incremental failing-SQL logger).
+Running Django 5.1's own ORM test apps over the wire (mssql-django 1.7 / pyodbc) against the endpoint is a high-yield real-application oracle (harness: the runner's own `test_*` database via real `CREATE`/`DROP DATABASE` — no configuration override needed since those ship — `other` alias as a `TEST MIRROR`, incremental failing-SQL logger).
 Fixed from the first pass: `SET NOCOUNT ON` count suppression (blocked every identity insert — see [`control-flow.md`](control-flow.md) / the DONE-token contract) and year-first slash/dot date parsing (`.dates()`/`.datetimes()` truncation — see [`casting.md`](casting.md)).
 Remaining surfaced gaps, roughly in breadth order:
 

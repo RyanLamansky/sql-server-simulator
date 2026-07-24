@@ -138,6 +138,41 @@ partial class SimulatedSqlException
         new($"Cannot drop the table '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
 
     /// <summary>
+    /// Mimics SQL Server error 1801: <c>CREATE DATABASE</c> named a database
+    /// that already exists. Probe-confirmed verbatim wording (Class 16,
+    /// State 3) against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException DatabaseAlreadyExists(string name) =>
+        new($"Database '{name}' already exists. Choose a different database name.", 1801, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 3701 with the <c>database</c> wording variant:
+    /// <c>DROP DATABASE</c> named a database that doesn't exist (and
+    /// <c>IF EXISTS</c> was absent). Distinct Class / State from the DROP TABLE
+    /// 3701 variant — probe-confirmed Class 11, State 1 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropDatabaseNotFound(string name) =>
+        new($"Cannot drop the database '{name}', because it does not exist or you do not have permission.", 3701, 11, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 3702: <c>DROP DATABASE</c> targeted a database
+    /// currently in use by a session (its <c>CurrentDatabase</c>). The name
+    /// appears double-quoted in the canonical message — probe-confirmed verbatim
+    /// (Class 16, State 3) against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropDatabaseInUse(string name) =>
+        new($"Cannot drop database \"{name}\" because it is currently in use.", 3702, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 3708: <c>DROP DATABASE</c> targeted a system
+    /// database (<c>master</c> / <c>tempdb</c> / <c>model</c> / <c>msdb</c>).
+    /// The offending name is shown verbatim — probe-confirmed (Class 16,
+    /// State 1) against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropSystemDatabase(string name) =>
+        new($"Cannot drop the database '{name}' because it is a system database.", 3708, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 3701 with the <c>synonym</c> wording variant:
     /// <c>DROP SYNONYM</c> targeted a name that doesn't exist (and
     /// <c>IF EXISTS</c> was absent). Probe-confirmed verbatim against SQL

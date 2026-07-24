@@ -38,8 +38,8 @@ public sealed partial class Simulation
         // ServerCollationName object-initializer setter runs afterward and
         // re-points each system database's collation to the chosen server
         // collation.
-        foreach (var (name, _) in SystemDatabaseIds)
-            this.Databases.Add(name, new Database(name, this.ServerCollation));
+        foreach (var (name, id) in SystemDatabaseIds)
+            this.Databases.Add(name, new Database(name, this.ServerCollation) { Id = id });
         var msdb = this.Databases[MsdbDatabaseName];
         SeedMsdbPolicyHealthView(msdb);
         SeedMsdbPolicyConfigurationView(msdb);
@@ -292,8 +292,8 @@ public sealed partial class Simulation
     /// in id order: <c>master</c> = 1, <c>tempdb</c> = 2, <c>model</c> = 3,
     /// <c>msdb</c> = 4. Every <see cref="Simulation"/> seeds all four at
     /// construction. This is the single source of truth for the reserved-id
-    /// block; user databases take ids from 5 in name order
-    /// (see <c>DatabasesWithIds</c>).
+    /// block; user databases take the smallest free id from 5 at registration
+    /// time (see <see cref="RegisterUserDatabase"/> / <c>DatabasesWithIds</c>).
     /// </summary>
     internal static readonly (string Name, short Id)[] SystemDatabaseIds =
     [
@@ -307,8 +307,8 @@ public sealed partial class Simulation
     /// Case-insensitive set of the four system-database names. Consulted by
     /// the initial-database fallback (a fresh connection never lands on a
     /// system database) and the user-database id allocation
-    /// (<c>DatabasesWithIds</c> filters these out before numbering user
-    /// databases from 5). Keyed by <see cref="BuiltInToken.Comparer"/>.
+    /// (<see cref="RegisterUserDatabase"/> keeps ids 1–4 reserved so user
+    /// databases number from 5). Keyed by <see cref="BuiltInToken.Comparer"/>.
     /// </summary>
     internal static readonly FrozenSet<string> SystemDatabaseNames =
         new[] { MasterDatabaseName, TempdbDatabaseName, ModelDatabaseName, MsdbDatabaseName }
@@ -387,6 +387,41 @@ public sealed partial class Simulation
     /// <see cref="SimulatedDbConnection"/>'s ResolveInitialDatabase).
     /// </summary>
     internal readonly Dictionary<string, Database> Databases = new(BuiltInToken.Comparer);
+
+    /// <summary>
+    /// Assigns <paramref name="db"/> the smallest free <c>database_id</c> ≥ 5
+    /// (the reserved block 1–4 is the four system databases) and adds it to
+    /// <see cref="Databases"/> under its name. Locks <see cref="Databases"/>
+    /// for the read-modify-write so concurrent <c>CREATE DATABASE</c> /
+    /// <c>ImportBacpac</c> calls can't collide on an id or the dictionary.
+    /// Callers already holding the <see cref="Databases"/> lock use
+    /// <see cref="RegisterUserDatabaseLocked"/> instead.
+    /// </summary>
+    internal void RegisterUserDatabase(Database db)
+    {
+        lock (this.Databases)
+            RegisterUserDatabaseLocked(db);
+    }
+
+    /// <summary>
+    /// The id-allocation + insert body of <see cref="RegisterUserDatabase"/>,
+    /// assuming the caller already holds the <see cref="Databases"/> lock (the
+    /// lazy default-database seed in <c>SimulatedDbConnection</c> runs inside
+    /// that lock). Picks the smallest <see cref="short"/> ≥ 5 not currently
+    /// held by any database; a freed id (from a dropped database) is naturally
+    /// the smallest gap, so it's reused first — matching real SQL Server.
+    /// </summary>
+    internal void RegisterUserDatabaseLocked(Database db)
+    {
+        var used = new HashSet<short>();
+        foreach (var existing in this.Databases.Values)
+            _ = used.Add(existing.Id);
+        short id = 5;
+        while (used.Contains(id))
+            id++;
+        db.Id = id;
+        this.Databases.Add(db.Name, db);
+    }
 
     /// <summary>
     /// SQL-authentication server logins created via <c>CREATE LOGIN</c>, keyed

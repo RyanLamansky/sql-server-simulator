@@ -71,7 +71,10 @@ public sealed class SimulatedDbConnection : DbConnection
                     return kvp.Value;
             }
             var seeded = new Database(Simulation.DefaultDatabaseName, simulation.ServerCollation);
-            simulation.Databases.Add(Simulation.DefaultDatabaseName, seeded);
+            // Already inside lock (simulation.Databases) — use the
+            // lock-held registration so the seed gets a stored database_id
+            // (the smallest free id ≥ 5, normally 5 on a fresh simulation).
+            simulation.RegisterUserDatabaseLocked(seeded);
             return seeded;
         }
     }

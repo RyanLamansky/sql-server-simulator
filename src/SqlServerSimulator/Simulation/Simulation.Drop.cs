@@ -44,6 +44,8 @@ partial class Simulation
         // grammars and live in per-database dicts rather than per-schema.
         switch (context.Token)
         {
+            case ReservedKeyword { Keyword: Keyword.Database }:
+                return TryParseDropDatabase(context);
             case ReservedKeyword { Keyword: Keyword.User }:
                 return TryParseDropUser(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Role }:
@@ -128,6 +130,71 @@ partial class Simulation
     }
 
     private enum DropTargetKind { None, Table, Function, View, Procedure, Type, Sequence, Trigger, Schema }
+
+    /// <summary>
+    /// Parses <c>DROP DATABASE [IF EXISTS] name[, name...]</c>. Each name is a
+    /// single identifier (bare or bracketed / quoted). Cursor on entry is the
+    /// <c>DATABASE</c> keyword. Per-name outcomes (probe-confirmed against SQL
+    /// Server 2025): a system database (<c>master</c> / <c>tempdb</c> /
+    /// <c>model</c> / <c>msdb</c>) → Msg 3708; a database in use by any session
+    /// (its <c>CurrentDatabase</c>) → Msg 3702; a missing database → Msg 3701
+    /// unless <c>IF EXISTS</c> is present (then a silent no-op).
+    /// </summary>
+    private static bool TryParseDropDatabase(ParserContext context)
+    {
+        context.MoveNextRequired();
+        var ifExists = false;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.If })
+        {
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Exists })
+                return false;
+            ifExists = true;
+            context.MoveNextRequired();
+        }
+
+        var simulation = context.Batch.Connection.Simulation;
+        while (true)
+        {
+            if (context.Token is not Name nameToken)
+                return false;
+            DropOneDatabase(context, simulation, nameToken.Value, ifExists);
+
+            // The name is a single token; peek the next for the comma separator.
+            context.MoveNextOptional();
+            if (context.Token is not Operator { Character: ',' })
+                break;
+            context.MoveNextRequired();
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Applies the <see cref="TryParseDropDatabase"/> rejection ladder to one
+    /// database name and removes it from <see cref="Simulation.Databases"/>
+    /// (freeing its <c>database_id</c> for the next <c>CREATE DATABASE</c> /
+    /// import to reuse). No-ops in skip mode.
+    /// </summary>
+    private static void DropOneDatabase(ParserContext context, Simulation simulation, string name, bool ifExists)
+    {
+        if (context.Batch.IsSkipping)
+            return;
+        if (Simulation.SystemDatabaseNames.Contains(name))
+            throw SimulatedSqlException.CannotDropSystemDatabase(name);
+        // Msg 3702 for a self-drop: the executing session sitting in the target
+        // database (USE foo; DROP DATABASE foo). Real also blocks *other* active
+        // sessions, but the teardown idiom every app runs first —
+        // SET SINGLE_USER WITH ROLLBACK IMMEDIATE — evicts those; the simulator
+        // treats that ALTER as parse-and-discard (no eviction model), so it
+        // mirrors the idiom's intent by treating other sessions as already
+        // evicted and blocking only the executing one.
+        if (BuiltInToken.Comparer.Equals(context.CurrentDatabase.Name, name))
+            throw SimulatedSqlException.CannotDropDatabaseInUse(name);
+        lock (simulation.Databases)
+        {
+            if (!simulation.Databases.Remove(name) && !ifExists)
+                throw SimulatedSqlException.CannotDropDatabaseNotFound(name);
+        }
+    }
 
     /// <summary>
     /// Removes one entry from <see cref="Database.Schemas"/>. Missing schema

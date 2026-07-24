@@ -158,6 +158,16 @@ partial class Simulation
         /// <see cref="ConsumeQueryStoreOptionsBlock"/>.
         /// </summary>
         QueryStore,
+        /// <summary>
+        /// A bare access-mode state (SINGLE_USER / MULTI_USER / RESTRICTED_USER)
+        /// with no <c>=</c> value, optionally followed by a termination clause
+        /// <c>WITH ROLLBACK IMMEDIATE | WITH ROLLBACK AFTER n [SECONDS] | WITH NO_WAIT</c>
+        /// — parse-and-discarded (the simulator has no connection-count access
+        /// model, so it never actually restricts). Emitted by mssql-django's
+        /// test-database teardown (<c>SET SINGLE_USER WITH ROLLBACK IMMEDIATE</c>
+        /// before DROP DATABASE).
+        /// </summary>
+        AccessMode,
     }
 
     /// <summary>
@@ -187,6 +197,9 @@ partial class Simulation
         ["OPTIMIZED_LOCKING"] = AlterDatabaseOptionKind.EqualsOnOff,
         ["TARGET_RECOVERY_TIME"] = AlterDatabaseOptionKind.IntegerWithUnit,
         ["QUERY_STORE"] = AlterDatabaseOptionKind.QueryStore,
+        ["SINGLE_USER"] = AlterDatabaseOptionKind.AccessMode,
+        ["MULTI_USER"] = AlterDatabaseOptionKind.AccessMode,
+        ["RESTRICTED_USER"] = AlterDatabaseOptionKind.AccessMode,
     }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -233,8 +246,58 @@ partial class Simulation
             context.GetNextRequired() is Name or ReservedKeyword,
         AlterDatabaseOptionKind.IntegerWithUnit => ConsumeIntegerWithUnit(context),
         AlterDatabaseOptionKind.QueryStore => ConsumeQueryStoreTail(context),
+        AlterDatabaseOptionKind.AccessMode => ConsumeAccessModeTail(context),
         _ => false,
     };
+
+    /// <summary>
+    /// Cursor on the access-mode name (SINGLE_USER / MULTI_USER /
+    /// RESTRICTED_USER), which is the whole option value. Consumes an optional
+    /// trailing <c>WITH &lt;termination&gt;</c> clause (ROLLBACK IMMEDIATE /
+    /// ROLLBACK AFTER n [SECONDS] / NO_WAIT), discarding every token up to the
+    /// statement boundary and leaving the cursor on the clause's last token
+    /// (or on the access-mode name when no WITH follows), per the
+    /// leave-on-last-token convention the other tail consumers use.
+    /// </summary>
+    private static bool ConsumeAccessModeTail(ParserContext context)
+    {
+        var beforeWith = context.SaveCheckpoint();
+        if (context.GetNextOptional() is not ReservedKeyword { Keyword: Keyword.With })
+        {
+            context.RestoreCheckpoint(beforeWith);
+            return true;
+        }
+        // WITH <termination>. Only ROLLBACK and WITH tokenize as keywords;
+        // IMMEDIATE / AFTER / SECONDS / NO_WAIT are plain identifiers matched by
+        // text. Parse the exact forms rather than scanning to a boundary — a
+        // scan can't stop reliably because ROLLBACK is itself a statement-
+        // starting keyword. Cursor is left on the clause's last token.
+        var termination = context.GetNextRequired();
+        if (IsBareWord(termination, "NO_WAIT"))
+            return true;
+        if (termination is not ReservedKeyword { Keyword: Keyword.Rollback })
+            return false;
+        var rollbackKind = context.GetNextRequired();
+        if (IsBareWord(rollbackKind, "IMMEDIATE"))
+            return true;
+        if (!IsBareWord(rollbackKind, "AFTER"))
+            return false;
+        if (context.GetNextRequired() is not Numeric { Value.IsNull: false })
+            return false;
+        // Optional trailing SECONDS.
+        var beforeSeconds = context.SaveCheckpoint();
+        if (!IsBareWord(context.GetNextOptional(), "SECONDS"))
+            context.RestoreCheckpoint(beforeSeconds);
+        return true;
+    }
+
+    /// <summary>
+    /// Case-insensitive text match for a bare-identifier token. <see cref="UnquotedString"/>
+    /// derives from <see cref="Name"/>, so matching <see cref="Name"/> covers both the
+    /// contextual-keyword and plain-identifier tokenizations the termination words take.
+    /// </summary>
+    private static bool IsBareWord(Token? token, string word) =>
+        token is Name name && name.Value.Equals(word, StringComparison.OrdinalIgnoreCase);
 
     private static bool ConsumeEqualsOnOff(ParserContext context) =>
         context.GetNextRequired() switch

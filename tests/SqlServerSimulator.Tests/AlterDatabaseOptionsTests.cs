@@ -47,6 +47,16 @@ public class AlterDatabaseOptionsTests
     [DataRow("ALTER DATABASE claude SET TARGET_RECOVERY_TIME = 1 MINUTES")]
     // CURRENT name
     [DataRow("ALTER DATABASE CURRENT SET ANSI_NULLS ON")]
+    // Access-mode states (bare, no `=`) with the optional termination clause —
+    // the teardown an ORM runs before DROP DATABASE (Django/mssql-django emits
+    // `SET SINGLE_USER WITH ROLLBACK IMMEDIATE`).
+    [DataRow("ALTER DATABASE claude SET SINGLE_USER")]
+    [DataRow("ALTER DATABASE claude SET MULTI_USER")]
+    [DataRow("ALTER DATABASE claude SET RESTRICTED_USER")]
+    [DataRow("ALTER DATABASE claude SET SINGLE_USER WITH ROLLBACK IMMEDIATE")]
+    [DataRow("ALTER DATABASE claude SET SINGLE_USER WITH ROLLBACK AFTER 5 SECONDS")]
+    [DataRow("ALTER DATABASE claude SET SINGLE_USER WITH ROLLBACK AFTER 30")]
+    [DataRow("ALTER DATABASE claude SET SINGLE_USER WITH NO_WAIT")]
     public void Option_ParsesAndDiscards(string sql)
         => AreEqual(-1, new Simulation().ExecuteNonQuery(sql));
 

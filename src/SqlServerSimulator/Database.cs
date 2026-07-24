@@ -35,6 +35,22 @@ internal sealed class Database
     public readonly string Name;
 
     /// <summary>
+    /// Stored <c>database_id</c>. System databases carry their fixed reserved
+    /// ids (master = 1, tempdb = 2, model = 3, msdb = 4); user databases take
+    /// the smallest free id ≥ 5 at registration time
+    /// (<see cref="Simulation.RegisterUserDatabase"/>) and keep it for their
+    /// lifetime — a <c>DROP DATABASE</c> frees the id for the next create to
+    /// reuse (matching real SQL Server's smallest-free allocation). Not set in
+    /// the constructor: the value depends on the ids already in use in the
+    /// hosting simulation, so <see cref="Simulation"/> assigns it after
+    /// construction. Single source of truth for
+    /// <see cref="Parser.Expressions.DbId.DatabasesWithIds"/> — read by
+    /// <c>DB_ID</c> / <c>DB_NAME</c>, <c>sys.databases.database_id</c>,
+    /// <c>OBJECT_NAME</c> routing, and <c>DBCC SHRINKDATABASE</c>.
+    /// </summary>
+    internal short Id;
+
+    /// <summary>
     /// Namespaces inside this database, keyed by name. Pre-populated with the
     /// default <c>dbo</c> schema; <c>CREATE SCHEMA &lt;name&gt;</c> adds more.
     /// Schema-qualified table references (<c>SELECT * FROM audit.t</c>) route

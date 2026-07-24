@@ -51,7 +51,9 @@ partial class Simulation
             throw new InvalidOperationException($"A database named '{databaseName}' already exists in this Simulation. Import is a create-only operation; choose a different name via BacpacImportOptions.DatabaseName.");
         result = new BacpacImportResult();
         var database = new Database(databaseName, this.ServerCollation);
-        Databases.Add(databaseName, database);
+        // Registers under lock and assigns a stored database_id (smallest free
+        // id ≥ 5), the single-source-of-truth id DatabasesWithIds surfaces.
+        RegisterUserDatabase(database);
         BacpacReader.Load(stream, this, database, maxDegreeOfParallelism, result);
         // The new database adds schema not visible to any plan parsed before
         // this call; bump so a stale cache entry parsed under the prior

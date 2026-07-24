@@ -9,12 +9,12 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// SQL Server's projected column type for this function.
 /// </summary>
 /// <remarks>
-/// The simulator allocates ids via <see cref="DatabasesWithIds"/>: the four
+/// The simulator surfaces ids via <see cref="DatabasesWithIds"/>: the four
 /// system databases carry their fixed reserved ids (master = 1, tempdb = 2,
-/// model = 3, msdb = 4), and user databases take 5, 6, … in case-insensitive
-/// name order — the same convention used to project
-/// <c>sys.databases.database_id</c>. Unknown name returns NULL; NULL argument
-/// returns NULL.
+/// model = 3, msdb = 4), and user databases carry the stored id assigned at
+/// registration (smallest free id ≥ 5, in creation order with dropped ids
+/// reused) — the same value projected by <c>sys.databases.database_id</c>.
+/// Unknown name returns NULL; NULL argument returns NULL.
 /// </remarks>
 internal sealed class DbId : Expression
 {
@@ -48,33 +48,20 @@ internal sealed class DbId : Expression
         return v.IsNull ? null : v.CoerceTo(SqlType.NVarchar).AsString;
     }
 
-    internal static IEnumerable<Database> OrderedDatabases(Simulation simulation) =>
-        simulation.Databases.Values.OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase);
-
     /// <summary>
-    /// Pairs each hosted database with its <c>database_id</c>: the four system
-    /// databases carry their fixed reserved ids (master = 1, tempdb = 2,
-    /// model = 3, msdb = 4, from <see cref="Simulation.SystemDatabaseIds"/>),
-    /// and every user database takes 5, 6, … in case-insensitive name order.
-    /// Single source of truth for <see cref="DbId"/> / <see cref="DbName"/>,
-    /// <c>OBJECT_NAME</c>'s database routing, <c>sys.databases.database_id</c>,
-    /// and <c>DBCC SHRINKDATABASE</c>'s numeric-id form. Yielded in
-    /// ascending id order (system databases first, then user databases).
+    /// Pairs each hosted database with its stored <c>database_id</c>
+    /// (<see cref="Database.Id"/>): the four system databases carry their fixed
+    /// reserved ids (master = 1, tempdb = 2, model = 3, msdb = 4), and every
+    /// user database carries the smallest-free id it was assigned at
+    /// registration (<see cref="Simulation.RegisterUserDatabase"/>) — user ids
+    /// start at 5 in creation order and a dropped database's id is reused by
+    /// the next create. Single source of truth for <see cref="DbId"/> /
+    /// <see cref="DbName"/>, <c>OBJECT_NAME</c>'s database routing,
+    /// <c>sys.databases.database_id</c>, and <c>DBCC SHRINKDATABASE</c>'s
+    /// numeric-id form. Yielded in ascending id order.
     /// </summary>
-    internal static IEnumerable<(Database Database, short Id)> DatabasesWithIds(Simulation simulation)
-    {
-        foreach (var (name, id) in Simulation.SystemDatabaseIds)
-        {
-            if (simulation.Databases.TryGetValue(name, out var systemDatabase))
-                yield return (systemDatabase, id);
-        }
-        short userId = 5;
-        foreach (var db in OrderedDatabases(simulation))
-        {
-            if (!Simulation.SystemDatabaseNames.Contains(db.Name))
-                yield return (db, userId++);
-        }
-    }
+    internal static IEnumerable<(Database Database, short Id)> DatabasesWithIds(Simulation simulation) =>
+        simulation.Databases.Values.OrderBy(static d => d.Id).Select(static d => (d, d.Id));
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 

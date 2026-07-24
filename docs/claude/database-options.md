@@ -20,6 +20,11 @@ Most options parse-and-discard; only the three "load-bearing" toggles (`COMPATIB
 **`IntegerWithUnit`** (`SET <name> = N SECONDS|MINUTES` — unit required per probe):
 - `TARGET_RECOVERY_TIME`
 
+**`AccessMode`** (bare state, no `=`, with an optional termination clause): `SET {SINGLE_USER | MULTI_USER | RESTRICTED_USER} [WITH ROLLBACK IMMEDIATE | WITH ROLLBACK AFTER n [SECONDS] | WITH NO_WAIT]`.
+The state and the termination clause are both parse-and-discarded — the simulator has no connection-count access model, so it never actually restricts, and `WITH ROLLBACK …` never evicts.
+Load-bearing for `DROP DATABASE`: every ORM/app test-teardown runs `SET SINGLE_USER WITH ROLLBACK IMMEDIATE` immediately before the drop (Django/mssql-django).
+Parsed explicitly (`ConsumeAccessModeTail`) rather than scanned to a boundary, because `ROLLBACK` is itself a statement-starting keyword — only `WITH`/`ROLLBACK` tokenize as keywords, `IMMEDIATE`/`AFTER`/`SECONDS`/`NO_WAIT` are matched by text.
+
 **`QueryStore`** (dedicated sub-grammar): `SET QUERY_STORE = ON [( … )] | = OFF | CLEAR [ALL]`.
 The sub-options block is itself a closed accept-list (`RecognizedQueryStoreSubOptions`):
 - `OPERATION_MODE` / `CLEANUP_POLICY` / `DATA_FLUSH_INTERVAL_SECONDS` / `MAX_STORAGE_SIZE_MB` / `INTERVAL_LENGTH_MINUTES` / `SIZE_BASED_CLEANUP_MODE` / `QUERY_CAPTURE_MODE` / `MAX_PLANS_PER_QUERY` / `WAIT_STATS_CAPTURE_MODE` / `QUERY_CAPTURE_POLICY`

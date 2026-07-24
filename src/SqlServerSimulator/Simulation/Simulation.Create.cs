@@ -18,6 +18,8 @@ partial class Simulation
     {
         switch (context.GetNextRequired())
         {
+            case ReservedKeyword { Keyword: Keyword.Database }:
+                return TryParseCreateDatabase(context);
             case ReservedKeyword { Keyword: Keyword.Schema }:
                 return TryParseCreateSchema(context);
             case ReservedKeyword { Keyword: Keyword.Function }:

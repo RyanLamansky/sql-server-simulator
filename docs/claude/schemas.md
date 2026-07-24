@@ -117,8 +117,20 @@ Every `Simulation` seeds all four SQL Server system databases — `master`, `tem
 All four are excluded from the initial-database fallback in `SimulatedDbConnection.ResolveInitialDatabase` (via the `Simulation.SystemDatabaseNames` set), so a fresh connection with no user database still lazily seeds and lands on `simulated`; a fresh connection with imported databases picks the alphabetically-first *user* database.
 The `#temp` routing is unaffected — `#foo` lives in the connection's `TempTables`, never in the seeded `tempdb` `Database`.
 
-Database ids are a **fixed reserved map: master = 1, tempdb = 2, model = 3, msdb = 4; user databases take 5, 6, … in case-insensitive name order.**
-The single sources of truth are `Simulation.SystemDatabaseIds` (the name↔id map + seed list) and `DbId.DatabasesWithIds(simulation)` (which layers user ids on top), consumed by `DB_ID` / `DB_NAME`, `OBJECT_NAME(id, db_id)`, the `sys.databases.database_id` column, and `DBCC SHRINKDATABASE`'s numeric-id form — keep them consistent by routing every id lookup through `DatabasesWithIds`.
+Database ids: the four system databases carry a **fixed reserved map (master = 1, tempdb = 2, model = 3, msdb = 4)**; every user database carries a **stored `Database.Id`** assigned at registration — the smallest free id ≥ 5, so a dropped id is reused before a higher one is minted (matching real SQL Server; probed dropped-id-12 → next-create reclaims 12).
+Every user-database entry point routes through `Simulation.RegisterUserDatabase` / `RegisterUserDatabaseLocked` (the id allocator): `CREATE DATABASE`, `Simulation.ImportBacpac`, and the lazy `simulated` seed in `ResolveInitialDatabase`.
+The single sources of truth are `Simulation.SystemDatabaseIds` (the system name↔id map + seed list) and `DbId.DatabasesWithIds(simulation)` (which projects `(db, db.Id)` ordered by id), consumed by `DB_ID` / `DB_NAME`, `OBJECT_NAME(id, db_id)`, the `sys.databases.database_id` column, and `DBCC SHRINKDATABASE`'s numeric-id form — keep them consistent by routing every id lookup through `DatabasesWithIds`.
+
+## `CREATE DATABASE` / `DROP DATABASE`
+
+`CREATE DATABASE <name> [COLLATE <collation>] [<file / option clauses>]` (`Simulation.CreateDatabase.cs`): the name is a single identifier (bare or bracketed, so `[app b-2]` with spaces works); `COLLATE` sets the new database's collation (default = the server collation, mirroring `model.collation`); every remaining clause (`ON (…)`, `LOG ON (…)`, `WITH …`, `CONTAINMENT = …`, `FOR ATTACH`, …) is parse-and-discarded — no physical-file model.
+A duplicate name raises **Msg 1801**.
+The database registers with the smallest-free id (above) and is immediately usable via `USE`.
+
+`DROP DATABASE [IF EXISTS] <name> [, …]` (`Simulation.Drop.cs`): a system database raises **Msg 3708**; the **executing** session sitting in the target (`USE foo; DROP DATABASE foo`) raises **Msg 3702**; a missing database raises **Msg 3701** unless `IF EXISTS` (then a silent no-op).
+Removing the database frees its id for reuse.
+Divergence from real: real also blocks *other* active sessions on the target (Msg 3702), but the teardown idiom apps run first — `ALTER DATABASE … SET SINGLE_USER WITH ROLLBACK IMMEDIATE` (parse-and-discarded, [`database-options.md`](database-options.md)) — evicts those on a real server; the simulator has no eviction model, so it treats other sessions as already evicted and blocks only the executing one, matching the idiom's intent.
+This is what lets an ORM's unmodified test runner (Django/mssql-django) create → migrate → run → drop its `test_*` database against the simulator with no configuration override.
 
 **`msdb.dbo.syspolicy_system_health_state`** is seeded as an empty object (six columns: `health_state_id bigint`, `policy_id int`, `last_run_date datetime`, `target_query_expression_with_id nvarchar(400)`, `target_query_expression nvarchar(max)`, `result bit`, probe-confirmed 2026-07-14) so SSMS's server-level Policy Health feature — which reads `has_dbaccess('msdb')` and then `select … from msdb.dbo.syspolicy_system_health_state` at connect — renders cleanly instead of raising a permission error.
 It's modeled as a real **VIEW** (`sys.objects.type_desc` = `VIEW`, matching the reference) whose body is a `WHERE 1 = 0` filter yielding zero rows; it's constructed directly on msdb's `dbo` schema at Simulation construction (no `CREATE VIEW` DDL, so no connection is materialized and `simulated` isn't seeded prematurely), and exists only in msdb.
