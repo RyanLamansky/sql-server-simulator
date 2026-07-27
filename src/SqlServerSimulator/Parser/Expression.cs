@@ -506,8 +506,16 @@ internal abstract class Expression
             {
                 if (VarbinaryToHex.TryResolve(reference.ReferencedName, context) is { } systemFunction)
                     return systemFunction;
-                if (context.Batch.TryResolveFunction(reference.ReferencedName, out var function) && function is ScalarFunction scalarFn)
-                    return UserFunctionCall.ParseCall(scalarFn, context);
+                if (context.Batch.TryResolveFunction(reference.ReferencedName, out var function))
+                {
+                    switch (function)
+                    {
+                        case ScalarFunction scalarFn:
+                            return UserFunctionCall.ParseCall(scalarFn, context);
+                        case ClrScalarFunction clrFn:
+                            return ClrFunctionCall.ParseCall(clrFn, context);
+                    }
+                }
                 // Skip mode: real SQL Server defers user-function binding, so
                 // an un-taken branch calling a missing schema-qualified
                 // function compiles and is discarded. Parse-and-discard the
@@ -1279,6 +1287,7 @@ internal abstract class Expression
             },
             16 => uppercaseName switch
             {
+                "ASSEMBLYPROPERTY" => new AssemblyProperty(context),
                 "IS_SRVROLEMEMBER" => new RoleMemberCheck(context, serverScope: true),
                 "JSON_PATH_EXISTS" => new JsonPathExists(context),
                 "OBJECTPROPERTYEX" => new ObjectPropertyEx(context),

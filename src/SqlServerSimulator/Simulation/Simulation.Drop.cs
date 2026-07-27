@@ -60,6 +60,8 @@ partial class Simulation
                 return Simulation.TryParseDropXml(context);
             case Name synonymWord when synonymWord.Value.Equals("SYNONYM", StringComparison.OrdinalIgnoreCase):
                 return TryParseDropSynonym(context);
+            case Name assemblyWord when assemblyWord.Value.Equals("ASSEMBLY", StringComparison.OrdinalIgnoreCase):
+                return TryParseDropAssembly(context);
         }
 
         var targetKind = context.Token switch

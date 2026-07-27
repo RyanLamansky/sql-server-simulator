@@ -265,7 +265,7 @@ internal static partial class BuiltInResources
             new("description", SqlType.NVarchar, 255, false),
             new("is_dynamic", SqlType.Bit, null, false),
             new("is_advanced", SqlType.Bit, null, false),
-        ], (batch, database) => ConfigurationsRows);
+        ], (batch, database) => ConfigurationRowsFor(batch));
 
         // sys.database_scoped_configurations: per-database configuration knobs.
         // value / value_for_secondary are sql_variant, matching real SQL Server:
@@ -868,6 +868,41 @@ internal static partial class BuiltInResources
     /// database argument — <c>sys.configurations</c> is server-scoped.
     /// </summary>
     private static readonly SqlValue[][] ConfigurationsRows = BuildConfigurationsRows();
+
+    /// <summary>
+    /// <c>sys.configurations</c> for one batch. Every row is fixed except
+    /// <c>clr enabled</c>, which reports the simulation's
+    /// <see cref="Simulation.EnableClr"/> opt-in, and <c>clr strict security</c>,
+    /// which drops to 0 once CLR is enabled — the simulator gates assembly
+    /// registration on the host opt-in rather than on assembly signing, so
+    /// continuing to report real's default of 1 would describe an enforcement it
+    /// does not perform.
+    /// </summary>
+    /// <remarks>
+    /// mssql-django's <c>enable_clr()</c> reads <c>clr enabled</c> here and only
+    /// falls through to <c>sp_configure</c> when it is 0, so tracking the opt-in
+    /// keeps that path from needing a configuration-write model.
+    /// </remarks>
+    private static SqlValue[][] ConfigurationRowsFor(Parser.BatchContext batch)
+    {
+        if (!batch.Connection.Simulation.EnableClr)
+            return ConfigurationsRows;
+
+        var rows = (SqlValue[][])ConfigurationsRows.Clone();
+        for (var i = 0; i < rows.Length; i++)
+        {
+            if (ConfigurationData[i].Name is not ("clr enabled" or "clr strict security"))
+                continue;
+
+            var row = (SqlValue[])rows[i].Clone();
+            var enabled = SqlValue.FromVariant(SqlValue.FromInt32(ConfigurationData[i].Name == "clr enabled" ? 1 : 0));
+            row[2] = enabled;
+            row[5] = enabled;
+            rows[i] = row;
+        }
+
+        return rows;
+    }
 
     private static SqlValue[][] BuildConfigurationsRows()
     {

@@ -315,6 +315,35 @@ public sealed partial class Simulation
             .ToFrozenSet(BuiltInToken.Comparer);
 
     /// <summary>
+    /// Whether this instance may register and run CLR assemblies
+    /// (<c>CREATE ASSEMBLY</c> plus the <c>EXTERNAL NAME</c> routines bound to
+    /// them). Defaults to <see langword="false"/>; set it in an object
+    /// initializer (<c>new Simulation { EnableClr = true }</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <strong>Enabling this permits arbitrary code execution inside the host
+    /// process.</strong> <c>CREATE ASSEMBLY</c> takes a .NET assembly as raw
+    /// bytes and runs its code in-process. Real SQL Server confines a
+    /// <c>SAFE</c> assembly with Code Access Security; .NET removed CAS
+    /// entirely and offers no in-process replacement, so a registered assembly
+    /// here runs with the host process's full trust no matter which
+    /// <c>PERMISSION_SET</c> the DDL names. The simulator screens candidates
+    /// statically at registration — rejecting non-managed images, P/Invoke
+    /// declarations, mutable statics, and references outside the framework and
+    /// into a denied API surface — but a metadata screen is defense in depth,
+    /// not a sandbox.
+    /// </para>
+    /// <para>
+    /// Leave it off unless the assembly bytes come from a source you trust as
+    /// much as your own application code. It matters most when a
+    /// <c>Simulation</c> is exposed over the network endpoint, where any client
+    /// that can issue DDL could otherwise supply an assembly.
+    /// </para>
+    /// </remarks>
+    public bool EnableClr { get; init; }
+
+    /// <summary>
     /// Server-wide default collation name. Used as the seed for every
     /// <see cref="Database"/> created on this simulation — both the lazy
     /// <c>"simulated"</c> seed picked up on first

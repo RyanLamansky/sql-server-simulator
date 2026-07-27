@@ -54,6 +54,8 @@ partial class Simulation
                 return Simulation.TryParseCreateSpatial(context);
             case Name synonymWord when synonymWord.Value.Equals("SYNONYM", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateSynonym(context);
+            case Name assemblyWord when assemblyWord.Value.Equals("ASSEMBLY", StringComparison.OrdinalIgnoreCase):
+                return TryParseCreateAssembly(context);
             case ReservedKeyword { Keyword: Keyword.Or }:
                 // CREATE OR ALTER {PROCEDURE|TRIGGER} — modern upsert syntax.
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Alter })

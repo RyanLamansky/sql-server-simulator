@@ -391,6 +391,24 @@ internal sealed class Database
     private int nextFullTextCatalogId;
 
     /// <summary>
+    /// Registered CLR assemblies, keyed by name. Populated by
+    /// <c>CREATE ASSEMBLY</c>, drained by <c>DROP ASSEMBLY</c>, surfaced by
+    /// <c>sys.assemblies</c> / <c>sys.assembly_files</c>. Assemblies are
+    /// database-scoped rather than schema-scoped, which is why they live here
+    /// rather than on <see cref="Schema"/>.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, SqlAssembly> Assemblies = new(StringComparer.OrdinalIgnoreCase);
+
+    // Real SQL Server hands user assemblies ids well above the system range
+    // (the shipped Microsoft.SqlServer.Types is 1; a first user assembly was
+    // observed at 65538). Starting the counter at 65536 keeps user ids in the
+    // same band without pretending to reproduce the exact seed.
+    private int nextAssemblyId = 65536;
+
+    /// <summary>Allocates the next <c>sys.assemblies.assembly_id</c>.</summary>
+    public int AllocateAssemblyId() => Interlocked.Increment(ref this.nextAssemblyId);
+
+    /// <summary>
     /// Allocates the next full-text catalog id. Real SQL Server's
     /// <c>sys.fulltext_catalogs.fulltext_catalog_id</c> uses a separate
     /// numbering space starting at 5 (the first user catalog probe-confirmed

@@ -138,7 +138,7 @@ Field rosters live in the source XML docs; this captures only identity + load-be
 
 - **`Simulation`** = server / instance.
   Holds `SystemHeapTables`, the `Databases` dict, and `ServerCollationName` (`init`-only; defaults `SQL_Latin1_General_CP1_CI_AS`; mirrors `model.collation` — install-time seed for every new `Database`, both the lazy `"simulated"` seed and collation-less bacpac imports; `init` reflects real immutability).
-  Public surface = `Simulation` ctor + `CreateDbConnection()` + `ImportBacpac()` + `AddRemoteSimulation()` + `ServerCollationName` + `ListenLocalAsync()` / `ListenNetworkAsync()` (int-port or `SimulatedNetworkListenerOptions` overloads) → `SimulatedNetworkListener`.
+  Public surface = `Simulation` ctor + `CreateDbConnection()` + `ImportBacpac()` + `AddRemoteSimulation()` + `ServerCollationName` + `EnableClr` + `ListenLocalAsync()` / `ListenNetworkAsync()` (int-port or `SimulatedNetworkListenerOptions` overloads) → `SimulatedNetworkListener`.
 - **`Database`** (internal) = one database.
   Holds `Schemas`, `CompatibilityLevel`, `CollationName`, the rowversion counter (`@@DBTS`), the MVCC version store, and the principal/permission/extended-property/full-text/DDL-trigger surfaces.
   `Databases` is seeded at construction with all four system databases — `master` / `tempdb` / `model` / `msdb` (so `USE <systemdb>` / `master.sys.*` / `master.dbo.<proc>` / SSMS's `msdb.dbo.syspolicy_system_health_state` all resolve without an import); the first `CreateDbConnection()` lazily seeds `DefaultDatabaseName` (`"simulated"`) when no *user* database is present, and all four system databases are excluded from the initial-database fallback (`Simulation.SystemDatabaseNames`) so a fresh connection still lands on `simulated`.
@@ -274,6 +274,7 @@ Entries name the *area*, not every member — each doc's own headings are its ca
 - **Name resolution, schema lookup, CREATE / DROP / ALTER SCHEMA TRANSFER, CREATE / DROP SYNONYM, CREATE / DROP DATABASE (stored smallest-free db_ids with freed-id reuse), the `OBJECT_*` / `SCHEMA_*` / `DB_*` scalars, cross-DB reads** → [`schemas.md`](docs/claude/schemas.md).
 - **System metadata surfaces** — the `sys.*` / `INFORMATION_SCHEMA.*` views, the metadata / file / filegroup scalars, and the `xp_*` / `sp_*` system procs backing ODBC and JDBC metadata calls (`sp_datatype_info_100`, `sp_tables`, `sp_columns_100`, `sp_pkeys`, `sp_statistics_100`, `sp_stored_procedures`) → [`catalog-views.md`](docs/claude/catalog-views.md).
 - **Scalar UDFs / TVFs / views / stored procs / dynamic SQL / `@@NESTLEVEL` / `@@PROCID`** → [`programmable.md`](docs/claude/programmable.md).
+- **CLR assemblies** — `CREATE`/`DROP ASSEMBLY`, `CREATE FUNCTION … AS EXTERNAL NAME` scalar routines, the `Simulation.EnableClr` host opt-in, static SAFE verification, `sys.assemblies` / `assembly_files` / `assembly_modules`, `ASSEMBLYPROPERTY` → [`clr-assemblies.md`](docs/claude/clr-assemblies.md).
 - **`#foo` / `##foo` routing, DROP TABLE, TRUNCATE TABLE** → [`temp-tables.md`](docs/claude/temp-tables.md).
 - **`DECLARE @t TABLE`, table-variable DML, `OUTPUT … INTO`** → [`table-variables.md`](docs/claude/table-variables.md).
 - **`CREATE TYPE … AS TABLE`, TVP params + `READONLY`, ADO.NET TVP** → [`table-valued-parameters.md`](docs/claude/table-valued-parameters.md).
@@ -316,7 +317,6 @@ Entries that raise a *real* SQL Server error deliberately are **not** here; they
 - **Key-range locks** — the one unbuilt piece of the locking model; see [`locking.md`](docs/claude/locking.md) for what does ship.
 - `BEGIN DISTRIBUTED TRANSACTION` → `NotSupportedException` at dispatch.
   `BEGIN TRANSACTION <name> WITH MARK 'm'` → **Msg 319** at parse (`WITH` not accepted here); bare named transactions (`BEGIN TRAN t1`) ship.
-- **`CREATE ASSEMBLY`** — Msg 102 at parse; CLR isn't modeled.
 - **Cross-database / cross-server DML** (`INSERT`/`UPDATE`/`DELETE`/`MERGE` through a 3-/4-part name) → `NotSupportedException` via `BatchContext.RejectCrossDatabaseMutation` — `USE <db>` first.
   Cross-DB / four-part *reads* (SELECT/JOIN) ship; catalog-view reads via four-part names (`srv.db.sys.tables`) fall to Msg 208.
   See [`schemas.md`](docs/claude/schemas.md), [`linked-servers.md`](docs/claude/linked-servers.md).
@@ -337,8 +337,8 @@ Entries that raise a *real* SQL Server error deliberately are **not** here; they
 - **`CREATE SCHEMA <schema_element>` greedy form** — dispatches trailing CREATE/GRANT as their own statements, not part of the CREATE SCHEMA.
   Same end state for the common idiom; mismatched-grammar trailers raise.
 - T-SQL `GOTO` / labels — `IF` / `WHILE` / `BREAK` / `CONTINUE` / `RETURN` ship; unconditional jumps don't.
-- **Programmable-object top-level gaps**: CLR functions, logon triggers, INSTEAD OF UPDATE/DELETE on non-updatable views, JOIN-view single-base UPDATE/DELETE, OUTPUT through views, multi-source alias-form UPDATE/DELETE through views (Msg 4405).
-  Natively-compiled + CLR procedures ship at parser-fidelity only (ATOMIC boundary → session isolation; CLR bodies parse but `EXEC` no-ops).
+- **Programmable-object top-level gaps**: CLR procedures / TVFs / aggregates / UDTs (CLR *scalar functions* ship — see [`clr-assemblies.md`](docs/claude/clr-assemblies.md)), logon triggers, INSTEAD OF UPDATE/DELETE on non-updatable views, JOIN-view single-base UPDATE/DELETE, OUTPUT through views, multi-source alias-form UPDATE/DELETE through views (Msg 4405).
+  Natively-compiled + CLR procedures ship at parser-fidelity only (ATOMIC boundary → session isolation; CLR proc bodies parse but `EXEC` no-ops).
   See [`programmable.md`](docs/claude/programmable.md).
 - **PRINT semantic gaps** — Msg 1046 subquery-in-operand not raised; non-string formatting uses `CoerceTo(varchar(8000))` not PRINT style 0; 8000/4000-byte truncation not enforced.
   The `InfoMessage` surface ships (`SimulatedDbConnection.InfoMessage`).

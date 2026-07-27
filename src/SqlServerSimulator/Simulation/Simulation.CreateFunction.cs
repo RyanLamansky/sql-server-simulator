@@ -292,11 +292,17 @@ partial class Simulation
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
+        // AS EXTERNAL NAME assembly.[class].method → the body lives in a
+        // registered CLR assembly rather than in T-SQL.
+        context.MoveNextRequired();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.External })
+            return ParseClrScalarTail(context, schema, functionName, parameters, returnType);
+
         // BEGIN/END required for scalar UDF bodies. Capture span between
         // outer BEGIN (exclusive) and matching END (exclusive) using token-
         // level nesting; BEGIN TRAN / TRANSACTION / DISTRIBUTED don't open a
         // body block.
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Begin })
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Begin })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var commandText = context.Command.CommandText;

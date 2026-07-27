@@ -29,6 +29,7 @@ public class QualityTests
                 nameof(Simulation.ImportBacpac),
                 nameof(Simulation.AddRemoteSimulation),
                 nameof(Simulation.ServerCollationName),
+                nameof(Simulation.EnableClr),
                 nameof(Simulation.ListenLocalAsync),
                 nameof(Simulation.ListenNetworkAsync),
             ],

@@ -95,6 +95,49 @@ internal sealed class ScalarFunction(
 }
 
 /// <summary>
+/// A scalar function whose body is a method in a registered
+/// <see cref="SqlAssembly"/> rather than T-SQL —
+/// <c>CREATE FUNCTION … RETURNS &lt;type&gt; AS EXTERNAL NAME
+/// assembly.[Class].Method</c>. Surfaces in <c>sys.objects</c> as type
+/// <c>FS</c> and in <c>sys.assembly_modules</c>; it has no
+/// <c>sys.sql_modules</c> row, matching real SQL Server.
+/// </summary>
+/// <remarks>
+/// The bound <see cref="System.Reflection.MethodInfo"/> is resolved once at
+/// CREATE time so the
+/// Msg 6505 / 6506 / 6550 / 6551 / 6552 binding errors fire there rather than
+/// at first call, matching real SQL Server.
+/// </remarks>
+internal sealed class ClrScalarFunction(
+    Schema schema,
+    string name,
+    int objectId,
+    UdfParameter[] parameters,
+    SqlType returnType,
+    SqlAssembly assembly,
+    string className,
+    string methodName,
+    System.Reflection.MethodInfo method,
+    DateTime createDate)
+    : UserDefinedFunction(schema, name, objectId, parameters, "", createDate)
+{
+    public override string ObjectTypeCode => "FS";
+    public override string ObjectTypeDescription => "CLR_SCALAR_FUNCTION";
+
+    public readonly SqlType ReturnType = returnType;
+    public readonly SqlAssembly Assembly = assembly;
+
+    /// <summary>The type half of the <c>EXTERNAL NAME</c> triple, as written.</summary>
+    public readonly string ClassName = className;
+
+    /// <summary>The method half of the <c>EXTERNAL NAME</c> triple, as written.</summary>
+    public readonly string MethodName = methodName;
+
+    /// <summary>The bound method, resolved and signature-checked at CREATE time.</summary>
+    public readonly System.Reflection.MethodInfo Method = method;
+}
+
+/// <summary>
 /// An inline table-valued function. Body is a single SELECT statement
 /// whose projection determines the function's output schema. Called from a
 /// FROM clause (<c>FROM schema.fn(args) [alias]</c>); the per-call execution

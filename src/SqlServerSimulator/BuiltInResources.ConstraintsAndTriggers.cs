@@ -71,9 +71,10 @@ internal static partial class BuiltInResources
             new("parent_type", SqlType.Int32, null, true),
         ], (batch, database) => EnumerateSysTriggerEventTypes(eventTypeNameCol));
 
-        // sys.assembly_modules: CLR (SQLCLR) modules aren't modeled, so this is
-        // an empty view with the documented SQL Server 2025 shape. SMO's
-        // CREATE-scripting trigger query LEFT JOINs it to detect a CLR trigger.
+        // sys.assembly_modules: one row per CLR routine bound through an
+        // EXTERNAL NAME clause. SMO's CREATE-scripting trigger query LEFT JOINs
+        // it to detect a CLR trigger; only scalar functions are modeled, so
+        // triggers never appear.
         Sys("assembly_modules",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -82,12 +83,13 @@ internal static partial class BuiltInResources
             new("assembly_method", SqlType.NVarchar, 128, true),
             new("null_on_null_input", SqlType.Bit, null, true),
             new("execute_as_principal_id", SqlType.Int32, null, true),
-        ], static (batch, database) => []);
+        ], static (batch, database) => EnumerateAssemblyModules(database));
 
-        // sys.assemblies: CLR assemblies aren't modeled, so this is an empty
-        // view with the documented SQL Server 2025 shape. SMO's CREATE-scripting
-        // trigger query LEFT JOINs it (via sys.assembly_modules.assembly_id) to
-        // pull a CLR trigger's assembly name; user triggers never appear here.
+        // sys.assemblies: the assemblies registered by CREATE ASSEMBLY, plus
+        // the Microsoft.SqlServer.Types system row real SQL Server always
+        // carries (assembly_id 1, UNSAFE_ACCESS) — the one sys.assembly_types
+        // joins against. SMO's CREATE-scripting trigger query LEFT JOINs this
+        // via sys.assembly_modules.assembly_id.
         Sys("assemblies",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -100,7 +102,7 @@ internal static partial class BuiltInResources
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_user_defined", SqlType.Bit, null, false),
-        ], static (batch, database) => []);
+        ], static (batch, database) => EnumerateAssemblies(database));
 
         // sys.foreign_keys: probe-confirmed 21-column shape against SQL
         // Server 2025 (2026-05-13). EF Core reads name / parent_object_id /
@@ -336,10 +338,11 @@ internal static partial class BuiltInResources
             new("event_group_type_desc", SqlType.NVarchar, 128, true),
         ], static (_, _) => EmptyCatalogRows);
 
-        // sys.assembly_files: CLR assembly source files. SQLCLR isn't modeled
-        // (sys.assemblies is empty), so this ships empty with the full probe-
-        // confirmed shape (SQL Server 2025). Colocated with sys.assemblies /
-        // sys.assembly_modules.
+        // sys.assembly_files: one row per registered assembly, carrying the
+        // verbatim bytes CREATE ASSEMBLY supplied. Probe-confirmed shape (SQL
+        // Server 2025); the system Microsoft.SqlServer.Types row real carries is
+        // omitted because the simulator has no bytes to project for it.
+        // Colocated with sys.assemblies / sys.assembly_modules.
         Sys("assembly_files",
         [
             new("assembly_id", SqlType.Int32, null, false),
@@ -348,7 +351,7 @@ internal static partial class BuiltInResources
             new("content", VarbinarySqlType.MaxForm, null, true),
             new("sha2_256", SqlType.Varbinary, 8000, true),
             new("sha2_512", SqlType.Varbinary, 8000, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], static (_, database) => EnumerateAssemblyFiles(database));
     }
 
     /// <summary>
@@ -1008,4 +1011,103 @@ internal static partial class BuiltInResources
         ReferentialAction.SetDefault => "SET DEFAULT",
         _ => "NO ACTION",
     };
+
+    /// <summary>
+    /// The <c>Microsoft.SqlServer.Types</c> row real SQL Server always carries
+    /// in <c>sys.assemblies</c> (assembly_id 1, owned by the <c>sys</c>
+    /// principal, UNSAFE_ACCESS). It backs the three CLR system types
+    /// <c>sys.assembly_types</c> projects, so without it that view's natural
+    /// join to <c>sys.assemblies</c> yields nothing.
+    /// </summary>
+    private static SqlValue[] SystemAssemblyRow()
+    {
+        // Real stamps the resource-database build date here; the simulator has
+        // no equivalent, so it reports the SQL Server 2025 RTM date rather than
+        // a per-run value that would make the row look user-created.
+        var stamp = SqlValue.FromDateTime(new DateTime(2025, 11, 1, 0, 0, 0, DateTimeKind.Utc));
+        return
+        [
+            SqlValue.FromSystemName("Microsoft.SqlServer.Types"),
+            SqlValue.FromInt32(4),
+            SqlValue.FromInt32(1),
+            SqlValue.FromNVarchar("microsoft.sqlserver.types, version=17.0.0.0, culture=neutral, publickeytoken=89845dcd8080cc91, processorarchitecture=msil"),
+            SqlValue.FromByte(3),
+            SqlValue.FromNVarchar("UNSAFE_ACCESS"),
+            SqlValue.FromBoolean(true),
+            stamp,
+            stamp,
+            SqlValue.FromBoolean(false),
+        ];
+    }
+
+    /// <summary>Rows for <c>sys.assemblies</c>.</summary>
+    private static IEnumerable<SqlValue[]> EnumerateAssemblies(Database database)
+    {
+        yield return SystemAssemblyRow();
+
+        foreach (var assembly in database.Assemblies.Values.OrderBy(a => a.AssemblyId))
+        {
+            yield return
+            [
+                SqlValue.FromSystemName(assembly.Name),
+                SqlValue.FromInt32(assembly.PrincipalId),
+                SqlValue.FromInt32(assembly.AssemblyId),
+                SqlValue.FromNVarchar(assembly.ClrName),
+                SqlValue.FromByte((byte)assembly.PermissionSet),
+                SqlValue.FromNVarchar(assembly.PermissionSetDescription),
+                SqlValue.FromBoolean(true),
+                SqlValue.FromDateTime(assembly.CreateDate),
+                SqlValue.FromDateTime(assembly.ModifyDate),
+                SqlValue.FromBoolean(true),
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.assembly_files</c>. Real also carries a row for the
+    /// system assembly; the simulator has no bytes to project for that one, so
+    /// only user assemblies appear.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateAssemblyFiles(Database database)
+    {
+        foreach (var assembly in database.Assemblies.Values.OrderBy(a => a.AssemblyId))
+        {
+            yield return
+            [
+                SqlValue.FromInt32(assembly.AssemblyId),
+                SqlValue.FromNVarchar(assembly.Name),
+                SqlValue.FromInt32(1),
+                SqlValue.FromVarbinary(assembly.Content),
+                SqlValue.FromVarbinary(System.Security.Cryptography.SHA256.HashData(assembly.Content)),
+                SqlValue.FromVarbinary(System.Security.Cryptography.SHA512.HashData(assembly.Content)),
+            ];
+        }
+    }
+
+    /// <summary>Rows for <c>sys.assembly_modules</c> — one per CLR routine.</summary>
+    private static IEnumerable<SqlValue[]> EnumerateAssemblyModules(Database database)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var function in schema.Functions.Values)
+            {
+                if (function is not ClrScalarFunction clr)
+                    continue;
+
+                yield return
+                [
+                    SqlValue.FromInt32(clr.ObjectId),
+                    SqlValue.FromInt32(clr.Assembly.AssemblyId),
+                    SqlValue.FromNVarchar(clr.ClassName),
+                    SqlValue.FromNVarchar(clr.MethodName),
+                    // Real reports 0 here for a routine created without
+                    // RETURNS NULL ON NULL INPUT (probe-confirmed); the
+                    // simulator doesn't accept that option on a CLR routine, so
+                    // the column is constant.
+                    SqlValue.FromBoolean(false),
+                    SqlValue.Null(SqlType.Int32),
+                ];
+            }
+        }
+    }
 }
