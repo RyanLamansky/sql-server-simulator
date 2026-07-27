@@ -2,7 +2,7 @@
 
 Parse-and-discard support for SQL Server's hint grammar.
 The simulator doesn't model locking / isolation / planner choices / indexes, so all recognized hint shapes are accepted and ignored.
-The value of shipping this is grammar compatibility: applications with `WITH (NOLOCK)` hints in their schema / raw SQL no longer trip `Msg 102` on parse.
+The value of shipping this is grammar compatibility: applications with `WITH (NOLOCK)` hints in their schema / raw SQL don't trip `Msg 102` on parse.
 
 Implementation lives in [`src/SqlServerSimulator/Parser/Selection.Hints.cs`](../../src/SqlServerSimulator/Parser/Selection.Hints.cs).
 
@@ -106,7 +106,7 @@ Unlike the rest of the OPTION grammar (parse-and-discard, no argument check), `U
 
 - Each argument must be a **non-null string literal** (`'…'` or `N'…'`).
   A non-string argument or empty parens raises the generic **Msg 102** (probe-confirmed: `USE HINT()` → `Incorrect syntax near ')'`, `USE HINT(123)` → `near '123'`).
-- Each name is matched **case-insensitively** against `ValidUseHintNames` — the contents of `sys.dm_exec_valid_use_hints` on SQL Server 2025 (35 names, probed 2026-07-16).
+- Each name is matched **case-insensitively** against `ValidUseHintNames` — the contents of `sys.dm_exec_valid_use_hints` on SQL Server 2025 (35 names, probed).
   An unknown name raises **Msg 10715** (`'<name>' is not a valid hint.`, class 15) — distinct from the generic OPTION-clause Msg 102.
   Real accepts a lowercase argument.
 - Combines with other OPTION hints in either order (`OPTION (MAXDOP 1, USE HINT('…'))` and the reverse both parse).
@@ -153,7 +153,7 @@ The hint-vs-alias question here has only one answer (alias), no divergence.
 
 ## Probe artifacts
 
-Captured 2026-05-14 against SQL Server 2025 from `/tmp/hint-probe/` and `/tmp/insert-hints/` (both deleted after their bundles landed).
+Captured against SQL Server 2025 from `/tmp/hint-probe/` and `/tmp/insert-hints/` (both deleted after use).
 Notable findings:
 
 - `Msg 321` for unknown table hint, with surrounding double-quotes on the offending name.

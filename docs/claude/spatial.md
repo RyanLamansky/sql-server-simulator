@@ -83,14 +83,13 @@ Unspecified GRIDS levels surface as NULL; `level_*_grid_desc` translates 1/2/3 c
 
 `Storage/Bacpac/SpatialWkbDecoder` + `SpatialWkbEncoder` are a decode/encode pair for Microsoft's spatial CLR-UDT binary format (a.k.a. "MS spatial binary" — despite the `Wkb` names, **not** OGC WKB).
 The decoder feeds the BACPAC loader (real bytes → WKT); the encoder feeds the `varbinary(max)` CAST projection and the TDS UDT wire form (stored WKT → real bytes).
-Byte-parity was probe-anchored against SQL Server 2025 (`CAST(geography::STGeomFromText(N'…', srid) AS varbinary(max))`, 2026-07-16) for every 2D shape class plus genuine WWI `StateProvinces.Border` values.
+Byte-parity was probe-anchored against SQL Server 2025 (`CAST(geography::STGeomFromText(N'…', srid) AS varbinary(max))`) for every 2D shape class plus genuine WWI `StateProvinces.Border` values.
 
 **Layout** (4-byte SRID + 1-byte version `0x01` + 1-byte serialization-properties bitfield, then a shortcut body or the full `numPoints + points[] + numFigures + figures[] + numShapes + shapes[]` tables):
 
 - **Single `POINT`** → properties `0x0C` (isValid | isSinglePoint), one coordinate pair, no tables (22 bytes).
 - **Single-segment `LINESTRING`** (exactly two points) → properties `0x14` (isValid | isSingleLineSegment), the two pairs, **no count and no tables**.
   Real uses this only for a 2-point line; a 3+-point line takes the full layout.
-  (The decoder previously mis-read this shortcut as a `numPoints`-prefixed variable-length form — a latent bug, never exercised because AW/WWI have no 2-point lines; fixed alongside the encoder so the pair round-trips.)
 - **Everything else** → properties `0x04` (isValid) + full tables.
 
 **Figure attributes (version 1)**: point / line figures `0x01`; a polygon's exterior (first) ring `0x02`, interior rings `0x00`.
@@ -99,7 +98,7 @@ Byte-parity was probe-anchored against SQL Server 2025 (`CAST(geography::STGeomF
 
 **isValid bit** (`0x04`) — probed divergence: real sets it for a valid instance and *clears* it for a stored-but-invalid one.
 The simulator stores WKT and cannot revalidate, so it **always sets isValid**.
-Quantified end-to-end (2026-07-17) by importing a simulator-exported WWI-Standard bacpac into the live reference and byte-comparing against the original database: **189 of 190 `Countries.Border` values byte-identical**, the single divergent row being WWI's one stored-invalid Border (`STIsValid() = 0` on the original; spatial methods on it raise 24144).
+Quantified end-to-end by importing a simulator-exported WWI-Standard bacpac into the live reference and byte-comparing against the original database: **189 of 190 `Countries.Border` values byte-identical**, the single divergent row being WWI's one stored-invalid Border (`STIsValid() = 0` on the original; spatial methods on it raise 24144).
 On the imported copy that row reports `STIsValid() = 1` and methods evaluate instead of throwing — the divergence's full observable consequence is that one row, one bit, and error-vs-answer method behavior on it.
 All 5,000 sampled `Cities.Location` points byte-identical.
 
@@ -119,4 +118,4 @@ Load-bearing for DacFx bacpac export: the bulk reader's `DATALENGTH([geoCol])` c
 - **Z / M coordinates + EMPTY geometries** in the binary encoder (the decoder skips them too — 2D non-empty is the modeled subset).
 - **Per-value SRID tracking** — the encoder stamps the type default (4326 geography / 0 geometry); a geometry value with a non-zero SRID exports as SRID 0.
 
-Byte-identical CAST/wire encoding for the modeled 2D shapes **now ships** (see [Binary CLR-UDT serialization](#binary-clr-udt-serialization)); `hierarchyid` remains on the deferred byte-form list.
+Byte-identical CAST/wire encoding for the modeled 2D shapes **ships** (see [Binary CLR-UDT serialization](#binary-clr-udt-serialization)); `hierarchyid` remains on the deferred byte-form list.

@@ -1,7 +1,7 @@
 # Foreign Keys
 
 `FOREIGN KEY` constraints ship: inline + table-level grammar with optional `[CONSTRAINT name]`, full `ON DELETE` / `ON UPDATE` action set (`NO ACTION` / `CASCADE` / `SET NULL` / `SET DEFAULT`), runtime enforcement on `INSERT` / `UPDATE` / `DELETE` / `MERGE`, cascade chains, `DROP TABLE` protection, and the `sys.foreign_keys` + `sys.foreign_key_columns` catalog surface.
-Probe-confirmed against SQL Server 2025 on 2026-05-13.
+Probe-confirmed against SQL Server 2025.
 
 ## Grammar
 

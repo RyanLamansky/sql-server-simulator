@@ -1,7 +1,7 @@
 # Temp tables and TRUNCATE
 
 ## `TRUNCATE TABLE`
-`TRUNCATE TABLE <name>` empties the heap (clears `Pages` / `LobPages`) and resets every identity column's high-water mark to its declared seed — probe-confirmed against SQL Server 2025 (2026-05-11) that a subsequent INSERT receives the seed, not the next-after-prior-max.
+`TRUNCATE TABLE <name>` empties the heap (clears `Pages` / `LobPages`) and resets every identity column's high-water mark to its declared seed — probe-confirmed against SQL Server 2025 that a subsequent INSERT receives the seed, not the next-after-prior-max.
 Routing reuses the same `#`-prefix dispatch as DROP TABLE (`#foo` → connection's `TempTables`; else the named schema's heap-table dict via `Database.Schemas`).
 Missing target raises **Msg 4701** (`"Cannot find the object \"X\" because it does not exist or you do not have permissions."` — note this is distinct from DROP's Msg 3701 and from generic INSERT/UPDATE/DELETE's Msg 208; TRUNCATE has its own error path, and its wording carries **only the leaf** of a multi-part name — probe-confirmed asymmetric with 208 / 3701 which embed the full qualifier).
 `@@ROWCOUNT` resets to 0.
@@ -19,20 +19,20 @@ Auto-cleared on `Dispose`, matching real SQL Server's session-close drop.
 Lifecycle, cross-conn isolation, and Msg 208 from other sessions all probe-confirmed against SQL Server 2025.
 
 - **`CREATE TABLE #foo`** reuses the full CREATE TABLE grammar (constraints, identity, computed, defaults).
-  Tokenizer: `#` is now a leading-identifier char (`Parser/Tokenizer.cs:ParseHashPrefixedName`), so `#foo` / `##foo` / bare `#` all lex as a `Name` (CheckReserved short-circuits because no keyword begins with `#`).
+  Tokenizer: `#` is a leading-identifier char (`Parser/Tokenizer.cs:ParseHashPrefixedName`), so `#foo` / `##foo` / bare `#` all lex as a `Name` (CheckReserved short-circuits because no keyword begins with `#`).
 - **`DROP TABLE [IF EXISTS] name[, name...]`** — new statement (`Simulation.Drop.cs`).
   Routes by `#`-prefix; comma-list form supported.
   Missing target → **Msg 3701 St 5 Class 11** verbatim (`"Cannot drop the table '<name>', because it does not exist or you do not have permission."`) — **identical for temp (`#foo`) and regular targets**, both flowing through `SimulatedSqlException.CannotDropTableDoesNotExist`; `IF EXISTS` suppresses either.
   Covers regular (non-`#`) tables too — first user-visible DROP TABLE support in the simulator.
 - **Multi-part qualifiers on `#`-prefixed names** (`tempdb..#foo`, `tempdb.dbo.#foo`, `claude..#foo`) all resolve to the session's `#foo` regardless of qualifier (DB and schema segments are cosmetic on `#` leaves — probe-confirmed).
-  With the schemas bundle this rule now applies uniformly across FROM / INSERT / UPDATE / DELETE / MERGE / SET IDENTITY_INSERT / DROP / TRUNCATE — the routing happens in `BatchContext.TryResolveTable` based on the leaf alone.
+  With the schemas bundle this rule applies uniformly across FROM / INSERT / UPDATE / DELETE / MERGE / SET IDENTITY_INSERT / DROP / TRUNCATE — the routing happens in `BatchContext.TryResolveTable` based on the leaf alone.
 - **Transactional CREATE / DROP**: probe-confirmed that `BEGIN TRAN; CREATE TABLE #foo; ROLLBACK` undoes the table, and DROP TABLE inside a tran is similarly reversible.
   `UndoLog` (re-shaped to a polymorphic `UndoEntry` hierarchy) records `TempTableCreation` and `TempTableRemoval` entries alongside the existing slot-mutation kinds.
 - **Persists across batches** in the same connection; **invisible to other connections** (Msg 208).
   Two sessions can independently hold a `#foo` of the same name — real SQL Server mangles internally; the simulator achieves the same effect by giving each connection its own dict (user-visible names stay un-mangled).
 - **Module-scoped lifetime**: a `#foo` created inside a stored procedure, trigger, or dynamic-SQL (`EXEC('…')` / `sp_executesql`) body is dropped when that module exits, not left on the session — a following statement sees Msg 208, and a re-entrant call (the same proc invoked twice on one connection, or tedious's `execSql` re-running a `create table #t` through `sp_executesql`) re-creates the name without a Msg 2714 collision.
   A session-level `#foo` (created outside any module) persists until the session ends; module-created temps stay visible to nested modules down the call stack during execution.
-  Probe-confirmed against SQL Server 2025 (2026-07-23) for procs, triggers, `EXEC('…')`, and `SELECT … INTO #t`.
+  Probe-confirmed against SQL Server 2025 for procs, triggers, `EXEC('…')`, and `SELECT … INTO #t`.
   Mechanism: the body's `BatchContext` records the temps it created (`RegisterScopedTempTable`, gated by `ScopesTempTables` = has a proc / trigger frame, or the RPC ad-hoc-statement `ForceTempTableScope`), and each module-body dispatch drops them in its `finally` (`DropScopedTempTables`) — so it runs on a body error too.
   The RPC `sp_executesql` / `sp_execute` / `sp_prepexec` path (which builds a top-level command rather than a dynamic-SQL frame) opts in via `SimulatedDbCommand.ScopeTempTablesToBatch`, dropped in `CreateResultSetsForCommand`'s finally.
 - **Bare `#`** is a valid temp-table name (one-char `#`).

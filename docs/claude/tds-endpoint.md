@@ -27,7 +27,7 @@ While the registry is empty — the zero-configuration default — any LOGIN7 cr
 Once at least one login exists, the LOGIN7 username must resolve in the registry (keyed case-insensitively, `BuiltInToken.Comparer` like the sibling server-scope dicts) and the password must verify against the stored hash (`PasswordHash.Verify`).
 The registry stores the legacy `0x0200` single-pass-SHA-512 format rather than PWDENCRYPT's `0x0300` PBKDF2 — the hashes never leave the simulation's memory, so 100k PBKDF2 iterations would be pure per-connection-open cost; verification dispatches on the version tag so either form verifies.
 Failure — wrong password, unknown login, empty password alike — writes ERROR **Msg 18456 severity 14 state 1**, message `Login failed for user '<name>'.`, then DONE with `DONE_ERROR` and closes the connection.
-Shape probe-confirmed against SQL Server 2025 (2026-07-13): the real server masks the detailed state, so all three failure causes are client-indistinguishable.
+Shape probe-confirmed against SQL Server 2025: the real server masks the detailed state, so all three failure causes are client-indistinguishable.
 
 The LOGIN7 password field de-obfuscates per MS-TDS (each byte XOR 0xA5 then nibble-swap, inverting the client's swap-then-XOR) and its length pair is **char-counted like every other LOGIN7 field** — oracle-confirmed with a surrogate-pair password, where a byte-counted read would overrun.
 `ALTER LOGIN … WITH PASSWORD` / `DROP LOGIN` update the registry live (entries are immutable and replaced wholesale, so a concurrent login sees a consistent hash); dropping the last login reverts the endpoint to accept-anything.
@@ -49,7 +49,7 @@ The session maps 1:1 onto a `SimulatedDbConnection`; execution flows through `Si
   Matches SqlClient/real-server behavior for pre-TDS-8 encryption.
   The TDS 8.0 strict path needs no shim (the `SslStream` sits directly on the socket, records flow raw) and no version pin.
 - `Login7Request` — parses TDS version, packet size (accepted when 512–32767 and acked via ENVCHANGE type 4), hostname/username/password (de-obfuscated)/appname/database.
-  An **empty** requested database maps to the default (user) database; **any non-empty name — including `master` — resolves genuinely through `ChangeDatabase`** (master is a real seeded database now, so `Database=master` lands in master rather than being aliased to the default).
+  An **empty** requested database maps to the default (user) database; **any non-empty name — including `master` — resolves genuinely through `ChangeDatabase`** (master is a real seeded database, so `Database=master` lands in master rather than being aliased to the default).
   A `ChangeDatabase` failure becomes the probe-confirmed login pair — Msg 4060 severity 11 (`Cannot open database "x" requested by the login. The login failed.`, double-quoted name) then Msg 18456 severity 14 — before the connection closes.
   Mid-session `USE` keeps the engine's Msg 911.
 - `TdsTokenWriter` — growable token buffer with packetizing flush; the session flushes after every row so memory stays bounded by max(row, packet).
@@ -74,10 +74,10 @@ The session maps 1:1 onto a `SimulatedDbConnection`; execution flows through `Si
   Classification and the two known gaps (a genuine syntax error mid-batch continues over the wire; `SET XACT_ABORT ON` batch-abort not honored) are in [`control-flow.md`](control-flow.md).
 - **PRINT / low-severity RAISERROR**: the session subscribes to `SimulatedDbConnection.InfoMessage` and drains the queue as INFO tokens between statements and at batch end.
   **Each INFO flush in a SQLBatch response gets its own DONE**, mirroring real per-statement DONEs: info preceding an outcome is followed by `DONE_MORE` count 0 before the outcome's tokens, and trailing info (batch ends in PRINT) forces the last outcome's DONE to `DONE_MORE` with a closing `DONE_FINAL` count 0 after the INFO — an INFO token must never follow the final DONE.
-  Without both, SqlClient's token reader stalls until command timeout on any batch mixing PRINT with a result set, and go-mssqldb silently drops the message (go-sqlcmd shakedown, 2026-07-14; the pre-fix oracle only covered PRINT-without-result-set).
+  Without both, SqlClient's token reader stalls until command timeout on any batch mixing PRINT with a result set, and go-mssqldb silently drops the message (go-sqlcmd shakedown,; the pre-fix oracle only covered PRINT-without-result-set).
   RPC responses are unaffected — every DONEINPROC already carries `DONE_MORE`.
 - **`USE`**: database change detected by comparing the session database against its value at message start (`databaseAtMessageStart`) and emitted as ENVCHANGE type 1 + INFO 5701 (`Changed database context to '<db>'.`) **before the response's final DONE** — the seam fires at every final-DONE site (batch outcome DONEs, the closing DONE, error-path DONEs, and the RPC handlers' final DONEPROC) and is idempotent, so it emits at most once per message.
-  Ordering is load-bearing: SqlClient's token reader stalls until command timeout on an ENVCHANGE that arrives after the last DONE (probe-confirmed 2026-07-15 — this froze SSMS on its first `use [master]` once master existed; go-mssqldb tolerates the late position, which is how the original after-the-DONEs ordering shipped unnoticed).
+  Ordering is load-bearing: SqlClient's token reader stalls until command timeout on an ENVCHANGE that arrives after the last DONE (probe-confirmed — this froze SSMS on its first `use [master]` once master existed; go-mssqldb tolerates the late position, which is how the original after-the-DONEs ordering shipped unnoticed).
   The INFO 5701 is wire-layer-only — the in-process engine raises no InfoMessage for `USE`, a minor in-process/wire asymmetry matching the login response's synthesized 5701.
 - **Reset-connection status bit** (pooled-connection recycle): backing connection disposed and recreated on the same database, acked with the empty ENVCHANGE type 18 before the batch's tokens.
 - **Attention** (type 6, mid-stream cancel): a client `SqlCommand.Cancel()` or expiring `CommandTimeout` sends an attention while a batch executes or streams.
@@ -90,7 +90,7 @@ The session maps 1:1 onto a `SimulatedDbConnection`; execution flows through `Si
 ### Dynamic-SQL exec scope (DONEINPROC/DONEPROC)
 
 Real SQL Server runs an `EXEC('…')` / `sp_executesql` body as a **nested procedure scope**: the statements inside report **DONEINPROC (0xFF)**, and the scope closes with **RETURNSTATUS (0) + DONEPROC (0xFE)** — the shape a plain batch-level DONE (`0xFD`) does not carry.
-Cleartext-probed 2026-07-19 against SQL Server 2025 (`Encrypt=False` login-only encryption leaves post-login tokens in the clear through a tee proxy) with the SSMS report viewer's environment-probe batch (three batch-level statements — a `SET` assignment and two `SELECT`s — then an `IF … ELSE EXEC('select … CONNECTIONPROPERTY …')`): the batch-level statements reported `0xFD DONE`, the `EXEC`'s inner SELECT reported `0xFF DONEINPROC` with `DONE_MORE|DONE_COUNT`, then `RETURNSTATUS 0` + `0xFE DONEPROC`.
+Cleartext-probed against SQL Server 2025 (`Encrypt=False` login-only encryption leaves post-login tokens in the clear through a tee proxy) with the SSMS report viewer's environment-probe batch (three batch-level statements — a `SET` assignment and two `SELECT`s — then an `IF … ELSE EXEC('select … CONNECTIONPROPERTY …')`): the batch-level statements reported `0xFD DONE`, the `EXEC`'s inner SELECT reported `0xFF DONEINPROC` with `DONE_MORE|DONE_COUNT`, then `RETURNSTATUS 0` + `0xFE DONEPROC`.
 The old simulator emitted a plain `0xFD DONE` for the exec's result set and no RETURNSTATUS/DONEPROC — the divergence that froze the report viewer's connection, whose app is `.NET Framework`'s legacy `System.Data.SqlClient` (native SNI + a stricter, older TDS parser than `Microsoft.Data.SqlClient`).
 
 Modeled via outcome-stream markers: the engine's `ExecuteDynamicBatch` brackets the dynamic body's outcomes with `SimulatedProcScopeBoundary` (Enter / Exit) markers; `StreamOutcomesAsync` raises a `procScopeDepth` on Enter (statements then render with DONEINPROC), and on Exit lowers it and emits `RETURNSTATUS 0 + DONEPROC` (with the usual more/final bit) — even when the body produced no result set.
@@ -104,8 +104,8 @@ A direct `EXEC <proc>` in a batch (through `InvokeProcedure`, not `ExecuteDynami
 ## Terminal crash boundary
 
 The typed catch lists in `RunAsync` / `RunMarsSessionAsync` (`IOException` / `SocketException` / `ObjectDisposedException` / `OperationCanceledException` / `InvalidDataException` / `AuthenticationException`) plus the per-handler `SimulatedSqlException` / `NotSupportedException` conversions handle every anticipated failure.
-Behind them sits a **terminal backstop**: an exception of no anticipated type (an internal bug, an unmodeled engine path that throws a raw CLR exception) used to end the session task silently, so the client saw only a raw transport reset with no message — the first thing a real user's tool hits when it sends something the simulator didn't anticipate.
-The backstop now emits a best-effort **Msg 0 / severity 20** ERROR (`"A severe error occurred on the current command. The results, if any, should be discarded."`) — the shape real SQL Server sends for an internal failure — then lets the connection close.
+Behind them sits a **terminal backstop**: an exception of no anticipated type (an internal bug, an unmodeled engine path that throws a raw CLR exception) would otherwise end the session task silently, leaving the client with a raw transport reset and no message — the first thing a real user's tool hits when it sends something the simulator didn't anticipate.
+The backstop emits a best-effort **Msg 0 / severity 20** ERROR (`"A severe error occurred on the current command. The results, if any, should be discarded."`) — the shape real SQL Server sends for an internal failure — then lets the connection close.
 SqlClient treats severity ≥ 20 as fatal: it surfaces a `SqlException` and marks the connection dead, so the failure is diagnosable instead of a bare reset.
 (Matched to SqlClient's documented severity-20 handling; not separately probed on a triggered real-server internal error.)
 
@@ -122,11 +122,11 @@ The forcing seam is a test-only per-`Simulation` hook (`NetworkBatchCrashHookFor
 
 Parameterized `SqlCommand`s arrive as RPC (packet type 3), never as batches.
 `TdsRpc.cs` parses the request (proc name or well-known ProcID, option flags, parameter list with per-parameter TYPE_INFO — the read-side mirror of the type codec, including PLP in both known-length and unknown-length chunked forms; multiple requests in one message split on the 0xFF batch-flag).
-**Table-valued parameters (0xF3), CLR-UDT (0xF0), and `sql_variant` (0x62) parameters are decoded** (see [TVP parameters](#tvp-parameters-sqldbtypestructured) + [CLR-UDT / sql_variant parameters](#clr-udt--sql_variant-parameters) below); **every input-parameter TYPE_INFO is now accepted** — the last rejection, legacy `image` (0x22), decodes as of 2026-07-19 (see [Legacy text / ntext / image](#legacy-text--ntext--image-wire-forms)).
+**Table-valued parameters (0xF3), CLR-UDT (0xF0), and `sql_variant` (0x62) parameters are decoded** (see [TVP parameters](#tvp-parameters-sqldbtypestructured) + [CLR-UDT / sql_variant parameters](#clr-udt--sql_variant-parameters) below); **every input-parameter TYPE_INFO is accepted** — the last rejection, legacy `image` (0x22), decodes as of 2026-07-19 (see [Legacy text / ntext / image](#legacy-text--ntext--image-wire-forms)).
 **Legacy `ntext` (0x63) and `text` (0x23) string parameters ARE decoded** — SqlClient sends the `sp_executesql` `@statement` / `@params` as `ntext` once they exceed nvarchar(4000) (the proc's declared parameter type), so any parameterized query over ~4000 chars arrives this way.
 Their wire value is the **legacy 4-byte-length form** (LONGLEN max size + 5-byte collation, then a 4-byte data length + the string bytes — `0xFFFFFFFF` length = NULL), NOT PLP.
-This was the multi-round SSMS Object-Explorer Databases-node blocker: SMO's HADR-aware user-database enumeration is a large parameterized query, so it always arrived as an `ntext` param and was rejected before executing — the node stayed empty with no surfaced error while every other server-side fix landed on a code path that never ran.
-Probe-confirmed wire shape 2026-07-15.
+This is what unblocks SSMS's Object-Explorer Databases node: SMO's HADR-aware user-database enumeration is a large parameterized query, so it always arrived as an `ntext` param and was rejected before executing — the node stayed empty with no surfaced error while every other server-side fix landed on a code path that never ran.
+Probe-confirmed wire shape.
 
 Dispatch (`TdsSession.Rpc.cs`):
 
@@ -151,7 +151,7 @@ Dispatch (`TdsSession.Rpc.cs`):
 `WellKnownProcId` in `TdsSession.Rpc.cs` maps both the well-known numeric ProcIDs (1 sp_cursor, 2 sp_cursoropen, 3 sp_cursorprepare, 4 sp_cursorexecute, 5 sp_cursorprepexec, 6 sp_cursorunprepare, 7 sp_cursorfetch, 8 sp_cursoroption, 9 sp_cursorclose) **and** the by-name form (SqlClient sends `CommandType.StoredProcedure` with `CommandText = "sp_cursoropen"` as ProcID 0 + name) to the dispatch.
 Each open cursor rides an engine `Cursor` (built by synthesizing a `DECLARE … CURSOR … FOR <stmt>; OPEN` batch and pulling the object out of `SimulatedDbConnection.Cursors` under an opaque `sss_apicursor_<handle>` name), stored in a per-session `Dictionary<int, ApiCursor>` — wire-protocol state, so on the session not the engine.
 Fetch drives `Cursor.Fetch` directly per row; positioned DML sets `Cursor.CurrentRid` to a buffered RID and runs a synthesized `UPDATE/DELETE … WHERE CURRENT OF <name>` so the full engine machinery (triggers, constraints, statement atomicity) fires.
-Probed against SQL Server 2025 (2026-07-17).
+Probed against SQL Server 2025.
 
 **sp_cursoropen**(@cursor OUT, @stmt, @scrollopt IN/OUT, @ccopt IN/OUT, @rowcount OUT) — builds + opens the cursor and writes a **metadata-only announce**: COLMETADATA for the projection plus a trailing `ROWSTAT` int column, **zero rows**.
 Return status 0.
@@ -203,19 +203,19 @@ Double-close or invalid handle → **Msg 16909** (state 1), return status 1.
 
 ## Bulk load (SqlBulkCopy)
 
-`SqlBulkCopy.WriteToServer` runs a three-message handshake per batch, all probed against SQL Server 2025 + SqlClient 6.0.2 / 7.0.2 (2026-07-18).
+`SqlBulkCopy.WriteToServer` runs a three-message handshake per batch, all probed against SQL Server 2025 + SqlClient 6.0.2 / 7.0.2.
 `TdsSession.BulkLoad.cs` + `TdsBulkLoadReader.cs` (wire) and `Simulation.BulkLoad.cs` (engine) implement it.
 
 1. **Metadata pre-batch** (SQLBatch) — once per `WriteToServer`.
    SqlClient 6.x sends `select @@trancount; SET FMTONLY ON select * from [dest] SET FMTONLY OFF exec ..sp_tablecollations_100 N'[dest]'`; SqlClient 7.x wraps a bigger version that reads the ordered column list from `.[sys].[all_columns]` via `sp_executesql`, then `SET FMTONLY ON; EXEC(N'SELECT '+@cols+' FROM [dest]'); SET FMTONLY OFF; EXEC ..sp_tablecollations_100 …`.
-   This drove four cross-cutting engine fixes: **FMTONLY is now session state** (`SimulatedDbConnection.FmtOnly`) — while ON a SELECT returns metadata-only zero rows and DML is suppressed (probe-confirmed a FMTONLY-wrapped INSERT persists nothing); **leading-empty-segment names** (`..sp_tablecollations_100`, `FROM .[sys].[all_columns]`) drop their omitted db/schema positions in `BatchContext.ParseObjectName` and the FROM-source dispatch; **`sp_tablecollations_100`** is a modeled system proc returning `colid / name / tds_collation binary(5) / collation` per column (the 5-byte TDS collation from `TdsCollationCodec`, NULL for non-string columns); and **bare `SELECT TOP n *`** parses (the count is now a single operand via `Expression.ParsePrimary`, so `TOP 1 *` no longer folds into `1 * …`).
+   This drove four cross-cutting engine fixes: **FMTONLY is session state** (`SimulatedDbConnection.FmtOnly`) — while ON a SELECT returns metadata-only zero rows and DML is suppressed (probe-confirmed a FMTONLY-wrapped INSERT persists nothing); **leading-empty-segment names** (`..sp_tablecollations_100`, `FROM .[sys].[all_columns]`) drop their omitted db/schema positions in `BatchContext.ParseObjectName` and the FROM-source dispatch; **`sp_tablecollations_100`** is a modeled system proc returning `colid / name / tds_collation binary(5) / collation` per column (the 5-byte TDS collation from `TdsCollationCodec`, NULL for non-string columns); and **bare `SELECT TOP n *`** parses (the count is a single operand via `Expression.ParsePrimary`, so `TOP 1 *` no longer folds into `1 * …`).
 2. **`INSERT BULK` statement** (SQLBatch) — `insert bulk [schema].[table] ([col] Type [COLLATE c], …) [WITH (opt, …)]`.
    The session parses it into a `BulkInsertPlan` (target table + ordered target columns + options), answers a bare DONE (SqlClient reads it before streaming), and holds the plan.
    One `INSERT BULK` per `BatchSize` chunk (BatchSize 2 over 5 rows → three statements), the metadata pre-batch only once.
 3. **BulkLoadBCP data packet** (type 7) — COLMETADATA + ROW tokens + DONE, the same wire encoding results use, decoded by `TdsBulkLoadReader`.
    The session writes the rows through `Simulation.ExecuteBulkInsert` and answers DONE with the row count.
    Wire-decode notes: SqlClient sends **FIXEDLENTYPE tokens** (INT4TYPE `0x38`, etc.) with raw un-prefixed values for NOT NULL columns and the nullable variants for nullable columns; **numeric/decimal values carry a fixed sign + 16-byte mantissa** (17 value bytes) behind a length byte that only flags NULL — the precision-implied width the byte reports is ignored.
-   **Legacy `text` / `ntext` / `image` destination columns decode** (2026-07-19): the COLMETADATA TYPE_INFO is the LONGLEN form (4-byte max size, the 5-byte collation for the string pair, then a two-byte zero-part TableName field SqlClient always sends in a client value stream — no source-table identity), and the ROW value is the in-band text-pointer form (1-byte pointer length, `0` = NULL; else a 16-byte pointer + 8-byte timestamp placeholder — SqlClient fills both with `0xFF` — a 4-byte data length, then the data).
+   **Legacy `text` / `ntext` / `image` destination columns decode**: the COLMETADATA TYPE_INFO is the LONGLEN form (4-byte max size, the 5-byte collation for the string pair, then a two-byte zero-part TableName field SqlClient always sends in a client value stream — no source-table identity), and the ROW value is the in-band text-pointer form (1-byte pointer length, `0` = NULL; else a 16-byte pointer + 8-byte timestamp placeholder — SqlClient fills both with `0xFF` — a 4-byte data length, then the data).
    Cleartext-probed against SqlClient 7.0.2.
    Oracle: `BulkCopyTests.LegacyLobColumns_TextNtextImage_InsertAndRoundTrip`.
 
@@ -246,7 +246,7 @@ The shared column decoder handles the scalar + MAX-LOB + `xml` + legacy-LOB set 
 ## Client value decode (`TdsWireValue` + `TdsColumnDecoder`)
 
 Client-authored values reach the endpoint in two framings — as **RPC parameters** (`TdsRpc.cs`, one TYPE_INFO-plus-value per parameter, yielding a `DbType`/`object` carrier the ADO layer binds) and as **columns inside a bulk-load / TVP row** (`TdsColumnDecoder`, COLMETADATA read once then many rows, yielding a `SqlValue` the engine coerces).
-These were two parallel TYPE_INFO→value implementations; they now share one decode home:
+These were two parallel TYPE_INFO→value implementations; they share one decode home:
 
 - **`TdsWireValue`** owns the framing-independent core: the low-level primitives (`ReadPlp`, `ScaledUnitsToTicks`, `AssembleLittleEndian`, `ReadThreeByteInt`, `TimeValueBytes`, `ReadCollationUtf8`, `Epoch1900`) and the two **self-describing** value decoders — the `sql_variant` body (`ReadVariantBody`, the read mirror of `TdsTypeCodec.BuildVariantBody`) and the CLR-UDT value builder (`BuildUdtValue`: OrdPath bytes for `hierarchyid`, spatial WKB → WKT for `geography` / `geometry`, Msg 8064 / 8023 on unknown-type / invalid-bytes).
   Because these bodies carry their own type, they decode identically in either framing.
@@ -255,12 +255,12 @@ These were two parallel TYPE_INFO→value implementations; they now share one de
 - **Genuinely per-framing wire differences stay separate** (not forced into one function): RPC parameters carry a decimal at its precision-implied width, while the bulk / TVP column stream always sends a fixed 17-byte (sign + 16) decimal behind a NULL-only length byte; RPC uses nullable-variant tokens throughout, the column stream uses FIXEDLENTYPE tokens with raw un-prefixed values for NOT NULL columns.
   Each framing keeps its own scalar switch over these; only the self-describing decoders and primitives are shared.
 
-Unifying the two surfaces is what let `sql_variant` and CLR-UDT **columns** decode inside a TVP (previously rejected) and `text` / `ntext` / `image` **columns** decode inside a `SqlBulkCopy` stream — each closed against a cleartext capture of what SqlClient actually sends (see [TVP parameters](#tvp-parameters-sqldbtypestructured) and [Bulk load](#bulk-load-sqlbulkcopy)).
+Unifying the two surfaces is what let `sql_variant` and CLR-UDT **columns** decode inside a TVP and `text` / `ntext` / `image` **columns** decode inside a `SqlBulkCopy` stream — each closed against a cleartext capture of what SqlClient actually sends (see [TVP parameters](#tvp-parameters-sqldbtypestructured) and [Bulk load](#bulk-load-sqlbulkcopy)).
 
 ## TVP parameters (`SqlDbType.Structured`)
 
 A `SqlParameter` with `SqlDbType.Structured` (value = `DataTable` / `IEnumerable<SqlDataRecord>` / `DbDataReader`, `TypeName = "schema.type"`) arrives as RPC parameter TYPE_INFO `0xF3` (MS-TDS §2.2.5.5.5 TVP_TYPE_INFO), decoded by `TdsTableValuedParameterReader` and materialized through the **same engine Structured-parameter binding the in-process ADO.NET path uses** — the wire decode produces a `TableValuedParameterData` carrier that joins `DataTable` / `IDataReader` as a third recognized source shape in `BatchContext.SeedTableVariablesFromStructuredParameters`, resolves the named `TableType`, clones it, and inserts the rows through `Simulation.InsertTableValuedParameterRow`.
-Probed against SQL Server 2025 + SqlClient 7.0.2 (2026-07-18).
+Probed against SQL Server 2025 + SqlClient 7.0.2.
 
 - **Wire form** (after the 0xF3 token): TVP_TYPENAME (db / schema / type, each B_VARCHAR — the db segment is empty, schema+type carry the `TypeName`), TVP_COLMETADATA (`USHORT` column count then per-column UserType `ULONG` / Flags `USHORT` / TYPE_INFO / ColName B_VARCHAR), the TVP_END_TOKEN `0x00`, then TVP_ROW (`0x01`) tokens each carrying every column's value, terminated by a final `0x00`.
   **Column metadata + per-value decode are the shared `TdsColumnDecoder`** (the single client-value decode home — same FIXEDLENTYPE-for-NOT-NULL and 17-byte decimal quirks; `nvarchar(N)` columns arrive as maxlen `0xFFFF` with PLP values), which routes `sql_variant` and CLR-UDT columns through the same self-describing decoders the RPC parameter path uses (`TdsWireValue` — see [Client value decode](#client-value-decode-tdswirevalue--tdscolumndecoder)).
@@ -268,20 +268,20 @@ Probed against SQL Server 2025 + SqlClient 7.0.2 (2026-07-18).
 - **Sources**: `DataTable`, `IEnumerable<SqlDataRecord>` (SqlClient serializes it to the same wire form — so it works over the wire even though the in-process path can't take it without a SqlClient dependency), and `DbDataReader` (a `SqlDataReader` from a second connection).
   Both `CommandType.StoredProcedure` (direct proc RPC — the TVP arg binds by name into a `ProcArgument.TableValue`) and `CommandType.Text` (sp_executesql, ProcID 10, the TVP as its own 0xF3 parameter) paths bind identically.
 - **Error parity** (real Msg numbers, not ERROR 50000, all probe-confirmed): column-count mismatch (subset **or** extra columns) → **Msg 500**; positional type clash (reordered incompatible column, e.g. nvarchar under an int column) → **Msg 245**; NULL into a NOT NULL column → **Msg 515**; CHECK violation → **Msg 547**; PK / UNIQUE duplicate → **Msg 2627** (constraint name uses the simulator's `PK__@rows__<hex>` convention, not byte-identical); UNIQUE index duplicate → **Msg 2601**; unknown `TypeName` → **Msg 2715**.
-  Enforcing NOT NULL / CHECK / PK / UNIQUE on the structured path is a fidelity upgrade shared with the in-process path (which previously skipped them via a direct `Heap.Insert`).
-- **`sql_variant` / UDT columns** decode (2026-07-19): a `sql_variant` TVP column arrives as `0x62` + a 4-byte max length with a 4-byte-total-length (0 = NULL) self-describing body value; a `hierarchyid` / `geography` / `geometry` column arrives as `0xF0` + three B_VARCHARs (db / schema / type) with a PLP value — **the same wire forms the matching RPC parameters carry** (cleartext-probed inside TVP_COLMETADATA / TVP_ROW against SQL Server 2025 + SqlClient 7.0.2), so unification made them decode for near-free.
+  Enforcing NOT NULL / CHECK / PK / UNIQUE on the structured path is shared with the in-process path.
+- **`sql_variant` / UDT columns** decode: a `sql_variant` TVP column arrives as `0x62` + a 4-byte max length with a 4-byte-total-length (0 = NULL) self-describing body value; a `hierarchyid` / `geography` / `geometry` column arrives as `0xF0` + three B_VARCHARs (db / schema / type) with a PLP value — **the same wire forms the matching RPC parameters carry** (cleartext-probed inside TVP_COLMETADATA / TVP_ROW against SQL Server 2025 + SqlClient 7.0.2), so unification made them decode for near-free.
   Oracle: `TvpVariantUdtColumnTests`.
   A LOB-backed TVP column (`geography` / `geometry`, like `nvarchar(max)`) round-trips through both the `sp_executesql` text path (the parameter is a batch table variable) **and** a **stored-procedure READONLY parameter** — the proc-parameter copy re-homes off-row values into the parameter's own heap (see [`table-valued-parameters.md`](table-valued-parameters.md)); `TvpVariantUdtColumnTests.LobBackedColumns_ThroughProcReadonlyParameter_RoundTrip` covers the proc route.
 - **Residuals**: a `DBNull`-valued Structured parameter is rejected by SqlClient client-side (`NotSupportedException`) before any bytes hit the wire, so the server never sees a null TVP (a wire TVP_NULL, column count `0xFFFF`, is handled defensively as an empty table).
   TVP_ORDER_UNIQUE (0x10) / TVP_COLUMN_ORDERING (0x11) optional metadata — never emitted by `DataTable` / `SqlDataReader` sources — is rejected with a clear ERROR rather than a guessed parse.
-  An identity column present in a TVP raises **Msg 1077** on real SQL Server even for a `DBNull` value; the simulator's structured path auto-generates on `DBNull` (pre-existing in-process divergence, unchanged).
+  An identity column present in a TVP raises **Msg 1077** on real SQL Server even for a `DBNull` value; the simulator's structured path auto-generates on `DBNull` (in-process divergence, unchanged).
 
 ## CLR-UDT / sql_variant parameters
 
 RPC parameter TYPE_INFO `0xF0` (CLR UDT) and `0x62` (`sql_variant`) decode straight into the engine's internal representations and bind by riding a **pre-built `SqlValue` on the parameter** — a fourth `SimulatedDbParameter.Value` carrier shape the variable-seed path (`BatchContext`) and the direct-proc argument binder both recognize alongside the DbType path, since no `DbType` expresses `hierarchyid` / spatial / `sql_variant`.
 Both the `sp_executesql` text path (ProcID 10, the value as its own parameter) and direct proc RPC (`CommandType.StoredProcedure`, binds by name) work.
 The RPC framing lives in `TdsRpc.cs` (`DecodeClrUdt` / `DecodeSqlVariant`); the self-describing value decoders themselves (`ReadVariantBody`, the UDT value builder) live in `TdsWireValue` and are shared with the TVP / bulk column decoder — see [Client value decode](#client-value-decode-tdswirevalue--tdscolumndecoder).
-Probed against SQL Server 2025 + SqlClient 7.0.2 (2026-07-19).
+Probed against SQL Server 2025 + SqlClient 7.0.2.
 
 - **CLR UDT (`0xF0`)** — the client UDT_INFO is **three B_VARCHARs** (db / schema / type; SqlClient fills only the type from `SqlParameter.UdtTypeName`, db + schema empty) with **neither** the leading `USHORT` max byte size **nor** the assembly-qualified name the server's COLMETADATA form carries — a shorter shape than the write side.
   The value is PLP: OrdPath bytes for `hierarchyid` (stored verbatim via `SqlValue.FromHierarchyIdBytes`), the MS spatial binary for `geography` / `geometry` (decoded back to WKT via `SpatialWkbDecoder.TryDecode`).
@@ -293,19 +293,19 @@ Probed against SQL Server 2025 + SqlClient 7.0.2 (2026-07-19).
 - **`sql_variant` (`0x62`)** — TYPE_INFO is a 4-byte max length (ignored); the value is a 4-byte total length (**0 = NULL**) then the MS-TDS §2.2.5.5.3 body (base-type token + property-byte count + property bytes + inner value), the read mirror of `TdsTypeCodec.BuildVariantBody`, decoded into the inner `SqlValue` and wrapped by `SqlValue.FromVariant` so `SQL_VARIANT_PROPERTY(@p,'BaseType')` reports the sent type.
   SqlClient's per-CLR-type base-type choices (probe-confirmed): `int`/`bigint`/`smallint`/`tinyint`/`bit` direct; `decimal` → `numeric(38, 2)` (base token `0x6C`); `float`/`real` direct; **both `string` and `SqlString` → `nvarchar`** (varchar is not sent as a variant); `DateTime` → `datetime`; `Guid` → `uniqueidentifier`; `SqlMoney` → `money`; `byte[]` → `varbinary`; `TimeSpan` → `time(7)`.
   (SqlClient 7.0.2 mis-serializes a `DateOnly` variant — the stream truncates client-side before the server sees it; not a server concern.)
-- **Output direction ships** (probe-captured RETURNVALUE shapes, SQL Server 2025 + SqlClient 7.0.2, 2026-07-19): a `sql_variant` output parameter's RETURNVALUE TYPE_INFO is `0x62` + ULONG max length (8009) with the same 4-byte-total-length + self-describing-body value a variant result column carries; a CLR-UDT output parameter's TYPE_INFO is the **COLMETADATA-shaped** UDT_INFO (USHORT max byte size — 892 for `hierarchyid`, `0xFFFF` for spatial — then db / schema / type B_VARCHARs and the US_VARCHAR assembly-qualified name; richer than the three-B_VARCHAR client request form) with a PLP value, PLP NULL for NULL.
+- **Output direction ships** (probe-captured RETURNVALUE shapes, SQL Server 2025 + SqlClient 7.0.2): a `sql_variant` output parameter's RETURNVALUE TYPE_INFO is `0x62` + ULONG max length (8009) with the same 4-byte-total-length + self-describing-body value a variant result column carries; a CLR-UDT output parameter's TYPE_INFO is the **COLMETADATA-shaped** UDT_INFO (USHORT max byte size — 892 for `hierarchyid`, `0xFFFF` for spatial — then db / schema / type B_VARCHARs and the US_VARCHAR assembly-qualified name; richer than the three-B_VARCHAR client request form) with a PLP value, PLP NULL for NULL.
   Real fills the db segment with the current database; the simulator reuses the column writers verbatim (empty db segment — SqlClient reads both).
   The engine value reaches the writer via `SimulatedDbParameter.OutputSqlValue`, an internal side-channel stamped at end-of-batch write-back alongside the CLR `Value` conversion, because the CLR object alone no longer carries the variant inner type / UDT kind; `TdsSession.Rpc.WriteOutputReturnValues` routes `DbType.Object`-marked outputs through the `SqlValue` overload of `TdsTypeCodec.WriteReturnValue`.
   **Variant decimal bodies are always 1 sign byte + a 16-byte magnitude** regardless of precision (probe-captured in both a result column and a RETURNVALUE): SqlClient's row-value reader tolerates a narrower magnitude but its RETURNVALUE reader reads the fixed 17 data bytes and desyncs on anything shorter — `BuildVariantDecimal` writes the fixed form.
   (**TVP columns** of UDT / `sql_variant` type also decode — the RPC decoders and the column decoder share `TdsWireValue`; see [TVP parameters](#tvp-parameters-sqldbtypestructured).)
-  A `sql_variant` carrying an inner value implicitly converted to a narrower sink (e.g. `insert … (int_col) values (@variant_int)`) is accepted by the simulator's engine-level variant coercion where **real raises Msg 257** — a pre-existing in-process `sql_variant` divergence surfaced (not introduced) by wire parameters.
+  A `sql_variant` carrying an inner value implicitly converted to a narrower sink (e.g. `insert … (int_col) values (@variant_int)`) is accepted by the simulator's engine-level variant coercion where **real raises Msg 257** — a in-process `sql_variant` divergence surfaced (not introduced) by wire parameters.
   Oracles: `UdtRpcParameterTests`, `SqlVariantRpcParameterTests`, `SqlVariantWireTests` (Tests.SqlClient), using the real `Microsoft.SqlServer.Types` package for typed `SqlGeography` / `SqlHierarchyId` construction (works headless on Linux; `SqlGeometry.STGeomFromText` does **not** — geometry is built from raw WKB bytes).
 
 ## Transaction Manager requests
 
 `SqlTransaction` uses TM requests (packet type 14), not SQL text.
 Begin (5) maps the wire isolation byte onto `BeginTransaction(IsolationLevel)` and answers ENVCHANGE type 8 carrying an opaque 8-byte transaction descriptor (a per-session counter; the client echoes it in ALL_HEADERS, which the listener ignores — the session connection *is* the transaction scope).
-Commit (7) / rollback (8) map to the transaction object and answer ENVCHANGE 9 / 10 **carrying the ending transaction's 8-byte descriptor in the old-value field** (begin puts the new descriptor in the new-value field) — captured byte-for-byte against SQL Server 2025 (2026-07-23). The old stunted 3-byte form (type + two empty values) desynced ODBC Driver 18's manual-commit mode ("Protocol error in TDS stream"), which pairs the descriptor across begin/end; SqlClient tolerated it (its transaction tests never caught the gap).
+Commit (7) / rollback (8) map to the transaction object and answer ENVCHANGE 9 / 10 **carrying the ending transaction's 8-byte descriptor in the old-value field** (begin puts the new descriptor in the new-value field) — captured byte-for-byte against SQL Server 2025. The old stunted 3-byte form (type + two empty values) desynced ODBC Driver 18's manual-commit mode ("Protocol error in TDS stream"), which pairs the descriptor across begin/end; SqlClient tolerated it (its transaction tests never caught the gap).
 **`fBeginXact` (bit 0 of the trailing flags byte on commit / rollback)**: the client asks the server to open a fresh transaction immediately after ending the current one — how ODBC's autocommit-off mode holds `@@TRANCOUNT` at 1 continuously (probe-confirmed; `IMPLICIT_TRANSACTIONS` stays off). The commit / rollback response then emits the end ENVCHANGE, a begin ENVCHANGE for the follow-on transaction (new descriptor), then DONE. Native DB-Library / ODBC drivers and SQLAlchemy (via pyodbc) depend on this; SqlClient begins each transaction explicitly, so it never sets the flag.
 `SqlTransaction.Save(name)` (9) and `Rollback(name)` route through SQL text (`SAVE TRANSACTION` / `ROLLBACK TRANSACTION [name]`, bracket-escaped); rollback-to-savepoint keeps the transaction alive so no transaction ENVCHANGE is emitted (fBeginXact isn't meaningful there).
 **Names in TM requests are B_VARBYTE** — the length prefix counts UTF-16 *bytes*, unlike the char-counted B_VARCHAR elsewhere (SqlClient writes `name.Length * 2`); misreading it as B_VARCHAR overruns the payload on every savepoint call.
@@ -321,7 +321,7 @@ Specifics:
   The FROM-less case matters because native tedious (and `SELECT 1`-style constant probes generally) reads the token name: without it a bare literal projected NOT NULL wrongly carried the N-variant (`select 1` → `IntN` not `Int` — surfaced by the tedious/Node driver, whose metadata exposes the token, where pyodbc / pymssql / JDBC's coarse type codes hid it).
   (The `usUpdateable` / `fComputed` bits real also sets on computed columns are not modeled — the sim writes a constant `0x08`/`0x09` flags byte; only fNullable is load-bearing and only fNullable is read by the standard client nullable accessor.)
   **The flag changes both the type token and the value encoding**: with fNullable=0 a fixed-width column carries the **FIXEDLENTYPE token** (INT1 `0x30` / INT2 `0x34` / INT4 `0x38` / INT8 `0x7F` / BIT `0x32` / FLT4 `0x3B` / FLT8 `0x3E` / MONEY4 `0x7A` / MONEY `0x3C` / DATETIM4 `0x3A` / DATETIME `0x3D` — a single byte, no max-length byte) rather than the nullable N-variant, and its ROW value is written raw at the declared width — no length prefix (`WriteTypeInfo(…, notNull)` via `TryFixedLenToken`, paired with `WriteRawFixedValue`).
-  This matches real byte-for-byte (probe-captured against SQL Server 2025, 2026-07-22): the old always-N-variant form (`0x26` INTN, etc. with a max-length byte) desynced the native ODBC driver, which follows the TDS spec and reads a `0x26` value as length-prefixed.
+  This matches real byte-for-byte (probe-captured against SQL Server 2025): the old always-N-variant form (`0x26` INTN, etc. with a max-length byte) desynced the native ODBC driver, which follows the TDS spec and reads a `0x26` value as length-prefixed.
   The other BYTELEN families (date / time / datetime2 / datetimeoffset, DECIMALN, GUIDN) have no FIXEDLENTYPE token, so they keep the N-variant + prefix regardless of the flag, as do all USHORTLEN / PLP forms.
   Load-bearing for DacFx bacpac export: the BCP data-file layout drops per-value prefixes on fixed-width NOT NULL columns per the *wire's* fNullable while the bacpac loader decodes per *model.xml* nullability — disagreement misaligns every exported row (`ColumnNullabilityWireTests`, `FixedLenTokenWireTests`).
 
@@ -342,18 +342,18 @@ Specifics:
   SqlClient surfaces the column as `SqlDbType.Udt`; with `Microsoft.SqlServer.Types` absent (the DacFx case) `GetValue` throws but `GetSqlBytes`/`GetBytes` return the raw bytes.
   The value is PLP (like `varbinary(max)`) carrying the CLR-UDT serialization synthesized from the stored WKT by `SpatialWkbEncoder` — see [`spatial.md`](spatial.md).
   Removing these from the reject list is what unblocked DacFx bacpac export of WWI's four `geography` columns.
-- **`hierarchyid`** (UDTTYPE `0xF0`): the same UDT arm as spatial but with hierarchyid's fixed max byte size **892** (not the `0xFFFF` max sentinel — probe-confirmed 2026-07-16 via `GetSchemaTable` `ColumnSize`), schema `sys`, type `hierarchyid`, and the `Microsoft.SqlServer.Types.SqlHierarchyId, …, Version=11.0.0.0, …, PublicKeyToken=89845dcd8080cc91` AQN.
+- **`hierarchyid`** (UDTTYPE `0xF0`): the same UDT arm as spatial but with hierarchyid's fixed max byte size **892** (not the `0xFFFF` max sentinel — probe-confirmed via `GetSchemaTable` `ColumnSize`), schema `sys`, type `hierarchyid`, and the `Microsoft.SqlServer.Types.SqlHierarchyId, …, Version=11.0.0.0, …, PublicKeyToken=89845dcd8080cc91` AQN.
   Value is PLP carrying the value's canonical OrdPath bytes verbatim (`SqlValue.AsHierarchyIdBytes`, zero-copy — hierarchyid stores that byte form; see [`hierarchyid.md`](hierarchyid.md)); NULL is the PLP `0xFF…` sentinel.
   SqlClient surfaces it as `SqlDbType.Udt`; DacFx pulls raw bytes via `GetSqlBytes`/`GetBytes`.
   Removing it from the reject list unblocked DacFx export of AW's `OrganizationNode` / `DocumentNode`.
   Oracle: `HierarchyIdWireTests`.
 - **`text` / `ntext` / `image`** (legacy in-band textptr form) — see [Legacy text / ntext / image](#legacy-text--ntext--image-wire-forms) below.
-- Every modeled result-column type now has a wire encoding; an unmodeled one would surface as `WriteTypeInfo`'s `NotSupportedException` → ERROR 50000.
+- Every modeled result-column type has a wire encoding; an unmodeled one would surface as `WriteTypeInfo`'s `NotSupportedException` → ERROR 50000.
 
 ## Legacy text / ntext / image wire forms
 
 The three deprecated large-object types stream over the wire in their pre-PLP in-band form.
-Wire shapes probe-captured against SQL Server 2025 (17.0.4065.4) through a cleartext tee proxy — `Encrypt=False` leaves post-login tokens in the clear — 2026-07-19.
+Wire shapes probe-captured against SQL Server 2025 (17.0.4065.4) through a cleartext tee proxy — `Encrypt=False` leaves post-login tokens in the clear —.
 `TdsTypeCodec` emits the result side; `TdsRpc.DecodeImage` / `DecodeLegacyLob` read the parameter side.
 
 **COLMETADATA TYPE_INFO.**
@@ -376,14 +376,14 @@ A value larger than one packet is written as one contiguous data block — the t
 Both direct-proc RPC and `sp_executesql` bind identically.
 Output-direction legacy-LOB parameters aren't a real SQL Server feature and don't arrive.
 
-**`SET TEXTSIZE` truncates at wire egress** (shipped 2026-07-19): the session byte cap clips `text`/`ntext`/`image` and the MAX-typed trio in result columns and output parameters — the truncation rides the shared client-boundary cursor (`SimulatedQueryResult.CreateClientCursor` → `TextSizeCursor`), so the TDS row writer inherits it; see [`scalars.md`](scalars.md) for the full semantics.
+**`SET TEXTSIZE` truncates at wire egress**: the session byte cap clips `text`/`ntext`/`image` and the MAX-typed trio in result columns and output parameters — the truncation rides the shared client-boundary cursor (`SimulatedQueryResult.CreateClientCursor` → `TextSizeCursor`), so the TDS row writer inherits it; see [`scalars.md`](scalars.md) for the full semantics.
 **`SqlBulkCopy` into a `text`/`ntext`/`image` column** decodes (see [Bulk load](#bulk-load-sqlbulkcopy) step 3).
 Oracles: `LegacyLobWireTests`, `BulkCopyTests.LegacyLobColumns_TextNtextImage_InsertAndRoundTrip`, `TextSizeWireTests`.
 
 ## Collation wire structure
 
 COLMETADATA's 5 bytes = packed uint (LCID bits 0–19, flags 20–27, version nibble 28–31, little-endian) + sortId byte.
-Derived generatively per collation (cached by interned reference), validated against a full 5540-name probe of the live reference (2026-07-13):
+Derived generatively per collation (cached by interned reference), validated against a full 5540-name probe of the live reference:
 
 - Flags from name tokens: CI→bit20, AI→bit21, absent WS→bit22 (ignore-width), absent KS→bit23 (ignore-kana), BIN→bit24, BIN2→bit25.
   **Width=22/Kana=23 is load-bearing** for KS/WS-only names and contradicts MS-TDS's field-declaration order — the spec's own assembly line and SqlClient's constants agree with 22/23, probe-confirmed via `_CI_AS_KS` (0x05) / `_CI_AS_WS` (0x09).
@@ -423,7 +423,7 @@ A real build number is load-bearing for SSMS's per-build client feature gates (A
 
 A client sends a TDS attention (packet type 6) when `SqlCommand.Cancel()` is called or `CommandTimeout` expires mid-execution/mid-drain, then waits for the server to acknowledge with a DONE carrying the `DONE_ATTN` flag before treating the connection as reusable.
 The server emits **no error token** — SqlClient manufactures the surfaced exception from its own state (Msg -2 "Execution Timeout Expired" for a timeout; Msg 0 "Operation cancelled by user" for an explicit cancel), so the endpoint's whole job is to notice the attention, stop, and ack.
-Semantics probed against SQL Server 2025 (2026-07-18).
+Semantics probed against SQL Server 2025.
 
 **Noticing it — carry-forward concurrent read.**
 The batch loop keeps exactly one inbound `ReadMessageAsync` in flight at all times.
@@ -446,7 +446,7 @@ Batch-scoped variables go with the ended batch either way; connection-scoped tem
 `SimulatedDbCommand.Cancel()` routes to the same machinery, so an in-process `Cancel()` from another thread interrupts a running `WAITFOR` / long batch identically (the reader then drains already-materialized rows, nothing left in flight — the documented in-process reaction bound).
 Oracle: `AttentionTests` (Tests.SqlClient), `WaitForDelayTests.Delay_InterruptedByInProcessCancel_ReturnsPromptly` (Tests).
 
-**Partial response packets don't flush early (probed 2026-07-20).**
+**Partial response packets don't flush early (probed).**
 The server accumulates response tokens into a TDS packet and sends it only when the packet fills or the response ends — real SQL Server behaves identically: for `select @p; waitfor delay '00:00:30'` the one-row first result set sits in the send buffer for the full 30 seconds and the client's first `ReadAsync` blocks until the batch ends, on real and sim alike.
 Two consequences: a client can't observe an early small result set to sequence a cancel after (the cancel must land while the client read is parked — `AttentionTests` retries via `CancelUntilComplete` for exactly this reason), and the attention path is the only way a blocked mid-batch client wakes early.
 A `SqlCommand.Cancel()` racing execution *start* is different: a cancel before the batch begins executing is a documented client-side no-op, and one landing inside `Execute*Async`'s setup surfaces SqlClient's own `InvalidOperationException` instead of the cancel `SqlException` — client-side races independent of the server, so tests never fire a single timer-based cancel.
@@ -455,7 +455,7 @@ A `SqlCommand.Cancel()` racing execution *start* is different: a cancel before t
 
 `MultipleActiveResultSets=True` lets a client run a second command while a reader is still open — the EF-lazy-load shape (iterate a parent query, touch a navigation per row).
 Without it SqlClient rejects the overlap client-side ("There is already an open DataReader…").
-Negotiation, SMP framing, concurrency model, and probed semantics (SQL Server 2025 + SqlClient 6.0.2 / 7.0.2, 2026-07-18) below.
+Negotiation, SMP framing, concurrency model, and probed semantics (SQL Server 2025 + SqlClient 6.0.2 / 7.0.2 below.
 
 **Negotiation (strictly additive).**
 The prelogin MARS option is acked `1` **only when the client requested `1`** (`ParsePreloginMars`); a client that doesn't ask, or asks `0`, gets `0` and a byte-identical non-MARS session.
@@ -465,7 +465,7 @@ Only *post-login* TDS messages are SMP-wrapped.
 **SMP framing ([MC-SMP]).**
 Every post-login TDS packet rides a 16-byte SMP header: SMID `0x53`, FLAGS (SYN `0x01` / ACK `0x02` / FIN `0x04` / DATA `0x08`), SID (`ushort`), LENGTH (`uint`, header-inclusive), SEQNUM (`uint`), WNDW (`uint`) — all little-endian.
 `SmpMultiplexer` owns the socket: one read loop demuxes frames into per-session `SmpSession`s, each exposing an `SmpSessionStream` (inbound via a `System.IO.Pipelines.Pipe`, outbound wrapped into DATA frames) that a per-session `TdsPacketTransport` rides — so the existing TDS batch loop (`RunMarsSessionAsync`) is unaware it is multiplexed.
-Frame flow **ground-truthed against the real SQL Server 2025** (captured cleartext through a tee proxy: `Encrypt=False` encrypts only the login packet, leaving post-login SMP frames in the clear; 2026-07-18) — see the server-to-client rules below.
+Frame flow **ground-truthed against the real SQL Server 2025** (captured cleartext through a tee proxy: `Encrypt=False` encrypts only the login packet, leaving post-login SMP frames in the clear) — see the server-to-client rules below.
 
 **Native vs managed SNI strictness (load-bearing).**
 On Linux, SqlClient uses managed SNI, which is lenient about SMUX; on Windows it uses the closed-source **native SNI**, which validates SMUX strictly and drops the physical connection ("Failed to establish a MARS session … Physical connection is not usable", **SMux provider error 19**) on frames the real server never sends.

@@ -16,9 +16,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <c>varchar</c> when the compressed payload was textual (WWI's
 /// <c>Website.VehicleTemperatures</c> does <c>CAST(DECOMPRESS(…) AS nvarchar(1000))</c>).
 /// Invalid gzip stream raises Msg 9803 in real SQL Server; the simulator
-/// surfaces the underlying <see cref="InvalidDataException"/> from
-/// <see cref="GZipStream"/> as a <see cref="SimulatedSqlException"/>
-/// with the same number for fidelity.
+/// catches the underlying <see cref="InvalidDataException"/> from
+/// <see cref="GZipStream"/> and returns NULL instead (see the Run body).
 /// </remarks>
 internal sealed class Decompress(ParserContext context) : Expression
 {

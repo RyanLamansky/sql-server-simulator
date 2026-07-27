@@ -29,7 +29,7 @@ Numeric/boolean `newValue` stays JSON-typed (`{"n":42}` not `{"n":"42"}`).
 `JSON_OBJECT([key : value [, ...]] [null_clause])` / `JSON_ARRAY([value [, ...]] [null_clause])` return `nvarchar(max)`.
 Probe-confirmed against SQL Server 2025.
 The default null clause is **builder-specific**: `JSON_OBJECT` defaults to **NULL ON NULL** (NULL values emit JSON `null`), while `JSON_ARRAY` defaults to **ABSENT ON NULL** (NULL elements omitted).
-Microsoft documents the `JSON_OBJECT` default verbatim ("The default setting for this option is `NULL ON NULL`"); note it is the *opposite* of the `FOR JSON` clause, which omits NULL properties unless `INCLUDE_NULL_VALUES` is given — an earlier probe note had `JSON_OBJECT` wrong (claimed ABSENT) by conflating the two surfaces, fixed 2026-05-27.
+Microsoft documents the `JSON_OBJECT` default verbatim ("The default setting for this option is `NULL ON NULL`"); note it is the *opposite* of the `FOR JSON` clause, which omits NULL properties unless `INCLUDE_NULL_VALUES` is given — an earlier probe note had `JSON_OBJECT` wrong (claimed ABSENT) by conflating the two surfaces, fixed.
 The trailing keyword pair (`NULL ON NULL` / `ABSENT ON NULL`) is matched as `ReservedKeyword`s (`Null` + `On` + `Null` / `Absent` falls through `UnquotedString` since `ABSENT` isn't reserved).
 Empty argument list yields `{}` / `[]`.
 Duplicate keys preserved (no dedup, matching real SQL Server).

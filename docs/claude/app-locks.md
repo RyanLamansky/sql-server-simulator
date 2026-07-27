@@ -1,8 +1,8 @@
 # Application locks
 
 `sp_getapplock` / `sp_releaseapplock` / `APPLOCK_MODE` / `APPLOCK_TEST`: cooperative named locks over the shared `LockManager`.
-Every behavior below was probe-confirmed against SQL Server 2025 on 2026-07-10.
-This surface is what makes **EF Core 9/10's `Database.Migrate()` work end-to-end** — the migrator unconditionally wraps its history-check + apply sequence in `sp_getapplock @Resource = '__EFMigrationsLock', @LockOwner = 'Session', @LockMode = 'Exclusive'` (emitted as literal text, return value read back through `EXEC @result = …; SELECT @result`), and that was the single missing piece blocking `Migrate()` before this shipped.
+Every behavior below was probe-confirmed against SQL Server 2025.
+This surface is what makes **EF Core 9/10's `Database.Migrate()` work end-to-end** — the migrator unconditionally wraps its history-check + apply sequence in `sp_getapplock @Resource = '__EFMigrationsLock', @LockOwner = 'Session', @LockMode = 'Exclusive'` (emitted as literal text, return value read back through `EXEC @result = …; SELECT @result`), without this surface, `Migrate()` cannot complete.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ This surface is what makes **EF Core 9/10's `Database.Migrate()` work end-to-end
 - **Transaction-owned acquires ride `SimulatedDbTransaction.HeldLocks`** (the generic tx-scoped release list) for their manager release at COMMIT / ROLLBACK; `TransactionAppLocks` clears alongside in `ReleaseAllLocks`.
   An explicit `sp_releaseapplock` retires one matching `HeldLocks` entry so transaction end doesn't double-release.
   Session-owned locks release at `Close()` / `Dispose()` (`ReleaseSessionAppLocks`, idempotent).
-- **`LockManager.TryAcquire`** is the non-throwing acquire core added for this feature (the throwing `Acquire` now wraps it): outcomes Granted / GrantedAfterWait / TimedOut / Deadlocked map to sp_getapplock's return codes.
+- **`LockManager.TryAcquire`** is the non-throwing acquire core added for this feature (the throwing `Acquire` wraps it): outcomes Granted / GrantedAfterWait / TimedOut / Deadlocked map to sp_getapplock's return codes.
   It reuses the full existing machinery — compatibility matrix, re-entrance counting, same-thread + cross-thread deadlock detection, gate waits.
 - Modes map 1:1 onto existing `LockMode` members: Shared, Update, IntentShared, IntentExclusive, Exclusive.
   Mode and owner strings parse case-insensitively (probe: `'exclusive'` grants and reports `Exclusive`).
@@ -58,4 +58,4 @@ The functions differ from the procs on the same inputs: invalid mode string → 
 - The `resource_description` hash is FNV-1a-32 over the name — the shape matches, the hash value won't byte-match real SQL Server's undocumented hash.
 - No principal-membership gate: any existing database principal passes `@DbPrincipal`; real SQL Server additionally requires the caller to be a member of it.
 - After a mode conversion, `APPLOCK_MODE` between the two releases reports whichever converted-pair hold remains (strongest-first release order); the real server's intermediate report wasn't probed.
-- The shipped `dm_tran_locks` column subset has no `request_owner_type` column (pre-existing seven-column shape), so SESSION-vs-TRANSACTION ownership isn't visible there.
+- The shipped `dm_tran_locks` column subset has no `request_owner_type` column (seven-column shape), so SESSION-vs-TRANSACTION ownership isn't visible there.

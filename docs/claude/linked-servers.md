@@ -53,7 +53,7 @@ Divergences:
   Not special-cased.
 - **Writes** (`INSERT`/`UPDATE`/`DELETE OPENQUERY(...)`) aren't modeled — consistent with the four-part-name cross-server-write deferral below.
 
-## What's shipped
+## What's modeled
 
 - **Read paths**: SELECT, JOIN (INNER / LEFT / RIGHT / FULL / CROSS / APPLY) across a four-part reference.
   Correlated subqueries re-execute the remote query per outer row via the existing lateral-plan re-execution pattern.
@@ -61,7 +61,7 @@ Divergences:
 - **`sys.servers`**: local instance as row 0 (`is_linked = 0`, name `"SIMULATED"`), one row per active linked server with the `srvproduct` / `provider` / `datasrc` from `sp_addlinkedserver`.
   Load-bearing 6-column subset (`server_id`, `name`, `product`, `provider`, `data_source`, `is_linked`) of real SQL Server's ~26-column shape.
 
-## What's not shipped
+## Not modeled yet
 
 - **Writes** through a four-part name (INSERT / UPDATE / DELETE / MERGE targeting `srv.db.schema.t`) raise `NotSupportedException` via [`BatchContext.RejectCrossDatabaseMutation`](../../src/SqlServerSimulator/Parser/BatchContext.cs).
   Lock-manager and undo-log coordination across `Simulation` boundaries aren't modeled — parallels the existing `BEGIN DISTRIBUTED TRANSACTION` rejection.
@@ -71,7 +71,7 @@ Divergences:
 - **Predicate / projection pushdown**: every four-part-name reference pulls the full remote table.
   Correct but slow; matches the agreed initial scope (no use case demands optimization yet).
 - **LOB columns**: SELECT-projection output uses the type-only `RowEncoder.EncodeRow` overload (no LOB store), so values stay inline.
-  A `varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)` payload large enough to overflow the 65535-byte var-section cap would raise during encoding on the remote — pre-existing simulator behavior, just rarely hit.
+  A `varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)` payload large enough to overflow the 65535-byte var-section cap would raise during encoding on the remote — simulator behavior, just rarely hit.
   No round-trip-specific gap.
 - **Unknown linked-server leading segment**: surfaces as Msg 208 (the simulator's existing default for missing objects), not real SQL Server's Msg 7202 ("Could not find server '<X>' in sys.servers").
   Different error code; same end state.

@@ -2,7 +2,7 @@
 
 `CREATE SEQUENCE [schema.]name [AS <type>] [START WITH n] [INCREMENT BY n] [MINVALUE n | NO MINVALUE] [MAXVALUE n | NO MAXVALUE] [CYCLE | NO CYCLE] [CACHE n | NO CACHE]`, dropped via `DROP SEQUENCE [IF EXISTS]`, mutated via `ALTER SEQUENCE`, consumed by `NEXT VALUE FOR [schema.]seqname [OVER (ORDER BY ...)]`.
 Lives in its owning `Schema`'s `Sequences` dict; shares the object namespace with tables / views / functions / procs (Msg 2714 on cross-kind collision).
-Probed against SQL Server 2025 (2026-05-12).
+Probed against SQL Server 2025.
 
 ## Type, start, range, cycle
 
@@ -59,7 +59,7 @@ The other clauses are covered.
 
 ## `sys.sequences` catalog view
 
-Shipped columns: `name`, `object_id`, `schema_id`, `principal_id` (always NULL — ownership follows the schema), `create_date`, `modify_date` (both the ALTER-preserving `SchemaObject` timestamps), `start_value`, `increment`, `minimum_value`, `maximum_value`, `is_cycling`, `is_cached` (always `true`), `cache_size` (always NULL), `current_value`, `last_used_value`, `system_type_id`, `user_type_id`, `is_exhausted`, `precision tinyint`, `scale tinyint` (nullable).
+Columns: `name`, `object_id`, `schema_id`, `principal_id` (always NULL — ownership follows the schema), `create_date`, `modify_date` (both the ALTER-preserving `SchemaObject` timestamps), `start_value`, `increment`, `minimum_value`, `maximum_value`, `is_cycling`, `is_cached` (always `true`), `cache_size` (always NULL), `current_value`, `last_used_value`, `system_type_id`, `user_type_id`, `is_exhausted`, `precision tinyint`, `scale tinyint` (nullable).
 **`last_used_value`** is a genuine `sql_variant` (the one value column that isn't bigint-substituted): NULL until the first `NEXT VALUE FOR` in the process, then the last emitted value wrapped in the sequence's declared type, and reset to NULL by `ALTER SEQUENCE … RESTART`.
 Backed by the nullable `Sequence.LastUsedValue` (set to the emitted value in `Advance`), distinct from `current_value` (which tracks the *next* value to emit).
 Probe-confirmed: a fresh sequence reports `last_used_value` NULL even though `current_value` is the start value, and a bacpac-restored sequence reports NULL here (it's per-instance runtime state, not persisted) even when `current_value` is advanced.

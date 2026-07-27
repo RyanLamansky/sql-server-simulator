@@ -1,7 +1,7 @@
 # Table-valued parameters (`CREATE TYPE … AS TABLE`)
 
 User-defined table types + their TVP / `DECLARE @t MyType` consumers.
-Probed against SQL Server 2025 (2026-05-12).
+Probed against SQL Server 2025.
 Shares the column-list parser with `CREATE TABLE` / `DECLARE @t TABLE` (`Simulation.ParseColumnList` with an `isTableType` flag).
 
 ## Storage scope
@@ -147,7 +147,7 @@ The TDS network endpoint decodes a `SqlDbType.Structured` parameter (RPC TYPE_IN
 Wire form, sources, and error parity live in [`tds-endpoint.md`](tds-endpoint.md#tvp-parameters-sqldbtypestructured).
 
 Constraint enforcement is shared by both entry points via `Simulation.InsertTableValuedParameterRow`: each row evaluates computed columns then enforces NOT NULL (Msg 515), CHECK (Msg 547), PRIMARY KEY / UNIQUE (Msg 2627), and UNIQUE indexes (Msg 2601) against the rows inserted so far before the heap write.
-This closed a pre-existing gap — the structured path previously did a direct `Heap.Insert` that skipped every constraint (probe-confirmed real SQL Server raises these against TVP rows).
+The structured path routes through the constraint-enforcing insert rather than a direct `Heap.Insert` (probe-confirmed real SQL Server raises these against TVP rows).
 
 ## Catalog views
 
@@ -169,7 +169,7 @@ The common idiom `IF type_id('dbo.MyType') IS NOT NULL DROP TYPE dbo.MyType` wor
 
 ## Fidelity gaps remaining
 
-- **CREATE-time body validation** — Msg 10700 against a TVP parameter surfaces at first EXEC, not at CREATE PROC (pre-existing gap with all stored-proc bodies).
+- **CREATE-time body validation** — Msg 10700 against a TVP parameter surfaces at first EXEC, not at CREATE PROC (gap with all stored-proc bodies).
   Real SQL Server validates body references at CREATE time.
 - **Inline non-unique `INDEX` clause** — Msg 102 in v1; real SQL Server accepts it.
   Adding it via the shared parser would close the gap for both `DECLARE @t TABLE` and `CREATE TYPE`.
@@ -199,4 +199,3 @@ The common idiom `IF type_id('dbo.MyType') IS NOT NULL DROP TYPE dbo.MyType` wor
   Constructor ordering matters.
 - **The ADO.NET concrete-pipeline classes (`SimulatedDbConnection` / `SimulatedDbCommand` / `SimulatedDbParameter` / `SimulatedDbParameterCollection` / `SimulatedDbDataReader` / `SimulatedDbTransaction`) are all public** with `new`-shadowed strongly-typed return shapes (`CreateCommand` → `SimulatedDbCommand`, `CreateParameter` → `SimulatedDbParameter`, `Parameters` → `SimulatedDbParameterCollection`, `ExecuteReader` → `SimulatedDbDataReader`, `BeginTransaction` → `SimulatedDbTransaction`).
   `TypeName` rides as an ordinary `SimulatedDbParameter` property; consumers never need a downcast when the variables are typed concretely.
-  Previously `TypeName` was a C# 14 `extension(DbParameter)` block over a process-wide `ConditionalWeakTable` — the publicization replaced it.

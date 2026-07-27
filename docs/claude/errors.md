@@ -1,7 +1,7 @@
 # Error diagnostics: line number, server, procedure
 
 How `SimulatedSqlException` / `SimulatedError` populate the three diagnostic fields real SqlClient surfaces on every error — `LineNumber`, `Server`, `Procedure` — plus the coupled `ERROR_LINE()` / `ERROR_PROCEDURE()` scalars and the TDS ERROR / INFO token fields.
-All semantics below are probe-confirmed against SQL Server 2025 (2026-07-18).
+All semantics below are probe-confirmed against SQL Server 2025.
 
 ## Probed matrix
 
@@ -55,7 +55,7 @@ The static exception factories (`SimulatedSqlException.*Errors.cs`) can't reach 
 
 - `BatchContext.LineOffset` / `ErrorProcedureName` — per-body-dispatch context, set on the child batch at `Simulation.InvokeProcedure`.
 - `Schemas.Procedure.BodyLineOffset` — computed once at CREATE (`Simulation.CountNewlines` over `[statement-start, body-start)`).
-- `StatementContext.StartLine` — the per-statement frame's start line, already captured at dispatch entry (unchanged; now also the exception's baseLine for runtime/bind errors).
+- `StatementContext.StartLine` — the per-statement frame's start line, already captured at dispatch entry (also the exception's baseLine for runtime/bind errors).
 
 ## Divergences / residuals
 

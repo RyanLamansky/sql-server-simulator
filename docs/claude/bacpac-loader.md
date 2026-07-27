@@ -29,7 +29,7 @@ It's a sealed `record class` so callers can `options with { … }`; passing the 
 `Simulation`'s ctor leaves `Databases` empty.
 `SimulatedDbConnection`'s ctor resolves `CurrentDatabase` in three tiers: (1) `"simulated"` if present; (2) lazy-create `"simulated"` when `Databases` is empty (so `new Simulation().ExecuteScalar(...)` still just works); (3) the alphabetically-first existing database otherwise.
 The lazy-create makes `new Simulation().ImportBacpac(stream, out _)` succeed against a fresh simulation — the stream-default `"simulated"` name has nothing to collide with until the first connection materializes the seed.
-Once a connection has opened (or an `ImportBacpac` has landed a database named `"simulated"`), a subsequent default-name stream import collides and throws — correct create-only behavior.
+Once a connection has opened (or an `ImportBacpac` has imported a database named `"simulated"`), a subsequent default-name stream import collides and throws — correct create-only behavior.
 `sys.databases` iterates every hosted database regardless of which one a given connection points at.
 `USE <db>` switches the session's current database (Msg 911 on miss); 3-part names route reads (SELECT / JOIN / catalog views) across databases.
 Cross-DB writes raise `NotSupportedException` — issue `USE` first.
@@ -117,7 +117,7 @@ Tables *without* a persisted computed column keep the untouched fast path — no
 
 `EmitTable` emits computed columns **inline in CREATE TABLE at their model ordinal** (`col AS (expr)`), so `sys.columns.column_id` matches the source database.
 This matters for system-versioned pairs: DacFx re-export orders `model.xml` columns by `column_id`, and re-import into real SQL Server fails with **Msg 13524** if the base table and its history sibling disagree on ordinals.
-WWI's `Application.People` (computed `SearchName` at 4, `OtherLanguages` at 18) and its `People_Archive` sibling (all simple columns, true order) now share identical ordinals; all 17 WWI temporal pairs align.
+WWI's `Application.People` (computed `SearchName` at 4, `OtherLanguages` at 18) and its `People_Archive` sibling (all simple columns, true order) share identical ordinals; all 17 WWI temporal pairs align.
 
 A computed expression that forward-references a user function can't resolve in the CREATE TABLE column-list parser (the UDF only lands in phase 7).
 `EmitTable` runs a **two-attempt** strategy per table: build the full DDL with computed columns inline and try it; on any failure *when the table has computed columns*, re-create with computed columns stripped and register the table in a `deferredComputedTables` set that phase 8 consumes (it processes only those tables).
@@ -151,7 +151,7 @@ The remaining four families:
   A primary XML index allocates the node-table object id at CREATE; see [`xml.md`](xml.md).
 - **`SqlFullTextCatalog`** (phase 1) → `CREATE FULLTEXT CATALOG … WITH ACCENT_SENSITIVITY = {ON|OFF} [AS DEFAULT] AUTHORIZATION owner`.
 - **`SqlFullTextIndex`** (phase 8) → `CREATE FULLTEXT INDEX ON t (col [TYPE COLUMN c] LANGUAGE n, …) KEY INDEX key ON catalog`.
-  Export needed `sys.fulltext_languages` populated (DacFx INNER JOINs it by `language_id` to name the column's language — an empty view NREs the column-specifier populator) and `sys.fulltext_indexes.data_space_id` = 1 (PRIMARY) + `stoplist_id` = 0 (system stoplist), both previously NULL — DacFx INNER JOINs `sys.data_spaces` on the former (NULL drops the parent index element, orphaning its column specifiers → NRE) and reads the latter to decide `DoUseSystemStopList` vs `IsStopListOff`.
+  Export needed `sys.fulltext_languages` populated (DacFx INNER JOINs it by `language_id` to name the column's language — an empty view NREs the column-specifier populator) and `sys.fulltext_indexes.data_space_id` = 1 (PRIMARY) + `stoplist_id` = 0 (system stoplist), both of which DacFx INNER JOINs `sys.data_spaces` on the former (NULL drops the parent index element, orphaning its column specifiers → NRE) and reads the latter to decide `DoUseSystemStopList` vs `IsStopListOff`.
   See [`full-text.md`](full-text.md).
 - **`SqlFilegroup`** (phase 1) → registers the (non-PRIMARY) filegroup on `Database.Filegroups` so `sys.filegroups` / `sys.data_spaces` surface it and DacFx re-emits the standalone element.
   No physical file / placement model — every heap lives on PRIMARY, so no table/index `Filegroup` relationships are emitted (the model-diff ignores relationships anyway).
@@ -172,7 +172,7 @@ CI runs against synthetic builders in seconds.
 5/5 schemas, 71/71 tables, 90/90 FKs, 89/89 CHECKs, 152/152 DEFAULTs, 89/95 indexes, 11/20 views, 10/10 procs, 11/11 functions, 10/10 DML triggers, 1/1 DDL trigger, 538/538 extended properties, 8/8 XML indexes, 1/1 full-text catalog, 3/3 full-text indexes, 2/2 indexed-view `SqlIndex` elements.
 **Import skips are 0.**
 The DacFx-export element gap vs the Microsoft original is 0 missing; property diffs are 0.
-One pre-existing divergence surfaces as an "extra" element: AW's system-named UNIQUE constraint on `Production.Document.rowguid` is scripted anonymously (name in an annotation) by DacFx normally, but *named* once the table has a full-text index — and the simulator's auto-generated constraint name (FNV-based) differs from real's object-id-derived one (a documented quirk), so the named form doesn't byte-match.
+One divergence surfaces as an "extra" element: AW's system-named UNIQUE constraint on `Production.Document.rowguid` is scripted anonymously (name in an annotation) by DacFx normally, but *named* once the table has a full-text index — and the simulator's auto-generated constraint name (FNV-based) differs from real's object-id-derived one (a documented quirk), so the named form doesn't byte-match.
 Doesn't block real import (verified: aw-export re-imports into a live SQL Server 2025, both view indexes present at index_id 1 / CLUSTERED / unique).
 
 **WideWorldImporters-Standard** — end-to-end clean.

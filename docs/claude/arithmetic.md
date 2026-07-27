@@ -24,7 +24,7 @@ Every other operator errors, matching SQL Server: `- % & | ^` → **Msg 402** (`
 
 ## Integer arithmetic overflow
 SQL Server keeps the narrow integer type through arithmetic instead of widening, so a result outside the operand width raises **Msg 8115 St 2** (`"Arithmetic overflow error converting expression to data type {type}."`) rather than wrapping.
-Probe-confirmed 2026-07-24 across `+ - * / %`, unary minus and `ABS`, for `tinyint` / `smallint` / `int` / `bigint` alike — `cast(255 as tinyint) + cast(1 as tinyint)` raises naming `tinyint`, not `int`.
+Probe-confirmed across `+ - * / %`, unary minus and `ABS`, for `tinyint` / `smallint` / `int` / `bigint` alike — `cast(255 as tinyint) + cast(1 as tinyint)` raises naming `tinyint`, not `int`.
 A mixed-width pair promotes first and so doesn't overflow at all: `int + bigint` → bigint, `smallint + int` → int.
 
 `PureIntegerArithmetic` computes in `long` and narrows back with `checked`, funnelling `OverflowException` into the Msg 8115 factory.
@@ -34,7 +34,7 @@ Bitwise `& | ^` can't leave the operand width, so they never trip it.
 `<type minimum> / -1` **and `<type minimum> % -1`** both overflow: SQL Server forms the quotient for `%` too, even though the mathematical remainder is 0 (probe-confirmed for smallint / int / bigint; `-5 % -1` and `<min> % 1` compute normally).
 The `long`-width computation hides the narrow cases from the checked narrowing — the remainder is in range — so `PureIntegerArithmetic` guards them explicitly via `SignedMinimum`.
 
-Aggregates were already covered before this landed: `SumAggregator.LongSum.Wrap` and `NumericAggregator` raise the same 8115, so `SUM(int)` past int range errors rather than wrapping — the realistic way to hit this, and the reason the per-row wrap was a wrong-answer divergence rather than a cosmetic one.
+Aggregates are covered by the same rule: `SumAggregator.LongSum.Wrap` and `NumericAggregator` raise the same 8115, so `SUM(int)` past int range errors rather than wrapping — the realistic way to hit this, and the reason the per-row wrap was a wrong-answer divergence rather than a cosmetic one.
 The checked path's cost is below measurement noise (300k-row arithmetic scan: 94–140 ms run-to-run on checked and unchecked builds alike, minima 95.3 vs 94.2 ms).
 Oracle: `IntegerArithmeticOverflowTests`.
 
@@ -81,7 +81,7 @@ Unary minus is a dedicated `Negate` node, not `0 - x` — negating through a sub
 The *value* is still computed via the shared `0 - x` arithmetic (so string coercion, date rejection, NULL propagation, and overflow all match the subtraction path), then re-boxed to the preserved type; only the five diverging cases (decimal / real / smallint / tinyint / bit) override the additive result — money / smallmoney / float / int / bigint the additive path already types correctly.
 
 ### Untyped NULL yields to a typed operand
-A bare `NULL` keyword is typed `int` as a placeholder (SQL Server has no truly untyped NULL), but that placeholder must not win a joint promotion: `COALESCE(NULL, 'z')` and `ISNULL(NULL, 'z')` are `varchar` (returning `'z'`), not `int` — the latter previously raised "Conversion failed when converting the varchar value 'z' to data type int."
+A bare `NULL` keyword is typed `int` as a placeholder (SQL Server has no truly untyped NULL), but that placeholder must not win a joint promotion: `COALESCE(NULL, 'z')` and `ISNULL(NULL, 'z')` are `varchar` (returning `'z'`), not `int`
 The bare-`NULL` `Value` carries an `IsUntypedNull` flag (distinct from a typed NULL like `@@REMSERVER` or `CAST(NULL AS varchar)`); `COALESCE` / `ISNULL` / `CASE` / `IIF` skip untyped-NULL arms in `SqlType.PromoteBranches` (via `Expression.PromoteValueArms`), so an untyped NULL yields to any typed sibling.
 A NULL with no typed sibling still resolves to `int` (`SELECT NULL` stays `int`), matching real.
 `ISNULL` fixes the result to its first argument's type but yields when that argument is an untyped NULL; it never joint-promotes, so no digit-count sizing applies there (`ISNULL(1, 2.5)` stays `int`).
@@ -124,7 +124,7 @@ Length-deriving scalars compute their projected width the way SQL Server does wh
 The const-fold path guarantees this — a value fits its declared input width, so `input × count`, `input − delete + replacement`, etc. bound the runtime output; the non-constant path falls back to the container, which is always wide enough.
 
 ### Binary length-variance comparison
-Two binary literals now carry distinct exact widths, so `SqlValue.CompareTo` / `Equals` admit **length-only variance within a binary family** (`varbinary(1)` vs `varbinary(2)`, `binary(N)` vs `binary(M)`) — the arms already compare raw byte spans, and `varbinary` coercion doesn't pin the target length, so the strict type-identity guard would otherwise throw (`IsLengthOnlyBinaryVariance`).
+Two binary literals carry distinct exact widths, so `SqlValue.CompareTo` / `Equals` admit **length-only variance within a binary family** (`varbinary(1)` vs `varbinary(2)`, `binary(N)` vs `binary(M)`) — the arms already compare raw byte spans, and `varbinary` coercion doesn't pin the target length, so the strict type-identity guard would otherwise throw (`IsLengthOnlyBinaryVariance`).
 Byte-span ordering is unchanged (`0x01 < 0x0100`: shorter-is-less, no right-padding).
 
 ### Error-message wording
@@ -132,10 +132,10 @@ The Msg 244 / 248 overflow and Msg 8116 / 447 invalid-type factories render the 
 (The literal-width change surfaced three sites still using `ToString()`.)
 
 ### Rejected: systemic length-0 → MAX wire flip
-Considered and rejected (2026-07-16, during the length-0 max-scalar audit — the `OBJECT_DEFINITION`-style silent-session-kill class): making the TDS codec treat *every* length-0 (value-width) var-column as MAX at COLMETADATA + value time would blanket-defend against any residual length-0 result over 32,767 chars, but it's a **fidelity regression** — real SQL Server advertises correctly-bounded scalars (`DATENAME`, `FORMAT`, `ERROR_MESSAGE`, string literals) as `nvarchar(4000)` / `varchar(8000)`, not MAX, so the blanket flip would make the common case less faithful to defend a rare one.
+Considered and rejected (during the length-0 max-scalar audit — the `OBJECT_DEFINITION`-style silent-session-kill class): making the TDS codec treat *every* length-0 (value-width) var-column as MAX at COLMETADATA + value time would blanket-defend against any residual length-0 result over 32,767 chars, but it's a **fidelity regression** — real SQL Server advertises correctly-bounded scalars (`DATENAME`, `FORMAT`, `ERROR_MESSAGE`, string literals) as `nvarchar(4000)` / `varchar(8000)`, not MAX, so the blanket flip would make the common case less faithful to defend a rare one.
 Rejected because (a) the acute silent-kill is already neutralized generically by `TdsTypeCodec.BoundedWireLength`, which converts a residual bounded-column overflow into a caught `InvalidDataException` (clean session end, not a silent transport death), and (b) every genuinely-MAX length-0 scalar was retyped per-scalar (`SqlType.NVarcharMax` / `VarcharMax` / `VarbinaryMax`: JSON_QUERY/MODIFY/OBJECT/ARRAY, STRING_ESCAPE, CONCAT/CONCAT_WS max-propagation, TRANSLATE max-propagation, COMPRESS/DECOMPRESS) or capped to a safe bound (JSON_VALUE 4000 → NULL, FORMATMESSAGE 2047, STRING_AGG Msg 9829 at 8000 bytes).
 If a future length-0 crash vector surfaces, prefer per-scalar retyping over the blanket flip.
 
 ### Residual divergences
 - `@@VERSION` and the built-in message scalars stay container-class (`nvarchar(4000)`), not real's exact `nvarchar(300)` — retyping the built-in catalog *wholesale* to real's exact widths was weighed and rejected as broad churn (see the rejected flip); per-scalar retyping stays the route when a specific width is shown to matter.
-- `TRANSLATE` projects `nvarchar` container even for a `varchar` input (a pre-existing family divergence — it coerces to nvarchar internally); real keeps the `varchar` family.
+- `TRANSLATE` projects `nvarchar` container even for a `varchar` input (a family divergence — it coerces to nvarchar internally); real keeps the `varchar` family.

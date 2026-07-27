@@ -48,7 +48,7 @@ The fast path uses `SqlValue.WithType` to re-tag a value with a different `SqlTy
 `VarcharSqlType.Decode` and `NVarcharSqlType.Decode` thread `this` (the actual interned instance) into `SqlValue.FromVarchar(VarcharSqlType, string)` / `FromNVarchar(NVarcharSqlType, string)` rather than the singleton `FromVarchar(string)` overload, so the column's collation/coercibility survives the decode.
 The parallel `SqlValue.FromString(type, value)` similarly preserves the target type during cross-string coercion.
 
-`CharSqlType.Decode` / `NCharSqlType.Decode` already passed `this` (via `FromChar` / `FromNChar`); collation came along free once the type-side wiring landed.
+`CharSqlType.Decode` / `NCharSqlType.Decode` pass `this` (via `FromChar` / `FromNChar`), so the decoded value carries the column's collation.
 
 ## Operator-site enforcement
 
@@ -72,7 +72,7 @@ Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-con
 Unknown collation name raises Msg 448 at parse time.
 
 The pseudo-collations **`catalog_default`** and **`database_default`** resolve before the name lookup: `catalog_default` → `Collation.Catalog` (the fixed metadata collation), `database_default` → `context.Batch.CurrentDatabase.Collation` (resolved at parse time to the active database).
-SMO's system-configuration query uses `name COLLATE catalog_default` to normalize catalog string columns; both were previously rejected with Msg 448.
+SMO's system-configuration query uses `name COLLATE catalog_default` to normalize catalog string columns.
 
 The **column-definition** COLLATE sites — CREATE TABLE / ALTER COLUMN / `DECLARE @t TABLE` / CREATE TYPE AS TABLE / `#temp` — resolve the same two keywords through the shared `CollateExpression.ResolvePseudoCollationName(name, batch)` seam, which expands `database_default` → the active database's collation *name* and `catalog_default` → the catalog collation name, storing the concrete name as the column's collation (so `sys.columns.collation_name` reports the resolved name, matching real).
 Any other name passes through unchanged to the per-site `Collation.IsRecognized` gate — an unmodeled-but-valid collation still raises `NotSupportedException` there rather than Msg 448, preserving the modeled-vs-unmodeled distinction.
@@ -115,8 +115,8 @@ Sites routed through the active DB collation:
   So `CAST(int AS varchar)` concatenates and compares cleanly with literals and other database-collation values (was `Collation.Baseline`, which raised Msg 457/468 under a non-baseline database — surfaced by SMO's `'extended_index_' + CAST(i.object_id AS varchar)` and `CONVERT(nvarchar(128), DATABASEPROPERTYEX(...))` patterns).
   Probe-confirmed against SQL Server 2025: `CAST(<char COLLATE X> AS varchar)` keeps `X`; `CAST(<int> AS varchar)` gets the database default.
 
-Probe-confirmed fidelity (real SQL Server CS database, 2026-05-22): `SELECT IIF(CHAR(65) = CHAR(97), 'eq', 'neq')` returns `'neq'` (literals don't case-fold under CS).
-The simulator now matches; the `CsDatabase_*CharFunctionResultUsesActiveCollation` tests in `NameComparisonRegimeTests.cs` lock the behavior in.
+Probe-confirmed fidelity (real SQL Server CS database): `SELECT IIF(CHAR(65) = CHAR(97), 'eq', 'neq')` returns `'neq'` (literals don't case-fold under CS).
+The simulator matches; the `CsDatabase_*CharFunctionResultUsesActiveCollation` tests in `NameComparisonRegimeTests.cs` lock the behavior in.
 
 Sites that intentionally stay on `Collation.Baseline`:
 - `SqlType.Varchar` / `NVarchar` pseudo-singletons and `SqlType.GetChar` / `GetNChar` static bridges — type-identity placeholders.
@@ -152,7 +152,6 @@ Other literal kinds (varbinary `0xHEX`, currency `$1.23`) don't carry collation 
 
 Effect: `SELECT IIF('A' = 'a', 'eq', 'neq')` on a CS database returns `'neq'` (case-sensitive), matching real SQL Server.
 The `CsDatabase_TwoVarcharLiteralsCompareCaseSensitively` / `CsDatabase_TwoNVarcharLiteralsCompareCaseSensitively` tests in `NameComparisonRegimeTests.cs` lock the behavior in.
-The earlier deferral framing (literal pairs falling through to the CI baseline because the tokenizer was stateless) is closed.
 
 `ALTER COLUMN` without an explicit `COLLATE` clause preserves the existing column's collation (probe-aligned).
 With an explicit `COLLATE`, the new collation pins at `Implicit` rank.
@@ -160,7 +159,7 @@ With an explicit `COLLATE`, the new collation pins at `Implicit` rank.
 ## Parser-driven catalog
 
 `Collation.TryGet(name)` decodes the grammatical shape of a name and constructs the matching instance on demand; results are interned so the same name always resolves to the same reference.
-The complete `sys.fn_helpcollations()` catalog ships — 5540 names total (77 SQL_* + 5463 non-SQL_*), probed against SQL Server 2025 on 2026-05-21 and validated against the per-prefix tail-set tables in `Collation.Catalog.cs`.
+The complete `sys.fn_helpcollations()` catalog ships — 5540 names total (77 SQL_* + 5463 non-SQL_*), probed against SQL Server 2025 and validated against the per-prefix tail-set tables in `Collation.Catalog.cs`.
 Names outside the catalog (whether outright misspellings or grammar-valid but never-shipped combinations like `Pashto_CI_AS` or `Latin1_General_140_BIN`) raise `NotSupportedException` in direct SQL and surface on `BacpacImportResult.Warnings` for BACPAC loads.
 
 ### Architecture
@@ -216,11 +215,11 @@ The override bakes four probe-extracted rank tables (DENSE_RANK over `CHAR(n)` /
   Thai tone-mark combining characters carry the lowest primary weight rather than SQL Server's secondary-diacritic treatment — a documented edge that doesn't affect tone-free data.
 - `Equals` is `Compare == 0` for in-repertoire pairs; a pair with any out-of-repertoire character uses the inner `CultureCollation`'s **plain** equality rather than its two-pass ordering (see [Equality and hash across the repertoire boundary](#equality-and-hash-across-the-repertoire-boundary)).
   `GetHashCode` hashes the primary+secondary weight runs after a hash canonicalization pass, so DISTINCT / GROUP BY stay consistent with equality.
-  Equality keeps every symbol significant (only trailing spaces fold, at the `SqlValue` layer), so `'co-op' = 'coop'` is false, and apostrophe ≠ hyphen even off-repertoire (probe-confirmed 2026-07-13: `N'ab''cＸ' = N'ab-cＸ'` is false and the two group separately).
+  Equality keeps every symbol significant (only trailing spaces fold, at the `SqlValue` layer), so `'co-op' = 'coop'` is false, and apostrophe ≠ hyphen even off-repertoire (probe-confirmed: `N'ab''cＸ' = N'ab-cＸ'` is false and the two group separately).
 
 One hand-adjustment in the data: the legacy varchar CI_AI form classifies cedilla (`Ç`/`ç`) as a distinct primary letter, but its CI_AS *sort* folds it onto `c` (probe-confirmed `'Çm' < 'cn'`), so those two primary entries are pinned to `c`'s rank.
 Strings with a character outside the active repertoire (CP1252, plus Thai for nvarchar) fall back to the inner `CultureCollation`'s `CompareInfo` two-pass (below) — close for arbitrary Unicode, exact for CP1252 and the Thai block.
-Adding the Thai block re-baked the nvarchar tables on the unified scale (now `ushort` — the union pushes the max rank past 255); the CP1252-only relative order is unchanged (`DENSE_RANK` is monotonic) and the 138k-pair fuzz stays at zero divergence.
+Adding the Thai block re-baked the nvarchar tables on the unified scale (`ushort` — the union pushes the max rank past 255); the CP1252-only relative order is unchanged (`DENSE_RANK` is monotonic) and the 138k-pair fuzz stays at zero divergence.
 
 **Known gap — trailing-space MAX/MIN representative.**
 This body sorts by collation weight, where SPACE is the lowest non-zero primary weight, so a trailing space makes a string sort *after* its trimmed form.
@@ -238,7 +237,7 @@ The hybrid body's `IEqualityComparer<string>` contract (`Equals(x, y)` ⇒ equal
 Three pieces make it hold (`Collation.SqlLatin1Sort.cs`):
 
 - **Cross-boundary `Equals` is the inner's *plain* equality**, not `inner.Compare == 0`.
-  The inner's two-pass minimal-punctuation logic is an *ordering* device whose tie-break checks only minimal-vs-real per position and would equate apostrophe with hyphen; plain `CompareInfo` equality keeps them distinct marks — matching the live server (probed 2026-07-13) and matching `CultureCollation`'s own `Equals`/`Compare` split.
+  The inner's two-pass minimal-punctuation logic is an *ordering* device whose tie-break checks only minimal-vs-real per position and would equate apostrophe with hyphen; plain `CompareInfo` equality keeps them distinct marks — matching the live server (probed) and matching `CultureCollation`'s own `Equals`/`Compare` split.
   Consequence: cross-boundary sort-equal-but-not-equal pairs exist, as they do on `CultureCollation` itself.
 - **`GetHashCode` has a fast path and a canonicalized path.**
   A string whose every character is in the per-body *hash-clean* set (repertoire minus `hashFolds` keys — the overwhelmingly common case) hashes straight off its weight runs, unchanged from before.
@@ -250,19 +249,19 @@ Three pieces make it hold (`Collation.SqlLatin1Sort.cs`):
 Why folds of *in-repertoire* characters exist at all: an out-of-repertoire spelling can be `Equals`-equal to two in-repertoire strings that are unequal to each other (fullwidth `２` equals both `2` and `²` through the inner collation), so those in-repertoire strings must share a hash — a legal collision of unequal strings.
 `CollationHashConsistencyTests` (Tests.Internal) guards the contract: repertoire-wide ICU-class sweep, Unicode-block normalization-variant sweep, seeded substitution fuzz, and the named triangles.
 
-Downstream effect (the bug this closed): every hash container keyed by the collation now folds alternate spellings — fullwidth / decomposed / homoglyph references to user tables, schemas, and procedures resolve (`Database.Schemas`, `Schema.HeapTables` / `Procedures`), EXEC duplicate-named-argument detection folds (`@a` + fullwidth `@ａ` → Msg 8143 echoing the first-seen spelling), and GROUP BY / DISTINCT buckets fold data-level variants (`N's'`, `N'ｓ'`, `N'S'` → one group — probe-confirmed).
+Downstream effect (the bug this closed): every hash container keyed by the collation folds alternate spellings — fullwidth / decomposed / homoglyph references to user tables, schemas, and procedures resolve (`Database.Schemas`, `Schema.HeapTables` / `Procedures`), EXEC duplicate-named-argument detection folds (`@a` + fullwidth `@ａ` → Msg 8143 echoing the first-seen spelling), and GROUP BY / DISTINCT buckets fold data-level variants (`N's'`, `N'ｓ'`, `N'S'` → one group — probe-confirmed).
 Coverage: the `Regime1_*` fullwidth/decomposed tests in `NameComparisonRegimeTests.cs`.
 
 ## Name regimes outside the database collation
 
-Two identifier surfaces do **not** follow the database collation (both probe-confirmed 2026-07-13 on a real `SQL_Latin1_General_CP1_CS_AS` database):
+Two identifier surfaces do **not** follow the database collation (both probe-confirmed on a real `SQL_Latin1_General_CP1_CS_AS` database):
 
 - **Variable / table-variable names** fold case, width, and kana type unconditionally — `declare @vx int; set @VX = 5` succeeds on a CS database, as does fullwidth `@ｖx` ≡ `@vx`.
   Comparer: `BatchContext.VariableNameComparer` (invariant `CompareInfo`, `IgnoreCase | IgnoreKanaType | IgnoreWidth`), keying `Variables` and `TableVariables` everywhere they're constructed.
   Note the contrast: *named-argument-to-parameter matching* (`exec p @A=1` against declared `@a`) **does** follow the database collation — on the CS database the case-flipped name doesn't bind (Msg 8144 too-many-arguments for sp_executesql).
 - **Temp-table names** stay case-insensitive on a CS database (`#zzc` ≡ `#ZZC`), consistent with tempdb's server-collation inheritance.
 
-Related tokenizer rule: non-spacing combining marks are identifier *continuation* characters (`Tokenizer.IsIdentifierBodyChar`) — a decomposed spelling (`zzcafe` + U+0301) both tokenizes and resolves against a composed `zzcafé` table on the live server (probed 2026-07-13); resolution comes free from the NFC step in hash canonicalization plus the inner equality.
+Related tokenizer rule: non-spacing combining marks are identifier *continuation* characters (`Tokenizer.IsIdentifierBodyChar`) — a decomposed spelling (`zzcafe` + U+0301) both tokenizes and resolves against a composed `zzcafé` table on the live server (probed); resolution comes free from the NFC step in hash canonicalization plus the inner equality.
 
 ## Symbol sort weighting (other SQL_\* / Windows / locale families)
 
@@ -314,7 +313,7 @@ Probe-confirmed against SQL Server 2025: `varchar BIN2` of `{Z, €, ƒ, NBSP}` 
 
 **Guard — nvarchar `_BIN2` is UTF-16 *code-unit*, not code-point; don't "fix" it.**
 Microsoft's `_BIN2` documentation describes the ordering in code-point terms, which invites a well-meaning correction toward 32-bit scalar comparison.
-Empirically (probed on SQL Server 2025, 2026-05-21) the box compares UTF-16 code units — i.e. surrogate pairs are compared as their two 16-bit halves, not as the combined scalar.
+Empirically (probed on SQL Server 2025) the box compares UTF-16 code units — i.e. surrogate pairs are compared as their two 16-bit halves, not as the combined scalar.
 So `(nchar(0xD83D)+nchar(0xDE00)) < nchar(0xE000)` is **true** under `Latin1_General_BIN2` (emoji U+1F600 sorts before U+E000 because the high surrogate 0xD83D < 0xE000), even though the scalar 0x1F600 > 0xE000.
 `StringComparer.Ordinal` is UTF-16 code-unit comparison, so `BinaryCollation` over `Ordinal` is byte-exact for nvarchar BIN2 *including* emoji / supplementary chars — adding code-point logic would break currently-correct behavior.
 (The varchar `_BIN2_UTF8` substitute *is* codepoint-ordered, because UTF-8 byte order equals surrogate-pair-combined scalar order — that's the one place the two coincide.)
@@ -337,7 +336,7 @@ Net effects:
 ### Microsoft-docs-vs-real-behavior gap: BIN2 is code *unit*, not code point
 
 Microsoft's [Collation and Unicode Support](https://learn.microsoft.com/en-us/sql/relational-databases/collations/collation-and-unicode-support) page states "In a `BIN2` collation all characters are sorted according to their code points." This is **inaccurate for supplementary characters on nvarchar**.
-Empirical behavior on SQL Server 2025 (probed 2026-05-21, three routes — `NCHAR`-synthesized, parameter-passed .NET string, raw SQL literal — all agree): BIN2 nvarchar compares UTF-16 16-bit code units, which differs from code-point order when surrogate pairs are involved.
+Empirical behavior on SQL Server 2025 (probed, three routes — `NCHAR`-synthesized, parameter-passed .NET string, raw SQL literal — all agree): BIN2 nvarchar compares UTF-16 16-bit code units, which differs from code-point order when surrogate pairs are involved.
 
 Demo: `(NCHAR(0xD83D) + NCHAR(0xDE00))` (the surrogate pair for 😀 U+1F600) sorts BEFORE `NCHAR(0xE000)` under BIN2, because the high surrogate D83D (0xD83D) < E000 (0xE000) as 16-bit values.
 Under code-point order, U+1F600 (0x1F600) > U+E000 would put the emoji last.
@@ -360,7 +359,7 @@ Probe-confirmed via `'Z'+emoji > 'Z'+nchar(0xE000)` returning TRUE under BIN and
 
 `Collation.IsSupplementaryCharacterAware` (virtual, default `false`; overridden `true` on `Latin1_General_100_CI_AS_SC_UTF8` and `Latin1_General_100_CS_AS_SC_UTF8`) drives eight scalar functions to switch between UTF-16 code-unit semantics (non-`_SC_`) and Unicode-codepoint semantics (`_SC_`).
 Each function reads the dispatch flag off its input value's `SqlType.Collation`, so a postfix `COLLATE …_SC_UTF8` flips the semantic per-call.
-Probe-confirmed against SQL Server 2025 (2026-05-21).
+Probe-confirmed against SQL Server 2025.
 
 | Function | Non-`_SC_` (code units) | `_SC_` (codepoints) |
 |---|---|---|
@@ -377,7 +376,7 @@ Probe-confirmed against SQL Server 2025 (2026-05-21).
 `SupplementaryCharacters` (in `Parser/Expressions/`) holds the rune-walking helpers (`CodepointCount`, `CodepointToCodeUnit`, `CodeUnitToCodepoint`, `LeftByCodepoints`, `RightByCodepoints`, `ReverseByCodepoints`, `ReverseByCodeUnits`, `LeadingCodepoint`).
 The non-`_SC_` path stays on .NET's native code-unit operations (`string.Length`, `Substring`, `IndexOf`, etc.), which already match real SQL Server's non-`_SC_` semantics.
 
-**Lone-surrogate preservation:** the nvarchar / nchar / sysname / ntext row encoders now byte-copy UTF-16 LE directly (`SystemNameSqlType.Utf16LeEncode` / `Utf16LeDecode` via `MemoryMarshal.AsBytes`) instead of routing through `Encoding.Unicode.GetBytes`, which silently rewrites lone surrogates to `U+FFFD` via its `EncoderReplacementFallback`.
+**Lone-surrogate preservation:** the nvarchar / nchar / sysname / ntext row encoders byte-copy UTF-16 LE directly (`SystemNameSqlType.Utf16LeEncode` / `Utf16LeDecode` via `MemoryMarshal.AsBytes`) instead of routing through `Encoding.Unicode.GetBytes`, which silently rewrites lone surrogates to `U+FFFD` via its `EncoderReplacementFallback`.
 Real SQL Server preserves lone surrogates end-to-end (probe-confirmed: `SUBSTRING(N'😀X', 1, 1)` on a non-`_SC_` column round-trips through `sys.columns` storage with the lone high surrogate intact); the byte-copy path keeps the simulator's fidelity bar.
 
 ## KS / WS suffix dispatch

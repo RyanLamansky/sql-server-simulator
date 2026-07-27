@@ -3,7 +3,7 @@
 ## Scalar user-defined functions
 `CREATE FUNCTION schema.name(@p type [= default], ...) RETURNS <type> [WITH RETURNS NULL ON NULL INPUT] AS BEGIN ... END`, called as `SELECT schema.fn(args)`.
 Body source captured between outer `BEGIN`/`END` (BEGIN TRAN/TRANSACTION/DISTRIBUTED skipped during nesting) and re-tokenized per call; parameters seed a child `BatchContext.Variables`, value-form RETURN lands in `BatchContext.UdfFrame.ReturnedValue`.
-Probed against SQL Server 2025 (2026-05-11).
+Probed against SQL Server 2025.
 
 - **2-part-name required.**
   Bare `fn(x)` → **Msg 195** ("not a recognized built-in function name") — real SQL Server treats unqualified UDF calls as built-in misses.
@@ -40,7 +40,7 @@ Probed against SQL Server 2025 (2026-05-11).
 Stored as `InlineTableValuedFunction` alongside `ScalarFunction` under the abstract `UserDefinedFunction` base in `Schema.Functions`.
 Body re-parsed per call inside a child `BatchContext` with parameters seeded as variables, returned as a synthetic `Selection.ForInlineTvf` wrapped in a `FromSource.LateralPlan`.
 Same 32-level recursion cap (Msg 217) as scalar UDFs.
-Probed against SQL Server 2025 (2026-05-12).
+Probed against SQL Server 2025.
 
 - **Body grammar**: exactly one SELECT.
   Parens optional.
@@ -58,7 +58,7 @@ Probed against SQL Server 2025 (2026-05-12).
 - **Catalog surface**: `sys.objects` `type='IF'` / `type_desc='SQL_INLINE_TABLE_VALUED_FUNCTION'`.
   `sys.columns` emits one row per output column (`is_identity=0`, `is_computed=0`).
   `sys.parameters` skips the `parameter_id=0` return-row (the TABLE shape lives in sys.columns).
-  `OBJECT_ID(name, 'IF')` resolves TVFs only; `'FN'` filter no longer matches; no-filter form tries both kinds.
+  `OBJECT_ID(name, 'IF')` resolves TVFs only; `'FN'` filter doesn't match; no-filter form tries both kinds.
 
 **Fidelity gaps**:
 - **`is_nullable` always True** in `sys.columns` for TVF output.
@@ -72,7 +72,7 @@ Probed against SQL Server 2025 (2026-05-12).
 `CREATE FUNCTION schema.name(@p type [= default], ...) RETURNS @r TABLE (column-list) [WITH SCHEMABINDING | ENCRYPTION] AS BEGIN ... END`, called from a FROM clause exactly like an inline TVF.
 Stored as `MultiStatementTableValuedFunction` alongside `ScalarFunction` / `InlineTableValuedFunction` under the abstract `UserDefinedFunction` base in `Schema.Functions`.
 The function class captures parsed `OutputColumns` + `KeyConstraints` + `CheckConstraints` once at CREATE time; the body re-tokenizes per call.
-Probed against SQL Server 2025 (2026-05-13).
+Probed against SQL Server 2025.
 
 - **Body grammar**: `BEGIN ... END` block; nesting walked at token level (same code path as scalar UDF body capture).
   Body statements freely `INSERT INTO @r` / `UPDATE @r` / `DELETE @r`, may read other tables, may call other functions.
@@ -108,7 +108,7 @@ Probed against SQL Server 2025 (2026-05-13).
 Stored as `View` in `Schema.Views`.
 Body re-parsed per call inside a child `BatchContext`, returned as `Selection.ForView` wrapped in a `FromSource.LateralPlan`.
 Same 32-level recursion cap (Msg 217) as scalar UDFs / inline TVFs.
-Probed against SQL Server 2025 (2026-05-12).
+Probed against SQL Server 2025.
 
 - **Body grammar**: a single SELECT (CTE-prefixed bodies via `WITH cte AS (...) SELECT ...` work — the body parse runs at depth 0).
   ORDER BY without TOP / OFFSET / FETCH → **Msg 1033** (same factory CTE bodies use).
@@ -142,7 +142,7 @@ Probed against SQL Server 2025 (2026-05-12).
 ## Updatable views (DML through views)
 INSERT / UPDATE / DELETE through a view route to the view's eventual base `HeapTable` with view-aware column-name translation, visibility filtering, and (optional) WITH CHECK OPTION enforcement.
 Captured at CREATE VIEW time via `AnalyzeViewUpdatability` (in `Simulation.CreateView.Updatability.cs`) onto five `View` fields: `BaseTable` / `BaseColumnOrdinals` / `RejectionReason` / `VisibilityCheck` / `CheckOptionCheck`.
-Probed against SQL Server 2025 (2026-05-12).
+Probed against SQL Server 2025.
 
 **Eligible shape** (each level in a view-on-view chain must satisfy all):
 - Exactly one FROM source (a heap table OR another updatable view).
@@ -200,7 +200,7 @@ The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row sele
 Body source captured from `AS` to end-of-batch (BEGIN/END is optional — probe-confirmed), re-tokenized per call inside a child `BatchContext` with parameters seeded as variables and a `ProcFrame` carrying the return-code slot.
 EXEC's result sets propagate to the outer caller (distinct from scalar UDFs, which discard).
 Same 32-level recursion cap (Msg 217) shared with UDFs / views via `SimulatedDbConnection.NestingLevel`.
-Probed against SQL Server 2025 (2026-05-12).
+Probed against SQL Server 2025.
 
 **Grammar**:
 - **Body capture**: from the first token after `AS` to end-of-batch, with empty bodies legal (`CREATE PROC p AS` with nothing after `AS` succeeds — probe-confirmed; the per-call invocation short-circuits when `BodyText` is empty so the parser doesn't reject empty `CommandText`).
@@ -244,7 +244,7 @@ Probed against SQL Server 2025 (2026-05-12).
   **Probe-confirmed: `RETURN NULL` yields 0 in the caller's `@rc`** — NULL coerces to 0 in this slot specifically (NOT propagated as `DBNull`), distinct from how NULL flows through other expression contexts.
 - `RETURN 'abc'` (non-coercible string) raises **Msg 245** at the proc body's RETURN statement.
 - Default return code (no explicit RETURN) is **0**.
-- Value-form RETURN is also legal inside scalar UDF bodies (existing); the parse-time check now accepts either `BatchContext.UdfFrame` or `BatchContext.ProcFrame` being non-null.
+- Value-form RETURN is also legal inside scalar UDF bodies (existing); the parse-time check accepts either `BatchContext.UdfFrame` or `BatchContext.ProcFrame` being non-null.
 
 **Multi-result-set forwarding**: a procedure body's `SELECT` statements yield result sets through the outer caller's iterator (`ExecuteReader().NextResult()` walks them).
 Unlike UDF bodies, the proc invocation iterates `DispatchStatementsUntil` and yields each outcome.

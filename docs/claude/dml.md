@@ -59,6 +59,18 @@ Probe-confirmed semantics (SQL Server 2025):
   `ResolveDmlTopCap` is always called when a limit is present (even at zero candidates) so the value errors fire regardless of match count.
 - **INSERT TOP** caps the inserted-row count across `VALUES` (multiple tuples), `SELECT`, and `EXEC` sources — applied to the buffered `sourceRows` list in `ProcessHeapInsert` (and the view / INSTEAD OF paths).
 
+## `DEFAULT` as a `VALUES` element
+
+`INSERT INTO t (a, b) VALUES (1, DEFAULT)` — the `DEFAULT` keyword in an individual value cell, distinct from the whole-row `DEFAULT VALUES` form below.
+Legal only inside `INSERT … VALUES`, so `ParseValuesTuples` takes an `allowDefault` flag and only the INSERT-VALUES path passes `true`.
+
+The VALUES source is parsed **before** identity diagnostics run (`Simulation.Insert.cs`), because the per-cell DEFAULT keywords have to be visible to them:
+
+- an **identity** column receiving `DEFAULT` raises **Msg 339** ("DEFAULT or NULL are not allowed as explicit identity values."), and it fires *before* the `IDENTITY_INSERT` gate — probe-confirmed to raise with `IDENTITY_INSERT` both ON and OFF.
+- a **non-identity** DEFAULT cell resolves to the column's default in the shared row-encode loop, taking the same path an omitted column would.
+
+Django's `db_default` field option emits this shape, which is what motivated it.
+
 ## `INSERT INTO t DEFAULT VALUES`
 Inserts a single row with every column defaulted.
 `ProcessHeapInsert` clears the destination-column list and feeds one empty source tuple, so every column flows through the default / identity-allocation / implicit-NULL path — a NOT NULL column with no default hits the same constraint error an explicit all-defaults insert would (probe-confirmed).
@@ -86,7 +98,7 @@ All three name-arg scalars accept a 1-/2-/3-part dotted runtime string via the s
 Result type is `numeric(38, 0)` matching real SQL Server's projection (covers tinyint/smallint/int/bigint columns uniformly).
 
 `SET IDENTITY_INSERT <table> ON | OFF` (`Simulation.Set.cs`) sets / clears `SimulatedDbConnection.IdentityInsertTable`.
-ON validates the target: a table with no identity column raises **Msg 8106** (`TableHasNoIdentityForSet`, "Table 't' does not have the identity property. Cannot perform SET operation."); a second table while one is already held raises **Msg 8107** (`IdentityInsertAlreadyOn`) — both probe-confirmed against SQL Server 2025 (2026-07-21).
+ON validates the target: a table with no identity column raises **Msg 8106** (`TableHasNoIdentityForSet`, "Table 't' does not have the identity property. Cannot perform SET operation."); a second table while one is already held raises **Msg 8107** (`IdentityInsertAlreadyOn`) — both probe-confirmed against SQL Server 2025.
 
 ## `@@ROWCOUNT` / `ROWCOUNT_BIG()`
 Both expose the row count of the most-recently-completed statement on the session via `SimulatedDbConnection.LastStatementRowCount`.
@@ -114,13 +126,13 @@ The EXEC clause runs through the shared EXEC machinery (`ParseExec` — stored-p
 Table-variable and updatable-view targets work (both share `ProcessHeapInsert`).
 
 Every yielded result set is decoded row-by-row (`RowDecoder.DecodeRow`) and buffered into the same `List<SqlValue[]>` the VALUES / SELECT arms produce, then funnels into the shared per-row encode loop — so defaults / identity / rowversion / computed columns / constraints / triggers all behave exactly as they would for `INSERT … SELECT` of the same rows.
-Probe-confirmed semantics (SQL Server 2025, 2026-07-14):
+Probe-confirmed semantics (SQL Server 2025):
 
 - **Multiple result sets append all rows** (`exec('select 5; select 6')` lands both), and `@@ROWCOUNT` is the **total** rows inserted across every result set.
 - **A procedure yielding no result set** (pure-DML body) inserts 0 rows and succeeds — non-tabular outcomes (`SimulatedNonQuery`) are skipped during the drain.
 - **Per-result-set column count** must match the target's column list — a mismatch (either direction) raises **Msg 213 St 7** (`InsertExecColumnCountMismatch`) — distinct from the SELECT arm's Msg 120/121, and distinct from OUTPUT INTO's Msg 213 St 1.
   Validated during the drain, before any heap write.
-- **Uncoercible values** surface the shared per-row coercion error (the simulator's Msg 245 conversion path — real SQL Server raises Msg 8114 for a dynamic value; the simulator's INSERT coercion path is Msg 245 for both INSERT…SELECT and INSERT…EXEC, a pre-existing divergence).
+- **Uncoercible values** surface the shared per-row coercion error (the simulator's Msg 245 conversion path — real SQL Server raises Msg 8114 for a dynamic value; the simulator's INSERT coercion path is Msg 245 for both INSERT…SELECT and INSERT…EXEC, a divergence).
 - **Nested INSERT…EXEC** (the executed proc / dynamic batch itself contains an `INSERT … EXEC`) raises **Msg 8164 St 1** "An INSERT EXEC statement cannot be nested." Guarded by `SimulatedDbConnection.InsertExecActive`, set while the outer drain runs and checked at the inner INSERT…EXEC entry.
 - **OUTPUT clause combined with INSERT…EXEC** raises **Msg 483 St 2** "The OUTPUT clause cannot be used in an INSERT...EXEC statement." — a structural check that fires regardless of skip state, before the source dispatch.
 
@@ -129,7 +141,7 @@ Skip-mode (un-taken IF branch) parses the EXEC clause for cursor advance but `Pa
 ## `SELECT … INTO target`
 Creates a destination table from the projection's inferred schema, then copies rows in.
 Target routes by `#`-prefix: `#foo` lands in the per-connection `TempTables` dict (same as `CREATE TABLE #foo`); regular names land in the current database's `HeapTables`.
-Probe-confirmed schema-inference rules (2026-05-11):
+Probe-confirmed schema-inference rules:
 
 - **Nullability**: direct column refs preserve source nullability.
   Integer arithmetic, `CAST`, `COALESCE`, aggregates (incl. `COUNT`), and bare `NULL` literal all project as **nullable**.

@@ -2,7 +2,7 @@
 
 `CREATE [UNIQUE] [CLUSTERED | NONCLUSTERED] INDEX` + `DROP INDEX` ship, with full grammar coverage for column ordering (ASC / DESC), INCLUDE columns, WHERE filter, and the WITH (options) clause.
 The `sys.indexes` + `sys.index_columns` catalog views project rows for PRIMARY KEY constraints, UNIQUE constraints, and CREATE INDEX-declared entries.
-Probe-confirmed against SQL Server 2025 on 2026-05-14.
+Probe-confirmed against SQL Server 2025.
 
 ## Grammar
 
@@ -31,7 +31,7 @@ The same two trailers are accepted on inline `CONSTRAINT … PRIMARY KEY | UNIQU
 
 ### Inline indexes in CREATE TABLE
 
-Both inline-index forms are accepted inside CREATE TABLE (probe-confirmed against SQL Server 2025, 2026-07-21):
+Both inline-index forms are accepted inside CREATE TABLE (probe-confirmed against SQL Server 2025):
 
 ```sql
 CREATE TABLE t (id int, INDEX ix (id));                             -- table-level
@@ -55,7 +55,7 @@ Although there's no B-tree, an index (or PK / UNIQUE key) **does** accelerate re
 `Selection.Execution.IndexSeek.cs` collects every top-level WHERE conjunct of the shape `indexedColumn = <stable value>` — where the value side is a literal, a variable, an outer/correlated column reference, an arithmetic node (`TwoSidedExpression`) whose operands are all themselves stable (which is how a negative literal arrives: the parser builds `-1` as `0 - 1`, so `col = -1` and `col = @v + 1` stay sargable — a deterministic operator over row-invariant operands is row-invariant), or a `CAST` / `CONVERT` / parenthesization peeling down to one of those (via `Expression.PureConversionOperand`) — then rewrites a single-base-table scan into a hash-index lookup keyed on the longest leading prefix of some index/key whose columns are all covered by those conjuncts.
 So `WHERE a = x AND b = y` against an index on `(a, b, …)` keys on the two-column tuple, not just `a`; conjunct order is irrelevant (columns map to the prefix by ordinal).
 The longest usable prefix across all keys/indexes wins, which is what keeps a **non-selective leading column** (a bit flag, a low-cardinality FK) from dragging its whole bucket through the residual filter — the full matched prefix is keyed precisely.
-Peeling pure conversions matches real SQL Server keeping `col = CAST(<const> AS …)` sargable (probe-confirmed 2026-05-25: integer / decimal widenings of a constant or variable still Index Seek; the cross-type case that does *not* seek there is `varchar` column vs `nvarchar` value, which the simulator's `Collation.Resolve` guard already declines).
+Peeling pure conversions matches real SQL Server keeping `col = CAST(<const> AS …)` sargable (probe-confirmed: integer / decimal widenings of a constant or variable still Index Seek; the cross-type case that does *not* seek there is `varchar` column vs `nvarchar` value, which the simulator's `Collation.Resolve` guard already declines).
 Every matched conjunct stays in WHERE as a residual filter, so the seek can only narrow the row source, never change results; the per-component key promotion / collation rules mirror the equi-join hash path exactly (`SqlType.Promote` + `CoerceTo` + collation-coercibility `Resolve` guard, applied column-by-column into a multi-value `SqlValueKey`).
 
 A WHERE conjunct of the shape `col IN (v1, v2, …)` — or its equivalent OR-of-equalities `col = v1 OR col = v2 OR …`, which EF Core emits for `Contains(...)` against a small list — decomposes through the same path via `BooleanExpression.TryGetEqualityFamily`.
@@ -119,7 +119,7 @@ A range on a column that is neither a leading key column nor the continuation co
 ### Equality-prefix + range continuation
 
 A stable range bound on the key column **immediately after** the matched equality prefix extends the seek predicate one column further: `WHERE a = @x AND b BETWEEN @lo AND @hi` against a key on `(a, b, …)` seeks the in-range slice of `a = @x`'s group rather than dragging the whole group through the residual filter.
-This mirrors a real index seek's predicate shape exactly (probe-confirmed against SQL Server 2025 plan XML, 2026-07-10): an equality prefix, then **at most one** range column, everything deeper residual — `a = @x AND c > 5` on `(a, b, c)` seeks width-1 on `a` and leaves the `c` bound residual, because a seek predicate can't skip a key column.
+This mirrors a real index seek's predicate shape exactly (probe-confirmed against SQL Server 2025 plan XML): an equality prefix, then **at most one** range column, everything deeper residual — `a = @x AND c > 5` on `(a, b, c)` seeks width-1 on `a` and leaves the `c` bound residual, because a seek predicate can't skip a key column.
 (The live server's other composite trick — folding a *leading-column range plus later-column equality* into tightened lexicographic endpoints, `a BETWEEN @1 AND @2 AND b = @3` → `Start (a,b) ≥ (@1,@3), End (a,b) ≤ (@2,@3)` with `b = @3` still residual — trims only the first and last groups of the scanned range, so the simulator's plain leading-range seek plus residual has identical coverage and doesn't mirror it.)
 
 Mechanically the extension is a composite `OrderedSeek` over the same per-`Heap` cache entry the ORDER BY path builds: the prefix probe tuple plus the bound value form ragged-arity `GetViewBetween` bounds (a missing side falls back to the prefix tuple alone, which sorts equal to every key sharing it).
@@ -173,7 +173,7 @@ ORDER BY elimination is the one index optimization that's **observable if wrong*
 
 A single-table `UPDATE t SET … WHERE …` / `DELETE FROM t WHERE …` narrows its target scan through the same seek cache rather than walking the whole heap.
 `Selection.SeekMutationTarget(table, where, batch)` builds a minimal single-source view of the base table, runs the **equality** (longest-prefix, IN-list / OR-family, composite) and **single-column range** analysis the `SELECT` path uses, and returns the seek-narrowed `(page, slot, bytes)` candidates — or `null` when the WHERE carries nothing seekable, so the caller keeps its `Heap.EnumerateRowsWithAddress()` full scan.
-The candidate cores (`TryComputeEqualityCandidates` / `TryComputeRangeCandidates`) are factored out of the query path's `TrySeekByLongestPrefix` / `TrySeekByRange`, which now wrap them with the read-path lock / snapshot materializer; the mutation path wraps the same cores with `MaterializeMutationCandidates` (dedup + tombstone-skip, yielding heap addresses to rewrite).
+The candidate cores (`TryComputeEqualityCandidates` / `TryComputeRangeCandidates`) are factored out of the query path's `TrySeekByLongestPrefix` / `TrySeekByRange`, which wrap them with the read-path lock / snapshot materializer; the mutation path wraps the same cores with `MaterializeMutationCandidates` (dedup + tombstone-skip, yielding heap addresses to rewrite).
 
 Two properties make this a pure narrowing with no fidelity cost:
 
@@ -302,7 +302,7 @@ View indexes reuse `Storage.Index` on a new `View.Indexes` list.
 A view has no heap and no storage ordinals, so a view index's key / INCLUDE `IndexKeyColumn` ordinals are **view OUTPUT-column ordinals** — the view row bytes are encoded in `View.OutputColumns` order, so the output ordinal doubles as the storage ordinal (for enforcement decode) and the column ordinal (for `sys.index_columns.column_id = ordinal + 1`, matching `sys.columns` of the view).
 `View.IndexIdentities()` is the view analog of `HeapTable.IndexIdentities()`: a view is never a heap (no synthetic index_id-0 row — probe-confirmed: an ordinary view has zero `sys.indexes` rows), the clustered index takes index_id 1 / CLUSTERED, others take 2..N in object-id order.
 
-### Create-time gates (probe-confirmed order, SQL Server 2025, 2026-07-17)
+### Create-time gates (probe-confirmed order, SQL Server 2025)
 
 Applied in this exact order:
 
@@ -326,7 +326,7 @@ The hook is zero-cost (`DependentIndexedViews.Count == 0` guard) for the overwhe
 The hook is wired on the INSERT and UPDATE paths.
 **MERGE** into an indexed-view base table isn't hooked (a niche shape — AW's indexed-view bases are never MERGE targets); it would need the same post-apply call in `Simulation.Merge.cs`.
 
-**DELETE is deliberately not enforced** (verified 2026-07-17): a valid indexed view is an inner-join / aggregate projection, so removing base rows can only remove or reduce view rows — never create a new duplicate key.
+**DELETE is deliberately not enforced** (verified): a valid indexed view is an inner-join / aggregate projection, so removing base rows can only remove or reduce view rows — never create a new duplicate key.
 (The simulator doesn't enforce real's determinism / `COUNT_BIG(*)` / GROUP BY battery, so a user could in principle build a shape where this reasoning fails; AW needs none of it — see Fidelity gaps.)
 
 `FROM <view> WITH (NOEXPAND)` is accepted (it's in the table-hint accept-list — see [`query-hints.md`](query-hints.md)); results are identical since the simulator always expands.
@@ -354,7 +354,7 @@ One row per (table, index), with ids allocated by the single authority described
 ### Index-id allocation
 
 `HeapTable.IndexIdentities()` is the **single source of truth** every index-id consumer reads — `sys.indexes` / `sys.index_columns` / `sys.stats` / `sys.stats_columns` / `sys.partitions` / `sys.allocation_units` / `sys.dm_db_partition_stats` (through the shared `EnumerateTableIndexIdentities` flattening), `sys.key_constraints.unique_index_id`, and `INDEX_COL` / `INDEXKEY_PROPERTY` / `STATS_DATE` (through `IndexLookup.ResolveByIndexId`).
-It returns the table's canonical `IndexIdentity` rows — `(index_id, type, name, KeyConstraint? Constraint, Index? Index)` — with SQL-Server-exact allocation (probe-confirmed against SQL Server 2025, 2026-07-16):
+It returns the table's canonical `IndexIdentity` rows — `(index_id, type, name, KeyConstraint? Constraint, Index? Index)` — with SQL-Server-exact allocation (probe-confirmed against SQL Server 2025):
 
 - The single **clustered** entry — a clustered PK / UNIQUE constraint (`KeyConstraint.IsClustered`) or a `CREATE CLUSTERED INDEX` (`Index.IsClustered`), whichever has the lowest object id — takes `index_id = 1`, `type = 1`, and **suppresses the HEAP row**.
   The clustered index is always id 1 regardless of creation order (a `CREATE CLUSTERED INDEX` added after nonclustered indexes still lands at 1; those keep their ids).

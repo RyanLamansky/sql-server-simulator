@@ -94,7 +94,7 @@ Modeled from probe (SQL Server 2025); without them DacFx NREs client-side (`SqlF
 A primary XML index allocates its node-table object id at CREATE (`XmlIndex.InternalTableObjectId`); `EnumerateXmlIndexStats` resolves each index (primary or secondary) to its owning node table.
 This is the only place the simulator surfaces a type-`IT` object.
 
-**`sys.xml_indexes`** (full 26-col shape, probe-confirmed against SQL Server 2025 WWI, 2026-07-16).
+**`sys.xml_indexes`** (full 26-col shape, probe-confirmed against SQL Server 2025 WWI).
 The load-bearing core keeps its original positions: `object_id` / `name` / `index_id` / `type` (=3) / `type_desc` (`XML`) / `using_xml_index_id` (NULL for primary) / `secondary_type` (char(1): `P`/`V`/`R`) / `secondary_type_desc` / `is_primary_key` (always false).
 Appended after them (real orders these interleaved; the simulator appends since consumers read by name): `is_unique` (false) / `data_space_id` (1) / `ignore_dup_key` (false) / `is_unique_constraint` (false) / `fill_factor` (0) / `is_padded` (false) / `is_disabled` (false) / `is_hypothetical` (false) / `is_ignored_in_optimization` (false) / `allow_row_locks` (true) / `allow_page_locks` (true) / `has_filter` (false) / `filter_definition` (NULL) / `xml_index_type` (0 primary, 1 secondary) / `xml_index_type_description` (`PRIMARY_XML` / `SECONDARY_XML`) / `path_id` (0) / `auto_created` (false).
 Values are the fresh-index defaults.

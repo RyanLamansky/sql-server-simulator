@@ -5,14 +5,14 @@
 EF emits all from `Math.X` LINQ; `Math.Truncate(x)` → `ROUND(x, 0, 1)`; `Math.Atan2` → `ATN2`.
 
 **Type-widening rule** (shared across `ABS`/`FLOOR`/`CEILING`/`ROUND`/`SIGN`/`POWER`'s first arg): `tinyint`/`smallint` → `int`; `smallmoney` → `money`; `real`/`bit` → `float` (sic — bit widens to float, not int); everything else preserves.
-`FLOOR`/`CEILING` add one specialization to that rule (`MathScalars.FloorCeilingResult`): an exact-numeric input keeps its precision but drops to **scale 0** (the result is integer-valued), so `CEILING(1.1)` → `numeric(2, 0)` value `2`, `CEILING(CAST(1 AS decimal(38,10)))` → `decimal(38, 0)` — probe-confirmed against SQL Server 2025 (2026-07-22); `money` stays `money`, `float` stays `float`, `int` stays `int`.
+`FLOOR`/`CEILING` add one specialization to that rule (`MathScalars.FloorCeilingResult`): an exact-numeric input keeps its precision but drops to **scale 0** (the result is integer-valued), so `CEILING(1.1)` → `numeric(2, 0)` value `2`, `CEILING(CAST(1 AS decimal(38,10)))` → `decimal(38, 0)` — probe-confirmed against SQL Server 2025; `money` stays `money`, `float` stays `float`, `int` stays `int`.
 `POWER` returns the post-widen type of the *first* arg regardless of exponent — `POWER(int, float) → int` with truncation toward zero — but an exact-numeric base widens its precision to **38** while keeping its scale (`MathScalars.PowerResult`), so `POWER(2.0, 10)` → `numeric(38, 1)` value `1024` (the pre-fix `decimal(2, 1)` couldn't hold it), `POWER(CAST(2 AS decimal(5,3)), 10)` → `decimal(38, 3)`; `money` base stays `money`, `float`/`real` → `float`.
 (The simulator has one decimal family — it reports `numeric` for a variant's `BaseType` even where real would say `decimal`; only precision/scale are matched, not the `numeric`-vs-`decimal` name.)
 `SQRT`/`LOG`/`EXP`/`LOG10` always return float.
 
 **Implicit string coercion** (full math family — `ABS`/`FLOOR`/`CEILING`/`SIGN`/`SQRT`/`DEGREES`/`RADIANS`/`POWER`/`ROUND`/`LOG`/`LOG10`/`EXP`/`SQUARE`/`SIN`/`COS`/`TAN`/`ASIN`/`ACOS`/`ATAN`/`ATN2`/`COT`): string operands route through `MathScalars.CoerceImplicit` → `CoerceTo(SqlType.Float)`.
 Bad strings produce Msg 8114 ("Error converting data type varchar to float.") through the existing string-to-float parser.
-Probe-confirmed against SQL Server 2025 (2026-05-22).
+Probe-confirmed against SQL Server 2025.
 The widening rule treats string input as float for projection-schema parity.
 Two per-function nuances: `POWER`'s result type follows the **first** arg's widen rule (so `POWER('2', 3) → float` but `POWER(2, '3') → int` with truncation toward zero); `ROUND`'s **value** arg coerces but the `length` / `function` args stay strict-int (Msg 8116 on string, matching real).
 
@@ -33,7 +33,7 @@ Decimal arm uses a 28-digit `DecimalPi` constant in evaluation order `(input * 1
 
 ## Additional date scalars: `DATENAME` / `DATETRUNC` / `SWITCHOFFSET` / `TODATETIMEOFFSET` / `DATE_BUCKET` / `CURRENT_DATE`
 
-- **`DATENAME(part, date)`** — sibling of `DATEPART` but returns the localized string for the matched part (`'January'` / `'Sunday'` / `'12'` / etc.) as a fixed **`nvarchar(30)`** regardless of the part (probe-confirmed against SQL Server 2025, 2026-07-22 — the earlier length-0 `nvarchar` container described as `nvarchar(4000)`).
+- **`DATENAME(part, date)`** — sibling of `DATEPART` but returns the localized string for the matched part (`'January'` / `'Sunday'` / `'12'` / etc.) as a fixed **`nvarchar(30)`** regardless of the part (probe-confirmed against SQL Server 2025 — the earlier length-0 `nvarchar` container described as `nvarchar(4000)`).
   Reuses `DATEPART`'s keyword tables for part validation and per-type compatibility (same Msg 9810 rejection set).
   Localized names follow .NET's `CultureInfo.InvariantCulture` — month names in English, weekday names in English, numeric parts as base-10 strings.
 - **`DATETRUNC(part, date)`** (`Parser/Expressions/DateTimeAdjustments.cs`) — floor to start of the named part.
@@ -61,7 +61,7 @@ Wrong combination → Msg 9810.
 
 **Implicit operand coercion** (date argument, all three functions): string operands route through `DatePartKinds.CoerceDateArgumentImplicit` → `CoerceTo(datetime2(7))`; integer operands → `CoerceTo(datetime)` (days-since-1900-01-01).
 `ParseDateTime2` also accepts a **bare time-of-day string** (`HH:mm[:ss[.fffffff]]`, anchored to 1900-01-01), so `DATEDIFF(second, '11:15:00', <time>)` / `DATEPART(microsecond, '11:15:00')` coerce like real (a Django DurationField/TimeField pattern) rather than raising Msg 241.
-Probe-confirmed against SQL Server 2025 (2026-05-22): `DATEPART(year, 0) = 1900`, `DATEADD(day, 1, 0) = 1900-01-02`, `DATEDIFF(day, 0, '2024-01-31') = 45320`.
+Probe-confirmed against SQL Server 2025: `DATEPART(year, 0) = 1900`, `DATEADD(day, 1, 0) = 1900-01-02`, `DATEDIFF(day, 0, '2024-01-31') = 45320`.
 `DATEADD`'s offset (second) arg stays strict-int — string offsets raise Msg 9810 ("Argument data type varchar is invalid for argument 2 of dateadd function") just like real SQL Server.
 Minor projection-schema quirk: real SQL Server reports `DATEADD(day, 1, '2024-01-15')` as `datetime`; the simulator reports it as `datetime2(7)` (the convention from `DATEDIFF`'s existing string path).
 
@@ -93,7 +93,7 @@ Surfaces as `ReservedKeyword { Keyword: Keyword.Current_Timestamp }`, dispatched
 Both stringify each arg via CAST-to-varchar/nvarchar, **skip NULL args** (don't propagate), and **never return NULL** — all-NULL input → `''`.
 Result is `nvarchar` if any arg has a national-string type, else `varchar`; **any MAX-typed arg (`varchar(max)` / `nvarchar(max)` / `text` / `ntext`) widens the result to the MAX form** (`SqlType.NVarcharMax` / `SqlType.VarcharMax`), probe-confirmed against SQL Server 2025, so a concatenation past 32,767 chars streams as PLP over the wire instead of overflowing the bounded length prefix.
 **Non-MAX result width** is the **sum of the per-argument widths** (`StringConcat.ArgumentWidth`), capped at 8000 (`varchar`) / 4000 (`nvarchar`) and floored at 1 — not the length-0 container (which described as `varchar(8000)`).
-Each argument contributes its string-conversion maximum, probe-confirmed against SQL Server 2025 (2026-07-22): a string type its declared length; `bit` 1, `tinyint` 4, `smallint` 6, `int` 12, `bigint` 24, `real`/`float` 23, `money`/`smallmoney` 40, `decimal`/`numeric` 41 (fixed, precision-independent), `date`/`time`/`datetime`/`datetimeoffset`/`uniqueidentifier` 40; a **bare untyped `NULL` literal contributes 0** (a typed `CAST(NULL AS int)` contributes its type width — the distinction rides `Expression.IsBareNullLiteral`).
+Each argument contributes its string-conversion maximum, probe-confirmed against SQL Server 2025: a string type its declared length; `bit` 1, `tinyint` 4, `smallint` 6, `int` 12, `bigint` 24, `real`/`float` 23, `money`/`smallmoney` 40, `decimal`/`numeric` 41 (fixed, precision-independent), `date`/`time`/`datetime`/`datetimeoffset`/`uniqueidentifier` 40; a **bare untyped `NULL` literal contributes 0** (a typed `CAST(NULL AS int)` contributes its type width — the distinction rides `Expression.IsBareNullLiteral`).
 So `CONCAT('a',1,NULL,'b')` → `varchar(14)`, `CONCAT(N'a',1)` → `nvarchar(13)`, and `CONCAT_WS` adds one separator width between each value pair (`CONCAT_WS('-','a','b','c')` → `varchar(5)`).
 Arg-count rules → Msg 189: `CONCAT` requires 2-254 args; `CONCAT_WS` requires 3-254 (separator + ≥2 values).
 
@@ -171,7 +171,7 @@ Non-string operands — integer, decimal, money, float/real, date-time, uniqueid
 Varbinary/binary route through `SqlValue.CoerceBinaryToStringWithStyle(target, 0)`: each byte reinterpret-through CP1252 (varchar) or UTF-16 LE (nvarchar).
 `LEN(0x4142202020) = 2` because the trailing 0x20 bytes are CP1252 spaces and trim like ASCII spaces; `LEN(CAST(0x010203 AS binary(10))) = 10` because binary's zero-padding survives `TrimEnd(' ')`.
 **Image stays rejected** (Msg 8116) — real SQL Server rejects too, and `IsCoerceableToVarchar` deliberately excludes the legacy LOB form.
-Probe-confirmed against SQL Server 2025 (2026-05-22): `LOWER(12345) = '12345'`, `LEN(CAST('2024-01-15' AS DATE)) = 10`, `LOWER(CAST('2024-01-15 12:34:56' AS DATETIME)) = 'jan 15 2024 12:34pm'` (legacy datetime default format), `REPLACE(CAST('2024-01-15' AS DATE), '-', '/') = '2024/01/15'`.
+Probe-confirmed against SQL Server 2025: `LOWER(12345) = '12345'`, `LEN(CAST('2024-01-15' AS DATE)) = 10`, `LOWER(CAST('2024-01-15 12:34:56' AS DATETIME)) = 'jan 15 2024 12:34pm'` (legacy datetime default format), `REPLACE(CAST('2024-01-15' AS DATE), '-', '/') = '2024/01/15'`.
 Source families outside the coerce-able set (varbinary, xml, spatial, table types) raise Msg 8116 via `InvalidArgumentDataType`.
 The projection-schema result type for `LEN` is always `int`; the other functions project as `varchar` for non-string sources and preserve the input string type otherwise.
 `REPLACE` runs the coerce per argument with the matching argument index in the Msg 8116 wording.
@@ -185,7 +185,7 @@ Alternate / ANSI forms SQL Server 2025 accepts, each probed against the live ref
   Same precedence / left-associativity as `+` (`'a' || 'b' + 'c'` → `'abc'`).
   NULL yields NULL (default `CONCAT_NULL_YIELDS_NULL ON`); result is `nvarchar` when either operand is a national string, else `varchar`.
   Requires at least one string operand and both operands concat-compatible (numeric except `bit`, money, date/time, uniqueidentifier); two non-strings (`1 || 2`), a `binary`, or a `bit` raise **Msg 402** "incompatible in the concat operator".
-- **ANSI `TRIM`** (`Parser/Expressions/Trim.cs`) now parses `TRIM([ [LEADING|TRAILING|BOTH] chars FROM ] x)` alongside the legacy `TRIM(x)`.
+- **ANSI `TRIM`** (`Parser/Expressions/Trim.cs`) parses `TRIM([ [LEADING|TRAILING|BOTH] chars FROM ] x)` alongside the legacy `TRIM(x)`.
   The trim characters form a *set*, not a substring: `TRIM('ab' FROM 'abxba')` → `'x'`.
   A side keyword makes `chars FROM` mandatory — `TRIM(LEADING FROM x)` → **Msg 156** near FROM.
   NULL `chars` or source yields NULL; an empty set removes nothing.
@@ -219,7 +219,7 @@ The rules below describe the *runtime* value; the width bounds it.
   Supported delimiter chars: `[`/`]`, `(`/`)`, `<`/`>`, `{`/`}`, `"`, `'`, `` ` ``. The pair is selected by either side (probe-verified: `QUOTENAME('a)b', '(')` doubles `)` inside the body). Multi-char delimiter argument picks the first char. NULL input, NULL delimiter, unsupported delimiter character, and input > 128 chars all return NULL.
 - **`REPLICATE(input, count)`** preserves the input's string type.
   Result truncates to 8000 bytes for non-MAX `varchar`/`nvarchar`; `varchar(MAX)` / `nvarchar(MAX)` / legacy LOB input bypass the cap.
-  MAX detection runs at `Run` time off the runtime input value's type: a MAX-declared column or CAST target decodes to a max-form (length -1) / LOB string type that survives `StringScalars.CoerceToVarchar`, so `Replicate.IsMaxForm` reads it directly — no parse-time resolver needed, which is what lets a FROM-source `varchar(MAX)` column bypass the cap (probe-confirmed 2026-07-10: `DATALENGTH(REPLICATE(vmaxcol, 200))` = 20000, and the `nvarchar(MAX)` sibling = 40000, while bounded `varchar(20)` / `nvarchar(20)` columns and plain literals stay capped at 8000 — MAX-ness is a property of the declared type, per Microsoft's docs).
+  MAX detection runs at `Run` time off the runtime input value's type: a MAX-declared column or CAST target decodes to a max-form (length -1) / LOB string type that survives `StringScalars.CoerceToVarchar`, so `Replicate.IsMaxForm` reads it directly — no parse-time resolver needed, which is what lets a FROM-source `varchar(MAX)` column bypass the cap (probe-confirmed: `DATALENGTH(REPLICATE(vmaxcol, 200))` = 20000, and the `nvarchar(MAX)` sibling = 40000, while bounded `varchar(20)` / `nvarchar(20)` columns and plain literals stay capped at 8000 — MAX-ness is a property of the declared type, per Microsoft's docs).
   Non-string `input` implicit-coerces to varchar via `StringScalars.CoerceToVarchar` (probe-confirmed: `REPLICATE(12345, 2) = '1234512345'`).
 - **`SPACE(count)`** always returns `varchar` (never nvarchar), truncated to 8000 chars.
   NULL / negative count → NULL.
@@ -269,12 +269,12 @@ A value held in a variable could reach it; the failure is a clean abort, just no
   Defaults: length 10, decimals 0 (rounds half-away-from-zero, doesn't truncate).
   Overflow (formatted value exceeds `length`) returns a string of `*` characters of length `length`.
   NULL → NULL.
-  Projects `varchar(length)` — the `length` argument (default 10) clamped to 1..8000 when it is a constant, else the `varchar(8000)` container (probe-confirmed against SQL Server 2025, 2026-07-22: `STR(3.14159, 6, 2)` → `varchar(6)`, a variable length → `varchar(8000)`); the earlier length-0 container described as `varchar(8000)` for every call.
+  Projects `varchar(length)` — the `length` argument (default 10) clamped to 1..8000 when it is a constant, else the `varchar(8000)` container (probe-confirmed against SQL Server 2025: `STR(3.14159, 6, 2)` → `varchar(6)`, a variable length → `varchar(8000)`); the earlier length-0 container described as `varchar(8000)` for every call.
 - **`TRANSLATE(input, chars, translations)`** (`Parser/Expressions/StringScalarAdditions.cs`) — character-by-character substitution.
   The `chars` and `translations` arguments must have equal length; mismatch raises Msg 9819 via a dedicated `TranslateUnequalChars` factory.
   NULL on any operand → NULL.
   Result is the length family of `input`: a MAX-form input (`varchar(max)` / `nvarchar(max)` / `text` / `ntext`) projects `SqlType.NVarcharMax` so a large result streams as PLP; a bounded input keeps the length-0 `nvarchar` shape.
-  (The simulator coerces every input to nvarchar before processing — a pre-existing minor family divergence from real, which keeps the varchar family for varchar input.)
+  (The simulator coerces every input to nvarchar before processing — a minor family divergence from real, which keeps the varchar family for varchar input.)
 - **`STRING_ESCAPE(text, 'json')`** — JSON-string escape pass on `text` (escapes `"` `\` `\b` `\f` `\n` `\r` `\t`, `/`, control chars as `\uXXXX`).
   Documentation says only `'json'` is a valid mode; the simulator accepts any string for the mode and treats it as `'json'` (real SQL Server raises Msg 9806 on unknown mode — minor divergence).
   NULL `text` → NULL.
@@ -307,15 +307,15 @@ Non-integer input raises **Msg 8116** (`ArgumentDataTypeInvalidForBitFunction`).
 
 ### `<<` / `>>` shift operators
 
-The `<<` / `>>` binary operators desugar to the same `BitShift` class as `LEFT_SHIFT` / `RIGHT_SHIFT` — probe-confirmed (2026-07-21) that operator and function are byte-identical (`5 << 1` = `LEFT_SHIFT(5, 1)` = 10; `0x05 << 1` = `0x0A`; `5 << -1` = 2 reverses direction; binary operand → varbinary).
+The `<<` / `>>` binary operators desugar to the same `BitShift` class as `LEFT_SHIFT` / `RIGHT_SHIFT` — probe-confirmed that operator and function are byte-identical (`5 << 1` = `LEFT_SHIFT(5, 1)` = 10; `0x05 << 1` = `0x0A`; `5 << -1` = 2 reverses direction; binary operand → varbinary).
 Tokenized as two adjacent `<` / `>` operators (the tokenizer emits single-char operators), the shift is recognized in `Expression.ParseBinaryContinuation` via a doubled-adjacent peek (`IsAdjacentDoubledOperator`), mirroring the `||`-concat detection — a lone `<` / `>` stays a comparison for the boolean layer.
 **Precedence sits at the `+ - & | ^` level** (below `* / %`), left-associative: `2 * 3 << 1` = 12, `4 | 1 << 2` = 20, `5 << 1 + 1` = 11 (all probe-confirmed).
-The shared `BitShift` class only accepts integer operands (binary-operand and negative-shift full fidelity remain a pre-existing function gap — the corpus exercises integer positive shifts only).
+The shared `BitShift` class only accepts integer operands (binary-operand and negative-shift full fidelity remain a function gap — the corpus exercises integer positive shifts only).
 
 ## `HASHBYTES(algorithm, input)`
 
 Cryptographic hash → `varbinary(8000)` (`Parser/Expressions/HashBytes.cs`), backed by the .NET BCL.
-Probe-confirmed against SQL Server 2025 (2026-07-21):
+Probe-confirmed against SQL Server 2025:
 
 - **Accepted algorithms (case-insensitive):** `MD5`, `MD4`, `SHA` / `SHA1` (identical output), `SHA2_256`, `SHA2_512`.
   The removed `MD2` and any unrecognized name yield a **NULL result** (not an error).
@@ -327,7 +327,7 @@ Probe-confirmed against SQL Server 2025 (2026-07-21):
 ### Unary `~` (bitwise NOT)
 
 `~` (`Parser/Expressions/BitwiseNot.cs`) is the one's-complement prefix operator — tokenized as an `Operator` and parsed in `Expression.Parse`'s pre-primary switch alongside unary `+` / `-`.
-Probe-confirmed against SQL Server 2025 (2026-07-15):
+Probe-confirmed against SQL Server 2025:
 
 - **Result keeps the operand's exact integer type** — `~1` → `int` -2, `~CAST(0 AS tinyint)` → `tinyint` 255, `~CAST(5 AS smallint)` → `smallint` -6, `~CAST(5 AS bigint)` → `bigint` -6.
   `bit` flips: `~CAST(1 AS bit)` → 0, `~CAST(0 AS bit)` → 1.
@@ -351,6 +351,18 @@ Probe-confirmed against SQL Server 2025 (2026-07-15):
   Load-bearing for DacFx bacpac export, whose bulk reader emits `DATALENGTH([maxCol])` companions and validates their wire type.
   Spatial operands report the CLR-UDT serialization length (a 2D point = 22, probe-confirmed against WWI), not the simulator's stored WKT byte count — DacFx writes the companion value as the BCP length prefix for the wire bytes, so the two must measure the same form.
   The legacy LOB family (`text`/`ntext`/`image`) reports `int`, matching real — only the three MAX types widen.
+
+## Gzip scalars: `COMPRESS` / `DECOMPRESS`
+
+`COMPRESS(expr)` (`Parser/Expressions/Compress.cs`) gzip-deflates its argument and returns `varbinary(max)`; `DECOMPRESS(varbinary)` (`Decompress.cs`) inflates it back to `varbinary(max)`.
+NULL in → NULL out on both.
+Backed by `GZipStream` at the default compression level — real SQL Server doesn't expose the level either, so there's nothing to match.
+
+**Input encoding** is the load-bearing detail: `COMPRESS` encodes `nchar`/`nvarchar`/`ntext` as UTF-16 LE and `char`/`varchar`/`text` as CP1252 (via the cached `CharSqlType.Cp1252Encoder`) before compressing, matching the bytes real SQL Server compresses for those column types; binary types pass through, and anything else falls through to the value's UTF-16 string form.
+`DECOMPRESS` returns raw inflated bytes, so callers cast to get text back — WWI's `Website.VehicleTemperatures` does `CAST(DECOMPRESS(…) AS nvarchar(1000))`, which is the shape DacFx-emitted views rely on.
+
+**Divergence**: an invalid gzip stream raises **Msg 9803** in real SQL Server; the simulator catches the `InvalidDataException` and returns NULL instead.
+DacFx-emitted views only call `DECOMPRESS` on known-compressed columns, so the bacpac path doesn't reach it.
 
 ## `FORMATMESSAGE`
 
@@ -446,7 +458,7 @@ Constants whose values don't carry real session/server identity in the simulator
 - **`@@TEXTSIZE`** — session state (`SimulatedDbConnection.TextSize`), default -1 (unlimited — the value a fresh SqlClient login establishes, probe-confirmed).
   `SET TEXTSIZE` carries semantic effect: the byte cap clips MAX-typed / legacy-LOB values at the client boundary (result columns via the `TextSizeCursor` decorator installed by `SimulatedQueryResult.CreateClientCursor`, output parameters at write-back), never server-side computation, variable assignment, or stored data; `varchar(max)`/`text` truncate at 1 byte per char, `nvarchar(max)`/`ntext` at 2 with an odd byte floored, `varbinary(max)`/`image` at raw bytes, while `xml`, bounded var types, and UDTs are exempt.
   Value mapping: `-1` preserved verbatim, `0` and every other negative collapse to 4096; a past-int-range literal raises **Msg 1080**; issued inside a proc body it reverts at proc exit while the body's result sets keep their production-time cap (`ClientTextSize` stamped per statement).
-  All probe-confirmed against SQL Server 2025 (2026-07-19).
+  All probe-confirmed against SQL Server 2025.
 - **`@@OPTIONS`** — 5432 (composite of ANSI/ARITHABORT/QUOTED_IDENTIFIER/CONCAT_NULL_YIELDS_NULL flags matching the simulator's defaults).
 - **`@@VERSION`** — a multi-line banner mirroring the real SQL Server 2025 `@@VERSION` shape (`Microsoft SQL Server 2025 (RTM-CU7) (KB5096981) - 17.0.4065.4 (X64)` / build-date line / copyright / edition line), with the simulator's own identity (`Developer Edition (64-bit) on SQL Server Simulator`) standing in for real's host-OS line.
 - **`@@MICROSOFTVERSION`** — int `285216737` (`0x11000FE1`), the `(major << 24) | (minor << 16) | build` packing of version `17.0.4065.4` (`(17 << 24) | 4065`), self-consistent with `SERVERPROPERTY('ProductVersion')` = `"17.0.4065.4"` and the real reference instance's value.
@@ -459,7 +471,7 @@ Server-instance metadata accessed via **`SERVERPROPERTY(name)`** — see [`catal
 ## System statistical counters + `sys.fn_virtualfilestats`
 
 DBA-introspection surface for cumulative server activity.
-Every `@@`-counter is **`int`** (probe-confirmed against SQL Server 2025, 2026-07-19); real reports live totals since server start, but the in-process simulator performs no physical IO, CPU-time accounting, or TDS-packet counting, so the elapsed-activity totals report a plausible **0** (the honest reading for a freshly started, idle instance).
+Every `@@`-counter is **`int`** (probe-confirmed against SQL Server 2025); real reports live totals since server start, but the in-process simulator performs no physical IO, CPU-time accounting, or TDS-packet counting, so the elapsed-activity totals report a plausible **0** (the honest reading for a freshly started, idle instance).
 Rarely read from application code; the constants exist so DBA tooling / health scripts receive a sensible non-error response.
 
 - **`@@CPU_BUSY`** / **`@@IDLE`** / **`@@IO_BUSY`** — 0 (no CPU-time / idle-time / IO-time accounting).
@@ -494,7 +506,7 @@ These carry real per-session state on `SimulatedDbConnection` (not placeholder c
   DacFx's bacpac-export preamble reads `ISNULL(SESSIONPROPERTY('ANSI_NULLS'), 0)` / `ISNULL(SESSIONPROPERTY('QUOTED_IDENTIFIER'), 1)`.
   Like real SQL Server the result is **`sql_variant`** with an inner base type of `int` (each option reads back 1 / 0).
   **Fresh-session defaults** (probe-confirmed against SQL Server 2025 on a SqlClient connection): every option is 1 **except `ARITHABORT` and `NUMERIC_ROUNDABORT`, which default 0**.
-  The six ANSI toggles are recorded as live state on `SimulatedDbConnection` (`AnsiNulls` / `AnsiPadding` / `AnsiWarnings` / `Arithabort` / `ConcatNullYieldsNull` / `NumericRoundabort`) by upgrading their previously parse-and-discard `SET` handlers (`RecordSessionStateOption` in `Simulation.Set.cs`, wired into both the single and comma-list `SET opt1, opt2, … ON|OFF` forms); `QUOTED_IDENTIFIER` reads the pre-existing tracked `QuotedIdentifiers` state.
+  The six ANSI toggles are recorded as live state on `SimulatedDbConnection` (`AnsiNulls` / `AnsiPadding` / `AnsiWarnings` / `Arithabort` / `ConcatNullYieldsNull` / `NumericRoundabort`) via their `SET` handlers (`RecordSessionStateOption` in `Simulation.Set.cs`, wired into both the single and comma-list `SET opt1, opt2, … ON|OFF` forms); `QUOTED_IDENTIFIER` reads the tracked `QuotedIdentifiers` state.
   Recording follows the `QUOTED_IDENTIFIER` scoping rule — a top-level `SET` persists to the session, but a `SET` inside a procedure / function / trigger body or dynamic SQL does not write through.
   **These six toggles remain parse-and-discard for their actual storage/arithmetic semantics** (the simulator doesn't model `= NULL` comparison, trailing-space padding-on-assign, or round-abort); the state exists only so the option reads back consistently.
   Names are case-insensitive; an unknown option name returns NULL.
@@ -519,7 +531,7 @@ An **unrecognized collation name** or an **unknown property** returns a NULL `sq
 Property names are case-insensitive.
 
 Values derive from the collation model (`Collation.TryGetMetrics`) so any recognized name resolves — the name is re-walked into its prefix / suffix-flags / version / code-page token.
-Probe-confirmed against SQL Server 2025 (2026-07-14): `SQL_Latin1_General_CP1_CI_AS` → CodePage 1252, LCID 1033, ComparisonStyle 196609, Version 0, Name `SQL_Latin1_General_CP1_CI_AS`.
+Probe-confirmed against SQL Server 2025: `SQL_Latin1_General_CP1_CI_AS` → CodePage 1252, LCID 1033, ComparisonStyle 196609, Version 0, Name `SQL_Latin1_General_CP1_CI_AS`.
 
 - **CodePage** — the ANSI code page.
   `_UTF8` names → 65001; SQL_\* names read their `CPnnn` name token (CP1 → 1252); Windows names come from the probe-built prefix registry (`Japanese*` → 932, `Latin1_General*` → 1252).
@@ -534,7 +546,7 @@ Probe-confirmed against SQL Server 2025 (2026-07-14): `SQL_Latin1_General_CP1_CI
 
 `Parser/Expressions/FileProperty.cs`: per-file metadata for a file of the **current** database.
 SSMS's Database Properties → General page reads it (`CAST(FILEPROPERTY(s.name, 'SpaceUsed') AS float) * 8` over `sys.database_files WHERE type = 1`) to compute the log file's used space, and `Database.SpaceAvailable` in SMO drives it.
-Returns **`int`** (probe-confirmed against SQL Server 2025, 2026-07-15).
+Returns **`int`** (probe-confirmed against SQL Server 2025).
 The simulator models exactly two files per database, mirroring `sys.database_files`: the primary data file `<db>_Data` (file_id 1, ROWS) and the log file `<db>_Log` (file_id 2, LOG).
 File names are matched with SQL Server's trailing-space-insensitive `=` semantics; property names are case-insensitive and trailing-space insensitive (the property arg is `TrimEnd(' ')`-ed before the switch, matching the probed reference which accepts `'SpaceUsed '`).
 
@@ -555,7 +567,7 @@ For a non-variant argument it describes the value directly.
 Like real SQL Server the *result* is **`sql_variant`** carrying a per-property inner base type: `BaseType` / `Collation` as `sysname` (an `nvarchar` inner), the four numeric facets as `int` (probe-confirmed against SQL Server 2025).
 Property names are case-insensitive.
 A NULL expression, a NULL property, an unknown property, or a value whose type can't live in a sql_variant (MAX strings, LOB, xml, spatial, hierarchyid) all return a NULL `sql_variant`.
-Probe-confirmed against SQL Server 2025 (2026-07-16):
+Probe-confirmed against SQL Server 2025:
 
 - **BaseType** — the bare type name (`1` → `int`, `'abc'` → `varchar`, `N'abc'` → `nvarchar`, `CAST(1 AS bit)` → `bit`, `GETDATE()` → `datetime`).
   Decimal-family values report **`numeric`** — matching a numeric literal's inference (`1.5` → `numeric`).
@@ -581,7 +593,7 @@ Probe-confirmed against SQL Server 2025 (2026-07-16):
 - **`SELECT … INTO`** from a variant-producing built-in creates a `sql_variant` column (probe-confirmed).
 - **Arithmetic** rejects: `variant + non-variant` → **Msg 257** (`Implicit conversion from data type sql_variant to <target> is not allowed. Use the CONVERT function to run this query.`); `variant + variant` and `string + variant` → **Msg 402** (`… incompatible in the add operator`).
   `PromoteForArithmetic` is the single source; a runtime guard in `IntegerArithmetic` routes through it so `Run`-time and projection-schema errors agree.
-- **Cross-type ordering / grouping** (`Storage/SqlVariantOrdering.cs`, probe-confirmed 2026-07-19): comparison is two-level — datatype-family rank first, then value within the family.
+- **Cross-type ordering / grouping** (`Storage/SqlVariantOrdering.cs`, probe-confirmed): comparison is two-level — datatype-family rank first, then value within the family.
   Six families, lowest to highest: **1 `uniqueidentifier`; 2 binary** (`binary`/`varbinary`, byte-lexicographic); **3 character** (`char`/`varchar`/`nchar`/`nvarchar` — Unicode and non-Unicode are ONE family); **4 exact numeric** (`bit`, integer types, `decimal`, `money`/`smallmoney`, compared as decimal); **5 approximate** (`real`/`float` — above *every* exact value regardless of magnitude); **6 date/time** (compared as an instant: `time` anchored to 1900-01-01, `datetimeoffset` by UTC instant).
   Cross-family comparison is value-blind (`float 0.5 > bigint 1000000`); within a family, cross-type values compare by value and equal values are truly equal — `int 5` / `bigint 5` / `decimal 5.00` are one GROUP BY / DISTINCT bucket whose representative is the first value encountered (matching real's plan-order representative), and their ORDER BY tie order is undefined on real (plan-dependent), so tests must not pin it.
   NULL sorts lowest.
@@ -597,7 +609,7 @@ Yields one row per substring split on the single-character separator.
 - Schema is decided at parse time: 2-arg form projects `(value <input-string-type>)`; 3-arg form with literal `enable_ordinal = 1` adds `ordinal bigint`.
   `enable_ordinal = 0` or NULL collapses back to the 2-arg schema.
   The third argument must be a parse-time-constant integer expression (the schema is shape-fixed at compile time).
-  The gate first walks the arg for any variable via `Expression.ContainsVariableReference` — **every** variable-bearing shape raises Msg 8748, not only a bare `@v` (probe-confirmed 2026-07-10: `cast(@v as int)`, `@v + 0`, and `(@v)` all reject) — then evaluates against an empty resolver to catch column references.
+  The gate first walks the arg for any variable via `Expression.ContainsVariableReference` — **every** variable-bearing shape raises Msg 8748, not only a bare `@v` (probe-confirmed: `cast(@v as int)`, `@v + 0`, and `(@v)` all reject) — then evaluates against an empty resolver to catch column references.
   Constant shapes with no variable are accepted (probe-confirmed: `cast(1 as int)`, `(1)`, `1 + 0` all add the ordinal column).
   `ContainsVariableReference` recurses through the common containers (`VariableReference` / `Parenthesized` / `Cast` / `TwoSidedExpression`); a variable buried in a less-common container is a residual coverage gap.
 - NULL `input` → zero rows; empty `input` → one row with empty value (and ordinal 1 in the ordinal-enabled form).
@@ -610,7 +622,7 @@ Yields one row per substring split on the single-character separator.
 ## Built-in TVF: `GENERATE_SERIES`
 `GENERATE_SERIES(start, stop [, step])` (SQL Server 2022+) — third sibling of `STRING_SPLIT` / `OPENJSON` in the `ParseSingleFromSource` dispatch (and the `ParseLateralFromSource` allowlist, so `CROSS APPLY GENERATE_SERIES(1, t.n)` lateral-correlates correctly).
 Projects a single column named `value`.
-Probe-confirmed against SQL Server 2025 (2026-05-23).
+Probe-confirmed against SQL Server 2025.
 
 - Allowed arg types: `tinyint`, `smallint`, `int`, `bigint`, `decimal` / `numeric`.
   Anything else (`float`, `real`, `money`, `varchar`, `date`, …) raises **Msg 8116** at parse, with verbatim wording `Argument data type <type> is invalid for argument <N> of generate_series function`.
@@ -640,7 +652,7 @@ Probe-confirmed against SQL Server 2025 (2026-05-23).
 ## Legacy text-pointer scalars: `TEXTPTR` / `TEXTVALID`
 
 `Parser/Expressions/TextPointer.cs` (`LegacyTextPointer` helper + `TextPointer`), `Parser/Expressions/TextValid.cs`.
-Probe-confirmed against SQL Server 2025 (2026-07-20).
+Probe-confirmed against SQL Server 2025.
 
 - **`TEXTPTR(column)`** returns the 16-byte `varbinary` text pointer of a base-table `text` / `ntext` / `image` column, or NULL when the cell is NULL.
   The argument must be a base-table column reference: a literal, CAST, or computed expression raises **Msg 280** (`Only base table columns are allowed in the TEXTPTR function.`), and a column of any other type (including `varchar(max)`) raises **Msg 8116** (`Argument data type <t> is invalid for argument 1 of textptr function.`).
@@ -655,7 +667,7 @@ Probe-confirmed against SQL Server 2025 (2026-07-20).
 
 `Parser/Expressions/CertificateFunctions.cs` (`CertificateFunction`, `isPrivateKey` flag), `Parser/Expressions/GetFilestreamTransactionContext.cs`.
 The simulator models no certificate store or FILESTREAM storage, so each returns a NULL `varbinary(max)` — the faithful answer for the state the simulator is always in.
-Probe-confirmed against SQL Server 2025 (2026-07-20).
+Probe-confirmed against SQL Server 2025.
 
 - **`CERTENCODED(cert_id)`** → NULL (the answer real gives for a nonexistent certificate id).
   Exactly one argument; any other count raises **Msg 174** (`The CertEncoded function requires 1 argument(s).` — PascalCase function name, unlike the lowercase-rendered `PI` / `ISNULL` form).

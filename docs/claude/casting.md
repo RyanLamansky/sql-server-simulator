@@ -56,8 +56,8 @@ Reverse direction (date-family → varbinary) isn't modeled — no production sc
 Both directions are in `SqlValue.CoerceTo` (style 0, the default CAST form):
 
 - **`varbinary`/`binary` → `varchar`/`nvarchar`** reinterprets each byte through the target's encoding (CP1252 for varchar/char, UTF-16 LE for nvarchar/nchar).
-  Probe-confirmed 2026-05-22: `CAST(0x414243 AS varchar(10))` → `'ABC'`.
-  `image` source is rejected: the explicit CAST `image → varchar/nvarchar/char/nchar` raises **Msg 529** (`"Explicit conversion from data type image to <target> is not allowed."`, tiberius-surfaced 2026-07-23 — previously fell to a generic Msg 50000 "No coercion implemented"), while the implicit-coerce path (`LEN(image)` etc.) raises Msg 8116.
+  Probe-confirmed: `CAST(0x414243 AS varchar(10))` → `'ABC'`.
+  `image` source is rejected: the explicit CAST `image → varchar/nvarchar/char/nchar` raises **Msg 529** (`"Explicit conversion from data type image to <target> is not allowed."`, tiberius-surfaced), while the implicit-coerce path (`LEN(image)` etc.) raises Msg 8116.
   The Msg 529 target renders the `(max)` suffix for a MAX target but drops a bounded declared length to the root name (`nvarchar(max)` vs `nvarchar`) — real's rendering, matched by `FamilyRootName`'s MAX-form arms.
 - **`varchar`/`char`/`nvarchar`/`nchar` → `varbinary`/`binary`** encodes the string with the source's natural encoding (CP1252 for varchar/char/sysname, UTF-16 LE for nvarchar/nchar/ntext/text).
   `varbinary(N)` receives the raw bytes and the CAST-level path truncates to N.
@@ -71,7 +71,7 @@ The encoder accepts any same-family pair regardless of length (write-time trunca
 
 ## Binary ↔ integer / money CAST
 
-Both directions live in `SqlValue.CoerceTo` (probe-confirmed against SQL Server 2025, 2026-07-14).
+Both directions live in `SqlValue.CoerceTo` (probe-confirmed against SQL Server 2025).
 This is what makes SSMS's connect queries (`CAST(0x0001 AS int)`, `(@@microsoftversion / 0x1000000) & 0xff`) and hex `nchar(0x41)` resolve.
 
 | Source → target | Rule |
@@ -89,14 +89,14 @@ Arithmetic/bitwise/comparison with a binary operand routes through these same pa
 
 ## Legacy LOB explicit conversions (`text` / `ntext` / `image`)
 An explicit `CAST` / `CONVERT` out of a legacy LOB type is gated by **source family**, and the payload's parseability never enters into it — `CAST(<text '5'> AS int)` is refused as firmly as a non-numeric one would be.
-Probe-confirmed 2026-07-24; **Msg 529 St 1**, `"Explicit conversion from data type {source} to {target} is not allowed."`, with bare family-root names on both sides (`decimal`, not `decimal(10,2)`).
+Probe-confirmed; **Msg 529 St 1**, `"Explicit conversion from data type {source} to {target} is not allowed."`, with bare family-root names on both sides (`decimal`, not `decimal(10,2)`).
 
 - `text` / `ntext` convert only **within the string family** — `char` / `nchar` / `varchar` / `nvarchar` / `text` / `ntext` / `xml`.
   `xml` is string-category in the simulator's type model, so `SqlType.IsStringCategory` *is* the whole allow-list.
   `int` / `bigint` / `decimal` / `float` / `money` / `bit` / `date` / `datetime` / `uniqueidentifier` / `varbinary` / `sql_variant` all raise 529.
 - `image` converts only **within the binary family** — `varbinary` / `binary` / `image`.
   Note the asymmetry: `xml` and `sql_variant` raise 529 from `image` even though `xml` is reachable from `text`.
-  (`image` → string was already rejected a layer down in `SqlValue.CoerceTo`; the explicit path now answers from the same gate as the rest.)
+  (`image` → string is also rejected a layer down in `SqlValue.CoerceTo`; the explicit path answers from the same gate as the rest.)
 
 `TRY_CAST` / `TRY_CONVERT` raise it rather than returning NULL — 529 is an *illegal conversion*, not a conversion failure (see the swallow set below).
 
@@ -110,7 +110,7 @@ Wrap regular CAST/CONVERT in try/catch that swallows documented "conversion fail
 Swallow set (`Cast.IsConversionFailure`): **241** (datetime-from-string parse), **242** (datetime out-of-range), **244** (tinyint/smallint INT1/INT2 overflow), **245** (string→numeric parse), **248** (int overflow), **295** (smalldatetime parse), **8114** (decimal conversion), **8115** (generic arithmetic overflow), **8169** (uniqueidentifier-from-string), **8170** (uniqueidentifier→too-narrow-string), **9807** (CONVERT-style mismatch on string input).
 
 NOT swallowed: Msg 529 (explicit-cast disallowed pair like `int → date`), Msg 243 (unknown target type), and any source-evaluation error that fires before the cast itself runs.
-`TRY_CAST(1/0 AS INT)` raises Msg 8134 in real SQL Server; the simulator surfaces a raw `DivideByZeroException` (pre-existing fidelity gap orthogonal to TRY_CAST).
+`TRY_CAST(1/0 AS INT)` raises Msg 8134 in real SQL Server; the simulator surfaces a raw `DivideByZeroException` (fidelity gap orthogonal to TRY_CAST).
 
 String-source truncation isn't a "conversion failure" path either way — `TRY_CAST('hello' AS varchar(3))` → `'hel'`.
 EF doesn't emit TRY_CAST/TRY_CONVERT from idiomatic LINQ (raw SQL only).
@@ -148,7 +148,7 @@ Unknown styles (anything not in the published table) raise **Msg 281** with the 
 **Time-only source hour-padding quirk**: styles 0/9/100/109 emit single-digit hour WITHOUT leading-space padding (`2:25PM`), but styles 22/130/131 DO pad (` 2:25:36 PM`) — verified against SQL Server 2025.
 The rationale isn't documented; the simulator mirrors it.
 
-**String → date-like** (`SqlValue.CoerceStringToDateLikeWithStyle`): mirrors SQL Server's flexible string-to-datetime parser (probed against SQL Server 2025, 2026-05-27).
+**String → date-like** (`SqlValue.CoerceStringToDateLikeWithStyle`): mirrors SQL Server's flexible string-to-datetime parser (probed against SQL Server 2025).
 On success re-encodes through `datetime2(7)` and narrows to the target; on failure, an input that's a valid date by some other format raises **Msg 9807** (`"The input character string does not follow style N, …"`), a non-date raises **Msg 241**.
 `TRY_CONVERT` swallows both.
 Two style classes:

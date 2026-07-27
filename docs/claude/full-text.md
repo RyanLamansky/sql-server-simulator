@@ -85,7 +85,7 @@ An unrecognized property name returns NULL `int` (probe-confirmed convention); n
 ## `FULLTEXTCATALOGPROPERTY('catalog_name', 'property')`
 
 `Parser/Expressions/FullTextCatalogProperty.cs`.
-Returns an `int` property of a full-text catalog resolved by name against `Database.FullTextCatalogs` (probe-confirmed return type; 2026-07-20).
+Returns an `int` property of a full-text catalog resolved by name against `Database.FullTextCatalogs` (probe-confirmed return type).
 The simulator has no indexing engine, so the population / size / status properties report the idle-empty answers a freshly created catalog gives — `ItemCount`, `IndexSize`, `PopulateStatus`, `PopulateCompletionAge`, `MergeStatus`, `ImportStatus`, `UniqueKeyCount`, `LogSize` all `0`.
 `AccentSensitivity` reflects the catalog's DDL-captured `ACCENT_SENSITIVITY` option (`FullTextCatalog.IsAccentSensitive`, defaulting `1` / accent-sensitive) — the one property that varies with catalog state.
 An unknown catalog name or unrecognized property returns NULL; property names are case-insensitive.
@@ -97,7 +97,6 @@ An unknown catalog name or unrecognized property returns NULL; property names ar
 - **`ALTER FULLTEXT CATALOG` / `INDEX`** (REORGANIZE / REBUILD / START/STOP POPULATION / ADD/DROP column) — `NotSupportedException` at parse.
 - **Filesystem-placement semantics** (`ON FILEGROUP` / `IN PATH`) — parse-and-discard.
 - **`sys.fulltext_document_types` / `sys.fulltext_stoplists`** — shipped empty (the stoplist registry is inert since only the system stoplist is modeled).
-  (`sys.fulltext_languages` now ships populated — see above.)
 
 ## BACPAC round-trip
 

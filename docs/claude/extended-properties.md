@@ -90,7 +90,7 @@ Unknown level0/1/2 type raises `NotSupportedException`.
 
 - **PARAMETER level type** — not modeled (raises Msg 15600).
   AW doesn't exercise it.
-  (`TRIGGER` / `FILEGROUP` level-0 hosts now ship — see [Recognized level types](#recognized-level-types).)
+  (`TRIGGER` / `FILEGROUP` level-0 hosts ship — see [Recognized level types](#recognized-level-types).)
 - **`fn_listextendedproperty` value type** — surfaced as nvarchar(MAX) rather than sql_variant (the TVF's schema is fixed for parse/plan parity).
   `sys.extended_properties.value` is a genuine sql_variant preserving the input base type; only the TVF read-path is lossy.
   DacFx's export uses `sys.extended_properties`, so this doesn't affect BACPAC round-trip.

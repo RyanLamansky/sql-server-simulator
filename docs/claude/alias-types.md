@@ -28,7 +28,7 @@ Column-site explicit `NULL` / `NOT NULL` overrides the alias default.
 
 ## Type-reference parsing at consumer sites
 
-The simulator accepts 1- or 2-part dotted type names at every consumer site (previously single-`Name` only):
+The simulator accepts 1- or 2-part dotted type names at every consumer site:
 - `CREATE TABLE` column type
 - `DECLARE @v <type>`
 - `ALTER TABLE … ALTER COLUMN`
@@ -64,7 +64,7 @@ Alias rows ship via `BuiltInResources.cs::EnumerateSysTypes`:
 - **`HeapColumn` doesn't carry a back-pointer to its declaring `AliasType`.**
   Consequence: `sys.columns.user_type_id` surfaces the underlying built-in's id (not the alias's) when a column is alias-typed, and `DROP TYPE` on an alias type doesn't enforce **Msg 3732** (referenced-by-object).
   Real bacpac load never drops alias types during import, so this is acceptable for the baseline.
-- **Alias-type `max_length` not emitted in `sys.types`** — pre-existing gap from the catalog view's shipped subset.
+- **Alias-type `max_length` not emitted in `sys.types`** — gap from the catalog view's shipped subset.
 - **Alias-of-alias not modeled** — `CREATE TYPE T2 FROM T1` where T1 is an alias raises Msg 222 (matches probe behavior).
 
 See [`table-valued-parameters.md`](table-valued-parameters.md) for the parallel `CREATE TYPE … AS TABLE` shape (table types share the namespace + collision check).

@@ -43,8 +43,8 @@ Probe-confirmed: real SQL Server's KEYSET on a no-unique-key heap also opens wit
   Deletes ahead are silently skipped; inserts ahead appear.
 
 Cursor identity rides the row's stable `(page, slot)` heap address.
-`Heap.UpdateAt` (see [`storage.md`](storage.md) — TODO if you split that out; for now the in-place / forwarding-pointer machinery lives in `Storage/Heap.cs`) preserves that address through value updates: a fits-in-place rewrite overwrites the slot's bytes; an oversize rewrite appends the new row elsewhere and installs a single-level forwarding pointer at the original slot.
-Either way the row's visible address is unchanged, so KEYSET re-reads and positioned `WHERE CURRENT OF` DML survive value updates without requiring a unique key — a strict improvement over the previous "force STATIC when no PK/UNIQUE" rule.
+`Heap.UpdateAt` (the in-place / forwarding-pointer machinery in `Storage/Heap.cs`) preserves that address through value updates: a fits-in-place rewrite overwrites the slot's bytes; an oversize rewrite appends the new row elsewhere and installs a single-level forwarding pointer at the original slot.
+Either way the row's visible address is unchanged, so KEYSET re-reads and positioned `WHERE CURRENT OF` DML survive value updates without requiring a unique key — no PK/UNIQUE needed, and no forced STATIC.
 
 ## FETCH
 
@@ -139,9 +139,9 @@ It surfaces through the standard `InfoMessage` pipeline.
   The forced-STATIC snapshot returns the **correct rowset** for a read-only forward loop — it only diverges on sensitivity (no mid-loop change visibility), `@@CURSOR_ROWS` (count instead of `-1`), and positioned DML (Msg 16929 instead of updating).
   Faithful multi-source cursors would need per-source row identity carried through the join driver (`EnumerateJoinedRows` yields identity-less `byte[]?[]` tuples) plus live re-execution + navigation — a separate subsystem.
   A set-op (UNION/…) cursor is forced STATIC on the real server too, so that case matches.
-- **Position is tracked by the row's stable heap address**, made possible by `Heap.UpdateAt`'s in-place / forwarding-pointer design (the simulator's UPDATE no longer relocates rows).
+- **Position is tracked by the row's stable heap address**, made possible by `Heap.UpdateAt`'s in-place / forwarding-pointer design (the simulator's UPDATE doesn't relocate rows).
   KEYSET membership additionally tracks the unique-key tuple when the base table has a PK/UNIQUE, so a UPDATE to those columns produces `@@FETCH_STATUS = -2` (matches real SQL Server's keyset-tracks-the-unique-index behavior, probe-confirmed).
-  Multi-source cursors still force STATIC — see the JOIN/derived-table/view bullet above; that's now the sole structural restriction.
+  Multi-source cursors still force STATIC — see the JOIN/derived-table/view bullet above; that's the sole structural restriction.
 - **`@@CURSOR_ROWS` is `-1` throughout for DYNAMIC.**
   Real SQL Server may report a transient positive count for a freshly-opened dynamic cursor before the first fetch (asynchronous population heuristic); the simulator doesn't model the transition.
 - **Keyset `-2` leaves INTO variables unchanged.**

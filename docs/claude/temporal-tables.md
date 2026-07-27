@@ -2,7 +2,7 @@
 
 Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW START / END`, `WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))`, the auto-created history sibling, `FOR SYSTEM_TIME ALL / AS OF` query syntax, or related `HeapTable` / `HeapColumn` metadata.
 
-## What ships
+## What's modeled
 
 - **CREATE TABLE** with `PERIOD FOR SYSTEM_TIME (startCol, endCol)` table-level declaration + per-column `GENERATED ALWAYS AS ROW START | END [HIDDEN] NOT NULL`.
   The two period columns must be `datetime2(N)` NOT NULL; nullable or non-datetime2 raises Msg 13501 / 13587.
@@ -30,7 +30,7 @@ Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW STA
   The remaining temporal-query forms (`BETWEEN ... AND ...`, `FROM ... TO ...`, `CONTAINED IN (..., ...)`) raise `NotSupportedException` until an application needs them.
 - **DROP TABLE** on a system-versioned parent or its history sibling raises Msg 13552; caller must `ALTER TABLE ... SET (SYSTEM_VERSIONING = OFF)` first.
 - **`ALTER TABLE [schema.]name SET (SYSTEM_VERSIONING = OFF)`** flips the parent's `HeapTable.SystemVersioning` to `null` and the history sibling's `HeapTable.IsHistoryTable` to `false` — both tables revert to plain regular status, and `DROP TABLE` on either now succeeds.
-  Period definition and GENERATED ALWAYS / HIDDEN column metadata stay intact on the parent (probe-confirmed 2026-05-13 against SQL Server 2025: `sys.tables.temporal_type` flips to 0 on both, `history_table_id` clears to NULL, but the parent's `sys.columns.generated_always_type_desc` keeps `AS_ROW_START` / `AS_ROW_END` and `is_hidden` stays `True`).
+  Period definition and GENERATED ALWAYS / HIDDEN column metadata stay intact on the parent (probe-confirmed against SQL Server 2025: `sys.tables.temporal_type` flips to 0 on both, `history_table_id` clears to NULL, but the parent's `sys.columns.generated_always_type_desc` keeps `AS_ROW_START` / `AS_ROW_END` and `is_hidden` stays `True`).
   Post-SET-OFF DML semantics: INSERT still auto-populates the period columns (the per-column GENERATED ALWAYS marker drives the auto-populate in `Simulation.Insert.cs`, independent of the versioning link); explicit INSERT into a GENERATED ALWAYS column still raises Msg 13536; UPDATE does **not** bump ROW START (the engine treats the marker as "no longer engine-maintained" for writes once versioning is off); DELETE doesn't copy to the (former) history table.
   Error paths: Msg 4902 if the target name doesn't resolve (the alter-table-specific table-not-found wording, distinct from Msg 208's generic name-resolution); Msg 13591 if the target exists but isn't system-versioned (fires both for plain regular tables and for the history sibling itself — the history sibling carries the `HISTORY_TABLE` role but doesn't "have" versioning, only the parent does).
 - **`ALTER TABLE [schema.]name SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))`** is the inverse of OFF: takes a base with a `PERIOD FOR SYSTEM_TIME` declaration (but no versioning link) and an existing history table, sets `base.SystemVersioning = history` + `history.IsHistoryTable = true`.

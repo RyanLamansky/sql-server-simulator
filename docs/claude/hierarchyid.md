@@ -42,7 +42,7 @@ Each label of a path is a self-delimiting bit sequence — a prefix-free tier co
 A **dotted sub-ordinal** (`/1/2.3/` = `[[1],[2,3]]`) encodes every non-final label of a segment as `ordinal + 1` with terminator `0`, the last label normally with terminator `1` — the order-preserving trick that sorts a dotted continuation after the plain node and before its next sibling.
 The decoder reads dotted forms back via the terminator bit (the previous decoder could not).
 
-**Modeled tier domain: ordinals −4168 .. 5199** (twelve tiers, every boundary byte-anchored by a live SQL Server 2025 probe, 2026-07-17).
+**Modeled tier domain: ordinals −4168 .. 5199** (twelve tiers, every boundary byte-anchored by a live SQL Server 2025 probe).
 `V` = value-bit group MSB→LSB, digit = fixed structural bit, final bit = terminator; ordinal = base + value:
 
 | Prefix | Layout | Ordinal range |
@@ -62,7 +62,7 @@ The decoder reads dotted forms back via the terminator bit (the previous decoder
 
 Ordinals outside that window (the wider 6-byte tiers, e.g. `/100000/` prefix `111110`, or below −4168) raise `NotSupportedException` on encode/decode; storage still round-trips their bytes opaquely.
 
-**Reverse CAST `CAST(varbinary AS hierarchyid)` is strict** — probe-confirmed 2026-07-17 that SQL Server rejects any non-canonical byte string (wrong pad bits: `0x59` vs canonical `0x58`; all-zero non-empty `0x00`; garbage prefix; trailing bytes) with the .NET-UDR error (Msg 6522).
+**Reverse CAST `CAST(varbinary AS hierarchyid)` is strict** — probe-confirmed that SQL Server rejects any non-canonical byte string (wrong pad bits: `0x59` vs canonical `0x58`; all-zero non-empty `0x00`; garbage prefix; trailing bytes) with the .NET-UDR error (Msg 6522).
 `HierarchyIdOrdPath.DecodeCanonical` enforces this by decoding then re-encoding and requiring byte equality, so canonicalization is checked by construction.
 `0x` (empty) → root `/`.
 

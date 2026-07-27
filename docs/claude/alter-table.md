@@ -2,7 +2,7 @@
 
 `ALTER TABLE` ships seven modeled shapes: `SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))` (see [`temporal-tables.md`](temporal-tables.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) …`, `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), and `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)).
 REBUILD, SWITCH PARTITION, and the `ALTER COLUMN col ADD/DROP {PERSISTED|MASKED|ROWGUIDCOL|SPARSE}` sub-clause forms raise `NotSupportedException`.
-Probe-confirmed against SQL Server 2025 on 2026-05-14.
+Probe-confirmed against SQL Server 2025.
 
 ## Grammar
 
@@ -148,24 +148,24 @@ Probe-confirmed.
 
 - `HeapTable.KeyConstraints` / `CheckConstraints` are `List<>` (the reference is `readonly`, contents mutable) so ADD / DROP can append / remove in place.
   Inline at CREATE TABLE still goes through the same lists.
-- `HeapTable.OutgoingForeignKeys` / `IncomingForeignKeys` already lists pre-existing (introduced with the FK bundle).
+- `HeapTable.OutgoingForeignKeys` / `IncomingForeignKeys` already carry the constraint lists.
 - `ForeignKey.IsNotTrusted` / `CheckConstraint.IsNotTrusted` are mutable bool fields, false on CREATE-time inline / true on WITH-NOCHECK ALTER ADD / true after `NOCHECK CONSTRAINT`.
   Cleared by `WITH CHECK CHECK CONSTRAINT` on successful revalidation.
 - `ForeignKey.IsDisabled` / `CheckConstraint.IsDisabled` are independent mutable bools — true after `NOCHECK CONSTRAINT`, false after either `CHECK CONSTRAINT` form.
   The enforcement loops (`EnforceCheckConstraints`, `EnforceOutgoingForeignKeys`, `EnforceIncomingForeignKeys`, `EnforceIncomingFkOnUpdate`) skip when `IsDisabled` — including suppressing cascade actions.
 - `CheckConstraint.IsSystemNamed` flags auto-named CHECKs; `KeyConstraint` infers the same from its name prefix (no explicit flag).
-- `HeapColumn.Default` is now mutable (ALTER ADD DEFAULT sets, ALTER DROP CONSTRAINT clears).
+- `HeapColumn.Default` is mutable (ALTER ADD DEFAULT sets, ALTER DROP CONSTRAINT clears).
 - `HeapColumn.DefaultConstraint` is the named metadata wrapper alongside `Default` — populated at inline DEFAULT (auto-named, `IsSystemNamed = true`) and named ALTER ADD DEFAULT (explicit name, `IsSystemNamed = false`).
 
 ## Catalog views
 
-Three new views ship with this bundle:
+Three catalog views cover constraint metadata:
 
 - **`sys.check_constraints`** — one row per CHECK constraint, with `is_not_trusted`, `is_system_named`, `parent_column_id` (1-based ordinal for inline column-level; `0` for table-level), and `definition` (the predicate's original source syntax, paren-wrapped — see [Definition columns](#definition-columns)).
 - **`sys.key_constraints`** — one row per PRIMARY KEY / UNIQUE constraint, with `type` = `PK` / `UQ`, `type_desc` = `PRIMARY_KEY_CONSTRAINT` / `UNIQUE_CONSTRAINT`, and `is_system_named` inferred from the auto-name prefix.
 - **`sys.default_constraints`** — one row per named DEFAULT (inline + ALTER ADD), with `parent_column_id`, `is_system_named`, and `definition` (the default expression's original source syntax, paren-wrapped — see [Definition columns](#definition-columns)).
 
-`sys.foreign_keys.is_not_trusted` / `is_disabled` now read from `ForeignKey.IsNotTrusted` / `IsDisabled`; `sys.check_constraints.is_not_trusted` / `is_disabled` read from the corresponding `CheckConstraint` flags.
+`sys.foreign_keys.is_not_trusted` / `is_disabled` read from `ForeignKey.IsNotTrusted` / `IsDisabled`; `sys.check_constraints.is_not_trusted` / `is_disabled` read from the corresponding `CheckConstraint` flags.
 
 ## Definition columns
 
@@ -196,13 +196,13 @@ A user-written paren wrapping the expression yields a doubled pair (`DEFAULT (0)
 ## EF Core integration
 
 EF Migrations emit FK adds via `ALTER TABLE` heavily (separate from `CREATE TABLE`).
-The simulator accepts that emit shape, but no EFCore-specific test ships in this bundle — once the FK is in place (whether declared inline at CREATE TABLE or added via ALTER), EF Core sees the same database state either way, so the `EFCoreForeignKey` test already covers the LINQ surface.
+The simulator accepts that emit shape; no EFCore-specific test covers it, because once the FK is in place (whether declared inline at CREATE TABLE or added via ALTER), EF Core sees the same database state either way, so the `EFCoreForeignKey` test already covers the LINQ surface.
 The simulator-side `AlterTableConstraintTests` covers the parser / validation / catalog surface for ALTER directly.
 
 ## Column ops
 
-`ALTER TABLE … ADD [COLUMN] col TYPE [, …]` and `ALTER TABLE … DROP COLUMN [IF EXISTS] col [, …]` ship as part of the EF Migrations parity workstream.
-Probe-confirmed against SQL Server 2025 on 2026-05-14.
+`ALTER TABLE … ADD [COLUMN] col TYPE [, …]` and `ALTER TABLE … DROP COLUMN [IF EXISTS] col [, …]` ship, matching the shapes EF Migrations emits.
+Probe-confirmed against SQL Server 2025.
 
 ### Grammar — ADD COLUMN
 
@@ -284,7 +284,7 @@ The mutation patterns:
 - `ForeignKey.ReferencedColumnOrdinals[i]` — array element reassignment (incoming, since this table is the referenced side)
 
 The heap is re-encoded: each row is decoded under the old `StoredColumns` layout, projected through the surviving ordinals, and re-encoded against the new `StoredColumns`.
-The old `Heap` is replaced wholesale (via the now-mutable `HeapTable.Heap` field).
+The old `Heap` is replaced wholesale (via the mutable `HeapTable.Heap` field).
 
 ### Fidelity gaps — Column ops
 

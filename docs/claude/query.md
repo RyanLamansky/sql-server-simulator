@@ -13,7 +13,7 @@
 - Quantified comparison (`Parser/BooleanExpression.cs` — `QuantifiedComparisonExpression`): all six operators (`=`, `<>`, `<`, `<=`, `>`, `>=`) plus T-SQL synonyms (`!=` → `<>`, `!<` → `>=`, `!>` → `<=`) fold at parse time into a `ComparisonOp` enum.
   `SOME` is a pure alias of `ANY`.
   Inner SELECT must project exactly one column (Msg 116, shared factory with IN-subquery).
-  **Predicate-only**: probe-confirmed (2026-05-13) that real SQL Server raises Msg 102 when the form appears in a SELECT-list expression slot — the simulator inherits the same restriction because parsing lives in `BooleanExpression.ParseComparison`, reachable only from the boolean-atom path.
+  **Predicate-only**: probe-confirmed that real SQL Server raises Msg 102 when the form appears in a SELECT-list expression slot — the simulator inherits the same restriction because parsing lives in `BooleanExpression.ParseComparison`, reachable only from the boolean-atom path.
   Empty inner: `ALL` is vacuously true, `ANY` vacuously false (LHS NULL irrelevant — the inner is consumed first).
   Non-empty inner runs three-valued fold: any comparison evaluating to `true` short-circuits `ANY` to `true`; any `false` short-circuits `ALL` to `false`; otherwise `null`-tainted comparisons turn the overall result UNKNOWN, fall-through is `false` for `ANY` / `true` for `ALL`.
   `<op> ANY` cannot be negated directly (`NOT <op> ANY` isn't grammar — apps must flip the operator: `NOT (x > ALL y)` ≡ `x <= ANY y`).
@@ -28,7 +28,7 @@
   Rides the same deferred `FromSource.LateralPlan` seam as a derived-table SELECT (`Selection.ForValuesConstructor`), so a VALUES source **under APPLY correlates to the outer row** — the SSMS server-properties shape `… CROSS APPLY (VALUES (1001, 'host_platform', 0, host_platform), …) t(id, [name], internal_value, [value])`, whose rows mix literals with outer-column references.
   Per-column result types promote across every row's cell via `SqlType.Promote` (set-op / CASE joint-envelope rule): int + decimal → decimal, varchar + N'…' → nvarchar; the promoted type coerces each cell at runtime (so `(1),('abc')` promotes to int, then Msg 245 on the `'abc'` row).
   Both the **alias and its column-alias list are required**: no alias → Msg 102 near `)`; no column list → **Msg 8155**; more row columns than list names → **Msg 8158**, fewer → **Msg 8159** (shared factory with CTE / view rename lists); rows of differing arity → **Msg 10709**; empty row `()` → Msg 102.
-  Untyped `NULL` cells carry the simulator's default `int` type (`SELECT NULL` quirk), so an all-`NULL` column is `int` (matches real) but a `NULL` + string column stays `int` and the string fails to coerce (diverges from real's untyped-NULL adoption — the pre-existing bare-NULL-is-int limitation, not VALUES-specific).
+  Untyped `NULL` cells carry the simulator's default `int` type (`SELECT NULL` quirk), so an all-`NULL` column is `int` (matches real) but a `NULL` + string column stays `int` and the string fails to coerce (diverges from real's untyped-NULL adoption — the bare-NULL-is-int limitation, not VALUES-specific).
 - **FROM-less `SELECT` with a trailing `ORDER BY`**: `SELECT 2 AS X, 1 AS Y ORDER BY X` is legal (the one synthesized row makes the sort a no-op, but the clause must parse rather than raise Msg 156).
   Also legal as the final `ORDER BY` of a set-op chain whose branches are FROM-less (`SELECT 2 AS X UNION ALL SELECT 1 ORDER BY X DESC` → 2, 1), applied by `ApplyTopLevelOrderBy`.
   The `OFFSET`/`FETCH` tail attaches too.
@@ -39,7 +39,7 @@
   Double-quoted delimited identifiers (`AS "x"`) aren't modeled: `"` is untokenized language-wide (Msg 102), not an alias-specific gap.
 - CASE: searched + simple.
   UNKNOWN excludes (matches WHERE); simple-form `CASE NULL WHEN NULL` falls through.
-  Result type from `SqlType.Promote` over the THEN / ELSE branches, **skipping bare untyped `NULL` literals** (`CaseExpression.CombineArmType`): SQL Server treats an untyped NULL as typeless in CASE result resolution — it yields to the typed branches, so `CASE WHEN … THEN 'x' ELSE NULL END` is nvarchar, not int (previously the bare-NULL placeholder `int` promoted the whole CASE to int and a string arm then failed to convert — surfaced by SMO's `CASE … THEN (SELECT name … COLLATE catalog_default) … ELSE NULL END`).
+  Result type from `SqlType.Promote` over the THEN / ELSE branches, **skipping bare untyped `NULL` literals** (`CaseExpression.CombineArmType`): SQL Server treats an untyped NULL as typeless in CASE result resolution — it yields to the typed branches, so `CASE WHEN … THEN 'x' ELSE NULL END` is nvarchar, not int (a bare-NULL placeholder `int` would otherwise promote the whole CASE to int and a string arm then failed to convert — surfaced by SMO's `CASE … THEN (SELECT name … COLLATE catalog_default) … ELSE NULL END`).
   Only when *every* branch is a bare NULL does the placeholder int type stand — and that all-NULL case raises **Msg 8133** anyway.
   A typed NULL (`CAST(NULL AS int)`) is not skipped.
   **Msg 8133** fires at parse when every result expression (every THEN body + the explicit ELSE if present; an absent ELSE counts as implicit bare NULL) is a bare `NULL` literal — `Expression.IsBareNullLiteral` unwraps `Parenthesized` so `(NULL)` still trips.
@@ -92,8 +92,8 @@ Sort keys decode only the ORDER BY columns off each row (`ComputeTopLevelOrderKe
 
 ## Aggregate / GROUP BY binding rules
 
-Four rules SQL Server binds at parse time, all in the over-permissive direction before they landed (an app query would work on the simulator and break on real).
-Probe-confirmed 2026-07-24; oracle `AggregateBindingRuleTests`.
+Four rules SQL Server binds at parse time; without them the simulator is over-permissive (an app query would work here and break on real).
+Probe-confirmed; oracle `AggregateBindingRuleTests`.
 
 - **Msg 130 Cls 15 St 1** — `"Cannot perform an aggregate function on an expression containing an aggregate or a subquery."`
   Fires when an aggregate's *own argument* contains another aggregate or a subquery at any depth: `SUM(MAX(a))`, `SUM(a + MAX(b))`, `MAX(CASE WHEN EXISTS(…) THEN a END)`, `MAX((SELECT 1))`, and the correlated form.
@@ -122,7 +122,7 @@ Counting at construction is complete by construction instead.
 The one wrinkle: a bare name is built as a `Reference` before the parser knows whether `(` follows, so `GETDATE()` briefly looks like a column.
 `Expression.ParseCallArguments` — the single funnel for every `<reference>(` shape — decrements on entry to cancel that, leaving a net count of genuine column references.
 
-Residual (permissive, matching prior behavior): an *outer* column reference counts like a local one, so a grouping item naming only an outer column inside a correlated subquery stays accepted where real raises Msg 164.
+Residual permissiveness: an *outer* column reference counts like a local one, so a grouping item naming only an outer column inside a correlated subquery stays accepted where real raises Msg 164.
 Closing that needs source resolution, not a parse-time count.
 Also, `STRING_AGG`'s `WITHIN GROUP (ORDER BY …)` and the JSON aggregates' key expression are parsed *after* the aggregate registers, so an aggregate or subquery hidden there escapes the Msg 130 bracket.
 
@@ -157,7 +157,7 @@ Returns `tinyint` 0/1 and `int` bitmap respectively; **leftmost arg of `GROUPING
 Argument must match a GROUP BY expression.
 Arg not in any grouping set → Msg 8161; same Msg for GROUPING outside any GROUP BY context.
 Two `Reference` operands match by leaf-name equality (qualifier-tolerant); any other pair matches by **structural equality** of the parenthesis-stripped parse tree (`Grouping.FindArg` strips redundant parens off both sides, then compares `DebugDisplay` renderings ordinal-ignore-case).
-Probe-confirmed 2026-07-10: `GROUPING(a+1)` / `GROUPING_ID(a+1, b)` with matching GROUP BY expressions return their 0/1 markers, `GROUPING((a+1))` (extra parens) still matches, while `GROUPING(1+a)` (operand order differs — no commutative normalization) and `GROUPING(a+2)` (value mismatch) both raise Msg 8161.
+Probe-confirmed: `GROUPING(a+1)` / `GROUPING_ID(a+1, b)` with matching GROUP BY expressions return their 0/1 markers, `GROUPING((a+1))` (extra parens) still matches, while `GROUPING(1+a)` (operand order differs — no commutative normalization) and `GROUPING(a+2)` (value mismatch) both raise Msg 8161.
 
 `STRING_AGG(expr, sep) WITHIN GROUP (ORDER BY ...)` reorders concatenation per group (EF emits this from `GroupBy(...).Select(g => string.Join(sep, g.OrderBy(...)))`).
 NULL operand rows skip both ORDER BY input and output.

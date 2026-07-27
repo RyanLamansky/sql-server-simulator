@@ -1,7 +1,7 @@
 # Table variables (`DECLARE @t TABLE (...)`)
 
 A per-batch heap table referenced via `@`-prefixed names.
-Probed against SQL Server 2025 (2026-05-12, gap-bundle 2026-05-12).
+Probed against SQL Server 2025.
 The column-list parser is shared with CREATE TABLE (see `Simulation.ParseColumnList`); table-variable-only restrictions (CONSTRAINT-named, REFERENCES) are gated on an `isTableVariable` flag.
 
 ## Storage scope
@@ -128,7 +128,7 @@ The defaulted value is coerced into the target column's type via the same `Coerc
 
 - **Shared column-list parser**: `Simulation.ParseColumnList` handles both CREATE TABLE and DECLARE @t TABLE column-list bodies.
   The `isTableVariable` flag gates the two restrictions (CONSTRAINT-named → Msg 102, REFERENCES → Msg 102); everything else (IDENTITY / UNIQUE / CHECK / computed / rowversion) is shared.
-  The shared parser also handles table-level PK promotion of bare-nullable columns to NOT NULL, fixing a pre-existing CREATE TABLE fidelity bug as a side effect.
+  The shared parser also handles table-level PK promotion of bare-nullable columns to NOT NULL, fixing a CREATE TABLE fidelity bug as a side effect.
 - **Where the dict lives**: `BatchContext.TableVariables` is the natural per-batch home.
   Variables share the same scope and the duplicate-name check (Msg 134) is one resolution.
 - **Why `HeapTable.IsTableVariable` instead of a separate type**: table variables reuse most of `HeapTable`'s storage / encoding / constraint enforcement.

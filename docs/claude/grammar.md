@@ -27,12 +27,20 @@ Before unification these predicates had drifted (EXEC/EXECUTE missing from sever
 # Implicit `EXECUTE` (bare procedure call)
 
 A statement that is a bare object name — optionally followed by an argument list — is an implicit `EXECUTE`, matching real SQL Server: `sp_datatype_info_100 0, 3` runs identically to `EXEC sp_datatype_info_100 0, 3`.
-This is the form mssql-jdbc's `getTypeInfo` sends (no `EXEC` keyword), which previously died with `Incorrect syntax near 'sp_datatype_info_100'`.
-The restriction is strict — probe-confirmed against SQL Server 2025 (2026-07-22): the bare form is accepted **only as the literal first statement of a batch**.
+This is the form mssql-jdbc's `getTypeInfo` sends (no `EXEC` keyword).
+The restriction is strict — probe-confirmed against SQL Server 2025: the bare form is accepted **only as the literal first statement of a batch**.
 Anywhere else it is Msg 102: after a prior statement (`SELECT 1; sp_who`), and even after a leading empty statement (`; sp_who`).
 The dispatch loop carries an `atBatchStart` flag (`DispatchStatementsUntil` → `DispatchOneStatement` → `DispatchOneStatementCore`) that starts true for a top-level batch (`endKeyword is null` — never inside a `BEGIN…END` block) and clears on the first `;` or dispatched statement.
 When it is still set and the leading token is a bare `Name` (not a reserved statement keyword — those match their own switch arms first), the statement routes through `ParseExec(batch, implicitExec: true)`, which skips the EXEC-keyword consume, the `EXECUTE AS` / `@rc =` capture, and the dynamic-SQL `(…)` branches and starts directly at the proc-name parse — so RPC and text execution stay identical.
 Positional args (`a, b`), named args (`@p = v`), and no-arg (`sp_who`) all work; an unknown bare name raises the normal proc-not-found (Msg 2812), not Msg 102.
+
+# Unquoted identifier body characters
+
+`Tokenizer.IsIdentifierBodyChar` governs what may follow an unquoted identifier's first character: letters and digits, `_`, **`$`, `#`, `@`**, and Unicode non-spacing marks (so a decomposed spelling — `zzcafe` + U+0301 — tokenizes and resolves to a table created as composed `zzcafé`).
+
+`$` / `#` / `@` are body-only.
+A *leading* `@` or `#` dispatches separately, as a variable or a temp-table name, and a leading `$` (outside `$action`) is a currency literal — so these three characters only extend an identifier mid-token.
+ORMs emit exactly this shape: Django's annotations tests generate crafted aliases like `crafted_alia$`, which is what motivated the rule.
 
 # Reserved keywords as identifiers
 
@@ -42,7 +50,7 @@ So the enum is the sole gate on which words are usable as unquoted identifiers, 
 Two canonical entries are **deliberately omitted** from the enum because real SQL Server doesn't actually enforce them as reserved (`ReservedKeywordsTests.DocumentedOmissions`):
 
 - **`WITHIN GROUP`** — a two-word entry whose component words aren't independently reserved (`WITHIN` is contextual; `GROUP` is covered).
-- **`PRECISION`** — on the list only because it forms the `DOUBLE PRECISION` type name, but probe-confirmed (SQL Server 2025, 2026-07-15) fully usable as an identifier in **every** position: dotted member (`clmns.precision`), bare projection (`SELECT precision FROM …`), alias (`SELECT 1 AS precision`), table alias, and `ORDER BY` all succeed.
+- **`PRECISION`** — on the list only because it forms the `DOUBLE PRECISION` type name, but probe-confirmed (SQL Server 2025) fully usable as an identifier in **every** position: dotted member (`clmns.precision`), bare projection (`SELECT precision FROM …`), alias (`SELECT 1 AS precision`), table alias, and `ORDER BY` all succeed.
   SMO's SSMS column-node query reads `CAST(clmns.precision AS int)` off `sys.all_columns`, so reserving it blocked a real client.
   Server behavior is authoritative over the doc list, so `Precision` is not a `Keyword`.
 
@@ -103,11 +111,11 @@ An identifier or other token still routes through the normalizer, so the alias-s
 
 A .NET stack overflow is uncatchable and process-fatal — unacceptable for an in-process library handed a pathological query.
 So no recursive spine that user SQL can drive arbitrarily deep is allowed to overflow: flat operator chains parse **and** evaluate iteratively (no per-term recursion), genuinely-nested shapes are bounded by SQL Server's own graceful structural errors, and a runtime stack probe backstops whatever remains.
-Thresholds probed against SQL Server 2025 (2026-07-18).
+Thresholds probed against SQL Server 2025.
 
 ### Flat left-associative chains — no cap (iterative)
 
-`Expression.Parse` parses binary-operator chains (`+ - * / % & | ^`) by **iterative precedence-climbing** (`ParseBinaryContinuation`), not the former ctor-recursion, so `1 + 1 + … + 1` of any length builds a left-leaning tree with parse recursion bounded by the number of precedence levels (2), not the term count.
+`Expression.Parse` parses binary-operator chains (`+ - * / % & | ^`) by **iterative precedence-climbing** (`ParseBinaryContinuation`) rather than constructor recursion, so `1 + 1 + … + 1` of any length builds a left-leaning tree with parse recursion bounded by the number of precedence levels (2), not the term count.
 Evaluation is iterative too: `TwoSidedExpression.Run` / `GetSqlType` walk the left spine in a loop (recursing only into right operands, whose depth is paren-bounded), and boolean `AND` / `OR` chains collapse to **n-ary** `AndExpression` / `OrExpression` nodes evaluated in a loop.
 A run of `NOT` prefixes collapses at parse (three-valued `NOT` is an involution).
 So flat `+` / concat / `AND` / `OR` chains of tens of thousands of terms parse and run without recursion.
@@ -119,7 +127,7 @@ The simulator has **no** artificial cap on flat chains — being more permissive
 ### Nested shapes — shared weighted budget, Msg 191
 
 Parens, scalar subqueries, and function-argument lists share **one** nesting budget (`ParserContext.NestingDepth`, cap `Expression.MaxNestingDepth` = 500), each construct charging its cost on entry and refunding it in a `finally`; crossing the cap raises **Msg 191, Class 15** (`StatementNestedTooDeeply()`, `Some part of your SQL statement is nested too deeply. …`).
-Probe-confirmed 2026-07-18 that real pools these into a single budget (1000 nested parens + 14 nested funcs fails; 150 subqueries + 116 parens fails) where a subquery level costs ≈ 6 paren levels — the simulator mirrors the ratio: `ParenNestingCost` = `FunctionCallNestingCost` = 1, `SubqueryNestingCost` = 6.
+Probe-confirmed that real pools these into a single budget (1000 nested parens + 14 nested funcs fails; 150 subqueries + 116 parens fails) where a subquery level costs ≈ 6 paren levels — the simulator mirrors the ratio: `ParenNestingCost` = `FunctionCallNestingCost` = 1, `SubqueryNestingCost` = 6.
 
 **Divergence:** real's absolute limits are higher and stack-dependent (1015 nested parens / 1013 nested funcs / 168 nested subqueries all succeed; +1 each raises Msg 191).
 The simulator's parse frames are fatter — a 1 MB Debug thread parses only ~990 nested parens before the stack probe would claim the shape as Msg 8631 — so the cap is set to 500 (paren/func limit 500, subquery limit ⌊500/6⌋ = 83), giving ~2× headroom on the tightest test config (1 MB Debug) while preserving the probed subquery ≈ 6× paren ratio.
@@ -130,7 +138,7 @@ Both outcomes are graceful.
 
 `CASE` / `IIF` lexical nesting is capped at ten levels (`ParserContext.CaseDepth`, `MaxCaseNestingDepth`), an eleventh raising **Msg 125, Class 15** (`Case expressions may only be nested to level 10.`) — an **exact** match to real.
 The **state** identifies the construct entered at the eleventh level: **State 4** for a searched/simple `CASE`, **State 2** for `IIF` (which desugars to a searched CASE).
-Probe-confirmed 2026-07-18: nesting in a `WHEN` condition counts identically to a `THEN` / `ELSE` result, the count is **not** reset by a scalar-subquery boundary, and a mixed CASE/IIF stack shares one counter (the innermost-entered construct sets the state).
+Probe-confirmed: nesting in a `WHEN` condition counts identically to a `THEN` / `ELSE` result, the count is **not** reset by a scalar-subquery boundary, and a mixed CASE/IIF stack shares one counter (the innermost-entered construct sets the state).
 
 ### Msg 8631 backstop
 

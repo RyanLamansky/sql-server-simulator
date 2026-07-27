@@ -36,7 +36,7 @@ Uncaught errors terminate the batch, so no path reads @@ERROR after a failure th
 The simulator doesn't model the doomed state, so values collapse to `0` / `1`.
 `@@TRANCOUNT > 0` and `XACT_STATE() = 1` are equivalent observables under the modeled scope.
 
-**Compound assignment** (`SET @v += expr` / `-=` / `*=` / `/=` / `%=` / `&=` / `|=` / `^=`) is a parse-time desugar: `@v += rhs` is rewritten as `FromCompoundOp('+', VariableReference(@v), rhs)` and routed through the existing assignment path, so the arithmetic / string-concat dispatch handles three-valued logic (NULL on either side propagates), string `+=` concatenates `varchar` / `nvarchar`, decimal / money widening matches plain `+`, and divide-by-zero raises Msg 8134 from the decimal path (or surfaces a raw `DivideByZeroException` on the integer path — same pre-existing simulator gap as plain `select 10/0`).
+**Compound assignment** (`SET @v += expr` / `-=` / `*=` / `/=` / `%=` / `&=` / `|=` / `^=`) is a parse-time desugar: `@v += rhs` is rewritten as `FromCompoundOp('+', VariableReference(@v), rhs)` and routed through the existing assignment path, so the arithmetic / string-concat dispatch handles three-valued logic (NULL on either side propagates), string `+=` concatenates `varchar` / `nvarchar`, decimal / money widening matches plain `+`, and divide-by-zero raises Msg 8134 from the decimal path (or surfaces a raw `DivideByZeroException` on the integer path — same simulator gap as plain `select 10/0`).
 The two characters of a compound op must be adjacent in source — probe-confirmed: `SET @v + = 5` (with a space) raises Msg 102 in real SQL Server, so an `EndIndex == StartIndex` adjacency check in `TryConsumeAssignmentOperator` matches.
 The same helper drives `UPDATE t SET col op= expr` (both bare and `t.col` qualified forms; mixed plain/compound across multiple SET-list entries).
 **Table variables** (`DECLARE @t TABLE (...)`) ship — see [Table variables](table-variables.md) for the storage scope, grammar coverage, non-transactional semantics, and `OUTPUT … INTO @t`.
@@ -46,7 +46,7 @@ The same helper drives `UPDATE t SET col op= expr` (both bare and `t.col` qualif
 TRY/CATCH + THROW + ERROR_*() functions ship as a separate section below.
 Value-form `RETURN N` ships inside scalar-UDF bodies (see [`programmable.md`](programmable.md)) and raises Msg 178 in batch / proc scope.
 GOTO/labels and stored-procedure `RETURN N` aren't modeled.
-Probed against SQL Server 2025 (2026-05-11).
+Probed against SQL Server 2025.
 
 - **Body grammar**: exactly one statement.
   The famous T-SQL footgun `IF cond SELECT 'a' SELECT 'b'` runs *both* SELECTs — only the first is the IF body; the second escapes the IF as a subsequent batch-level statement.
@@ -123,7 +123,7 @@ The top-level loop calls `DispatchStatementsUntil(null)`; `ParseBeginBlock` call
 `IsStatementBoundary` includes `If` / `Else` / `End` / `While` / `Break` / `Continue` / `Return` so the cursor-normalization at the end of each dispatch correctly recognizes nested-control terminators.
 `Selection.ParseInner`'s projection-list terminator switch lists the same set plus `Drop` so `SELECT ... ELSE` / `SELECT ... END` / `SELECT ... BREAK` / etc. correctly stop at the keyword instead of throwing Msg 102.
 
-**Deferred name resolution in skipped branches** — the compile-vs-defer rule (probe-confirmed against SQL Server 2025, 2026-07-17).
+**Deferred name resolution in skipped branches** — the compile-vs-defer rule (probe-confirmed against SQL Server 2025).
 Real SQL Server binds *base object* names lazily but binds *columns of a resolvable table* eagerly at compile time.
 So deferral is scoped to a missing object, and the matrix is:
 
@@ -141,19 +141,19 @@ The simulator has no compile/run split — it resolves inline with parsing — s
 - **Placeholder parse-continuation (the primary mechanism).**
   A skip-mode FROM-clause table miss (`Selection.cs`, the `TryResolveTable` fail) substitutes a **`FromSource.DeferredPlaceholder`** (`FromSource.IsPlaceholder`) instead of throwing Msg 208; a skip-mode schema-qualified function miss (`Expression.cs`, `ParseDeferredCallAndDiscard`) parses-and-discards the argument list and yields a placeholder `Value` instead of throwing Msg 4121.
   The statement then parses to completion and is discarded whole (skip mode gates its execution).
-  This is what stops the **orphaned-fragment cascade**: an `EXISTS (SELECT … FROM <missing>)` inside a skipped `IF` condition used to throw mid-parse, and the recovery scan orphaned the trailing THEN / `ELSE` / `END` into bare statements (spurious Msg 102 / 156, and over the wire an infinite error stream — the SSMS Query Store probe crash of 2026-07-15).
+  This is what stops the **orphaned-fragment cascade**: without it, an `EXISTS (SELECT … FROM <missing>)` inside a skipped `IF` condition throws mid-parse and the recovery scan orphans the trailing THEN / `ELSE` / `END` into bare statements (spurious Msg 102 / 156, and over the wire an infinite error stream — an SSMS Query Store probe hits exactly this).
   With the placeholder the inner IF parses its full THEN+ELSE and the whole thing skip-completes.
   Column references across a source set that contains a placeholder bind leniently (`Selection.ResolveColumnTypeAcrossSources` returns a placeholder type; `FindSourceColumn`'s Msg 209 is suppressed) — matching "any missing object defers the whole statement's binding." Without a placeholder in scope, a missing column on a resolvable table still raises Msg 207.
 - **Residual object-name swallow.**
   The remaining object-resolution sites that still resolve inline — DML target tables (INSERT / UPDATE / DELETE / MERGE), `NEXT VALUE FOR` sequences, XML schema collections — throw Msg 208 in skip mode, caught in `DispatchOneStatement`'s materialize-then-catch wrapper.
-  `IsDeferrableNameResolutionError` is now `{208}` (Msg 207 removed — it must reach the batch-aborting path per the matrix); the wrapper swallows the 208, advances the cursor to the next statement boundary, and drops the statement with **no** `@@ERROR` / `InFlightError` mutation.
+  `IsDeferrableNameResolutionError` is `{208}` (Msg 207 removed — it must reach the batch-aborting path per the matrix); the wrapper swallows the 208, advances the cursor to the next statement boundary, and drops the statement with **no** `@@ERROR` / `InFlightError` mutation.
   Runs *ahead* of the TRY-frame path so a skipped `BEGIN TRY` body's missing-name error doesn't activate its CATCH.
   Residual divergence: because this path uses the flat recovery scan rather than placeholder parse-continuation, the astronomically-rare shape of a deferred *DML / sequence / XML-collection* reference immediately followed by an orphan-prone `ELSE` / `END` can still mis-navigate — the common table / column / function shapes are fully covered by the placeholder path.
 
 A missing-column Msg 207 (or ambiguity / unbindable-identifier) surfacing from a skipped statement is **batch-aborting** (`IsBatchAbortingNameResolution`), so it stops the batch even from a dead branch, matching real.
 `ParseBeginBlock` / `ParseBeginAtomicBlock` short-circuit their "expect END" check on `BatchContext.BatchAborted` (alongside `ReturnSignaled`) so a batch-abort mid-block surfaces the real error instead of a spurious Msg 102 near the abandoned token.
 
-Variable declarations are the counterpart rule (probe-confirmed 2026-07-15): `DECLARE` is compile-scoped batch-wide, so a DECLARE in an un-taken branch still registers its slot (scalar, `@t TABLE`, and table-type forms alike) — only the initializer is execution-scoped (skipped → the variable stays NULL).
+Variable declarations are the counterpart rule (probe-confirmed): `DECLARE` is compile-scoped batch-wide, so a DECLARE in an un-taken branch still registers its slot (scalar, `@t TABLE`, and table-type forms alike) — only the initializer is execution-scoped (skipped → the variable stays NULL).
 Consequently duplicate names raise Msg 134 even when either declaration sits in a dead branch, and `SET @undeclared` raises Msg 137 even in a skipped branch — variable-name resolution never defers, unlike table/function names.
 SSMS's server-properties batch relies on exactly this split (dead Managed-Instance branch declaring and assigning variables while referencing `master.sys.server_resource_stats`).
 The shared column-list parser signals skip mode to its CREATE FUNCTION caller so a skipped `CREATE FUNCTION … RETURNS @r TABLE` still doesn't register the function (DDL stays execution-scoped).
@@ -177,10 +177,10 @@ Inner CommandText-equivalent contexts (procedure / function / trigger / dynamic-
 In SQL Server most errors are **statement-terminating, not batch-terminating**: the failed statement ends but the batch continues to the next one (unless `SET XACT_ABORT ON`, or a batch/connection-aborting severity).
 The engine models this as its **only** mode — there is no fail-fast fork.
 Every top-level batch continues past a statement-terminating error, emitting a **`SimulatedErrorOutcome`** into one shared outcome stream, and **two renderers** consume it: the TDS wire writes error tokens; the in-process ADO surface converts outcomes to SqlClient-shaped exceptions.
-Behavior was probed against real SQL Server 2025 + `Microsoft.Data.SqlClient` (2026-07-17) and treated as ground truth.
+Behavior was probed against real SQL Server 2025 + `Microsoft.Data.SqlClient` and treated as ground truth.
 
 `Simulation.CreateResultSetsForCommand(command, continueOnError = true)` defaults its flag to `true`; both the in-process front door (`SimulatedDbCommand`) and `TdsSession.StreamOutcomesAsync` set it, so both render the same stream.
-The flag now marks a **top-level batch** (threaded onto `BatchContext.ContinueOnError`): child batches (proc / trigger / UDF / dynamic-SQL bodies) construct their own `BatchContext` and leave it `false`, so their errors **throw** and surface at the invoking statement rather than being emitted as outcomes (the parameter survives only because `TdsSession` — which must not be edited — passes it by name).
+The flag marks a **top-level batch** (threaded onto `BatchContext.ContinueOnError`): child batches (proc / trigger / UDF / dynamic-SQL bodies) construct their own `BatchContext` and leave it `false`, so their errors **throw** and surface at the invoking statement rather than being emitted as outcomes (the parameter survives only because `TdsSession` — which must not be edited — passes it by name).
 
 **The seam** is `DispatchOneStatement`'s catch (`Simulation.cs`).
 Its materialize-then-catch wrapper (a) rolls back on deadlock class 13, (b) defers name-resolution errors in skip mode, (c) records the error into a `CATCH` frame when `TryFrameDepth > 0`.
@@ -190,7 +190,7 @@ This path deliberately does **not** touch `InFlightError` / `ErrorSignaled` — 
 **Batch-aborting errors** — a path sits *before* the statement-terminating one and stops the whole batch (emit the one error, set `BatchContext.BatchAborted`, `DispatchStatementsUntil` breaks on the flag, **no** cursor-recovery scan).
 Two kinds:
 - **Bind-class name-resolution misses** (`IsBatchAbortingNameResolution`: Msg 208 invalid object, 207 invalid column, 209 ambiguous column, 4104 unbindable multi-part identifier, 4121 unfound column/function, 195 unrecognized function).
-  Real SQL Server aborts the remaining batch (probe-confirmed 2026-07-16: `SELECT 1; SELECT * FROM missing; SELECT 2` streams `1`, surfaces one Msg 208, never runs `SELECT 2` — contrast Msg 3701 / 8134 / a severity-16 RAISERROR, which continue).
+  Real SQL Server aborts the remaining batch (probe-confirmed: `SELECT 1; SELECT * FROM missing; SELECT 2` streams `1`, surfaces one Msg 208, never runs `SELECT 2` — contrast Msg 3701 / 8134 / a severity-16 RAISERROR, which continue).
 - **An uncaught `THROW`** (`SimulatedSqlException.TerminatesBatch`, set by the THROW factories).
   Real SQL Server's `THROW` terminates the batch even though it shares class 16 with a *continuing* `RAISERROR` — probe-confirmed (`… RAISERROR('x',16,1); INSERT; THROW 50001,'y',1; INSERT` runs two inserts, aggregates Msg 50000 + 50001, and skips the third).
   The flag on the exception is what distinguishes the two.
@@ -218,13 +218,13 @@ See [`tds-endpoint.md`](tds-endpoint.md).
   Real tooling never sends invalid batches; the batches that rely on continuation (`DROP #tmp` cleanup) are all runtime errors.
 - **Row materialization**: a SELECT that errors mid-scan (`SELECT 10/id …`) materializes its rows up front, so the error fires before any partial row is yielded — real SQL Server streams the rows preceding the failing one, then throws.
   The positional shape (Read throws, reader survives, tail clean) matches; the pre-error row count does not.
-- **`SET XACT_ABORT ON` batch-abort semantics are still not honored** (pre-existing).
+- **`SET XACT_ABORT ON` batch-abort semantics are not honored.**
   XACT_ABORT is parse-and-discard, so continuation applies regardless of the option's state.
 
 ## TRY/CATCH + ERROR_*() + live @@ERROR + THROW
 `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` blocks parse via `Simulation.TryCatch.cs:ParseTryCatch`.
 TRY and CATCH aren't reserved keywords (contextual identifiers), so the BEGIN dispatch site peeks the next token: `Tran`/`Transaction` routes to `TryParseBeginTransaction`, `TRY` (unquoted) routes here, `ATOMIC` raises `NotSupportedException`, anything else falls through to `ParseBeginBlock`.
-Probed against SQL Server 2025 (2026-05-12).
+Probed against SQL Server 2025.
 
 **Catch boundary mechanism.**
 `DispatchOneStatement` is split into an outer wrapper + a `DispatchOneStatementCore` iterator (yield-return inside try/catch isn't legal in C#, so the wrapper materializes Core's outcomes via `[.. Core(...)]` and runs the C# `try { ... } catch (SimulatedSqlException ex) when (batch.TryFrameDepth > 0) { ... }` around that).
@@ -256,7 +256,7 @@ Statement adjacency requires `;` before THROW (probe-confirmed: `select 1 throw 
   NULL on any arg surfaces a generic raised error; real SQL Server has more specific paths but apps rarely hit them.
 
 **Live @@ERROR.**
-`LastErrorExpression` now reads `runtime.Batch.Connection.LastErrorNumber` instead of hardcoded 0.
+`LastErrorExpression` reads `runtime.Batch.Connection.LastErrorNumber` instead of hardcoded 0.
 The wrap maintains the value: caught error → `LastErrorNumber = ex.Number`, successful statement → reset to 0, with `StatementContext.SuppressErrorReset` as the one opt-out (used by `RAISERROR ... WITH SETERROR` at sev ≤ 10 to land 50000 into the next statement's read).
 Outside any TRY/CATCH the value otherwise stays 0 because uncaught errors tear down the batch.
 
@@ -276,8 +276,8 @@ Outside any TRY/CATCH the value otherwise stays 0 because uncaught errors tear d
   (A *skipped* TRY body is handled separately — see the deferred-name-resolution note above — its missing-name error is swallowed and never reaches CATCH.)
   Apps that depend on the catch-or-not distinction here will diverge.
 - **Divide-by-zero raises raw `DivideByZeroException`** (not `SimulatedSqlException` Msg 8134), so TRY/CATCH doesn't catch it.
-  Pre-existing gap independent of TRY/CATCH; will close when the arithmetic error path is converted to factory-emitted Msg 8134.
-- **ERROR_LINE() / ERROR_PROCEDURE()** now report the exception's resolved line / procedure (see [`errors.md`](errors.md)); residuals there (tokenizer-thrown multi-line literals; UDF/TVF/trigger/view bodies) are narrow.
+  Gap independent of TRY/CATCH; will close when the arithmetic error path is converted to factory-emitted Msg 8134.
+- **ERROR_LINE() / ERROR_PROCEDURE()** report the exception's resolved line / procedure (see [`errors.md`](errors.md)); residuals there (tokenizer-thrown multi-line literals; UDF/TVF/trigger/view bodies) are narrow.
 - **No XACT_STATE() / XACT_ABORT / doomed-transaction semantics**: deferred.
   `@@TRANCOUNT` is correct (caught errors don't auto-rollback), so the common idiom works; apps relying on `XACT_STATE() = -1` to detect doomed transactions won't.
 
@@ -285,7 +285,7 @@ Outside any TRY/CATCH the value otherwise stays 0 because uncaught errors tear d
 `RAISERROR (msg, severity, state [, arg]…) [WITH option[, option]…]` — fires an error of the supplied severity / state, or surfaces an informational message at severity ≤ 10.
 `msg` is either an inline format string (`varchar`/`nvarchar` literal or `@variable`) or a numeric `msg_id`; the per-arg substitution machinery is a C-runtime-style printf subset shipped via `Parser/MessageFormatter.cs`.
 
-**Severity routing** (probe-confirmed against SQL Server 2025, 2026-05-12):
+**Severity routing** (probe-confirmed against SQL Server 2025):
 - Severity 0-10 → informational.
   Doesn't throw; doesn't enter TRY/CATCH; doesn't update `@@ERROR` unless `WITH SETERROR` forces it to 50000.
   NULL / negative severity treated as 0.
@@ -336,7 +336,7 @@ Matches real SQL Server's grammar (probe-confirmed).
 `PRINT <expression>` parses + evaluates the operand and **discards the result** — no `InfoMessage` event on `SimulatedDbConnection` (DbConnection doesn't define one, and no application has needed PRINT output observation yet).
 The evaluation isn't a no-op: operand-side errors still surface — `PRINT 'val=' + 5` raises Msg 245 because the `+` operator's int-side promotion tries to parse `'val='` as int (probe-confirmed against SQL Server 2025).
 
-Probe-confirmed semantics (2026-05-11) the simulator handles correctly because evaluation runs unchanged:
+Probe-confirmed semantics the simulator handles correctly because evaluation runs unchanged:
 - `PRINT NULL` and `PRINT ''` are silent no-ops (no message body, no error).
 - `PRINT` resets `@@ROWCOUNT` to 0 — applied by the dispatcher after the parser returns.
 - Skip-mode (un-taken IF, after BREAK / CONTINUE / RETURN) suppresses operand evaluation entirely, so an error-bearing operand in a skipped branch doesn't fire.
@@ -351,7 +351,7 @@ Probe-confirmed semantics (2026-05-11) the simulator handles correctly because e
 
 ## `WAITFOR DELAY`
 `WAITFOR DELAY '<time>'` and `WAITFOR DELAY @variable` block the calling thread via `Thread.Sleep(TimeSpan)`, matching real SQL Server's "blocks the connection" semantics.
-Operand grammar is strict (matches probe of SQL Server 2025, 2026-05-11): only a varchar/nvarchar string literal or an `@-variable` reference.
+Operand grammar is strict (matches probe of SQL Server 2025): only a varchar/nvarchar string literal or an `@-variable` reference.
 `cast(...)`, integer literal, bare `NULL` literal all fail at parse (Msg 102/156); `time`-typed variable raises **Msg 9815** (`"Waitfor delay and waitfor time cannot be of type time."` — note SQL Server reserves the operand slot for *string-typed* values, not its own `time` type).
 Empty string and NULL-valued variable both silently succeed as zero delay.
 Bad-format string raises **Msg 148** with the offending value embedded.
