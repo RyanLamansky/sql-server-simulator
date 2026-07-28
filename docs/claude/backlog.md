@@ -30,6 +30,8 @@ A standing survey of areas with no build behind them, one line each pointing at 
 Presence here is status, not a priority claim — the ordering caveat at the top of this file applies.
 The subsections that follow carry the areas with work in flight.
 
+- **Windows over multi-stream grouping** — a window combined with `ROLLUP` / `CUBE` / `GROUPING SETS` raises `NotSupportedException`; one window would have to span every grouping set's group stream as a single row set, where the executor loops per set.
+  Windows over a plain GROUP BY ship → [`query.md`](query.md#windows-over-a-grouped-query).
 - **Full-text query pipeline** — the tokenizer / stemmer / inverted-index build behind `CONTAINS` / `FREETEXT`, which raise `NotSupportedException`; the catalog + index DDL, the BACPAC round-trip, and the property scalars ship → [`full-text.md`](full-text.md#known-gaps).
 - **Spatial method evaluation** — the OGC pipeline (`.STDistance` / `.STIntersects` / `.STArea` / …), WKT/WKB parse validation, SRID tracking and transformation, `sys.spatial_reference_systems` seed rows, `ALTER SPATIAL INDEX`; storage, byte-identical CAST/wire encoding, and the index DDL ship → [`spatial.md`](spatial.md#known-gaps).
 - **XML mutation and XQuery beyond the path subset** — `.modify()` XML-DML plus its `UPDATE … SET` integration, FLWOR / comparison / boolean / arithmetic operators, value predicates, constructors, XSD validation against `xml(collection)` bindings, `ALTER XML SCHEMA COLLECTION ADD` → [`xml.md`](xml.md#known-gaps).
@@ -173,12 +175,6 @@ Tracked elsewhere and over-permissive in the same sense: `bit` arithmetic (below
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
-- **Window functions can't share a SELECT with GROUP BY / HAVING / aggregates** — the executor raises `NotSupportedException` for the whole combination, so an ordinary `SELECT a, SUM(b), ROW_NUMBER() OVER (ORDER BY a) FROM t GROUP BY a` fails alongside the aggregate-over-aggregate shape.
-  The narrower `SELECT SUM(SUM(b)) OVER () FROM t GROUP BY a` is legal on real (probe-confirmed: returns the grand total repeated per group) and is the idiomatic "group subtotal against the overall total" shape reporting SQL leans on; the simulator rejects it earlier still, with **Msg 130**, because `AggregateExpression`'s operand validation fires before the OVER clause is considered.
-  This is the *under*-permissive direction — valid queries failing — so it blocks real workloads rather than merely letting bad ones through.
-  Whatever implements it keeps the Msg 130 gate for the bare `SUM(SUM(b))` while letting the `OVER (…)` form reach `WindowExpression` without routing through that validation.
-  Surfaced while probing the aggregate-binding rules.
-  Home: `Parser/Expressions/WindowExpression.cs`, `Parser/Selection.Execution.cs`.
 - **`IGNORE_DUP_KEY = ON` parses but isn't honored** — the option is accepted on both `CREATE UNIQUE INDEX … WITH (…)` and the `UNIQUE (…) WITH (…)` constraint form and then has no effect, so an INSERT carrying a duplicate raises **Msg 2601** where real skips that row and continues.
   Probe-confirmed against SQL Server 2025: the duplicate is dropped and the statement succeeds with the rest inserted (`INSERT … VALUES (2),(1),(3)` over an existing `1` inserts 2 and 3, `@@ROWCOUNT = 2`, `@@ERROR = 0`), and a severity-10 **Msg 3604** (`Duplicate key was ignored.`) rides the info-message stream **once per statement** regardless of how many rows were skipped.
   The downgrade is INSERT-only — an `UPDATE` into a duplicate still raises Msg 2601 on real.

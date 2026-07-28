@@ -34,6 +34,9 @@ internal sealed partial class Selection
         string[] outputColumnNames,
         List<OrderBySpec> orderByItems,
         List<AggregateExpression> aggregates,
+        List<WindowExpression> windows,
+        SqlType[] windowOperandTypes,
+        SqlType[] windowResultTypes,
         TopSpec top,
         int? offsetCount,
         int? fetchCount,
@@ -250,6 +253,103 @@ internal sealed partial class Selection
             }
 
             var orderRuntime = new RuntimeContext(ResolveOrderName, batch);
+
+            // Windowed grouped query: the windows run over this query's
+            // *groups*, not its base rows, so the group stream has to be
+            // materialized (post-HAVING — probe-confirmed that a window sees
+            // only surviving groups) before any window value can be computed.
+            // Each survivor caches its aggregate results so re-binding them
+            // for the window pass and again for projection doesn't re-run
+            // Aggregator.Result() (which sorts, for STRING_AGG / JSON_ARRAYAGG).
+            if (windows.Count > 0)
+            {
+                var survivors = new List<(GroupState State, SqlValue[] AggregateValues)>(groups.Count);
+                var savedSetForWindows = batch.GroupingSetExpressions;
+                var savedAllForWindows = batch.AllGroupingExpressions;
+                batch.GroupingSetExpressions = groupingSet;
+                batch.AllGroupingExpressions = fromClause.AllGroupingExpressions;
+                try
+                {
+                    foreach (var (_, state) in groups)
+                    {
+                        currentState = state;
+                        var aggregateValues = new SqlValue[aggregates.Count];
+                        for (var i = 0; i < aggregates.Count; i++)
+                        {
+                            aggregateValues[i] = state.Aggregators[i].Result();
+                            aggregates[i].BindResult(batch, aggregateValues[i]);
+                        }
+
+                        if (fromClause.Having is { } havingFilter && havingFilter.Run(groupRuntime) != true)
+                            continue;
+
+                        survivors.Add((state, aggregateValues));
+                    }
+
+                    // Re-points the group slot and re-binds that group's
+                    // aggregate results, so a window operand's inner aggregate
+                    // (`SUM(SUM(b))`) reads the group's value.
+                    RuntimeContext RuntimeAtGroup(int index)
+                    {
+                        var (state, aggregateValues) = survivors[index];
+                        currentState = state;
+                        for (var i = 0; i < aggregates.Count; i++)
+                            aggregates[i].BindResult(batch, aggregateValues[i]);
+                        return groupRuntime;
+                    }
+
+                    var perWindowKeys = new List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]>(survivors.Count);
+                    for (var g = 0; g < survivors.Count; g++)
+                    {
+                        var groupContext = RuntimeAtGroup(g);
+                        var keys = new (SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[windows.Count];
+                        for (var w = 0; w < windows.Count; w++)
+                        {
+                            var win = windows[w];
+                            var partitionKeys = new SqlValue[win.PartitionBy.Length];
+                            for (var p = 0; p < win.PartitionBy.Length; p++)
+                                partitionKeys[p] = win.PartitionBy[p].Run(groupContext);
+                            var orderKeys = new SqlValue[win.OrderBy.Length];
+                            for (var o = 0; o < win.OrderBy.Length; o++)
+                                orderKeys[o] = win.OrderBy[o].Expr!.Run(groupContext);
+                            keys[w] = (partitionKeys, orderKeys);
+                        }
+                        perWindowKeys.Add(keys);
+                    }
+
+                    var groupWindowResults = ComputeWindowResults(
+                        windows, perWindowKeys, survivors.Count, RuntimeAtGroup, resolveColumnType, windowOperandTypes, windowResultTypes, batch);
+
+                    for (var g = 0; g < survivors.Count; g++)
+                    {
+                        var groupContext = RuntimeAtGroup(g);
+                        for (var w = 0; w < windows.Count; w++)
+                            windows[w].BindResult(batch, groupWindowResults[w][g]);
+
+                        var projectedGroup = new SqlValue[expressions.Count];
+                        for (var i = 0; i < expressions.Count; i++)
+                            projectedGroup[i] = expressions[i].Run(groupContext);
+
+                        currentProjected = projectedGroup;
+                        var groupOrderKeys = new SqlValue[orderByItems.Count];
+                        for (var k = 0; k < orderByItems.Count; k++)
+                        {
+                            groupOrderKeys[k] = orderByItems[k].IsOrdinal
+                                ? projectedGroup[orderByItems[k].Ordinal - 1]
+                                : orderByItems[k].Expr!.Run(orderRuntime);
+                        }
+
+                        output.Add((groupOrderKeys, projectedGroup));
+                    }
+                }
+                finally
+                {
+                    batch.GroupingSetExpressions = savedSetForWindows;
+                    batch.AllGroupingExpressions = savedAllForWindows;
+                }
+
+                continue;
+            }
 
             foreach (var (_, state) in groups)
             {

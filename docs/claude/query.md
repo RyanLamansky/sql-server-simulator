@@ -210,6 +210,23 @@ Cross-aggregate Msg 8711 isn't modeled (EF doesn't emit).
   Frames whose start is pinned at `UNBOUNDED PRECEDING` (the default ORDER BY frame, and `ROWS/RANGE UNBOUNDED PRECEDING TO …`) never remove, so they're a pure forward accumulation valid for every aggregator.
   Frame rejection paths: ranking + LAG/LEAD with a frame → Msg 10752; frame without ORDER BY → Msg 10756; `BETWEEN ... FOLLOWING AND ... PRECEDING` → Msg 4193; `BETWEEN CURRENT ROW AND UNBOUNDED PRECEDING` / `BETWEEN UNBOUNDED FOLLOWING AND ...` → Msg 102 syntax.
 - Errors: `STRING_AGG OVER` → Msg 4113; `COUNT(DISTINCT) OVER` / `SUM(DISTINCT) OVER` → Msg 10759; windowed function in WHERE/HAVING/GROUP BY/ON → Msg 4108.
-  Window + GROUP BY/HAVING in same SELECT → `NotSupportedException`.
+
+### Windows over a grouped query
+
+A window sharing a SELECT with GROUP BY / aggregates runs over the query's **groups**, not its base rows — the reporting shape `SELECT cat, SUM(amt), RANK() OVER (ORDER BY SUM(amt) DESC) … GROUP BY cat`.
+Semantics probed against SQL Server 2025:
+
+- **The row set is the post-HAVING group stream.** `COUNT(*) OVER ()` returns the number of surviving groups (while a plain `COUNT(*)` still counts that group's base rows), and a group filtered out by HAVING contributes nothing to any window.
+- **`AGG(AGG(x)) OVER (…)` is the aggregate-over-aggregate shape** — the inner aggregate is the group's value, the outer window spans groups, so `SUM(SUM(amt)) OVER ()` repeats the grand total on every row.
+  Exactly one nesting level is legal: the bare `SUM(SUM(amt))` and the doubled `SUM(SUM(SUM(amt))) OVER ()` both stay **Msg 130** (see [Aggregate / GROUP BY binding rules](#aggregate--group-by-binding-rules)).
+- **Window operands and PARTITION BY / ORDER BY expressions are group-level**, so they carry the same containment obligation as the select list: a grouping column or an aggregate binds, a bare non-grouped column is **Msg 8120** with the select-list wording — `SUM(amt) OVER ()` and `PARTITION BY region` both reject under `GROUP BY cat`.
+  This is the one rule that makes identical window text legal in an ungrouped query and illegal in a grouped one.
+- Frames apply over the group rows (`SUM(SUM(amt)) OVER (ORDER BY cat ROWS UNBOUNDED PRECEDING)` is a running total of group totals), and a window is legal in the grouped query's ORDER BY.
+
+Implementation: `ComputeWindowResults` (`Selection.Execution.Window.cs`) is the shared window engine — it addresses rows only by index through a `WindowRowContext` accessor, so it is agnostic to whether a "row" is a joined base tuple or a group.
+`BuildAggregateProjectionRows` materializes the post-HAVING groups, caches each group's aggregate results, and supplies an accessor that re-binds them per group — which is what lets a window operand's inner aggregate resolve to that group's value without any expression rewriting.
+
+**Not modeled yet**: windows combined with `ROLLUP` / `CUBE` / `GROUPING SETS` raise `NotSupportedException` — those emit several group streams that one window would have to span as a single row set, where the executor loops per set.
+
 - EF Core 10 reach: only `ROW_NUMBER` (via `Skip`/`Take`/`OrderBy + Take` per group) and aggregate-OVER (via grouped-projection patterns) are reached from LINQ.
   `EF.Functions` does NOT expose `Rank` / `DenseRank` / `CumeDist` / `PercentRank` / `Lag` / `Lead` / `NTile` / `FirstValue` / `LastValue` / `PercentileCont` / `PercentileDisc` — those are reachable only through raw SQL (`FromSqlInterpolated` / `SqlQuery`), so the simulator's expanded coverage helps applications that use raw SQL but doesn't intersect EF's LINQ→SQL translation surface.

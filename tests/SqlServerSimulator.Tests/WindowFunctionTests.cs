@@ -152,15 +152,58 @@ public sealed class WindowFunctionTests
             _ = connection.CreateCommand("select row_number() over() from posts").ExecuteScalar());
     }
 
+    /// <summary>
+    /// A window sharing a SELECT with GROUP BY numbers the <em>groups</em>, so
+    /// the row count matches the group count and the ranks run 1..N over them
+    /// (probe-confirmed against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void RowNumber_CombinedWithGroupBy_NotSupported()
+    public void RowNumber_CombinedWithGroupBy_NumbersTheGroups()
     {
-        // SQL Server allows this in real life, but EF Core 10 doesn't emit
-        // the combination, so the simulator hasn't built it.
         using var connection = SeededPosts();
-        _ = Throws<NotSupportedException>(() =>
-            _ = connection.CreateCommand(
-                "select blog_id, row_number() over(order by blog_id), count(*) from posts group by blog_id").ExecuteScalar());
+        using var reader = connection.CreateCommand(
+            "select blog_id, row_number() over(order by blog_id), count(*) from posts group by blog_id order by blog_id")
+            .ExecuteReader();
+
+        var rowNumbers = new List<long>();
+        var perGroupCounts = new List<int>();
+        while (reader.Read())
+        {
+            rowNumbers.Add(Convert.ToInt64(reader.GetValue(1)));
+            perGroupCounts.Add(Convert.ToInt32(reader.GetValue(2)));
+        }
+
+        IsNotEmpty(rowNumbers);
+        // ROW_NUMBER runs 1..groupCount — it counts groups, not base rows.
+        CollectionAssert.AreEqual(
+            Enumerable.Range(1, rowNumbers.Count).Select(i => (long)i).ToList(),
+            rowNumbers);
+        // The per-group COUNT(*) still counts that group's base rows, so the
+        // two are measuring different things in the same projection.
+        IsGreaterThanOrEqualTo(rowNumbers.Count, perGroupCounts.Sum());
+    }
+
+    /// <summary>
+    /// A ranking window ordered by an aggregate — the reporting shape
+    /// "rank each group by its total".
+    /// </summary>
+    [TestMethod]
+    public void Rank_OrderedByAggregate_RanksGroupsByTheirTotal()
+    {
+        using var connection = SeededPosts();
+        using var reader = connection.CreateCommand(
+            "select blog_id, count(*) as n, rank() over(order by count(*) desc) as rnk from posts group by blog_id")
+            .ExecuteReader();
+
+        var byRank = new List<(long Rank, int Count)>();
+        while (reader.Read())
+            byRank.Add((Convert.ToInt64(reader.GetValue(2)), Convert.ToInt32(reader.GetValue(1))));
+
+        IsNotEmpty(byRank);
+        byRank.Sort((a, b) => a.Rank.CompareTo(b.Rank));
+        AreEqual(1L, byRank[0].Rank);
+        // Rank 1 must hold the largest group.
+        AreEqual(byRank.Max(entry => entry.Count), byRank[0].Count);
     }
 
     // === RANK / DENSE_RANK ===

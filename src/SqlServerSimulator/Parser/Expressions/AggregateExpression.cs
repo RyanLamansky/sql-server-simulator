@@ -170,13 +170,43 @@ internal sealed class AggregateExpression : Expression
     /// </list>
     /// Probe-confirmed 2026-07-24. STRING_AGG's untyped-NULL rejection is a
     /// different message (Msg 8116, the argument form) and isn't covered here.
+    /// <para>The Msg 130 rule has one carve-out: an aggregate-bearing operand
+    /// is legal when <em>this</em> aggregate carries an <c>OVER</c> clause, so
+    /// <c>SUM(SUM(b)) OVER ()</c> binds where the bare <c>SUM(SUM(b))</c>
+    /// doesn't (probe-confirmed — it returns the grand total repeated per
+    /// group). The OVER keyword sits two tokens ahead at this point (the
+    /// aggregate's closing paren is still unconsumed), so the carve-out is a
+    /// bounded lookahead rather than deferred state. It also reproduces real's
+    /// depth rule for free: in <c>SUM(SUM(SUM(x))) OVER ()</c> the middle
+    /// aggregate is followed by a paren rather than OVER, so it still raises
+    /// Msg 130.</para>
     /// </summary>
     private static void ValidateOperand(ParserContext context, AggregateKind kind, Expression operand, int aggregatesBefore, int subqueriesBefore)
     {
-        if (context.AggregatesParsed > aggregatesBefore || context.SubqueriesParsed > subqueriesBefore)
+        if ((context.AggregatesParsed > aggregatesBefore || context.SubqueriesParsed > subqueriesBefore)
+            && !OverFollowsCall(context))
+        {
             throw SimulatedSqlException.AggregateOnAggregateOrSubquery();
+        }
         if (kind != AggregateKind.StringAgg && IsUntypedNullLiteral(operand))
             throw SimulatedSqlException.OperandDataTypeNullInvalid(LowerNameOf(kind));
+    }
+
+    /// <summary>
+    /// Non-consuming lookahead for the <c>) OVER</c> pair that turns this
+    /// aggregate into a window function. Called with the cursor parked on the
+    /// aggregate's closing paren; restores that position either way, so the
+    /// caller's normal paren + OVER consumption is unaffected.
+    /// </summary>
+    private static bool OverFollowsCall(ParserContext context)
+    {
+        if (context.Token is not Operator { Character: ')' })
+            return false;
+
+        var checkpoint = context.SaveCheckpoint();
+        var next = context.GetNextOptional();
+        context.RestoreCheckpoint(checkpoint);
+        return next is ReservedKeyword { Keyword: Keyword.Over };
     }
 
     /// <summary>

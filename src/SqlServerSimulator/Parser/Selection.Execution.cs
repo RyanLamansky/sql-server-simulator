@@ -90,7 +90,7 @@ internal sealed partial class Selection
     /// doesn't resolve against these sources (correlated / outer) is not this
     /// query's grouping concern.
     /// </summary>
-    private static void ValidateGroupByReferences(FromSource[] sources, List<Expression> expressions, List<OrderBySpec> orderBy, string[] outputColumnNames, FromClause fromClause)
+    private static void ValidateGroupByReferences(FromSource[] sources, List<Expression> expressions, List<OrderBySpec> orderBy, string[] outputColumnNames, FromClause fromClause, List<WindowExpression> windows)
     {
         var groupedBare = new HashSet<(int Source, int Column)>();
         var groupedComponent = new HashSet<(int Source, int Column)>();
@@ -126,6 +126,32 @@ internal sealed partial class Selection
 
         foreach (var expression in expressions)
             expression.VisitColumnReferences(name => Check(name, SimulatedSqlException.ColumnNotInGroupByForSelect));
+
+        // A window in an aggregate query runs over the *grouped* rows, so its
+        // own operand and PARTITION BY / ORDER BY expressions are group-level
+        // too: each may name a grouping column or an aggregate, but a bare
+        // non-grouped column is Msg 8120 exactly as in the select list
+        // (probe-confirmed for an operand, `SUM(amt) OVER ()`, and for a
+        // partition key, `PARTITION BY region` — both report the select-list
+        // wording). Reaching the window aggregate's operand *directly* is what
+        // separates those from the legal nested `SUM(SUM(amt)) OVER ()`, where
+        // the operand is itself an aggregate whose own operand stays skipped.
+        // Windows are read off the parser's collector rather than walked out of
+        // the projection trees, so one buried in an arithmetic expression is
+        // covered identically.
+        foreach (var window in windows)
+        {
+            void CheckWindowOperand(Expression? operand) =>
+                operand?.VisitColumnReferences(name => Check(name, SimulatedSqlException.ColumnNotInGroupByForSelect));
+
+            CheckWindowOperand(window.Operand);
+            CheckWindowOperand(window.AggregateInfo?.Operand);
+            CheckWindowOperand(window.DefaultArg);
+            foreach (var partition in window.PartitionBy)
+                CheckWindowOperand(partition);
+            foreach (var item in window.OrderBy)
+                CheckWindowOperand(item.Expr);
+        }
 
         fromClause.Having?.VisitOperandExpressions(op =>
             op.VisitColumnReferences(name => Check(name, SimulatedSqlException.ColumnNotInGroupByForHaving)));
@@ -318,8 +344,13 @@ internal sealed partial class Selection
         MultiPartName? intoTarget,
         Dictionary<int, (Storage.HeapTable Table, HashSet<int> Columns)>? readColumnSink)
     {
-        if (windows.Count > 0 && (aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null))
-            throw new NotSupportedException("Combining window functions with GROUP BY / HAVING / aggregates in the same SELECT isn't modeled. EF Core 10 doesn't emit this shape.");
+        // Windows combined with GROUP BY / aggregates run over the grouped
+        // rows (BuildAggregateProjectionRows drives the window engine). The
+        // multi-grouping-set shapes (ROLLUP / CUBE / GROUPING SETS) emit
+        // several group streams that a window would have to span as one, which
+        // the per-set loop doesn't model.
+        if (windows.Count > 0 && fromClause.GroupingSets.Count > 1)
+            throw new NotSupportedException("Combining window functions with ROLLUP / CUBE / GROUPING SETS in the same SELECT isn't modeled.");
 
         // Convert a comma-join / CROSS JOIN carrying an equi-join predicate in
         // WHERE into an INNER JOIN, so it rides the equi-join seek / hash path
@@ -495,7 +526,7 @@ internal sealed partial class Selection
         // its other columns — and binds this at parse time, before any row is
         // read, so it runs here on the cached plan build.
         if (aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null)
-            ValidateGroupByReferences(sources, expressions, orderBy, outputColumnNames, fromClause);
+            ValidateGroupByReferences(sources, expressions, orderBy, outputColumnNames, fromClause, windows);
 
         var offsetExpression = fromClause.OffsetExpression;
         var fetchExpression = fromClause.FetchExpression;
@@ -558,7 +589,7 @@ internal sealed partial class Selection
                 // hash path can key them. Correlated sources are left untouched.
                 var execSources = MaterializeUncorrelatedDeferredSources(sources, batch);
                 return aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
-                    ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, top, offsetCount, fetchCount, batch, outerResolver)
+                    ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, batch, outerResolver)
                     : windows.Count > 0
                         ? ProjectWindowedRows(execSources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
                         : ProjectSqlRows(execSources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, batch, outerResolver);

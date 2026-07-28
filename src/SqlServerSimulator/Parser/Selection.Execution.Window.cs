@@ -100,441 +100,24 @@ internal sealed partial class Selection
             perWindowKeys.Add(keys);
         }
 
-        // Step 2: for each window, group buffered tuples by partition key
-        // and compute the per-tuple result. ROW_NUMBER sorts each partition
-        // and assigns 1..N ranks; aggregate windows run an Aggregator over
-        // every tuple in the partition (no sort) and broadcast the
-        // per-partition Result to every tuple in the same partition. The
-        // result array is kept as SqlValue[] so the two kinds share storage.
-        var perWindowResults = new SqlValue[windows.Count][];
-        for (var w = 0; w < windows.Count; w++)
+        // Re-points the hoisted tuple slot at a buffered row and hands back the
+        // one shared runtime — the engine's whole view of the row set.
+        RuntimeContext RuntimeAtBuffered(int index)
         {
-            var win = windows[w];
-            var results = new SqlValue[buffered.Count];
-            var partitions = new Dictionary<SqlValue[], List<int>>(RowEqualityComparer.Instance);
-            for (var i = 0; i < buffered.Count; i++)
-            {
-                var pk = perWindowKeys[i][w].PartitionKeys;
-                if (!partitions.TryGetValue(pk, out var list))
-                {
-                    list = [];
-                    partitions[pk] = list;
-                }
-                list.Add(i);
-            }
-
-            var orderByList = new List<OrderBySpec>(win.OrderBy);
-
-            switch (win.Kind)
-            {
-                case WindowKind.RowNumber:
-                    foreach (var (_, indices) in partitions)
-                    {
-                        indices.Sort((a, b) =>
-                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
-                        for (var rank = 0; rank < indices.Count; rank++)
-                            results[indices[rank]] = SqlValue.FromInt64(rank + 1);
-                    }
-                    break;
-
-                case WindowKind.Rank:
-                    foreach (var (_, indices) in partitions)
-                    {
-                        indices.Sort((a, b) =>
-                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
-                        long rankValue = 1;
-                        for (var i = 0; i < indices.Count; i++)
-                        {
-                            // Same ORDER BY key as previous → keep prior rank;
-                            // otherwise the rank "catches up" to (i+1), so
-                            // ties consume rank numbers that the next distinct
-                            // group skips.
-                            if (i > 0 && CompareOrderKeys(
-                                    perWindowKeys[indices[i]][w].OrderKeys,
-                                    perWindowKeys[indices[i - 1]][w].OrderKeys,
-                                    orderByList) != 0)
-                            {
-                                rankValue = i + 1;
-                            }
-                            results[indices[i]] = SqlValue.FromInt64(rankValue);
-                        }
-                    }
-                    break;
-
-                case WindowKind.DenseRank:
-                    foreach (var (_, indices) in partitions)
-                    {
-                        indices.Sort((a, b) =>
-                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
-                        long denseRank = 1;
-                        for (var i = 0; i < indices.Count; i++)
-                        {
-                            if (i > 0 && CompareOrderKeys(
-                                    perWindowKeys[indices[i]][w].OrderKeys,
-                                    perWindowKeys[indices[i - 1]][w].OrderKeys,
-                                    orderByList) != 0)
-                            {
-                                denseRank++;
-                            }
-                            results[indices[i]] = SqlValue.FromInt64(denseRank);
-                        }
-                    }
-                    break;
-
-                case WindowKind.NTile:
-                    {
-                        // NTILE's bucket count: evaluated once per query with
-                        // the first buffered row's resolver (matches real SQL
-                        // Server's constant-only restriction for the common
-                        // case while letting non-constant expressions surface
-                        // naturally if a value can't be produced).
-                        var bucketCount = (int)EvaluateScalarArg(win.BucketCount!, buffered, sources, batch, outerResolver).CoerceTo(SqlType.BigInt).AsInt64;
-                        if (bucketCount <= 0)
-                            throw SimulatedSqlException.NTileBucketCountMustBePositive();
-                        foreach (var (_, indices) in partitions)
-                        {
-                            indices.Sort((a, b) =>
-                                CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
-                            var count = indices.Count;
-                            var smallerSize = count / bucketCount;
-                            var firstFewBuckets = count % bucketCount;
-                            for (var i = 0; i < count; i++)
-                            {
-                                // First firstFewBuckets buckets carry (smallerSize+1)
-                                // rows; the remainder carry smallerSize. Two-piece
-                                // formula keeps integer arithmetic tight.
-                                var p = i + 1;
-                                var bucket = p <= firstFewBuckets * (smallerSize + 1)
-                                    ? ((p - 1) / (smallerSize + 1)) + 1
-                                    : smallerSize == 0
-                                        ? bucketCount
-                                        : firstFewBuckets + ((p - (firstFewBuckets * (smallerSize + 1)) - 1) / smallerSize) + 1;
-                                results[indices[i]] = SqlValue.FromInt32(bucket);
-                            }
-                        }
-                    }
-                    break;
-
-                case WindowKind.CumeDist:
-                    foreach (var (_, indices) in partitions)
-                    {
-                        indices.Sort((a, b) =>
-                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
-                        var n = indices.Count;
-                        var i = 0;
-                        while (i < n)
-                        {
-                            // Walk the peer group sharing this ORDER BY key; every
-                            // peer gets (rows with key <= this) / N — i.e. the
-                            // group's last 1-based position over N.
-                            var j = i;
-                            while (j + 1 < n && CompareOrderKeys(
-                                    perWindowKeys[indices[j + 1]][w].OrderKeys,
-                                    perWindowKeys[indices[j]][w].OrderKeys,
-                                    orderByList) == 0)
-                            {
-                                j++;
-                            }
-                            var cumeDist = SqlValue.FromDouble((double)(j + 1) / n);
-                            for (var k = i; k <= j; k++)
-                                results[indices[k]] = cumeDist;
-                            i = j + 1;
-                        }
-                    }
-                    break;
-
-                case WindowKind.PercentRank:
-                    foreach (var (_, indices) in partitions)
-                    {
-                        indices.Sort((a, b) =>
-                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
-                        var n = indices.Count;
-                        long rankValue = 1;
-                        for (var i = 0; i < n; i++)
-                        {
-                            if (i > 0 && CompareOrderKeys(
-                                    perWindowKeys[indices[i]][w].OrderKeys,
-                                    perWindowKeys[indices[i - 1]][w].OrderKeys,
-                                    orderByList) != 0)
-                            {
-                                rankValue = i + 1;
-                            }
-                            // PERCENT_RANK = (RANK - 1) / (N - 1); a single-row
-                            // partition is defined as 0 (avoids divide-by-zero).
-                            var percentRank = n == 1 ? 0.0 : (double)(rankValue - 1) / (n - 1);
-                            results[indices[i]] = SqlValue.FromDouble(percentRank);
-                        }
-                    }
-                    break;
-
-                case WindowKind.PercentileCont:
-                case WindowKind.PercentileDisc:
-                    {
-                        var isDisc = win.Kind == WindowKind.PercentileDisc;
-                        var sortType = win.OrderBy[0].Expr!.GetSqlType(batch, name => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver: null));
-                        var descending = win.OrderBy[0].Descending;
-
-                        // The percentile fraction is evaluated once per query.
-                        // NULL or a value outside [0, 1] surfaces Msg 8727. With
-                        // no buffered rows there's no partition to emit into, so
-                        // the check is skipped (matches "no rows → no error").
-                        var p = 0.0;
-                        if (buffered.Count > 0)
-                        {
-                            var pValue = EvaluateScalarArg(win.PercentileArg!, buffered, sources, batch, outerResolver);
-                            if (pValue.IsNull)
-                                throw SimulatedSqlException.PercentileInputOutOfRange();
-                            p = pValue.CoerceTo(SqlType.Float).AsDouble;
-                            if (p is < 0.0 or > 1.0)
-                                throw SimulatedSqlException.PercentileInputOutOfRange();
-                        }
-
-                        foreach (var (_, indices) in partitions)
-                        {
-                            // Collect non-NULL WITHIN GROUP sort-key values; NULLs
-                            // are excluded from the percentile computation.
-                            var values = new List<SqlValue>(indices.Count);
-                            foreach (var idx in indices)
-                            {
-                                var key = perWindowKeys[idx][w].OrderKeys[0];
-                                if (!key.IsNull)
-                                    values.Add(key);
-                            }
-                            values.Sort((a, b) =>
-                            {
-                                var c = CompareScalarValues(a, b);
-                                return descending ? -c : c;
-                            });
-
-                            SqlValue result;
-                            if (values.Count == 0)
-                            {
-                                result = SqlValue.Null(isDisc ? sortType : SqlType.Float);
-                            }
-                            else if (isDisc)
-                            {
-                                // Smallest value whose cumulative distribution >= p:
-                                // index ceil(p*n) - 1, clamped. Returned in the sort
-                                // expression's own type.
-                                var k = Math.Max(0, (int)Math.Ceiling(p * values.Count) - 1);
-                                result = values[k].CoerceTo(sortType);
-                            }
-                            else
-                            {
-                                // Continuous: linear interpolation at rank p*(n-1).
-                                var count = values.Count;
-                                var rank = p * (count - 1);
-                                var lo = (int)Math.Floor(rank);
-                                var hi = (int)Math.Ceiling(rank);
-                                var loValue = values[lo].CoerceTo(SqlType.Float).AsDouble;
-                                var hiValue = values[hi].CoerceTo(SqlType.Float).AsDouble;
-                                result = SqlValue.FromDouble(loValue + ((rank - lo) * (hiValue - loValue)));
-                            }
-
-                            foreach (var idx in indices)
-                                results[idx] = result;
-                        }
-                    }
-                    break;
-
-                case WindowKind.Lag:
-                case WindowKind.Lead:
-                    {
-                        var sign = win.Kind == WindowKind.Lag ? -1 : 1;
-                        var lagOffset = win.OffsetArg is null
-                            ? 1
-                            : (int)EvaluateScalarArg(win.OffsetArg, buffered, sources, batch, outerResolver).CoerceTo(SqlType.BigInt).AsInt64;
-                        var operandType = win.Operand!.GetSqlType(batch, name => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver: null));
-                        foreach (var (_, indices) in partitions)
-                        {
-                            indices.Sort((a, b) =>
-                                CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
-                            for (var i = 0; i < indices.Count; i++)
-                            {
-                                var targetIdx = i + (sign * lagOffset);
-                                if (targetIdx < 0 || targetIdx >= indices.Count)
-                                {
-                                    // Out of partition bounds → DEFAULT expression
-                                    // (or typed NULL). Default is evaluated in the
-                                    // current row's resolver context, matching real
-                                    // SQL Server (default expressions can reference
-                                    // the row's columns).
-                                    if (win.DefaultArg is null)
-                                    {
-                                        results[indices[i]] = SqlValue.Null(operandType);
-                                    }
-                                    else
-                                    {
-                                        var localTuple = buffered[indices[i]];
-                                        SqlValue ResolveSelf(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSelf, memo);
-                                        results[indices[i]] = win.DefaultArg.Run(new RuntimeContext(ResolveSelf, batch));
-                                    }
-                                }
-                                else
-                                {
-                                    var targetTuple = buffered[indices[targetIdx]];
-                                    SqlValue ResolveTarget(MultiPartName name) => ResolveAcrossTuple(sources, targetTuple, name, batch, outerResolver, ResolveTarget, memo);
-                                    results[indices[i]] = win.Operand.Run(new RuntimeContext(ResolveTarget, batch));
-                                }
-                            }
-                        }
-                    }
-                    break;
-
-                case WindowKind.FirstValue:
-                case WindowKind.LastValue:
-                    {
-                        // Both walk a per-row frame extent. FIRST_VALUE returns
-                        // the operand evaluated at the frame start; LAST_VALUE
-                        // at the frame end. Empty-frame extent (start > end)
-                        // emits typed NULL — probe-confirmed against SQL Server
-                        // for both with explicit frames outside partition.
-                        var isLast = win.Kind == WindowKind.LastValue;
-                        var operandType = win.Operand!.GetSqlType(batch, name => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver: null));
-                        foreach (var (_, indices) in partitions)
-                        {
-                            indices.Sort((a, b) =>
-                                CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
-                            for (var i = 0; i < indices.Count; i++)
-                            {
-                                var (frameStart, frameEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
-                                if (frameStart > frameEnd)
-                                {
-                                    results[indices[i]] = SqlValue.Null(operandType);
-                                    continue;
-                                }
-                                var refIdx = isLast ? frameEnd : frameStart;
-                                var refTuple = buffered[indices[refIdx]];
-                                SqlValue ResolveRef(MultiPartName name) => ResolveAcrossTuple(sources, refTuple, name, batch, outerResolver, ResolveRef, memo);
-                                results[indices[i]] = win.Operand.Run(new RuntimeContext(ResolveRef, batch));
-                            }
-                        }
-                    }
-                    break;
-
-                case WindowKind.Aggregate:
-                    {
-                        // Aggregate window: per-row Aggregator over the row's
-                        // frame extent. Without ORDER BY (and no explicit frame)
-                        // every row's frame is the whole partition, so the
-                        // result is broadcast — same shape as the pre-frame
-                        // implementation. With ORDER BY, default frame is
-                        // RANGE UNBOUNDED PRECEDING TO CURRENT ROW (running
-                        // total with peer-tie grouping). Operand and result
-                        // types were pre-resolved by BuildSqlProjection.
-                        var aggregate = win.AggregateInfo!;
-                        var operandType = windowOperandTypes[w];
-                        var resultType = windowResultTypes[w];
-
-                        // JSON_OBJECTAGG carries a per-row key that the generic
-                        // value-only Add path can't thread, so it gets a
-                        // dedicated walk. JSON_ARRAYAGG has no second operand and
-                        // rides the generic path below unchanged.
-                        if (aggregate.Kind == AggregateKind.JsonObjectAgg)
-                        {
-                            ComputeJsonObjectAggWindow(win, sources, buffered, perWindowKeys, w, orderByList, operandType, resultType, partitions, results, batch, outerResolver);
-                            break;
-                        }
-
-                        foreach (var (_, indices) in partitions)
-                        {
-                            if (orderByList.Count > 0)
-                            {
-                                indices.Sort((a, b) =>
-                                    CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
-                            }
-
-                            // Whole-partition fast path: no ORDER BY and no
-                            // explicit frame → compute once + broadcast.
-                            if (orderByList.Count == 0 && win.Frame is null)
-                            {
-                                var aggregator = Aggregator.Create(aggregate, operandType, resultType);
-                                foreach (var i in indices)
-                                {
-                                    var localTuple = buffered[i];
-                                    SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource, memo);
-                                    var operandValue = aggregate.Operand is null
-                                        ? SqlValue.Null(SqlType.Int32)
-                                        : aggregate.Operand.Run(new RuntimeContext(ResolveSource, batch));
-                                    aggregator.Add(operandValue);
-                                }
-                                var partitionResult = aggregator.Result();
-                                foreach (var i in indices)
-                                    results[i] = partitionResult;
-                                continue;
-                            }
-
-                            // Framed path. Evaluate each row's operand exactly
-                            // once (in sorted order), then maintain the frame
-                            // incrementally. Both frame bounds move
-                            // monotonically forward as i advances, so a
-                            // two-pointer slide — Add as the end advances, Remove
-                            // as the start advances — touches each row O(1)
-                            // amortized, collapsing the former per-row
-                            // re-aggregation from O(n²) to O(n) per partition.
-                            var count = indices.Count;
-                            var operandByPos = new SqlValue[count];
-                            for (var p = 0; p < count; p++)
-                            {
-                                var localTuple = buffered[indices[p]];
-                                SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource, memo);
-                                operandByPos[p] = aggregate.Operand is null
-                                    ? SqlValue.Null(SqlType.Int32)
-                                    : aggregate.Operand.Run(new RuntimeContext(ResolveSource, batch));
-                            }
-
-                            // The start advances (so rows leave the frame and the
-                            // aggregator must support removal) for any explicit
-                            // start bound other than UNBOUNDED PRECEDING. The
-                            // default frame (no explicit frame, with ORDER BY) is
-                            // UNBOUNDED PRECEDING TO CURRENT ROW — start pinned at
-                            // row 0, so it's a pure forward accumulation.
-                            var startAdvances = win.Frame is { } frame && frame.Start.Kind != FrameBoundKind.UnboundedPreceding;
-                            var slider = Aggregator.Create(aggregate, operandType, resultType, removable: startAdvances);
-
-                            // DISTINCT forms can't undo an Add (illegal with OVER
-                            // anyway): re-aggregate each frame, but off the
-                            // once-evaluated operands.
-                            if (startAdvances && !slider.CanRemove)
-                            {
-                                for (var i = 0; i < count; i++)
-                                {
-                                    var (rebuildStart, rebuildEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
-                                    var aggregator = Aggregator.Create(aggregate, operandType, resultType);
-                                    for (var j = rebuildStart; j <= rebuildEnd; j++)
-                                        aggregator.Add(operandByPos[j]);
-                                    results[indices[i]] = aggregator.Result();
-                                }
-                                continue;
-                            }
-
-                            var emptyResult = Aggregator.Create(aggregate, operandType, resultType).Result();
-                            var lo = 0;
-                            var hi = -1;
-                            for (var i = 0; i < count; i++)
-                            {
-                                var (frameStart, frameEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
-                                if (frameStart > frameEnd)
-                                {
-                                    results[indices[i]] = emptyResult;
-                                    continue;
-                                }
-                                while (hi < frameEnd)
-                                    slider.Add(operandByPos[++hi]);
-                                while (lo < frameStart)
-                                    slider.Remove(operandByPos[lo++]);
-                                results[indices[i]] = slider.Result();
-                            }
-                        }
-                    }
-                    break;
-
-                default:
-                    throw new InvalidOperationException($"Unknown window kind {win.Kind}.");
-            }
-
-            perWindowResults[w] = results;
+            currentTuple = buffered[index];
+            return rowRuntime;
         }
+
+        SqlType ResolveWindowColumnType(MultiPartName name) =>
+            ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver: null);
+
+        // Step 2: compute every window's per-row result over the buffered
+        // rows. The engine is shared with the grouped path (see
+        // BuildAggregateProjectionRows) and reaches rows only through
+        // runtimeAt, so it is agnostic to whether a "row" is a joined base
+        // tuple or a GROUP BY group.
+        var perWindowResults = ComputeWindowResults(
+            windows, perWindowKeys, buffered.Count, RuntimeAtBuffered, ResolveWindowColumnType, windowOperandTypes, windowResultTypes, batch);
 
         // Step 3: walk buffered tuples in original order, bind each
         // window's per-tuple result, then project. From here on,
@@ -591,20 +174,16 @@ internal sealed partial class Selection
     /// </summary>
     private static void ComputeJsonObjectAggWindow(
         WindowExpression win,
-        FromSource[] sources,
-        List<byte[]?[]> buffered,
+        WindowRowContext runtimeAt,
         List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]> perWindowKeys,
         int w,
         List<OrderBySpec> orderByList,
         SqlType operandType,
         SqlType resultType,
         Dictionary<SqlValue[], List<int>> partitions,
-        SqlValue[] results,
-        BatchContext batch,
-        Func<MultiPartName, SqlValue>? outerResolver)
+        SqlValue[] results)
     {
         var aggregate = win.AggregateInfo!;
-        var memo = new SourceColumnMemo();
         foreach (var (_, indices) in partitions)
         {
             if (orderByList.Count > 0)
@@ -618,9 +197,7 @@ internal sealed partial class Selection
             var values = new SqlValue[count];
             for (var p = 0; p < count; p++)
             {
-                var localTuple = buffered[indices[p]];
-                SqlValue ResolveSource(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, ResolveSource, memo);
-                var runtime = new RuntimeContext(ResolveSource, batch);
+                var runtime = runtimeAt(indices[p]);
                 keys[p] = aggregate.KeyExpression!.Run(runtime);
                 values[p] = aggregate.Operand!.Run(runtime);
             }
@@ -771,18 +348,467 @@ internal sealed partial class Selection
     /// rather than imposing a parser-side restriction. Buffered must be
     /// non-empty (no-op partitions short-circuit before this call).
     /// </summary>
-    private static SqlValue EvaluateScalarArg(
-        Expression arg,
-        List<byte[]?[]> buffered,
-        FromSource[] sources,
-        BatchContext batch,
-        Func<MultiPartName, SqlValue>? outerResolver)
+    private static SqlValue EvaluateScalarArg(Expression arg, int rowCount, WindowRowContext runtimeAt) =>
+        rowCount == 0 ? SqlValue.Null(SqlType.Int32) : arg.Run(runtimeAt(0));
+
+    /// <summary>
+    /// Positional row context for the window engine: activates the buffered
+    /// row at <paramref name="index"/> and returns the
+    /// <see cref="RuntimeContext"/> that expressions evaluate against.
+    /// Implementations own a single hoisted resolver + runtime and merely
+    /// re-point it, per the per-row-scaffolding rule — so an N-row window
+    /// costs no per-row delegate allocations.
+    /// </summary>
+    internal delegate RuntimeContext WindowRowContext(int index);
+
+    /// <summary>
+    /// The window engine: partitions the row set by each window's PARTITION BY
+    /// keys and computes that window's per-row result (ranking, offset,
+    /// distribution, percentile, and framed aggregate kinds).
+    /// <para>Row-shape agnostic — it addresses rows only by index, reading
+    /// pre-computed <paramref name="perWindowKeys"/> and reaching values
+    /// through <paramref name="runtimeAt"/>. That is what lets a GROUP BY
+    /// query window over its <em>groups</em>: the grouped caller supplies a
+    /// context that binds each group's aggregate results, so a window operand
+    /// like <c>SUM(SUM(b))</c> resolves its inner aggregate to that group's
+    /// value.</para>
+    /// </summary>
+    private static SqlValue[][] ComputeWindowResults(
+        List<WindowExpression> windows,
+        List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]> perWindowKeys,
+        int rowCount,
+        WindowRowContext runtimeAt,
+        Func<MultiPartName, SqlType> resolveColumnType,
+        SqlType[] windowOperandTypes,
+        SqlType[] windowResultTypes,
+        BatchContext batch)
     {
-        if (buffered.Count == 0)
-            return SqlValue.Null(SqlType.Int32);
-        var firstTuple = buffered[0];
-        var memo = new SourceColumnMemo();
-        SqlValue Resolve(MultiPartName name) => ResolveAcrossTuple(sources, firstTuple, name, batch, outerResolver, Resolve, memo);
-        return arg.Run(new RuntimeContext(Resolve, batch));
+        // For each window, group rows by partition key and compute the
+        // and compute the per-tuple result. ROW_NUMBER sorts each partition
+        // and assigns 1..N ranks; aggregate windows run an Aggregator over
+        // every tuple in the partition (no sort) and broadcast the
+        // per-partition Result to every tuple in the same partition. The
+        // result array is kept as SqlValue[] so the two kinds share storage.
+        var perWindowResults = new SqlValue[windows.Count][];
+        for (var w = 0; w < windows.Count; w++)
+        {
+            var win = windows[w];
+            var results = new SqlValue[rowCount];
+            var partitions = new Dictionary<SqlValue[], List<int>>(RowEqualityComparer.Instance);
+            for (var i = 0; i < rowCount; i++)
+            {
+                var pk = perWindowKeys[i][w].PartitionKeys;
+                if (!partitions.TryGetValue(pk, out var list))
+                {
+                    list = [];
+                    partitions[pk] = list;
+                }
+                list.Add(i);
+            }
+
+            var orderByList = new List<OrderBySpec>(win.OrderBy);
+
+            switch (win.Kind)
+            {
+                case WindowKind.RowNumber:
+                    foreach (var (_, indices) in partitions)
+                    {
+                        indices.Sort((a, b) =>
+                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                        for (var rank = 0; rank < indices.Count; rank++)
+                            results[indices[rank]] = SqlValue.FromInt64(rank + 1);
+                    }
+                    break;
+
+                case WindowKind.Rank:
+                    foreach (var (_, indices) in partitions)
+                    {
+                        indices.Sort((a, b) =>
+                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                        long rankValue = 1;
+                        for (var i = 0; i < indices.Count; i++)
+                        {
+                            // Same ORDER BY key as previous → keep prior rank;
+                            // otherwise the rank "catches up" to (i+1), so
+                            // ties consume rank numbers that the next distinct
+                            // group skips.
+                            if (i > 0 && CompareOrderKeys(
+                                    perWindowKeys[indices[i]][w].OrderKeys,
+                                    perWindowKeys[indices[i - 1]][w].OrderKeys,
+                                    orderByList) != 0)
+                            {
+                                rankValue = i + 1;
+                            }
+                            results[indices[i]] = SqlValue.FromInt64(rankValue);
+                        }
+                    }
+                    break;
+
+                case WindowKind.DenseRank:
+                    foreach (var (_, indices) in partitions)
+                    {
+                        indices.Sort((a, b) =>
+                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                        long denseRank = 1;
+                        for (var i = 0; i < indices.Count; i++)
+                        {
+                            if (i > 0 && CompareOrderKeys(
+                                    perWindowKeys[indices[i]][w].OrderKeys,
+                                    perWindowKeys[indices[i - 1]][w].OrderKeys,
+                                    orderByList) != 0)
+                            {
+                                denseRank++;
+                            }
+                            results[indices[i]] = SqlValue.FromInt64(denseRank);
+                        }
+                    }
+                    break;
+
+                case WindowKind.NTile:
+                    {
+                        // NTILE's bucket count: evaluated once per query with
+                        // the first buffered row's resolver (matches real SQL
+                        // Server's constant-only restriction for the common
+                        // case while letting non-constant expressions surface
+                        // naturally if a value can't be produced).
+                        var bucketCount = (int)EvaluateScalarArg(win.BucketCount!, rowCount, runtimeAt).CoerceTo(SqlType.BigInt).AsInt64;
+                        if (bucketCount <= 0)
+                            throw SimulatedSqlException.NTileBucketCountMustBePositive();
+                        foreach (var (_, indices) in partitions)
+                        {
+                            indices.Sort((a, b) =>
+                                CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                            var count = indices.Count;
+                            var smallerSize = count / bucketCount;
+                            var firstFewBuckets = count % bucketCount;
+                            for (var i = 0; i < count; i++)
+                            {
+                                // First firstFewBuckets buckets carry (smallerSize+1)
+                                // rows; the remainder carry smallerSize. Two-piece
+                                // formula keeps integer arithmetic tight.
+                                var p = i + 1;
+                                var bucket = p <= firstFewBuckets * (smallerSize + 1)
+                                    ? ((p - 1) / (smallerSize + 1)) + 1
+                                    : smallerSize == 0
+                                        ? bucketCount
+                                        : firstFewBuckets + ((p - (firstFewBuckets * (smallerSize + 1)) - 1) / smallerSize) + 1;
+                                results[indices[i]] = SqlValue.FromInt32(bucket);
+                            }
+                        }
+                    }
+                    break;
+
+                case WindowKind.CumeDist:
+                    foreach (var (_, indices) in partitions)
+                    {
+                        indices.Sort((a, b) =>
+                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                        var n = indices.Count;
+                        var i = 0;
+                        while (i < n)
+                        {
+                            // Walk the peer group sharing this ORDER BY key; every
+                            // peer gets (rows with key <= this) / N — i.e. the
+                            // group's last 1-based position over N.
+                            var j = i;
+                            while (j + 1 < n && CompareOrderKeys(
+                                    perWindowKeys[indices[j + 1]][w].OrderKeys,
+                                    perWindowKeys[indices[j]][w].OrderKeys,
+                                    orderByList) == 0)
+                            {
+                                j++;
+                            }
+                            var cumeDist = SqlValue.FromDouble((double)(j + 1) / n);
+                            for (var k = i; k <= j; k++)
+                                results[indices[k]] = cumeDist;
+                            i = j + 1;
+                        }
+                    }
+                    break;
+
+                case WindowKind.PercentRank:
+                    foreach (var (_, indices) in partitions)
+                    {
+                        indices.Sort((a, b) =>
+                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                        var n = indices.Count;
+                        long rankValue = 1;
+                        for (var i = 0; i < n; i++)
+                        {
+                            if (i > 0 && CompareOrderKeys(
+                                    perWindowKeys[indices[i]][w].OrderKeys,
+                                    perWindowKeys[indices[i - 1]][w].OrderKeys,
+                                    orderByList) != 0)
+                            {
+                                rankValue = i + 1;
+                            }
+                            // PERCENT_RANK = (RANK - 1) / (N - 1); a single-row
+                            // partition is defined as 0 (avoids divide-by-zero).
+                            var percentRank = n == 1 ? 0.0 : (double)(rankValue - 1) / (n - 1);
+                            results[indices[i]] = SqlValue.FromDouble(percentRank);
+                        }
+                    }
+                    break;
+
+                case WindowKind.PercentileCont:
+                case WindowKind.PercentileDisc:
+                    {
+                        var isDisc = win.Kind == WindowKind.PercentileDisc;
+                        var sortType = win.OrderBy[0].Expr!.GetSqlType(batch, resolveColumnType);
+                        var descending = win.OrderBy[0].Descending;
+
+                        // The percentile fraction is evaluated once per query.
+                        // NULL or a value outside [0, 1] surfaces Msg 8727. With
+                        // no buffered rows there's no partition to emit into, so
+                        // the check is skipped (matches "no rows → no error").
+                        var p = 0.0;
+                        if (rowCount > 0)
+                        {
+                            var pValue = EvaluateScalarArg(win.PercentileArg!, rowCount, runtimeAt);
+                            if (pValue.IsNull)
+                                throw SimulatedSqlException.PercentileInputOutOfRange();
+                            p = pValue.CoerceTo(SqlType.Float).AsDouble;
+                            if (p is < 0.0 or > 1.0)
+                                throw SimulatedSqlException.PercentileInputOutOfRange();
+                        }
+
+                        foreach (var (_, indices) in partitions)
+                        {
+                            // Collect non-NULL WITHIN GROUP sort-key values; NULLs
+                            // are excluded from the percentile computation.
+                            var values = new List<SqlValue>(indices.Count);
+                            foreach (var idx in indices)
+                            {
+                                var key = perWindowKeys[idx][w].OrderKeys[0];
+                                if (!key.IsNull)
+                                    values.Add(key);
+                            }
+                            values.Sort((a, b) =>
+                            {
+                                var c = CompareScalarValues(a, b);
+                                return descending ? -c : c;
+                            });
+
+                            SqlValue result;
+                            if (values.Count == 0)
+                            {
+                                result = SqlValue.Null(isDisc ? sortType : SqlType.Float);
+                            }
+                            else if (isDisc)
+                            {
+                                // Smallest value whose cumulative distribution >= p:
+                                // index ceil(p*n) - 1, clamped. Returned in the sort
+                                // expression's own type.
+                                var k = Math.Max(0, (int)Math.Ceiling(p * values.Count) - 1);
+                                result = values[k].CoerceTo(sortType);
+                            }
+                            else
+                            {
+                                // Continuous: linear interpolation at rank p*(n-1).
+                                var count = values.Count;
+                                var rank = p * (count - 1);
+                                var lo = (int)Math.Floor(rank);
+                                var hi = (int)Math.Ceiling(rank);
+                                var loValue = values[lo].CoerceTo(SqlType.Float).AsDouble;
+                                var hiValue = values[hi].CoerceTo(SqlType.Float).AsDouble;
+                                result = SqlValue.FromDouble(loValue + ((rank - lo) * (hiValue - loValue)));
+                            }
+
+                            foreach (var idx in indices)
+                                results[idx] = result;
+                        }
+                    }
+                    break;
+
+                case WindowKind.Lag:
+                case WindowKind.Lead:
+                    {
+                        var sign = win.Kind == WindowKind.Lag ? -1 : 1;
+                        var lagOffset = win.OffsetArg is null
+                            ? 1
+                            : (int)EvaluateScalarArg(win.OffsetArg, rowCount, runtimeAt).CoerceTo(SqlType.BigInt).AsInt64;
+                        var operandType = win.Operand!.GetSqlType(batch, resolveColumnType);
+                        foreach (var (_, indices) in partitions)
+                        {
+                            indices.Sort((a, b) =>
+                                CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                            for (var i = 0; i < indices.Count; i++)
+                            {
+                                var targetIdx = i + (sign * lagOffset);
+                                if (targetIdx < 0 || targetIdx >= indices.Count)
+                                {
+                                    // Out of partition bounds → DEFAULT expression
+                                    // (or typed NULL). Default is evaluated in the
+                                    // current row's resolver context, matching real
+                                    // SQL Server (default expressions can reference
+                                    // the row's columns).
+                                    if (win.DefaultArg is null)
+                                    {
+                                        results[indices[i]] = SqlValue.Null(operandType);
+                                    }
+                                    else
+                                    {
+                                        results[indices[i]] = win.DefaultArg.Run(runtimeAt(indices[i]));
+                                    }
+                                }
+                                else
+                                {
+                                    results[indices[i]] = win.Operand.Run(runtimeAt(indices[targetIdx]));
+                                }
+                            }
+                        }
+                    }
+                    break;
+
+                case WindowKind.FirstValue:
+                case WindowKind.LastValue:
+                    {
+                        // Both walk a per-row frame extent. FIRST_VALUE returns
+                        // the operand evaluated at the frame start; LAST_VALUE
+                        // at the frame end. Empty-frame extent (start > end)
+                        // emits typed NULL — probe-confirmed against SQL Server
+                        // for both with explicit frames outside partition.
+                        var isLast = win.Kind == WindowKind.LastValue;
+                        var operandType = win.Operand!.GetSqlType(batch, resolveColumnType);
+                        foreach (var (_, indices) in partitions)
+                        {
+                            indices.Sort((a, b) =>
+                                CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                            for (var i = 0; i < indices.Count; i++)
+                            {
+                                var (frameStart, frameEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
+                                if (frameStart > frameEnd)
+                                {
+                                    results[indices[i]] = SqlValue.Null(operandType);
+                                    continue;
+                                }
+                                var refIdx = isLast ? frameEnd : frameStart;
+                                results[indices[i]] = win.Operand.Run(runtimeAt(indices[refIdx]));
+                            }
+                        }
+                    }
+                    break;
+
+                case WindowKind.Aggregate:
+                    {
+                        // Aggregate window: per-row Aggregator over the row's
+                        // frame extent. Without ORDER BY (and no explicit frame)
+                        // every row's frame is the whole partition, so the
+                        // result is broadcast — same shape as the pre-frame
+                        // implementation. With ORDER BY, default frame is
+                        // RANGE UNBOUNDED PRECEDING TO CURRENT ROW (running
+                        // total with peer-tie grouping). Operand and result
+                        // types were pre-resolved by BuildSqlProjection.
+                        var aggregate = win.AggregateInfo!;
+                        var operandType = windowOperandTypes[w];
+                        var resultType = windowResultTypes[w];
+
+                        // JSON_OBJECTAGG carries a per-row key that the generic
+                        // value-only Add path can't thread, so it gets a
+                        // dedicated walk. JSON_ARRAYAGG has no second operand and
+                        // rides the generic path below unchanged.
+                        if (aggregate.Kind == AggregateKind.JsonObjectAgg)
+                        {
+                            ComputeJsonObjectAggWindow(win, runtimeAt, perWindowKeys, w, orderByList, operandType, resultType, partitions, results);
+                            break;
+                        }
+
+                        foreach (var (_, indices) in partitions)
+                        {
+                            if (orderByList.Count > 0)
+                            {
+                                indices.Sort((a, b) =>
+                                    CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                            }
+
+                            // Whole-partition fast path: no ORDER BY and no
+                            // explicit frame → compute once + broadcast.
+                            if (orderByList.Count == 0 && win.Frame is null)
+                            {
+                                var aggregator = Aggregator.Create(aggregate, operandType, resultType);
+                                foreach (var i in indices)
+                                {
+                                    var operandValue = aggregate.Operand is null
+                                        ? SqlValue.Null(SqlType.Int32)
+                                        : aggregate.Operand.Run(runtimeAt(i));
+                                    aggregator.Add(operandValue);
+                                }
+                                var partitionResult = aggregator.Result();
+                                foreach (var i in indices)
+                                    results[i] = partitionResult;
+                                continue;
+                            }
+
+                            // Framed path. Evaluate each row's operand exactly
+                            // once (in sorted order), then maintain the frame
+                            // incrementally. Both frame bounds move
+                            // monotonically forward as i advances, so a
+                            // two-pointer slide — Add as the end advances, Remove
+                            // as the start advances — touches each row O(1)
+                            // amortized, collapsing the former per-row
+                            // re-aggregation from O(n²) to O(n) per partition.
+                            var count = indices.Count;
+                            var operandByPos = new SqlValue[count];
+                            for (var p = 0; p < count; p++)
+                            {
+                                operandByPos[p] = aggregate.Operand is null
+                                    ? SqlValue.Null(SqlType.Int32)
+                                    : aggregate.Operand.Run(runtimeAt(indices[p]));
+                            }
+
+                            // The start advances (so rows leave the frame and the
+                            // aggregator must support removal) for any explicit
+                            // start bound other than UNBOUNDED PRECEDING. The
+                            // default frame (no explicit frame, with ORDER BY) is
+                            // UNBOUNDED PRECEDING TO CURRENT ROW — start pinned at
+                            // row 0, so it's a pure forward accumulation.
+                            var startAdvances = win.Frame is { } frame && frame.Start.Kind != FrameBoundKind.UnboundedPreceding;
+                            var slider = Aggregator.Create(aggregate, operandType, resultType, removable: startAdvances);
+
+                            // DISTINCT forms can't undo an Add (illegal with OVER
+                            // anyway): re-aggregate each frame, but off the
+                            // once-evaluated operands.
+                            if (startAdvances && !slider.CanRemove)
+                            {
+                                for (var i = 0; i < count; i++)
+                                {
+                                    var (rebuildStart, rebuildEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
+                                    var aggregator = Aggregator.Create(aggregate, operandType, resultType);
+                                    for (var j = rebuildStart; j <= rebuildEnd; j++)
+                                        aggregator.Add(operandByPos[j]);
+                                    results[indices[i]] = aggregator.Result();
+                                }
+                                continue;
+                            }
+
+                            var emptyResult = Aggregator.Create(aggregate, operandType, resultType).Result();
+                            var lo = 0;
+                            var hi = -1;
+                            for (var i = 0; i < count; i++)
+                            {
+                                var (frameStart, frameEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
+                                if (frameStart > frameEnd)
+                                {
+                                    results[indices[i]] = emptyResult;
+                                    continue;
+                                }
+                                while (hi < frameEnd)
+                                    slider.Add(operandByPos[++hi]);
+                                while (lo < frameStart)
+                                    slider.Remove(operandByPos[lo++]);
+                                results[indices[i]] = slider.Result();
+                            }
+                        }
+                    }
+                    break;
+
+                default:
+                    throw new InvalidOperationException($"Unknown window kind {win.Kind}.");
+            }
+
+            perWindowResults[w] = results;
+        }
+
+        return perWindowResults;
     }
 }
