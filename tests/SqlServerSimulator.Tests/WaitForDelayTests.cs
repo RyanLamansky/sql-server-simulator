@@ -314,6 +314,11 @@ public sealed class WaitForDelayTests
     /// distinct from the Msg 0 a caller-driven cancel produces. Probed against
     /// SqlClient 7.0.2 / SQL Server 2025.
     /// </summary>
+    // Sequential phase: a timeout can't be expressed in under a second
+    // (CommandTimeout is whole seconds), and WAITFOR blocks the calling
+    // thread for that whole second. Several of those running concurrently
+    // starve the threadpool, which surfaces as failures in whichever test
+    // was waiting on a thread — LockingTests carries the reciprocal note.
     [TestMethod]
     [DoNotParallelize]
     [DataRow("waitfor delay '00:00:10'")]

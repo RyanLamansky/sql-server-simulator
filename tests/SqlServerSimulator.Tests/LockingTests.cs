@@ -16,8 +16,26 @@ namespace SqlServerSimulator;
 /// blocking end-to-end through SQL.
 /// </summary>
 [TestClass]
+// Every test here hands work to a threadpool thread and then asserts, on a
+// deadline, that it *started*, so the class needs a thread to be available
+// promptly. That holds only while no other test monopolizes the pool — the
+// suite's rule is that a test which blocks a thread for a meaningful time
+// carries [DoNotParallelize] (see WaitForDelayTests' CommandTimeout cases).
+// When that rule is broken the failures land *here*, as a varying subset of
+// these tests, reading like a lock-manager concurrency bug rather than the
+// scheduling artifact it is — so start by looking for a new thread-blocking
+// test elsewhere before suspecting the lock manager.
 public sealed class LockingTests
 {
+    /// <summary>
+    /// Ceiling for "the background thread got scheduled and reached its first
+    /// statement". Generous on purpose: it is only ever waited out on the
+    /// failure path, so a large value costs a passing run nothing while
+    /// leaving room for a loaded CI machine. It is not a measure of how long
+    /// lock acquisition should take — the tests assert that separately.
+    /// </summary>
+    private const int ThreadStartTimeoutMs = 10_000;
+
     /// <summary>
     /// No conflicting holder → SET LOCK_TIMEOUT N has no observable effect
     /// on a single-connection workload. Pin that the statement parses and
@@ -120,7 +138,7 @@ public sealed class LockingTests
             readerResult = (int)reader.CreateCommand("select count(*) from t").ExecuteScalar()!;
         }, TestContext.CancellationToken);
 
-        IsTrue(readerStarted.Wait(2000, TestContext.CancellationToken));
+        IsTrue(readerStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
         // Give the reader thread time to enter the wait.
         await Task.Delay(100, TestContext.CancellationToken);
         IsNull(readerResult);
@@ -196,7 +214,7 @@ public sealed class LockingTests
             _ = writer.CreateCommand("insert t values (2)").ExecuteNonQuery();
         }, TestContext.CancellationToken);
 
-        IsTrue(writeStarted.Wait(2000, TestContext.CancellationToken));
+        IsTrue(writeStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
         await Task.Delay(100, TestContext.CancellationToken);
         IsFalse(writeTask.IsCompleted);
 
@@ -230,7 +248,7 @@ public sealed class LockingTests
             catch (Exception ex) { aError = ex; }
         }, TestContext.CancellationToken);
         // Wait for A to enter the wait, then have B request t1 → cycle.
-        IsTrue(aStarted.Wait(2000, TestContext.CancellationToken));
+        IsTrue(aStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
         await Task.Delay(100, TestContext.CancellationToken);
 
         var taskB = Task.Run(() =>
@@ -240,7 +258,7 @@ public sealed class LockingTests
             catch (Exception ex) { bError = ex; }
         }, TestContext.CancellationToken);
 
-        IsTrue(bStarted.Wait(2000, TestContext.CancellationToken));
+        IsTrue(bStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
         await Task.WhenAll(taskA, taskB).WaitAsync(TimeSpan.FromSeconds(5), TestContext.CancellationToken);
 
         // Exactly one connection was the victim — phase-1a policy is
@@ -375,7 +393,7 @@ public sealed class LockingTests
             _ = other.CreateCommand("select * from t with (updlock)").ExecuteScalar();
         }, TestContext.CancellationToken);
 
-        IsTrue(otherStarted.Wait(2000, TestContext.CancellationToken));
+        IsTrue(otherStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
         await Task.Delay(100, TestContext.CancellationToken);
         IsFalse(otherTask.IsCompleted);
 
@@ -404,7 +422,7 @@ public sealed class LockingTests
             readResult = (int)reader.CreateCommand("select count(*) from t").ExecuteScalar()!;
         }, TestContext.CancellationToken);
 
-        IsTrue(readStarted.Wait(2000, TestContext.CancellationToken));
+        IsTrue(readStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
         await Task.Delay(100, TestContext.CancellationToken);
         IsNull(readResult);
 
@@ -434,7 +452,7 @@ public sealed class LockingTests
             readResult = (int)reader.CreateCommand("select count(*) from t").ExecuteScalar()!;
         }, TestContext.CancellationToken);
 
-        IsTrue(readStarted.Wait(2000, TestContext.CancellationToken));
+        IsTrue(readStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
         await Task.Delay(100, TestContext.CancellationToken);
         IsNull(readResult);
 
@@ -466,7 +484,7 @@ public sealed class LockingTests
             _ = writer.CreateCommand("insert t values (2)").ExecuteNonQuery();
         }, TestContext.CancellationToken);
 
-        IsTrue(writeStarted.Wait(2000, TestContext.CancellationToken));
+        IsTrue(writeStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
         await Task.Delay(100, TestContext.CancellationToken);
         IsFalse(writeTask.IsCompleted);
 
@@ -505,7 +523,7 @@ public sealed class LockingTests
             _ = writer.CreateCommand("update t set id = 10 where id = 1").ExecuteNonQuery();
         }, TestContext.CancellationToken);
 
-        IsTrue(upStarted.Wait(2000, TestContext.CancellationToken));
+        IsTrue(upStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
         await Task.Delay(100, TestContext.CancellationToken);
         IsFalse(upTask.IsCompleted);
 
@@ -635,7 +653,7 @@ public sealed class LockingTests
             _ = waiter.CreateCommand("select * from t with (updlock)").ExecuteScalar();
         }, TestContext.CancellationToken);
 
-        IsTrue(started.Wait(2000, TestContext.CancellationToken));
+        IsTrue(started.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
         await Task.Delay(150, TestContext.CancellationToken);
 
         var holderSpid = (short)holder.CreateCommand("select @@spid").ExecuteScalar()!;
@@ -669,7 +687,7 @@ public sealed class LockingTests
             _ = waiter.CreateCommand("update t set id = 3 where id = 2").ExecuteNonQuery();
         }, TestContext.CancellationToken);
 
-        IsTrue(started.Wait(2000, TestContext.CancellationToken));
+        IsTrue(started.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
         await Task.Delay(150, TestContext.CancellationToken);
 
         var waitRows = (int)observer.CreateCommand(

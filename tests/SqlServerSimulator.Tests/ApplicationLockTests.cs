@@ -29,6 +29,29 @@ public class ApplicationLockTests
         => ReturnCode(connection,
             $"declare @r int; exec @r = sp_releaseapplock @Resource = N'{resource}', @LockOwner = '{owner}'; select @r");
 
+    /// <summary>
+    /// Polls <c>sys.dm_tran_locks</c> until a blocked application-lock request
+    /// appears (an <c>APPLICATION</c> resource in <c>WAIT</c> status), giving
+    /// tests a deterministic "the other connection is now blocked" signal
+    /// instead of a sleep. The ceiling is generous because it is only waited
+    /// out when the signal never arrives — i.e. on failure.
+    /// </summary>
+    private static bool SpinUntilApplicationLockWait(DbConnection observer)
+    {
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        while (elapsed.Elapsed < TimeSpan.FromSeconds(30))
+        {
+            var waiting = (int)Scalar(observer, """
+                select count(*) from sys.dm_tran_locks
+                where request_status = 'WAIT' and resource_type = 'APPLICATION'
+                """)!;
+            if (waiting > 0)
+                return true;
+            Thread.Sleep(10);
+        }
+        return false;
+    }
+
     private static int ReturnCode(DbConnection connection, string sql)
     {
         using var command = connection.CreateCommand(sql);
@@ -261,24 +284,31 @@ public class ApplicationLockTests
     {
         var simulation = new Simulation();
         using var a = simulation.CreateOpenConnection();
+        using var observer = simulation.CreateOpenConnection();
 
         AreEqual(0, GetAppLock(a, "res", "Exclusive"));
 
-        // B waits up to 3s; A releases after ~200ms, so B is granted after
-        // waiting and reports return code 1.
-        var waiter = Task.Run(() =>
-        {
-            using var b = simulation.CreateOpenConnection();
-            return GetAppLock(b, "res", "Shared", timeout: 3000);
-        }, this.TestContext.CancellationToken);
+        // B blocks on A's exclusive lock and reports 1 — granted only after
+        // waiting. Its timeout just has to outlast the handoff below, so it is
+        // generous rather than tuned.
+        var waiter = Task.Run(
+            () =>
+            {
+                using var b = simulation.CreateOpenConnection();
+                return GetAppLock(b, "res", "Shared", timeout: 60_000);
+            },
+            this.TestContext.CancellationToken);
 
-        var releaser = Task.Run(() =>
-        {
-            Thread.Sleep(200);
-            _ = ReleaseAppLock(a, "res");
-        }, this.TestContext.CancellationToken);
+        // Release only once B is *observably* blocked. Sleeping a guessed
+        // interval instead raced both ways under load: releasing before B had
+        // even requested made B report 0 (granted without waiting), and a
+        // releaser that missed its threadpool slot let B's timeout expire into
+        // -1. A blocked request surfaces as an APPLICATION row in WAIT status,
+        // which turns the handoff into a fact rather than a bet on timing.
+        IsTrue(SpinUntilApplicationLockWait(observer), "B never registered as waiting for the application lock.");
+        _ = ReleaseAppLock(a, "res");
 
-        IsTrue(Task.WaitAll([waiter, releaser], TimeSpan.FromSeconds(15)), "Wait/release tasks did not complete in time.");
+        IsTrue(waiter.Wait(TimeSpan.FromSeconds(60), this.TestContext.CancellationToken), "Waiter did not complete in time.");
         AreEqual(1, waiter.Result);
     }
 
