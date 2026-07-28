@@ -16,6 +16,8 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class WaitForDelayTests
 {
+    public TestContext TestContext { get; set; } = null!;
+
     [TestMethod]
     public void Delay_Zero_StringLiteral_ReturnsImmediately()
         => _ = new Simulation().ExecuteNonQuery("waitfor delay '00:00:00'");
@@ -63,8 +65,10 @@ public sealed class WaitForDelayTests
     /// <summary>
     /// In-process <c>Cancel()</c> from another thread interrupts a running
     /// <c>WAITFOR DELAY</c> — the same abort machinery the TDS attention path
-    /// drives, exposed through the ADO surface. The 30-second wait returns
-    /// promptly once cancelled; the connection stays usable.
+    /// drives, exposed through the ADO surface. The 30-second wait aborts
+    /// promptly and surfaces the cancelled-command exception (<b>Msg 0</b>,
+    /// what real SqlClient manufactures for an attention — probe-confirmed
+    /// against SqlClient 7.0.2); the connection stays usable afterwards.
     /// </summary>
     [TestMethod]
     public void Delay_InterruptedByInProcessCancel_ReturnsPromptly()
@@ -90,11 +94,12 @@ public sealed class WaitForDelayTests
 
         var start = Stopwatch.GetTimestamp();
         canceller.Start();
-        _ = command.ExecuteNonQuery();
+        var cancelled = Throws<SimulatedSqlException>(() => _ = command.ExecuteNonQuery());
         Volatile.Write(ref done, true);
         canceller.Join();
         var elapsed = Stopwatch.GetElapsedTime(start);
 
+        AreEqual(0, cancelled.Number);
         IsLessThan(10000, elapsed.TotalMilliseconds,
             $"Expected the cancel to interrupt the 30s wait promptly, got {elapsed.TotalMilliseconds}ms");
 
@@ -249,5 +254,173 @@ public sealed class WaitForDelayTests
         var elapsed = Stopwatch.GetElapsedTime(start);
         IsLessThan(2000, elapsed.TotalMilliseconds,
             $"Expected fast loop, got {elapsed.TotalMilliseconds}ms");
+    }
+
+    /// <summary>
+    /// A <see cref="CancellationToken"/> cancelled <em>mid-execution</em>
+    /// surfaces the same Msg 0 as an explicit <c>Cancel()</c> — the ADO.NET
+    /// base class registers the token to call <c>Cancel()</c>, so both reach
+    /// the engine's abort the same way. Real SqlClient throws rather than
+    /// handing back an empty reader / zero rows, so a caller can't mistake a
+    /// cancelled batch for a legitimately empty answer.
+    /// </summary>
+    [TestMethod]
+    public async Task Delay_CancelledTokenMidExecution_ThrowsMsg0()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateDbConnection();
+        await connection.OpenAsync(TestContext.CancellationToken);
+        using var command = connection.CreateCommand();
+        command.CommandText = "waitfor delay '00:00:30'; select 42";
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+
+        var cancelled = await ThrowsAsync<SimulatedSqlException>(async () =>
+        {
+            using var reader = await command.ExecuteReaderAsync(cts.Token);
+        });
+
+        AreEqual(0, cancelled.Number);
+
+        using var probe = connection.CreateCommand();
+        probe.CommandText = "select 42";
+        AreEqual(42, probe.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A token already cancelled <em>before</em> execute keeps the ADO.NET
+    /// base class's <see cref="TaskCanceledException"/> — real SqlClient
+    /// behaves identically, so only the mid-execution case routes to Msg 0.
+    /// </summary>
+    [TestMethod]
+    public async Task PreCancelledToken_StaysTaskCanceled()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateDbConnection();
+        await connection.OpenAsync(TestContext.CancellationToken);
+        using var command = connection.CreateCommand();
+        command.CommandText = "select 1";
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        _ = await ThrowsAsync<TaskCanceledException>(async () =>
+        {
+            using var reader = await command.ExecuteReaderAsync(cts.Token);
+        });
+    }
+
+    /// <summary>
+    /// <c>CommandTimeout</c> expiry aborts the batch and surfaces <b>Msg -2</b>
+    /// (Class 11 / State 0) — SqlClient's own manufactured timeout exception,
+    /// distinct from the Msg 0 a caller-driven cancel produces. Probed against
+    /// SqlClient 7.0.2 / SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DoNotParallelize]
+    [DataRow("waitfor delay '00:00:10'")]
+    [DataRow("waitfor delay '00:00:10'; select 42")]
+    public void CommandTimeout_Expiry_RaisesMinus2(string sql)
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.CommandTimeout = 1;
+
+        var timeout = Throws<SimulatedSqlException>(() => _ = command.ExecuteNonQuery());
+
+        AreEqual(-2, timeout.Number);
+        AreEqual(11, timeout.Class);
+        AreEqual(0, timeout.State);
+    }
+
+    /// <summary>
+    /// A caller-driven cancel keeps Msg 0 even with a timeout armed — the two
+    /// causes stay distinguishable, which is the whole point of tracking them
+    /// separately.
+    /// </summary>
+    [TestMethod]
+    public void ExplicitCancel_KeepsMsg0_EvenWithTimeoutArmed()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "waitfor delay '00:00:20'";
+        command.CommandTimeout = 30;
+
+        var done = false;
+        var canceller = new Thread(() =>
+        {
+            while (!Volatile.Read(ref done))
+            {
+                Thread.Sleep(100);
+                command.Cancel();
+            }
+        });
+        canceller.Start();
+        var cancelled = Throws<SimulatedSqlException>(() => _ = command.ExecuteNonQuery());
+        Volatile.Write(ref done, true);
+        canceller.Join();
+
+        AreEqual(0, cancelled.Number);
+    }
+
+    /// <summary>
+    /// <c>CommandTimeout = 0</c> is infinite, the SqlClient convention
+    /// (probe-confirmed: a wait longer than any finite default completes).
+    /// </summary>
+    [TestMethod]
+    [DoNotParallelize]
+    public void CommandTimeout_Zero_IsInfinite()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "waitfor delay '00:00:01'";
+        command.CommandTimeout = 0;
+
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// The default matches SqlClient's 30 seconds — a batch under it runs
+    /// untouched.
+    /// </summary>
+    [TestMethod]
+    public void CommandTimeout_DefaultsToThirtySeconds()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+
+        AreEqual(30, command.CommandTimeout);
+    }
+
+    /// <summary>
+    /// After a timeout the connection stays usable and an open transaction
+    /// **survives** — probe-confirmed against SQL Server 2025, which reports
+    /// <c>@@TRANCOUNT = 1</c> and serves the next command normally (the same
+    /// shape as a cancel under the default <c>SET XACT_ABORT OFF</c>).
+    /// </summary>
+    [TestMethod]
+    [DoNotParallelize]
+    public void CommandTimeout_LeavesConnectionUsableAndTransactionOpen()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "begin tran; waitfor delay '00:00:10'";
+            command.CommandTimeout = 1;
+            _ = Throws<SimulatedSqlException>(() => _ = command.ExecuteNonQuery());
+        }
+
+        using var probe = connection.CreateCommand();
+        probe.CommandText = "select @@TRANCOUNT";
+        AreEqual(1, probe.ExecuteScalar());
     }
 }

@@ -239,11 +239,37 @@ public sealed class SimulatedDbConnection : DbConnection
     /// execution — a cancel that fired against a previous command doesn't
     /// bleed into the next one on the same connection.
     /// </summary>
-    internal void BeginExecutionScope()
+    internal void BeginExecutionScope(TimeSpan? timeout = null)
     {
-        var previous = Interlocked.Exchange(ref this.executionCancellation, new CancellationTokenSource());
+        var fresh = new CancellationTokenSource();
+        // A finite CommandTimeout arms the same source the engine already
+        // polls, so a timeout aborts through exactly the path a Cancel() or a
+        // TDS attention does — no second signal to coordinate. The cause is
+        // recovered from executionCancelledByUser rather than a linked source:
+        // whoever cancelled sets the flag, so an unflagged cancellation is the
+        // timer's. (A cancel racing the deadline reports as a cancel; real has
+        // the same inherent ambiguity.)
+        if (timeout is { } span)
+            fresh.CancelAfter(span);
+        this.executionCancelledByUser = false;
+        var previous = Interlocked.Exchange(ref this.executionCancellation, fresh);
         previous.Dispose();
     }
+
+    /// <summary>
+    /// Set by <see cref="CancelExecution"/> so a cancelled execution can tell a
+    /// user / attention cancel (Msg 0) from a <c>CommandTimeout</c> expiry
+    /// (Msg -2). Cleared when each execution scope opens.
+    /// </summary>
+    private volatile bool executionCancelledByUser;
+
+    /// <summary>
+    /// True when the current execution was aborted by its <c>CommandTimeout</c>
+    /// rather than by a <see cref="CancelExecution"/> caller — the discriminator
+    /// between the Msg -2 and Msg 0 surfaces.
+    /// </summary>
+    internal bool ExecutionTimedOut =>
+        Volatile.Read(ref this.executionCancellation).IsCancellationRequested && !this.executionCancelledByUser;
 
     /// <summary>The current execution's cancellation token; the engine's safe-point poll target.</summary>
     internal CancellationToken ExecutionCancellationToken => Volatile.Read(ref this.executionCancellation).Token;
@@ -258,6 +284,7 @@ public sealed class SimulatedDbConnection : DbConnection
     {
         try
         {
+            this.executionCancelledByUser = true;
             Volatile.Read(ref this.executionCancellation).Cancel();
         }
         catch (ObjectDisposedException)

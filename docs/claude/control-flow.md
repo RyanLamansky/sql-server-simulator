@@ -360,5 +360,14 @@ Bad-format string raises **Msg 148** with the offending value embedded.
 Skip-mode suppresses the sleep entirely (an `IF 1=0 WAITFOR DELAY '00:00:10'` returns instantly).
 **`WAITFOR TIME`** (absolute-time wait) raises `NotSupportedException` — scheduling-style primitive not yet needed.
 **Cancellation**: an `ExecuteReaderAsync` caller's `CancellationToken` *is* observed — the sleep waits on the per-execution `CancellationTokenSource`'s handle (see [`tds-endpoint.md`](tds-endpoint.md#mid-stream-attention-cancel)), so a token cancelled 400 ms into a 5-second `WAITFOR` ends the wait at 400 ms and aborts the batch at the statement boundary (a trailing `SELECT 42` in the same batch doesn't run).
-The residual is the **reaction shape**: the call returns an open, empty reader rather than throwing, where real SqlClient surfaces a cancellation exception.
-A token already cancelled *before* execute throws `TaskCanceledException` from the ADO.NET base class, so only the mid-execution case diverges.
+The cancelled execution then surfaces as **Msg 0** (`SimulatedSqlException`) from `ExecuteReader` / `ExecuteNonQuery` / `ExecuteScalar` and their async forms — the exception real SqlClient manufactures for an attention, so a caller can't mistake a cancelled batch for a legitimately empty answer.
+A token already cancelled *before* execute, and one observed while draining an already-open reader, both keep the ADO.NET base class's `TaskCanceledException` — matching real, which reserves the Msg 0 shape for the mid-execution case.
+
+**`CommandTimeout`** is enforced in-process by the same machinery: `BeginExecutionScope` arms the execution's cancellation source with `CancelAfter`, so an expiry aborts through the identical safe-point path and surfaces **Msg -2, Class 11, State 0** (`Execution Timeout Expired.  …` — SqlClient's own wording, double space included).
+The cause is recovered from a flag `CancelExecution` sets rather than a second token, so a caller-driven cancel stays Msg 0 while a deadline expiry reports Msg -2.
+The default is **30 seconds** (SqlClient's) and `CommandTimeout = 0` is infinite.
+Probe-confirmed against SQL Server 2025: the connection stays usable afterwards and an **open transaction survives** the timeout (`@@TRANCOUNT` unchanged), the same shape a cancel has under the default `SET XACT_ABORT OFF` — see [`transactions.md`](transactions.md).
+The wire path needs none of this: SqlClient enforces its own `CommandTimeout` client-side by sending an attention, which the endpoint already answers.
+
+**Enforcement is at safe points, not a hard deadline.**
+A timeout is observed at a statement boundary, a `WHILE` iteration, or during a `WAITFOR` wait, so a *single* long-running statement still materializes to completion before the deadline is noticed — the same bound the cancel path documents.

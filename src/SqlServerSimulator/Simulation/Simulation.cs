@@ -762,7 +762,12 @@ public sealed partial class Simulation
         // doesn't bleed into this one. Child batches (proc / UDF / dynamic-SQL
         // bodies) don't re-enter here — they share this scope through the
         // connection, so an attention aborts them too.
-        command.Connection?.BeginExecutionScope();
+        // CommandTimeout is seconds, 0 meaning infinite (the SqlClient
+        // convention). The deadline is enforced at the engine's safe points,
+        // so a batch aborts between statements / loop iterations / during a
+        // WAITFOR — a single statement still materializes to completion first.
+        command.Connection?.BeginExecutionScope(
+            command.CommandTimeout > 0 ? TimeSpan.FromSeconds(command.CommandTimeout) : null);
 
         // CommandType.StoredProcedure: CommandText is the procedure name and
         // Parameters maps by name to the proc's declared parameters. Bypass

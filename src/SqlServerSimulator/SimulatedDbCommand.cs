@@ -124,6 +124,10 @@ public sealed class SimulatedDbCommand : DbCommand
     /// reader then drains already-materialized rows) — matching SqlClient's
     /// no-op when called with nothing to cancel. A <c>Cancel</c> with no
     /// live execution is a no-op.
+    /// <para>A cancel that <em>did</em> abort an execution surfaces as
+    /// <see cref="SimulatedSqlException.CommandCancelled"/> (Msg 0) out of the
+    /// execute call, mirroring SqlClient rather than returning a truncated
+    /// result as a successful one.</para>
     /// </summary>
     public override void Cancel() => this.Connection?.CancelExecution();
 
@@ -156,6 +160,7 @@ public sealed class SimulatedDbCommand : DbCommand
             }
         }
 
+        ThrowIfExecutionCancelled();
         return errors is not null
             ? throw AggregateErrors(errors)
             : counted ? affected : -1;
@@ -203,6 +208,7 @@ public sealed class SimulatedDbCommand : DbCommand
             }
         }
 
+        ThrowIfExecutionCancelled();
         return errors is not null ? throw AggregateErrors(errors) : scalar;
     }
 
@@ -240,7 +246,51 @@ public sealed class SimulatedDbCommand : DbCommand
 
     /// <inheritdoc/>
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior = default)
-        => new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this));
+    {
+        // The reader's constructor drains outcomes up to the first result set,
+        // so a cancellation that aborted the batch is already observable here —
+        // the check costs no extra eagerness. Real SqlClient throws out of
+        // ExecuteReader rather than handing back an empty reader, so a caller
+        // can't mistake a cancelled batch for a zero-row answer.
+        var reader = new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this));
+        if (WasExecutionCancelled())
+        {
+            reader.Dispose();
+            throw CancellationException();
+        }
+        return reader;
+    }
+
+    /// <summary>
+    /// True when the execution that just ran on this command's connection was
+    /// cancelled (an <c>ExecuteReaderAsync</c> caller's token — the ADO.NET
+    /// base class registers it to call <see cref="Cancel"/> — or a direct
+    /// <see cref="Cancel"/> from another thread). The engine aborts at its next
+    /// safe point and simply stops producing outcomes, so without this check
+    /// the surface would report a truncated batch as a successful one.
+    /// </summary>
+    private bool WasExecutionCancelled() =>
+        this.Connection?.ExecutionCancellationToken.IsCancellationRequested == true;
+
+    /// <summary>
+    /// Surfaces a cancelled execution the way real SqlClient does — see
+    /// <see cref="SimulatedSqlException.CommandCancelled"/>.
+    /// </summary>
+    private void ThrowIfExecutionCancelled()
+    {
+        if (WasExecutionCancelled())
+            throw CancellationException();
+    }
+
+    /// <summary>
+    /// Picks the surface for an aborted execution: <b>Msg -2</b> when the
+    /// command's <see cref="CommandTimeout"/> expired, <b>Msg 0</b> when a
+    /// caller cancelled — the same split real SqlClient makes.
+    /// </summary>
+    private SimulatedSqlException CancellationException() =>
+        this.Connection?.ExecutionTimedOut == true
+            ? SimulatedSqlException.ExecutionTimeoutExpired()
+            : SimulatedSqlException.CommandCancelled();
 
     /// <summary>Strongly-typed shadow over <see cref="DbCommand.CreateParameter"/>.</summary>
     public new SimulatedDbParameter CreateParameter() => (SimulatedDbParameter)base.CreateParameter();

@@ -12,6 +12,32 @@ partial class SimulatedSqlException
     /// stability lock is involved on either side). The state is parameterized
     /// so callers can match the real-server discriminator.
     /// </summary>
+    /// <summary>
+    /// The client-side exception a cancelled command surfaces — <b>Msg 0</b>,
+    /// not a server error: real SQL Server sends no error token for an
+    /// attention, so SqlClient manufactures this from its own state and the
+    /// simulator's in-process surface mirrors it (probe-confirmed against
+    /// SqlClient 7.0.2 for a mid-execution <c>CancellationToken</c> and for
+    /// <c>SqlCommand.Cancel()</c> alike; the wording, including its double
+    /// space, is SqlClient's own).
+    /// <para>Only the mid-execution case reaches here. A token already
+    /// cancelled before execute, and one observed while draining an open
+    /// reader, both surface <c>TaskCanceledException</c> from the ADO.NET base
+    /// class on real and here alike.</para>
+    /// </summary>
+    /// <summary>
+    /// <b>Msg -2</b> — a <c>CommandTimeout</c> expiry. Like
+    /// <see cref="CommandCancelled"/> this is manufactured client-side rather
+    /// than sent by a server, and carries SqlClient's own wording (double space
+    /// included) with Class 11 / State 0 — probe-confirmed against SqlClient
+    /// 7.0.2 driving SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ExecutionTimeoutExpired() =>
+        new("Execution Timeout Expired.  The timeout period elapsed prior to completion of the operation or the server is not responding.", -2, 11, 0);
+
+    internal static SimulatedSqlException CommandCancelled() =>
+        new("A severe error occurred on the current command.  The results, if any, should be discarded.", 0, 11, 0);
+
     internal static SimulatedSqlException LockRequestTimeOutExceeded(byte state = 56) =>
         new("Lock request time out period exceeded.", 1222, 16, state);
 
