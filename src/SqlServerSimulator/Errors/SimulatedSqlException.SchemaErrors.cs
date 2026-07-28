@@ -1033,6 +1033,57 @@ partial class SimulatedSqlException
         new($"Cannot find the object \"{qualifiedName}\" because it does not exist or you do not have permissions.", 1088, 16, 12);
 
     /// <summary>
+    /// The indexed-view qualifying battery real SQL Server runs at
+    /// <c>CREATE INDEX</c>. Every message below is verbatim from SQL Server
+    /// 2025, including its quoting: most quote the view with <c>"</c>, but
+    /// Msg 10116 / 10138 / 1949 use <c>'</c>, and Msg 8662 alone names the
+    /// index as well and carries State 0 where the rest carry State 1. The
+    /// view name is database-qualified (<c>db.schema.view</c>) throughout.
+    /// </summary>
+    internal static SimulatedSqlException IndexedViewHasDistinct(string qualifiedViewName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it contains the DISTINCT keyword. Consider removing DISTINCT from the view or not indexing the view. Alternatively, consider replacing DISTINCT with GROUP BY or COUNT_BIG(*) to simulate DISTINCT on grouping columns.", 10100, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewHasDistinct"/>
+    internal static SimulatedSqlException IndexedViewHasTopOrOffset(string qualifiedViewName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it contains the TOP or OFFSET keyword. Consider removing the TOP or OFFSET or not indexing the view.", 10101, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewHasDistinct"/>
+    internal static SimulatedSqlException IndexedViewHasOuterJoin(string qualifiedViewName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it uses a LEFT, RIGHT, or FULL OUTER join, and no OUTER joins are allowed in indexed views. Consider using an INNER join instead.", 10113, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewHasDistinct"/>
+    internal static SimulatedSqlException IndexedViewHasSetOperator(string qualifiedViewName) =>
+        new($"Cannot create index on view '{qualifiedViewName}' because it contains one or more UNION, INTERSECT, or EXCEPT operators. Consider creating a separate indexed view for each query that is an input to the UNION, INTERSECT, or EXCEPT operators of the original view.", 10116, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewHasDistinct"/>
+    internal static SimulatedSqlException IndexedViewHasDisallowedAggregate(string qualifiedViewName, string aggregateName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it uses aggregate \"{aggregateName}\". Consider eliminating the aggregate, not indexing the view, or using alternate aggregates. For example, for AVG substitute SUM and COUNT_BIG, or for COUNT, substitute COUNT_BIG.", 10125, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewHasDistinct"/>
+    internal static SimulatedSqlException IndexedViewHasSubquery(string qualifiedViewName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it contains one or more subqueries. Consider changing the view to use only joins instead of subqueries. Alternatively, consider not indexing this view.", 10127, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewHasDistinct"/>
+    internal static SimulatedSqlException IndexedViewUsesCount(string qualifiedViewName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it uses the aggregate COUNT. Use COUNT_BIG instead.", 10136, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewHasDistinct"/>
+    internal static SimulatedSqlException IndexedViewMissingCountBig(string qualifiedViewName) =>
+        new($"Cannot create index on view '{qualifiedViewName}' because its select list does not include a proper use of COUNT_BIG. Consider adding COUNT_BIG(*) to select list.", 10138, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewHasDistinct"/>
+    internal static SimulatedSqlException IndexedViewSumsNullableExpression(string indexName, string qualifiedViewName) =>
+        new($"Cannot create the clustered index \"{indexName}\" on view \"{qualifiedViewName}\" because the view references an unknown value (SUM aggregate of nullable expression). Consider referencing only non-nullable values in SUM. ISNULL() may be useful for this.", 8662, 16, 0);
+
+    /// <inheritdoc cref="IndexedViewHasDistinct"/>
+    internal static SimulatedSqlException IndexedViewIsNondeterministic(string qualifiedViewName, string functionName) =>
+        new($"Cannot create index on view '{qualifiedViewName}'. The function '{functionName}' yields nondeterministic results. Use a deterministic system function, or modify the user-defined function to return deterministic results.", 1949, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewHasDistinct"/>
+    internal static SimulatedSqlException IndexedViewHasSelfJoin(string qualifiedViewName, string qualifiedTableName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\". The view contains a self join on \"{qualifiedTableName}\".", 1947, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1939: <c>CREATE INDEX</c> on a view that wasn't
     /// declared <c>WITH SCHEMABINDING</c>. Probe-confirmed wording (SQL Server
     /// 2025, 2026-07-17) uses the view's <b>leaf</b> name (unqualified),

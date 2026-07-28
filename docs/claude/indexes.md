@@ -406,6 +406,34 @@ With the simulator:
 - `HasIndex().HasFilter("...")` emits a `WHERE` clause — the predicate is captured and honored for UNIQUE indexes (filter-aware uniqueness).
 - Non-UNIQUE indexes are no-ops at the storage layer (no query acceleration), but their presence in `sys.indexes` keeps EF Migrations introspection happy.
 
+## Indexed-view qualifying battery
+
+Real SQL Server accepts *any* view body at CREATE VIEW and applies the qualifying rules at **CREATE INDEX** (probe-confirmed: every shape below creates as a view without complaint and fails only when indexed).
+The simulator matches that placement — `Simulation.IndexedViews.cs`'s `EnforceIndexedViewQualifies` runs after the 1939 / 1941 / 1940 gates and re-parses the view's stored body with an `IndexedViewShape` collector installed (`ParserContext.IndexedViewShapeCollector`, the same collector pattern aggregates / windows / sequences use, so the recording sites are null checks on the normal path).
+
+| Shape | Msg | State |
+|---|---|---|
+| `DISTINCT` | 10100 | 1 |
+| `TOP` / `OFFSET` / `FETCH` | 10101 | 1 |
+| LEFT / RIGHT / FULL join | 10113 | 1 |
+| `UNION` / `INTERSECT` / `EXCEPT` | 10116 | 1 |
+| `AVG` / `MIN` / `MAX` / `STDEV*` / `VAR*` (named in the text) | 10125 | 1 |
+| Subquery at any depth | 10127 | 1 |
+| `COUNT(*)` | 10136 | 1 |
+| `GROUP BY` without `COUNT_BIG(*)` | 10138 | 1 |
+| `SUM` over a nullable expression | 8662 | **0** |
+| Nondeterministic built-in | 1949 | 1 |
+| Self-join | 1947 | 1 |
+
+Wording is verbatim, including real's **inconsistent quoting**: 10116 / 10138 / 1949 single-quote the view name where the rest use double quotes, and 8662 alone names the *index* as well as the view and carries State 0.
+The view is database-qualified (`db.schema.view`) throughout, and Msg 1949 lower-cases the function name regardless of how it was written.
+
+Nondeterminism is a closed set of built-ins (`GETDATE` / `GETUTCDATE` / `SYSDATETIME` / `SYSUTCDATETIME` / `SYSDATETIMEOFFSET` / `NEWID` / `NEWSEQUENTIALID` / `RAND`) recorded at `ResolveBuiltIn`, so a reference at any nesting depth is caught.
+Aggregates outside the disallowed set (`STRING_AGG` and friends) are **left alone** rather than guessed at — an unprobed rejection would be the over-restrictive direction.
+`SUM` nullability reuses `Expression.ResultIsNullable`, the same rule that drives result-metadata nullability, with an unresolvable column treated as nullable.
+
+Shapes that keep indexing cleanly: inner-join projections (the form AdventureWorks' two indexed views take), `SUM` + `COUNT_BIG` grouped views over NOT NULL columns, and filtered projections.
+
 ## Fidelity gaps
 
 - **`filter_definition` edge cases**: the column is rendered (see [Filtered-index `filter_definition`](#filtered-index-filter_definition)) and byte-matches SQL Server across the common filtered grammar, but two literal-typing corners diverge: an integer literal larger than `int` range renders `(5000000000)` where SQL Server types it as `numeric` and renders `(5000000000.)` (trailing dot), and a scale-0 decimal literal likewise omits the trailing dot.
@@ -422,10 +450,8 @@ With the simulator:
 - **No partition-aware index storage**: `partition_ordinal` always 0, `data_space_id` always 1 (PRIMARY).
 - **DROP INDEX comma list not atomic**: each entry resolves independently.
   Real SQL Server rolls back all on any failure.
-- **Indexed-view determinism battery**: real SQL Server rejects a non-qualifying indexed-view shape at CREATE INDEX with the Msg 10100-series / Msg 10138 checks (schema-bound, deterministic, `COUNT_BIG(*)` present when GROUP BY, no outer joins / subqueries / DISTINCT / TOP, two-part names, etc.).
-  The simulator applies only the 1939 / 1941 / 1940 gates and accepts the rest — so it materializes-and-enforces view shapes real would reject.
-  AW's two indexed views (both simple inner-join projections) qualify, and the DELETE-can't-violate reasoning depends on the accepted shapes being the qualifying ones.
-  See [Indexed views](#indexed-views).
+- **Indexed-view battery gate order**: each rejection below was probed in isolation, so real's precedence when one view violates several at once isn't pinned — a body with both DISTINCT and TOP may name the other one on real.
+  The simulator's order is fixed and documented in `Simulation.IndexedViews.cs`.
 - **Indexed-view `sys.partitions` row**: real reports a `sys.partitions` / `sys.dm_db_partition_stats` row for a view index carrying the materialized row count; the simulator (which never materializes) omits view indexes from those page-count views.
   `sys.indexes` / `sys.index_columns` / `sys.stats` are populated.
 - **Index hints (`SELECT … WITH (INDEX = name)`)**: not modeled — query planner is single-strategy (full scan) regardless.

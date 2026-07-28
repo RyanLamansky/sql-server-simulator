@@ -75,6 +75,82 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Records the facts <c>CREATE INDEX</c> judges a view on, when a
+    /// validation parse installed a collector (see
+    /// <see cref="IndexedViewShape"/>). Everything the battery needs except
+    /// subqueries and nondeterministic functions is already in scope here, so
+    /// this is the single recording site for the structural half.
+    /// </summary>
+    private static void RecordIndexedViewShape(
+        BatchContext parseBatch,
+        FromSource[] sources,
+        JoinSpec[] joins,
+        FromClause fromClause,
+        bool distinct,
+        Expression? topExpression,
+        List<AggregateExpression> aggregates)
+    {
+        if (parseBatch.Parser.IndexedViewShapeCollector is not { } shape)
+            return;
+
+        shape.HasDistinct |= distinct;
+        shape.HasTopOrOffset |= topExpression is not null
+            || fromClause.OffsetExpression is not null
+            || fromClause.FetchExpression is not null;
+        shape.HasGroupBy |= fromClause.GroupingSets.Count > 0;
+
+        foreach (var join in joins)
+        {
+            if (join.Kind is JoinKind.Left or JoinKind.Right or JoinKind.Full)
+            {
+                shape.HasOuterJoin = true;
+                break;
+            }
+        }
+
+        // Self-join: two FROM sources resolving to the same base table. Real
+        // names that table in Msg 1947, so the first duplicate is captured.
+        for (var i = 0; shape.SelfJoinedTable is null && i < sources.Length; i++)
+        {
+            if (sources[i].BackingTable is not { } table)
+                continue;
+            for (var j = i + 1; j < sources.Length; j++)
+            {
+                if (ReferenceEquals(sources[j].BackingTable, table))
+                {
+                    shape.SelfJoinedTable = table;
+                    break;
+                }
+            }
+        }
+
+        // SUM over an expression that can produce NULL is Msg 8662. Column
+        // nullability comes from the FROM sources, the same source
+        // Expression.ResultIsNullable consults for result metadata.
+        foreach (var aggregate in aggregates)
+        {
+            shape.Aggregates.Add(aggregate.Kind);
+            if (aggregate.Kind == AggregateKind.Sum
+                && aggregate.Operand is { } operand
+                && operand.ResultIsNullable(name => ColumnIsNullableAcrossSources(sources, name)))
+            {
+                shape.SumsNullableExpression = true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Column-nullability lookup across the FROM sources for
+    /// <see cref="RecordIndexedViewShape"/>; an unresolvable name is treated as
+    /// nullable, the conservative direction for a gate that rejects.
+    /// </summary>
+    private static bool ColumnIsNullableAcrossSources(FromSource[] sources, MultiPartName name)
+    {
+        var (sourceIndex, columnIndex) = FindSourceColumn(sources, name);
+        return sourceIndex < 0 || sources[sourceIndex].Columns[columnIndex].Nullable;
+    }
+
+    /// <summary>
     /// Enforces the GROUP BY containment rule (Msg 8120 / 8121 / 8127): outside
     /// an aggregate, a column reference must resolve to a bare GROUP BY column.
     /// <see cref="Expression.VisitColumnReferences"/> already skips
@@ -344,6 +420,8 @@ internal sealed partial class Selection
         MultiPartName? intoTarget,
         Dictionary<int, (Storage.HeapTable Table, HashSet<int> Columns)>? readColumnSink)
     {
+        RecordIndexedViewShape(parseBatch, sources, joins, fromClause, distinct, topExpression, aggregates);
+
         // Windows combined with GROUP BY / aggregates run over the grouped
         // rows (BuildAggregateProjectionRows drives the window engine). The
         // multi-grouping-set shapes (ROLLUP / CUBE / GROUPING SETS) emit

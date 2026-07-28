@@ -1027,9 +1027,41 @@ internal abstract class Expression
         : collation.Equals(name, "DAYOFMONTH") ? "DAY"
         : name;
 
+    /// <summary>
+    /// Notes a nondeterministic built-in for the indexed-view battery
+    /// (Msg 1949, whose text embeds the function name lower-cased). Only the
+    /// closed set of built-ins whose value can differ between two evaluations
+    /// of the same row matters here — that is exactly what makes a view's
+    /// materialized contents unreproducible.
+    /// </summary>
+    private static void RecordNondeterministicBuiltIn(string name, ParserContext context)
+    {
+        if (context.IndexedViewShapeCollector is not { } shape || shape.NondeterministicFunction is not null)
+            return;
+
+        // The arms yield the lower-cased spelling real reports, so no
+        // case conversion of the caller's text is needed (and CA1308's
+        // normalization concern doesn't arise).
+        Span<char> upper = stackalloc char[name.Length];
+        var length = name.ToUpperInvariant(upper);
+        shape.NondeterministicFunction = length switch
+        {
+            4 => upper[..length] is "RAND" ? "rand" : null,
+            5 => upper[..length] is "NEWID" ? "newid" : null,
+            7 => upper[..length] is "GETDATE" ? "getdate" : null,
+            10 => upper[..length] is "GETUTCDATE" ? "getutcdate" : null,
+            11 => upper[..length] is "SYSDATETIME" ? "sysdatetime" : null,
+            14 => upper[..length] is "SYSUTCDATETIME" ? "sysutcdatetime" : null,
+            15 => upper[..length] is "NEWSEQUENTIALID" ? "newsequentialid" : null,
+            17 => upper[..length] is "SYSDATETIMEOFFSET" ? "sysdatetimeoffset" : null,
+            _ => null,
+        };
+    }
+
     private static Expression ResolveBuiltIn(string name, ParserContext context)
     {
         Span<char> uppercaseName = stackalloc char[name.Length];
+        RecordNondeterministicBuiltIn(name, context);
         return name.ToUpperInvariant(uppercaseName) switch
         {
             2 => uppercaseName switch

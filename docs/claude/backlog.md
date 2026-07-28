@@ -142,8 +142,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **Cross-collation comparison / concatenation binds per row, not at compile time** — `c1.x = c2.x` across differently-collated columns raises Msg 468 once a row is evaluated, but the same statement over an **empty** rowset passes silently where real rejects it during compilation (probe-confirmed: real's is an uncatchable bind-time failure).
   Set operations bind at compile time and match real exactly; this is the residual, and closing it means carrying collation through the static type path at every comparison site.
   → [`collations.md`](collations.md#known-gaps).
-- **Indexed-view determinism battery unenforced** — real gates `CREATE INDEX` on a view with the Msg 10100-series / Msg 10138 checks (schema-bound, deterministic, `COUNT_BIG(*)` present with GROUP BY, no outer joins / subqueries / DISTINCT / TOP, two-part names); the simulator applies only the 1939 / 1941 / 1940 gates, so a `SELECT DISTINCT` view indexes cleanly and is then materialized and enforced.
-  → [`indexes.md`](indexes.md#fidelity-gaps).
 - **Msg 1902 one-clustered-index-per-table covers only the `CREATE INDEX` statement** — every constraint path is unchecked: inline `PRIMARY KEY CLUSTERED` beside `UNIQUE CLUSTERED` in one CREATE TABLE, two `ALTER TABLE ADD CONSTRAINT … CLUSTERED` in sequence, and a clustered PK added after a `CREATE CLUSTERED INDEX` all pass.
   The extra clustered entries fall back to nonclustered ids rather than raising.
   → [`indexes.md`](indexes.md#fidelity-gaps).

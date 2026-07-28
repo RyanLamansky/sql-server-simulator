@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 using StoredIndex = SqlServerSimulator.Storage.Index;
@@ -22,10 +23,11 @@ partial class Simulation
     /// <strong>Msg 1941</strong> (a non-unique CLUSTERED index is never
     /// allowed on a view); then <strong>Msg 1940</strong> (any index requires
     /// an existing unique clustered index, i.e. the first index on a view must
-    /// be UNIQUE CLUSTERED). The determinism / COUNT_BIG / GROUP BY validation
-    /// battery real SQL Server runs at CREATE (Msg 10100-series) is
-    /// deliberately not modeled — the simulator accepts view shapes real might
-    /// reject there; AW needs none of it. See <c>docs/claude/indexes.md</c>.
+    /// be UNIQUE CLUSTERED). The qualifying battery real runs after those —
+    /// determinism, DISTINCT / TOP / OUTER JOIN / set-op / subquery shape, and
+    /// the aggregate rules — follows in
+    /// <see cref="EnforceIndexedViewQualifies"/>. See
+    /// <c>docs/claude/indexes.md</c>.
     /// </remarks>
     private void CreateIndexOnView(
         ParserContext context, View view, string indexName, bool isUnique, bool isClustered,
@@ -50,6 +52,8 @@ partial class Simulation
         }
         if (!hasUniqueClustered && !(isUnique && isClustered))
             throw SimulatedSqlException.CannotIndexViewNoUniqueClustered(qualifiedViewName);
+
+        EnforceIndexedViewQualifies(context, view, indexName);
 
         foreach (var existing in view.Indexes)
         {
@@ -269,5 +273,114 @@ partial class Simulation
         }
         foreach (var nested in nestedViews)
             this.CollectViewBaseTables(outerBatch, nested, tables, visited);
+    }
+
+    /// <summary>
+    /// The qualifying battery real SQL Server runs when an index is created on
+    /// a view. Every shape below creates fine as a *view* and fails only here
+    /// (probe-confirmed against SQL Server 2025), so the check re-parses the
+    /// stored body with an <see cref="IndexedViewShape"/> collector installed
+    /// rather than inspecting anything stamped at CREATE VIEW.
+    /// <para><strong>Gate order is the simulator's own.</strong> Each rejection
+    /// was probed in isolation, so real's precedence when a view violates
+    /// several at once isn't pinned; a body with both DISTINCT and TOP may name
+    /// the other one on real.</para>
+    /// </summary>
+    private void EnforceIndexedViewQualifies(ParserContext context, View view, string indexName)
+    {
+        var shape = AnalyzeIndexedViewShape(context.Batch, view);
+        // Real database-qualifies the view in every message of this family.
+        var qualified = $"{context.Batch.CurrentDatabase.Name}.{view.Schema.Name}.{view.Name}";
+
+        if (shape.NondeterministicFunction is { } nondeterministic)
+            throw SimulatedSqlException.IndexedViewIsNondeterministic(qualified, nondeterministic);
+        if (shape.SelfJoinedTable is { } selfJoined)
+        {
+            throw SimulatedSqlException.IndexedViewHasSelfJoin(
+                qualified,
+                $"{context.Batch.CurrentDatabase.Name}.{SchemaNameOf(context.Batch.CurrentDatabase, selfJoined)}.{selfJoined.Name}");
+        }
+        if (shape.HasDistinct)
+            throw SimulatedSqlException.IndexedViewHasDistinct(qualified);
+        if (shape.HasTopOrOffset)
+            throw SimulatedSqlException.IndexedViewHasTopOrOffset(qualified);
+        if (shape.HasOuterJoin)
+            throw SimulatedSqlException.IndexedViewHasOuterJoin(qualified);
+        if (shape.HasSetOperation)
+            throw SimulatedSqlException.IndexedViewHasSetOperator(qualified);
+        if (shape.HasSubquery)
+            throw SimulatedSqlException.IndexedViewHasSubquery(qualified);
+
+        foreach (var aggregate in shape.Aggregates)
+        {
+            // COUNT has its own message pointing at COUNT_BIG; the rest of the
+            // disallowed family shares Msg 10125 and names itself. Aggregates
+            // outside both sets (STRING_AGG and friends) are left alone rather
+            // than guessed at — an unprobed rejection would be the
+            // over-restrictive direction.
+            if (aggregate == AggregateKind.Count)
+                throw SimulatedSqlException.IndexedViewUsesCount(qualified);
+            if (DisallowedAggregateName(aggregate) is { } name)
+                throw SimulatedSqlException.IndexedViewHasDisallowedAggregate(qualified, name);
+        }
+
+        if (shape.HasGroupBy && !shape.Aggregates.Contains(AggregateKind.CountBig))
+            throw SimulatedSqlException.IndexedViewMissingCountBig(qualified);
+        if (shape.SumsNullableExpression)
+            throw SimulatedSqlException.IndexedViewSumsNullableExpression(indexName, qualified);
+    }
+
+    /// <summary>
+    /// The name Msg 10125 embeds for an aggregate an indexed view may not use,
+    /// or null when the aggregate is allowed (or not classified).
+    /// </summary>
+    private static string? DisallowedAggregateName(AggregateKind kind) => kind switch
+    {
+        AggregateKind.Avg => "AVG",
+        AggregateKind.Max => "MAX",
+        AggregateKind.Min => "MIN",
+        AggregateKind.Stdev => "STDEV",
+        AggregateKind.StdevP => "STDEVP",
+        AggregateKind.Var => "VAR",
+        AggregateKind.VarP => "VARP",
+        _ => null,
+    };
+
+    /// <summary>Schema name for a table, resolved by its schema id.</summary>
+    private static string SchemaNameOf(Database database, HeapTable table)
+    {
+        foreach (var (name, schema) in database.Schemas)
+        {
+            if (schema.SchemaId == table.SchemaId)
+                return name;
+        }
+        return Database.DefaultSchemaName;
+    }
+
+    /// <summary>
+    /// Re-parses a view's stored body purely to collect the structural facts
+    /// <see cref="EnforceIndexedViewQualifies"/> judges. Mirrors
+    /// <c>InvokeViewCore</c>'s child-batch setup but stops at parse — nothing
+    /// is executed, so the body's side-effect-free shape is all that's read.
+    /// </summary>
+    private IndexedViewShape AnalyzeIndexedViewShape(BatchContext outerBatch, View view)
+    {
+        using var bodyCommand = new SimulatedDbCommand(this, outerBatch.Connection);
+#pragma warning disable CA2100 // view.BodyText is the view's pre-validated stored body, not external input
+        bodyCommand.CommandText = view.BodyText;
+#pragma warning restore CA2100
+        var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
+        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32))
+        {
+            SuppressDiagnosticsResolution = true,
+        };
+
+        var shape = new IndexedViewShape();
+        var parser = innerBatch.Parser;
+        parser.IndexedViewShapeCollector = shape;
+        parser.MoveNextRequired();
+        _ = Selection.Parse(parser, depth: 0);
+        shape.HasSubquery = parser.SubqueriesParsed > 0;
+        return shape;
     }
 }

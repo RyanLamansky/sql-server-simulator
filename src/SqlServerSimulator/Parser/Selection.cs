@@ -492,9 +492,21 @@ internal sealed partial class Selection
             }
 
             var right = ParseIntersectChain(context, depth, outerTypeResolver, isFirstBranch: false);
+            RecordSetOperationForIndexedViewShape(context);
             left = CombineSetOps(left, right, kind);
         }
         return left;
+    }
+
+    /// <summary>
+    /// Notes a UNION / INTERSECT / EXCEPT for the indexed-view battery
+    /// (Msg 10116). Recorded at the two chain sites rather than inside
+    /// <c>CombineSetOps</c>, which has no parser context.
+    /// </summary>
+    private static void RecordSetOperationForIndexedViewShape(ParserContext context)
+    {
+        if (context.IndexedViewShapeCollector is { } shape)
+            shape.HasSetOperation = true;
     }
 
     /// <summary>
@@ -508,6 +520,7 @@ internal sealed partial class Selection
         {
             context.MoveNextRequired();
             var right = ParseSingleSelectStatement(context, depth, outerTypeResolver, allowOrderBy: false);
+            RecordSetOperationForIndexedViewShape(context);
             left = CombineSetOps(left, right, SetOpKind.Intersect);
         }
         return left;

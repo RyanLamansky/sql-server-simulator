@@ -180,6 +180,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// without a tree walk. INSERT installs one around its <c>VALUES</c> tuple
     /// parse to enforce Msg 11731.
     /// </summary>
+    /// <summary>
+    /// When non-null, the parse records the structural facts an indexed view
+    /// is judged on into it. Installed only by the validation parse
+    /// <c>CREATE INDEX</c> runs over a view's stored body, so every recording
+    /// site is a null check on the normal path.
+    /// </summary>
+    public IndexedViewShape? IndexedViewShapeCollector;
+
     public List<Schemas.Sequence>? SequenceCollector;
 
     public List<Expressions.WindowExpression>? WindowCollector;
