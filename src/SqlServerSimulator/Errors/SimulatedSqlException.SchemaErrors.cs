@@ -274,6 +274,17 @@ partial class SimulatedSqlException
         new($"The start value for sequence object '{fullName}' must be between the minimum and maximum value of the sequence object.", 11703, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 11731 — a multi-row <c>VALUES</c> row
+    /// constructor references a sequence that a target column's DEFAULT also
+    /// uses, without that column appearing in the INSERT's column list.
+    /// Probe-confirmed against SQL Server 2025: the single-row form is
+    /// <em>accepted</em> (both references then yield the same value); only the
+    /// multi-row constructor is rejected, at bind time.
+    /// </summary>
+    internal static SimulatedSqlException SequenceDefaultColumnMustBeListed() =>
+        new("A column that uses a sequence object in the default constraint must be present in the target columns list, if the same sequence object appears in a row constructor.", 11731, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 11720: <c>NEXT VALUE FOR</c> was used in a
     /// clause that disallows it (TOP / OVER / OUTPUT / ON / WHERE / GROUP BY
     /// / HAVING / ORDER BY). Probe-confirmed verbatim wording.

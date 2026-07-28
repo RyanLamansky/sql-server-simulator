@@ -229,10 +229,10 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   This is a broad, mechanical owner-indirection refactor landing on the most regression-sensitive subsystem (lock manager × GC timing × threading).
   Payoff is bounded (EF disposes scrupulously; only buggy consumer code leaks), so it's **deliberately deferred** as high-risk / low-frequency.
   Eventual home: [`locking.md`](locking.md).
-- **Sequence advances twice when one INSERT reaches it through both VALUES and a column DEFAULT** — `INSERT INTO d (v) VALUES (NEXT VALUE FOR s)` against `d.id int DEFAULT (NEXT VALUE FOR s)` stores `id = 2, v = 1`; real stamps one value per row and returns 1 for both.
-  Silent wrong data with no error — the only entry in this section that diverges in stored values rather than in an error, a metadata column, or timing.
-  Workaround is naming the column in the INSERT list so the DEFAULT doesn't fire.
-  See [`sequences.md`](sequences.md#deferred).
+- **`sys.sequences.current_value` is one increment ahead of real** — real reports the *last value issued* (or `start_value` before first use); the simulator projects its internal next-to-issue counter, so after one `NEXT VALUE FOR` on a `START WITH 1 INCREMENT BY 1` sequence real reports 1 and the simulator reports 2 (probe-confirmed both sides).
+  `last_used_value` is correct, so the two columns disagree where real has them equal after first use.
+  The fix isn't simply subtracting the increment: `last_used_value` is documented as per-instance runtime state that a bacpac-restored sequence reports NULL for while the position *is* restored, so the projection has to distinguish never-issued from restored-and-not-yet-issued.
+  See [`sequences.md`](sequences.md).
 - **Raw `OverflowException` on out-of-`int`-range scalar arguments** — a length / position / count / code-point argument beyond `int` range surfaces the .NET narrowing exception instead of a SQL-shaped error: `SUBSTRING` (length), `CHARINDEX` (start), `STUFF` (start / length), `REPLICATE` / `SPACE` (count), `CHOOSE` (index), `CHAR` / `NCHAR` (code point).
   `LEFT` / `RIGHT` (Msg 8115) and `DATEADD` (Msg 517) harden the same argument, so the shape to copy exists.
   Real's response is per-function (clamp, compute as bigint, or a value-class error), which is why one shared guard wouldn't be faithful and the handling stayed point-local — closing it is a per-function decision.

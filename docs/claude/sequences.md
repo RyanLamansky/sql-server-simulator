@@ -75,6 +75,22 @@ End-to-end coverage in `EFCoreHiLo.cs`: the test boots a sequence + table manual
 EF's SqlServer provider issues `SELECT NEXT VALUE FOR HiLoSeq` once per allocation range; the simulator emits monotonically-advancing values, EF distributes them client-side, and the resulting INSERT rows get sequential IDs.
 Validates the LINQ→SQL pipeline against the simulator's NEXT VALUE FOR shape.
 
+## One value per row
+
+Every reference to one sequence within a **single inserted row** returns the same value — including a DEFAULT-clause reference on a column the INSERT didn't list.
+Probe-confirmed against SQL Server 2025: `INSERT INTO d (v) VALUES (NEXT VALUE FOR s)` against `d.id int DEFAULT (NEXT VALUE FOR s)` stores `(1, 1)` and consumes exactly one value.
+
+The two references are evaluated in different phases — the VALUES tuple in `EvaluateParsedTuples`, the DEFAULT in the row-encode loop — so the encode loop **restores** the stamp its tuple was evaluated under rather than bumping to a fresh one, letting the DEFAULT hit `BatchContext.SequenceRowCache`.
+(Bumping there drew a second value and silently stored `(2, 1)`.)
+SELECT / EXEC row sources carry no per-tuple stamp and keep the fresh per-row bump.
+
+**Msg 11731** gates the shape real declines to define: a **multi-row** `VALUES` constructor referencing a sequence that an *unlisted* target column also defaults from raises `A column that uses a sequence object in the default constraint must be present in the target columns list, if the same sequence object appears in a row constructor.` at bind time.
+The single-row form is accepted (it shares one value, above); only the row-constructor form rejects — probe-confirmed both ways.
+Detection collects the tuples' sequence references through `ParserContext.SequenceCollector` (the same collector pattern aggregates and windows use, so a reference at any nesting depth is caught) and matches them against each column's DEFAULT peeled to a bare `NEXT VALUE FOR`.
+A sequence buried inside a larger default expression (`NEXT VALUE FOR s + 1`) isn't detected — the bare form is what a sequence default takes in practice.
+
+These shapes stay legal and each advance once per row, matching real: the defaulted column listed explicitly, a *different* sequence in the constructor, and a multi-row insert whose tuples reference no sequence.
+
 ## Deferred
 
 - `NEXT VALUE FOR ... OVER (ORDER BY ...)` — the OVER clause is parsed and discarded (the simulator iterates in a single deterministic order regardless of the OVER's ordering hint; the row-by-row sequence-advance pattern is the same with or without OVER).
@@ -84,8 +100,6 @@ Validates the LINQ→SQL pipeline against the simulator's NEXT VALUE FOR shape.
 - **Bumps not wired into `ON` / `OUTPUT` clauses** — `NEXT VALUE FOR` inside a JOIN's ON predicate or an OUTPUT clause won't raise Msg 11720; it'll run and emit values.
   Real SQL Server rejects both.
   Apps that emit those shapes typically don't (EF Core never does), so the gap is documented rather than fixed in v1.
-- **VALUES + DEFAULT mixing** — when an INSERT row has both a `NEXT VALUE FOR seq` in the VALUES tuple AND a DEFAULT-clause `NEXT VALUE FOR seq` for an unspecified column, the simulator advances the sequence twice (different row stamps for the two evaluation phases).
-  Real SQL Server returns the same value for both.
-  Workaround: explicitly supply the column in the INSERT column list so DEFAULT doesn't fire.
+- *(the VALUES + DEFAULT double-advance is fixed — see [One value per row](#one-value-per-row) below)*
 - **CREATE SEQUENCE in transaction undo log** — sequence creation isn't logged.
   Same asymmetry as CREATE TABLE for regular (non-temp) tables, documented as a quirk.

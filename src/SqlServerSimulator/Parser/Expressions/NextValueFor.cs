@@ -36,7 +36,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class NextValueFor : Expression
 {
-    private readonly Sequence sequence;
+    /// <summary>The sequence this reference advances.</summary>
+    internal readonly Sequence Sequence;
 
     public NextValueFor(ParserContext context, MultiPartName sequenceName)
     {
@@ -52,20 +53,23 @@ internal sealed class NextValueFor : Expression
                 throw SimulatedSqlException.ObjectIsNotASequence(sequenceName.ToString());
             throw SimulatedSqlException.InvalidObjectName(sequenceName);
         }
-        this.sequence = resolved;
+        this.Sequence = resolved;
+        // Record the reference for any collector in scope (INSERT's Msg 11731
+        // gate); collecting here catches a reference at any nesting depth.
+        context.SequenceCollector?.Add(resolved);
     }
 
     public override SqlValue Run(RuntimeContext runtime)
     {
         var batch = runtime.Batch;
-        if (batch.SequenceRowCache.TryGetValue(this.sequence, out var entry) && entry.Stamp == batch.CurrentRowStamp)
+        if (batch.SequenceRowCache.TryGetValue(this.Sequence, out var entry) && entry.Stamp == batch.CurrentRowStamp)
             return entry.Value;
-        var value = this.sequence.Advance();
-        batch.SequenceRowCache[this.sequence] = (batch.CurrentRowStamp, value);
+        var value = this.Sequence.Advance();
+        batch.SequenceRowCache[this.Sequence] = (batch.CurrentRowStamp, value);
         return value;
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.sequence.DeclaredType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Sequence.DeclaredType;
 
-    internal override string DebugDisplay() => $"NEXT VALUE FOR {this.sequence.FullName}";
+    internal override string DebugDisplay() => $"NEXT VALUE FOR {this.Sequence.FullName}";
 }

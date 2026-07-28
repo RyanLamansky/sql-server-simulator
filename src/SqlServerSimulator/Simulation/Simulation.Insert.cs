@@ -285,9 +285,25 @@ partial class Simulation
         // DEFAULT raises Msg 339, and non-identity DEFAULT cells resolve to the
         // column default in the row-encode loop. SELECT / EXEC / DEFAULT VALUES
         // sources carry no DEFAULT keyword, so this stays null for them.
-        var valueTuples = context.Token is ReservedKeyword { Keyword: Keyword.Values }
-            ? ParseValuesTuples(context, allowDefault: true)
-            : null;
+        List<Expression[]>? valueTuples = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Values })
+        {
+            // Collect the sequences the tuples reference so the Msg 11731 gate
+            // below can compare them against the target's DEFAULT clauses.
+            var savedCollector = context.SequenceCollector;
+            var tupleSequences = new List<Schemas.Sequence>();
+            context.SequenceCollector = tupleSequences;
+            try
+            {
+                valueTuples = ParseValuesTuples(context, allowDefault: true);
+            }
+            finally
+            {
+                context.SequenceCollector = savedCollector;
+            }
+
+            RejectSequenceDefaultOutsideColumnList(valueTuples, tupleSequences, destinationTable, destinationColumns);
+        }
 
         if (identityColumn is not null)
         {
@@ -304,9 +320,10 @@ partial class Simulation
         }
 
         List<SqlValue[]> sourceRows;
+        long[]? valueTupleStamps = null;
         if (valueTuples is not null)
         {
-            sourceRows = EvaluateParsedTuples(valueTuples, context.Batch);
+            sourceRows = EvaluateParsedTuples(valueTuples, context.Batch, out valueTupleStamps);
         }
         else if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
         {
@@ -346,13 +363,20 @@ partial class Simulation
         for (var rowIndex = 0; rowIndex < sourceRows.Count; rowIndex++)
         {
             var sourceRow = sourceRows[rowIndex];
-            // Per-row stamp bump for DEFAULT-clause expression evaluation
-            // below — NEXT VALUE FOR in a DEFAULT advances per row inserted
-            // (probe-confirmed against SQL Server 2025). VALUES tuples were
-            // already evaluated with their own bumps in EvaluateValuesTuples
-            // so they each saw a distinct stamp; SELECT-source rows likewise
-            // pick up Selection's per-row bump.
-            context.Batch.BumpRowStamp();
+            // Per-row evaluation context for the DEFAULT-clause expressions
+            // below, so NEXT VALUE FOR in a DEFAULT advances once per row
+            // inserted (probe-confirmed against SQL Server 2025).
+            // For a VALUES source the row's stamp is *restored* rather than
+            // bumped: all references to one sequence within a single row —
+            // including a DEFAULT-clause one — must return the same value, so
+            // the DEFAULT has to re-enter the stamp its tuple was evaluated
+            // under and hit the per-row cache. Bumping here drew a second
+            // value instead. SELECT / EXEC sources carry no per-tuple stamp
+            // and keep the fresh bump.
+            if (valueTupleStamps is not null && rowIndex < valueTupleStamps.Length)
+                context.Batch.CurrentRowStamp = valueTupleStamps[rowIndex];
+            else
+                context.Batch.BumpRowStamp();
             var rowValues = new SqlValue[destinationTable.Columns.Length];
             for (var i = 0; i < rowValues.Length; i++)
                 rowValues[i] = SqlValue.Null(destinationTable.Columns[i].Type);
@@ -578,8 +602,62 @@ partial class Simulation
     /// reference columns; the column-resolver hook always raises
     /// <see cref="SimulatedSqlException.InvalidColumnName(string)"/>.
     /// </summary>
+    /// <summary>
+    /// <b>Msg 11731</b> — a multi-row <c>VALUES</c> constructor may not
+    /// reference a sequence that one of the target's unlisted columns also
+    /// defaults from, because the row's single sequence value would have to
+    /// serve both and real declines to define that for a row constructor.
+    /// The <em>single-row</em> form is legal and shares one value across both
+    /// references (probe-confirmed) — hence the row-count gate.
+    /// <para>The DEFAULT side is matched by peeling parens / casts to a bare
+    /// <c>NEXT VALUE FOR</c>, which is the shape a sequence default takes in
+    /// practice; a sequence buried in a larger default expression
+    /// (<c>NEXT VALUE FOR s + 1</c>) isn't detected.</para>
+    /// </summary>
+    private static void RejectSequenceDefaultOutsideColumnList(
+        List<Expression[]> valueTuples,
+        List<Schemas.Sequence> tupleSequences,
+        HeapTable? destinationTable,
+        HeapColumn[] destinationColumns)
+    {
+        if (valueTuples.Count < 2 || tupleSequences.Count == 0 || destinationTable is null)
+            return;
+
+        foreach (var column in destinationTable.Columns)
+        {
+            if (column.Default is not { } defaultExpression || DefaultSequenceOf(defaultExpression) is not { } sequence)
+                continue;
+            if (!tupleSequences.Contains(sequence))
+                continue;
+            var listed = false;
+            foreach (var destination in destinationColumns)
+            {
+                if (ReferenceEquals(destination, column))
+                {
+                    listed = true;
+                    break;
+                }
+            }
+            if (!listed)
+                throw SimulatedSqlException.SequenceDefaultColumnMustBeListed();
+        }
+    }
+
+    /// <summary>
+    /// Peels parenthesization / pure conversions off a DEFAULT expression and
+    /// returns the sequence it advances, or null when it isn't a bare
+    /// <c>NEXT VALUE FOR</c>.
+    /// </summary>
+    private static Schemas.Sequence? DefaultSequenceOf(Expression defaultExpression)
+    {
+        var peeled = defaultExpression;
+        while (peeled.PureConversionOperand is { } inner)
+            peeled = inner;
+        return (peeled as Parser.Expressions.NextValueFor)?.Sequence;
+    }
+
     private static List<SqlValue[]> EvaluateValuesTuples(ParserContext context)
-        => EvaluateParsedTuples(ParseValuesTuples(context), context.Batch);
+        => EvaluateParsedTuples(ParseValuesTuples(context), context.Batch, out _);
 
     /// <summary>
     /// Evaluates already-parsed <c>VALUES</c> tuples to <see cref="SqlValue"/>
@@ -590,16 +668,23 @@ partial class Simulation
     /// the sentinel by position and resolves it against the target column's
     /// default before this placeholder is ever read.
     /// </summary>
-    private static List<SqlValue[]> EvaluateParsedTuples(List<Expression[]> tuples, BatchContext batch)
+    private static List<SqlValue[]> EvaluateParsedTuples(List<Expression[]> tuples, BatchContext batch, out long[] tupleStamps)
     {
         var runtime = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch);
         var rows = new List<SqlValue[]>(tuples.Count);
+        tupleStamps = new long[tuples.Count];
+        var tupleIndex = 0;
         foreach (var tuple in tuples)
         {
             // Per-row stamp bump so NEXT VALUE FOR advances on the next
             // tuple (and dedupes across multiple NEXT VALUE FOR instances
             // within one tuple). See BatchContext.CurrentRowStamp.
+            // The stamp is recorded so the row-encode loop can re-enter this
+            // row's evaluation context rather than starting a new one — a
+            // DEFAULT-clause NEXT VALUE FOR has to return the *same* value the
+            // tuple's own reference did (probe-confirmed).
             batch.BumpRowStamp();
+            tupleStamps[tupleIndex++] = batch.CurrentRowStamp;
             var values = new SqlValue[tuple.Length];
             for (var i = 0; i < tuple.Length; i++)
             {

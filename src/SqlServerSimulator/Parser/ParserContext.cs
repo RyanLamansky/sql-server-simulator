@@ -173,6 +173,15 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// windowed-projection branch (buffer + partition + sort + bind) and
     /// to know which expressions to bind row-number values into per row.
     /// </summary>
+    /// <summary>
+    /// When non-null, every <c>NEXT VALUE FOR</c> parsed records its sequence
+    /// here. Mirrors <see cref="AggregateCollector"/> / <see cref="WindowCollector"/>:
+    /// collecting at construction catches a reference at any nesting depth
+    /// without a tree walk. INSERT installs one around its <c>VALUES</c> tuple
+    /// parse to enforce Msg 11731.
+    /// </summary>
+    public List<Schemas.Sequence>? SequenceCollector;
+
     public List<Expressions.WindowExpression>? WindowCollector;
 
     /// <summary>
