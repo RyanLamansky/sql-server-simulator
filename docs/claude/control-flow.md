@@ -328,12 +328,13 @@ Matches real SQL Server's grammar (probe-confirmed).
 - `WITH LOG` is uniformly rejected via Msg 2778 for the same reason.
   Apps that depend on the message being logged (real SQL Server writes to the Windows event log + SQL Server error log) get neither logging nor the implicit sysadmin permission grant.
 - System-message ids registered in real SQL Server's `sys.messages` (e.g. `RAISERROR(13001, 16, 1)` surfaces the system "file name" message text) fall through to Msg 18054 here.
-- Severity ≤ 10 messages are discarded — same as PRINT, for the same reason (no `InfoMessage` event on `SimulatedDbConnection`).
-  The behavioral effects (TRY/CATCH skip, `@@ERROR` via SETERROR) are preserved; only the text is lost.
+- Severity ≤ 10 messages are informational and flow to `SimulatedDbConnection.InfoMessage` (verified for both `RAISERROR('m', 10, 1)` and `RAISERROR('m', 0, 1)`) rather than being raised — matching the severity table above.
+  The behavioral effects (TRY/CATCH skip, `@@ERROR` via SETERROR) are preserved alongside the delivered text.
 - `NOWAIT` is structurally ignored (no streaming model); real SQL Server flushes the buffer immediately.
 
 ## `PRINT`
-`PRINT <expression>` parses + evaluates the operand and **discards the result** — no `InfoMessage` event on `SimulatedDbConnection` (DbConnection doesn't define one, and no application has needed PRINT output observation yet).
+`PRINT <expression>` parses + evaluates the operand and delivers the text to `SimulatedDbConnection.InfoMessage`, the simulator's stand-in for `SqlConnection.InfoMessage` (`DbConnection` defines no such event, so the shape is mirrored rather than inherited).
+Multiple PRINTs in one batch coalesce into a single newline-joined event.
 The evaluation isn't a no-op: operand-side errors still surface — `PRINT 'val=' + 5` raises Msg 245 because the `+` operator's int-side promotion tries to parse `'val='` as int (probe-confirmed against SQL Server 2025).
 
 Probe-confirmed semantics the simulator handles correctly because evaluation runs unchanged:
@@ -341,11 +342,11 @@ Probe-confirmed semantics the simulator handles correctly because evaluation run
 - `PRINT` resets `@@ROWCOUNT` to 0 — applied by the dispatcher after the parser returns.
 - Skip-mode (un-taken IF, after BREAK / CONTINUE / RETURN) suppresses operand evaluation entirely, so an error-bearing operand in a skipped branch doesn't fire.
   Standard pattern: parse the expression unconditionally to advance the cursor, then gate `expression.Run` on `!batch.IsSkipping`.
-- Rollback doesn't undo a PRINT (real SQL Server's InfoMessage stream is non-transactional too); orthogonal to the simulator's discard-everything design.
+- Rollback doesn't undo a PRINT (real SQL Server's InfoMessage stream is non-transactional too), and the simulator's delivery is likewise outside the undo log.
 
 **Fidelity gaps** (modeled deviations from probed behavior):
 - Real SQL Server's PRINT truncates messages at 8000 chars (varchar) / 4000 chars (nvarchar).
-  Simulator: no truncation modeled (output is discarded).
+  The simulator delivers the whole string untruncated.
 - Real SQL Server raises **Msg 1046** ("Subqueries are not allowed in this context. Only scalar expressions are allowed.") for `PRINT (SELECT 'inner')`.
   The simulator silently evaluates the scalar subquery — Msg 1046 isn't modeled.
 
@@ -358,4 +359,6 @@ Bad-format string raises **Msg 148** with the offending value embedded.
 `@@ROWCOUNT` resets to 0.
 Skip-mode suppresses the sleep entirely (an `IF 1=0 WAITFOR DELAY '00:00:10'` returns instantly).
 **`WAITFOR TIME`** (absolute-time wait) raises `NotSupportedException` — scheduling-style primitive not yet needed.
-**Cancellation gap**: an `ExecuteReaderAsync` caller's `CancellationToken` isn't threaded into the sleep; the thread blocks until the duration elapses regardless.
+**Cancellation**: an `ExecuteReaderAsync` caller's `CancellationToken` *is* observed — the sleep waits on the per-execution `CancellationTokenSource`'s handle (see [`tds-endpoint.md`](tds-endpoint.md#mid-stream-attention-cancel)), so a token cancelled 400 ms into a 5-second `WAITFOR` ends the wait at 400 ms and aborts the batch at the statement boundary (a trailing `SELECT 42` in the same batch doesn't run).
+The residual is the **reaction shape**: the call returns an open, empty reader rather than throwing, where real SqlClient surfaces a cancellation exception.
+A token already cancelled *before* execute throws `TaskCanceledException` from the ADO.NET base class, so only the mid-execution case diverges.

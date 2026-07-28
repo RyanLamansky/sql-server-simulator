@@ -391,9 +391,11 @@ Probe-confirmed against SQL Server 2025: `nchar(0x30A2) = nchar(0x3042)` is FALS
 
 ## Known gaps
 
-- **Set ops (UNION / UNION ALL / INTERSECT / EXCEPT) don't apply collation-conflict checks at the column-pair level yet.**
+- **Set ops (UNION / UNION ALL / INTERSECT / EXCEPT) don't apply collation-conflict checks at the column-pair level.**
   Probe showed UNION raises Msg 468, UNION ALL raises Msg 457 across cross-collation columns; the simulator's set-op type-promotion path doesn't call `Collation.Resolve`.
-  Cross-collation set-op columns currently fall through to the legacy type-precedence resolution.
+  Cross-collation set-op columns fall through to the legacy type-precedence resolution.
+- **Comparison / concatenation conflicts are raised per row at execution, not at compile time.**
+  `c1.x = c2.x` across two differently-collated columns raises Msg 468 (and `c1.x + c2.x` raises Msg 457) as soon as a row is evaluated, but the same statement over an **empty** rowset succeeds silently — real rejects it during compilation regardless of row count.
 - **`text` / `ntext` columns can't be declared with an explicit COLLATE in the simulator.**
   Real SQL Server allows it; the simulator's single-instance modeling collapses all text/ntext to the default.
   Low impact (text/ntext deprecated since SQL Server 2005).

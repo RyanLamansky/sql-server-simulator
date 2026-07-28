@@ -363,7 +363,7 @@ It returns the table's canonical `IndexIdentity` rows — `(index_id, type, name
 - Every remaining (nonclustered) constraint / index — including a NONCLUSTERED PK — takes `index_id = 2..N`, `type = 2`, in object-id (declaration) order (the simulator's `AllocateObjectId` is monotonic, so this matches SQL Server's declaration-order behavior).
 
 A PK defaults **clustered** (unless declared `NONCLUSTERED`); a UNIQUE constraint defaults **nonclustered** (unless declared `CLUSTERED`) — captured at parse time (`ParseInlineKeyKindAndModifiers` → `KeyConstraint.IsClustered`) across inline column constraints, table-level constraints, and `ALTER TABLE ADD CONSTRAINT` (the shape the bacpac loader emits).
-At most one clustered index exists per table (real's Msg 1902 invariant, not enforced — an over-declared second clustered entry falls back to a nonclustered id rather than raising).
+At most one clustered index exists per table (real's Msg 1902 invariant, enforced on the `CREATE INDEX` path only — a second clustered entry declared through a *constraint* falls back to a nonclustered id rather than raising; see [Fidelity gaps](#fidelity-gaps)).
 
 `compression_delay` is **NULL** on every row: it carries a minute-delay only for columnstore indexes (unmodeled), and is NULL for every rowstore index (probe-confirmed).
 SMO's index-scripting query reads it as `CAST(i.compression_delay AS int)` with no `ISNULL` wrapper.
@@ -412,10 +412,13 @@ With the simulator:
   Both are rare in filtered predicates.
   A predicate the simulator accepts but can't render canonically (an `OR`, `NOT`, `BETWEEN`, or function call — all of which a real server *rejects* at CREATE for a filtered index) reports `filter_definition` NULL with `has_filter` still set.
 - **CLUSTERED keyword drives allocation, not storage**: `CREATE CLUSTERED INDEX` (and a clustered PK / `UNIQUE CLUSTERED` constraint) correctly reports `index_id = 1` / `type_desc = CLUSTERED` and suppresses the HEAP row (see [Index-id allocation](#index-id-allocation)), but there's no row-ordered storage behind it — clustering never changes scan/seek behavior.
-- **Multiple clustered indexes**: real SQL Server raises Msg 1902 (`Cannot create more than one clustered index on table`).
-  The simulator silently accepts a second CLUSTERED entry; only the lowest-object-id clustered entry claims `index_id = 1`, the rest fall back to nonclustered ids.
+- **Msg 1902 covers only the `CREATE INDEX` statement**: `CREATE CLUSTERED INDEX` against an existing clustered index or clustered PK raises it correctly (see [Grammar](#grammar)), but the constraint paths don't check — inline `PRIMARY KEY CLUSTERED` beside `UNIQUE CLUSTERED` in one CREATE TABLE, two `ALTER TABLE ADD CONSTRAINT … CLUSTERED` in sequence, and a clustered PK added after a `CREATE CLUSTERED INDEX` are all accepted.
+  Only the lowest-object-id clustered entry claims `index_id = 1`; the rest fall back to nonclustered ids.
+  Tracked in [`backlog.md`](backlog.md)'s over-permissive register.
 - **WITH options ignored**: `FILLFACTOR`, `IGNORE_DUP_KEY`, `ONLINE`, `MAXDOP`, etc. all parse but have no behavior.
-  `IGNORE_DUP_KEY = ON` notably should downgrade Msg 2601 to a warning + skip — not modeled.
+  `IGNORE_DUP_KEY = ON` is the one with observable fallout: real skips the duplicate row and continues (probe-confirmed — the surviving rows insert, `@@ROWCOUNT` counts only those, and a severity-10 Msg 3604 `Duplicate key was ignored.` rides the info stream once per statement), while the simulator raises Msg 2601 and fails the INSERT.
+  The flag isn't stored either, so `sys.indexes.ignore_dup_key` reports 0 for a declared-ON index.
+  Tracked in [`backlog.md`](backlog.md).
 - **No partition-aware index storage**: `partition_ordinal` always 0, `data_space_id` always 1 (PRIMARY).
 - **DROP INDEX comma list not atomic**: each entry resolves independently.
   Real SQL Server rolls back all on any failure.

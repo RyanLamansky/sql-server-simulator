@@ -110,7 +110,7 @@ Wrap regular CAST/CONVERT in try/catch that swallows documented "conversion fail
 Swallow set (`Cast.IsConversionFailure`): **241** (datetime-from-string parse), **242** (datetime out-of-range), **244** (tinyint/smallint INT1/INT2 overflow), **245** (string→numeric parse), **248** (int overflow), **295** (smalldatetime parse), **8114** (decimal conversion), **8115** (generic arithmetic overflow), **8169** (uniqueidentifier-from-string), **8170** (uniqueidentifier→too-narrow-string), **9807** (CONVERT-style mismatch on string input).
 
 NOT swallowed: Msg 529 (explicit-cast disallowed pair like `int → date`), Msg 243 (unknown target type), and any source-evaluation error that fires before the cast itself runs.
-`TRY_CAST(1/0 AS INT)` raises Msg 8134 in real SQL Server; the simulator surfaces a raw `DivideByZeroException` (fidelity gap orthogonal to TRY_CAST).
+`TRY_CAST(1/0 AS INT)` raises Msg 8134 on both — the divide-by-zero fires during operand evaluation, before the cast runs, and 8134 isn't in the swallow set either way.
 
 String-source truncation isn't a "conversion failure" path either way — `TRY_CAST('hello' AS varchar(3))` → `'hel'`.
 EF doesn't emit TRY_CAST/TRY_CONVERT from idiomatic LINQ (raw SQL only).

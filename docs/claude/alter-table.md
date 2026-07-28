@@ -190,8 +190,6 @@ A user-written paren wrapping the expression yields a doubled pair (`DEFAULT (0)
 - **Multi-constraint ADD in one statement** — `ALTER TABLE t ADD CONSTRAINT pk1 PRIMARY KEY (id), CONSTRAINT fk1 FOREIGN KEY (p_id) REFERENCES p(id)` raises `NotSupportedException`.
   Real SQL Server supports it; EF Migrations doesn't emit it.
 - **`ALTER TABLE … DROP CONSTRAINT name1, , name2`** (empty middle element) — accepted by real SQL Server; the simulator's grammar rejects with Msg 102.
-- **Defaults' parent_column_id for inline-DEFAULT-on-computed-column** — the simulator allows inline DEFAULT on computed columns (which real SQL Server rejects with Msg 8183).
-  Edge case unlikely in practice.
 
 ## EF Core integration
 

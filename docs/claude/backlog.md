@@ -24,6 +24,26 @@ An item can appear in both with opposite intent.
 
 ## Missing features
 
+### Unbuilt feature areas
+
+A standing survey of areas with no build behind them, one line each pointing at the deep-dive that holds the detail.
+Presence here is status, not a priority claim — the ordering caveat at the top of this file applies.
+The subsections that follow carry the areas with work in flight.
+
+- **Full-text query pipeline** — the tokenizer / stemmer / inverted-index build behind `CONTAINS` / `FREETEXT`, which raise `NotSupportedException`; the catalog + index DDL, the BACPAC round-trip, and the property scalars ship → [`full-text.md`](full-text.md#known-gaps).
+- **Spatial method evaluation** — the OGC pipeline (`.STDistance` / `.STIntersects` / `.STArea` / …), WKT/WKB parse validation, SRID tracking and transformation, `sys.spatial_reference_systems` seed rows, `ALTER SPATIAL INDEX`; storage, byte-identical CAST/wire encoding, and the index DDL ship → [`spatial.md`](spatial.md#known-gaps).
+- **XML mutation and XQuery beyond the path subset** — `.modify()` XML-DML plus its `UPDATE … SET` integration, FLWOR / comparison / boolean / arithmetic operators, value predicates, constructors, XSD validation against `xml(collection)` bindings, `ALTER XML SCHEMA COLLECTION ADD` → [`xml.md`](xml.md#known-gaps).
+- **DDL trigger firing** — `CREATE TRIGGER … ON DATABASE` parses, stores, and projects into `sys.triggers` / `sys.trigger_events` / `sys.trigger_event_types`, but no DDL event dispatches to it, so no body ever runs → [`triggers.md`](triggers.md).
+- **Trigger-body intrinsics and ordering** — `UPDATE()` / `COLUMNS_UPDATED()`, `sp_settriggerorder` firing order, `RECURSIVE_TRIGGERS ON`, `is_nested_triggers_on = OFF`, and trigger-body result sets (drained and discarded at the call site) → [`triggers.md`](triggers.md#not-modeled).
+- **`INSERT … EXEC` and `WITH RESULT SETS`** — the INSERT parser doesn't recognize `EXEC` as a row source (Msg 102), and the EXEC result-set option falls through to a syntax error → [`programmable.md`](programmable.md).
+- **Multi-source cursors** — a cursor over a JOIN / derived table / view is forced STATIC where real is DYNAMIC, costing mid-loop change visibility, `@@CURSOR_ROWS = -1`, and positioned DML; it needs per-source row identity carried through the join driver plus live re-execution → [`cursors.md`](cursors.md).
+- **Temporal query forms and retention** — `FOR SYSTEM_TIME BETWEEN … AND …` / `FROM … TO …` / `CONTAINED IN (…)`, `HISTORY_RETENTION_PERIOD` pruning, auto-named history tables, and base-vs-history column-shape validation at `SET (SYSTEM_VERSIONING = ON)` → [`temporal-tables.md`](temporal-tables.md#not-modeled).
+- **Synonym catalog surface** — `sys.synonyms` / `sys.objects` projection, `OBJECT_ID('syn')`, synonyms as EXEC / scalar-function / sequence targets, cross-database bases, and the reverse name-collision check → [`schemas.md`](schemas.md).
+- **Key-range locks** — the one unbuilt piece of the locking model; HOLDLOCK widens to table-S in their place → [`locking.md`](locking.md).
+- **Column-level INSERT grants and column grants on views** — column-level SELECT / UPDATE / REFERENCES ship → [`permissions.md`](permissions.md#known-gaps).
+- **`GRANT … ON SERVER` / `ON LOGIN::` securables and application roles** — server-scope permission *names* and server roles ship → [`permissions.md`](permissions.md#known-gaps).
+- **Multi-statement plan caching** — the cache keys single-SELECT batches, so every SaveChanges INSERT-then-`SELECT SCOPE_IDENTITY()` round trip re-parses → [`plan-cache.md`](plan-cache.md).
+
 ### TDS network endpoint — follow-up phases
 
 The endpoint ships with SQLBatch + RPC + Transaction Manager support and credential enforcement via the `CREATE LOGIN` registry (see [`tds-endpoint.md`](tds-endpoint.md)); EF Core runs over the wire through vanilla `UseSqlServer`.
@@ -111,15 +131,60 @@ Low priority / niche — simulatable (as placeholder constants or a small model)
   The faithful fix splits the per-`(p, s)` `DecimalSqlType` singleton by declared keyword, forking the reference-identity space the row encoder, promote paths, and catalog surfaces key on — a medium refactor whose blast radius far exceeds the one metadata string it corrects, so it's deliberately deferred.
   Deliberate exclusion, don't re-pitch: `msdb.dbo.syspolicy_configuration.current_value` stays `nvarchar` — it's a *view-body* projection (not a resource column) mixing `int` rows with a `binary` GUID row, every consumer reads a single named row and CASTs it, so a variant migration there would only touch the view SQL text for no observable gain.
 
+## Over-permissive register
+
+The simulator accepting what real rejects is the more dangerous divergence direction — the query passes here and fails in production — and it is invisible to any sim-only failure list (see the reverse-delta note under the Django shakedown).
+This is the standing list: each entry names the error real raises that the simulator doesn't, and the linked deep-dive carries the detail.
+Entries are verified against the simulator, so one that no longer reproduces is removed rather than re-worded.
+
+- **Set operations skip collation-conflict resolution** — UNION / UNION ALL over two columns with different explicit collations return rows where real raises **Msg 468** / **Msg 457**; the set-op type-promotion path doesn't call `Collation.Resolve` and falls through to legacy type precedence.
+  Comparison and concatenation *do* raise both messages, but per row at execution rather than at compile time, so the same conflict over an empty rowset also passes silently where real rejects the statement outright.
+  → [`collations.md`](collations.md#known-gaps).
+- **Indexed-view determinism battery unenforced** — real gates `CREATE INDEX` on a view with the Msg 10100-series / Msg 10138 checks (schema-bound, deterministic, `COUNT_BIG(*)` present with GROUP BY, no outer joins / subqueries / DISTINCT / TOP, two-part names); the simulator applies only the 1939 / 1941 / 1940 gates, so a `SELECT DISTINCT` view indexes cleanly and is then materialized and enforced.
+  → [`indexes.md`](indexes.md#fidelity-gaps).
+- **Msg 1902 one-clustered-index-per-table covers only the `CREATE INDEX` statement** — every constraint path is unchecked: inline `PRIMARY KEY CLUSTERED` beside `UNIQUE CLUSTERED` in one CREATE TABLE, two `ALTER TABLE ADD CONSTRAINT … CLUSTERED` in sequence, and a clustered PK added after a `CREATE CLUSTERED INDEX` all pass.
+  The extra clustered entries fall back to nonclustered ids rather than raising.
+  → [`indexes.md`](indexes.md#fidelity-gaps).
+- **`NEXT VALUE FOR` in a JOIN `ON` or `OUTPUT` clause** — real rejects both with **Msg 11720**; the simulator runs them and emits values.
+  → [`sequences.md`](sequences.md#deferred).
+- **Statement-permission gates stop at the modeled set** — CREATE TABLE / VIEW / PROCEDURE / FUNCTION / SEQUENCE / ROLE / USER / SCHEMA, ALTER TABLE, DROP TABLE and DROP USER are checked; other CREATE / ALTER / DROP statements run unchecked, as does `ALTER` / `CREATE OR ALTER` of an existing module.
+  → [`permissions.md`](permissions.md#known-gaps).
+- **Non-Framework CLR assemblies load** — real resolves every `AssemblyRef` against a fixed .NET Framework catalog and raises **Msg 6503** otherwise (probe-confirmed for .NET 10 and for .NET Standard 2.0); the simulator runs on .NET so all of them bind, which is also what lets the tests emit a fixture assembly without a Framework toolchain.
+  → [`clr-assemblies.md`](clr-assemblies.md#divergences).
+- **`REGEXP_LIKE` isn't reserved at compatibility level 170** — detail under the Django shakedown above; closing it belongs with the native predicate.
+- **Alias swallow after a complete select-list expression** — `SELECT 1 xyz 2` parses as two columns.
+  The reject shape on real isn't probed; the over-permissiveness is documented as a latent gap in the identifier normalizer.
+  → [`grammar.md`](grammar.md).
+- **Module body validation deferred to first execution** — a TVP parameter's **Msg 10700** and the **Msg 111** batch-first rule surface at EXEC where real validates at CREATE.
+  → [`table-valued-parameters.md`](table-valued-parameters.md#fidelity-gaps-remaining), [`programmable.md`](programmable.md).
+- **Composite FK referenced-column order** — `ReferencedColumnsFormKey` accepts a referenced UNIQUE whose column order differs from the FK's, by set equality; real matches declared order.
+  Unprobed.
+  → [`foreign-keys.md`](foreign-keys.md#fidelity-gaps).
+- **`FOREIGN KEY … SET DEFAULT` with no DEFAULT on the column** — real raises **Msg 1789** at CREATE TABLE; the simulator defers to a runtime **Msg 515**, so the statement fails later and under a different code.
+  → [`foreign-keys.md`](foreign-keys.md#fidelity-gaps).
+- **CONVERT style leniency** — the two-digit-vs-four-digit-year century restriction isn't enforced, and a `T`-separated time is accepted under general styles; the live server rejects both.
+  → [`casting.md`](casting.md).
+- **`FORCESEEK(index_name(col_list))` nested-form name validation** — parses silently where real raises **Msg 308**.
+  → [`query-hints.md`](query-hints.md#not-enforced).
+
+Tracked elsewhere and over-permissive in the same sense: `bit` arithmetic (below), and the recursive-CTE part restrictions Msg 460 / 461 / 462 / 467 / 465 (CLAUDE.md's Not-modeled-yet).
+
 ## Fidelity gaps in shipped behavior
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
-- **Windowed aggregate over an aggregate rejected** — `SELECT SUM(SUM(b)) OVER () FROM t GROUP BY a` is legal on real (probe-confirmed: returns the grand total repeated per group) and is the idiomatic "group subtotal against the overall total" shape reporting SQL leans on; the simulator raises `NotSupportedException`.
-  This is the *under*-permissive direction — a valid query failing — so it blocks real workloads rather than merely letting bad ones through.
-  Note it must stay distinct from the Msg 130 gate: the bare `SUM(SUM(b))` **is** Msg 130, and only the `OVER (…)` form is legal, so whatever implements this has to reach `WindowExpression` without routing through `AggregateExpression`'s operand validation.
+- **Window functions can't share a SELECT with GROUP BY / HAVING / aggregates** — the executor raises `NotSupportedException` for the whole combination, so an ordinary `SELECT a, SUM(b), ROW_NUMBER() OVER (ORDER BY a) FROM t GROUP BY a` fails alongside the aggregate-over-aggregate shape.
+  The narrower `SELECT SUM(SUM(b)) OVER () FROM t GROUP BY a` is legal on real (probe-confirmed: returns the grand total repeated per group) and is the idiomatic "group subtotal against the overall total" shape reporting SQL leans on; the simulator rejects it earlier still, with **Msg 130**, because `AggregateExpression`'s operand validation fires before the OVER clause is considered.
+  This is the *under*-permissive direction — valid queries failing — so it blocks real workloads rather than merely letting bad ones through.
+  Whatever implements it keeps the Msg 130 gate for the bare `SUM(SUM(b))` while letting the `OVER (…)` form reach `WindowExpression` without routing through that validation.
   Surfaced while probing the aggregate-binding rules.
-  Home: `Parser/Expressions/WindowExpression.cs`.
+  Home: `Parser/Expressions/WindowExpression.cs`, `Parser/Selection.Execution.cs`.
+- **`IGNORE_DUP_KEY = ON` parses but isn't honored** — the option is accepted on both `CREATE UNIQUE INDEX … WITH (…)` and the `UNIQUE (…) WITH (…)` constraint form and then has no effect, so an INSERT carrying a duplicate raises **Msg 2601** where real skips that row and continues.
+  Probe-confirmed against SQL Server 2025: the duplicate is dropped and the statement succeeds with the rest inserted (`INSERT … VALUES (2),(1),(3)` over an existing `1` inserts 2 and 3, `@@ROWCOUNT = 2`, `@@ERROR = 0`), and a severity-10 **Msg 3604** (`Duplicate key was ignored.`) rides the info-message stream **once per statement** regardless of how many rows were skipped.
+  The downgrade is INSERT-only — an `UPDATE` into a duplicate still raises Msg 2601 on real.
+  `sys.indexes.ignore_dup_key` also reports `0` for a declared-ON index where real reports `1`, so the flag has to be stored before either the behavior or the catalog column can be right.
+  The *under*-permissive direction — a valid INSERT failing.
+  Home: `KeyConstraint` / `Index` (the stored flag), the INSERT duplicate-detection path (the skip + info message), `BuiltInResources` (the catalog column).
 - **`bit` arithmetic accepted where real rejects it** — the simulator computes `bit + bit` / `- ` / `*` / `/` and hands back a bit (`PureIntegerArithmetic`'s `common == SqlType.Bit` arm); real refuses the same-type pair outright.
   Probe-confirmed: `+` / `-` → **Msg 402** (`"The data types bit and bit are incompatible in the add operator."`), `*` / `/` → **Msg 8117** (`"Operand data type bit is invalid for multiply operator."`), and `SUM(bit)` → **Msg 8117** (`"Operand data type bit is invalid for sum operator."`).
   A mixed `bit + int` promotes and computes normally (→ 2) on both sides, so only the same-type pair diverges.
@@ -145,6 +210,11 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 - **Result-set `fNullable` inference — remaining long tail** — the projection nullability that drives the COLMETADATA `fNullable` flag (see `Expression.ResultIsNullable`) covers the structural cases: direct refs, literals, ISNULL, CASE, and (added in the go-mssqldb pass) CONCAT / CONCAT_WS (always NOT NULL), IIF (both-arm rule), and VALUES row-constructor columns (OR over rows).
   Still over-claiming nullable vs real: (1) **per-function** signatures — `CEILING` / `FLOOR` / `ROUND` / `SIGN` / `GETDATE` project NOT NULL on real while `ABS` / `POWER` / `SQUARE` / `NEWID` / `RAND` stay nullable, an idiosyncratic per-builtin table with no clean rule; (2) **`@@`-variable** nullability (`@@ROWCOUNT` / `@@SPID` are NOT NULL on real); (3) **string `+` concatenation** of two non-null operands (real projects NOT NULL, but the resolver has no `BatchContext` to distinguish string-vs-arithmetic `+` — `1+1` stays nullable on real, so it can't blanket-propagate); (4) **constant-fold** cases where real eliminates a null arm — `NULLIF(1,2)`, no-ELSE `CASE WHEN <constant> …`, all-constant `COALESCE(NULL,5)` (realistic `COALESCE(agg,0)` already matches: nullable on both).
   All are metadata-only over-claims (nullable is the safe direction); low demand, no clean rule.
+- **Mid-execution `CancellationToken` yields an empty reader instead of throwing** — a token cancelled while a statement runs does the right work (the sleep or row loop ends promptly and the batch aborts at the statement boundary, so a trailing statement doesn't run), but `ExecuteReaderAsync` hands back an open, row-less reader rather than surfacing a cancellation exception the way SqlClient does.
+  A consumer awaiting with a timeout token therefore observes "zero rows" instead of "cancelled" — a silent-empty-result shape that hides the abort.
+  A token already cancelled *before* execute throws `TaskCanceledException` from the ADO.NET base class, so only the mid-execution case diverges.
+  The wire path is unaffected: it writes a `DONE_ATTN` and SqlClient manufactures the exception itself, so this is the in-process surface only.
+  See [`control-flow.md`](control-flow.md) and [`tds-endpoint.md`](tds-endpoint.md#mid-stream-attention-cancel).
 - **Runtime-error streaming shape** — a per-row runtime error (`SELECT 10/0`, arithmetic overflow) is emitted by real *after* COLMETADATA, so a streaming client surfaces it while draining rows; the simulator raises it at execute-time before any COLMETADATA, so the client sees it from the initial execute call.
   Message / number / class match; only the wire position differs.
   Deferred — deep change to statement execution ordering, low practical impact.
@@ -162,6 +232,24 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   This is a broad, mechanical owner-indirection refactor landing on the most regression-sensitive subsystem (lock manager × GC timing × threading).
   Payoff is bounded (EF disposes scrupulously; only buggy consumer code leaks), so it's **deliberately deferred** as high-risk / low-frequency.
   Eventual home: [`locking.md`](locking.md).
+- **Sequence advances twice when one INSERT reaches it through both VALUES and a column DEFAULT** — `INSERT INTO d (v) VALUES (NEXT VALUE FOR s)` against `d.id int DEFAULT (NEXT VALUE FOR s)` stores `id = 2, v = 1`; real stamps one value per row and returns 1 for both.
+  Silent wrong data with no error — the only entry in this section that diverges in stored values rather than in an error, a metadata column, or timing.
+  Workaround is naming the column in the INSERT list so the DEFAULT doesn't fire.
+  See [`sequences.md`](sequences.md#deferred).
+- **Raw `OverflowException` on out-of-`int`-range scalar arguments** — a length / position / count / code-point argument beyond `int` range surfaces the .NET narrowing exception instead of a SQL-shaped error: `SUBSTRING` (length), `CHARINDEX` (start), `STUFF` (start / length), `REPLICATE` / `SPACE` (count), `CHOOSE` (index), `CHAR` / `NCHAR` (code point).
+  `LEFT` / `RIGHT` (Msg 8115) and `DATEADD` (Msg 517) harden the same argument, so the shape to copy exists.
+  Real's response is per-function (clamp, compute as bigint, or a value-class error), which is why one shared guard wouldn't be faithful and the handling stayed point-local — closing it is a per-function decision.
+  See [`scalars.md`](scalars.md#known-gap-out-of-int-range-integer-arguments).
+- **Trigger-body statements sit outside the parent's atomic scope** — when a trigger body runs several statements and a later one throws, the earlier statements' writes (an audit-log insert, typically) survive, because the body's child `BatchContext` allocates fresh per-statement undo logs instead of sharing the parent statement's log.
+  Real rolls back the whole parent + trigger unit.
+  Single-statement bodies and a body-side `THROW` before any side effect behave correctly.
+  See [`triggers.md`](triggers.md#not-modeled).
+- **MVCC history keeps one version per UPDATE, not one per committed transaction** — real collapses intra-transaction intermediate states so only the pre- and post-transaction states are visible.
+  Visibility matches for the common single-UPDATE-per-transaction case; a snapshot landing between two UPDATEs of one transaction sees a state real never exposes.
+  See [`locking.md`](locking.md#known-mvcc-limitations).
+- **Locale-collation ORDER BY parity** — sort keys for `Turkish_CI_AS` / `Japanese_XJIS_140_CI_AS` / `Chinese_PRC_CI_AS` come from .NET `CompareInfo`, which doesn't reproduce SQL Server's NLS tables; `varchar` under the Japanese / Chinese collations is further off because real routes those through CP932 / CP936 while the simulator routes the invariant UTF-16 comparer (2 of 21 probed positions align).
+  Equality, CI/CS / KS / WS folding, grouping and LIKE all align — only ordering diverges, and `nvarchar` is the closer storage.
+  See [`collations.md`](collations.md#locale-comparer-sort-parity-gap).
 - **Workload-harness divergence reporting quirks** (`.vs/workload/Program.cs`, local-only) — the parity report's example line rebuilds parameters from the op seed and can mismatch the actual divergent instance, and divergent instances aren't re-run single-threaded to classify transient-vs-stable.
   Both made the shared-plan-state hunt slower than it needed to be (the fixed bug class itself — instance-bound aggregate/window results, baked TOP/OFFSET counts, frozen RAND, unstamped replay clock — is documented in [`plan-cache.md`](plan-cache.md)'s shared-plan contract section).
 
