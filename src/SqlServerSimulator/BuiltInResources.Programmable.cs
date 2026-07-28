@@ -1198,6 +1198,19 @@ internal static partial class BuiltInResources
             VarbinarySqlType vb => DeclaredVarLength(vb.length, col.MaxLength, octetPerChar: 1),
             _ when t == SqlType.UniqueIdentifier => (null, null, null, null, null, null),
             _ when t == SqlType.RowVersion => (null, null, null, null, null, null),
+            // The CLR-backed / variant types report a length pair and nothing
+            // else (probe-confirmed against SQL Server 2025): xml and both
+            // spatial types carry the MAX sentinel -1, hierarchyid its 892-byte
+            // bound, sql_variant a literal 0. Reaching the throw below for one
+            // of these used to fail the *whole view* — the generator
+            // materializes every column in the database before any WHERE
+            // filter, so a single xml column anywhere made every
+            // INFORMATION_SCHEMA.COLUMNS query raise, including one filtered to
+            // an unrelated table (both AdventureWorks and WideWorldImporters
+            // carry such columns).
+            XmlSqlType or SpatialSqlType => (-1, -1, null, null, null, null),
+            HierarchyIdSqlType => (892, 892, null, null, null, null),
+            SqlVariantSqlType => (0, 0, null, null, null, null),
             _ => throw new NotSupportedException($"No INFORMATION_SCHEMA.COLUMNS metadata for {t}."),
         };
     }

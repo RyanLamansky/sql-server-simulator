@@ -108,4 +108,60 @@ public sealed class ObjectPropertyTests
         AreEqual(1, sim.ExecuteScalar(
             "select count(*) from sys.default_constraints d where objectproperty(d.parent_object_id, 'IsSystemTable') = 0"));
     }
+
+    /// <summary>
+    /// Real answers the whole <c>TableHas*</c> family from the plain
+    /// <c>OBJECTPROPERTY</c>, not just <c>OBJECTPROPERTYEX</c> — probed
+    /// against SQL Server 2025 on this exact table shape, which returns
+    /// identity 0, primary key 1, clustered 1, index 1, unique 1, check 1,
+    /// foreign key 0, foreign ref 0, rowguidcol 1.
+    /// </summary>
+    [TestMethod]
+    [DataRow("TableHasIdentity", 0)]
+    [DataRow("TableHasPrimaryKey", 1)]
+    [DataRow("TableHasClustIndex", 1)]
+    [DataRow("TableHasIndex", 1)]
+    [DataRow("TableHasUniqueCnst", 1)]
+    [DataRow("TableHasCheckCnst", 1)]
+    [DataRow("TableHasForeignKey", 0)]
+    [DataRow("TableHasForeignRef", 0)]
+    [DataRow("TableHasRowGuidCol", 1)]
+    public void TableFlags_AnsweredByBothEntryPoints(string property, int expected)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table f9 (
+                id int not null primary key, g uniqueidentifier rowguidcol,
+                u int unique, c int check (c > 0))
+            """);
+        AreEqual(expected, sim.ExecuteScalar($"select objectproperty(object_id('f9'), '{property}')"));
+        AreEqual(expected, sim.ExecuteScalar($"select convert(int, objectpropertyex(object_id('f9'), '{property}'))"));
+    }
+
+    /// <summary>
+    /// <c>Cardinality</c> and <c>BaseType</c> are the genuinely EX-only pair:
+    /// the plain form returns NULL for both on real (probe-confirmed), since
+    /// neither is integer-valued.
+    /// </summary>
+    [TestMethod]
+    [DataRow("Cardinality")]
+    [DataRow("BaseType")]
+    public void ExtendedOnlyProperties_AreNullFromThePlainForm(string property)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int)");
+        AreEqual(DBNull.Value, sim.ExecuteScalar($"select objectproperty(object_id('t'), '{property}')"));
+        AreNotEqual(DBNull.Value, sim.ExecuteScalar($"select objectpropertyex(object_id('t'), '{property}')"));
+    }
+
+    /// <summary>
+    /// A non-table object answers NULL for the table family, matching real.
+    /// </summary>
+    [TestMethod]
+    public void TableFlags_NonTableReturnsNull()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create view v as select 1 x");
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select objectproperty(object_id('v'), 'TableHasPrimaryKey')"));
+    }
 }

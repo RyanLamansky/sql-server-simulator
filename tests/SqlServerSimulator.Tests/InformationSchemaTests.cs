@@ -662,4 +662,55 @@ public sealed class InformationSchemaTests
             where CONSTRAINT_NAME = 'fk_mc'
             """));
     }
+
+    /// <summary>
+    /// The CLR-backed and variant column types must resolve in
+    /// <c>INFORMATION_SCHEMA.COLUMNS</c>. Values probe-confirmed against SQL
+    /// Server 2025: <c>xml</c> / <c>geography</c> / <c>geometry</c> carry the
+    /// MAX sentinel <c>-1</c> for both length columns, <c>hierarchyid</c>
+    /// reports its 892-byte bound, and <c>sql_variant</c> a literal 0.
+    /// </summary>
+    [TestMethod]
+    [DataRow("xml", "xml", -1)]
+    [DataRow("geography", "geography", -1)]
+    [DataRow("geometry", "geometry", -1)]
+    [DataRow("hierarchyid", "hierarchyid", 892)]
+    [DataRow("sql_variant", "sql_variant", 0)]
+    public void InformationSchemaColumns_ExoticTypes(string declared, string dataType, int length)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table t (c {declared})");
+        using var reader = sim.ExecuteReader("""
+            select DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, CHARACTER_OCTET_LENGTH
+            from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 't'
+            """);
+        IsTrue(reader.Read());
+        AreEqual(dataType, reader.GetString(0));
+        AreEqual(length, reader.GetInt32(1));
+        AreEqual(length, reader.GetInt32(2));
+    }
+
+    /// <summary>
+    /// The row generator materializes every column in the database before any
+    /// WHERE filter applies, so a type it can't describe used to fail the whole
+    /// view — a single <c>xml</c> column anywhere made even a query filtered to
+    /// an unrelated table raise. Both AdventureWorks and WideWorldImporters
+    /// carry such columns, so this guards the schema-introspection path.
+    /// </summary>
+    [TestMethod]
+    public void InformationSchemaColumns_ExoticColumnElsewhereDoesNotBreakOtherTables()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("""
+            create table plain (id int, nm varchar(10));
+            create table exotic (doc xml, p geography, h hierarchyid, v sql_variant);
+            """);
+        using var reader = sim.ExecuteReader("""
+            select COLUMN_NAME from INFORMATION_SCHEMA.COLUMNS
+            where TABLE_NAME = 'plain' order by ORDINAL_POSITION
+            """);
+        var names = new List<string>();
+        while (reader.Read()) names.Add(reader.GetString(0));
+        CollectionAssert.AreEqual(new[] { "id", "nm" }, names);
+    }
 }

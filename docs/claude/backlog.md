@@ -211,6 +211,12 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   A token already cancelled *before* execute throws `TaskCanceledException` from the ADO.NET base class, so only the mid-execution case diverges.
   The wire path is unaffected: it writes a `DONE_ATTN` and SqlClient manufactures the exception itself, so this is the in-process surface only.
   See [`control-flow.md`](control-flow.md) and [`tds-endpoint.md`](tds-endpoint.md#mid-stream-attention-cancel).
+- **`PRIMARY KEY (col DESC)` direction is parse-and-discard** — `KeyConstraint` tracks no per-column direction, so `sys.index_columns.is_descending_key` reports 0 where real reports 1 (probe-confirmed).
+  A schema-diff or index-scripting tool reading the column sees an ascending key; the stored rows are unordered either way, so only the metadata diverges.
+  See [`catalog-views.md`](catalog-views.md).
+- **`OBJECTPROPERTY(id, 'IsDeterministic')` doesn't analyze the body** — every scalar function reports 1, so a non-deterministic one (a `GETDATE()`-bearing UDF) over-reports; real evaluates determinism per module.
+  `IsSchemaBound` likewise reports 0 for a schema-bound *function* (the flag is tracked on views only).
+  See [`catalog-views.md`](catalog-views.md).
 - **Runtime-error streaming shape** — a per-row runtime error (`SELECT 10/0`, arithmetic overflow) is emitted by real *after* COLMETADATA, so a streaming client surfaces it while draining rows; the simulator raises it at execute-time before any COLMETADATA, so the client sees it from the initial execute call.
   Message / number / class match; only the wire position differs.
   Deferred — deep change to statement execution ordering, low practical impact.

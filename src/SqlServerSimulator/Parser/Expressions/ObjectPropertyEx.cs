@@ -95,43 +95,40 @@ internal sealed class ObjectPropertyEx : Expression
                     : SqlValue.Null(SqlType.SqlVariant),
                 _ => SqlValue.Null(SqlType.SqlVariant),
             },
-            13 => upper[..len] switch
-            {
-                "TABLEHASINDEX" => TableFlag(obj, HasAnyIndex),
-                _ => SqlValue.Null(SqlType.SqlVariant),
-            },
-            16 => upper[..len] switch
-            {
-                "TABLEHASIDENTITY" => TableFlag(obj, HasIdentity),
-                _ => SqlValue.Null(SqlType.SqlVariant),
-            },
-            17 => upper[..len] switch
-            {
-                "TABLEHASCHECKCNST" => TableFlag(obj, HasCheckConstraint),
-                _ => SqlValue.Null(SqlType.SqlVariant),
-            },
-            18 => upper[..len] switch
-            {
-                "TABLEHASCLUSTINDEX" => TableFlag(obj, HasClusteredIndex),
-                "TABLEHASFOREIGNKEY" => TableFlag(obj, HasOutgoingForeignKey),
-                "TABLEHASFOREIGNREF" => TableFlag(obj, HasIncomingForeignKey),
-                "TABLEHASPRIMARYKEY" => TableFlag(obj, HasPrimaryKey),
-                "TABLEHASROWGUIDCOL" => TableFlag(obj, AlwaysFalse),
-                "TABLEHASUNIQUECNST" => TableFlag(obj, HasUniqueConstraint),
-                _ => SqlValue.Null(SqlType.SqlVariant),
-            },
+            // The TableHas* family — shared verbatim with the non-EX
+            // OBJECTPROPERTY, which real supports for every one of these
+            // (probe-confirmed; only BaseType / Cardinality above are
+            // genuinely EX-only, returning NULL from the non-EX form).
+            13 or 16 or 17 or 18 => IntVariant(TableFlagByName(obj, upper[..len]) is bool flag ? flag ? 1 : 0 : null),
             _ => SqlValue.Null(SqlType.SqlVariant),
         };
     }
 
+    /// <summary>
+    /// Maps an upper-cased <c>TableHas*</c> property name to its answer for
+    /// <paramref name="obj"/>: <see langword="null"/> when the object isn't a
+    /// table or the name isn't one of the family (both are NULL on real), else
+    /// the flag. Single source of truth for <c>OBJECTPROPERTY</c> and
+    /// <c>OBJECTPROPERTYEX</c>, which expose the identical set.
+    /// </summary>
+    internal static bool? TableFlagByName(SchemaObject obj, ReadOnlySpan<char> upperName) =>
+        obj is not HeapTable table ? null : upperName switch
+        {
+            "TABLEHASCHECKCNST" => HasCheckConstraint(table),
+            "TABLEHASCLUSTINDEX" => HasClusteredIndex(table),
+            "TABLEHASFOREIGNKEY" => HasOutgoingForeignKey(table),
+            "TABLEHASFOREIGNREF" => HasIncomingForeignKey(table),
+            "TABLEHASIDENTITY" => HasIdentity(table),
+            "TABLEHASINDEX" => HasAnyIndex(table),
+            "TABLEHASPRIMARYKEY" => HasPrimaryKey(table),
+            "TABLEHASROWGUIDCOL" => HasRowGuidCol(table),
+            "TABLEHASUNIQUECNST" => HasUniqueConstraint(table),
+            _ => null,
+        };
+
     private static SqlValue IntVariant(int? value) => value is int v
         ? SqlValue.FromVariant(SqlValue.FromInt32(v))
         : SqlValue.Null(SqlType.SqlVariant);
-
-    private static SqlValue TableFlag(SchemaObject obj, Func<HeapTable, bool> predicate) =>
-        obj is HeapTable table
-            ? SqlValue.FromVariant(SqlValue.FromInt32(predicate(table) ? 1 : 0))
-            : SqlValue.Null(SqlType.SqlVariant);
 
     private static bool HasAnyIndex(HeapTable table) => table.Indexes.Count > 0 || table.KeyConstraints.Count > 0;
 
@@ -141,7 +138,21 @@ internal sealed class ObjectPropertyEx : Expression
 
     private static bool HasIncomingForeignKey(HeapTable table) => table.IncomingForeignKeys.Count > 0;
 
-    private static bool AlwaysFalse(HeapTable table) => false;
+    /// <summary>
+    /// Real reports 1 when any column carries the <c>ROWGUIDCOL</c> marker
+    /// (probe-confirmed); the per-column marker is tracked on
+    /// <see cref="HeapColumn.IsRowGuidCol"/>, which
+    /// <c>sys.columns.is_rowguidcol</c> already projects.
+    /// </summary>
+    private static bool HasRowGuidCol(HeapTable table)
+    {
+        foreach (var col in table.Columns)
+        {
+            if (col.IsRowGuidCol)
+                return true;
+        }
+        return false;
+    }
 
     private static bool HasIdentity(HeapTable table)
     {

@@ -130,6 +130,7 @@ internal sealed class ObjectProperty : Expression
                 // populator filters on `= 0`, so a NULL here silently drops
                 // every DEFAULT constraint from a bacpac export.
                 "ISSYSTEMTABLE" => 0,
+                "TABLEHASINDEX" => TableFlag(obj, upper),
                 _ => null,
             },
             15 => upper switch
@@ -142,6 +143,7 @@ internal sealed class ObjectProperty : Expression
             {
                 "ISINLINEFUNCTION" => obj is InlineTableValuedFunction ? 1 : 0,
                 "ISSCALARFUNCTION" => obj is ScalarFunction ? 1 : 0,
+                "TABLEHASIDENTITY" => TableFlag(obj, upper),
                 _ => null,
             },
             // The module SET-option snapshot pair: every simulator module is
@@ -152,8 +154,14 @@ internal sealed class ObjectProperty : Expression
             17 => upper switch
             {
                 "EXECISANSINULLSON" => IsSqlModule(obj) ? 1 : null,
+                "TABLEHASCHECKCNST" => TableFlag(obj, upper),
                 _ => null,
             },
+            // The rest of the TableHas* family, all 18 characters. Real
+            // answers every one of these from the plain OBJECTPROPERTY as
+            // well as the EX form (probe-confirmed); only BaseType and
+            // Cardinality are genuinely EX-only.
+            18 => TableFlag(obj, upper),
             19 => upper switch
             {
                 "EXECISQUOTEDIDENTON" => IsSqlModule(obj) ? 1 : null,
@@ -173,6 +181,20 @@ internal sealed class ObjectProperty : Expression
         obj is Procedure or View or Trigger or ScalarFunction or InlineTableValuedFunction or MultiStatementTableValuedFunction;
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+
+    /// <summary>
+    /// Adapts <see cref="ObjectPropertyEx.TableFlagByName"/> to this function's
+    /// <c>int?</c> result shape: real answers the whole <c>TableHas*</c> family
+    /// from the plain <c>OBJECTPROPERTY</c> as well as the EX form
+    /// (probe-confirmed), so both route through the one mapping.
+    /// </summary>
+    private static int? TableFlag(SchemaObject obj, ReadOnlySpan<char> upperName) =>
+        ObjectPropertyEx.TableFlagByName(obj, upperName) switch
+        {
+            true => 1,
+            false => 0,
+            null => null,
+        };
 
     internal override string DebugDisplay() => $"OBJECTPROPERTY({this.idArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
 }
