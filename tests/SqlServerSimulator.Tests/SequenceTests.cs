@@ -349,9 +349,11 @@ public sealed class SequenceTests
         _ = simulation.ExecuteNonQuery("create sequence sysview2 as int start with 1 increment by 1");
         _ = simulation.ExecuteScalar("select next value for sysview2");
         _ = simulation.ExecuteScalar("select next value for sysview2");
-        // After two advances starting from 1 with increment 1, current_value
-        // is the next value to emit: 3 (int inner base type for an int sequence).
-        AreEqual(3, simulation.ExecuteScalar<int>("select current_value from sys.sequences where name = 'sysview2'"));
+        // After two advances from 1 with increment 1, current_value is the
+        // value most recently *emitted* — 2, not the 3 that comes next
+        // (probe-confirmed against SQL Server 2025; it agrees with
+        // last_used_value once anything has been issued).
+        AreEqual(2, simulation.ExecuteScalar<int>("select current_value from sys.sequences where name = 'sysview2'"));
     }
 
     // A decimal sequence's inner type reports BaseType 'numeric' — the
@@ -532,5 +534,110 @@ public sealed class SequenceTests
             rows.Add($"{reader.GetInt32(0)}/{reader.GetInt32(1)}");
 
         AreEqual(expected, string.Join(" ", rows));
+    }
+
+    /// <summary>
+    /// <c>sys.sequences.current_value</c> is the most recent value emitted, or
+    /// — before anything has been — the position the next <c>NEXT VALUE FOR</c>
+    /// will return. Every stage below is verbatim from SQL Server 2025 for a
+    /// <c>START WITH 10 INCREMENT BY 5</c> sequence; the simulator previously
+    /// projected its internal next-to-issue counter, reporting one increment
+    /// ahead after any use and disagreeing with <c>last_used_value</c> where
+    /// real has the two equal.
+    /// </summary>
+    [TestMethod]
+    public void SysSequences_CurrentValue_TracksLastEmittedNotNext()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create sequence s as int start with 10 increment by 5");
+
+        AssertSequenceState(sim, "fresh", currentValue: 10, lastUsed: null);
+
+        _ = sim.ExecuteScalar("select next value for s");
+        AssertSequenceState(sim, "after issuing 10", currentValue: 10, lastUsed: 10);
+
+        _ = sim.ExecuteNonQuery("alter sequence s restart with 100");
+        AssertSequenceState(sim, "after RESTART WITH 100", currentValue: 100, lastUsed: null);
+
+        _ = sim.ExecuteScalar("select next value for s");
+        _ = sim.ExecuteScalar("select next value for s");
+        AssertSequenceState(sim, "after issuing 100 and 105", currentValue: 105, lastUsed: 105);
+    }
+
+    /// <summary>
+    /// <c>RESTART WITH n</c> moves the sequence's <em>start</em> as well as its
+    /// position: <c>sys.sequences.start_value</c> reports n afterwards, and a
+    /// later bare <c>RESTART</c> returns to n rather than to the value the
+    /// sequence was declared with (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void AlterSequenceRestartWith_MovesStartValue()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create sequence s as int start with 10 increment by 5");
+        AreEqual(10, sim.ExecuteScalar<int>("select start_value from sys.sequences where name = 's'"));
+
+        _ = sim.ExecuteNonQuery("alter sequence s restart with 100");
+        AreEqual(100, sim.ExecuteScalar<int>("select start_value from sys.sequences where name = 's'"));
+
+        _ = sim.ExecuteScalar("select next value for s");
+        _ = sim.ExecuteNonQuery("alter sequence s restart");
+
+        // Back to 100 — the restarted origin — not the declared 10.
+        AssertSequenceState(sim, "after bare RESTART", currentValue: 100, lastUsed: null);
+        AreEqual(100, sim.ExecuteScalar<int>("select next value for s"));
+    }
+
+    private static void AssertSequenceState(Simulation sim, string stage, int currentValue, int? lastUsed)
+    {
+        AreEqual(currentValue, sim.ExecuteScalar<int>("select current_value from sys.sequences where name = 's'"), stage);
+        var actualLastUsed = sim.ExecuteScalar("select last_used_value from sys.sequences where name = 's'");
+        if (lastUsed is { } expected)
+            AreEqual(expected, Convert.ToInt32(actualLastUsed), stage);
+        else
+            AreEqual(DBNull.Value, actualLastUsed, stage);
+    }
+
+    /// <summary>
+    /// <c>NEXT VALUE FOR</c> is rejected in every clause real names in Msg
+    /// 11720 — probe-confirmed that all eight raise, and that the rejection is
+    /// parse-time (uncatchable by TRY/CATCH in the same batch on real).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select t.a from t join u on u.b = next value for s")]
+    [DataRow("insert dst output next value for s values (1)")]
+    [DataRow("select top (next value for s) a from t")]
+    [DataRow("select sum(a) over (order by next value for s) from t")]
+    [DataRow("select a from t where a = next value for s")]
+    [DataRow("select a from t order by next value for s")]
+    [DataRow("select a from t group by next value for s")]
+    public void NextValueFor_InDisallowedClause_Raises11720(string sql)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create sequence s as int start with 1 increment by 1;
+            create table t (a int); create table u (b int); create table dst (a int)
+            """);
+
+        var ex = sim.AssertSqlError(sql, 11720);
+        AreEqual(
+            "NEXT VALUE FOR function is not allowed in the TOP, OVER, OUTPUT, ON, WHERE, GROUP BY, HAVING, or ORDER BY clauses.",
+            ex.Message);
+    }
+
+    /// <summary>The clauses that legitimately accept it keep working.</summary>
+    [TestMethod]
+    [DataRow("select next value for s")]
+    [DataRow("insert dst (a) values (next value for s)")]
+    [DataRow("select next value for s from t")]
+    public void NextValueFor_InAllowedPosition_Accepted(string sql)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create sequence s as int start with 1 increment by 1;
+            create table t (a int); create table dst (a int);
+            insert t values (1)
+            """);
+        _ = sim.ExecuteNonQuery(sql);
     }
 }

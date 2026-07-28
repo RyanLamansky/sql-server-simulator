@@ -91,15 +91,37 @@ A sequence buried inside a larger default expression (`NEXT VALUE FOR s + 1`) is
 
 These shapes stay legal and each advance once per row, matching real: the defaulted column listed explicitly, a *different* sequence in the constructor, and a multi-row insert whose tuples reference no sequence.
 
+## Catalog state: `current_value` vs `last_used_value`
+
+`sys.sequences.current_value` is the value most recently **emitted**, or — before anything has been — the position the next `NEXT VALUE FOR` will return.
+Probe-confirmed against SQL Server 2025 across every state of a `START WITH 10 INCREMENT BY 5` sequence:
+
+| Stage | `current_value` | `last_used_value` |
+|---|---|---|
+| fresh | 10 | NULL |
+| after issuing 10 | 10 | 10 |
+| after `RESTART WITH 100` | 100 | NULL |
+| after issuing 100, 105 | 105 | 105 |
+| after bare `RESTART` | 100 | NULL |
+
+So the projection is `LastUsedValue ?? CurrentValue` (`Sequence.CurrentValueAsVariant`) — the internal `CurrentValue` field holds the *next* value to issue, which is the right answer only while nothing has been issued.
+Projecting it unconditionally reported one increment ahead of real after any use, and disagreed with `last_used_value` where real has the two equal.
+
+**`RESTART WITH n` moves the start value**, not just the position: `start_value` reports n afterwards and a later bare `RESTART` returns to n rather than to the declared origin (probe-confirmed — the last row above returns to 100, not 10).
+
+## Where `NEXT VALUE FOR` is rejected
+
+**Msg 11720** covers all eight clauses its own text names — `TOP`, `OVER`, `OUTPUT`, `ON`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY` — enforced at parse via `ParserContext.RejectNextValueFor`, which each clause's parse sets for its own duration.
+Real binds this at parse too (probe-confirmed: TRY/CATCH in the same batch doesn't intercept it).
+The allowed positions — a bare `SELECT`, a `VALUES` tuple, a projection over a FROM source, and a column `DEFAULT` — are unaffected.
+
 ## Deferred
 
 - `NEXT VALUE FOR ... OVER (ORDER BY ...)` — the OVER clause is parsed and discarded (the simulator iterates in a single deterministic order regardless of the OVER's ordering hint; the row-by-row sequence-advance pattern is the same with or without OVER).
 - Multi-name `DROP SEQUENCE a, b, c` — the comma-separated form works (inherited from the shared DROP parser); each name is dropped independently with `IF EXISTS` applied uniformly.
 - `INFORMATION_SCHEMA.SEQUENCES` — ISO-standard surface, not shipped.
   Apps that query catalogs typically use `sys.sequences` instead.
-- **Bumps not wired into `ON` / `OUTPUT` clauses** — `NEXT VALUE FOR` inside a JOIN's ON predicate or an OUTPUT clause won't raise Msg 11720; it'll run and emit values.
-  Real SQL Server rejects both.
-  Apps that emit those shapes typically don't (EF Core never does), so the gap is documented rather than fixed in v1.
+- *(the `ON` / `OUTPUT` gap is closed — see [Where `NEXT VALUE FOR` is rejected](#where-next-value-for-is-rejected))*
 - *(the VALUES + DEFAULT double-advance is fixed — see [One value per row](#one-value-per-row) below)*
 - **CREATE SEQUENCE in transaction undo log** — sequence creation isn't logged.
   Same asymmetry as CREATE TABLE for regular (non-temp) tables, documented as a quirk.

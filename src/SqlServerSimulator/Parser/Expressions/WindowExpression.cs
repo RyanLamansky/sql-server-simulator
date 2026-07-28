@@ -569,12 +569,26 @@ internal sealed class WindowExpression : Expression
     /// return, cursor is on the next OVER-body lookahead token (typically
     /// <c>ORDER</c>, <c>ROWS</c>, <c>RANGE</c>, or the closing <c>)</c>).
     /// </summary>
-    private static Expression[] ParseOptionalPartitionBy(ParserContext context) =>
-        context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Partition }
-            ? []
-            : context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By }
-                ? throw SimulatedSqlException.SyntaxErrorNear(context)
-                : ParseExpressionList(context);
+    private static Expression[] ParseOptionalPartitionBy(ParserContext context)
+    {
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Partition })
+            return [];
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        // An OVER body rejects NEXT VALUE FOR (Msg 11720) — real names OVER
+        // alongside WHERE / ORDER BY / the rest in that message.
+        var saved = context.RejectNextValueFor;
+        context.RejectNextValueFor = true;
+        try
+        {
+            return ParseExpressionList(context);
+        }
+        finally
+        {
+            context.RejectNextValueFor = saved;
+        }
+    }
 
     /// <summary>
     /// Rejects an explicit frame specification for kinds that aren't allowed
@@ -758,6 +772,23 @@ internal sealed class WindowExpression : Expression
     /// after-list token (typically the OVER's closing <c>)</c>).
     /// </summary>
     private static OrderBySpec[] ParseOrderByList(ParserContext context)
+    {
+        // Same Msg 11720 rejection as PARTITION BY — this list is only ever an
+        // OVER body's ORDER BY, and real names OVER in that message.
+        var saved = context.RejectNextValueFor;
+        context.RejectNextValueFor = true;
+        try
+        {
+            return ParseOrderByListCore(context);
+        }
+        finally
+        {
+            context.RejectNextValueFor = saved;
+        }
+    }
+
+    /// <summary>Body of <see cref="ParseOrderByList"/>.</summary>
+    private static OrderBySpec[] ParseOrderByListCore(ParserContext context)
     {
         var items = new List<OrderBySpec>();
         while (true)

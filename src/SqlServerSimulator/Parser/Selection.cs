@@ -807,7 +807,16 @@ internal sealed partial class Selection
             // multiplication (`TOP 1 *` → `1 * …`, `TOP (1) *` → `(1) * …`),
             // swallowing the star and failing near the next token; ParsePrimary
             // stops before any binary operator, leaving `*` for the select list.
-            topExpression = Expression.ParsePrimary(context.MoveNextRequiredReturnSelf());
+            var savedRejectInTop = context.RejectNextValueFor;
+            context.RejectNextValueFor = true;
+            try
+            {
+                topExpression = Expression.ParsePrimary(context.MoveNextRequiredReturnSelf());
+            }
+            finally
+            {
+                context.RejectNextValueFor = savedRejectInTop;
+            }
             // `TOP n PERCENT` — cap becomes ceil(n% × rowcount). PERCENT is a
             // reserved keyword.
             if (context.Token is ReservedKeyword { Keyword: Keyword.Percent })
@@ -1341,7 +1350,18 @@ internal sealed partial class Selection
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.MoveNextRequired();
-                on = BooleanExpression.Parse(context);
+                // An ON predicate rejects NEXT VALUE FOR (Msg 11720), like the
+                // other clauses real names in that message.
+                var savedRejectInOn = context.RejectNextValueFor;
+                context.RejectNextValueFor = true;
+                try
+                {
+                    on = BooleanExpression.Parse(context);
+                }
+                finally
+                {
+                    context.RejectNextValueFor = savedRejectInOn;
+                }
             }
             joins.Add(new JoinSpec(kind, on));
         }

@@ -106,6 +106,27 @@ partial class Simulation
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
 
+        // An OUTPUT clause rejects NEXT VALUE FOR (Msg 11720), one of the
+        // clauses real names in that message.
+        var savedRejectNextValueFor = context.RejectNextValueFor;
+        context.RejectNextValueFor = true;
+        try
+        {
+            return ParseOutputClauseBody(context, table, allowInserted, allowDeleted);
+        }
+        finally
+        {
+            context.RejectNextValueFor = savedRejectNextValueFor;
+        }
+    }
+
+    /// <summary>Body of <see cref="TryParseOutputClauseForMutation"/>.</summary>
+    private static MutationOutputProjection? ParseOutputClauseBody(
+        ParserContext context,
+        HeapTable table,
+        bool allowInserted,
+        bool allowDeleted)
+    {
         var expressions = new List<Expression>();
         var names = new List<string>();
         do
@@ -396,6 +417,22 @@ partial class Simulation
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
 
+        // Msg 11720, as on the mutation-side OUTPUT entry above.
+        var savedRejectNextValueFor = context.RejectNextValueFor;
+        context.RejectNextValueFor = true;
+        try
+        {
+            return ParseInsertOutputClauseBody(context, destinationTable, sourceColumnNames);
+        }
+        finally
+        {
+            context.RejectNextValueFor = savedRejectNextValueFor;
+        }
+    }
+
+    /// <summary>Body of <see cref="TryParseOutputClause"/>.</summary>
+    private static OutputProjection? ParseInsertOutputClauseBody(ParserContext context, HeapTable destinationTable, (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? sourceColumnNames)
+    {
         var expressions = new List<Expression>();
         var columnNames = new List<string>();
 

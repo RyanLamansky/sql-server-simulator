@@ -62,7 +62,13 @@ internal sealed class Sequence(
     /// </summary>
     public readonly SqlType DeclaredType = declaredType;
 
-    /// <summary>The declared start value — captured for sys.sequences but otherwise unused after construction; ALTER … RESTART WITH overrides into <see cref="CurrentValue"/>.</summary>
+    /// <summary>
+    /// The sequence's start value, as <c>sys.sequences.start_value</c> reports
+    /// it and as a bare <c>ALTER SEQUENCE … RESTART</c> resets to.
+    /// <c>RESTART WITH n</c> moves it to n (probe-confirmed), so it tracks the
+    /// most recent declared-or-restarted origin rather than staying pinned to
+    /// the CREATE-time value.
+    /// </summary>
     public long StartValue = startValue;
 
     public long Increment = increment;
@@ -96,6 +102,23 @@ internal sealed class Sequence(
     /// runtime state, not persisted). <c>ALTER SEQUENCE … RESTART</c> clears it.
     /// </summary>
     public long? LastUsedValue;
+
+    /// <summary>
+    /// <c>sys.sequences.current_value</c> as a sql_variant: the most recent
+    /// value emitted, or — before any has been — the position the next
+    /// <c>NEXT VALUE FOR</c> will return.
+    /// <para>Probe-confirmed against SQL Server 2025 across all four states of
+    /// a <c>START WITH 10 INCREMENT BY 5</c> sequence: fresh reports 10,
+    /// issuing 10 leaves it at 10 (not the 15 that comes next),
+    /// <c>RESTART WITH 100</c> reports 100, and issuing 100 leaves it at 100.
+    /// So it is <see cref="LastUsedValue"/> when set, else
+    /// <see cref="CurrentValue"/> — which holds the pending start / restart
+    /// position and is what a freshly imported sequence carries.</para>
+    /// <para>Projecting <see cref="CurrentValue"/> alone reported one
+    /// increment ahead of real after any use, disagreeing with
+    /// <c>last_used_value</c> where real has the two equal.</para>
+    /// </summary>
+    public SqlValue CurrentValueAsVariant => this.AsDeclaredVariant(this.LastUsedValue ?? this.CurrentValue);
 
     /// <summary>
     /// <c>sys.sequences.last_used_value</c> as a sql_variant: NULL when the

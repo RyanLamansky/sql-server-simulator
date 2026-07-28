@@ -815,7 +815,7 @@ internal static partial class BuiltInResources
                     seq.Cycle ? trueBit : falseBit,
                     trueBit,
                     nullCache,
-                    seq.AsDeclaredVariant(seq.CurrentValue),
+                    seq.CurrentValueAsVariant,
                     seq.LastUsedValueAsVariant,
                     SqlValue.FromByte(systemTypeId),
                     SqlValue.FromInt32(userTypeId),

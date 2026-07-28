@@ -525,7 +525,14 @@ partial class Simulation
                         var afterRestart = context.SaveCheckpoint();
                         if (context.MoveNext() && context.Token is ReservedKeyword { Keyword: Keyword.With })
                         {
-                            sequence.CurrentValue = ReadSignedIntegerLiteral(context);
+                            // RESTART WITH n moves the sequence's *start* as
+                            // well as its position — probe-confirmed against
+                            // SQL Server 2025: sys.sequences.start_value
+                            // reports n afterwards, and a later bare RESTART
+                            // returns to n rather than to the value the
+                            // sequence was declared with.
+                            sequence.StartValue = ReadSignedIntegerLiteral(context);
+                            sequence.CurrentValue = sequence.StartValue;
                         }
                         else
                         {

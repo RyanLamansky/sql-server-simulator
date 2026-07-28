@@ -142,8 +142,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **Cross-collation comparison / concatenation binds per row, not at compile time** — `c1.x = c2.x` across differently-collated columns raises Msg 468 once a row is evaluated, but the same statement over an **empty** rowset passes silently where real rejects it during compilation (probe-confirmed: real's is an uncatchable bind-time failure).
   Set operations bind at compile time and match real exactly; this is the residual, and closing it means carrying collation through the static type path at every comparison site.
   → [`collations.md`](collations.md#known-gaps).
-- **`NEXT VALUE FOR` in a JOIN `ON` or `OUTPUT` clause** — real rejects both with **Msg 11720**; the simulator runs them and emits values.
-  → [`sequences.md`](sequences.md#deferred).
 - **Statement-permission gates stop at the modeled set** — CREATE TABLE / VIEW / PROCEDURE / FUNCTION / SEQUENCE / ROLE / USER / SCHEMA, ALTER TABLE, DROP TABLE and DROP USER are checked; other CREATE / ALTER / DROP statements run unchecked, as does `ALTER` / `CREATE OR ALTER` of an existing module.
   → [`permissions.md`](permissions.md#known-gaps).
 - **Non-Framework CLR assemblies load** — real resolves every `AssemblyRef` against a fixed .NET Framework catalog and raises **Msg 6503** otherwise (probe-confirmed for .NET 10 and for .NET Standard 2.0); the simulator runs on .NET so all of them bind, which is also what lets the tests emit a fixture assembly without a Framework toolchain.
@@ -219,10 +217,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   This is a broad, mechanical owner-indirection refactor landing on the most regression-sensitive subsystem (lock manager × GC timing × threading).
   Payoff is bounded (EF disposes scrupulously; only buggy consumer code leaks), so it's **deliberately deferred** as high-risk / low-frequency.
   Eventual home: [`locking.md`](locking.md).
-- **`sys.sequences.current_value` is one increment ahead of real** — real reports the *last value issued* (or `start_value` before first use); the simulator projects its internal next-to-issue counter, so after one `NEXT VALUE FOR` on a `START WITH 1 INCREMENT BY 1` sequence real reports 1 and the simulator reports 2 (probe-confirmed both sides).
-  `last_used_value` is correct, so the two columns disagree where real has them equal after first use.
-  The fix isn't simply subtracting the increment: `last_used_value` is documented as per-instance runtime state that a bacpac-restored sequence reports NULL for while the position *is* restored, so the projection has to distinguish never-issued from restored-and-not-yet-issued.
-  See [`sequences.md`](sequences.md).
 - **Raw `OverflowException` on out-of-`int`-range scalar arguments** — a length / position / count / code-point argument beyond `int` range surfaces the .NET narrowing exception instead of a SQL-shaped error: `SUBSTRING` (length), `CHARINDEX` (start), `STUFF` (start / length), `REPLICATE` / `SPACE` (count), `CHOOSE` (index), `CHAR` / `NCHAR` (code point).
   `LEFT` / `RIGHT` (Msg 8115) and `DATEADD` (Msg 517) harden the same argument, so the shape to copy exists.
   Real's response is per-function (clamp, compute as bigint, or a value-class error), which is why one shared guard wouldn't be faithful and the handling stayed point-local — closing it is a per-function decision.
