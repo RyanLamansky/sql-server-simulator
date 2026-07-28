@@ -139,8 +139,8 @@ The simulator accepting what real rejects is the more dangerous divergence direc
 This is the standing list: each entry names the error real raises that the simulator doesn't, and the linked deep-dive carries the detail.
 Entries are verified against the simulator, so one that no longer reproduces is removed rather than re-worded.
 
-- **Set operations skip collation-conflict resolution** — UNION / UNION ALL over two columns with different explicit collations return rows where real raises **Msg 468** / **Msg 457**; the set-op type-promotion path doesn't call `Collation.Resolve` and falls through to legacy type precedence.
-  Comparison and concatenation *do* raise both messages, but per row at execution rather than at compile time, so the same conflict over an empty rowset also passes silently where real rejects the statement outright.
+- **Cross-collation comparison / concatenation binds per row, not at compile time** — `c1.x = c2.x` across differently-collated columns raises Msg 468 once a row is evaluated, but the same statement over an **empty** rowset passes silently where real rejects it during compilation (probe-confirmed: real's is an uncatchable bind-time failure).
+  Set operations bind at compile time and match real exactly; this is the residual, and closing it means carrying collation through the static type path at every comparison site.
   → [`collations.md`](collations.md#known-gaps).
 - **Indexed-view determinism battery unenforced** — real gates `CREATE INDEX` on a view with the Msg 10100-series / Msg 10138 checks (schema-bound, deterministic, `COUNT_BIG(*)` present with GROUP BY, no outer joins / subqueries / DISTINCT / TOP, two-part names); the simulator applies only the 1939 / 1941 / 1940 gates, so a `SELECT DISTINCT` view indexes cleanly and is then materialized and enforced.
   → [`indexes.md`](indexes.md#fidelity-gaps).

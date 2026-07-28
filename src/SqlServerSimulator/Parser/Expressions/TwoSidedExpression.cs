@@ -143,7 +143,8 @@ internal abstract class TwoSidedExpression : Expression
             // Other arithmetic operators on string operands reject in
             // PromoteForArithmetic before this point.
             var resolved = Collation.Resolve(leftType, rightType)
-                ?? throw SimulatedSqlException.UnresolvedCollationInImplicitConversion(result);
+                ?? throw SimulatedSqlException.UnresolvedCollationInImplicitConversion(
+                    result, rightType.Collation!.Name, leftType.Collation!.Name, "add");
             result = result.WithCollation(resolved.Collation, resolved.Coercibility);
         }
         return result;

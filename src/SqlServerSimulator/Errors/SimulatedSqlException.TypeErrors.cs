@@ -518,9 +518,19 @@ partial class SimulatedSqlException
     /// source/destination type names are both the same bare keyword (e.g.
     /// <c>varchar</c>) — SQL Server's wording uses the same word twice in
     /// the unresolved-collation case.
+    /// <para>The message names the conflicting pair and the operator that
+    /// couldn't resolve it — <c>add</c> for string <c>+</c>,
+    /// <c>UNION ALL</c> for the set operator (probe-confirmed; note real
+    /// spells the set operator upper-case and the arithmetic one lower-case,
+    /// and says "operator" where Msg 468 says "operation"). Collation names
+    /// follow the same right-then-left order Msg 468 uses.</para>
     /// </summary>
-    internal static SimulatedSqlException UnresolvedCollationInImplicitConversion(SqlType type) =>
-        new($"Implicit conversion of {type.SqlServerName} value to {type.SqlServerName} cannot be performed because the collation of the value is unresolved due to a collation conflict.", 457, 16, 1);
+    internal static SimulatedSqlException UnresolvedCollationInImplicitConversion(
+        SqlType type,
+        string rightCollation,
+        string leftCollation,
+        string operatorName) =>
+        new($"Implicit conversion of {type.SqlServerName} value to {type.SqlServerName} cannot be performed because the collation of the value is unresolved due to a collation conflict between \"{rightCollation}\" and \"{leftCollation}\" in {operatorName} operator.", 457, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 8116 — the bit-manipulation family

@@ -51,7 +51,8 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
         if (leftIsString && rightIsString)
         {
             collation = Collation.Resolve(leftType, rightType)
-                ?? throw SimulatedSqlException.UnresolvedCollationInImplicitConversion(baseType);
+                ?? throw SimulatedSqlException.UnresolvedCollationInImplicitConversion(
+                    baseType, rightType.Collation!.Name, leftType.Collation!.Name, "add");
         }
         else
         {

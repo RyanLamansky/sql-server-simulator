@@ -59,7 +59,7 @@ The parallel `SqlValue.FromString(type, value)` similarly preserves the target t
   Conflict raises Msg 468 with operator name `"like"`.
   The resolved `Collation.CaseSensitive` flag flips `RegexOptions.IgnoreCase`.
 - **String concat (`+`)** — `Add.StringConcatenation` calls `Collation.Resolve` on the operand pair.
-  Conflict raises **Msg 457 State 1** (`Implicit conversion of varchar value to varchar cannot be performed because the collation of the value is unresolved due to a collation conflict.`).
+  Conflict raises **Msg 457 State 1** (`Implicit conversion of varchar value to varchar cannot be performed because the collation of the value is unresolved due to a collation conflict between "R" and "L" in add operator.` — real names the pair and the operator, and calls string `+` *add*).
   `TwoSidedExpression.GetSqlType` mirrors the same resolution so the projection schema's result type matches the runtime value's type — RowEncoder rejects mismatched instances, so the GetSqlType / Run paths must stay aligned.
 
 ## `COLLATE` postfix
@@ -389,13 +389,28 @@ With `_KS_WS` they distinguish.
 `CultureCollation` takes optional `kanaTypeSensitive` / `widthSensitive` parameters (default `false`); the `Latin1_General_CI_AS_KS_WS` instance passes `true` for both.
 Probe-confirmed against SQL Server 2025: `nchar(0x30A2) = nchar(0x3042)` is FALSE under `_KS_WS` and TRUE under plain `_CI_AS`.
 
+## Set-operation collation resolution
+
+Cross-collation branches of a set operation must resolve to a single output collation, and the check binds at **compile time** — probe-confirmed against SQL Server 2025 that it fires on empty tables.
+`Selection.Execution.SetOps.cs`'s per-column unification loop runs at parse, so the check lands in the right phase naturally.
+
+| Operation | Error | Wording |
+|---|---|---|
+| `UNION` / `INTERSECT` / `EXCEPT` | **Msg 468, State 9** | `Cannot resolve the collation conflict between "R" and "L" in the UNION\|INTERSECT\|EXCEPT operation.` |
+| `UNION ALL` | **Msg 457, State 1** | `Implicit conversion of varchar value to varchar cannot be performed because the collation of the value is unresolved due to a collation conflict between "R" and "L" in UNION ALL operator.` |
+
+The value-comparing operators raise 468; `UNION ALL` only concatenates but still has to name one collation for the output column, so it takes the implicit-conversion message instead.
+Note real upper-cases the set operator where it lower-cases the comparison / `add` names, and says *operation* for 468 versus *operator* for 457.
+Collation names follow the same right-then-left order the comparison sites use.
+
+Resolution follows `Collation.Resolve`'s precedence, so these bind cleanly: an explicit `COLLATE` on one branch (Explicit outranks Implicit), a literal branch (coercible-default yields), matching collations, and non-string columns.
+A `CAST` does **not** resolve a conflict — the cast result inherits the source column's collation, so `CAST(x AS nvarchar(10))` on both branches still raises (probe-confirmed).
+
 ## Known gaps
 
-- **Set ops (UNION / UNION ALL / INTERSECT / EXCEPT) don't apply collation-conflict checks at the column-pair level.**
-  Probe showed UNION raises Msg 468, UNION ALL raises Msg 457 across cross-collation columns; the simulator's set-op type-promotion path doesn't call `Collation.Resolve`.
-  Cross-collation set-op columns fall through to the legacy type-precedence resolution.
 - **Comparison / concatenation conflicts are raised per row at execution, not at compile time.**
-  `c1.x = c2.x` across two differently-collated columns raises Msg 468 (and `c1.x + c2.x` raises Msg 457) as soon as a row is evaluated, but the same statement over an **empty** rowset succeeds silently — real rejects it during compilation regardless of row count.
+  `c1.x = c2.x` across two differently-collated columns raises Msg 468 (and `c1.x + c2.x` raises Msg 457) as soon as a row is evaluated, but the same statement over an **empty** rowset succeeds silently — real rejects it during compilation regardless of row count (probe-confirmed: the error isn't even catchable by TRY/CATCH in the same batch, being a bind-time failure).
+  Set operations *do* bind at compile time (below), so this is now the residual case; closing it means carrying collation through the static type path at every comparison site.
 - **`text` / `ntext` columns can't be declared with an explicit COLLATE in the simulator.**
   Real SQL Server allows it; the simulator's single-instance modeling collapses all text/ntext to the default.
   Low impact (text/ntext deprecated since SQL Server 2005).

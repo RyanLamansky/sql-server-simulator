@@ -182,8 +182,10 @@ public sealed class CollationDeclaredColumnTests
             insert a values ('x'); insert b values ('y')
             """);
         var ex = sim.AssertSqlError("select a.s + b.s from a, b", 457);
+        // Verbatim from SQL Server 2025 for this exact pair — the message names
+        // the conflicting collations (right operand's first) and the operator.
         AreEqual(
-            "Implicit conversion of varchar value to varchar cannot be performed because the collation of the value is unresolved due to a collation conflict.",
+            "Implicit conversion of varchar value to varchar cannot be performed because the collation of the value is unresolved due to a collation conflict between \"Latin1_General_CS_AS\" and \"Latin1_General_CI_AS\" in add operator.",
             ex.Message);
     }
 
@@ -1116,4 +1118,73 @@ public sealed class CollationDeclaredColumnTests
     }
 
     private static void IsNull(object? value) => Microsoft.VisualStudio.TestTools.UnitTesting.Assert.IsNull(value is DBNull ? null : value);
+
+    /// <summary>
+    /// Cross-collation set-op branches must resolve to one output collation.
+    /// Value-comparing operators raise <b>Msg 468 State 9</b>; <c>UNION ALL</c>
+    /// only concatenates but still has to name one collation for the output
+    /// column, so it raises <b>Msg 457 State 1</b> instead. All wording
+    /// verbatim from SQL Server 2025 — note the set operator is upper-cased
+    /// where the comparison / <c>add</c> names are lower-cased, and that 468
+    /// says "operation" where 457 says "operator".
+    /// </summary>
+    [TestMethod]
+    [DataRow("union", 468, "Cannot resolve the collation conflict between \"Latin1_General_CS_AS\" and \"Latin1_General_CI_AS\" in the UNION operation.")]
+    [DataRow("intersect", 468, "Cannot resolve the collation conflict between \"Latin1_General_CS_AS\" and \"Latin1_General_CI_AS\" in the INTERSECT operation.")]
+    [DataRow("except", 468, "Cannot resolve the collation conflict between \"Latin1_General_CS_AS\" and \"Latin1_General_CI_AS\" in the EXCEPT operation.")]
+    [DataRow("union all", 457, "Implicit conversion of varchar value to varchar cannot be performed because the collation of the value is unresolved due to a collation conflict between \"Latin1_General_CS_AS\" and \"Latin1_General_CI_AS\" in UNION ALL operator.")]
+    public void SetOp_CrossCollation_Raises(string setOp, int errorNumber, string message)
+    {
+        var sim = SeededCrossCollationTables();
+        var ex = sim.AssertSqlError($"select s from a {setOp} select s from b", errorNumber);
+        AreEqual(message, ex.Message);
+    }
+
+    /// <summary>
+    /// The conflict binds at compile time, so it fires with no rows to compare
+    /// — probe-confirmed against SQL Server 2025, which rejects the statement
+    /// on empty tables (and uncatchably, as a batch-aborting bind error).
+    /// </summary>
+    [TestMethod]
+    public void SetOp_CrossCollation_RaisesOnEmptyTables()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table a (s varchar(20) collate Latin1_General_CI_AS);
+            create table b (s varchar(20) collate Latin1_General_CS_AS)
+            """);
+        _ = sim.AssertSqlError("select s from a union select s from b", 468);
+    }
+
+    /// <summary>
+    /// The resolution paths stay clean: an explicit <c>COLLATE</c> on one
+    /// branch outranks its partner, a literal branch is coercible-default and
+    /// yields, matching collations never conflict, and non-string columns are
+    /// untouched by the check.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select s collate Latin1_General_CS_AS from a union select s from b")]
+    [DataRow("select s from a union select 'literal'")]
+    [DataRow("select s from a union select s from a")]
+    [DataRow("select 1 union select 2")]
+    public void SetOp_ResolvableCollations_Succeed(string sql)
+    {
+        var sim = SeededCrossCollationTables();
+        using var reader = sim.ExecuteReader(sql);
+        while (reader.Read())
+        {
+            // Draining is the assertion — the statement must bind and run.
+        }
+    }
+
+    private static Simulation SeededCrossCollationTables()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table a (s varchar(20) collate Latin1_General_CI_AS);
+            create table b (s varchar(20) collate Latin1_General_CS_AS);
+            insert a values ('x'); insert b values ('y')
+            """);
+        return sim;
+    }
 }

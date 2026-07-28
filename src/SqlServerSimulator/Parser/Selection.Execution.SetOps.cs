@@ -19,6 +19,20 @@ internal sealed partial class Selection
     /// <see cref="HasOrderBy"/>; if it stuck around when a set operator
     /// follows, that's a syntax error).
     /// </summary>
+    /// <summary>
+    /// The operator name Msg 468 embeds for a set operation — upper-case,
+    /// unlike the lower-cased comparison / <c>like</c> names the same message
+    /// uses elsewhere (probe-confirmed: <c>"… in the UNION operation."</c>).
+    /// </summary>
+    private static string SetOpName(SetOpKind kind) => kind switch
+    {
+        SetOpKind.Except => "EXCEPT",
+        SetOpKind.Intersect => "INTERSECT",
+        SetOpKind.Union => "UNION",
+        SetOpKind.UnionAll => "UNION ALL",
+        _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
+    };
+
     internal static Selection CombineSetOps(Selection left, Selection right, SetOpKind kind)
     {
         if (left.HasOrderBy)
@@ -68,6 +82,27 @@ internal sealed partial class Selection
             var rightType = right.Schema[i];
             var effectiveLeft = leftDigit > 0 && rightType.Category == SqlTypeCategory.Decimal ? SqlType.GetDecimal(leftDigit, 0) : leftType;
             var effectiveRight = rightDigit > 0 && leftType.Category == SqlTypeCategory.Decimal ? SqlType.GetDecimal(rightDigit, 0) : rightType;
+            // Cross-collation branches must resolve to one output collation.
+            // Real binds this at compile time — probe-confirmed that it fires
+            // on empty tables — and this loop runs at parse, so the check lands
+            // in the right phase for free. UNION / INTERSECT / EXCEPT compare
+            // values and raise Msg 468; UNION ALL only concatenates but still
+            // has to name one collation for the output column, so it raises
+            // Msg 457 instead (both probe-confirmed against SQL Server 2025).
+            // A branch carrying an explicit COLLATE, or a literal (which is
+            // coercible-default), outranks its partner and resolves cleanly —
+            // Collation.Resolve encodes that precedence.
+            if (effectiveLeft.Category == SqlTypeCategory.String && effectiveRight.Category == SqlTypeCategory.String
+                && effectiveLeft != effectiveRight && Collation.Resolve(effectiveLeft, effectiveRight) is null)
+            {
+                var rightName = effectiveRight.Collation!.Name;
+                var leftName = effectiveLeft.Collation!.Name;
+                throw kind == SetOpKind.UnionAll
+                    ? SimulatedSqlException.UnresolvedCollationInImplicitConversion(
+                        SqlType.Promote(effectiveLeft, effectiveRight), rightName, leftName, "UNION ALL")
+                    : SimulatedSqlException.CollationConflict(rightName, leftName, SetOpName(kind));
+            }
+
             combinedSchema[i] = SqlType.Promote(effectiveLeft, effectiveRight);
             if (leftDigit > 0 && rightDigit > 0)
                 (combinedDigits ??= new int[combinedSchema.Length])[i] = Math.Max(leftDigit, rightDigit);

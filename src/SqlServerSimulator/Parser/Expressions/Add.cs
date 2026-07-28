@@ -86,7 +86,8 @@ internal sealed class Add : TwoSidedExpression
         if (left.Type.Category == SqlTypeCategory.String && right.Type.Category == SqlTypeCategory.String)
         {
             var resolved = Collation.Resolve(left.Type, right.Type)
-                ?? throw SimulatedSqlException.UnresolvedCollationInImplicitConversion(resultType);
+                ?? throw SimulatedSqlException.UnresolvedCollationInImplicitConversion(
+                    resultType, right.Type.Collation!.Name, left.Type.Collation!.Name, "add");
             resultType = resultType.WithCollation(resolved.Collation, resolved.Coercibility);
         }
 
