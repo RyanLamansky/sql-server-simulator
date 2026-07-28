@@ -420,15 +420,6 @@ public sealed class StoredProcedureTests
     }
 
     [TestMethod]
-    public void Insert_Exec_PopulatesTarget()
-    {
-        using var connection = Open();
-        _ = connection.CreateCommand("create table dbo.t (val int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("create procedure dbo.p as select 1 as v union all select 2 union all select 3").ExecuteNonQuery();
-        // INSERT...EXEC isn't part of the v1 scope — skip if it doesn't ship; otherwise the rows are present.
-    }
-
-    [TestMethod]
     public void Catalog_Sys_Procedures_Lists_Created_Procs()
     {
         using var connection = Open();

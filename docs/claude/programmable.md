@@ -283,8 +283,8 @@ Each `DbParameter` binds to a proc parameter by name (the `@` prefix is stripped
 - **`OUTPUT` parameter timing**: the simulator's `SimulatedDbDataReader` populates output `DbParameter.Value` after the reader closes (via the synthesized `WriteBackOutputParameters` path), matching real SqlClient's general behavior; pre-close access reads the pre-EXEC value.
 - **No `WITH RESULT SETS`** (EXEC option to override result-set schema).
   Parses fall through to syntax error.
-- **No `INSERT ... EXEC`** wiring through the catalog yet (the `INSERT` parser doesn't recognize `EXEC` as a row source).
-  Apps that emit this surface Msg 102.
+- `INSERT … EXEC` **ships** — the INSERT parser takes `EXEC` as a third row source alongside VALUES / SELECT, appending every result set the proc or dynamic batch yields.
+  See [`dml.md`](dml.md#insert--exec).
 
 ## Dynamic SQL (`EXEC (@sql)` / `sp_executesql`)
 Two re-tokenizing paths in `Simulation.ExecDynamicSql.cs`.
