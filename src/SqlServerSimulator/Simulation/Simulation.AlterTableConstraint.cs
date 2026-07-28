@@ -283,6 +283,21 @@ partial class Simulation
 
         var name = explicitName ?? AutoConstraintName(table.Name, kind, fullOrdinals, table.Columns);
         var isClustered = clustered ?? (kind == KeyConstraintKind.PrimaryKey);
+
+        // One clustered index per table, counting a clustered PK / UNIQUE
+        // constraint as well as a CREATE CLUSTERED INDEX. Real raises Msg 1902
+        // here naming the existing one, the same message the CREATE INDEX path
+        // uses (probe-confirmed; the all-inline CREATE TABLE case takes the
+        // distinct Msg 8112 instead, since neither entry exists yet to name).
+        if (isClustered)
+        {
+            var existingClustered =
+                table.KeyConstraints.FirstOrDefault(k => k.IsClustered)?.Name
+                ?? table.Indexes.FirstOrDefault(ix => ix.IsClustered)?.Name;
+            if (existingClustered is not null)
+                throw SimulatedSqlException.MoreThanOneClusteredIndex(table.Name, existingClustered);
+        }
+
         var constraint = new KeyConstraint(kind, name, storageOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered);
         ValidateExistingRowsForKeyConstraint(table, constraint);
         table.KeyConstraints.Add(constraint);

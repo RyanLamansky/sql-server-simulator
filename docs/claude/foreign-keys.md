@@ -175,10 +175,7 @@ Once tables exist:
 
 - **`key_index_id` in `sys.foreign_keys`** — Always reports `1`.
   Real SQL Server reports the index id on the parent table that backs the FK's referenced columns; the simulator has no index storage, so 1 is the canonical "the FK is backed by the parent's PK / first UQ" answer.
-- **Composite FK that references a multi-column UNIQUE where the column order differs from the FK column order** — accepted by `ReferencedColumnsFormKey`'s set-equality check; real SQL Server matches the column order as declared.
-  Probe didn't surface this case; the simulator's matching rule is slightly looser.
+- *(the referenced-column order gap is closed — `ReferencedColumnsFormKey` matches in declared order, so `REFERENCES p(y, x)` against `UNIQUE (x, y)` raises **Msg 1776 State 1** as real does; probe-confirmed)*
 - **`OBJECT_ID(name, 'F')`** — Returns NULL.
   The handful of `F`-filter callers in the wild can use `select object_id from sys.foreign_keys where name = …` instead.
-- **`SET DEFAULT` when the column has no `DEFAULT` clause** — Real SQL Server raises Msg 1789 at CREATE TABLE if the FK column's `SET DEFAULT` would resolve to NULL on a NOT NULL column.
-  The simulator defers the check to runtime, where the resulting NULL fails Msg 515 instead.
-  Same end state (the statement fails); different error code.
+- *(the `SET DEFAULT` gap is closed — a NOT NULL referencing column with no DEFAULT raises **Msg 1762** at declaration, matching real. The earlier note claimed Msg 1789; the probed number is 1762, and its text names the constraint in double quotes where Msg 1776 beside it uses single. A **nullable** referencing column without a default is accepted, since NULL is then the value SET DEFAULT sets.)*

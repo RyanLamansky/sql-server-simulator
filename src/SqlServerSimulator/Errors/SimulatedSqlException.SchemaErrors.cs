@@ -602,7 +602,7 @@ partial class SimulatedSqlException
     /// PRIMARY KEY clause was declared in a CREATE TABLE.
     /// </summary>
     internal static SimulatedSqlException MultiplePrimaryKey(string tableName) =>
-        new($"Cannot add multiple PRIMARY KEY constraints to table '{tableName}'.", 8110, 16, 0);
+        new($"Cannot add multiple PRIMARY KEY constraints to table '{tableName}'.", 8110, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 8111: a PRIMARY KEY constraint named a column
@@ -892,6 +892,28 @@ partial class SimulatedSqlException
         new($"Cannot find the object \"{nameAsWritten}\" because it does not exist or you do not have permissions.", 4902, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 1762 — a FOREIGN KEY declares <c>SET DEFAULT</c>
+    /// while one or more of its referencing columns is NOT NULL and carries no
+    /// DEFAULT — the action would have nothing to set. Probe-confirmed against
+    /// SQL Server 2025, including the <c>"</c>-quoted constraint name (Msg 1776
+    /// beside it uses <c>'</c>), and that a *nullable* referencing column
+    /// without a default is accepted, since NULL is then the settable value.
+    /// Real raises this at CREATE / ALTER, not on the first cascading delete.
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeySetDefaultWithoutDefault(string foreignKeyName) =>
+        new($"Cannot create the foreign key \"{foreignKeyName}\" with the SET DEFAULT referential action, because one or more referencing not-nullable columns lack a default constraint.", 1762, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8112: a single CREATE TABLE declares more than
+    /// one CLUSTERED key constraint. Probe-confirmed against SQL Server 2025 —
+    /// the inline-pair case has its own message, distinct from the Msg 1902 the
+    /// CREATE INDEX and ALTER TABLE ADD CONSTRAINT paths raise (which names the
+    /// existing clustered index; this one can't, since neither exists yet).
+    /// </summary>
+    internal static SimulatedSqlException MultipleClusteredConstraints(string tableName) =>
+        new($"Cannot add more than one clustered index for constraints on table '{tableName}'.", 8112, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1776: a FOREIGN KEY's referenced column list
     /// doesn't match any PRIMARY KEY or UNIQUE constraint on the referenced
     /// table. Real SQL Server pairs this with a trailing Msg 1750 / 1753
@@ -900,7 +922,7 @@ partial class SimulatedSqlException
     /// Probe-confirmed verbatim wording against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException ForeignKeyNoMatchingKey(string referencedTable, string foreignKeyName) =>
-        new($"There are no primary or candidate keys in the referenced table '{referencedTable}' that match the referencing column list in the foreign key '{foreignKeyName}'.", 1776, 16, 0);
+        new($"There are no primary or candidate keys in the referenced table '{referencedTable}' that match the referencing column list in the foreign key '{foreignKeyName}'.", 1776, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 3726: <c>DROP TABLE</c> targeted a table that

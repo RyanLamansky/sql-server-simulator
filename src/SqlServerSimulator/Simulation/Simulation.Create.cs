@@ -1492,12 +1492,23 @@ partial class Simulation
             return [];
 
         var primaryKeyCount = 0;
+        var clusteredCount = 0;
         var resolved = new KeyConstraint[pendingKeys.Count];
         for (var c = 0; c < pendingKeys.Count; c++)
         {
             var pending = pendingKeys[c];
             if (pending.Kind == KeyConstraintKind.PrimaryKey && ++primaryKeyCount > 1)
                 throw SimulatedSqlException.MultiplePrimaryKey(tableName);
+
+            // A single declaration may carry at most one CLUSTERED key. Real
+            // gives this its own Msg 8112 rather than the Msg 1902 the CREATE
+            // INDEX / ALTER ADD CONSTRAINT paths raise — 1902 names the
+            // pre-existing clustered index, which doesn't exist yet when both
+            // constraints arrive in the same statement. Ordered after the
+            // primary-key count check, which outranks it (probe-confirmed: two
+            // PKs, both clustered by default, report Msg 8110).
+            if ((pending.Clustered ?? (pending.Kind == KeyConstraintKind.PrimaryKey)) && ++clusteredCount > 1)
+                throw SimulatedSqlException.MultipleClusteredConstraints(tableName);
 
             var storageOrdinals = new int[pending.FullOrdinals.Length];
             for (var i = 0; i < pending.FullOrdinals.Length; i++)
@@ -1901,8 +1912,8 @@ partial class Simulation
             }
 
             // Referenced columns must form a PRIMARY KEY or UNIQUE constraint
-            // (Msg 1776). Match is multiset-style: the set of referenced
-            // ordinals must equal the set of some existing key's ordinals.
+            // (Msg 1776), matched in declared order — see
+            // ReferencedColumnsFormKey.
             if (!ReferencedColumnsFormKey(referencedTable, refOrdinals))
             {
                 throw SimulatedSqlException.ForeignKeyNoMatchingKey(
@@ -1911,6 +1922,21 @@ partial class Simulation
             }
 
             var fkName = pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf));
+
+            // SET DEFAULT needs something to set: a NOT NULL referencing column
+            // with no DEFAULT leaves the action no value, which real rejects at
+            // declaration (Msg 1762) rather than at the first cascading delete.
+            // A nullable column is fine — NULL is the value it sets.
+            if (pf.DeleteAction == ReferentialAction.SetDefault || pf.UpdateAction == ReferentialAction.SetDefault)
+            {
+                foreach (var childOrdinal in pf.ChildFullOrdinals)
+                {
+                    var childColumn = childTable.Columns[childOrdinal];
+                    if (!childColumn.Nullable && childColumn.Default is null)
+                        throw SimulatedSqlException.ForeignKeySetDefaultWithoutDefault(fkName);
+                }
+            }
+
             var fk = new ForeignKey(
                 fkName,
                 context.CurrentDatabase.AllocateObjectId(),
@@ -1974,26 +2000,24 @@ partial class Simulation
     {
         foreach (var key in referencedTable.KeyConstraints)
         {
-            // Compare as sets of full ordinals — order doesn't matter for
-            // referenced-column-list matching (probe-confirmed).
+            // Order-sensitive: the referenced column list must match a key's
+            // columns in declared order. Probe-confirmed against SQL Server
+            // 2025 — REFERENCES p(y, x) against UNIQUE (x, y) raises Msg 1776,
+            // so the earlier set-equality match accepted an FK real rejects.
             if (key.StorageOrdinals.Length != refFullOrdinals.Length)
                 continue;
             var keyFull = StorageOrdinalsToFullOrdinals(referencedTable, key.StorageOrdinals);
-            if (SameSet(keyFull, refFullOrdinals))
+            if (SameSequence(keyFull, refFullOrdinals))
                 return true;
         }
         return false;
 
-        static bool SameSet(int[] a, int[] b)
+        static bool SameSequence(int[] a, int[] b)
         {
-            foreach (var x in a)
+            for (var i = 0; i < a.Length; i++)
             {
-                var found = false;
-                foreach (var y in b)
-                {
-                    if (y == x) { found = true; break; }
-                }
-                if (!found) return false;
+                if (a[i] != b[i])
+                    return false;
             }
             return true;
         }

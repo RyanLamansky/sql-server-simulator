@@ -142,9 +142,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **Cross-collation comparison / concatenation binds per row, not at compile time** — `c1.x = c2.x` across differently-collated columns raises Msg 468 once a row is evaluated, but the same statement over an **empty** rowset passes silently where real rejects it during compilation (probe-confirmed: real's is an uncatchable bind-time failure).
   Set operations bind at compile time and match real exactly; this is the residual, and closing it means carrying collation through the static type path at every comparison site.
   → [`collations.md`](collations.md#known-gaps).
-- **Msg 1902 one-clustered-index-per-table covers only the `CREATE INDEX` statement** — every constraint path is unchecked: inline `PRIMARY KEY CLUSTERED` beside `UNIQUE CLUSTERED` in one CREATE TABLE, two `ALTER TABLE ADD CONSTRAINT … CLUSTERED` in sequence, and a clustered PK added after a `CREATE CLUSTERED INDEX` all pass.
-  The extra clustered entries fall back to nonclustered ids rather than raising.
-  → [`indexes.md`](indexes.md#fidelity-gaps).
 - **`NEXT VALUE FOR` in a JOIN `ON` or `OUTPUT` clause** — real rejects both with **Msg 11720**; the simulator runs them and emits values.
   → [`sequences.md`](sequences.md#deferred).
 - **Statement-permission gates stop at the modeled set** — CREATE TABLE / VIEW / PROCEDURE / FUNCTION / SEQUENCE / ROLE / USER / SCHEMA, ALTER TABLE, DROP TABLE and DROP USER are checked; other CREATE / ALTER / DROP statements run unchecked, as does `ALTER` / `CREATE OR ALTER` of an existing module.
@@ -157,11 +154,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
   → [`grammar.md`](grammar.md).
 - **Module body validation deferred to first execution** — a TVP parameter's **Msg 10700** and the **Msg 111** batch-first rule surface at EXEC where real validates at CREATE.
   → [`table-valued-parameters.md`](table-valued-parameters.md#fidelity-gaps-remaining), [`programmable.md`](programmable.md).
-- **Composite FK referenced-column order** — `ReferencedColumnsFormKey` accepts a referenced UNIQUE whose column order differs from the FK's, by set equality; real matches declared order.
-  Unprobed.
-  → [`foreign-keys.md`](foreign-keys.md#fidelity-gaps).
-- **`FOREIGN KEY … SET DEFAULT` with no DEFAULT on the column** — real raises **Msg 1789** at CREATE TABLE; the simulator defers to a runtime **Msg 515**, so the statement fails later and under a different code.
-  → [`foreign-keys.md`](foreign-keys.md#fidelity-gaps).
 - **CONVERT style leniency** — the two-digit-vs-four-digit-year century restriction isn't enforced, and a `T`-separated time is accepted under general styles; the live server rejects both.
   → [`casting.md`](casting.md).
 - **`FORCESEEK(index_name(col_list))` nested-form name validation** — parses silently where real raises **Msg 308**.

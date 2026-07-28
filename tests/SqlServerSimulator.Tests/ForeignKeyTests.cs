@@ -566,4 +566,70 @@ public sealed class ForeignKeyTests
         AreEqual(2, conn.CreateCommand("select count(*) from a").ExecuteScalar());
         AreEqual(2, conn.CreateCommand("select count(*) from b").ExecuteScalar());
     }
+
+    /// <summary>
+    /// The referenced column list must match a key's columns <em>in declared
+    /// order</em>. Probe-confirmed against SQL Server 2025:
+    /// <c>REFERENCES p(y, x)</c> against <c>UNIQUE (x, y)</c> raises Msg 1776,
+    /// so the earlier set-equality match accepted an FK real rejects.
+    /// </summary>
+    [TestMethod]
+    public void CompositeForeignKey_ReversedReferencedOrder_Raises1776()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table p (x int not null, y int not null, constraint uq_p unique (x, y))");
+
+        var ex = sim.AssertSqlError(
+            "create table c (a int not null, b int not null, constraint fk_c foreign key (a, b) references p(y, x))",
+            1776);
+        Assert.AreEqual(
+            "There are no primary or candidate keys in the referenced table 'p' that match the referencing column list in the foreign key 'fk_c'.",
+            ex.Message);
+    }
+
+    /// <summary>Matching order stays accepted — the gate narrows nothing else.</summary>
+    [TestMethod]
+    public void CompositeForeignKey_MatchingReferencedOrder_Accepted()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table p (x int not null, y int not null, constraint uq_p unique (x, y))");
+        _ = sim.ExecuteNonQuery(
+            "create table c (a int not null, b int not null, constraint fk_c foreign key (a, b) references p(x, y))");
+    }
+
+    /// <summary>
+    /// <c>SET DEFAULT</c> needs something to set: a NOT NULL referencing column
+    /// with no DEFAULT leaves the action no value, which real rejects at
+    /// declaration with <b>Msg 1762</b> rather than at the first cascading
+    /// delete (probe-confirmed — note the constraint name is double-quoted
+    /// here where Msg 1776 single-quotes it).
+    /// </summary>
+    [TestMethod]
+    public void ForeignKeySetDefault_NotNullColumnWithoutDefault_Raises1762()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table p (x int not null constraint pk_p primary key)");
+
+        var ex = sim.AssertSqlError(
+            "create table c (a int not null, constraint fk_c foreign key (a) references p(x) on delete set default)",
+            1762);
+        Assert.AreEqual(
+            "Cannot create the foreign key \"fk_c\" with the SET DEFAULT referential action, because one or more referencing not-nullable columns lack a default constraint.",
+            ex.Message);
+    }
+
+    /// <summary>
+    /// A <em>nullable</em> referencing column without a default is accepted —
+    /// NULL is the value SET DEFAULT then sets (probe-confirmed), so the gate
+    /// keys on nullability rather than on the mere absence of a default.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table c (a int null, constraint fk_c foreign key (a) references p(x) on delete set default)")]
+    [DataRow("create table c (a int not null default (0), constraint fk_c foreign key (a) references p(x) on delete set default)")]
+    public void ForeignKeySetDefault_SettableColumn_Accepted(string sql)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table p (x int not null constraint pk_p primary key)");
+        _ = sim.ExecuteNonQuery(sql);
+    }
 }

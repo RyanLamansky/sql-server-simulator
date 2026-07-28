@@ -463,4 +463,77 @@ public sealed class KeyConstraintTests
             "merge into t using (values (1, 200)) as src (id, x) on 1=0 when not matched then insert (id, x) values (src.id, src.x);", 2627);
         Assert.Contains("PRIMARY KEY constraint 'pk_t'", ex.Message);
     }
+
+    /// <summary>
+    /// A single CREATE TABLE may declare at most one CLUSTERED key. Real gives
+    /// this its own <b>Msg 8112</b> rather than the Msg 1902 the CREATE INDEX
+    /// and ALTER ADD CONSTRAINT paths raise — 1902 names the pre-existing
+    /// clustered index, which doesn't exist yet when both constraints arrive in
+    /// the same statement (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void TwoClusteredConstraints_InOneCreateTable_Raises8112()
+    {
+        var ex = new Simulation().AssertSqlError(
+            "create table t (a int not null primary key clustered, b int not null unique clustered)", 8112);
+        Assert.AreEqual("Cannot add more than one clustered index for constraints on table 't'.", ex.Message);
+    }
+
+    /// <summary>
+    /// The multiple-PRIMARY-KEY check outranks the clustered check — two PKs
+    /// are both clustered by default, and real reports Msg 8110 for them
+    /// (probe-confirmed), so gate order is load-bearing here.
+    /// </summary>
+    [TestMethod]
+    public void TwoPrimaryKeys_BothClusteredByDefault_StillRaises8110()
+        => new Simulation().AssertSqlError("create table t (a int primary key, b int primary key)", 8110);
+
+    /// <summary>
+    /// The constraint paths carry the same one-clustered-per-table rule the
+    /// CREATE INDEX path already enforced: real raises <b>Msg 1902 State 3</b>
+    /// naming the existing clustered index, whether it arrived as a constraint
+    /// or as a CREATE CLUSTERED INDEX.
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter table t add constraint pk_t primary key clustered (a)", "alter table t add constraint uq_t unique clustered (b)", "pk_t")]
+    public void SecondClusteredConstraint_ViaAlter_Raises1902(string first, string second, string existingName)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int not null, b int not null)");
+        _ = sim.ExecuteNonQuery(first);
+
+        var ex = sim.AssertSqlError(second, 1902);
+        Assert.AreEqual(
+            $"Cannot create more than one clustered index on table 't'. Drop the existing clustered index '{existingName}' before creating another.",
+            ex.Message);
+        Assert.AreEqual(3, ex.State);
+    }
+
+    /// <summary>
+    /// A clustered constraint added after a CREATE CLUSTERED INDEX hits the
+    /// same rule from the other direction.
+    /// </summary>
+    [TestMethod]
+    public void ClusteredConstraint_AfterClusteredIndex_Raises1902()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int not null, b int not null)");
+        _ = sim.ExecuteNonQuery("create clustered index ix_t on t(a)");
+
+        var ex = sim.AssertSqlError("alter table t add constraint pk_t primary key clustered (b)", 1902);
+        Assert.AreEqual(
+            "Cannot create more than one clustered index on table 't'. Drop the existing clustered index 'ix_t' before creating another.",
+            ex.Message);
+    }
+
+    /// <summary>
+    /// A single clustered key — the overwhelmingly common shape — is untouched
+    /// by either gate, including alongside a nonclustered UNIQUE.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (a int not null primary key clustered, b bit not null default (0))")]
+    [DataRow("create table t (a int not null primary key clustered, b int not null unique)")]
+    [DataRow("create table t (a int identity(1,1) not null constraint pk_t primary key clustered, b int not null)")]
+    public void SingleClusteredKey_Accepted(string sql)
+        => _ = new Simulation().ExecuteNonQuery(sql);
 }
