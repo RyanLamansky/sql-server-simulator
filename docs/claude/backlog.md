@@ -17,6 +17,8 @@ When an item ships:
    Never rely on git history (or this file) for the *how*.
 
 Per project convention, probe the live SQL Server 2025 reference instance before encoding "matches SQL Server" behavior.
+**Re-verify an entry before building on it** — entries go stale as the surface moves, and this file has held claims that no longer reproduced.
+When re-probing, give each claim its own batch: a reference probe that creates a table and queries it in one batch fails compile-time column resolution on real (Msg 207) for reasons that have nothing to do with the claim, which reads exactly like the divergence you were looking for.
 
 This file is the home for net-new non-function feature proposals too.
 CLAUDE.md's **Not modeled yet** section is the complementary *descriptive* map (what raises `NotSupportedException` / Msg today, so the surface isn't over-promised); this list is the *prospective* one.
@@ -42,7 +44,7 @@ The subsections that follow carry the areas with work in flight.
 - **Temporal query forms and retention** — `FOR SYSTEM_TIME BETWEEN … AND …` / `FROM … TO …` / `CONTAINED IN (…)`, `HISTORY_RETENTION_PERIOD` pruning, auto-named history tables, and base-vs-history column-shape validation at `SET (SYSTEM_VERSIONING = ON)` → [`temporal-tables.md`](temporal-tables.md#not-modeled).
 - **Synonym catalog surface** — `sys.synonyms` / `sys.objects` projection, `OBJECT_ID('syn')`, synonyms as EXEC / scalar-function / sequence targets, cross-database bases, and the reverse name-collision check → [`schemas.md`](schemas.md).
 - **Key-range locks** — the one unbuilt piece of the locking model; HOLDLOCK widens to table-S in their place → [`locking.md`](locking.md).
-- **Column-level INSERT grants and column grants on views** — column-level SELECT / UPDATE / REFERENCES ship → [`permissions.md`](permissions.md#known-gaps).
+- **Column grants on views aren't honored** — `GRANT SELECT (col) ON <view>` is accepted and then denies the *granted* column too (Msg 229 at object level), where real allows it; column-level SELECT / UPDATE / REFERENCES on **tables** ship → [`permissions.md`](permissions.md#known-gaps).
 - **`GRANT … ON SERVER` / `ON LOGIN::` securables and application roles** — server-scope permission *names* and server roles ship → [`permissions.md`](permissions.md#known-gaps).
 - **Multi-statement plan caching** — the cache keys single-SELECT batches, so every SaveChanges INSERT-then-`SELECT SCOPE_IDENTITY()` round trip re-parses → [`plan-cache.md`](plan-cache.md).
 
@@ -77,8 +79,10 @@ One residual, probed on the same server: `REGEXP_LIKE` is a reserved keyword at 
 
 Remaining **sim-only** delta (real passes, simulator fails), roughly in breadth order:
 
-- **`OUTPUT … INTO <target>` over the ODBC/pyodbc wire** — an INSERT/UPDATE/DELETE whose OUTPUT clause has an `INTO @tablevar` **or** `INTO #temp` target produces a **malformed TDS response** over ODBC Driver 18 (client reports `HY000 "A severe error occurred"` and the connection breaks) — yet **Microsoft.Data.SqlClient tolerates it**, and the in-process ADO path works, so the engine is correct and only the wire response for the OUTPUT-INTO statement is wrong. `OUTPUT … VALUES(…)` *without* INTO works over ODBC. Blocks Django's `db_default` returning path (`SELECT TOP 0 … INTO #tmp; INSERT … OUTPUT INSERTED.* INTO #tmp VALUES(DEFAULT…); SELECT … FROM #tmp`) — ~7 `field_defaults` tests. Narrowed to the response of the single OUTPUT-INTO statement (returns `SimulatedNonQuery`, so the fault is in the DONE/completion-token sequence the wire emits); no `TdsSession` backstop fires and `TdsTokenWriter.FlushAsync` isn't reached, so response generation aborts before flush. A deep TDS-path bug — needs a sim-vs-real byte capture (cleartext proxy) of the OUTPUT-INTO statement's completion tokens. Home: `Network/`.
-- **`GREATEST` / `LEAST` over aggregates + subtle aggregate-result divergences** (~5 `aggregation`/`annotation`/`expressions` tests). The `Greatest`/`Least` shape is `(SELECT MIN(value) FROM (VALUES (MIN(col)),(x)) AS _LEAST(value))` — a **correlated aggregate inside a VALUES-constructor tuple** (Msg 207: `value` doesn't resolve / the outer aggregate in the nested VALUES isn't evaluated). Isolated: a plain `(VALUES(1),(5)) v(value)` derived table and `MIN`-over-VALUES both work; only the aggregate-referencing-the-outer-table-inside-VALUES case fails. The rest are wrong-result divergences in aggregate/annotation computation (assertion mismatches, no SQL error). Deep query-engine work. Home: `Selection.cs`.
+- **Correlated derived table nested in a scalar subquery doesn't see the outermost query** (~5 `aggregation`/`annotation`/`expressions` tests). Django's `Greatest`/`Least` emits `(SELECT MIN(value) FROM (VALUES (MIN(col)),(x)) AS _LEAST(value))`; real returns a value, the simulator raises **Msg 207** on `col`.
+  Re-probed 2026-07-29 and the gap is **wider than the aggregate**: even the non-aggregate `(VALUES (t.col),(5))` inside a scalar subquery fails the same way, so the first layer is plain correlation depth — a derived table (VALUES *or* SELECT) in a subquery's FROM can't reach the outermost scope, where real correlates per outer row (`3, 5, 5`).
+  The second layer is aggregate scoping: with `MIN(t.col)` the outer query must itself become aggregated (real returns one row), and the simulator instead leaks an internal invariant — `"AggregateExpression.Run was called before its result was bound"` — rather than any SQL-shaped error, which is its own small bug.
+  Deep query-engine work. Home: `Selection.cs`.
 
 **Over-permissive validation — the simulator *accepts* what real *rejects*.** This is the more dangerous divergence direction (an app query works on the simulator and breaks on real), and it is invisible to a sim-only failure list: surface it with the *reverse* delta `comm -13 <sim fails> <real fails>`, where real-only failures mean the simulator over-passes. **Whole-suite audits should always run the reverse delta — a green "matches real" claim requires both directions.**
 
@@ -142,19 +146,25 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **Cross-collation comparison / concatenation binds per row, not at compile time** — `c1.x = c2.x` across differently-collated columns raises Msg 468 once a row is evaluated, but the same statement over an **empty** rowset passes silently where real rejects it during compilation (probe-confirmed: real's is an uncatchable bind-time failure).
   Set operations bind at compile time and match real exactly; this is the residual, and closing it means carrying collation through the static type path at every comparison site.
   → [`collations.md`](collations.md#known-gaps).
+- **Column lists accepted on `INSERT` / `DELETE` grants** — `GRANT INSERT (col) ON t TO u` and the `DELETE` equivalent are accepted; real rejects both with **Msg 1020** (Class 15 State 1, `"Sub-entity lists (such as column or security expressions) cannot be specified for entity-level permissions."`) because those are entity-level permissions with no column form.
+  `SELECT` / `UPDATE` / `REFERENCES` do take a column list on real, and ship.
+  → [`permissions.md`](permissions.md#known-gaps).
+- **`OUTPUT … INTO` doesn't gate the target's identity column** — writing an OUTPUT row into a target that has an `IDENTITY` column is accepted in every form; real allows exactly one.
+  Probed 2026-07-29: no target column list → **Msg 8101** (`"An explicit value for the identity column in table 'dbo.dest' can only be specified when a column list is used and IDENTITY_INSERT is ON."`, batch-aborting); a column list naming the identity column → **Msg 544**, whose message slot names the **source** table rather than the OUTPUT target (a real SQL Server quirk worth mirroring verbatim); the same with `SET IDENTITY_INSERT <target> ON` → **still Msg 544**, so the setting never unlocks it; a column list that excludes the identity column → accepted, the row landing with a generated id.
+  Reached easily from ORMs, since `SELECT TOP 0 * INTO #tmp FROM t` inherits `t`'s identity property and `OUTPUT INSERTED.* INTO #tmp` then hits it.
+  → [`dml.md`](dml.md).
 - **Statement-permission gates stop at the modeled set** — CREATE TABLE / VIEW / PROCEDURE / FUNCTION / SEQUENCE / ROLE / USER / SCHEMA, ALTER TABLE, DROP TABLE and DROP USER are checked; other CREATE / ALTER / DROP statements run unchecked, as does `ALTER` / `CREATE OR ALTER` of an existing module.
   → [`permissions.md`](permissions.md#known-gaps).
 - **Non-Framework CLR assemblies load** — real resolves every `AssemblyRef` against a fixed .NET Framework catalog and raises **Msg 6503** otherwise (probe-confirmed for .NET 10 and for .NET Standard 2.0); the simulator runs on .NET so all of them bind, which is also what lets the tests emit a fixture assembly without a Framework toolchain.
   → [`clr-assemblies.md`](clr-assemblies.md#divergences).
 - **`REGEXP_LIKE` isn't reserved at compatibility level 170** — detail under the Django shakedown above; closing it belongs with the native predicate.
-- **Alias swallow after a complete select-list expression** — `SELECT 1 xyz 2` parses as two columns.
-  The reject shape on real isn't probed; the over-permissiveness is documented as a latent gap in the identifier normalizer.
+- **Alias swallow after a complete select-list expression** — `SELECT 1 xyz 2` parses as two columns; real raises **Msg 102** (`"Incorrect syntax near '2'."`, Class 15 — probed 2026-07-29, closing this entry's long-standing "reject shape not probed" note).
   → [`grammar.md`](grammar.md).
 - **Module body validation deferred to first execution** — a TVP parameter's **Msg 10700** and the **Msg 111** batch-first rule surface at EXEC where real validates at CREATE.
   → [`table-valued-parameters.md`](table-valued-parameters.md#fidelity-gaps-remaining), [`programmable.md`](programmable.md).
-- **CONVERT style leniency** — the two-digit-vs-four-digit-year century restriction isn't enforced, and a `T`-separated time is accepted under general styles; the live server rejects both.
+- **CONVERT style leniency** — the two-digit-vs-four-digit-year century restriction isn't enforced, and a `T`-separated time is accepted under general styles; real raises **Msg 241** for both (`CONVERT(datetime, '01/01/99', 101)` and `CONVERT(datetime, '2020-01-01T10:00:00', 100)`, probed 2026-07-29).
   → [`casting.md`](casting.md).
-- **`FORCESEEK(index_name(col_list))` nested-form name validation** — parses silently where real raises **Msg 308**.
+- **`FORCESEEK(index_name(col_list))` nested-form name validation** — parses silently where real raises **Msg 308** (`"Index 'nosuchindex' on table 'dbo.fs' (specified in the FROM clause) does not exist."`).
   → [`query-hints.md`](query-hints.md#not-enforced).
 
 Tracked elsewhere and over-permissive in the same sense: `bit` arithmetic (below), and the recursive-CTE part restrictions Msg 460 / 461 / 462 / 467 / 465 (CLAUDE.md's Not-modeled-yet).
@@ -170,18 +180,19 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   The *under*-permissive direction — a valid INSERT failing.
   Home: `KeyConstraint` / `Index` (the stored flag), the INSERT duplicate-detection path (the skip + info message), `BuiltInResources` (the catalog column).
 - **`bit` arithmetic accepted where real rejects it** — the simulator computes `bit + bit` / `- ` / `*` / `/` and hands back a bit (`PureIntegerArithmetic`'s `common == SqlType.Bit` arm); real refuses the same-type pair outright.
-  Probe-confirmed: `+` / `-` → **Msg 402** (`"The data types bit and bit are incompatible in the add operator."`), `*` / `/` → **Msg 8117** (`"Operand data type bit is invalid for multiply operator."`), and `SUM(bit)` → **Msg 8117** (`"Operand data type bit is invalid for sum operator."`).
+  Probe-confirmed: `+` / `-` → **Msg 402** (`"The data types bit and bit are incompatible in the add operator."`), `*` / `/` → **Msg 8117** (`"Operand data type bit is invalid for multiply operator."`).
   A mixed `bit + int` promotes and computes normally (→ 2) on both sides, so only the same-type pair diverges.
-  The over-permissive direction, and small — a type-pair gate ahead of the arithmetic plus one `SumAggregator` dispatch arm.
+  **`SUM(bit)` already matches** — the simulator raises Msg 8117 as real does (re-verified 2026-07-29); only the four arithmetic operators remain.
+  The over-permissive direction, and small — a type-pair gate ahead of the arithmetic.
   Surfaced while adding the integer-overflow checks and held out of that bundle to keep it scoped; `BitWithStringArithmetic` is the existing precedent for the message split.
   Home: `TwoSidedExpression.PureIntegerArithmetic`.
 - **Per-object creation-time `QUOTED_IDENTIFIER` capture not modeled** — real SQL Server stamps procedures / views / triggers / tables with the QI setting in effect at CREATE (`sys.sql_modules.uses_quoted_identifier`, `OBJECTPROPERTY(id, 'IsQuotedIdentOn')`) and executes bodies under the captured setting; the simulator re-parses bodies under the executing session's current setting.
   See [`grammar.md`](grammar.md).
   Rare legacy-pattern impact.
 - **Skip-mode deferred name resolution — DML target tables not placeholder-continued** — the skip-mode parse-continuation fix substitutes placeholder metadata for a missing *FROM-clause table* or *schema-qualified function* so an un-taken branch parses to completion and is discarded whole (killing the orphaned-`ELSE` cascade — see [`control-flow.md`](control-flow.md)).
-  A missing **DML target table** (INSERT / UPDATE / DELETE / MERGE) still resolves inline and throws Msg 208, caught by the residual object-name swallow whose flat recovery scan can orphan a trailing `ELSE` / `END` when the throw fires before the statement's own body is consumed.
-  Probe-confirmed real SQL Server defers these (`IF 1=0 INSERT INTO missing SELECT * FROM other; SELECT 'after'` → `after`; the ELSE form runs the ELSE).
-  The simulator instead surfaces a spurious Msg 208 (or Msg 102 for MERGE) and skips the ELSE.
+  Re-probed 2026-07-29: the **spurious Msg 208 is gone** — `IF 1=0 INSERT INTO missing SELECT * FROM other; SELECT 'after'` now returns `after`, as do the UPDATE and DELETE forms, so a dead branch with a missing DML target no longer breaks the following statement.
+  What still reproduces is the **orphaned `ELSE`**: the bare (non-`BEGIN`/`END`) form `IF 1=0 INSERT INTO missing … ELSE SELECT 'else-ran'` raises **Msg 102** near `else` where real runs the ELSE, and a missing **MERGE** target raises Msg 102 near `;`.
+  Wrapping the dead branch in `BEGIN`/`END` parses correctly, as does the same shape over an existing table, which localizes it to the object-name swallow's flat recovery scan consuming the `ELSE` when the throw fires before the statement body is.
   Narrow (requires a *missing* DML target in a dead branch — the common safe-guard idiom targets an existing table), .
   The faithful fix is placeholder-continuation through the DML column-validation surface (INSERT column-list / arity, UPDATE SET / DELETE WHERE against a placeholder target), which is a broad, per-processor change — deferred as low-frequency.
 - **Nested paren/subquery/function caps below real's absolute thresholds** — the expression-depth restructure (iterative precedence-climbing parse, iterative `Run`/`GetSqlType`, n-ary `AND`/`OR`, NOT-collapse) removed the process-death risk and lifted flat operator chains to no artificial cap.
@@ -197,6 +208,9 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 - **`PRIMARY KEY (col DESC)` direction is parse-and-discard** — `KeyConstraint` tracks no per-column direction, so `sys.index_columns.is_descending_key` reports 0 where real reports 1 (probe-confirmed).
   A schema-diff or index-scripting tool reading the column sees an ascending key; the stored rows are unordered either way, so only the metadata diverges.
   See [`catalog-views.md`](catalog-views.md).
+- **`OBJECT_ID('<fn>')` returns NULL for an unqualified scalar function** — real resolves the bare name against the default schema and returns the id; the simulator resolves only the qualified `OBJECT_ID('dbo.f')` form (probed 2026-07-29).
+  Tables, procedures and views all resolve unqualified, so this is specific to the function namespace — and it silently breaks the `OBJECTPROPERTY(OBJECT_ID('f'), …)` idiom, which then reports NULL rather than the property.
+  See [`catalog-views.md`](catalog-views.md), [`schemas.md`](schemas.md).
 - **`OBJECTPROPERTY(id, 'IsDeterministic')` doesn't analyze the body** — every scalar function reports 1, so a non-deterministic one (a `GETDATE()`-bearing UDF) over-reports; real evaluates determinism per module.
   `IsSchemaBound` likewise reports 0 for a schema-bound *function* (the flag is tracked on views only).
   See [`catalog-views.md`](catalog-views.md).
