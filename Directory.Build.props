@@ -17,6 +17,8 @@
     <!-- Only SqlServerSimulator publishes; everything else opts out here and
          the package project sets true. -->
     <IsPackable>false</IsPackable>
+    <!-- Exclude test run debris from build consideration. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);TestResults/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

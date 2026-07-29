@@ -4,6 +4,9 @@ bin/
 obj/
 *.user
 
+# Test run output
+TestResults/
+
 # Code coverage analysis results
 *.coverage
 
