@@ -96,7 +96,15 @@ internal sealed class ObjectId : Expression
         // matches.
         if (typeFilter is null || BuiltInToken.EqualsAny(typeFilter, "FN", "IF", "TF"))
         {
-            if (runtime.Batch.TryResolveFunction(parsed, out var function))
+            // TryResolveFunction takes 2-/3-part names only, because a bare
+            // f() at a *call* site is Msg 195 on real. OBJECT_ID is a name
+            // lookup rather than a call, and real resolves the unqualified
+            // form against the default schema (probe-confirmed: OBJECT_ID('f')
+            // returns the id), so qualify a 1-part name before asking.
+            var functionName = parsed.Count == 1
+                ? new MultiPartName(Database.DefaultSchemaName).WithAddedPart(parsed.Leaf)
+                : parsed;
+            if (runtime.Batch.TryResolveFunction(functionName, out var function))
             {
                 var kindMatches = typeFilter switch
                 {

@@ -241,6 +241,8 @@ Raising real SQL Server's own error **is** modeled behavior.
 These are coverage, not gaps: accepting the statement instead would regress fidelity, and the simulator accepting what real rejects is the more dangerous divergence direction (see the over-permissive section of [`backlog.md`](docs/claude/backlog.md)).
 
 - `text` / `ntext` / `image` in comparison (Msg 402), ORDER BY / DISTINCT (Msg 306), and aggregates (Msg 8117 from MAX/MIN).
+- `bit` paired with `bit` in arithmetic — **Msg 402** for `+` / `-` / `%`, **Msg 8117** for `*` / `/` (bitwise `&` / `|` / `^` and a mixed `bit + int` stay legal) — see [`arithmetic.md`](docs/claude/arithmetic.md).
+- A column list on a permission that has no column form (everything but `SELECT` / `UPDATE` / `REFERENCES`) → **Msg 1020** — see [`permissions.md`](docs/claude/permissions.md).
 - `RANGE BETWEEN <N> PRECEDING/FOLLOWING` numeric-offset → **Msg 4194** (real's licensed-feature rejection); `ROWS` numeric-offset ships.
   Default frame with ORDER BY = `RANGE UNBOUNDED PRECEDING TO CURRENT ROW`; without it, whole partition — and LAST_VALUE matches real's default-frame semantic.
 - Table-variable named constraints / FKs → **Msg 102** (real's `DECLARE @t TABLE` grammar restriction); multi-variable DECLARE with a table variable, mixed scalar+table DECLARE, and `SET IDENTITY_INSERT @t ON` reject the same way.

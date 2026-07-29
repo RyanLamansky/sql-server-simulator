@@ -103,6 +103,8 @@ The type filter is case-insensitive but whitespace-sensitive — `'U'` and `'u'`
 A NULL on any argument propagates NULL.
 
 - **Runtime-evaluated arguments**: `DECLARE @n nvarchar(100) = 'foo'; SELECT OBJECT_ID(@n)` works — both args are full `Expression`s.
+- **Unqualified function names resolve against the default schema.** `BatchContext.TryResolveFunction` takes 2-/3-part names only, because a bare `f()` at a *call* site is Msg 195 on real; `OBJECT_ID` is a name lookup rather than a call, and real returns the id for `OBJECT_ID('f')`, so the 1-part form is qualified with `dbo` before the resolver is asked.
+  Tables, procedures and views already resolved unqualified — this was specific to the function namespace, and it silently broke the common `OBJECTPROPERTY(OBJECT_ID('f'), …)` idiom, which reported NULL rather than the property.
 - **Temp-table divergence**: `OBJECT_ID('#foo')` resolves the session's `#foo` directly because `BatchContext.TryResolveTable` routes `#` leaves to the connection's temp dict regardless of qualifier.
   Real SQL Server requires the explicit `tempdb..#foo` three-part form (since unqualified resolution targets the current DB, not tempdb).
   The simulator's existing temp-routing simplification carries through; `OBJECT_ID('tempdb..#foo')` also works (probe-confirmed real behavior).

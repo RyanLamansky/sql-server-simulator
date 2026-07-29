@@ -379,8 +379,21 @@ internal abstract partial class SqlType
         // and don't accept decimal operands anyway — fall through to the
         // joint-envelope rule for type unification (decimal × bitwise will
         // raise the unsupported-numeric-pair error at runtime instead).
+        // bit & bit / | / ^ are legal and land here (probe-confirmed).
         if (op is '&' or '|' or '^')
             return Promote(a, b);
+
+        // bit paired with bit has no arithmetic at all on real, splitting the
+        // same way the binary pair above does: Msg 8117 for '* /', Msg 402 for
+        // '+ - %' (probe-confirmed against SQL Server 2025, including the
+        // modulo wording). A mixed bit + int promotes and computes normally,
+        // so only the same-type pair is refused.
+        if (a == Bit && b == Bit)
+        {
+            throw op is '*' or '/'
+                ? SimulatedSqlException.OperandDataTypeInvalid(a, BinaryOperatorWord(op))
+                : SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, op == '+' ? "add" : BinaryOperatorWord(op));
+        }
 
         // String + string is concatenation, not arithmetic. Lengths combine
         // as min(8000, N+M) for varchar/char pairs, min(4000, N+M) for any

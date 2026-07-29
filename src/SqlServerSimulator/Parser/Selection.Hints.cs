@@ -434,6 +434,27 @@ internal sealed partial class Selection
             || sourceSpan.Equals("FORCESCAN", StringComparison.OrdinalIgnoreCase))
         {
             info.IndexHint = true;
+            context.MoveNextRequired();
+            if (context.Token is Operator { Character: '(' })
+            {
+                // FORCESEEK's nested form names an index —
+                // FORCESEEK(index_name(col [, …])). Peek that name so the
+                // FROM-source call site validates its existence exactly as it
+                // does for INDEX(name); real raises the same Msg 308 for both.
+                // Then rewind so the payload skip below stays the single
+                // consumer of the parenthesized run. FORCESCAN takes no
+                // arguments, so it never enters here.
+                var checkpoint = context.SaveCheckpoint();
+                context.MoveNextRequired();
+                if (context.Token is Name)
+                    CaptureOneIndexArgument(context, ref info);
+                context.RestoreCheckpoint(checkpoint);
+
+                SkipBalancedParens(context);
+                context.MoveNextRequired();
+            }
+
+            return;
         }
         context.MoveNextRequired();
         if (context.Token is Operator { Character: '=' })

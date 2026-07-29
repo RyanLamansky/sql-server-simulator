@@ -209,6 +209,38 @@ partial class Simulation
             return true;
         }
 
+        // Fold a securable-placed column list (GRANT SELECT ON t (a, b)) into
+        // every permission. It cannot combine with a per-permission list
+        // (GRANT SELECT (a) ON t (b) is malformed).
+        if (objectColumns is not null)
+        {
+            if (permissions.Exists(p => p.Columns is not null))
+                throw SimulatedSqlException.GrantInvalidColumnListAfterObject();
+            for (var i = 0; i < permissions.Count; i++)
+                permissions[i] = (permissions[i].Name, objectColumns);
+        }
+
+        // The three object permissions with a column form. Every other
+        // permission is entity-level, so a column list on it is Msg 1020.
+        static bool PermissionAcceptsColumnList(string name) =>
+            BuiltInToken.EqualsAny(name.Trim(), "SELECT", "UPDATE", "REFERENCES");
+
+        // A parenthesized column list is legal only on an object-scope grant,
+        // and then only for the three permissions that have a column form.
+        // Everything else is entity-level and takes no sub-entity list —
+        // probed across SELECT / UPDATE / REFERENCES (accepted) vs INSERT /
+        // DELETE / EXECUTE / ALTER / CONTROL / TAKE OWNERSHIP / VIEW DEFINITION
+        // / VIEW CHANGE TRACKING / RECEIVE (all Msg 1020).
+        // Real reports this at Class 15 — a compile-time rejection that fires
+        // before the securable resolves, so it beats the Msg 4606 kind check
+        // (GRANT EXECUTE (col) on a *table* is 1020, not 4606) and TRY/CATCH
+        // can't intercept it. Hence its position ahead of the resolution chain.
+        if (permissions.Exists(p => p.Columns is not null
+            && (permClass != PermissionChecker.ClassObject || !PermissionAcceptsColumnList(p.Name))))
+        {
+            throw SimulatedSqlException.GrantSubEntityListNotAllowed();
+        }
+
         var database = context.CurrentDatabase;
         SchemaObject? securableObject = null;
 
@@ -237,20 +269,6 @@ partial class Simulation
                 ValidatePermissionAgainstObjectKind(permName, obj.ObjectTypeCode);
         }
 
-        // Fold a securable-placed column list (GRANT SELECT ON t (a, b)) into
-        // every permission. It cannot combine with a per-permission list
-        // (GRANT SELECT (a) ON t (b) is malformed).
-        if (objectColumns is not null)
-        {
-            if (permissions.Exists(p => p.Columns is not null))
-                throw SimulatedSqlException.GrantInvalidColumnListAfterObject();
-            for (var i = 0; i < permissions.Count; i++)
-                permissions[i] = (permissions[i].Name, objectColumns);
-        }
-
-        // A parenthesized column list is legal only on an object-scope grant.
-        if (permClass != PermissionChecker.ClassObject && permissions.Exists(p => p.Columns is not null))
-            throw SimulatedSqlException.GrantSubEntityListNotAllowed();
 
         // Msg 4624: a grant / deny / revoke targeting sa / dbo / sys /
         // INFORMATION_SCHEMA / entity owner / self is a silent no-op delivered

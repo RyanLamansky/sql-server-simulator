@@ -146,13 +146,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **Cross-collation comparison / concatenation binds per row, not at compile time** — `c1.x = c2.x` across differently-collated columns raises Msg 468 once a row is evaluated, but the same statement over an **empty** rowset passes silently where real rejects it during compilation (probe-confirmed: real's is an uncatchable bind-time failure).
   Set operations bind at compile time and match real exactly; this is the residual, and closing it means carrying collation through the static type path at every comparison site.
   → [`collations.md`](collations.md#known-gaps).
-- **Column lists accepted on `INSERT` / `DELETE` grants** — `GRANT INSERT (col) ON t TO u` and the `DELETE` equivalent are accepted; real rejects both with **Msg 1020** (Class 15 State 1, `"Sub-entity lists (such as column or security expressions) cannot be specified for entity-level permissions."`) because those are entity-level permissions with no column form.
-  `SELECT` / `UPDATE` / `REFERENCES` do take a column list on real, and ship.
-  → [`permissions.md`](permissions.md#known-gaps).
-- **`OUTPUT … INTO` doesn't gate the target's identity column** — writing an OUTPUT row into a target that has an `IDENTITY` column is accepted in every form; real allows exactly one.
-  Probed 2026-07-29: no target column list → **Msg 8101** (`"An explicit value for the identity column in table 'dbo.dest' can only be specified when a column list is used and IDENTITY_INSERT is ON."`, batch-aborting); a column list naming the identity column → **Msg 544**, whose message slot names the **source** table rather than the OUTPUT target (a real SQL Server quirk worth mirroring verbatim); the same with `SET IDENTITY_INSERT <target> ON` → **still Msg 544**, so the setting never unlocks it; a column list that excludes the identity column → accepted, the row landing with a generated id.
-  Reached easily from ORMs, since `SELECT TOP 0 * INTO #tmp FROM t` inherits `t`'s identity property and `OUTPUT INSERTED.* INTO #tmp` then hits it.
-  → [`dml.md`](dml.md).
 - **Statement-permission gates stop at the modeled set** — CREATE TABLE / VIEW / PROCEDURE / FUNCTION / SEQUENCE / ROLE / USER / SCHEMA, ALTER TABLE, DROP TABLE and DROP USER are checked; other CREATE / ALTER / DROP statements run unchecked, as does `ALTER` / `CREATE OR ALTER` of an existing module.
   → [`permissions.md`](permissions.md#known-gaps).
 - **Non-Framework CLR assemblies load** — real resolves every `AssemblyRef` against a fixed .NET Framework catalog and raises **Msg 6503** otherwise (probe-confirmed for .NET 10 and for .NET Standard 2.0); the simulator runs on .NET so all of them bind, which is also what lets the tests emit a fixture assembly without a Framework toolchain.
@@ -164,10 +157,8 @@ Entries are verified against the simulator, so one that no longer reproduces is 
   → [`table-valued-parameters.md`](table-valued-parameters.md#fidelity-gaps-remaining), [`programmable.md`](programmable.md).
 - **CONVERT style leniency** — the two-digit-vs-four-digit-year century restriction isn't enforced, and a `T`-separated time is accepted under general styles; real raises **Msg 241** for both (`CONVERT(datetime, '01/01/99', 101)` and `CONVERT(datetime, '2020-01-01T10:00:00', 100)`, probed 2026-07-29).
   → [`casting.md`](casting.md).
-- **`FORCESEEK(index_name(col_list))` nested-form name validation** — parses silently where real raises **Msg 308** (`"Index 'nosuchindex' on table 'dbo.fs' (specified in the FROM clause) does not exist."`).
-  → [`query-hints.md`](query-hints.md#not-enforced).
 
-Tracked elsewhere and over-permissive in the same sense: `bit` arithmetic (below), and the recursive-CTE part restrictions Msg 460 / 461 / 462 / 467 / 465 (CLAUDE.md's Not-modeled-yet).
+Tracked elsewhere and over-permissive in the same sense: the recursive-CTE part restrictions Msg 460 / 461 / 462 / 467 / 465 (CLAUDE.md's Not-modeled-yet).
 
 ## Fidelity gaps in shipped behavior
 
@@ -179,13 +170,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   `sys.indexes.ignore_dup_key` also reports `0` for a declared-ON index where real reports `1`, so the flag has to be stored before either the behavior or the catalog column can be right.
   The *under*-permissive direction — a valid INSERT failing.
   Home: `KeyConstraint` / `Index` (the stored flag), the INSERT duplicate-detection path (the skip + info message), `BuiltInResources` (the catalog column).
-- **`bit` arithmetic accepted where real rejects it** — the simulator computes `bit + bit` / `- ` / `*` / `/` and hands back a bit (`PureIntegerArithmetic`'s `common == SqlType.Bit` arm); real refuses the same-type pair outright.
-  Probe-confirmed: `+` / `-` → **Msg 402** (`"The data types bit and bit are incompatible in the add operator."`), `*` / `/` → **Msg 8117** (`"Operand data type bit is invalid for multiply operator."`).
-  A mixed `bit + int` promotes and computes normally (→ 2) on both sides, so only the same-type pair diverges.
-  **`SUM(bit)` already matches** — the simulator raises Msg 8117 as real does (re-verified 2026-07-29); only the four arithmetic operators remain.
-  The over-permissive direction, and small — a type-pair gate ahead of the arithmetic.
-  Surfaced while adding the integer-overflow checks and held out of that bundle to keep it scoped; `BitWithStringArithmetic` is the existing precedent for the message split.
-  Home: `TwoSidedExpression.PureIntegerArithmetic`.
 - **Per-object creation-time `QUOTED_IDENTIFIER` capture not modeled** — real SQL Server stamps procedures / views / triggers / tables with the QI setting in effect at CREATE (`sys.sql_modules.uses_quoted_identifier`, `OBJECTPROPERTY(id, 'IsQuotedIdentOn')`) and executes bodies under the captured setting; the simulator re-parses bodies under the executing session's current setting.
   See [`grammar.md`](grammar.md).
   Rare legacy-pattern impact.
@@ -208,9 +192,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 - **`PRIMARY KEY (col DESC)` direction is parse-and-discard** — `KeyConstraint` tracks no per-column direction, so `sys.index_columns.is_descending_key` reports 0 where real reports 1 (probe-confirmed).
   A schema-diff or index-scripting tool reading the column sees an ascending key; the stored rows are unordered either way, so only the metadata diverges.
   See [`catalog-views.md`](catalog-views.md).
-- **`OBJECT_ID('<fn>')` returns NULL for an unqualified scalar function** — real resolves the bare name against the default schema and returns the id; the simulator resolves only the qualified `OBJECT_ID('dbo.f')` form (probed 2026-07-29).
-  Tables, procedures and views all resolve unqualified, so this is specific to the function namespace — and it silently breaks the `OBJECTPROPERTY(OBJECT_ID('f'), …)` idiom, which then reports NULL rather than the property.
-  See [`catalog-views.md`](catalog-views.md), [`schemas.md`](schemas.md).
 - **`OBJECTPROPERTY(id, 'IsDeterministic')` doesn't analyze the body** — every scalar function reports 1, so a non-deterministic one (a `GETDATE()`-bearing UDF) over-reports; real evaluates determinism per module.
   `IsSchemaBound` likewise reports 0 for a schema-bound *function* (the flag is tracked on views only).
   See [`catalog-views.md`](catalog-views.md).

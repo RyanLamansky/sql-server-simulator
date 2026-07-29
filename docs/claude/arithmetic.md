@@ -11,6 +11,14 @@ Hex (`'0x05'`) likewise rejected.
 WHERE on a varchar column compared against int halts on the first unparseable row (not isolated as per-row UNKNOWN).
 SQL Server's lazy-IN quirk (unparseable IN-list value suppressed when another matches) isn't modeled.
 
+## `bit` operand pairs
+
+A `bit` paired with a `bit` has no arithmetic on real, and the rejection splits by operator the same way the binary pair does: `*` / `/` raise **Msg 8117** (`"Operand data type bit is invalid for multiply operator."`), while `+` / `-` / `%` raise **Msg 402** (`"The data types bit and bit are incompatible in the add operator."`, and the subtract / modulo wordings).
+The gate lives in `SqlType.PromoteForArithmetic`, so it fires from the static type path as well as the runtime one.
+
+Two neighbours stay legal and are deliberately outside the gate: the **bitwise** operators (`&`, `|`, `^`) accept a bit pair, and a **mixed** `bit + int` promotes to `int` and computes normally — only the same-type arithmetic pair is refused.
+`SUM(bit)` is refused separately by the aggregate dispatch, also with Msg 8117.
+
 ## Binary operand promotion
 One `binary`/`varbinary` operand paired with one integer-family operand converts the **binary side** to the integer type — for arithmetic (`+ - * / %`) *and* bitwise (`& | ^`), so the result keeps the integer partner's specific subtype (`1 + 0x01` → int 2; `cast(5 as bigint) / 0x02` → bigint 2; `cast(5 as tinyint) + 0x01` → tinyint 6; `255 & 0x01` → int 1).
 Comparison converts the same way (`0x01 = 1` compares equal).

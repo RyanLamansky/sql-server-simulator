@@ -519,6 +519,23 @@ partial class SimulatedSqlException
         new($"Cannot insert explicit value for identity column in table '{tableName}' when IDENTITY_INSERT is set to OFF.", 544, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 8101: a value would land in an identity column
+    /// without a column list naming it. The simulator raises it from
+    /// <c>OUTPUT … INTO &lt;target&gt;</c> when the projection is wider than the
+    /// target's non-identity columns, so the positional fill would have to
+    /// write the identity column.
+    /// </summary>
+    /// <remarks>
+    /// Probe-confirmed against SQL Server 2025: this one names the OUTPUT
+    /// target <em>schema-qualified</em> (<c>'dbo.OUTPUTTGT'</c>, or the bare
+    /// <c>'#tmp'</c> form for a temp table) — unlike the sibling Msg 544 on the
+    /// column-list form, which names the DML statement's own target table.
+    /// The two disagree about which table they name; both are mirrored as-is.
+    /// </remarks>
+    internal static SimulatedSqlException ExplicitIdentityNeedsColumnList(string qualifiedTableName) =>
+        new($"An explicit value for the identity column in table '{qualifiedTableName}' can only be specified when a column list is used and IDENTITY_INSERT is ON.", 8101, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 545: <c>SET IDENTITY_INSERT ... ON</c> is
     /// active, so the INSERT must list the identity column and supply an
     /// explicit value rather than relying on auto-generation.

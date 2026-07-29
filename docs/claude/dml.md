@@ -28,6 +28,11 @@
   Unbound qualifier on `.*` raises Msg 4104, same as `<qualifier>.<col>`.
   The expansion runs before `Expression.Parse`, so the alias-suffix shape (`INSERTED.* AS x`) inherits real SQL Server's Msg 102 rejection naturally — the cursor advances past `*` to either `,` or the end-of-OUTPUT terminator.
   `OUTPUT … INTO @t [(cols)]` ships for INSERT/UPDATE/DELETE/MERGE — see [Table variables](table-variables.md).
+- **`OUTPUT … INTO` against a target with an IDENTITY column** follows real's rules exactly (probe-confirmed matrix).
+  The positional (no column list) form fills the target's **non-identity** columns, so the projection is measured against that narrower count: equal succeeds and the identity column generates its own value; fewer is **Msg 213**; more would have to write the identity column and is **Msg 8101**, whose message names the OUTPUT target *schema-qualified* (`'dbo.dest'`, or the bare `'#tmp'` form for a temp table).
+  An explicit column list naming the identity column is **Msg 544** — and `SET IDENTITY_INSERT <target> ON` does **not** unlock it.
+  Msg 544's slot names the **DML statement's own target table**, not the OUTPUT target that owns the identity column; that is real's behavior and is mirrored verbatim, so the two messages disagree about which table they name.
+  A column list that omits the identity column is the accepted spelling.
 
 ## `TOP (expr) [PERCENT]` on UPDATE / DELETE / INSERT
 

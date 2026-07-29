@@ -161,7 +161,7 @@ partial class Simulation
             names.Add(expr.Name);
         } while (context.Token is Operator { Character: ',' });
 
-        var outputTarget = TryParseOutputIntoTarget(context, expressions.Count);
+        var outputTarget = TryParseOutputIntoTarget(context, expressions.Count, table.Name);
 
         SqlType ResolveOutputType(MultiPartName reference)
         {
@@ -194,6 +194,16 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Renders the OUTPUT target's name for Msg 8101: schema-qualified for a
+    /// regular table, bare for a <c>#temp</c> or <c>@table</c> variable (which
+    /// have no schema), matching what real puts in the message slot.
+    /// </summary>
+    private static string QualifiedOutputTargetName(MultiPartName written, HeapTable table) =>
+        BatchContext.IsTableVariableName(table.Name) || table.Name.StartsWith('#')
+            ? table.Name
+            : $"{(written.Count > 1 ? written.ImmediateQualifier : Database.DefaultSchemaName)}.{table.Name}";
+
+    /// <summary>
     /// Parses an optional <c>INTO &lt;target&gt; [(col_list)]</c> suffix on an
     /// OUTPUT clause. Returns <see langword="null"/> when no INTO keyword is
     /// present. The target can be either a table variable (<c>@t</c>) or a
@@ -203,9 +213,14 @@ partial class Simulation
     /// <remarks>
     /// <para>
     /// Column mapping resolves at parse time: with no column list, projection
-    /// column i maps to target column i (count must match — probe-confirmed
-    /// Msg 213 on mismatch). With a column list, projection column i maps to
-    /// the target column whose name matches list[i].
+    /// column i maps to the target's i-th <em>non-identity</em> column, so the
+    /// projection count must equal that narrower count — fewer is Msg 213,
+    /// more would have to write the identity column and is Msg 8101
+    /// (probe-confirmed matrix: a target of identity + N plain columns accepts
+    /// exactly N). With a column list, projection column i maps to the target
+    /// column whose name matches list[i], and naming the identity column is
+    /// Msg 544 — which <c>SET IDENTITY_INSERT</c> on the target does not
+    /// unlock.
     /// </para>
     /// <para>
     /// Probe-confirmed: a table variable must already be declared (Msg 1087
@@ -217,7 +232,7 @@ partial class Simulation
     /// <see cref="OutputTarget.Append"/>.
     /// </para>
     /// </remarks>
-    private static OutputTarget? TryParseOutputIntoTarget(ParserContext context, int projectionColumnCount)
+    private static OutputTarget? TryParseOutputIntoTarget(ParserContext context, int projectionColumnCount, string mutationTargetName)
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Into })
             return null;
@@ -263,17 +278,42 @@ partial class Simulation
             context.MoveNextOptional();
             if (ordinals.Count != projectionColumnCount)
                 throw SimulatedSqlException.OutputIntoColumnCountMismatch();
+            // An explicit list may not name the target's identity column, and
+            // SET IDENTITY_INSERT on the target does not unlock it (probed).
+            // The arity check above runs first, matching real's ordering.
+            foreach (var ordinal in ordinals)
+            {
+                if (targetTable.Columns[ordinal].Identity is not null)
+                    throw SimulatedSqlException.CannotInsertExplicitIdentity(mutationTargetName);
+            }
+
             columnOrdinals = [.. ordinals];
         }
         else
         {
-            // Positional mapping. Count must match the target's full column
-            // count (probe-confirmed Msg 213 on mismatch).
-            if (targetTable.Columns.Length != projectionColumnCount)
+            // Positional mapping fills the target's *non-identity* columns in
+            // order — the identity column is skipped and generates its own
+            // value. So the projection is measured against that narrower count:
+            // fewer is Msg 213, more would have to write the identity column
+            // and is Msg 8101 (probe-confirmed matrix against SQL Server 2025 —
+            // a target of identity + N plain columns accepts exactly N).
+            var fillable = new List<int>(targetTable.Columns.Length);
+            for (var i = 0; i < targetTable.Columns.Length; i++)
+            {
+                if (targetTable.Columns[i].Identity is null)
+                    fillable.Add(i);
+            }
+
+            if (projectionColumnCount > fillable.Count)
+            {
+                throw fillable.Count == targetTable.Columns.Length
+                    ? SimulatedSqlException.OutputIntoColumnCountMismatch()
+                    : SimulatedSqlException.ExplicitIdentityNeedsColumnList(QualifiedOutputTargetName(targetName, targetTable));
+            }
+
+            if (projectionColumnCount < fillable.Count)
                 throw SimulatedSqlException.OutputIntoColumnCountMismatch();
-            columnOrdinals = new int[projectionColumnCount];
-            for (var i = 0; i < projectionColumnCount; i++)
-                columnOrdinals[i] = i;
+            columnOrdinals = [.. fillable];
         }
 
         return new OutputTarget(targetTable, columnOrdinals, context.Batch);
@@ -295,10 +335,12 @@ partial class Simulation
         /// <summary>
         /// Appends one row to <see cref="Target"/>. Columns named in the
         /// projection map by ordinal via <see cref="ProjectionToTargetOrdinal"/>;
-        /// any target column not covered evaluates the column's
-        /// <c>DEFAULT</c> expression if declared, else falls through to
-        /// NULL (probe-confirmed against SQL Server 2025: unfilled OUTPUT-INTO
-        /// target columns receive the target's DEFAULT, not NULL). Mutations
+        /// any target column not covered generates an identity value if it is
+        /// an identity column, else evaluates the column's <c>DEFAULT</c>
+        /// expression if declared, else falls through to NULL (probe-confirmed
+        /// against SQL Server 2025: unfilled OUTPUT-INTO target columns receive
+        /// the target's DEFAULT, not NULL, and an identity column fills from
+        /// its own sequence). Mutations
         /// route through the same undo log as direct DML on the target:
         /// table variables use the per-statement
         /// <see cref="BatchContext.CurrentTableVarUndoLog"/>; regular tables
@@ -319,9 +361,14 @@ partial class Simulation
                 if (covered[i])
                     continue;
                 var column = this.Target.Columns[i];
-                targetValues[i] = column.Default is { } defaultExpression
-                    ? CoerceForInsert(defaultExpression.Run(new RuntimeContext(NoColumnResolver, this.batch)), column.Type)
-                    : SqlValue.Null(column.Type);
+                // An uncovered identity column generates its own value, as it
+                // does for a direct INSERT that omits it — the positional map
+                // skips identity columns entirely, and a column list may too.
+                targetValues[i] = column.Identity is { } identity
+                    ? CoerceForIdentity(identity.GenerateNext(), column)
+                    : column.Default is { } defaultExpression
+                        ? CoerceForInsert(defaultExpression.Run(new RuntimeContext(NoColumnResolver, this.batch)), column.Type)
+                        : SqlValue.Null(column.Type);
             }
             var undoLog = this.Target.IsTableVariable ? this.batch.CurrentTableVarUndoLog : this.batch.CurrentUndoLog;
             var (newPage, newSlot) = this.Target.Heap.Insert(
@@ -493,7 +540,7 @@ partial class Simulation
         }
         while (context.Token is Operator { Character: ',' });
 
-        var outputTarget = TryParseOutputIntoTarget(context, expressions.Count);
+        var outputTarget = TryParseOutputIntoTarget(context, expressions.Count, destinationTable.Name);
 
         var schema = new SqlType[expressions.Count];
         for (var i = 0; i < expressions.Count; i++)

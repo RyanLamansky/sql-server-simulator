@@ -315,6 +315,12 @@ Registered in `BuiltInResources.Security.cs` via the shared `EmptyCatalogRows`.
 
 All probe-confirmed against SQL Server 2025.
 
+**Column lists are legal on `SELECT` / `UPDATE` / `REFERENCES` only.**
+Every other permission is entity-level and takes no sub-entity list, so a column list on it raises **Msg 1020** (`"Sub-entity lists (such as column or security expressions) cannot be specified for entity-level permissions."`).
+Probed across `INSERT` / `DELETE` / `EXECUTE` / `ALTER` / `CONTROL` / `TAKE OWNERSHIP` / `VIEW DEFINITION` / `VIEW CHANGE TRACKING` / `RECEIVE` — all rejected.
+Real reports it at **Class 15**, a compile-time rejection raised before the securable resolves: `TRY`/`CATCH` cannot intercept it, and it beats the Msg 4606 permission-vs-object-kind check, so `GRANT EXECUTE (col)` on a *table* is Msg 1020 rather than 4606.
+Both spellings are covered — the per-permission `GRANT EXECUTE (col) ON t` and the securable-placed `GRANT EXECUTE ON t (col)`.
+
 ## Principal scalars
 
 Probed against SQL Server 2025 for shape + return type.

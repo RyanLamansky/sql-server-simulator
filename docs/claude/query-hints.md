@@ -139,11 +139,11 @@ Every other recognized OPTION hint is a pure no-op.
   Name form matches case-insensitively against `HeapTable.KeyConstraints[].Name` (PRIMARY KEY / UNIQUE) plus `HeapTable.Indexes[].Name` (CREATE INDEX).
   Wired only into the FROM-source / JOIN-RHS heap-table path (`ValidateIndexHintArguments` in `Selection.Hints.cs`); arguments are captured at parse time into `TableHintInfo.IndexArguments` via the dedicated `ConsumeIndexHintArguments` walker (handles both `INDEX(arg [, …])` and `INDEX = arg` forms; negative integer arg raises Msg 102 at parse, matching probe).
   Multi-arg `INDEX(bad, good)` raises Msg 308 on the first failing argument and skips the rest.
+  `FORCESEEK`'s nested form carries an index name too — `FORCESEEK(IX_foo(c1, c2))` — and the parser peeks that leading name into the same `IndexArguments` list (rewinding so the balanced-paren skip stays the single consumer of the payload), so it validates through the identical path and raises the identical Msg 308.
+  The bare `FORCESEEK` / `FORCESCAN` forms carry no name and are unaffected.
 
 ## Not enforced
 
-- **`FORCESEEK(index_name(col_list))` nested-form index-name validation** — the simulator skip-parses the nested syntax via `SkipBalancedParens` rather than capturing the leading name, so `FORCESEEK(bad_name(c))` parses silently where real SQL Server raises Msg 308.
-  The common bare `FORCESEEK` ships unaffected.
 - **FORCESEEK plan rejection** (`Msg 8622`) — fires on real SQL Server when planner can't honor the directive; the simulator has no planner state to conflict over.
 - **`INDEX = (value-list)` equals-form** — probe-confirmed that real SQL Server raises `Msg 102` on the equals-with-multiple-values form anyway (the docs notwithstanding), so the simulator's "= takes one literal" rule matches by parsing as well.
 
