@@ -146,6 +146,10 @@ internal sealed partial class Selection
             _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
         }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema)
         {
+            // The combined result takes the first branch's output names, so it
+            // takes that branch's projections too — a top-level ORDER BY
+            // resolves names against them (see ApplyTopLevelOrderBy).
+            ProjectionExpressions = left.ProjectionExpressions,
             ColumnIntegerLiteralDigits = combinedDigits,
             ColumnReportsNumeric = combinedReportsNumeric,
         };
@@ -274,6 +278,31 @@ internal sealed partial class Selection
     /// branch's projection so it can reference non-projected source
     /// columns, matching SQL Server's documented behavior.)
     /// </summary>
+    /// <summary>
+    /// Maps each projected column to the source column name behind it, or null
+    /// when the projection isn't a plain column reference. An alias wrapper is
+    /// unwrapped first — <c>num AS Col2</c> is a reference to <c>num</c> named
+    /// <c>Col2</c>, and a top-level ORDER BY over a set operation may use
+    /// either name.
+    /// </summary>
+    private static string?[]? SourceColumnNamesOf(Expression[]? projections, int columnCount)
+    {
+        if (projections is null || projections.Length != columnCount)
+            return null;
+
+        string?[]? names = null;
+        for (var i = 0; i < projections.Length; i++)
+        {
+            var expression = projections[i] is Expressions.NamedExpression named ? named.Inner : projections[i];
+            if (expression is not Expressions.Reference reference)
+                continue;
+            names ??= new string?[columnCount];
+            names[i] = reference.ReferencedName.Leaf;
+        }
+
+        return names;
+    }
+
     private static Selection ApplyTopLevelOrderBy(Selection inner, List<OrderBySpec> orderBy, Expression? offsetExpression, Expression? fetchExpression)
     {
         var schema = inner.Schema;
@@ -282,6 +311,12 @@ internal sealed partial class Selection
         // Cached HeapColumn[] for the combined schema, so per-column key decodes
         // hit RowLayout's identity-keyed geometry cache (see RowDecoder.ColumnsFor).
         var keyColumns = RowDecoder.ColumnsFor(schema);
+
+        // Per output column, the source column name behind it when the
+        // projection is a plain column reference (`num AS Col2` → "num"), so a
+        // top-level ORDER BY can name either form. Null entries are
+        // computed projections, which have no source name to match.
+        var sourceColumnNames = SourceColumnNamesOf(inner.ProjectionExpressions, columnNames.Length);
 
         return new Selection(schema, columnNames,
             hasOrderBy: true,
@@ -311,7 +346,7 @@ internal sealed partial class Selection
                 // only the ORDER BY columns off each row, not the full tuple.
                 var keyed = new List<(byte[] Row, SqlValue[] Keys)>(allRows.Count);
                 foreach (var rowBytes in allRows)
-                    keyed.Add((rowBytes, ComputeTopLevelOrderKeys(orderBy, columnNames, keyColumns, rowBytes, batch)));
+                    keyed.Add((rowBytes, ComputeTopLevelOrderKeys(orderBy, columnNames, keyColumns, sourceColumnNames, rowBytes, batch)));
 
                 keyed.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
                 ordered = keyed.Select(r => r.Row);

@@ -384,4 +384,78 @@ public sealed class SetOperationTests
         => CollectionAssert.AreEquivalent(new[] { 3 },
             ReadInts(SeededTwoTables().CreateCommand(
                 "select x.v from (select v from left_t intersect select v from right_t) x")));
+
+    /// <summary>
+    /// A top-level ORDER BY over a set operation resolves a name against the
+    /// <em>source</em> column behind a projected one, not only its output
+    /// alias. ORMs alias every output positionally (<c>num AS Col2</c>) and
+    /// then order by the model's field name, so without this the whole shape
+    /// raises Msg 207.
+    /// </summary>
+    [TestMethod]
+    [DataRow("[num]", "3,2,1")]
+    [DataRow("[Col2]", "3,2,1")]
+    [DataRow("2", "3,2,1")]
+    public void SetOperation_TopLevelOrderBy_ResolvesSourceNameAliasAndOrdinal(string orderByTerm, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table n (id int, num int, other_num int)",
+            "insert n values (1,1,10),(2,2,20),(3,3,30)");
+
+        using var reader = sim.ExecuteReader(
+            "select id as Col1, num as Col2 from n where num <= 1 "
+            + "union select id as Col1, num as Col2 from n where num >= 2 "
+            + $"order by {orderByTerm} desc");
+        var values = new List<string>();
+        while (reader.Read())
+            values.Add($"{reader.GetValue(1)}");
+        AreEqual(expected, string.Join(",", values));
+    }
+
+    /// <summary>
+    /// The output alias still wins when it shadows a different source column,
+    /// so adding the source-name fallback can't change an existing binding.
+    /// </summary>
+    [TestMethod]
+    public void SetOperation_TopLevelOrderBy_OutputAliasWinsOverSourceName()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table n (id int, num int, other_num int)",
+            "insert n values (1,1,30),(2,2,20),(3,3,10)");
+
+        // The alias `other_num` names the id column; ordering by it must sort
+        // by id (1,2,3), not by the real other_num column (which would be 3,2,1).
+        using var reader = sim.ExecuteReader(
+            "select id as other_num from n where num <= 1 "
+            + "union select id as other_num from n where num >= 2 "
+            + "order by other_num");
+        var values = new List<string>();
+        while (reader.Read())
+            values.Add($"{reader.GetValue(0)}");
+        AreEqual("1,2,3", string.Join(",", values));
+    }
+
+    /// <summary>
+    /// A name matching neither an output alias nor a projected source column
+    /// is still Msg 207.
+    /// </summary>
+    /// <remarks>
+    /// Needs more than one result row: the sort — and with it the ORDER BY name
+    /// resolution — is skipped when there is nothing to order, so the error is
+    /// raised at execution rather than at bind time the way real does.
+    /// </remarks>
+    [TestMethod]
+    public void SetOperation_TopLevelOrderBy_UnknownName_RaisesMsg207()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table n (id int, num int, other_num int)",
+            "insert n values (1,1,10),(2,2,20),(3,3,30)");
+
+        _ = sim.AssertSqlError(
+            "select id as Col1 from n where num <= 1 union select id as Col1 from n where num >= 2 order by [nosuchcol]",
+            207);
+    }
 }

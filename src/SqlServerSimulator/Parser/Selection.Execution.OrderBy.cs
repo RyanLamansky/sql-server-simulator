@@ -64,6 +64,7 @@ internal sealed partial class Selection
         List<OrderBySpec> orderBy,
         string[] columnNames,
         HeapColumn[] columns,
+        string?[]? sourceColumnNames,
         byte[] rowBytes,
         BatchContext batch)
     {
@@ -74,6 +75,23 @@ internal sealed partial class Selection
                 if (BuiltInToken.Equals(columnNames[j], name.Leaf))
                     return RowDecoder.DecodeColumn(columns, rowBytes, j);
             }
+
+            // A top-level ORDER BY over a set operation may also name the
+            // *source* column behind a projected one, not just its output
+            // alias: `SELECT num AS Col2 … UNION … ORDER BY num` sorts by
+            // Col2 on real (probe-confirmed), which is what ORMs emit when
+            // they alias every output positionally. Checked after the output
+            // names so an alias that shadows a different source column still
+            // wins.
+            if (sourceColumnNames is not null)
+            {
+                for (var j = 0; j < sourceColumnNames.Length; j++)
+                {
+                    if (sourceColumnNames[j] is { } source && BuiltInToken.Equals(source, name.Leaf))
+                        return RowDecoder.DecodeColumn(columns, rowBytes, j);
+                }
+            }
+
             throw SimulatedSqlException.InvalidColumnName(name);
         }
 

@@ -20,7 +20,11 @@
 - Set ops (UNION / UNION ALL / INTERSECT / EXCEPT): standard precedence (INTERSECT > UNION/EXCEPT).
   **NULLs are equal during set-op dedup/matching** (opposite of `=`'s tri-state).
   Per-branch ORDER BY in non-final branch → Msg 156.
-  Top-level ORDER BY references first-branch column names only.
+  Top-level ORDER BY references the first branch's columns, and resolves a term three ways (probe-confirmed, in this order): an **output alias**, the **source column name behind a projected column** (`SELECT num AS Col2 … UNION … ORDER BY num` sorts by Col2 — what ORMs emit when they alias every output positionally), or an **ordinal**.
+  The alias is checked first, so an alias shadowing a different source column keeps its binding.
+  Two divergences remain here.
+  A term naming a real column that isn't projected raises Msg 207 where real raises **Msg 104** (`"ORDER BY items must appear in the select list if the statement contains a UNION, INTERSECT or EXCEPT operator."`) — telling the two apart needs the branch's FROM sources at ORDER BY resolution, which that seam doesn't carry.
+  And resolution is execution-time: the sort is skipped when there is at most one result row, so an unresolvable term goes unreported for such a query where real rejects it at bind time.
 - `SELECT *`: bare and qualified `<source>.*`.
   Multi-source `*` keeps duplicate names.
   Unbound `<qualifier>.*` → Msg 4104.
