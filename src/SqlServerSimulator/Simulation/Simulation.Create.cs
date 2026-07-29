@@ -996,6 +996,11 @@ partial class Simulation
             var resolvedCollation =
                 (columnCollation is not null ? Collation.TryGet(columnCollation) : null)
                 ?? context.Batch.Connection.CurrentDatabase.Collation;
+            // text keeps the shared baseline collation instead of interning a
+            // per-column instance, so its Msg 459 gate can't ride the char /
+            // varchar type factories and has to fire here.
+            if (resolvedType is TextSqlType)
+                resolvedCollation.RejectIfUnicodeOnly();
             resolvedType = resolvedType.WithCollation(resolvedCollation, Coercibility.Implicit);
         }
 

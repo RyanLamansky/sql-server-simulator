@@ -1265,17 +1265,25 @@ internal readonly partial struct SqlValue
         : value.AsInt64.ToString(CultureInfo.InvariantCulture);
 
     /// <summary>
-    /// Encodes a string for binary/varbinary CAST: CP1252 (Latin1) for
-    /// <c>varchar</c> / <c>char</c> / <c>sysname</c> sources, UTF-16 LE for
-    /// <c>nvarchar</c> / <c>nchar</c> / <c>ntext</c> / <c>text</c> sources.
-    /// Matches the default-style (style 0) byte rendering real SQL Server
-    /// uses; explicit-style CONVERT routes through
-    /// <see cref="CoerceStringToBinaryWithStyle"/> for the hex-string forms.
+    /// Encodes a string for binary/varbinary CAST: UTF-16 LE for
+    /// <c>nvarchar</c> / <c>nchar</c> / <c>ntext</c> / <c>sysname</c> sources,
+    /// otherwise the source collation's own storage encoding — the bytes the
+    /// column actually holds, so <c>CONVERT(varbinary, col)</c> agrees with
+    /// <c>DATALENGTH(col)</c> and round-trips. Matches the default-style
+    /// (style 0) byte rendering real SQL Server uses; explicit-style CONVERT
+    /// routes through <see cref="CoerceStringToBinaryWithStyle"/> for the
+    /// hex-string forms.
     /// </summary>
+    /// <remarks>
+    /// Not <c>Encoding.Latin1</c>: that is ISO-8859-1, which differs from
+    /// CP1252 across 0x80-0x9F and best-fit-folds rather than preserving
+    /// (probe-confirmed real: <c>€</c> → 0x80, <c>Š</c> → 0x8A, <c>—</c> →
+    /// 0x97, where Latin1 gives 0x3F / 0x53 / 0x2D).
+    /// </remarks>
     private static byte[] EncodeStringForBinary(string source, SqlType sourceType) =>
         sourceType is NVarcharSqlType or NCharSqlType or NTextSqlType or SystemNameSqlType
             ? System.Text.Encoding.Unicode.GetBytes(source)
-            : System.Text.Encoding.Latin1.GetBytes(source);
+            : (sourceType.Collation ?? Collation.Baseline).StorageEncoding.GetBytes(source);
 
     /// <summary>
     /// Decodes a varbinary/binary payload into an integer-family value the way

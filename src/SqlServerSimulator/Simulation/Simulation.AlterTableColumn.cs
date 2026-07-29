@@ -775,6 +775,10 @@ partial class Simulation
                 (newCollationName is not null ? Collation.TryGet(newCollationName) : null)
                 ?? existingCol.Type.Collation
                 ?? context.Batch.CurrentDatabase.Collation;
+            // See the matching gate in Simulation.Create.cs: text has no
+            // per-column collation instance to carry the Msg 459 rejection.
+            if (newType is TextSqlType)
+                newCollation.RejectIfUnicodeOnly();
             newType = newType.WithCollation(newCollation, Coercibility.Implicit);
             newCollationStored = newCollationName ?? existingCol.Collation;
         }
@@ -1048,8 +1052,18 @@ partial class Simulation
                         // length-agnostic at the SqlValue level — bounded vs
                         // unspecified is a column-level distinction — so the
                         // truncation check lives here.
-                        if (newCol.MaxLength is int max && max != SqlType.MaxLengthSentinel && coerced.AsString.Length > max)
-                            throw SimulatedSqlException.StringOrBinaryWouldBeTruncated(table.Name, newCol.Name, coerced.AsString, max);
+                        // varchar / char budget N bytes of their collation's
+                        // code page; nvarchar budgets N UTF-16 code units.
+                        var narrowingEncoding = newCol.Type is VarcharSqlType or CharSqlType
+                            ? newCol.Type.Collation!.StorageEncoding
+                            : null;
+                        if (newCol.MaxLength is int max
+                            && max != SqlType.MaxLengthSentinel
+                            && (narrowingEncoding?.GetByteCount(coerced.AsString) ?? coerced.AsString.Length) > max)
+                        {
+                            throw SimulatedSqlException.StringOrBinaryWouldBeTruncated(table.Name, newCol.Name, coerced.AsString, max, narrowingEncoding);
+                        }
+
                         newStoredValues[newStorageOrdinal] = coerced;
                     }
                 }

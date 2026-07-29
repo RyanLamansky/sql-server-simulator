@@ -240,14 +240,95 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
     /// <summary>
     /// The byte encoding the storage layer uses when this collation is
-    /// pinned on a <c>varchar</c> / <c>char</c> column. Default is CP1252;
-    /// <c>*_UTF8</c> collations override to <see cref="Encoding.UTF8"/>.
-    /// Read by <see cref="VarcharSqlType.Encode"/> /
-    /// <see cref="VarcharSqlType.Decode"/> / <see cref="VarcharSqlType.GetVariableByteCount"/>
-    /// and the equivalent <see cref="CharSqlType"/> entry points; not
-    /// consulted by nvarchar / nchar (UTF-16 storage is fixed).
+    /// pinned on a <c>varchar</c> / <c>char</c> column: the collation's own
+    /// ANSI code page (CP1252 for the Latin1 families, CP1254 for Turkish,
+    /// CP932 for Japanese, …), or UTF-8 for the <c>*_UTF8</c> names. Read by
+    /// <see cref="VarcharSqlType.Encode"/> / <see cref="VarcharSqlType.Decode"/>
+    /// / <see cref="VarcharSqlType.GetVariableByteCount"/> and the equivalent
+    /// <see cref="CharSqlType"/> entry points; not consulted by nvarchar /
+    /// nchar (UTF-16 storage is fixed).
+    /// <para>Only meaningful when <see cref="AnsiCodePage"/> is non-zero — a
+    /// Unicode-only collation never reaches a char-family type, because
+    /// <see cref="RejectIfUnicodeOnly"/> gates every such construction with
+    /// Msg 459.</para>
     /// </summary>
     internal virtual Encoding StorageEncoding => CharSqlType.Cp1252Encoder;
+
+    /// <summary>
+    /// The collation's ANSI code page — what <c>COLLATIONPROPERTY(name,
+    /// 'CodePage')</c> reports — or <c>0</c> for the Windows collations that
+    /// real SQL Server supports on Unicode data types only (Assamese, Bengali,
+    /// Divehi, Indic_General, Khmer, Lao, Maltese, Maori, Nepali, Pashto,
+    /// Syriac, Tibetan). <c>*_UTF8</c> names report 65001.
+    /// </summary>
+    internal virtual int AnsiCodePage => 1252;
+
+    /// <summary>
+    /// Raises Msg 459 when a collation with no ANSI code page is applied to
+    /// <c>char</c> / <c>varchar</c> / <c>text</c>, matching real SQL Server's
+    /// batch-aborting rejection. Called from the char-family type factories,
+    /// which is the one chokepoint every such pairing passes through, so
+    /// <see cref="StorageEncoding"/> downstream is always code-page-bearing.
+    /// </summary>
+    internal void RejectIfUnicodeOnly()
+    {
+        if (this.AnsiCodePage == 0)
+            throw SimulatedSqlException.CollationIsUnicodeOnly(this.Name);
+    }
+
+    /// <summary>
+    /// Returns the encoder for <paramref name="codePage"/>, configured to match
+    /// SQL Server's lossy narrowing: an unrepresentable character becomes
+    /// <c>?</c> rather than throwing. Instances are interned per code page
+    /// because <see cref="Encoding.GetEncoding(int, EncoderFallback, DecoderFallback)"/>
+    /// allocates a fresh wrapper per call and the encoder sits on the row
+    /// encode/decode path.
+    /// </summary>
+    internal static Encoding AnsiEncoding(int codePage) =>
+        codePage == 1252
+            ? CharSqlType.Cp1252Encoder
+            : ansiEncodings.GetOrAdd(codePage, static cp => Encoding.GetEncoding(
+                cp,
+                new EncoderReplacementFallback("?"),
+                DecoderFallback.ReplacementFallback));
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, Encoding> ansiEncodings = new();
+
+    /// <summary>
+    /// Clips <paramref name="value"/> to the longest prefix whose encoded form
+    /// fits <paramref name="maxBytes"/>, never splitting a character. This is
+    /// what a <c>varchar(N)</c> budget means: <c>N</c> counts bytes, so under a
+    /// multi-byte code page fewer characters fit than <c>N</c> (probe-confirmed
+    /// real: <c>CAST</c> of five CP932 kana to <c>varchar(5)</c> yields two
+    /// kana / four bytes, and the same overflow into a column reports
+    /// <c>'こん'</c> as Msg 2628's truncated value).
+    /// <para>Single-byte code pages take the <c>value.Length</c> fast path,
+    /// which is every call under the default collation.</para>
+    /// </summary>
+    internal static string ClipToByteBudget(string value, int maxBytes, Encoding encoding)
+    {
+        if (encoding.GetByteCount(value) <= maxBytes)
+            return value;
+        if (encoding.IsSingleByte)
+            return value[..maxBytes];
+
+        // Walk characters, accumulating encoded width, so the cut lands on a
+        // character boundary. Surrogate pairs advance two code units at once —
+        // splitting one would encode the halves as replacement characters.
+        var used = 0;
+        var i = 0;
+        while (i < value.Length)
+        {
+            var step = char.IsHighSurrogate(value[i]) && i + 1 < value.Length && char.IsLowSurrogate(value[i + 1]) ? 2 : 1;
+            var width = encoding.GetByteCount(value.AsSpan(i, step));
+            if (used + width > maxBytes)
+                break;
+            used += width;
+            i += step;
+        }
+
+        return value[..i];
+    }
 
     /// <summary>
     /// Reads the Unicode scalar at <paramref name="i"/>: a surrogate pair
@@ -295,15 +376,18 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         private readonly Encoding storageEncoding;
 
+        private readonly int ansiCodePage;
+
         private readonly bool isSupplementaryCharacterAware;
 
-        internal CultureCollation(string name, string description, string cultureName, bool caseSensitive, bool kanaTypeSensitive, bool widthSensitive, Encoding storageEncoding, bool isSupplementaryCharacterAware)
+        internal CultureCollation(string name, string description, string cultureName, bool caseSensitive, bool kanaTypeSensitive, bool widthSensitive, Encoding storageEncoding, int ansiCodePage, bool isSupplementaryCharacterAware)
         {
             this.name = name;
             this.description = description;
             this.caseSensitive = caseSensitive;
             this.compareInfo = CultureInfo.GetCultureInfo(cultureName).CompareInfo;
             this.storageEncoding = storageEncoding;
+            this.ansiCodePage = ansiCodePage;
             this.isSupplementaryCharacterAware = isSupplementaryCharacterAware;
             var baseOpts = caseSensitive
                 ? CompareOptions.None
@@ -324,6 +408,8 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         public override bool CaseSensitive => this.caseSensitive;
 
         internal override Encoding StorageEncoding => this.storageEncoding;
+
+        internal override int AnsiCodePage => this.ansiCodePage;
 
         internal override bool IsSupplementaryCharacterAware => this.isSupplementaryCharacterAware;
 
@@ -424,14 +510,17 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         private readonly Encoding storageEncoding;
 
+        private readonly int ansiCodePage;
+
         private readonly Collation varcharBody;
 
-        internal BinaryCollationBody(string name, string description, bool preBin2, Encoding storageEncoding, Collation varcharBody)
+        internal BinaryCollationBody(string name, string description, bool preBin2, Encoding storageEncoding, int ansiCodePage, Collation varcharBody)
         {
             this.name = name;
             this.description = description;
             this.preBin2 = preBin2;
             this.storageEncoding = storageEncoding;
+            this.ansiCodePage = ansiCodePage;
             this.varcharBody = varcharBody;
         }
 
@@ -442,6 +531,8 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         public override bool CaseSensitive => true;
 
         internal override Encoding StorageEncoding => this.storageEncoding;
+
+        internal override int AnsiCodePage => this.ansiCodePage;
 
         internal override Collation ForVarcharStorage() => this.varcharBody;
 
@@ -491,24 +582,32 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     }
 
     /// <summary>
-    /// CP1252-byte body for binary collations when pinned on a varchar /
-    /// char column (non-UTF8 family). Encodes each operand to CP1252 then
-    /// byte-compares — matches real SQL Server's BIN / BIN2 varchar sort
-    /// and equality. <see cref="Name"/> is shared with the nvarchar-bodied
-    /// sibling so catalog views report one collation name;
+    /// ANSI-byte body for binary collations when pinned on a varchar /
+    /// char column (non-UTF8 family). Encodes each operand to the collation's
+    /// own code page then byte-compares — matches real SQL Server's BIN /
+    /// BIN2 varchar sort and equality, where the ordering is over stored
+    /// bytes and so follows the code page (CP1252 for Latin1_General_BIN2,
+    /// CP932 for Japanese_BIN2, …). <see cref="Name"/> is shared with the
+    /// nvarchar-bodied sibling so catalog views report one collation name;
     /// <see cref="Resolve"/> treats them as the same collation for
     /// cross-operand coercibility.
     /// </summary>
-    internal sealed class Cp1252BinaryCollation : Collation
+    internal sealed class AnsiBinaryCollation : Collation
     {
         private readonly string name;
 
         private readonly string description;
 
-        internal Cp1252BinaryCollation(string name, string description)
+        private readonly Encoding encoding;
+
+        private readonly int ansiCodePage;
+
+        internal AnsiBinaryCollation(string name, string description, Encoding encoding, int ansiCodePage)
         {
             this.name = name;
             this.description = description;
+            this.encoding = encoding;
+            this.ansiCodePage = ansiCodePage;
         }
 
         public override string Name => this.name;
@@ -517,33 +616,41 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         public override bool CaseSensitive => true;
 
+        internal override Encoding StorageEncoding => this.encoding;
+
+        internal override int AnsiCodePage => this.ansiCodePage;
+
         public override int Compare(string? x, string? y) =>
             x is null
                 ? (y is null ? 0 : -1)
-                : y is null ? 1 : CompareBytes(x, y);
+                : y is null ? 1 : this.CompareBytes(x, y);
 
         public override bool Equals(string? x, string? y) =>
             x is null
                 ? y is null
-                : y is not null && CompareBytes(x, y) == 0;
+                : y is not null && this.CompareBytes(x, y) == 0;
 
         public override int GetHashCode(string obj)
         {
-            // CP1252 is single-byte, so the byte count equals the char count.
-            var buffer = obj.Length <= 256 ? stackalloc byte[obj.Length] : new byte[obj.Length];
-            var length = CharSqlType.Cp1252Encoder.GetBytes(obj, buffer);
+            // Sized by GetByteCount rather than char count: the DBCS code
+            // pages (932 / 936 / 949 / 950) emit two bytes for most of their
+            // repertoire, so a char-sized buffer would overflow.
+            var byteCount = this.encoding.GetByteCount(obj);
+            var buffer = byteCount <= 256 ? stackalloc byte[byteCount] : new byte[byteCount];
+            var length = this.encoding.GetBytes(obj, buffer);
             var hash = default(HashCode);
             hash.AddBytes(buffer[..length]);
             return hash.ToHashCode();
         }
 
-        private static int CompareBytes(string x, string y)
+        private int CompareBytes(string x, string y)
         {
-            var encoding = CharSqlType.Cp1252Encoder;
-            var xBuffer = x.Length <= 256 ? stackalloc byte[x.Length] : new byte[x.Length];
-            var yBuffer = y.Length <= 256 ? stackalloc byte[y.Length] : new byte[y.Length];
-            var xLength = encoding.GetBytes(x, xBuffer);
-            var yLength = encoding.GetBytes(y, yBuffer);
+            var xCount = this.encoding.GetByteCount(x);
+            var yCount = this.encoding.GetByteCount(y);
+            var xBuffer = xCount <= 256 ? stackalloc byte[xCount] : new byte[xCount];
+            var yBuffer = yCount <= 256 ? stackalloc byte[yCount] : new byte[yCount];
+            var xLength = this.encoding.GetBytes(x, xBuffer);
+            var yLength = this.encoding.GetBytes(y, yBuffer);
             return xBuffer[..xLength].SequenceCompareTo(yBuffer[..yLength]);
         }
     }
@@ -575,6 +682,8 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         public override bool CaseSensitive => true;
 
         internal override Encoding StorageEncoding => Encoding.UTF8;
+
+        internal override int AnsiCodePage => 65001;
 
         public override int Compare(string? x, string? y)
         {

@@ -84,7 +84,12 @@ partial class Simulation
 
         throw column.Type is VarbinarySqlType or BinarySqlType
             ? SimulatedSqlException.StringOrBinaryWouldBeTruncated(tableName, column.Name, source.AsBytes, max)
-            : SimulatedSqlException.StringOrBinaryWouldBeTruncated(tableName, column.Name, source.AsString, max);
+            : SimulatedSqlException.StringOrBinaryWouldBeTruncated(
+                tableName,
+                column.Name,
+                source.AsString,
+                max,
+                column.Type is VarcharSqlType or CharSqlType ? column.Type.Collation!.StorageEncoding : null);
     }
 
     /// <summary>

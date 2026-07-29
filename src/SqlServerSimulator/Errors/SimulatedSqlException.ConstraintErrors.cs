@@ -6,7 +6,12 @@ partial class SimulatedSqlException
     /// Mimics SQL Server's verbose truncation error (Msg 2628): a string value
     /// would not fit within the destination column's declared maximum length.
     /// The displayed "truncated value" is the prefix of the offending value
-    /// clipped to the column's max length.
+    /// clipped to the column's max length. A non-null storage encoding clips
+    /// that prefix to the byte budget on a character boundary, since a
+    /// <c>varchar(N)</c> budget counts bytes: under a DBCS code page fewer
+    /// characters fit than <c>N</c> (probe-confirmed real — five CP932 kana
+    /// into <c>varchar(5)</c> reports <c>'こん'</c>). Pass null for an
+    /// nvarchar destination, whose budget is UTF-16 code units.
     /// </summary>
     /// <remarks>
     /// Introduced in SQL Server 2019 (compatibility level 150) behind trace
@@ -16,9 +21,11 @@ partial class SimulatedSqlException
     /// (Msg 8152). The simulator selects between the two via
     /// <see cref="SimulatedDbConnection.IsVerboseTruncationActive"/>.
     /// </remarks>
-    internal static SimulatedSqlException StringOrBinaryWouldBeTruncated(string tableName, string columnName, string value, int max)
+    internal static SimulatedSqlException StringOrBinaryWouldBeTruncated(string tableName, string columnName, string value, int max, System.Text.Encoding? encoding)
     {
-        var prefix = value.Length <= max ? value : value[..max];
+        var prefix = encoding is null
+            ? (value.Length <= max ? value : value[..max])
+            : Collation.ClipToByteBudget(value, max, encoding);
         return new($"String or binary data would be truncated in table '{tableName}', column '{columnName}'. Truncated value: '{prefix}'.", 2628, 16, 1);
     }
 

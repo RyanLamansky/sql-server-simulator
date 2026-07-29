@@ -162,7 +162,7 @@ Probe-confirmed: `GROUPING(a+1)` / `GROUPING_ID(a+1, b)` with matching GROUP BY 
 `STRING_AGG(expr, sep) WITHIN GROUP (ORDER BY ...)` reorders concatenation per group (EF emits this from `GroupBy(...).Select(g => string.Join(sep, g.OrderBy(...)))`).
 NULL operand rows skip both ORDER BY input and output.
 The result type is the operand's string type.
-**A bounded (non-MAX) operand whose concatenation exceeds 8000 bytes raises Msg 9829** (`"STRING_AGG aggregation result exceeded the limit of 8000 bytes. Use LOB types to avoid result truncation."`, probe-confirmed against SQL Server 2025) rather than truncating — the byte count uses UTF-16 width for `nvarchar`, CP1252 for `varchar`; a `varchar(max)` / `nvarchar(max)` operand streams unbounded and skips the check (and, retyped through the operand, rides PLP over the TDS wire).
+**A bounded (non-MAX) operand whose concatenation exceeds 8000 bytes raises Msg 9829** (`"STRING_AGG aggregation result exceeded the limit of 8000 bytes. Use LOB types to avoid result truncation."`, probe-confirmed against SQL Server 2025) rather than truncating — the byte count uses UTF-16 width for `nvarchar` and the result collation's ANSI code page for `varchar`; a `varchar(max)` / `nvarchar(max)` operand streams unbounded and skips the check (and, retyped through the operand, rides PLP over the TDS wire).
 Non-`STRING_AGG` aggregate with `WITHIN GROUP` → **Msg 10757**; ORDER BY ordinal in this context → **Msg 5308** (distinct from projection-level ORDER BY which accepts ordinals); `WITHIN` is contextual (not reserved).
 Cross-aggregate Msg 8711 isn't modeled (EF doesn't emit).
 

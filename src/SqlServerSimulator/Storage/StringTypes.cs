@@ -5,9 +5,10 @@ using System.Text;
 namespace SqlServerSimulator.Storage;
 
 /// <summary>
-/// SQL Server's <c>varchar(N)</c>: variable-length CP1252 string, declared
-/// length 1-8000 bytes. Each <c>(length, collation, coercibility)</c> trio is
-/// a distinct interned singleton via <see cref="Get(int, SqlServerSimulator.Collation, SqlServerSimulator.Coercibility)"/>;
+/// SQL Server's <c>varchar(N)</c>: variable-length string in the collation's
+/// own ANSI code page, declared length 1-8000 <em>bytes</em> (so a DBCS or
+/// UTF-8 code page fits fewer than N characters).
+/// Each <c>(length, collation, coercibility)</c> trio is a distinct interned singleton via <see cref="Get(int, SqlServerSimulator.Collation, SqlServerSimulator.Coercibility)"/>;
 /// the length-unspecified sentinel is <c>Get(0, …)</c> (returned from
 /// arithmetic / column resolution paths that haven't pinned a length) and the
 /// LOB <c>varchar(MAX)</c> form is <c>Get(-1, …)</c>.
@@ -23,6 +24,9 @@ internal sealed class VarcharSqlType : SqlType
     private VarcharSqlType(short length, Collation collation, Coercibility coercibility)
         : base(SqlTypeCategory.String)
     {
+        // Runs once per interned (length, collation, coercibility) triple, so
+        // the Msg 459 gate costs nothing on the cache-hit path.
+        collation.RejectIfUnicodeOnly();
         this.length = length;
         this.collation = collation;
         this.coercibility = coercibility;
@@ -306,8 +310,8 @@ internal sealed class ImageSqlType() : SqlType(SqlTypeCategory.Other)
 }
 
 /// <summary>
-/// SQL Server's <c>char(N)</c>: fixed-length CP1252 string, declared length
-/// 1-8000 bytes. Each <c>(length, collation, coercibility)</c> trio is a
+/// SQL Server's <c>char(N)</c>: fixed-length string in the collation's own
+/// ANSI code page, declared length 1-8000 bytes. Each <c>(length, collation, coercibility)</c> trio is a
 /// distinct interned singleton. Stored values are right-padded with U+0020
 /// to the declared length, both in memory and on disk; comparison and
 /// equality strip trailing spaces via the type's collation so
@@ -324,6 +328,8 @@ internal sealed class CharSqlType : SqlType
     private CharSqlType(short length, Collation collation, Coercibility coercibility)
         : base(SqlTypeCategory.String)
     {
+        // Interned per triple, so the Msg 459 gate runs once per pairing.
+        collation.RejectIfUnicodeOnly();
         this.length = length;
         this.collation = collation;
         this.coercibility = coercibility;
@@ -356,7 +362,12 @@ internal sealed class CharSqlType : SqlType
 
     private static readonly ConcurrentDictionary<(short, Collation, Coercibility), CharSqlType> cache = new();
 
-    /// <summary>Shared CP1252 encoder; identical configuration to <see cref="VarcharSqlType"/>.</summary>
+    /// <summary>
+    /// Shared CP1252 encoder — the default collation's storage encoding, and
+    /// the interned instance <see cref="Collation.AnsiEncoding"/> returns for
+    /// code page 1252. Also the one place the code-pages provider is
+    /// registered, which every other ANSI code page depends on.
+    /// </summary>
     internal static readonly Encoding Cp1252Encoder = LoadCp1252();
 
     private static Encoding LoadCp1252()

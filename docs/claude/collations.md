@@ -277,22 +277,25 @@ The same approach could extend to other heavily-used names if a divergence surfa
 
 ## Locale-comparer sort-parity gap
 
-Probed against SQL Server 2025 with a curated word set per locale (mixed-case ASCII, accented Latin, hiragana / katakana / half-width katakana, common CJK characters and 2-character compounds).
-For each `(collation, storage)` pair, ORDER BY result vs `CompareInfo.Compare` ordering compared position-by-position:
+Probed against SQL Server 2025 with a hard word set per locale (Turkish `İ`/`ı`/`i`, `ğ`, `ş`, `â` plus case variants; hiragana / full-width and half-width katakana, voiced marks, prolonged sound marks; CJK including mixed-script strings).
+Scored **tie-robustly**: every adjacent pair in real's `ORDER BY` output must compare `<=` under `CompareInfo`.
+That distinction matters — under a CI collation `'çay'` and `'Çay'` compare *equal*, so their relative order is unspecified on real too, and a position-by-position diff counts such ties as divergences that aren't.
 
-| Collation | nvarchar parity | varchar parity | Divergence shape |
-|---|---|---|---|
-| `Turkish_CI_AS` | 17 / 19 align | 12 / 19 align | nvarchar: only `çay` vs `Çay` case-tiebreaker order within the equality class. varchar: same, plus the `{İ, ı, I, i}` cluster interleaves with neighboring accented letters in a different order — CP1252 vs UTF-16 sort-key generation. |
-| `Japanese_XJIS_140_CI_AS` | 11 / 21 align | 2 / 21 align | nvarchar: hiragana / full-width katakana / half-width katakana group correctly (kana-type folding works), but the secondary tiebreaker order inside each kana family flips for some characters. varchar: essentially unusable — CP1252 doesn't represent Japanese; real SQL Server would use a Japanese codepage (CP932). |
-| `Chinese_PRC_CI_AS` | 0 / 17 align | 12 / 17 align | nvarchar: every position shifts by 2 because `.NET` puts CJK before Latin and SQL Server puts Latin before CJK; internal Chinese pinyin ordering is mostly aligned. varchar: small internal pinyin-order divergence on a few 2-char compounds (`上海` vs `韩国` swap). |
+| Collation | Adjacent pairs consistent | Divergence shape |
+|---|---|---|
+| `Turkish_CI_AS` | **30 / 30** | None found. The Turkish-specific `ı` &lt; `i` &lt; `İ` cluster, `ğ` after `g`, `ş` after `s`, `ö` after `o`, `ü` after `u` all match. |
+| `Japanese_XJIS_140_CI_AS` | **27 / 28** | One: `らーめん` vs `ﾗｰﾒﾝ`, which kana-type + width insensitivity should make equal — the half-width prolonged sound mark (U+FF70) doesn't fold onto U+30FC in `CompareInfo`. |
+| `Chinese_PRC_CI_AS` | 13 / 18 | Two kinds. **Script order**: `zh-CN` ranks CJK *before* Latin, real ranks it after (`az` &lt; `a中`, `Zebra` &lt; `安徽`). **Polyphonic readings**: real reads 重 as *zhòng* and 长 as *cháng*, `zh-CN` picks the other reading, so `重庆` and `长沙` land in different places. |
 
-**Equality + CI/CS / KS / WS folding all align** for the inputs probed (Turkish-i, kana-type, width, accent).
-Pure sort-key parity within those equivalence classes doesn't — SQL Server's NLS sort tables aren't reproducible from .NET `CompareInfo` for these locales, and the simulator doesn't ship its own NLS data.
-Apps whose tests assert on exact byte-for-byte ORDER BY output of locale-collation columns will see divergence; apps using these collations for grouping / equality / LIKE / Turkish-i case folding match.
+**Equality, CI/CS / KS / WS folding, grouping and LIKE all align** for the inputs probed.
+Only ordering diverges, and only for Chinese in any material way.
 
-**`varchar(N)` on the Japanese / Chinese collations** is meaningfully wrong because the underlying codepage differs.
-Real SQL Server routes these through CP932 / CP936 respectively; the simulator routes through the invariant UTF-16 CompareInfo at the value layer.
-Use `nvarchar(N)` for any non-Latin column that needs even approximate sort parity.
+Closing the Chinese gap needs a per-character primary-rank table of the kind [the default collation's body](#sql_latin1_general_cp1_ci_as--byte-exact-sort) carries, because the rank is interleaved rather than layered: real compares a single primary scale where a character's script class is the high bits and its own rank the low bits.
+Three cheaper approximations were tried and **verified to fail** — first-character script class, script-run segmentation, and class-vector-prefix comparison all get `az` vs `a中` or `a中` vs `z` wrong.
+Neither the invariant nor `en-US` comparer is a shortcut: they order the scripts correctly but lose pinyin inside CJK (`上海 | 中国 | 北京 | 安徽 | 广州` instead of `安徽 | 北京 | 广州 | 上海 | 中国`), which is the half `zh-CN` gets right.
+
+Sort parity is now the *whole* of this gap: `varchar` under these collations stores its own code page (see [Storage code page](#storage-code-page)), so it orders as well as `nvarchar` does.
+Before that, varchar under any non-CP1252 collation replaced every character with `?`, which destroyed the data before it could be compared — the earlier "2 of 21 positions align" reading of Japanese varchar was measuring that, not a sort-table difference.
 
 ## Binary collation storage-aware dispatch
 
@@ -318,7 +321,38 @@ So `(nchar(0xD83D)+nchar(0xDE00)) < nchar(0xE000)` is **true** under `Latin1_Gen
 `StringComparer.Ordinal` is UTF-16 code-unit comparison, so `BinaryCollation` over `Ordinal` is byte-exact for nvarchar BIN2 *including* emoji / supplementary chars — adding code-point logic would break currently-correct behavior.
 (The varchar `_BIN2_UTF8` substitute *is* codepoint-ordered, because UTF-8 byte order equals surrogate-pair-combined scalar order — that's the one place the two coincide.)
 
-## UTF-8 storage encoding
+## Storage code page
+
+`varchar` / `char` store through the collation's **own ANSI code page**, not CP1252 for everything.
+`Collation.AnsiCodePage` carries it (what `COLLATIONPROPERTY(name, 'CodePage')` reports), and `Collation.StorageEncoding` is the matching encoder, interned per code page by `Collation.AnsiEncoding` with an `EncoderReplacementFallback("?")` so an unrepresentable character narrows to `?` the way real does rather than throwing.
+Resolution lives in one place — `Collation.Parser.cs`'s `ResolveAnsiCodePage`, shared by `CreateInstance` and `TryGetMetrics` so storage and the catalog can't disagree: `_UTF8` → 65001, else a `CPnnn` name token (the SQL_\* family carries its page there — `CP1` = 1252, `CP850` = 850), else the per-prefix registry in `Collation.LcidCodePage.cs`.
+
+Verified exhaustively: all **5540** names from `sys.fn_helpcollations()` report the same code page as the reference server, and storage bytes + `DATALENGTH` + `LEN` match byte-for-byte across one representative collation per code page (1250, 1251, 1252, 1253, 1254, 1255, 1256, 1257, 1258, 874, 932, 936, 949, 950, 850, 437).
+
+- **The byte budget is the code page's.**
+  `varchar(N)` counts N **bytes**, so under a DBCS page fewer characters fit: five CP932 kana need ten bytes, and `varchar(5)` holds two.
+  `Simulation.Coerce.EnforceMaxLength` measures with `GetByteCount`, and `Collation.ClipToByteBudget` does the clipping wherever a value is cut down — CAST/CONVERT to a narrower target, Msg 2628's `Truncated value:` prefix, and the `ALTER COLUMN` narrowing scan.
+  It never splits a multi-byte character (or a surrogate pair), matching real: `CAST(<five kana> AS varchar(5))` yields two kana / four bytes, and the Msg 2628 text reports `'こん'`.
+- **String functions stay character-based.**
+  `LEN`, `LEFT`, `RIGHT`, `SUBSTRING` count characters while `DATALENGTH` and the declared width count bytes — so `LEFT(v, 2)` over CP932 kana is two characters and four bytes.
+- **`ASCII` reads the argument's code page**, first byte only: `Ğ` under Turkish is 208 (CP1254), `こ` under Japanese is 130 (the CP932 lead byte).
+  `UNICODE` is code-point based and so is code-page independent.
+- **`CAST(varchar AS varbinary)` renders the stored bytes**, so it agrees with `DATALENGTH` over the same expression.
+  This path used `Encoding.Latin1` before, which is ISO-8859-1 rather than CP1252 — it differs across 0x80-0x9F *and* best-fit-folds (`€` → `?`, `Š` → `S`, `—` → `-`), so the default collation returned wrong bytes for its own repertoire.
+- **Binary collations byte-compare in their code page** (`AnsiBinaryCollation`), so `Japanese_BIN2` on varchar orders by CP932 bytes.
+  Its buffers size by `GetByteCount`, not character count, which a DBCS page would overflow.
+
+### Unicode-only collations — Msg 459
+
+Twelve Windows prefixes have no ANSI code page at all (Assamese, Bengali, Divehi, Indic_General, Khmer, Lao, Maltese, Maori, Nepali, Pashto, Syriac, Tibetan); real reports their `COLLATIONPROPERTY` code page as **0** and rejects them on a char family type with **Msg 459** (Class 16 State 2, batch-aborting — `TRY`/`CATCH` doesn't intercept it):
+
+> Collation 'Assamese_100_CI_AS' is supported on Unicode data types only and cannot be applied to char, varchar or text data types.
+
+`Collation.RejectIfUnicodeOnly` fires from the `VarcharSqlType` / `CharSqlType` constructors — the one chokepoint every char-family pairing interns through, so the check runs once per triple and never on the cache-hit path, and `StorageEncoding` downstream is always code-page-bearing.
+`text` needs its own gate at the CREATE TABLE / ALTER COLUMN column sites because it reports the shared `Collation.Baseline` instance rather than interning a per-column type (see [Type-side wiring](#type-side-wiring)).
+`nvarchar` under these collations is accepted, as on real.
+
+### UTF-8 storage encoding
 
 Three modeled collations carry UTF-8 as their `StorageEncoding`: `Latin1_General_100_CI_AS_SC_UTF8`, `_CS_AS_SC_UTF8`, `_BIN2_UTF8`.
 The encoding is read by `VarcharSqlType.Encode` / `Decode` / `GetVariableByteCount` (and the same trio on `CharSqlType`) at row-encode time, and by `Simulation.Coerce.EnforceMaxLength` for the per-row byte-budget check.
@@ -412,7 +446,8 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
   `c1.x = c2.x` across two differently-collated columns raises Msg 468 (and `c1.x + c2.x` raises Msg 457) as soon as a row is evaluated, but the same statement over an **empty** rowset succeeds silently — real rejects it during compilation regardless of row count (probe-confirmed: the error isn't even catchable by TRY/CATCH in the same batch, being a bind-time failure).
   Set operations *do* bind at compile time (below), so this is now the residual case; closing it means carrying collation through the static type path at every comparison site.
 - **`text` / `ntext` columns can't be declared with an explicit COLLATE in the simulator.**
-  Real SQL Server allows it; the simulator's single-instance modeling collapses all text/ntext to the default.
+  Real SQL Server allows it; the simulator's single-instance modeling collapses all text/ntext to the default, so a `text` column stores CP1252 regardless of the clause.
+  The clause is still *validated* — a Unicode-only collation on `text` raises Msg 459 from the column-declaration site (see [Unicode-only collations](#unicode-only-collations--msg-459)) — it just isn't pinned.
   Low impact (text/ntext deprecated since SQL Server 2005).
 - **Sysname's collation is always `Collation.Baseline`** at `Implicit` rank — real SQL Server's sysname inherits the server's catalog collation which can differ from the user database's collation; the simulator's single-instance modeling collapses them.
 - **`CAST(expr AS varchar(N)) COLLATE …UTF8` doesn't re-truncate under the postfix collation.**

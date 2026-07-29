@@ -94,6 +94,7 @@ internal sealed class ConvertExpression : Expression
         if (sourceValue.IsNull)
             return Cast.RecollateStringResult(SqlValue.Null(this.targetType), this.targetType, sourceValue.Type, dbCollation);
 
+        var budgetCollation = Cast.ResultCollation(this.targetType, sourceValue.Type, dbCollation);
         SqlValue coerced;
         try
         {
@@ -116,9 +117,9 @@ internal sealed class ConvertExpression : Expression
                         => sourceValue.CoerceBinaryToStringWithStyle(this.targetType, sc),
                     ({ Category: SqlTypeCategory.String }, VarbinarySqlType or BinarySqlType)
                         => sourceValue.CoerceStringToBinaryWithStyle(this.targetType, sc),
-                    _ => Cast.ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength),
+                    _ => Cast.ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength, budgetCollation),
                 }
-                : Cast.ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength);
+                : Cast.ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength, budgetCollation);
         }
         catch (SimulatedSqlException ex) when (this.tryMode && Cast.IsConversionFailure(ex.Number))
         {

@@ -125,7 +125,7 @@ internal sealed class StringAggAggregator : Aggregator
         {
             var byteLength = this.resultType is NVarcharSqlType or NCharSqlType || this.resultType == SqlType.NText
                 ? result.Length * 2
-                : CharSqlType.Cp1252Encoder.GetByteCount(result);
+                : (this.resultType.Collation ?? Collation.Baseline).StorageEncoding.GetByteCount(result);
             if (byteLength > MaxResultBytes)
                 throw SimulatedSqlException.StringAggResultExceededLimit();
         }

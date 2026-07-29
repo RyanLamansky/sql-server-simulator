@@ -138,15 +138,28 @@ internal abstract partial class Collation
                 + (flags.HasFlag(CollationFlags.WidthSensitive) ? 0 : 0x20000);
         var versionOrdinal = version switch { 90 => 1, 100 => 2, 140 => 3, 160 => 4, _ => 0 };
 
-        var hasRegistered = LcidAndCodePageByPrefix.TryGetValue(prefix, out var registered);
-        var lcid = hasRegistered ? registered.Lcid : 0x0409;
-        var ansiCodePage = flags.HasFlag(CollationFlags.Utf8)
-            ? 65001
-            : codePage ?? (hasRegistered && registered.CodePage != 0 ? registered.CodePage : 1252);
+        var lcid = LcidAndCodePageByPrefix.TryGetValue(prefix, out var registered) ? registered.Lcid : 0x0409;
 
-        metrics = new CollationMetrics(ansiCodePage, lcid, comparisonStyle, versionOrdinal, collation.Name);
+        metrics = new CollationMetrics(ResolveAnsiCodePage(prefix, codePage, flags), lcid, comparisonStyle, versionOrdinal, collation.Name);
         return true;
     }
+
+    /// <summary>
+    /// The ANSI code page a collation stores <c>varchar</c> / <c>char</c> data
+    /// in, and reports through <c>COLLATIONPROPERTY(name, 'CodePage')</c>.
+    /// A <c>_UTF8</c> name overrides everything to 65001; otherwise a
+    /// <c>CPnnn</c> name token wins (the SQL_* family carries its code page
+    /// there — <c>CP1</c> = 1252, <c>CP850</c> = 850), falling back to the
+    /// prefix registry.
+    /// <para>Returns <c>0</c> for the twelve Windows prefixes real SQL Server
+    /// supports on Unicode data types only (probe-confirmed: their
+    /// <c>COLLATIONPROPERTY</c> code page is 0, and pinning one on a char
+    /// family type raises Msg 459). An unregistered prefix defaults to 1252
+    /// rather than 0, so an unrecognized name stays storable.</para>
+    /// </summary>
+    private static int ResolveAnsiCodePage(string prefix, int? codePage, CollationFlags flags) =>
+        flags.HasFlag(CollationFlags.Utf8) ? 65001
+        : codePage ?? (LcidAndCodePageByPrefix.TryGetValue(prefix, out var registered) ? registered.CodePage : 1252);
 
     /// <summary>
     /// Enumerates every recognized collation name with its description
@@ -347,15 +360,19 @@ internal abstract partial class Collation
     {
         var description = BuildDescription(name, prefix, prefixInfo, version, codePage, flags);
         var isUtf8 = flags.HasFlag(CollationFlags.Utf8);
-        var storageEncoding = isUtf8 ? Encoding.UTF8 : CharSqlType.Cp1252Encoder;
+        var ansiCodePage = ResolveAnsiCodePage(prefix, codePage, flags);
+        // A Unicode-only collation has no ANSI encoding to pin; the char-family
+        // type factories reject it with Msg 459 before storage is reached, so
+        // the placeholder here is never consulted.
+        var storageEncoding = ansiCodePage == 0 ? CharSqlType.Cp1252Encoder : AnsiEncoding(ansiCodePage);
 
         if (flags.HasFlag(CollationFlags.Binary) || flags.HasFlag(CollationFlags.Binary2))
         {
             var preBin2 = flags.HasFlag(CollationFlags.Binary);
             Collation varcharBody = isUtf8
                 ? new Utf8CodepointBinaryCollation(name, description)
-                : new Cp1252BinaryCollation(name, description);
-            return new BinaryCollationBody(name, description, preBin2, storageEncoding, varcharBody);
+                : new AnsiBinaryCollation(name, description, storageEncoding, ansiCodePage);
+            return new BinaryCollationBody(name, description, preBin2, storageEncoding, ansiCodePage, varcharBody);
         }
 
         var caseSensitive = flags.HasFlag(CollationFlags.CaseSensitive);
@@ -364,7 +381,7 @@ internal abstract partial class Collation
         // SC behavior is engaged when the _SC_ flag is set explicitly or
         // when the version is v140+ (where SC is implicit / default).
         var scAware = flags.HasFlag(CollationFlags.SupplementaryCharacters) || version is >= 140;
-        var cultureBody = new CultureCollation(name, description, prefixInfo.CultureName, caseSensitive, kanaSensitive, widthSensitive, storageEncoding, scAware);
+        var cultureBody = new CultureCollation(name, description, prefixInfo.CultureName, caseSensitive, kanaSensitive, widthSensitive, storageEncoding, ansiCodePage, scAware);
 
         // The default collation gets a byte-exact sort body wrapping the
         // generic culture comparer (which still supplies metadata + the

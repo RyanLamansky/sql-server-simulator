@@ -228,8 +228,10 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 - **MVCC history keeps one version per UPDATE, not one per committed transaction** — real collapses intra-transaction intermediate states so only the pre- and post-transaction states are visible.
   Visibility matches for the common single-UPDATE-per-transaction case; a snapshot landing between two UPDATEs of one transaction sees a state real never exposes.
   See [`locking.md`](locking.md#known-mvcc-limitations).
-- **Locale-collation ORDER BY parity** — sort keys for `Turkish_CI_AS` / `Japanese_XJIS_140_CI_AS` / `Chinese_PRC_CI_AS` come from .NET `CompareInfo`, which doesn't reproduce SQL Server's NLS tables; `varchar` under the Japanese / Chinese collations is further off because real routes those through CP932 / CP936 while the simulator routes the invariant UTF-16 comparer (2 of 21 probed positions align).
-  Equality, CI/CS / KS / WS folding, grouping and LIKE all align — only ordering diverges, and `nvarchar` is the closer storage.
+- **`Chinese_PRC_CI_AS` ORDER BY parity** — 13 of 18 adjacent pairs consistent with real, diverging two ways: `zh-CN` ranks CJK *before* Latin where real ranks it after, and it picks the other reading for polyphonic characters (real reads 重 as *zhòng*, 长 as *cháng*).
+  Closing it needs a per-character primary-rank table like the default collation's byte-exact body, because the rank is interleaved rather than layered — three cheaper approximations were tried and verified to fail.
+  `Turkish_CI_AS` (30/30) and `Japanese_XJIS_140_CI_AS` (27/28, the lone miss being half-width prolonged-sound-mark folding) need nothing; equality, CI/CS / KS / WS folding, grouping and LIKE align everywhere.
+  Scores are tie-robust — a position-by-position diff miscounts unspecified CI tie order as divergence, which is what the earlier, larger-looking numbers were measuring.
   See [`collations.md`](collations.md#locale-comparer-sort-parity-gap).
 - **Workload-harness divergence reporting quirks** (`.vs/workload/Program.cs`, local-only) — the parity report's example line rebuilds parameters from the op seed and can mismatch the actual divergent instance, and divergent instances aren't re-run single-threaded to classify transient-vs-stable.
   Both made the shared-plan-state hunt slower than it needed to be (the fixed bug class itself — instance-bound aggregate/window results, baked TOP/OFFSET counts, frozen RAND, unstamped replay clock — is documented in [`plan-cache.md`](plan-cache.md)'s shared-plan contract section).

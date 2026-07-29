@@ -80,7 +80,10 @@ internal sealed class HashBytes : Expression
                 bytes = value.IsNull ? null : System.Text.Encoding.Unicode.GetBytes(value.AsString);
                 return true;
             case VarcharSqlType or CharSqlType or TextSqlType:
-                bytes = value.IsNull ? null : CharSqlType.Cp1252Encoder.GetBytes(value.AsString);
+                // The collation's own code page, so hashing a Turkish column
+                // digests its CP1254 bytes (probe-confirmed real: equal to
+                // HASHBYTES over the same bytes as a varbinary literal).
+                bytes = value.IsNull ? null : (value.Type.Collation ?? Collation.Baseline).StorageEncoding.GetBytes(value.AsString);
                 return true;
             default:
                 bytes = null;

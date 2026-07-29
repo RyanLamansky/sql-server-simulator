@@ -498,6 +498,19 @@ partial class SimulatedSqlException
         new($"Invalid collation '{name}'.", 448, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 459: a collation with no ANSI code page — the
+    /// Windows collations real SQL Server supports on Unicode data types only
+    /// (Assamese, Bengali, Divehi, Indic_General, Khmer, Lao, Maltese, Maori,
+    /// Nepali, Pashto, Syriac, Tibetan) — was applied to <c>char</c>,
+    /// <c>varchar</c>, or <c>text</c>. Probe-confirmed against SQL Server
+    /// 2025: Class 16 State 2, and batch-aborting (<c>TRY</c>/<c>CATCH</c>
+    /// does not intercept it), which the simulator gets for free because the
+    /// rejection fires while the column type is being constructed.
+    /// </summary>
+    internal static SimulatedSqlException CollationIsUnicodeOnly(string name) =>
+        new($"Collation '{name}' is supported on Unicode data types only and cannot be applied to char, varchar or text data types.", 459, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 468: both operands of an operator (currently
     /// <c>LIKE</c>) carry explicit <c>COLLATE</c> postfixes that don't agree.
     /// Probe-confirmed against SQL Server 2025: Class 16 State 9, with the

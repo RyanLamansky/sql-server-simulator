@@ -71,7 +71,7 @@ internal sealed class Cast : Expression
         SqlValue coerced;
         try
         {
-            coerced = ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength);
+            coerced = ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength, ResultCollation(this.targetType, sourceValue.Type, dbCollation));
         }
         catch (SimulatedSqlException ex) when (this.tryMode && IsConversionFailure(ex.Number))
         {
@@ -103,6 +103,15 @@ internal sealed class Cast : Expression
             : sourceType.Collation is { } sourceCollation
                 ? targetType.WithCollation(sourceCollation, sourceType.Coercibility)
                 : targetType.WithCollation(dbCollation, Coercibility.CoercibleDefault);
+
+    /// <summary>
+    /// The collation half of <see cref="ResultStringType"/>, without interning
+    /// a <see cref="SqlType"/>. Needed before the coercion runs, because a
+    /// <c>varchar(N)</c> byte budget has to be measured in the code page the
+    /// result will carry rather than the parse-time target's.
+    /// </summary>
+    internal static Collation? ResultCollation(SqlType targetType, SqlType sourceType, Collation dbCollation) =>
+        targetType.Collation is null ? null : sourceType.Collation ?? dbCollation;
 
     /// <summary>
     /// Applies <see cref="ResultStringType"/> to a coerced CAST/CONVERT value,
@@ -217,7 +226,7 @@ internal sealed class Cast : Expression
             ? !SqlType.IsStringCategory(target)
             : source == SqlType.Image && target is not (VarbinarySqlType or BinarySqlType or ImageSqlType);
 
-    internal static SqlValue ApplyCoercion(SqlValue value, SqlType targetType, int? targetMaxLength)
+    internal static SqlValue ApplyCoercion(SqlValue value, SqlType targetType, int? targetMaxLength, Collation? budgetCollation = null)
     {
         if (IsRejectedLegacyLobConversion(value.Type, targetType))
             throw SimulatedSqlException.ExplicitConversionNotAllowed(value.Type, targetType);
@@ -265,7 +274,7 @@ internal sealed class Cast : Expression
             throw SimulatedSqlException.ArithmeticOverflow(targetType.ToString()!);
         }
 
-        return EnforceTargetMaxLength(coerced, targetType, targetMaxLength, sourceType);
+        return EnforceTargetMaxLength(coerced, targetType, targetMaxLength, sourceType, budgetCollation);
     }
 
     /// <summary>
@@ -297,7 +306,7 @@ internal sealed class Cast : Expression
     /// arrives as <c>null</c> from <see cref="SqlType.GetByName"/> and they
     /// short-circuit this method.
     /// </summary>
-    private static SqlValue EnforceTargetMaxLength(SqlValue coerced, SqlType targetType, int? targetMaxLength, SqlType sourceType)
+    private static SqlValue EnforceTargetMaxLength(SqlValue coerced, SqlType targetType, int? targetMaxLength, SqlType sourceType, Collation? budgetCollation)
     {
         if (coerced.IsNull || targetMaxLength is not int max || max <= 0)
             return coerced;
@@ -309,12 +318,29 @@ internal sealed class Cast : Expression
             // "nvarchar") regardless of the target's declared length, so
             // ToString() — which would emit "varchar(5)" — is wrong here.
             var familyName = targetType is NVarcharSqlType ? "nvarchar" : "varchar";
-            return text.Length <= max ? coerced : sourceType.Category switch
+            // nvarchar(N) budgets N UTF-16 code units; varchar(N) budgets N
+            // *bytes* of the result collation's code page, which is fewer
+            // characters under UTF-8 or a DBCS code page. The budget follows
+            // the collation the result will carry — for CAST/CONVERT that is
+            // the source's, which the parse-time target type doesn't know.
+            // Null encoding means "one unit per char" — nvarchar, and every
+            // single-byte code page, which is the overwhelmingly common case
+            // and keeps the budget check O(1) rather than a byte-count walk.
+            var encoding = targetType is NVarcharSqlType
+                ? null
+                : (budgetCollation ?? targetType.Collation ?? Collation.Baseline).StorageEncoding;
+            if (encoding?.IsSingleByte == true)
+                encoding = null;
+            if (encoding is null ? text.Length <= max : encoding.GetByteCount(text) <= max)
+                return coerced;
+
+            var clipped = encoding is null ? text[..max] : Collation.ClipToByteBudget(text, max, encoding);
+            return sourceType.Category switch
             {
                 SqlTypeCategory.String or SqlTypeCategory.DateTime
-                    => SqlValue.FromString(targetType, text[..max]),
+                    => SqlValue.FromString(targetType, clipped),
                 SqlTypeCategory.Other when sourceType is VarbinarySqlType or BinarySqlType or ImageSqlType
-                    => SqlValue.FromString(targetType, text[..max]),
+                    => SqlValue.FromString(targetType, clipped),
                 SqlTypeCategory.Integer when sourceType != SqlType.BigInt && targetType is VarcharSqlType
                     => SqlValue.FromVarchar("*"),
                 SqlTypeCategory.Integer

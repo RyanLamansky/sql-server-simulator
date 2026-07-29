@@ -150,12 +150,13 @@ Multi-part dotted refs and binary chains in the zone slot aren't modeled; wrap i
 Basic one-arg conversions between a character and its code point.
 
 - **`ASCII(input)`** returns `int`.
-  Reads the first character of `input` and returns its CP1252 byte value.
+  Reads the first character of `input` and returns the first byte of its encoding in the argument collation's ANSI code page.
   NULL → NULL; empty string → NULL.
-  Unicode input is CP1252-encoded first, so `ASCII(N'€')` returns 128 (CP1252's `€`); unrepresentable Unicode (emoji etc.) returns 63 via the encoder's `'?'` replacement fallback.
+  Unicode input is encoded first, so `ASCII(N'€')` returns 128 (CP1252's `€`); unrepresentable Unicode (emoji etc.) returns 63 via the encoder's `'?'` replacement fallback.
+  The code page is the argument's, not always CP1252 — `ASCII` of a `Turkish_CI_AS` column holding `Ğ` is 208 — and under a DBCS code page the result is the *lead* byte of a two-byte character (`こ` under `Japanese_XJIS_140_CI_AS` → 130).
   Non-string inputs implicitly stringify *before* the first-char read, so `ASCII(65)` is 54 (the byte for `'6'`, the first char of `"65"`), not 65.
 - **`UNICODE(input)`** returns `int`.
-  Same input-handling shape as `ASCII`, but reads the .NET `char` directly rather than CP1252-encoding it.
+  Same input-handling shape as `ASCII`, but reads the .NET `char` directly rather than encoding it, so it is code-page independent.
   Supplementary code points (above U+FFFF, e.g. `N'😀'`) return the high surrogate value (55357 for 😀) under the non-SC default collation — not the full Unicode code point.
   An SC-aware variant returning 128512 would need explicit collation modeling; matches the simulator's "default collation only" stance.
 - **`CHAR(code)`** returns `char(1)` (not `varchar(1)` — probe-confirmed via `sql_variant_property(CHAR(65), 'basetype')`).
@@ -321,7 +322,8 @@ Probe-confirmed against SQL Server 2025:
 - **Accepted algorithms (case-insensitive):** `MD5`, `MD4`, `SHA` / `SHA1` (identical output), `SHA2_256`, `SHA2_512`.
   The removed `MD2` and any unrecognized name yield a **NULL result** (not an error).
   `MD4` isn't in the BCL, so it's hand-rolled (RFC 1320); every other algorithm routes to the framework.
-- **Input** must be a character or binary type: `char`/`varchar`/`text` encode CP1252, `nchar`/`nvarchar`/`ntext` UTF-16LE, binary verbatim (so `HASHBYTES('SHA2_256','x')` == `HASHBYTES('SHA2_256',0x78)`).
+- **Input** must be a character or binary type: `char`/`varchar`/`text` encode through the collation's ANSI code page, `nchar`/`nvarchar`/`ntext` UTF-16LE, binary verbatim (so `HASHBYTES('SHA2_256','x')` == `HASHBYTES('SHA2_256',0x78)`).
+  Probe-confirmed real: hashing a `Turkish_CI_AS` column holding `Ğğ` equals hashing `0xD0F0`, its CP1254 bytes.
   A non-character / non-binary argument (int, numeric, untyped `NULL` literal) raises **Msg 8116** (`InvalidArgumentDataType`, "…of hashbytes function"); a typed-but-NULL string / binary yields a NULL result.
 - Divergence: the bare `NULL` literal is typed `int` in the simulator, so `HASHBYTES(alg, NULL)` reports the type word `int` where real reports `NULL` — both error, non-corpus edge.
 
@@ -359,7 +361,7 @@ Probe-confirmed against SQL Server 2025:
 NULL in → NULL out on both.
 Backed by `GZipStream` at the default compression level — real SQL Server doesn't expose the level either, so there's nothing to match.
 
-**Input encoding** is the load-bearing detail: `COMPRESS` encodes `nchar`/`nvarchar`/`ntext` as UTF-16 LE and `char`/`varchar`/`text` as CP1252 (via the cached `CharSqlType.Cp1252Encoder`) before compressing, matching the bytes real SQL Server compresses for those column types; binary types pass through, and anything else falls through to the value's UTF-16 string form.
+**Input encoding** is the load-bearing detail: `COMPRESS` encodes `nchar`/`nvarchar`/`ntext` as UTF-16 LE and `char`/`varchar`/`text` through the collation's ANSI code page before compressing, matching the bytes real SQL Server compresses for those column types; binary types pass through, and anything else falls through to the value's UTF-16 string form.
 `DECOMPRESS` returns raw inflated bytes, so callers cast to get text back — WWI's `Website.VehicleTemperatures` does `CAST(DECOMPRESS(…) AS nvarchar(1000))`, which is the shape DacFx-emitted views rely on.
 
 **Divergence**: an invalid gzip stream raises **Msg 9803** in real SQL Server; the simulator catches the `InvalidDataException` and returns NULL instead.
@@ -536,7 +538,8 @@ Probe-confirmed against SQL Server 2025: `SQL_Latin1_General_CP1_CI_AS` → Code
 
 - **CodePage** — the ANSI code page.
   `_UTF8` names → 65001; SQL_\* names read their `CPnnn` name token (CP1 → 1252); Windows names come from the probe-built prefix registry (`Japanese*` → 932, `Latin1_General*` → 1252).
-  *The simulator stores all non-UTF8 varchar as CP1252, so `StorageEncoding.CodePage` is not the source — the token/registry lookup is.*
+  The same `ResolveAnsiCodePage` that pins `Collation.StorageEncoding`, so the reported page and the stored bytes can't disagree; verified equal to the reference server across all 5540 `sys.fn_helpcollations()` names.
+  Twelve Windows prefixes report 0 (Unicode-only) rather than falling back to 1252 — see [`collations.md`](collations.md#unicode-only-collations--msg-459).
 - **LCID** — from the probe-built prefix registry (`SQL_Latin1_General` / `Latin1_General` → 0x0409 = 1033, `Japanese` → 0x0411 = 1041); defaults to 0x0409 for a recognized prefix that isn't tabulated.
   *Known minor divergences: sort-variant prefixes with a distinct sort-order LCID and the CP1254 SQL_Latin1 members fall back to the base-prefix LCID.*
 - **ComparisonStyle** — derived from the suffix flags: binary (`_BIN` / `_BIN2`) → 0, else `ignore-case (0x1 when CI) + ignore-accent (0x2 when AI) + ignore-kana (0x10000 unless KS) + ignore-width (0x20000 unless WS)` (CI_AS → 196609, CI_AI → 196611, CS_AS → 196608, CI_AS_KS_WS → 1).

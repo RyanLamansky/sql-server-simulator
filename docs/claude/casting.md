@@ -55,11 +55,13 @@ Reverse direction (date-family → varbinary) isn't modeled — no production sc
 
 Both directions are in `SqlValue.CoerceTo` (style 0, the default CAST form):
 
-- **`varbinary`/`binary` → `varchar`/`nvarchar`** reinterprets each byte through the target's encoding (CP1252 for varchar/char, UTF-16 LE for nvarchar/nchar).
+- **`varbinary`/`binary` → `varchar`/`nvarchar`** reinterprets each byte through the target's encoding (the collation's ANSI code page for varchar/char — CP1252 on the default — and UTF-16 LE for nvarchar/nchar).
   Probe-confirmed: `CAST(0x414243 AS varchar(10))` → `'ABC'`.
   `image` source is rejected: the explicit CAST `image → varchar/nvarchar/char/nchar` raises **Msg 529** (`"Explicit conversion from data type image to <target> is not allowed."`, tiberius-surfaced), while the implicit-coerce path (`LEN(image)` etc.) raises Msg 8116.
   The Msg 529 target renders the `(max)` suffix for a MAX target but drops a bounded declared length to the root name (`nvarchar(max)` vs `nvarchar`) — real's rendering, matched by `FamilyRootName`'s MAX-form arms.
-- **`varchar`/`char`/`nvarchar`/`nchar` → `varbinary`/`binary`** encodes the string with the source's natural encoding (CP1252 for varchar/char/sysname, UTF-16 LE for nvarchar/nchar/ntext/text).
+- **`varchar`/`char`/`nvarchar`/`nchar` → `varbinary`/`binary`** encodes the string with the source's natural encoding — the source collation's ANSI code page for varchar/char, UTF-16 LE for nvarchar/nchar/ntext/sysname — so the bytes agree with `DATALENGTH` over the same expression.
+  Not ISO-8859-1: it differs from CP1252 across 0x80-0x9F and best-fit-folds (`€` → `?`, `Š` → `S`), which real never does.
+  See [`collations.md`](collations.md#storage-code-page).
   `varbinary(N)` receives the raw bytes and the CAST-level path truncates to N.
   `binary(N)` routes through `FromBinary` for zero-pad-or-truncate.
   Probe-confirmed: `CAST('abc' AS varbinary(10))` → `0x616263`, `CAST('abc' AS binary(10))` → `0x61626300000000000000`, `CAST(N'abc' AS varbinary(10))` → `0x610062006300`.
@@ -197,7 +199,7 @@ Unknown styles raise Msg 281 with `"float"` or `"real"` in the wording.
 
 | Style | Output direction | Input direction |
 | --- | --- | --- |
-| 0 | bytes reinterpreted as characters: CP1252 for `varchar`, UTF-16 LE for `nvarchar` | string bytes copied verbatim: CP1252 for varchar-family source, UTF-16 LE for nvarchar-family |
+| 0 | bytes reinterpreted as characters: the collation's code page for `varchar`, UTF-16 LE for `nvarchar` | string bytes copied verbatim: the collation's code page for a varchar-family source, UTF-16 LE for nvarchar-family |
 | 1 | `"0xHHHH…"` uppercase hex with `0x` prefix | parses hex with required `0x` prefix (missing → Msg 8114) |
 | 2 | bare `"HHHH…"` uppercase hex | parses hex with prefix explicitly disallowed (presence → Msg 8114) |
 

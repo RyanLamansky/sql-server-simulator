@@ -42,11 +42,10 @@ internal sealed class Compress(ParserContext context) : Expression
             return value.AsBytes;
         if (value.Type is NVarcharSqlType or NCharSqlType or NTextSqlType or SystemNameSqlType)
             return System.Text.Encoding.Unicode.GetBytes(value.AsString);
-        // varchar / char / text → CP1252 to match SQL Server's column storage
-        // (use the cached encoder hanging off CharSqlType so the CP1252 code-
-        // pages provider is registered exactly once).
+        // varchar / char / text → the collation's own code page, matching the
+        // bytes SQL Server stores and therefore compresses.
         if (value.Type is VarcharSqlType or CharSqlType or TextSqlType)
-            return CharSqlType.Cp1252Encoder.GetBytes(value.AsString);
+            return (value.Type.Collation ?? Collation.Baseline).StorageEncoding.GetBytes(value.AsString);
         // Fall-through: coerce via the value's string form (numeric / etc.).
         return System.Text.Encoding.Unicode.GetBytes(value.AsString);
     }

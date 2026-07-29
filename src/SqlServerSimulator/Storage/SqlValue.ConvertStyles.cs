@@ -408,8 +408,8 @@ internal readonly partial struct SqlValue
     /// <summary>
     /// CONVERT-style string formatting for a <c>varbinary</c>/<c>binary</c>/<c>image</c>
     /// source. Style 0 reinterprets bytes character-by-character through the
-    /// target's encoding (CP1252 for <c>varchar</c>, UTF-16 LE for
-    /// <c>nvarchar</c>). Style 1 emits <c>"0xHHHH…"</c> with uppercase hex
+    /// target's encoding (the collation's ANSI code page for <c>varchar</c>,
+    /// UTF-16 LE for <c>nvarchar</c>). Style 1 emits <c>"0xHHHH…"</c> with uppercase hex
     /// digits; style 2 emits bare <c>"HHHH…"</c>. Any other style raises
     /// Msg 281 with <c>"varbinary"</c> as the source family name.
     /// </summary>
@@ -420,7 +420,7 @@ internal readonly partial struct SqlValue
         {
             0 => target is NVarcharSqlType or NCharSqlType or SystemNameSqlType
                 ? Encoding.Unicode.GetString(bytes)
-                : Encoding.Latin1.GetString(bytes),
+                : (target.Collation ?? Collation.Baseline).StorageEncoding.GetString(bytes),
             1 => "0x" + Convert.ToHexString(bytes),
             2 => Convert.ToHexString(bytes),
             _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "varbinary"),
@@ -430,8 +430,9 @@ internal readonly partial struct SqlValue
 
     /// <summary>
     /// CONVERT-style hex / character → <c>varbinary</c>/<c>binary</c>
-    /// coercion. Style 0 copies the input's bytes verbatim (CP1252 for
-    /// varchar-family, UTF-16 LE for nvarchar-family). Style 1 parses
+    /// coercion. Style 0 copies the input's bytes verbatim (the source
+    /// collation's ANSI code page for varchar-family, UTF-16 LE for
+    /// nvarchar-family). Style 1 parses
     /// <c>"0xHHHH…"</c> with the prefix required (missing prefix → Msg
     /// 8114). Style 2 parses bare <c>"HHHH…"</c> with the prefix
     /// explicitly disallowed (presence → Msg 8114). Both hex paths require
@@ -445,7 +446,7 @@ internal readonly partial struct SqlValue
         var sourceIsUnicode = this.Type is NVarcharSqlType or NCharSqlType or SystemNameSqlType;
         var bytes = style switch
         {
-            0 => sourceIsUnicode ? Encoding.Unicode.GetBytes(s) : Encoding.Latin1.GetBytes(s),
+            0 => sourceIsUnicode ? Encoding.Unicode.GetBytes(s) : (this.Type.Collation ?? Collation.Baseline).StorageEncoding.GetBytes(s),
             1 => ParseHexWithPrefix(s, requirePrefix: true),
             2 => ParseHexWithPrefix(s, requirePrefix: false),
             _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, sourceIsUnicode ? "nvarchar" : "varchar"),
