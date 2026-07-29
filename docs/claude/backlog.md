@@ -18,7 +18,10 @@ When an item ships:
 
 Per project convention, probe the live SQL Server 2025 reference instance before encoding "matches SQL Server" behavior.
 **Re-verify an entry before building on it** — entries go stale as the surface moves, and this file has held claims that no longer reproduced.
-When re-probing, give each claim its own batch: a reference probe that creates a table and queries it in one batch fails compile-time column resolution on real (Msg 207) for reasons that have nothing to do with the claim, which reads exactly like the divergence you were looking for.
+Two traps, both hit in practice:
+give each claim its own batch, because a reference probe that creates a table and queries it in one batch fails compile-time column resolution on real (Msg 207) for reasons that have nothing to do with the claim, and reads exactly like the divergence you were looking for;
+and **a hand-built probe that passes is not proof the entry is stale** — an `OUTPUT … INTO` entry was deleted on the strength of a wide matrix of hand-written shapes that all passed, when the real trigger was a destination-column *type mismatch* (`CAST(id AS bigint)`) that none of them happened to have.
+Prefer re-running the oracle that found the bug over reconstructing it from the entry's prose.
 
 This file is the home for net-new non-function feature proposals too.
 CLAUDE.md's **Not modeled yet** section is the complementary *descriptive* map (what raises `NotSupportedException` / Msg today, so the surface isn't over-promised); this list is the *prospective* one.
@@ -77,7 +80,19 @@ A `dbo.REGEXP_LIKE` built-in was **tried and reverted** — faking it as a built
 
 One residual, probed on the same server: `REGEXP_LIKE` is a reserved keyword at **compatibility level 170**, so real raises Msg 156 on the unbracketed `dbo.REGEXP_LIKE(...)` there and accepts it at 160 and below. The simulator defaults to compat 170 and does *not* reserve the keyword, so it accepts the unbracketed form at every level — over-permissive at 170. Closing it belongs with the native bare `REGEXP_LIKE(col, pattern [, flags])` **predicate** (a reserved keyword, distinct from the UDF), which is a separate, genuinely-faithful builtin worth adding independently and would supply the reservation.
 
+Re-measured 2026-07-29 on a 21-app ORM slice (**2069 tests**, larger than the 1021-test slice the earlier numbers came from, so they aren't directly comparable): **sim-only 50, real-only 26, 76 failing on both**.
+The `OUTPUT … INTO` destination-type coercion fix in that pass took sim-only from 59 to 50.
+
+**The dominant sim-only cost is cascade, not breadth.** A statement that raises an *unexpected* .NET exception (rather than a `SimulatedSqlException` or `NotSupportedException`, both of which surface cleanly) aborts the TDS response mid-stream; the client reports `HY000 "A severe error occurred"` and the connection dies, so every later test in the same `TestCase` class fails with Django's `"Cannot open a new connection in an atomic block"`.
+**One** such statement accounted for 27 of the 50 remaining.
+Making the endpoint convert any unhandled exception into a clean TDS error token would turn each of those cascades into a single honest failure and is worth more than any individual gap below.
+
 Remaining **sim-only** delta (real passes, simulator fails), roughly in breadth order:
+
+- **`Greatest` over aggregates of a joined table** — `(SELECT MAX(value) FROM (VALUES (AVG(b.rating)), (AVG(b.price))) AS _GREATEST(value))` projected and repeated in HAVING, over a `LEFT JOIN` + `GROUP BY`.
+  The aggregates belong to the enclosing grouped query, so `RejectAggregateOverOuterScope` doesn't fire; something further in leaves the aggregate unbound and the resulting unhandled exception kills the connection (the 27-test cascade above).
+  Same root as the aggregate-binding entry below — an aggregate written inside a nested VALUES/derived table has to bind to the query that owns its columns.
+  Home: `Selection.cs`.
 
 - **An aggregate over an enclosing query's columns binds to the wrong query** — `(SELECT MAX(t.col) FROM u)` written inside a query over `t` binds to the *outer* query on real, which then becomes an aggregate query and collapses to one row.
   The simulator binds it to the query it is written in, so it now raises `NotSupportedException` rather than silently returning one row per outer row (the wrong-answer direction).

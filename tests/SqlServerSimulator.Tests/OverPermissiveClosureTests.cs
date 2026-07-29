@@ -249,4 +249,52 @@ public sealed class OverPermissiveClosureTests
         // A genuinely absent name still yields NULL.
         AreEqual(DBNull.Value, sim.ExecuteScalar("select object_id('nosuchthing')"));
     }
+    /// <summary>
+    /// The OUTPUT projection's type comes from the source table and need not
+    /// match the destination column's, so each value coerces on the way in.
+    /// An ORM writing <c>SELECT TOP 0 CAST(id AS bigint) … INTO #tmp</c> then
+    /// <c>OUTPUT INSERTED.id INTO #tmp</c> hands an int to a bigint column;
+    /// storing it raw reached the row encoder's type check as a bare
+    /// ArgumentException, which over the TDS wire aborted the response
+    /// mid-stream and the client reported a severe protocol error.
+    /// </summary>
+    [TestMethod]
+    [DataRow("bigint", "1")]
+    [DataRow("decimal(18,2)", "1.00")]
+    [DataRow("varchar(20)", "1")]
+    public void OutputInto_CoercesToDestinationColumnType(string destinationType, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table src (id int identity primary key, v int)",
+            $"create table dest (id {destinationType})");
+
+        _ = sim.ExecuteNonQuery("insert into src (v) output inserted.id into dest values (7)");
+        AreEqual(expected, (string)sim.ExecuteScalar("select cast(id as varchar(20)) from dest")!);
+    }
+
+    /// <summary>
+    /// The same coercion applies to a <c>#temp</c> target shaped by
+    /// <c>SELECT TOP 0 … INTO</c>, which is how ORMs build a returning buffer.
+    /// </summary>
+    [TestMethod]
+    public void OutputInto_TempTargetShapedBySelectInto_Coerces()
+    {
+        var sim = new Simulation();
+        // One connection throughout: #buf is session-scoped.
+        using var connection = sim.CreateOpenConnection();
+        foreach (var statement in new[]
+        {
+            "create table src (id int identity primary key, created datetime2 not null)",
+            "select top 0 cast(id as bigint) as id, created into #buf from src",
+            "insert into src (created) output inserted.id, inserted.created into #buf values ('2020-01-01')",
+        })
+        {
+            using var command = connection.CreateCommand(statement);
+            _ = command.ExecuteNonQuery();
+        }
+
+        using var read = connection.CreateCommand("select id from #buf");
+        AreEqual(1L, read.ExecuteScalar());
+    }
 }

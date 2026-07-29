@@ -353,8 +353,18 @@ partial class Simulation
             var covered = new bool[this.Target.Columns.Length];
             for (var i = 0; i < projectedValues.Length; i++)
             {
-                targetValues[this.ProjectionToTargetOrdinal[i]] = projectedValues[i];
-                covered[this.ProjectionToTargetOrdinal[i]] = true;
+                var ordinal = this.ProjectionToTargetOrdinal[i];
+                // Coerce to the destination column's type, the same way the
+                // uncovered-column defaults below do. The projection's type
+                // comes from the source table, which need not match the
+                // target's — an ORM writing `SELECT TOP 0 CAST(id AS bigint)
+                // … INTO #tmp` then `OUTPUT INSERTED.id INTO #tmp` hands an
+                // int to a bigint column. Storing it raw reaches the row
+                // encoder's type check as a bare ArgumentException, which over
+                // the wire aborts the response mid-stream and the client
+                // reports a severe protocol error rather than anything useful.
+                targetValues[ordinal] = CoerceForInsert(projectedValues[i], this.Target.Columns[ordinal].Type);
+                covered[ordinal] = true;
             }
             for (var i = 0; i < targetValues.Length; i++)
             {

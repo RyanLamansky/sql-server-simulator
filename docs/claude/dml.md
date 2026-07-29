@@ -33,6 +33,10 @@
   An explicit column list naming the identity column is **Msg 544** — and `SET IDENTITY_INSERT <target> ON` does **not** unlock it.
   Msg 544's slot names the **DML statement's own target table**, not the OUTPUT target that owns the identity column; that is real's behavior and is mirrored verbatim, so the two messages disagree about which table they name.
   A column list that omits the identity column is the accepted spelling.
+- **`OUTPUT … INTO` coerces each value to its destination column's type.**
+  The projection's type comes from the source table and need not match the target's — an ORM building a returning buffer with `SELECT TOP 0 CAST(id AS bigint) … INTO #tmp` then `OUTPUT INSERTED.id INTO #tmp` hands an int to a bigint column.
+  Storing it raw reached the row encoder's type check as a bare `ArgumentException`; over the TDS wire that aborts the response mid-stream, so the client reports `HY000 "A severe error occurred"` and the connection dies rather than getting any usable error.
+  Uncovered columns already coerced their DEFAULT the same way — this closes the covered-column half.
 
 ## `TOP (expr) [PERCENT]` on UPDATE / DELETE / INSERT
 
