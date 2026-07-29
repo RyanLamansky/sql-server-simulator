@@ -79,10 +79,11 @@ One residual, probed on the same server: `REGEXP_LIKE` is a reserved keyword at 
 
 Remaining **sim-only** delta (real passes, simulator fails), roughly in breadth order:
 
-- **Correlated derived table nested in a scalar subquery doesn't see the outermost query** (~5 `aggregation`/`annotation`/`expressions` tests). Django's `Greatest`/`Least` emits `(SELECT MIN(value) FROM (VALUES (MIN(col)),(x)) AS _LEAST(value))`; real returns a value, the simulator raises **Msg 207** on `col`.
-  Re-probed 2026-07-29 and the gap is **wider than the aggregate**: even the non-aggregate `(VALUES (t.col),(5))` inside a scalar subquery fails the same way, so the first layer is plain correlation depth — a derived table (VALUES *or* SELECT) in a subquery's FROM can't reach the outermost scope, where real correlates per outer row (`3, 5, 5`).
-  The second layer is aggregate scoping: with `MIN(t.col)` the outer query must itself become aggregated (real returns one row), and the simulator instead leaks an internal invariant — `"AggregateExpression.Run was called before its result was bound"` — rather than any SQL-shaped error, which is its own small bug.
-  Deep query-engine work. Home: `Selection.cs`.
+- **An aggregate over an enclosing query's columns binds to the wrong query** — `(SELECT MAX(t.col) FROM u)` written inside a query over `t` binds to the *outer* query on real, which then becomes an aggregate query and collapses to one row.
+  The simulator binds it to the query it is written in, so it now raises `NotSupportedException` rather than silently returning one row per outer row (the wrong-answer direction).
+  This is the residual half of Django's `Greatest`/`Least` emission (`(SELECT MIN(value) FROM (VALUES (MIN(col)),(x)) AS _LEAST(value))`) — the correlation half ships; see [`query.md`](query.md#outer-scope-correlation-in-the-select-list).
+  Closing it means detecting at parse time that an aggregate's operand reads only outer columns and re-binding it to the enclosing query's aggregation, which changes that query's shape (row count) from the inside out.
+  Home: `Selection.cs` / `Selection.Execution.Aggregate.cs`.
 
 **Over-permissive validation — the simulator *accepts* what real *rejects*.** This is the more dangerous divergence direction (an app query works on the simulator and breaks on real), and it is invisible to a sim-only failure list: surface it with the *reverse* delta `comm -13 <sim fails> <real fails>`, where real-only failures mean the simulator over-passes. **Whole-suite audits should always run the reverse delta — a green "matches real" claim requires both directions.**
 

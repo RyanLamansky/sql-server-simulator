@@ -265,6 +265,7 @@ Entries name the *area*, not every member — each doc's own headings are its ca
 - **`SimulatedDbDataReader` client surface** (typed accessors, `datetime` client-millisecond rounding, `GetOrdinal` precedence, GetBytes/GetChars materialization divergence) → [`data-reader.md`](docs/claude/data-reader.md).
 - **`Selection`, aggregates, window functions, set ops, CASE, OFFSET/FETCH, `TOP`, named windows, `TABLESAMPLE`** — including the aggregate/GROUP BY binding rules (Msg 130 / 8117 / 144 / 164, via `ParserContext` parse-time counters rather than a tree walk) → [`query.md`](docs/claude/query.md).
 - **Subqueries** (EXISTS / IN(SELECT) / scalar / quantified ANY-SOME-ALL, three-valued rules, arbitrary-depth correlation, set ops in subquery contexts) → [`subqueries.md`](docs/claude/subqueries.md).
+- **Outer-scope correlation from the select list** — the FROM clause binds before the select list (SQL Server's binder order, not the written order) so a select-list subquery, a derived table in a subquery's FROM, or a nested APPLY can reference the enclosing query → [`query.md`](docs/claude/query.md#outer-scope-correlation-in-the-select-list).
 - **JOIN / APPLY** — all join kinds + CROSS/OUTER APPLY, ANSI-89 comma-FROM, EF `LeftJoin`/`RightJoin` routing, and `JoinDriver`'s equi-join hash fast path vs nested-loop fallback → [`joins.md`](docs/claude/joins.md).
 - **`PIVOT` / `UNPIVOT`** — PIVOT desugars to grouped conditional aggregation, UNPIVOT is a NULL-skipping unfold; both attach as a postfix FROM-source wrapper on the derived-table `LateralPlan` seam → [`pivot.md`](docs/claude/pivot.md).
 - **UPDATE / DELETE / INSERT…SELECT / SELECT…INTO / MERGE / OUTPUT**, plus rowversion (`@@DBTS`), the identity helpers (`SCOPE_IDENTITY` / `IDENT_CURRENT` / …), `@@ROWCOUNT`, and `DEFAULT` as a VALUES element → [`dml.md`](docs/claude/dml.md).
@@ -317,6 +318,8 @@ Everything here is unbuilt for cost reasons and is fair game to pick up — [`ba
 Entries that raise a *real* SQL Server error deliberately are **not** here; they're coverage, under [Faithful rejections](#faithful-rejections).
 
 - **Key-range locks** — the one unbuilt piece of the locking model; see [`locking.md`](docs/claude/locking.md) for what does ship.
+- **An aggregate reading only an enclosing query's columns** (`(SELECT MAX(t.col) FROM u)` inside a query over `t`) → `NotSupportedException`; real binds it to the outer query, collapsing that query to one row.
+  Correlation itself ships — see [`query.md`](docs/claude/query.md#outer-scope-correlation-in-the-select-list).
 - `BEGIN DISTRIBUTED TRANSACTION` → `NotSupportedException` at dispatch.
   `BEGIN TRANSACTION <name> WITH MARK 'm'` → **Msg 319** at parse (`WITH` not accepted here); bare named transactions (`BEGIN TRAN t1`) ship.
 - **Cross-database / cross-server DML** (`INSERT`/`UPDATE`/`DELETE`/`MERGE` through a 3-/4-part name) → `NotSupportedException` via `BatchContext.RejectCrossDatabaseMutation` — `USE <db>` first.

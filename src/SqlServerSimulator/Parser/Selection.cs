@@ -546,6 +546,10 @@ internal sealed partial class Selection
         // switch into aggregate or windowed-projection mode.
         var savedAggregateCollector = context.AggregateCollector;
         var savedWindowCollector = context.WindowCollector;
+        // ParseInner installs this scope's FROM sources as the outer resolver
+        // so the select list can bind against them; restoring it here keeps
+        // the enclosing scope intact on every exit path, including throws.
+        var savedOuterTypeResolver = context.OuterTypeResolver;
         var aggregates = new List<AggregateExpression>();
         var windows = new List<WindowExpression>();
         context.AggregateCollector = aggregates;
@@ -558,6 +562,7 @@ internal sealed partial class Selection
         {
             context.AggregateCollector = savedAggregateCollector;
             context.WindowCollector = savedWindowCollector;
+            context.OuterTypeResolver = savedOuterTypeResolver;
         }
     }
 
@@ -848,6 +853,57 @@ internal sealed partial class Selection
         var fromClause = new FromClause();
         MultiPartName? intoTarget = null;
 
+        // Bind the FROM clause before the select list, the way SQL Server's
+        // binder does. The select list is written first but *resolves* against
+        // the FROM sources, and a subquery in it can reference them
+        // (`SELECT (SELECT t.col) FROM t`) — which needs the scope in place at
+        // parse time, because a projection's type is resolved statically by
+        // GetSqlType rather than deferred to Run the way a WHERE reference is.
+        // Sources are parsed exactly once: the cursor jumps to the FROM
+        // keyword, parses them, then rewinds to the select list, and the
+        // loop's own FROM arm resumes from `afterSources` instead of
+        // re-parsing. A FROM-less SELECT skips all of this.
+        List<FromSource>? preParsedSources = null;
+        List<JoinSpec>? preParsedJoins = null;
+        (int Index, Token? Token) afterSources = default;
+        if (FindOwnFromClause(context) is { } fromCheckpoint)
+        {
+            var selectListStart = context.SaveCheckpoint();
+            context.RestoreCheckpoint(fromCheckpoint);
+            var candidateSources = new List<FromSource>();
+            var candidateJoins = new List<JoinSpec>();
+            try
+            {
+                ParseSourcesAndJoins(context, depth, candidateSources, candidateJoins, outerTypeResolver);
+                afterSources = context.SaveCheckpoint();
+                preParsedSources = candidateSources;
+                preParsedJoins = candidateJoins;
+            }
+            catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
+            {
+                // The pre-pass is speculative: it only exists to have the
+                // scope ready while the select list parses. If the FROM can't
+                // be parsed on its own — an unresolvable table, a skip-mode
+                // dead branch, a statement-level error the normal order would
+                // have reported first (a CTE's Msg 319 outranking a Msg 208) —
+                // discard it and leave the original path to parse the FROM in
+                // place, so error identity and ordering stay exactly as they
+                // were. Nothing is kept from the failed attempt.
+                preParsedSources = null;
+                preParsedJoins = null;
+            }
+
+            context.RestoreCheckpoint(selectListStart);
+
+            // Chain this scope ahead of any enclosing one, so a select-list
+            // subquery resolves outer columns at every nesting level.
+            if (preParsedSources is { } scope)
+            {
+                var scopeSources = scope.ToArray();
+                context.OuterTypeResolver = name => ResolveColumnTypeAcrossSources(scopeSources, name, outerTypeResolver);
+            }
+        }
+
         do
         {
             switch (context.Token)
@@ -1055,9 +1111,24 @@ internal sealed partial class Selection
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.From }:
-                    var sources = new List<FromSource>();
-                    var joins = new List<JoinSpec>();
-                    ParseFromSourceAndJoins(context, depth, sources, joins, fromClause, outerTypeResolver, allowOrderBy);
+                    List<FromSource> sources;
+                    List<JoinSpec> joins;
+                    if (preParsedSources is not null)
+                    {
+                        // Sources came from the pre-pass; resume from the token
+                        // after them and consume only the WHERE tail.
+                        sources = preParsedSources;
+                        joins = preParsedJoins!;
+                        context.RestoreCheckpoint(afterSources);
+                        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], outerTypeResolver, allowOrderBy);
+                    }
+                    else
+                    {
+                        sources = [];
+                        joins = [];
+                        ParseFromSourceAndJoins(context, depth, sources, joins, fromClause, outerTypeResolver, allowOrderBy);
+                    }
+
                     if (topExpression is not null && fromClause.OffsetExpression is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, sources);
@@ -1144,7 +1215,7 @@ internal sealed partial class Selection
                 : ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch),
             ResolveRowCountLimit(fromClause.OffsetExpression, RowLimitKind.Offset, context.Batch),
             ResolveRowCountLimit(fromClause.FetchExpression, RowLimitKind.Fetch, context.Batch),
-            ResolveAssignmentMode(expressions), intoTarget);
+            ResolveAssignmentMode(expressions), intoTarget, context.OuterTypeResolver ?? outerTypeResolver);
     }
 
     /// <summary>
@@ -1209,6 +1280,67 @@ internal sealed partial class Selection
     /// HAVING / ORDER BY tail, ready for the outer dispatch loop to
     /// observe the next un-consumed token.
     /// </remarks>
+    /// <summary>
+    /// Scans forward from the cursor for this SELECT's own <c>FROM</c> keyword
+    /// and returns a checkpoint positioned on it, or <see langword="null"/>
+    /// when the statement has no FROM (<c>SELECT 1</c>) or the scan leaves the
+    /// statement first. The cursor is left where it started — this only looks.
+    /// </summary>
+    /// <remarks>
+    /// Paren depth keeps nested constructs out of the match: a scalar subquery
+    /// or derived table in the select list carries its own FROM, and only a
+    /// depth-0 keyword belongs to this SELECT. A depth-0 set-operation keyword
+    /// ends the search, because a FROM after it belongs to the next branch;
+    /// a closing paren that drops depth below zero means the enclosing
+    /// subquery ended first.
+    /// </remarks>
+    private static (int Index, Token? Token)? FindOwnFromClause(ParserContext context)
+    {
+        var start = context.SaveCheckpoint();
+        try
+        {
+            var parenDepth = 0;
+            var previousWasDistinct = false;
+            while (true)
+            {
+                // `IS [NOT] DISTINCT FROM` puts a FROM keyword at depth 0 that
+                // is part of an expression, not a clause. It always follows
+                // DISTINCT directly, whereas `SELECT DISTINCT … FROM` has the
+                // select list in between, so one token of history separates
+                // them. Every other FROM-bearing construct (TRIM / EXTRACT /
+                // SUBSTRING's ANSI forms) is parenthesized and so is already
+                // excluded by depth.
+                var tokenIsDistinct = context.Token is ReservedKeyword { Keyword: Keyword.Distinct };
+                switch (context.Token)
+                {
+                    case null:
+                        return null;
+                    case Operator { Character: '(' }:
+                        parenDepth++;
+                        break;
+                    case Operator { Character: ')' }:
+                        if (--parenDepth < 0)
+                            return null;
+                        break;
+                    case Operator { Character: ';' }:
+                        return null;
+                    case ReservedKeyword { Keyword: Keyword.From } when parenDepth == 0 && !previousWasDistinct:
+                        return context.SaveCheckpoint();
+                    case ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect } when parenDepth == 0:
+                        return null;
+                }
+
+                previousWasDistinct = tokenIsDistinct;
+                if (!context.MoveNext())
+                    return null;
+            }
+        }
+        finally
+        {
+            context.RestoreCheckpoint(start);
+        }
+    }
+
     private static void ParseFromSourceAndJoins(
         ParserContext context,
         uint depth,
@@ -2916,7 +3048,7 @@ internal sealed partial class Selection
     /// no-op for sort but its presence flips <see cref="HasOrderBy"/>
     /// so the set-op chain rejects per-branch ORDER BY (Msg 156).
     /// </summary>
-    private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly, MultiPartName? intoTarget)
+    private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly, MultiPartName? intoTarget, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         // The FROM-less SELECT path bakes projection values at parse time
         // (see the Run-then-GetSqlType loop below) — replaying that closure
@@ -2936,12 +3068,37 @@ internal sealed partial class Selection
         // wording. For successful runs, GetSqlType then bridges the matched
         // branch's runtime type to the joint-promoted schema (CASE / Coalesce
         // with mixed-type branches in a FROM-less SELECT).
+        // A FROM-less SELECT nested in an outer query can still reference the
+        // outer row (`SELECT (SELECT t.col) FROM t` — real returns one value
+        // per outer row), and such a projection cannot be baked at parse time
+        // because its value changes per invocation. Detect any column
+        // reference and defer those to the executor, where the outer resolver
+        // is supplied; the reference-free case keeps the baked fast path
+        // unchanged, so `SELECT 1` still folds at parse time.
+        var referencesOuterColumns = false;
+        foreach (var expression in expressions)
+            expression.VisitColumnReferences(_ => referencesOuterColumns = true);
+
+        SqlType TypeResolver(MultiPartName column) =>
+            outerTypeResolver is not null
+                ? outerTypeResolver(column)
+                : throw SimulatedSqlException.InvalidColumnName(column);
+
         var parseRuntime = new RuntimeContext(column => throw SimulatedSqlException.InvalidColumnName(column), parseBatch);
         for (var i = 0; i < expressions.Count; i++)
         {
-            var raw = expressions[i].Run(parseRuntime);
-            schema[i] = expressions[i].GetSqlType(parseBatch, column => throw SimulatedSqlException.InvalidColumnName(column));
             columnNames[i] = expressions[i].Name;
+            if (referencesOuterColumns)
+            {
+                // Values come from the executor instead; only the type is
+                // needed here, and Run would throw on the outer reference.
+                schema[i] = expressions[i].GetSqlType(parseBatch, TypeResolver);
+                continue;
+            }
+
+            // Run before GetSqlType — see the ordering note above.
+            var raw = expressions[i].Run(parseRuntime);
+            schema[i] = expressions[i].GetSqlType(parseBatch, TypeResolver);
             values[i] = raw.IsNull || raw.Type == schema[i] ? raw : raw.CoerceTo(schema[i]);
         }
 
@@ -2968,7 +3125,19 @@ internal sealed partial class Selection
                     return [];
             }
 
-            return [RowEncoder.EncodeRow(schema, values)];
+            if (!referencesOuterColumns)
+                return [RowEncoder.EncodeRow(schema, values)];
+
+            // Deferred projection: evaluate against this invocation's outer row.
+            var perCall = new SqlValue[expressions.Count];
+            var runtime = new RuntimeContext(Resolve, batch);
+            for (var i = 0; i < expressions.Count; i++)
+            {
+                var raw = expressions[i].Run(runtime);
+                perCall[i] = raw.IsNull || raw.Type == schema[i] ? raw : raw.CoerceTo(schema[i]);
+            }
+
+            return [RowEncoder.EncodeRow(schema, perCall)];
         }, isAssignmentOnly,
         intoTarget,
         // FROM-less SELECT INTO: no source sources/joins to inspect, so the

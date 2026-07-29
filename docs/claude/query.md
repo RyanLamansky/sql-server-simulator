@@ -90,6 +90,34 @@ Sort keys decode only the ORDER BY columns off each row (`ComputeTopLevelOrderKe
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT)` / `COUNT_BIG`, `SUM` / `AVG`, `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`.
 `AVG(int)` truncates; `AVG(decimal(p,s))` widens to `decimal(38, max(s,6))`.
 
+## Outer-scope correlation in the select list
+
+A SELECT's FROM clause is bound **before** its select list, matching SQL Server's binder rather than the written order.
+The reason is that a select-list subquery can reference the enclosing query (`SELECT (SELECT t.col) FROM t` returns one value per outer row on real), and a projection's type is resolved statically by `GetSqlType` — unlike a WHERE reference, which defers to `Run` and so never needed the scope at parse time.
+That asymmetry is why correlation through WHERE always worked while the same reference in the select list raised Msg 207.
+
+`FindOwnFromClause` locates this SELECT's own FROM by a depth-aware token scan; `ParseInner` then parses the sources there, rewinds to the select list, installs `ResolveColumnTypeAcrossSources` over them as `ParserContext.OuterTypeResolver`, and the FROM arm resumes after the already-parsed sources rather than re-parsing.
+Sources are parsed exactly once.
+Two details keep the scan honest:
+
+- **`IS [NOT] DISTINCT FROM` carries a depth-0 FROM keyword** that belongs to an expression, not a clause.
+  It always follows `DISTINCT` directly, whereas `SELECT DISTINCT … FROM` has the select list in between, so one token of history separates them.
+  Every other FROM-bearing construct (`TRIM(… FROM …)`, `EXTRACT(… FROM …)`) is parenthesized and excluded by depth.
+- **The pre-pass is speculative.**
+  If the FROM can't be parsed on its own — an unresolvable table, a skip-mode dead branch, or a statement-level error the normal order reports first (a CTE's Msg 319 outranking a Msg 208) — the attempt is discarded and the original in-place path runs, so error identity and ordering are unchanged.
+  Nothing is kept from a failed attempt.
+
+A FROM-less SELECT that references an outer column can't bake its projection at parse time the way `SELECT 1` does, since the value changes per invocation.
+`BuildSynthesizedSqlRow` detects any column reference and defers those expressions to the executor, where the outer resolver is supplied; the reference-free case keeps the baked fast path unchanged.
+This is also why `NamedExpression` forwards `VisitColumnReferences` — an alias renames a projection, it doesn't hide what the expression reads, and without the forward `t.col AS v` looked reference-free.
+
+Covered shapes (all probe-confirmed): a FROM-less subquery projecting an outer column, a derived table (VALUES or SELECT, including a FROM-less or set-operation body) in a subquery's FROM, and APPLY both at the top level and nested inside a subquery.
+
+**Not modeled: an aggregate reading only the enclosing query's columns.**
+`(SELECT MAX(t.col) FROM u)` inside a query over `t` binds to the *outer* query on real, collapsing it to one row.
+The simulator binds it to the query it is written in, which would silently return one row per outer row, so `RejectAggregateOverOuterScope` raises `NotSupportedException` instead of answering.
+An aggregate mixing inner and outer references, or reading no column (`COUNT(*)`, `MAX(1)`), is unaffected.
+
 ## Aggregate / GROUP BY binding rules
 
 Four rules SQL Server binds at parse time; without them the simulator is over-permissive (an app query would work here and break on real).

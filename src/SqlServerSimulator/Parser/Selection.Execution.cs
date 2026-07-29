@@ -403,6 +403,44 @@ internal sealed partial class Selection
         return null;
     }
 
+    /// <summary>
+    /// Rejects an aggregate whose operand reads only the <em>enclosing</em>
+    /// query's columns, such as <c>(SELECT MAX(t.col) FROM u)</c> inside a
+    /// query over <c>t</c>. Real SQL Server binds that aggregate to the outer
+    /// query, which then becomes an aggregate query itself and collapses to
+    /// one row; the simulator binds it to the query it is written in, so it
+    /// would silently return one row per outer row instead.
+    /// </summary>
+    /// <remarks>
+    /// A wrong answer is worse than a refusal, so this raises rather than
+    /// guessing. An aggregate mixing inner and outer references, or reading no
+    /// column at all (<c>COUNT(*)</c>, <c>MAX(1)</c>), is left alone — only the
+    /// wholly-outer case is ambiguous.
+    /// </remarks>
+    private static void RejectAggregateOverOuterScope(FromSource[] sources, List<AggregateExpression> aggregates)
+    {
+        foreach (var aggregate in aggregates)
+        {
+            // Walk the operand, not the aggregate: VisitColumnReferences on an
+            // AggregateExpression deliberately skips its own operand so the
+            // GROUP BY containment rule sees only bare references.
+            if (aggregate.Operand is not { } operand)
+                continue;
+
+            var referenced = 0;
+            var resolvedHere = 0;
+            operand.VisitColumnReferences(name =>
+            {
+                referenced++;
+                if (FindSourceColumn(sources, name).SourceIndex >= 0)
+                    resolvedHere++;
+            });
+
+            if (referenced > 0 && resolvedHere == 0)
+                throw new NotSupportedException("An aggregate over an enclosing query's columns (which binds to the outer query on SQL Server) isn't modeled.");
+        }
+    }
+
     private static Selection BuildSqlProjection(
         BatchContext parseBatch,
         FromSource[] sources,
@@ -429,6 +467,8 @@ internal sealed partial class Selection
         // the per-set loop doesn't model.
         if (windows.Count > 0 && fromClause.GroupingSets.Count > 1)
             throw new NotSupportedException("Combining window functions with ROLLUP / CUBE / GROUPING SETS in the same SELECT isn't modeled.");
+
+        RejectAggregateOverOuterScope(sources, aggregates);
 
         // Convert a comma-join / CROSS JOIN carrying an equi-join predicate in
         // WHERE into an INNER JOIN, so it rides the equi-join seek / hash path

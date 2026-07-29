@@ -27,5 +27,12 @@ internal sealed class NamedExpression(Expression expression, string name) : Expr
 
     internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => this.Inner.ResultIsNullable(resolveColumnNullable);
 
+    /// <summary>
+    /// Forwards to the wrapped expression: an alias renames a projection, it
+    /// doesn't hide what the expression reads. Without this a caller walking
+    /// references sees <c>t.col AS v</c> as reference-free.
+    /// </summary>
+    internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.Inner.VisitColumnReferences(visit);
+
     internal override bool ResultReportsNumeric => this.Inner.ResultReportsNumeric;
 }
