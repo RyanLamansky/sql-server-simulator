@@ -417,8 +417,9 @@ internal sealed partial class Selection
     /// column at all (<c>COUNT(*)</c>, <c>MAX(1)</c>), is left alone — only the
     /// wholly-outer case is ambiguous.
     /// </remarks>
-    private static void RejectAggregateOverOuterScope(FromSource[] sources, List<AggregateExpression> aggregates)
+    private static void RehomeAggregatesOverOuterScope(BatchContext parseBatch, FromSource[] sources, List<AggregateExpression> aggregates)
     {
+        List<AggregateExpression>? rehomed = null;
         foreach (var aggregate in aggregates)
         {
             // Walk the operand, not the aggregate: VisitColumnReferences on an
@@ -436,9 +437,24 @@ internal sealed partial class Selection
                     resolvedHere++;
             });
 
-            if (referenced > 0 && resolvedHere == 0)
+            if (referenced == 0 || resolvedHere > 0)
+                continue;
+
+            // The aggregate reads only the enclosing query's columns, so it
+            // belongs to that query: real evaluates it there, which makes the
+            // enclosing query an aggregate query and collapses it to one row
+            // per group. Move the same instance across — the expression tree
+            // here keeps referencing it, so once the owning query binds its
+            // per-group result this scope reads that value.
+            if (parseBatch.Parser.EnclosingAggregateCollector is not { } enclosing)
                 throw new NotSupportedException("An aggregate over an enclosing query's columns (which binds to the outer query on SQL Server) isn't modeled.");
+
+            enclosing.Add(aggregate);
+            (rehomed ??= []).Add(aggregate);
         }
+
+        if (rehomed is not null)
+            _ = aggregates.RemoveAll(rehomed.Contains);
     }
 
     private static Selection BuildSqlProjection(
@@ -468,7 +484,7 @@ internal sealed partial class Selection
         if (windows.Count > 0 && fromClause.GroupingSets.Count > 1)
             throw new NotSupportedException("Combining window functions with ROLLUP / CUBE / GROUPING SETS in the same SELECT isn't modeled.");
 
-        RejectAggregateOverOuterScope(sources, aggregates);
+        RehomeAggregatesOverOuterScope(parseBatch, sources, aggregates);
 
         // Convert a comma-join / CROSS JOIN carrying an equi-join predicate in
         // WHERE into an INNER JOIN, so it rides the equi-join seek / hash path
@@ -707,7 +723,7 @@ internal sealed partial class Selection
                 // hash path can key them. Correlated sources are left untouched.
                 var execSources = MaterializeUncorrelatedDeferredSources(sources, batch);
                 return aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
-                    ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, batch, outerResolver)
+                    ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver)
                     : windows.Count > 0
                         ? ProjectWindowedRows(execSources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
                         : ProjectSqlRows(execSources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, batch, outerResolver);
@@ -974,6 +990,10 @@ internal sealed partial class Selection
         Func<MultiPartName, SqlValue> resolveSource = null!;
         resolveSource = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, resolveSource, memo);
         var rowRuntime = new RuntimeContext(resolveSource, batch);
+
+        // Computed once: the column each projection reads, for the DISTINCT
+        // ORDER BY check (a term may name the source column behind an alias).
+        var projectionSources = ProjectionSourceReferences(expressions);
         foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
         {
             currentTuple = tuple;
@@ -996,7 +1016,7 @@ internal sealed partial class Selection
             for (var i = 0; i < expressions.Count; i++)
                 projected[i] = expressions[i].Run(rowRuntime);
 
-            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, distinct, batch, resolveSource);
+            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, projectionSources, distinct, batch, resolveSource);
             buffer.Add((projected, keys));
         }
 

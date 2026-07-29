@@ -575,6 +575,8 @@ internal sealed partial class Selection
         var savedOuterTypeResolver = context.OuterTypeResolver;
         var aggregates = new List<AggregateExpression>();
         var windows = new List<WindowExpression>();
+        var savedEnclosingAggregateCollector = context.EnclosingAggregateCollector;
+        context.EnclosingAggregateCollector = savedAggregateCollector;
         context.AggregateCollector = aggregates;
         context.WindowCollector = windows;
         try
@@ -585,6 +587,7 @@ internal sealed partial class Selection
         {
             context.AggregateCollector = savedAggregateCollector;
             context.WindowCollector = savedWindowCollector;
+            context.EnclosingAggregateCollector = savedEnclosingAggregateCollector;
             context.OuterTypeResolver = savedOuterTypeResolver;
         }
     }

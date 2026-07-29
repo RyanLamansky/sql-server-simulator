@@ -26,6 +26,7 @@
   Top-level ORDER BY references the first branch's columns, and resolves a term three ways (probe-confirmed, in this order): an **output alias**, the **source column name behind a projected column** (`SELECT num AS Col2 … UNION … ORDER BY num` sorts by Col2 — what ORMs emit when they alias every output positionally), or an **ordinal**.
   The alias is checked first, so an alias shadowing a different source column keeps its binding.
   Two divergences remain here.
+  Only a **bare** reference (or ordinal) resolves through that fallback: real accepts `… UNION … ORDER BY num` but rejects any *expression* over such a name — `ORDER BY CASE WHEN num IS NULL …` is Msg 104 and an expression over an output alias is Msg 207 — so letting the fallback fire inside an expression would accept what real refuses.
   A term naming a real column that isn't projected raises Msg 207 where real raises **Msg 104** (`"ORDER BY items must appear in the select list if the statement contains a UNION, INTERSECT or EXCEPT operator."`) — telling the two apart needs the branch's FROM sources at ORDER BY resolution, which that seam doesn't carry.
   And resolution is execution-time: the sort is skipped when there is at most one result row, so an unresolvable term goes unreported for such a query where real rejects it at bind time.
 - `SELECT *`: bare and qualified `<source>.*`.
@@ -88,11 +89,14 @@
 
 ## ORDER BY term resolution
 
+**Qualifier-awareness is the recurring rule across every resolver here.** A name matched on its leaf alone binds to the wrong column whenever a join brings a same-named one into scope — silently, with no error. It applies in four places, all now qualifier-aware: the plain ORDER BY resolver, the grouped ORDER BY resolver, the grouped-key resolver behind a grouped *projection* (`SELECT p.name` binding to a `b.name` grouping key), and the DISTINCT select-list check.
+
 An **unqualified** term matches the select list first (output alias, then ordinal), falling back to a source column when it matches no output — SQL Server permits ordering by a non-selected source column.
 A **qualified** term (`alias.col`) is a *source-column reference* and never matches an output alias: real orders `SELECT val AS id FROM ob t ORDER BY t.id` by `t`'s id column even though an output alias `id` exists (probe-confirmed).
 Matching on the leaf alone silently sorted by the wrong column whenever a join brought a same-named column into scope — `ORDER BY child.id` bound to the projected `parent.id`, which is the shape an ORM emits when ordering by a related model's field.
 
 `DISTINCT` keeps its own rule: the term must appear in the select list, and a miss is Msg 145 rather than a source fallback.
+The term may name the **source column behind a projected one** rather than its output alias (`SELECT DISTINCT c.name AS Col5 … ORDER BY c.name`), which is the only spelling left when an ORM aliases every output positionally.
 **Divergence**: under DISTINCT the qualified form is still matched by leaf against the output names, so `SELECT DISTINCT val AS id … ORDER BY t.id` is accepted where real raises Msg 145 (the qualified source column isn't selected) — over-permissive, and the non-DISTINCT path is the one that carries the source-reference rule.
 
 ## Result drain / ORDER BY representation
@@ -169,6 +173,20 @@ The one wrinkle: a bare name is built as a `Reference` before the parser knows w
 Residual permissiveness: an *outer* column reference counts like a local one, so a grouping item naming only an outer column inside a correlated subquery stays accepted where real raises Msg 164.
 Closing that needs source resolution, not a parse-time count.
 Also, `STRING_AGG`'s `WITHIN GROUP (ORDER BY …)` and the JSON aggregates' key expression are parsed *after* the aggregate registers, so an aggregate or subquery hidden there escapes the Msg 130 bracket.
+
+## DISTINCT over a grouped query
+
+`DISTINCT` dedupes the **grouped** projection, before ORDER BY and before any row limit.
+Grouping alone doesn't imply distinct output — the projection can be narrower than the grouping key, which is how an ORM's `.dates()` collapses one row per record to one row per distinct year (`SELECT DISTINCT YEAR(pubdate) … GROUP BY id, pubdate`).
+
+## Aggregate ownership across scopes
+
+An aggregate whose operand reads only an **enclosing** query's columns belongs to that query: real evaluates it there, which makes the enclosing query an aggregate query and collapses it to one row per group.
+`RehomeAggregatesOverOuterScope` moves the same `AggregateExpression` instance into the enclosing scope's collector at parse time (`ParserContext.EnclosingAggregateCollector`), so the nested expression tree keeps referencing it and reads the value the owning query bound.
+This is what makes an ORM's `GREATEST` / `LEAST` emission work — `(SELECT MAX(value) FROM (VALUES (AVG(b.rating)), (AVG(b.price))) AS _G(value))` over a joined, grouped outer query.
+An aggregate mixing inner and outer references, or reading no column (`COUNT(*)`), is untouched; with no enclosing scope to move to, it still raises `NotSupportedException`.
+
+Ownership is decided by walking the operand's column references, so **an expression wrapper that doesn't forward `VisitColumnReferences` hides them** — `CONVERT` didn't, while its `CAST` sibling did, which made `AVG(CONVERT(float, b.rating))` look reference-free and left the aggregate unbound.
 
 ## GROUP BY extensions
 

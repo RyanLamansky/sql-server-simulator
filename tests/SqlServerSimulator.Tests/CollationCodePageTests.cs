@@ -299,4 +299,30 @@ public sealed class CollationCodePageTests
         AreEqual("82B182F182C982BF82CD", Hex(sim, "select convert(varbinary(20), v) from t"));
         AreEqual(10, sim.ExecuteScalar<int>("select datalength(v) from t"));
     }
+
+    /// <summary>
+    /// A searching scalar compares under the collation its arguments resolve
+    /// to, so an explicit <c>COLLATE</c> on <em>any</em> argument decides the
+    /// whole call. This is how an ORM forces a case-sensitive REPLACE on a
+    /// case-insensitive database, and the simulator previously hardcoded a
+    /// case-insensitive comparison.
+    /// </summary>
+    [TestMethod]
+    [DataRow("replace('George R. R. Martin', 'r. r.', '')", "George  Martin")]
+    [DataRow("replace('George R. R. Martin', 'r. r.', '' collate SQL_Latin1_General_CP1_CS_AS)", "George R. R. Martin")]
+    [DataRow("replace('George R. R. Martin', 'r. r.' collate SQL_Latin1_General_CP1_CS_AS, '')", "George R. R. Martin")]
+    [DataRow("replace('George R. R. Martin' collate SQL_Latin1_General_CP1_CS_AS, 'r. r.', '')", "George R. R. Martin")]
+    public void Replace_ComparesUnderTheResolvedCollation(string expression, string expected) =>
+        AreEqual(expected, Text(new Simulation(), $"select {expression}"));
+
+    /// <summary>
+    /// <c>CHARINDEX</c> follows the same rule.
+    /// </summary>
+    [TestMethod]
+    public void CharIndex_ComparesUnderTheResolvedCollation()
+    {
+        var sim = new Simulation();
+        AreEqual(8, sim.ExecuteScalar<int>("select charindex('r. r.', 'George R. R. Martin')"));
+        AreEqual(0, sim.ExecuteScalar<int>("select charindex('r. r.' collate SQL_Latin1_General_CP1_CS_AS, 'George R. R. Martin')"));
+    }
 }

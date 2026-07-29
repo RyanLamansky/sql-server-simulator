@@ -41,7 +41,7 @@ internal sealed class Replace : Expression
         // .NET's String.Replace rejects it with ArgumentException.
         var replaced = oldString.Length == 0
             ? i.AsString
-            : i.AsString.Replace(oldString, n.AsString, StringComparison.InvariantCultureIgnoreCase);
+            : i.AsString.Replace(oldString, n.AsString, StringScalars.ComparisonFor(runtime.Batch, rawInput.Type, rawOld.Type, rawNew.Type));
         // REPLACE can grow the input (a longer replacement per match), so the
         // result type is the family container (varchar(8000) / nvarchar(4000))
         // regardless of the input's declared width — probe-confirmed against

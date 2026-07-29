@@ -59,7 +59,7 @@ internal sealed class CharIndex : Expression
         if (startCu >= haystackStr.Length)
             return SqlValue.FromInt32(0);
 
-        var foundCu = haystackStr.IndexOf(needleStr, startCu, StringComparison.InvariantCultureIgnoreCase);
+        var foundCu = haystackStr.IndexOf(needleStr, startCu, StringScalars.ComparisonFor(runtime.Batch, h.Type, n.Type));
         return SqlValue.FromInt32(foundCu < 0
             ? 0
             : isSc

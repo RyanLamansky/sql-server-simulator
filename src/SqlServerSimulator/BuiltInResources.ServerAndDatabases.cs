@@ -172,6 +172,21 @@ internal static partial class BuiltInResources
             new("host_architecture", SqlType.NVarchar, 256, false),
         ], (batch, database) => DmOsHostInfoRows);
 
+        // sys.time_zone_info: the Windows time-zone catalog, server-scope.
+        // mssql-django probes it as its `has_zoneinfo_database` capability
+        // check (`SELECT TOP 1 1 FROM sys.time_zone_info`), and the capability
+        // is genuine here — AT TIME ZONE already matches real including DST.
+        // Names are baked (real reports Windows ids; the ICU mapping behind
+        // TimeZoneInfo yields IANA names on Linux) while the offset and DST
+        // flag are computed live per query, so the row reflects the current
+        // instant the way real's does.
+        Sys("time_zone_info",
+        [
+            new("name", SqlType.NVarchar, 128, false),
+            new("current_utc_offset", SqlType.NVarchar, 6, false),
+            new("is_currently_dst", SqlType.Bit, null, false),
+        ], (batch, database) => TimeZoneInfoRows());
+
         // sys.dm_exec_sessions: one row per live connection, server-scope.
         // SMO's contained-authentication check reads
         // `authenticating_database_id ... WHERE session_id = @@SPID` (always 1

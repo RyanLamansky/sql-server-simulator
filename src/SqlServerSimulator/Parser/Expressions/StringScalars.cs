@@ -164,6 +164,49 @@ internal static class StringScalars
     }
 
     /// <summary>
+    /// The string comparison a searching scalar (<see cref="Replace"/>,
+    /// <see cref="CharIndex"/>) should use, given its operands. SQL Server
+    /// compares under the collation its arguments resolve to, so an explicit
+    /// <c>COLLATE</c> on <em>any</em> argument decides the whole call —
+    /// `REPLACE(name, 'r. r.', '' COLLATE …_CS_AS)` leaves a differently-cased
+    /// match alone (probe-confirmed, and the shape ORMs emit to force a
+    /// case-sensitive replace on a case-insensitive database).
+    /// </summary>
+    /// <remarks>
+    /// Case sensitivity is the whole of the approximation: the comparison stays
+    /// culture-based rather than routing through the collation's own comparer,
+    /// which is what the surrounding string scalars already do.
+    /// <para>Allocation-free per call: the operand list is a
+    /// <c>params ReadOnlySpan</c> rather than an array, and the fold carries a
+    /// <c>(Collation, Coercibility)</c> accumulator through
+    /// <c>Collation.Resolve(Collation, Coercibility, SqlType)</c> rather
+    /// than synthesizing a throwaway <see cref="SqlType"/> per step — both
+    /// would otherwise cost per row on a string-scalar hot path.</para>
+    /// </remarks>
+    public static StringComparison ComparisonFor(BatchContext batch, params ReadOnlySpan<SqlType> operands)
+    {
+        var resolved = operands.Length == 0 ? null : operands[0].Collation;
+        var coercibility = operands.Length == 0 ? Coercibility.CoercibleDefault : operands[0].Coercibility;
+        for (var i = 1; i < operands.Length; i++)
+        {
+            if (Collation.Resolve(resolved ?? Collation.Baseline, coercibility, operands[i]) is not { } step)
+            {
+                // Unresolvable peer collations are Msg 468 territory at a
+                // comparison site; this scalar keeps the database default
+                // rather than raising from a code path that never has.
+                resolved = null;
+                break;
+            }
+
+            (resolved, coercibility) = (step.Collation, step.Coercibility);
+        }
+
+        return (resolved ?? batch.CurrentDatabase.Collation).CaseSensitive
+            ? StringComparison.InvariantCulture
+            : StringComparison.InvariantCultureIgnoreCase;
+    }
+
+    /// <summary>
     /// The length-0 (unspecified) form of the same variable-length string
     /// family as <paramref name="sourceType"/>, preserving its collation and
     /// coercibility. Renders as the family container width (varchar(8000) /

@@ -107,7 +107,7 @@ internal sealed partial class Selection
 
             var orderKey = orderBy.Count == 0
                 ? []
-                : ComputeOrderKeys(orderBy, values, this.ColumnNames, distinct: false, batch, Resolve);
+                : ComputeOrderKeys(orderBy, values, this.ColumnNames, projectionSources: null, distinct: false, batch, Resolve);
 
             SqlValue[]? uniqueKey = null;
             if (keyOrdinals is not null)

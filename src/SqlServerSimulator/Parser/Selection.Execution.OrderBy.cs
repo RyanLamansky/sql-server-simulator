@@ -17,10 +17,45 @@ internal sealed partial class Selection
     /// DISTINCT, source fallback would be ambiguous post-dedup so a missing
     /// output match raises Msg 145.
     /// </summary>
+    /// <summary>
+    /// Whether a term names the same column a projection or grouping key
+    /// reads. The leaf must match, and two qualifiers must agree when both
+    /// sides carry one — either side written unqualified matches on the leaf,
+    /// since an unqualified reference that resolves at all is unambiguous.
+    /// Shared with the grouped-projection resolver, where matching on the leaf
+    /// alone made `p.name` bind to a `b.name` grouping key across a join.
+    /// </summary>
+    internal static bool SourceReferenceMatches(MultiPartName source, MultiPartName term) =>
+        BuiltInToken.Equals(source.Leaf, term.Leaf)
+        && (term.ImmediateQualifier is null
+            || source.ImmediateQualifier is null
+            || BuiltInToken.Equals(source.ImmediateQualifier, term.ImmediateQualifier));
+
+    /// <summary>
+    /// The column each projection reads, or null where it isn't a plain column
+    /// reference. An alias wrapper is unwrapped first, so <c>c.name AS Col5</c>
+    /// reports <c>c.name</c>.
+    /// </summary>
+    internal static MultiPartName?[]? ProjectionSourceReferences(List<Expression> projections)
+    {
+        MultiPartName?[]? sources = null;
+        for (var i = 0; i < projections.Count; i++)
+        {
+            var expression = projections[i] is Expressions.NamedExpression named ? named.Inner : projections[i];
+            if (expression is not Expressions.Reference reference)
+                continue;
+            sources ??= new MultiPartName?[projections.Count];
+            sources[i] = reference.ReferencedName;
+        }
+
+        return sources;
+    }
+
     private static SqlValue[] ComputeOrderKeys(
         List<OrderBySpec> orderBy,
         SqlValue[] projected,
         string[] outputColumnNames,
+        MultiPartName?[]? projectionSources,
         bool distinct,
         BatchContext batch,
         Func<MultiPartName, SqlValue> resolveSource)
@@ -55,6 +90,20 @@ internal sealed partial class Selection
                     }
                 }
 
+                // Under DISTINCT the term must appear in the select list, but
+                // it may name the *source* column behind a projected one
+                // rather than its output alias: `SELECT DISTINCT c.name AS Col5
+                // … ORDER BY c.name` is legal on real, and an ORM aliasing
+                // every output positionally leaves no other spelling.
+                if (distinct && projectionSources is not null)
+                {
+                    for (var j = 0; j < projectionSources.Length; j++)
+                    {
+                        if (projectionSources[j] is { } source && SourceReferenceMatches(source, name))
+                            return projected[j];
+                    }
+                }
+
                 return distinct
                     ? throw SimulatedSqlException.OrderByItemNotInSelectListWithDistinct()
                     : resolveSource(name);
@@ -81,6 +130,12 @@ internal sealed partial class Selection
         byte[] rowBytes,
         BatchContext batch)
     {
+        // Only a *bare* reference may resolve through the source-column
+        // fallback below. Real accepts `… UNION … ORDER BY num` (num behind a
+        // projected column) but rejects any expression over such a name —
+        // `ORDER BY CASE WHEN num IS NULL …` is Msg 104 — so letting the
+        // fallback fire inside an expression would accept what real refuses.
+        var termIsBareReference = false;
         SqlValue ResolveByOutputName(MultiPartName name)
         {
             for (var j = 0; j < columnNames.Length; j++)
@@ -96,7 +151,7 @@ internal sealed partial class Selection
             // they alias every output positionally. Checked after the output
             // names so an alias that shadows a different source column still
             // wins.
-            if (sourceColumnNames is not null)
+            if (termIsBareReference && sourceColumnNames is not null)
             {
                 for (var j = 0; j < sourceColumnNames.Length; j++)
                 {
@@ -112,6 +167,7 @@ internal sealed partial class Selection
         for (var i = 0; i < orderBy.Count; i++)
         {
             var spec = orderBy[i];
+            termIsBareReference = spec.Expr is Expressions.Reference;
             keys[i] = spec.IsOrdinal
                 ? RowDecoder.DecodeColumn(columns, rowBytes, spec.Ordinal - 1)
                 : spec.Expr!.Run(new RuntimeContext(ResolveByOutputName, batch));

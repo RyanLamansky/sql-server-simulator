@@ -124,6 +124,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public List<Expressions.AggregateExpression>? AggregateCollector;
 
     /// <summary>
+    /// The <see cref="AggregateCollector"/> of the query one level out, kept
+    /// so an aggregate written inside a nested scope but reading only the
+    /// enclosing query's columns can be re-homed to the query that owns those
+    /// columns. Null at the outermost SELECT.
+    /// </summary>
+    public List<Expressions.AggregateExpression>? EnclosingAggregateCollector;
+
+    /// <summary>
     /// Monotonic parse-time occurrence counters, bumped once per node of the
     /// named kind as the parser builds expressions. Bracketing a sub-parse
     /// (snapshot before, compare after) answers "did this expression contain an

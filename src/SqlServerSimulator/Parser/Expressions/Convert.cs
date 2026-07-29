@@ -134,6 +134,14 @@ internal sealed class ConvertExpression : Expression
 
     internal override bool ResultReportsNumeric => this.targetReportsNumeric;
 
+    /// <summary>
+    /// Forwards to the converted expression, mirroring <see cref="Cast"/>.
+    /// A conversion doesn't hide what its operand reads, and without this an
+    /// aggregate whose argument is wrapped in CONVERT looked reference-free to
+    /// callers that walk references.
+    /// </summary>
+    internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.source.VisitColumnReferences(visit);
+
     internal override string DebugDisplay() =>
         this.style is null
             ? $"{(this.tryMode ? "TRY_CONVERT" : "CONVERT")}({this.targetType}, {this.source.DebugDisplay()})"

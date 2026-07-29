@@ -40,6 +40,7 @@ internal sealed partial class Selection
         TopSpec top,
         int? offsetCount,
         int? fetchCount,
+        bool distinct,
         BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         if (top.Count == 0 && top.Percent is null)
@@ -206,8 +207,11 @@ internal sealed partial class Selection
             {
                 for (var i = 0; i < groupingSet.Length; i++)
                 {
+                    // Qualifier-aware: matching on the leaf alone made a
+                    // projected `p.name` bind to a `b.name` grouping key
+                    // whenever a join brought both into scope.
                     if (groupingSet[i] is Reference r
-                        && BuiltInToken.Equals(r.Name, name.Leaf))
+                        && SourceReferenceMatches(r.ReferencedName, name))
                     {
                         return currentState.KeyValues[i];
                     }
@@ -218,7 +222,7 @@ internal sealed partial class Selection
                 foreach (var expr in fromClause.AllGroupingExpressions)
                 {
                     if (expr is Reference r
-                        && BuiltInToken.Equals(r.Name, name.Leaf))
+                        && SourceReferenceMatches(r.ReferencedName, name))
                     {
                         return SqlValue.Null(expr.GetSqlType(batch, resolveColumnType));
                     }
@@ -243,10 +247,17 @@ internal sealed partial class Selection
             // alias, a grouped column, or a grouping expression.
             SqlValue ResolveOrderName(MultiPartName name)
             {
-                for (var j = 0; j < outputColumnNames.Length; j++)
+                // A qualified term names a source column, never an output
+                // alias — the same rule the non-grouped ORDER BY follows.
+                // Matching on the leaf alone made `ORDER BY publisher.name`
+                // bind to a projected `book.name` across a join.
+                if (name.ImmediateQualifier is null)
                 {
-                    if (BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
-                        return currentProjected[j];
+                    for (var j = 0; j < outputColumnNames.Length; j++)
+                    {
+                        if (BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
+                            return currentProjected[j];
+                    }
                 }
 
                 return resolveByGroupKey(name);
@@ -398,6 +409,17 @@ internal sealed partial class Selection
                     batch.AllGroupingExpressions = savedAll;
                 }
             }
+        }
+
+        // DISTINCT dedupes the *grouped* projection, and does so before ORDER
+        // BY and any row limiting: `SELECT DISTINCT YEAR(pubdate) … GROUP BY id,
+        // pubdate` collapses one row per group to one row per distinct year
+        // (probe-confirmed). Grouping alone doesn't imply distinct output —
+        // the projection can be narrower than the grouping key.
+        if (distinct && output.Count > 1)
+        {
+            var seen = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
+            _ = output.RemoveAll(o => !seen.Add(o.Row));
         }
 
         // ORDER BY sorts the full grouped stream (across all grouping sets)

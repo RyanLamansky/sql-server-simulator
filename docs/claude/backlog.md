@@ -80,38 +80,17 @@ A `dbo.REGEXP_LIKE` built-in was **tried and reverted** — faking it as a built
 
 One residual, probed on the same server: `REGEXP_LIKE` is a reserved keyword at **compatibility level 170**, so real raises Msg 156 on the unbracketed `dbo.REGEXP_LIKE(...)` there and accepts it at 160 and below. The simulator defaults to compat 170 and does *not* reserve the keyword, so it accepts the unbracketed form at every level — over-permissive at 170. Closing it belongs with the native bare `REGEXP_LIKE(col, pattern [, flags])` **predicate** (a reserved keyword, distinct from the UDF), which is a separate, genuinely-faithful builtin worth adding independently and would supply the reservation.
 
-Re-measured 2026-07-29 on a 21-app ORM slice (**2069 tests**, larger than the 1021-test slice the earlier numbers came from, so they aren't directly comparable): **sim-only 25, real-only 26, 76 failing on both** (25 → 14 with the two ORDER BY fixes below).
+Re-measured 2026-07-29 on a 21-app ORM slice (**2069 tests**): **sim-only 0**, real-only 27, 74 failing on both.
+The simulator now fails only tests that fail on real too — mssql-django's own emulation limits — so this oracle is exhausted at this slice width.
+Re-widen the slice (or move to another real application) to find more; the runner is `runtests.py --settings=<sim|real> --parallel=1 <apps>` against a `ListenLocalAsync` host, with the delta taken **both** ways.
 
-Two fixes in that pass produced it.
-`OUTPUT … INTO` now coerces to the destination column's type (an ORM's `CAST(id AS bigint)` returning buffer handed an int to a bigint column), and the endpoint reports an unanticipated statement fault as Msg 50000 severity 16 while keeping the session (see [`tds-endpoint.md`](tds-endpoint.md#statement-tier--severity-16-session-survives)).
-Together they took sim-only from 59 to 25.
+Getting there took eleven roots, and the pattern worth keeping is that failures cluster by *cause*, not by test — grouping them that way found each one:
 
-**The second was worth more than its own bug count, and the reason generalizes.**
-A statement raising an unexpected .NET exception used to abort the TDS response mid-stream and kill the connection, so every later test sharing it failed with Django's `"Cannot open a new connection in an atomic block"` — noise that named neither the statement nor the gap.
-**One** such statement accounted for 27 of the then-50 failures; the re-run shows zero severe errors and zero cascades.
-When a suite's failures cluster implausibly in one app, suspect a cascade before a feature gap: `aggregation` fell from 28 sim-only failures to 3 on this fix alone.
+- **Cascade beats breadth.** An unmodeled statement used to kill the TDS connection, so every later test in the class failed too; one statement accounted for 27 of 50 at the time. Now a statement-level fault is Msg 50000 severity 16 and the session survives ([`tds-endpoint.md`](tds-endpoint.md#statement-tier--severity-16-session-survives)).
+- **Qualifier-blindness in name resolution** was the single largest class — a leaf-only match binds to the wrong column whenever a join brings a same-named one into scope, silently. It was wrong in four resolvers ([`query.md`](query.md#order-by-term-resolution)).
+- The rest: outer-scope correlation from the select list, `UPDATE … SET` subqueries, parenthesized set-op branches, `OUTPUT … INTO` destination coercion, DISTINCT over a grouped projection, collation-aware `REPLACE` / `CHARINDEX`, aggregate re-homing across scopes, and `sys.time_zone_info`.
 
-Remaining sim-only by app: aggregation 3, aggregation_regress 3, db_functions 2, queries 1, annotations 1 (**10 total**).
-Two more roots closed after that: a subquery in an `UPDATE … SET` expression now sees the target's columns (2 tests — see [`dml.md`](dml.md)), and a set-op branch may be parenthesized (2 tests — see [`query.md`](query.md#boolean--set-ops--projection--case)).
-Of the 10 left, `db_functions.test_trunc_none` wants `sys.time_zone_info`, which mssql-django uses as its `has_zoneinfo_database` probe; `AT TIME ZONE` itself already matches real (including DST), so the capability is real and only the catalog view is missing — but real reports **Windows** zone IDs there, which `TimeZoneInfo.GetSystemTimeZones()` won't produce on Linux, so it needs a baked name table rather than a live projection.
-Three more (`aggregation.test_expression_on_aggregation` and relatives) are the aggregate-binding entry below.
-Two ORDER BY rules accounted for 11 of the 25 this section started at, both found by grouping failures by cause rather than by test: set-op top-level terms resolving against the source column behind a projected one (8 tests), and a qualified term binding to the source column rather than a same-named output alias (3 tests) — see [`query.md`](query.md#order-by-term-resolution).
-What's left looks genuinely separate: 7 SQL errors and 7 wrong-result assertions across five apps, no shared shape visible.
-
-**Over-permissive residual from that work**: under `DISTINCT`, a qualified ORDER BY term is still matched by leaf against the output names, so `SELECT DISTINCT val AS id … ORDER BY t.id` is accepted where real raises Msg 145.
-
-Remaining **sim-only** delta (real passes, simulator fails), roughly in breadth order:
-
-- **`Greatest` over aggregates of a joined table** — `(SELECT MAX(value) FROM (VALUES (AVG(b.rating)), (AVG(b.price))) AS _GREATEST(value))` projected and repeated in HAVING, over a `LEFT JOIN` + `GROUP BY`.
-  The aggregates belong to the enclosing grouped query, so `RejectAggregateOverOuterScope` doesn't fire; something further in leaves the aggregate unbound and the resulting unhandled exception is now reported as a single Msg 50000 rather than taking the session with it.
-  Same root as the aggregate-binding entry below — an aggregate written inside a nested VALUES/derived table has to bind to the query that owns its columns.
-  Home: `Selection.cs`.
-
-- **An aggregate over an enclosing query's columns binds to the wrong query** — `(SELECT MAX(t.col) FROM u)` written inside a query over `t` binds to the *outer* query on real, which then becomes an aggregate query and collapses to one row.
-  The simulator binds it to the query it is written in, so it now raises `NotSupportedException` rather than silently returning one row per outer row (the wrong-answer direction).
-  This is the residual half of Django's `Greatest`/`Least` emission (`(SELECT MIN(value) FROM (VALUES (MIN(col)),(x)) AS _LEAST(value))`) — the correlation half ships; see [`query.md`](query.md#outer-scope-correlation-in-the-select-list).
-  Closing it means detecting at parse time that an aggregate's operand reads only outer columns and re-binding it to the enclosing query's aggregation, which changes that query's shape (row count) from the inside out.
-  Home: `Selection.cs` / `Selection.Execution.Aggregate.cs`.
+**Two residual over-permissive cases** from the ORDER BY work, both recorded rather than shipped silently: under `DISTINCT` a qualified term is still leaf-matched against the output names (`SELECT DISTINCT val AS id … ORDER BY t.id` accepted where real raises Msg 145), and a set-op ORDER BY term naming an unprojected column raises Msg 207 where real raises Msg 104.
 
 **Over-permissive validation — the simulator *accepts* what real *rejects*.** This is the more dangerous divergence direction (an app query works on the simulator and breaks on real), and it is invisible to a sim-only failure list: surface it with the *reverse* delta `comm -13 <sim fails> <real fails>`, where real-only failures mean the simulator over-passes. **Whole-suite audits should always run the reverse delta — a green "matches real" claim requires both directions.**
 

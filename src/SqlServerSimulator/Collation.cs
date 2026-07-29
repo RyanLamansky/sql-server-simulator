@@ -181,18 +181,32 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     /// coercible-default by definition, and there's nothing to conflict
     /// with).</para>
     /// </remarks>
-    internal static (Collation Collation, Coercibility Coercibility)? Resolve(SqlType a, SqlType b)
+    internal static (Collation Collation, Coercibility Coercibility)? Resolve(SqlType a, SqlType b) =>
+        Resolve(a.Collation ?? Baseline, a.Coercibility, b);
+
+    /// <summary>
+    /// The same resolution with the left side given as an already-resolved
+    /// <paramref name="collation"/> / <paramref name="coercibility"/> pair
+    /// rather than a <see cref="SqlType"/>. Folding a multi-operand call
+    /// (a string scalar's argument list) otherwise has to synthesize a
+    /// throwaway <see cref="SqlType"/> per step just to carry the accumulator,
+    /// which costs an intern-cache lookup per argument per row.
+    /// </summary>
+    /// <remarks>
+    /// Pass <see cref="Baseline"/> for an operand that carries no collation of
+    /// its own — the tie-break below distinguishes it by reference, exactly as
+    /// the <see cref="SqlType"/> overload's <c>?? Baseline</c> fallback does.
+    /// </remarks>
+    internal static (Collation Collation, Coercibility Coercibility)? Resolve(Collation collation, Coercibility coercibility, SqlType b)
     {
-        var ca = a.Coercibility;
         var cb = b.Coercibility;
-        if (ca > cb)
-            return (a.Collation ?? Baseline, ca);
-        if (cb > ca)
+        if (coercibility > cb)
+            return (collation, coercibility);
+        if (cb > coercibility)
             return (b.Collation ?? Baseline, cb);
-        var aCol = a.Collation ?? Baseline;
         var bCol = b.Collation ?? Baseline;
-        if (StringComparer.OrdinalIgnoreCase.Equals(aCol.Name, bCol.Name))
-            return (aCol, ca);
+        if (StringComparer.OrdinalIgnoreCase.Equals(collation.Name, bCol.Name))
+            return (collation, coercibility);
         // Two same-rank operands with different collations are unresolvable at
         // Implicit / Explicit rank (Msg 468 / 457), but NOT at
         // CoercibleDefault: SQL Server's coercibility rules make two
@@ -203,8 +217,8 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         // Baseline fallback that unpinned system-function results use; for the
         // ASCII identifiers these comparisons overwhelmingly involve, the
         // choice is equality-neutral.
-        return ca == Coercibility.CoercibleDefault
-            ? (ReferenceEquals(aCol, Baseline) ? bCol : aCol, Coercibility.CoercibleDefault)
+        return coercibility == Coercibility.CoercibleDefault
+            ? (ReferenceEquals(collation, Baseline) ? bCol : collation, Coercibility.CoercibleDefault)
             : null;
     }
 
@@ -589,8 +603,8 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     /// bytes and so follows the code page (CP1252 for Latin1_General_BIN2,
     /// CP932 for Japanese_BIN2, …). <see cref="Name"/> is shared with the
     /// nvarchar-bodied sibling so catalog views report one collation name;
-    /// <see cref="Resolve"/> treats them as the same collation for
-    /// cross-operand coercibility.
+    /// <see cref="Resolve(SqlType, SqlType)"/> treats them as the same
+    /// collation for cross-operand coercibility.
     /// </summary>
     internal sealed class AnsiBinaryCollation : Collation
     {

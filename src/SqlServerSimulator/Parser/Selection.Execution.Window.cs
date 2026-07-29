@@ -123,6 +123,7 @@ internal sealed partial class Selection
         // window's per-tuple result, then project. From here on,
         // mirror ProjectBuffered's DISTINCT / ORDER BY / OFFSET / TAKE
         // post-processing.
+        var projectionSources = ProjectionSourceReferences(expressions);
         var projectedBuffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>(buffered.Count);
         for (var i = 0; i < buffered.Count; i++)
         {
@@ -134,7 +135,7 @@ internal sealed partial class Selection
             for (var j = 0; j < expressions.Count; j++)
                 projected[j] = expressions[j].Run(rowRuntime);
 
-            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, distinct, batch, resolveSource);
+            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, projectionSources, distinct, batch, resolveSource);
             projectedBuffer.Add((projected, keys));
         }
 

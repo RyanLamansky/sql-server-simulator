@@ -108,18 +108,22 @@ public sealed class OuterScopeCorrelationTests
 
     /// <summary>
     /// An aggregate reading only the enclosing query's columns binds to the
-    /// <em>outer</em> query on real, which then collapses to one row. The
-    /// simulator would bind it to the query it is written in and silently
-    /// return one row per outer row, so it refuses instead of guessing.
+    /// <em>outer</em> query, which then becomes an aggregate query itself and
+    /// collapses to one row — the same instance is re-homed at parse time, so
+    /// the nested scope reads the value the owning query bound.
     /// </summary>
+    /// <remarks>
+    /// The second shape is Django's `Greatest` / `Least` emission; the third
+    /// wraps the aggregate argument in CONVERT, which is how an ORM casts for
+    /// a float result and which previously hid the reference from the walk
+    /// that decides ownership.
+    /// </remarks>
     [TestMethod]
-    [DataRow("select (select max(t.col) from u) from t")]
-    [DataRow("select (select min(value) from (values (min(t.col)), (5)) as _l(value)) from t")]
-    public void AggregateOverOuterScope_IsRefusedRatherThanAnswered(string sql)
-    {
-        var error = Throws<NotSupportedException>(() => Column(Seeded(), sql));
-        Contains("enclosing query", error.Message);
-    }
+    [DataRow("select (select max(t.col) from u) from t", "7")]
+    [DataRow("select (select min(value) from (values (min(t.col)), (5)) as _l(value)) from t", "3")]
+    [DataRow("select (select max(value) from (values (max(convert(float, t.col))), (5)) as _g(value)) from t", "7")]
+    public void AggregateOverOuterScope_BindsToTheEnclosingQuery(string sql, string expected) =>
+        AreEqual(expected, string.Join(",", Column(Seeded(), sql)));
 
     /// <summary>
     /// Aggregates that read this query's own columns, or no column at all, are

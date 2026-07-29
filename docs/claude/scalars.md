@@ -155,6 +155,9 @@ Basic one-arg conversions between a character and its code point.
   Unicode input is encoded first, so `ASCII(N'€')` returns 128 (CP1252's `€`); unrepresentable Unicode (emoji etc.) returns 63 via the encoder's `'?'` replacement fallback.
   The code page is the argument's, not always CP1252 — `ASCII` of a `Turkish_CI_AS` column holding `Ğ` is 208 — and under a DBCS code page the result is the *lead* byte of a two-byte character (`こ` under `Japanese_XJIS_140_CI_AS` → 130).
   Non-string inputs implicitly stringify *before* the first-char read, so `ASCII(65)` is 54 (the byte for `'6'`, the first char of `"65"`), not 65.
+**`REPLACE` and `CHARINDEX` compare under the collation their arguments resolve to** (`StringScalars.ComparisonFor`), so an explicit `COLLATE` on *any* argument decides the whole call: `REPLACE(name, 'r. r.', '' COLLATE …_CS_AS)` leaves a differently-cased match alone, which is how an ORM forces a case-sensitive replace on a case-insensitive database.
+Case sensitivity is the whole of the approximation — the comparison stays culture-based rather than routing through the collation's own comparer, matching the surrounding string scalars.
+
 - **`UNICODE(input)`** returns `int`.
   Same input-handling shape as `ASCII`, but reads the .NET `char` directly rather than encoding it, so it is code-page independent.
   Supplementary code points (above U+FFFF, e.g. `N'😀'`) return the high surrogate value (55357 for 😀) under the non-SC default collation — not the full Unicode code point.
