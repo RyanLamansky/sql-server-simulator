@@ -448,4 +448,28 @@ public sealed class UpdateTests
 
         CollectionAssert.AreEqual(new[] { "A" }, ReadStrings(simulation.CreateCommand("select status from customers")));
     }
+
+    /// <summary>
+    /// A subquery in a SET expression can reference the update target's
+    /// columns — <c>SET alias = (SELECT MAX(v) FROM (VALUES (t.name),(t.goes_by)) x(v))</c>
+    /// is what ORMs emit for GREATEST / LEAST. Runtime already threaded the
+    /// per-row resolver; only parse-time type resolution was missing, so the
+    /// whole shape raised Msg 207.
+    /// </summary>
+    [TestMethod]
+    public void Update_SetExpression_SubqueryReferencesTargetColumns()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table au (id int identity primary key, name varchar(20), goes_by varchar(20), alias varchar(20))",
+            "insert au (name, goes_by) values ('James Smith', 'Jim')");
+
+        _ = sim.ExecuteNonQuery(
+            "update au set alias = (select max(value) from (values (au.name), (au.goes_by)) as _g(value))");
+        AreEqual("Jim", (string)sim.ExecuteScalar("select alias from au")!);
+
+        // The plain correlated scalar form works too.
+        _ = sim.ExecuteNonQuery("update au set alias = (select au.name)");
+        AreEqual("James Smith", (string)sim.ExecuteScalar("select alias from au")!);
+    }
 }

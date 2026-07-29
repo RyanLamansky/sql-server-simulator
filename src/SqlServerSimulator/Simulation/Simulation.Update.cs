@@ -111,6 +111,23 @@ partial class Simulation
         // pre-update value as the LHS — matches probe-confirmed
         // "UPDATE t SET v += rhs" semantics on a real SQL Server instance.
         var rawAssignments = new List<(string ColumnName, Expression Expr)>();
+
+        // A subquery in a SET expression can reference the update target's
+        // columns — `SET alias = (SELECT MAX(v) FROM (VALUES (t.name),(t.goes_by)) x(v))`
+        // is what ORMs emit for GREATEST / LEAST — so the target's columns have
+        // to be in scope while the SET list parses. Runtime already threads the
+        // per-row resolver through RuntimeContext; only the parse-time type
+        // resolution was missing. The multi-table alias form has no target yet
+        // at this point and keeps the enclosing scope.
+        // Restored right after the loop; a throw in between aborts the whole
+        // statement, so there is no later parse to see a stale scope.
+        var savedOuterTypeResolver = context.OuterTypeResolver;
+        if (leadingTable is { } scopeTable)
+        {
+            var enclosing = savedOuterTypeResolver;
+            context.OuterTypeResolver = name => ResolveUpdateTargetColumnType(scopeTable, name, enclosing);
+        }
+
         while (true)
         {
             if (context.GetNextRequired() is not StringToken first)
@@ -145,6 +162,8 @@ partial class Simulation
                 continue;
             break;
         }
+
+        context.OuterTypeResolver = savedOuterTypeResolver;
 
         // OUTPUT requires a known target. If leading-ident resolved to a
         // table, parse OUTPUT now (existing single-table OUTPUT path). For
@@ -799,6 +818,30 @@ partial class Simulation
     /// GENERATED ALWAYS columns up-front so the per-row loop never has to
     /// re-check.
     /// </summary>
+    /// <summary>
+    /// Parse-time column-type resolver for the UPDATE target, so a subquery in
+    /// a SET expression can bind the target's columns
+    /// (<c>SET alias = (SELECT MAX(v) FROM (VALUES (t.name),(t.goes_by)) x(v))</c>,
+    /// the shape ORMs emit for GREATEST / LEAST). A qualified reference must
+    /// name the target table; anything else falls through to the enclosing
+    /// scope, which is null at statement level and raises Msg 207 there.
+    /// </summary>
+    private static SqlType ResolveUpdateTargetColumnType(HeapTable table, MultiPartName name, Func<MultiPartName, SqlType>? enclosing)
+    {
+        if (name.ImmediateQualifier is null || BuiltInToken.Equals(name.ImmediateQualifier, table.Name))
+        {
+            foreach (var column in table.Columns)
+            {
+                if (BuiltInToken.Equals(column.Name, name.Leaf))
+                    return column.Type;
+            }
+        }
+
+        return enclosing is not null
+            ? enclosing(name)
+            : throw SimulatedSqlException.InvalidColumnName(name);
+    }
+
     private static List<(int Ordinal, Expression Expr)> ResolveSetAssignments(
         List<(string ColumnName, Expression Expr)> rawAssignments,
         HeapTable table,

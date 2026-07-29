@@ -515,15 +515,38 @@ internal sealed partial class Selection
     /// </summary>
     internal static Selection ParseIntersectChain(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool isFirstBranch)
     {
-        var left = ParseSingleSelectStatement(context, depth, outerTypeResolver, allowOrderBy: isFirstBranch);
+        var left = ParseSetOpBranch(context, depth, outerTypeResolver, allowOrderBy: isFirstBranch);
         while (context.Token is ReservedKeyword { Keyword: Keyword.Intersect })
         {
             context.MoveNextRequired();
-            var right = ParseSingleSelectStatement(context, depth, outerTypeResolver, allowOrderBy: false);
+            var right = ParseSetOpBranch(context, depth, outerTypeResolver, allowOrderBy: false);
             RecordSetOperationForIndexedViewShape(context);
             left = CombineSetOps(left, right, SetOpKind.Intersect);
         }
         return left;
+    }
+
+    /// <summary>
+    /// Parses one branch of a set-op chain. A branch may be parenthesized, and
+    /// the parentheses may wrap a whole nested chain rather than a single
+    /// SELECT — `SELECT … UNION (SELECT … UNION SELECT …)` is what an ORM emits
+    /// when it combines an already-combined queryset (probe-confirmed on
+    /// SQL Server 2025, as is a parenthesized *first* branch).
+    /// Without this the opening paren read as a scalar subquery, so the branch
+    /// looked like a one-column select list and the chain failed the
+    /// equal-expression-count check instead.
+    /// </summary>
+    private static Selection ParseSetOpBranch(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy)
+    {
+        if (context.Token is not Operator { Character: '(' })
+            return ParseSingleSelectStatement(context, depth, outerTypeResolver, allowOrderBy);
+
+        context.MoveNextRequired();
+        var inner = ParseUnionExceptChain(context, depth, outerTypeResolver);
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+        return inner;
     }
 
     /// <summary>

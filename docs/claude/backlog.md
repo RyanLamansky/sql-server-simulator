@@ -91,7 +91,10 @@ A statement raising an unexpected .NET exception used to abort the TDS response 
 **One** such statement accounted for 27 of the then-50 failures; the re-run shows zero severe errors and zero cascades.
 When a suite's failures cluster implausibly in one app, suspect a cascade before a feature gap: `aggregation` fell from 28 sim-only failures to 3 on this fix alone.
 
-Remaining sim-only by app: db_functions 4, aggregation 3, aggregation_regress 3, queries 3, annotations 1 (**14 total**).
+Remaining sim-only by app: aggregation 3, aggregation_regress 3, db_functions 2, queries 1, annotations 1 (**10 total**).
+Two more roots closed after that: a subquery in an `UPDATE … SET` expression now sees the target's columns (2 tests — see [`dml.md`](dml.md)), and a set-op branch may be parenthesized (2 tests — see [`query.md`](query.md#boolean--set-ops--projection--case)).
+Of the 10 left, `db_functions.test_trunc_none` wants `sys.time_zone_info`, which mssql-django uses as its `has_zoneinfo_database` probe; `AT TIME ZONE` itself already matches real (including DST), so the capability is real and only the catalog view is missing — but real reports **Windows** zone IDs there, which `TimeZoneInfo.GetSystemTimeZones()` won't produce on Linux, so it needs a baked name table rather than a live projection.
+Three more (`aggregation.test_expression_on_aggregation` and relatives) are the aggregate-binding entry below.
 Two ORDER BY rules accounted for 11 of the 25 this section started at, both found by grouping failures by cause rather than by test: set-op top-level terms resolving against the source column behind a projected one (8 tests), and a qualified term binding to the source column rather than a same-named output alias (3 tests) — see [`query.md`](query.md#order-by-term-resolution).
 What's left looks genuinely separate: 7 SQL errors and 7 wrong-result assertions across five apps, no shared shape visible.
 

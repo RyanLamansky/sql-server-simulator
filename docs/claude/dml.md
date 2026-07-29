@@ -33,6 +33,10 @@
   An explicit column list naming the identity column is **Msg 544** — and `SET IDENTITY_INSERT <target> ON` does **not** unlock it.
   Msg 544's slot names the **DML statement's own target table**, not the OUTPUT target that owns the identity column; that is real's behavior and is mirrored verbatim, so the two messages disagree about which table they name.
   A column list that omits the identity column is the accepted spelling.
+- **A subquery in a SET expression sees the update target's columns.**
+  `UPDATE t SET alias = (SELECT MAX(v) FROM (VALUES (t.name), (t.goes_by)) x(v))` — the shape ORMs emit for GREATEST / LEAST — binds `t`'s columns at parse time via a target-scoped resolver installed around the SET list.
+  Runtime already threaded the per-row resolver through `RuntimeContext`, so only the parse-time type resolution was missing.
+  The multi-table alias form has no resolved target at that point and keeps the enclosing scope.
 - **`OUTPUT … INTO` coerces each value to its destination column's type.**
   The projection's type comes from the source table and need not match the target's — an ORM building a returning buffer with `SELECT TOP 0 CAST(id AS bigint) … INTO #tmp` then `OUTPUT INSERTED.id INTO #tmp` hands an int to a bigint column.
   Storing it raw reached the row encoder's type check as a bare `ArgumentException`; over the TDS wire that aborts the response mid-stream, so the client reports `HY000 "A severe error occurred"` and the connection dies rather than getting any usable error.

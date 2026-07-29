@@ -20,6 +20,9 @@
 - Set ops (UNION / UNION ALL / INTERSECT / EXCEPT): standard precedence (INTERSECT > UNION/EXCEPT).
   **NULLs are equal during set-op dedup/matching** (opposite of `=`'s tri-state).
   Per-branch ORDER BY in non-final branch → Msg 156.
+  A branch may be **parenthesized**, and the parentheses may wrap a whole nested chain rather than a single SELECT — `SELECT … UNION (SELECT … UNION SELECT …)` and `… EXCEPT (… INTERSECT …)` are what an ORM emits when it combines an already-combined queryset (`ParseSetOpBranch`).
+  Without it the opening paren read as a scalar subquery, so the branch looked like a one-column select list and the chain failed the equal-expression-count check.
+  **Not accepted yet**: a parenthesized *leading* branch at statement start (`(SELECT …) UNION SELECT …`) still raises Msg 102 — that needs the statement dispatcher to route a leading `(` into the SELECT parser, not just the branch position.
   Top-level ORDER BY references the first branch's columns, and resolves a term three ways (probe-confirmed, in this order): an **output alias**, the **source column name behind a projected column** (`SELECT num AS Col2 … UNION … ORDER BY num` sorts by Col2 — what ORMs emit when they alias every output positionally), or an **ordinal**.
   The alias is checked first, so an alias shadowing a different source column keeps its binding.
   Two divergences remain here.

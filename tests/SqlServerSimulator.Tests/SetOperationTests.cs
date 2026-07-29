@@ -458,4 +458,33 @@ public sealed class SetOperationTests
             "select id as Col1 from n where num <= 1 union select id as Col1 from n where num >= 2 order by [nosuchcol]",
             207);
     }
+
+    /// <summary>
+    /// A set-op branch may be parenthesized, and the parentheses may wrap a
+    /// whole nested chain rather than a single SELECT — what an ORM emits when
+    /// it combines an already-combined queryset. Without it the opening paren
+    /// read as a scalar subquery, so the branch looked like a one-column select
+    /// list and the chain failed the equal-expression-count check.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select id, num from nn union (select id, num from nn union select id, num from nn)", "1,10|2,20")]
+    [DataRow("select id, num from nn union (select id, num from nn)", "1,10|2,20")]
+    [DataRow("select id, num from nn intersect (select id, num from nn union select id, num from nn)", "1,10|2,20")]
+    // A EXCEPT (A INTERSECT A) is A EXCEPT A — empty, and that it evaluates at
+    // all is the point.
+    [DataRow("select id, num from nn except (select id, num from nn intersect select id, num from nn)", "")]
+    public void SetOperation_ParenthesizedBranch_Parses(string sql, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table nn (id int, num int)",
+            "insert nn values (1,10),(2,20)");
+
+        using var reader = sim.ExecuteReader(sql);
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add($"{reader.GetValue(0)},{reader.GetValue(1)}");
+        rows.Sort(StringComparer.Ordinal);
+        AreEqual(expected, string.Join("|", rows));
+    }
 }
