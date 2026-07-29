@@ -323,6 +323,40 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     internal const string SevereErrorMessage = "A severe error occurred on the current command. The results, if any, should be discarded.";
 
     /// <summary>
+    /// Whether an exception none of the per-statement typed catches anticipated
+    /// can still be reported in band as a <em>statement-level</em> error,
+    /// leaving the session usable — as opposed to escaping to the terminal
+    /// crash boundary, which reports severity 20 and kills the connection.
+    /// </summary>
+    /// <remarks>
+    /// <para>Worth the breadth because the alternative is disproportionate: a
+    /// single unmodeled statement used to take the whole connection down with
+    /// it, so in a test suite every later test sharing that connection failed
+    /// too. One measured run had a single such statement account for 27 of 50
+    /// failures — the cascade cost far exceeds the underlying gap.</para>
+    /// <para>Two exclusions. Transport and cancellation types must keep flowing
+    /// to the session loop, which owns disconnect and attention handling. And
+    /// the writer must be at a token boundary: a fault that struck mid-token
+    /// has already emitted a partial token, so appending ERROR would desync the
+    /// stream — that case still belongs to the terminal backstop.</para>
+    /// </remarks>
+    private static bool IsRecoverableStatementFault(Exception ex, TdsTokenWriter writer) =>
+        writer.AtTokenBoundary
+        && ex is not (IOException or SocketException or ObjectDisposedException
+            or OperationCanceledException or InvalidDataException or AuthenticationException);
+
+    /// <summary>
+    /// Reports an unanticipated exception as a severity-16 statement error, so
+    /// the client sees a diagnosable failure and keeps the connection. The
+    /// exception type is named because these are simulator defects rather than
+    /// modeled SQL Server behavior, and the type is what makes them findable.
+    /// </summary>
+    private static void WriteUnexpectedStatementFault(TdsTokenWriter writer, Exception ex) =>
+        writer.WriteErrorOrInfo(
+            Tds.TokenError, 50000, 1, 16,
+            $"SqlServerSimulator: unhandled {ex.GetType().Name}: {ex.Message}", "SIMULATED", "", 1);
+
+    /// <summary>
     /// Best-effort terminal backstop: appends a severity-20 ERROR + DONE to the
     /// response and flushes it, so an otherwise-silent session crash reaches the
     /// client as a <c>SqlException</c> rather than a bare transport reset. Only
@@ -608,6 +642,15 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             this.WriteDatabaseChangeIfAny(writer);
             writer.WriteDone(Tds.DoneError, 0);
         }
+#pragma warning disable CA1031 // Deliberate: an unmodeled statement must not cost the whole session — see IsRecoverableStatementFault.
+        catch (Exception ex) when (IsRecoverableStatementFault(ex, writer))
+        {
+            _ = this.FlushInfoMessages(writer);
+            WriteUnexpectedStatementFault(writer, ex);
+            this.WriteDatabaseChangeIfAny(writer);
+            writer.WriteDone(Tds.DoneError, 0);
+        }
+#pragma warning restore CA1031
     }
 
     /// <summary>

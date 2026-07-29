@@ -54,6 +54,14 @@ internal sealed partial class TdsSession
             writer.WriteErrorOrInfo(Tds.TokenError, 50000, 1, 16, $"SqlServerSimulator: {ex.Message}", "SIMULATED", "", 1);
             writer.WriteDone(Tds.DoneError, 0);
         }
+#pragma warning disable CA1031 // Deliberate: see TdsSession.IsRecoverableStatementFault.
+        catch (Exception ex) when (IsRecoverableStatementFault(ex, writer))
+        {
+            this.pendingBulk = null;
+            WriteUnexpectedStatementFault(writer, ex);
+            writer.WriteDone(Tds.DoneError, 0);
+        }
+#pragma warning restore CA1031
     }
 
     /// <summary>
@@ -92,5 +100,13 @@ internal sealed partial class TdsSession
             writer.WriteErrorOrInfo(Tds.TokenError, 50000, 1, 16, $"SqlServerSimulator: {ex.Message}", "SIMULATED", "", 1);
             writer.WriteDone(Tds.DoneError, 0);
         }
+#pragma warning disable CA1031 // Deliberate: see TdsSession.IsRecoverableStatementFault.
+        catch (Exception ex) when (IsRecoverableStatementFault(ex, writer))
+        {
+            _ = this.FlushInfoMessages(writer);
+            WriteUnexpectedStatementFault(writer, ex);
+            writer.WriteDone(Tds.DoneError, 0);
+        }
+#pragma warning restore CA1031
     }
 }

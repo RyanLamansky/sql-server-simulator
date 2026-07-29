@@ -14,11 +14,16 @@ These notes are the local implementation contracts.
   Contract + probed constants in [`docs/claude/tds-endpoint.md`](../../../docs/claude/tds-endpoint.md).
   One task per socket; teardown is socket-close-driven.
   The typed catch list in `RunAsync` (`IOException` / `SocketException` / `ObjectDisposedException` / `OperationCanceledException` / `InvalidDataException` / `AuthenticationException`) + the per-handler `SimulatedSqlException` / `NotSupportedException` conversions handle every anticipated failure, so wire-format parse failures must throw `InvalidDataException`, unsupported features `NotSupportedException` (converted to ERROR tokens in handlers, never leaked).
-  **Behind them is a terminal crash backstop**: an exception of no anticipated type used to kill the session silently (client sees a raw transport reset).
-  It now emits a best-effort **Msg 0 / severity 20** ERROR (`SevereErrorMessage`) so SqlClient surfaces a `SqlException` and marks the connection dead, then the connection closes — but only via `TryWriteSevereErrorAsync`, which appends the ERROR **only when `TdsTokenWriter.AtTokenBoundary` is true** (see the mid-token bullet).
-  Same backstop on the MARS per-session loop, so one logical session's crash doesn't silently kill the mux.
-  The forcing seam for tests is a per-`Simulation` internal hook (`NetworkBatchCrashHookForTesting`), never public.
-  Oracles: `CrashBoundaryTests`, `TokenBoundaryTests`.
+  **Behind them are two tiers of backstop, and the difference is whether the session survives.**
+  - **Statement tier** (`IsRecoverableStatementFault` + `WriteUnexpectedStatementFault`, wired into every message handler — batch, RPC, bulk load, TM): an unanticipated exception raised while executing one statement becomes **Msg 50000 / severity 16** naming the exception type (`"SqlServerSimulator: unhandled OverflowException: …"`), and the connection stays usable.
+    This is the common case and the one that matters most in bulk: before it, a single unmodeled statement took the whole connection with it, so in a client test suite every later test sharing that connection failed too — one measured Django run had a single such statement account for **27 of 50** failures.
+    Excluded from the tier: the transport / cancellation types (they belong to the session loop, which owns disconnect and attention), and any fault where `AtTokenBoundary` is false.
+  - **Terminal tier** (`TryWriteSevereErrorAsync`): what's left — a mid-token fault, or one raised outside a statement handler — emits a best-effort **Msg 0 / severity 20** ERROR (`SevereErrorMessage`) so SqlClient surfaces a `SqlException` and marks the connection dead, then the connection closes.
+    Same backstop on the MARS per-session loop, so one logical session's crash doesn't silently kill the mux.
+
+  The forcing seam for the terminal tier is a per-`Simulation` internal hook (`NetworkBatchCrashHookForTesting`, never public) invoked *before* the handler's try, so it still escapes to the terminal boundary; the statement tier is forced by a genuinely unmodeled statement instead.
+  **A new message handler needs the statement-tier catch too** — without it, its unanticipated faults fall through to the terminal tier and cost the session.
+  Oracles: `CrashBoundaryTests` (both tiers), `TokenBoundaryTests`.
 - **MARS / SMP layer** (`SmpMultiplexer` / `SmpSession` / `SmpSessionStream`): active only when the client requested MARS in prelogin (`ParsePreloginMars` → ack `1`, strictly additive — non-MARS stays byte-identical).
   After the raw login response, `RunAsync` hands the post-TLS stream to `SmpMultiplexer`, which owns it: one read loop demuxes 16-byte SMP frames ([MC-SMP]) into per-`SmpSession` pipes, and `RunMarsSessionAsync` runs one TDS batch loop per session over an `SmpSessionStream`-backed `TdsPacketTransport`.
   **All sessions share one `SimulatedDbConnection`**; the per-connection `engineExecutionGate` (`SemaphoreSlim(1,1)`) serializes engine execution — cooperative multiplexing, never parallel (the engine assumes one executor per connection).

@@ -81,6 +81,16 @@ internal sealed partial class TdsSession
                     this.WriteDatabaseChangeIfAny(writer);
                 writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
             }
+#pragma warning disable CA1031 // Deliberate: an unmodeled statement must not cost the whole session — see IsRecoverableStatementFault.
+            catch (Exception ex) when (IsRecoverableStatementFault(ex, writer))
+            {
+                _ = this.FlushInfoMessages(writer);
+                WriteUnexpectedStatementFault(writer, ex);
+                if (!moreRequests)
+                    this.WriteDatabaseChangeIfAny(writer);
+                writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
+            }
+#pragma warning restore CA1031
         }
     }
 

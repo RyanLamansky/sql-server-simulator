@@ -80,17 +80,23 @@ A `dbo.REGEXP_LIKE` built-in was **tried and reverted** — faking it as a built
 
 One residual, probed on the same server: `REGEXP_LIKE` is a reserved keyword at **compatibility level 170**, so real raises Msg 156 on the unbracketed `dbo.REGEXP_LIKE(...)` there and accepts it at 160 and below. The simulator defaults to compat 170 and does *not* reserve the keyword, so it accepts the unbracketed form at every level — over-permissive at 170. Closing it belongs with the native bare `REGEXP_LIKE(col, pattern [, flags])` **predicate** (a reserved keyword, distinct from the UDF), which is a separate, genuinely-faithful builtin worth adding independently and would supply the reservation.
 
-Re-measured 2026-07-29 on a 21-app ORM slice (**2069 tests**, larger than the 1021-test slice the earlier numbers came from, so they aren't directly comparable): **sim-only 50, real-only 26, 76 failing on both**.
-The `OUTPUT … INTO` destination-type coercion fix in that pass took sim-only from 59 to 50.
+Re-measured 2026-07-29 on a 21-app ORM slice (**2069 tests**, larger than the 1021-test slice the earlier numbers came from, so they aren't directly comparable): **sim-only 25, real-only 26, 76 failing on both**.
 
-**The dominant sim-only cost is cascade, not breadth.** A statement that raises an *unexpected* .NET exception (rather than a `SimulatedSqlException` or `NotSupportedException`, both of which surface cleanly) aborts the TDS response mid-stream; the client reports `HY000 "A severe error occurred"` and the connection dies, so every later test in the same `TestCase` class fails with Django's `"Cannot open a new connection in an atomic block"`.
-**One** such statement accounted for 27 of the 50 remaining.
-Making the endpoint convert any unhandled exception into a clean TDS error token would turn each of those cascades into a single honest failure and is worth more than any individual gap below.
+Two fixes in that pass produced it.
+`OUTPUT … INTO` now coerces to the destination column's type (an ORM's `CAST(id AS bigint)` returning buffer handed an int to a bigint column), and the endpoint reports an unanticipated statement fault as Msg 50000 severity 16 while keeping the session (see [`tds-endpoint.md`](tds-endpoint.md#statement-tier--severity-16-session-survives)).
+Together they took sim-only from 59 to 25.
+
+**The second was worth more than its own bug count, and the reason generalizes.**
+A statement raising an unexpected .NET exception used to abort the TDS response mid-stream and kill the connection, so every later test sharing it failed with Django's `"Cannot open a new connection in an atomic block"` — noise that named neither the statement nor the gap.
+**One** such statement accounted for 27 of the then-50 failures; the re-run shows zero severe errors and zero cascades.
+When a suite's failures cluster implausibly in one app, suspect a cascade before a feature gap: `aggregation` fell from 28 sim-only failures to 3 on this fix alone.
+
+Remaining sim-only by app: queries 14, db_functions 4, aggregation_regress 3, aggregation 3, annotations 1.
 
 Remaining **sim-only** delta (real passes, simulator fails), roughly in breadth order:
 
 - **`Greatest` over aggregates of a joined table** — `(SELECT MAX(value) FROM (VALUES (AVG(b.rating)), (AVG(b.price))) AS _GREATEST(value))` projected and repeated in HAVING, over a `LEFT JOIN` + `GROUP BY`.
-  The aggregates belong to the enclosing grouped query, so `RejectAggregateOverOuterScope` doesn't fire; something further in leaves the aggregate unbound and the resulting unhandled exception kills the connection (the 27-test cascade above).
+  The aggregates belong to the enclosing grouped query, so `RejectAggregateOverOuterScope` doesn't fire; something further in leaves the aggregate unbound and the resulting unhandled exception is now reported as a single Msg 50000 rather than taking the session with it.
   Same root as the aggregate-binding entry below — an aggregate written inside a nested VALUES/derived table has to bind to the query that owns its columns.
   Home: `Selection.cs`.
 

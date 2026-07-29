@@ -101,22 +101,40 @@ Oracles: `ProcScopeBoundaryTests` (Tests.Internal, marker emission), `DynamicSql
 **Residual divergences (still present, none regressed by the fix; not reproducible from Linux, which lacks the native-SNI Framework parser — managed `System.Data.SqlClient` / `Microsoft.Data.SqlClient` read both the old and new streams fine):** the DONE `curcmd` field stays 0 where real carries statement-type codes (0xC1 SELECT/SET, 0xC0 IF, 0xE0 EXECUTE) — cosmetic, needs statement-type surfacing; the simulator emits no DONE for a `SET`-assignment or an `IF` statement (real does — those yield no engine outcome).
 A direct `EXEC <proc>` in a batch (through `InvokeProcedure`, not `ExecuteDynamicBatch`) is the identical-shaped sibling that would want the same markers — not yet wired.
 
-## Terminal crash boundary
+## Unexpected-fault handling
 
 The typed catch lists in `RunAsync` / `RunMarsSessionAsync` (`IOException` / `SocketException` / `ObjectDisposedException` / `OperationCanceledException` / `InvalidDataException` / `AuthenticationException`) plus the per-handler `SimulatedSqlException` / `NotSupportedException` conversions handle every anticipated failure.
-Behind them sits a **terminal backstop**: an exception of no anticipated type (an internal bug, an unmodeled engine path that throws a raw CLR exception) would otherwise end the session task silently, leaving the client with a raw transport reset and no message — the first thing a real user's tool hits when it sends something the simulator didn't anticipate.
-The backstop emits a best-effort **Msg 0 / severity 20** ERROR (`"A severe error occurred on the current command. The results, if any, should be discarded."`) — the shape real SQL Server sends for an internal failure — then lets the connection close.
+Behind them sit **two tiers**, and which one runs decides whether the session survives.
+
+### Statement tier — severity 16, session survives
+
+An exception of no anticipated type raised while executing one statement is reported as **Msg 50000 / severity 16** naming the exception type — `"SqlServerSimulator: unhandled OverflowException: Arithmetic operation resulted in an overflow."` — and the connection stays usable.
+Wired into every message handler: SQLBatch, RPC (which also carries the `sp_cursor*` family), bulk load, and the transaction manager.
+
+The type name is deliberate: these are simulator defects rather than modeled SQL Server behavior, so naming the type is what makes one findable from a client-side log.
+
+Why the breadth is worth it: the alternative is disproportionate.
+A single unmodeled statement used to take the whole connection down, so in a client test suite every later test sharing that connection failed too — one measured Django ORM run had **one** such statement account for 27 of 50 remaining failures, all of them reported as Django's `"Cannot open a new connection in an atomic block"` rather than anything about the statement.
+Converting the fault in place turns each of those cascades into a single honest failure.
+
+Two exclusions, both load-bearing: the transport / cancellation types stay with the session loop, which owns disconnect and attention handling; and a fault that struck mid-token goes to the terminal tier instead (below).
+
+### Terminal tier — severity 20, connection closes
+
+What's left — a mid-token fault, or one raised outside a statement handler — would otherwise end the session task silently, leaving the client with a raw transport reset and no message.
+This backstop emits a best-effort **Msg 0 / severity 20** ERROR (`"A severe error occurred on the current command. The results, if any, should be discarded."`) — the shape real SQL Server sends for an internal failure — then lets the connection close.
 SqlClient treats severity ≥ 20 as fatal: it surfaces a `SqlException` and marks the connection dead, so the failure is diagnosable instead of a bare reset.
 (Matched to SqlClient's documented severity-20 handling; not separately probed on a triggered real-server internal error.)
 
+The rest of this section is that tier's detail: an exception of no anticipated type (an internal bug, an unmodeled engine path that throws a raw CLR exception) would otherwise end the session task silently, leaving the client with a raw transport reset and no message — the first thing a real user's tool hits when it sends something the simulator didn't anticipate.
 **Mid-token safety is the hard constraint.**
 An ERROR token may be appended only at a token boundary — a crash that struck mid-COLMETADATA / mid-ROW left a partial token in the writer's buffer, and appending another token there would desync the stream and make it worse.
 `TdsTokenWriter.AtTokenBoundary` tracks this: it is true whenever the buffer ends at a complete token (every self-contained token method runs to completion synchronously, leaving it true), and the three writers that interleave a throw-capable per-column sub-write between a single token's bytes — `WriteColMetadata`, `WriteRow`, `WriteReturnValue` — bracket their body with `EnterComposite()` / `LeaveComposite()`, so a throw mid-body leaves it false.
 The backstop (`TryWriteSevereErrorAsync`) appends the ERROR only when `AtTokenBoundary` is true; otherwise it just closes.
 Bytes already flushed for the current response stay well-formed either way — a split token's remainder is still buffered, and an ERROR token legally follows any complete tokens (even a partial result set the client then discards).
 The MARS per-session loop applies the same backstop so one logical session's crash surfaces as a severe error rather than silently killing the whole mux.
-Oracles: `CrashBoundaryTests` (Tests.SqlClient, end-to-end severity-20 `SqlException`), `TokenBoundaryTests` (Tests.Internal, the `AtTokenBoundary` flag invariant).
-The forcing seam is a test-only per-`Simulation` hook (`NetworkBatchCrashHookForTesting`, internal, not public API).
+Oracles: `CrashBoundaryTests` (Tests.SqlClient — both tiers end to end), `TokenBoundaryTests` (Tests.Internal, the `AtTokenBoundary` flag invariant).
+The forcing seam for the terminal tier is a test-only per-`Simulation` hook (`NetworkBatchCrashHookForTesting`, internal, not public API) invoked *before* the handler's try, so it bypasses the statement tier by construction; the statement tier is forced by a genuinely unmodeled statement instead.
 
 ## RPC requests
 
