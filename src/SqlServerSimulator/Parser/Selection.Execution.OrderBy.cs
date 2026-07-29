@@ -37,11 +37,24 @@ internal sealed partial class Selection
 
             keys[i] = spec.Expr!.Run(new RuntimeContext(name =>
             {
-                for (var j = 0; j < outputColumnNames.Length; j++)
+                // A *qualified* term names a source column, never an output
+                // alias: real orders `SELECT val AS id FROM ob t ORDER BY t.id`
+                // by t's id column even though an output alias `id` exists
+                // (probe-confirmed). Only an unqualified term matches the
+                // select list, so the alias scan is skipped when a qualifier
+                // is present — matching on the leaf alone silently sorted by
+                // the wrong column whenever a join brought a same-named
+                // column into scope (`ORDER BY child.id` binding to the
+                // projected `parent.id`).
+                if (name.ImmediateQualifier is null || distinct)
                 {
-                    if (BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
-                        return projected[j];
+                    for (var j = 0; j < outputColumnNames.Length; j++)
+                    {
+                        if (BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
+                            return projected[j];
+                    }
                 }
+
                 return distinct
                     ? throw SimulatedSqlException.OrderByItemNotInSelectListWithDistinct()
                     : resolveSource(name);

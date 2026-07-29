@@ -80,7 +80,7 @@ A `dbo.REGEXP_LIKE` built-in was **tried and reverted** — faking it as a built
 
 One residual, probed on the same server: `REGEXP_LIKE` is a reserved keyword at **compatibility level 170**, so real raises Msg 156 on the unbracketed `dbo.REGEXP_LIKE(...)` there and accepts it at 160 and below. The simulator defaults to compat 170 and does *not* reserve the keyword, so it accepts the unbracketed form at every level — over-permissive at 170. Closing it belongs with the native bare `REGEXP_LIKE(col, pattern [, flags])` **predicate** (a reserved keyword, distinct from the UDF), which is a separate, genuinely-faithful builtin worth adding independently and would supply the reservation.
 
-Re-measured 2026-07-29 on a 21-app ORM slice (**2069 tests**, larger than the 1021-test slice the earlier numbers came from, so they aren't directly comparable): **sim-only 25, real-only 26, 76 failing on both** (25 → 17 with the set-op ORDER BY fix below).
+Re-measured 2026-07-29 on a 21-app ORM slice (**2069 tests**, larger than the 1021-test slice the earlier numbers came from, so they aren't directly comparable): **sim-only 25, real-only 26, 76 failing on both** (25 → 14 with the two ORDER BY fixes below).
 
 Two fixes in that pass produced it.
 `OUTPUT … INTO` now coerces to the destination column's type (an ORM's `CAST(id AS bigint)` returning buffer handed an int to a bigint column), and the endpoint reports an unanticipated statement fault as Msg 50000 severity 16 while keeping the session (see [`tds-endpoint.md`](tds-endpoint.md#statement-tier--severity-16-session-survives)).
@@ -91,8 +91,11 @@ A statement raising an unexpected .NET exception used to abort the TDS response 
 **One** such statement accounted for 27 of the then-50 failures; the re-run shows zero severe errors and zero cascades.
 When a suite's failures cluster implausibly in one app, suspect a cascade before a feature gap: `aggregation` fell from 28 sim-only failures to 3 on this fix alone.
 
-Remaining sim-only by app: queries 6, db_functions 4, aggregation_regress 3, aggregation 3, annotations 1 (**17 total**).
-The `queries` cluster was 14 until set-op top-level ORDER BY learned to resolve a term against the source column behind a projected one (see [`query.md`](query.md#boolean--set-ops--projection--case)) — 8 of those 14 were that one rule, the cascade lesson repeating in a milder form.
+Remaining sim-only by app: db_functions 4, aggregation 3, aggregation_regress 3, queries 3, annotations 1 (**14 total**).
+Two ORDER BY rules accounted for 11 of the 25 this section started at, both found by grouping failures by cause rather than by test: set-op top-level terms resolving against the source column behind a projected one (8 tests), and a qualified term binding to the source column rather than a same-named output alias (3 tests) — see [`query.md`](query.md#order-by-term-resolution).
+What's left looks genuinely separate: 7 SQL errors and 7 wrong-result assertions across five apps, no shared shape visible.
+
+**Over-permissive residual from that work**: under `DISTINCT`, a qualified ORDER BY term is still matched by leaf against the output names, so `SELECT DISTINCT val AS id … ORDER BY t.id` is accepted where real raises Msg 145.
 
 Remaining **sim-only** delta (real passes, simulator fails), roughly in breadth order:
 

@@ -308,4 +308,60 @@ public class OrderByTests
         using var reader = new Simulation().ExecuteReader("select 2 as x union all select 1 order by x desc");
         CollectionAssert.AreEqual(new object?[] { 2, 1 }, Column0(reader));
     }
+
+    /// <summary>
+    /// A <em>qualified</em> ORDER BY term names a source column, never an
+    /// output alias. Matching on the leaf alone silently sorted by the wrong
+    /// column whenever a join brought a same-named column into scope — an ORM
+    /// ordering by a related model's field (`ORDER BY child.id`) bound to the
+    /// projected `parent.id` instead.
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_QualifiedTerm_BindsToTheSourceColumnNotTheOutputAlias()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table parent (id int identity primary key, name varchar(20))",
+            "create table child (id int identity primary key, parent_id int)",
+            "insert parent (name) values ('p1'), ('p2')",
+            "insert child (parent_id) values (1), (2), (1)");
+
+        // Ordering by child.id gives p1, p2, p1; by parent.id it would be p1, p1, p2.
+        using var reader = sim.ExecuteReader(
+            "select parent.id, parent.name from parent left outer join child on parent.id = child.parent_id "
+            + "order by child.id asc, parent.id asc");
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add($"{reader.GetValue(1)}");
+        AreEqual("p1,p2,p1", string.Join(",", rows));
+    }
+
+    /// <summary>
+    /// The alias is bypassed even when it shadows the qualified name outright:
+    /// <c>SELECT val AS id … ORDER BY t.id</c> sorts by <c>t.id</c>, so the
+    /// projected values come back in id order rather than val order.
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_QualifiedTerm_IgnoresAShadowingOutputAlias()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table ob (id int, val int)",
+            "insert ob values (1,30),(2,20),(3,10)");
+
+        AreEqual("30,20,10", string.Join(",", Column(sim, "select val as id from ob t order by t.id")));
+        // An unqualified term still binds to the alias.
+        AreEqual("10,20,30", string.Join(",", Column(sim, "select val as x from ob t order by x")));
+        // And a qualified source column that isn't projected still resolves.
+        AreEqual("10,20,30", string.Join(",", Column(sim, "select val as x from ob t order by t.val")));
+    }
+
+    private static List<string> Column(Simulation simulation, string commandText)
+    {
+        using var reader = simulation.ExecuteReader(commandText);
+        var values = new List<string>();
+        while (reader.Read())
+            values.Add($"{reader.GetValue(0)}");
+        return values;
+    }
 }

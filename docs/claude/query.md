@@ -83,6 +83,15 @@
 - `TABLESAMPLE [SYSTEM] (n PERCENT | n ROWS) [REPEATABLE (seed)]` on a FROM source parses and is **discarded** — the query returns every row.
 - SQL Server's sample is nondeterministic (any subset is a valid wire result), so returning all rows is a documented deterministic approximation; the win is accepting the syntax.
 
+## ORDER BY term resolution
+
+An **unqualified** term matches the select list first (output alias, then ordinal), falling back to a source column when it matches no output — SQL Server permits ordering by a non-selected source column.
+A **qualified** term (`alias.col`) is a *source-column reference* and never matches an output alias: real orders `SELECT val AS id FROM ob t ORDER BY t.id` by `t`'s id column even though an output alias `id` exists (probe-confirmed).
+Matching on the leaf alone silently sorted by the wrong column whenever a join brought a same-named column into scope — `ORDER BY child.id` bound to the projected `parent.id`, which is the shape an ORM emits when ordering by a related model's field.
+
+`DISTINCT` keeps its own rule: the term must appear in the select list, and a miss is Msg 145 rather than a source fallback.
+**Divergence**: under DISTINCT the qualified form is still matched by leaf against the output names, so `SELECT DISTINCT val AS id … ORDER BY t.id` is accepted where real raises Msg 145 (the qualified source column isn't selected) — over-permissive, and the non-DISTINCT path is the one that carries the source-reference rule.
+
 ## Result drain / ORDER BY representation
 The FROM-bearing SELECT projection paths — streaming, buffered (ORDER BY / DISTINCT), windowed, and aggregate — all yield already-projected `SqlValue[]` rows, so `SimulatedSqlResultSet` serves the reader and TDS cursors directly with no encode-then-re-decode round-trip (see the `SimulatedSqlResultSet` doc + [`data-reader.md`](data-reader.md)).
 **ORDER BY on a single SELECT sorts those projected `SqlValue[]` rows** (`ProjectBuffered.materialized.Sort`), so ordered drains ride the same decoded-once fast path as unordered ones; the only ordered-vs-unordered cost is the inherent buffer + per-row key computation + `List.Sort`, not a decode round-trip, and peak retained memory is effectively unchanged (measured within 0.2% on a 150k-row wide drain).
