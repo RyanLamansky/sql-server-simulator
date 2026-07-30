@@ -160,8 +160,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **Non-Framework CLR assemblies load** — real resolves every `AssemblyRef` against a fixed .NET Framework catalog and raises **Msg 6503** otherwise (probe-confirmed for .NET 10 and for .NET Standard 2.0); the simulator runs on .NET so all of them bind, which is also what lets the tests emit a fixture assembly without a Framework toolchain.
   → [`clr-assemblies.md`](clr-assemblies.md#divergences).
 - **`REGEXP_LIKE` isn't reserved at compatibility level 170** — detail under the Django shakedown above; closing it belongs with the native predicate.
-- **Alias swallow after a complete select-list expression** — `SELECT 1 xyz 2` parses as two columns; real raises **Msg 102** (`"Incorrect syntax near '2'."`, Class 15 — probed 2026-07-29, closing this entry's long-standing "reject shape not probed" note).
-  → [`grammar.md`](grammar.md).
 - **Module body validation deferred to first execution** — a TVP parameter's **Msg 10700** and the **Msg 111** batch-first rule surface at EXEC where real validates at CREATE.
   → [`table-valued-parameters.md`](table-valued-parameters.md#fidelity-gaps-remaining), [`programmable.md`](programmable.md).
 Tracked elsewhere and over-permissive in the same sense: the recursive-CTE part restrictions Msg 460 / 461 / 462 / 467 / 465 (CLAUDE.md's Not-modeled-yet).
@@ -170,8 +168,9 @@ Tracked elsewhere and over-permissive in the same sense: the recursive-CTE part 
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
-- **A keyword blocking a non-first select-list element reports the wrong error** — `SELECT 1, UPDATE(c1) FROM t` raises Msg 102 near `'('` where real raises **Msg 156** near the keyword (probed 2026-07-30).
-  The empty-list case ships (see [`grammar.md`](grammar.md#empty-select-lists)); this residual needs an element-expected flag threaded through the projection loop's alias-continue paths, which re-enter the element switch with an element already collected.
+- **A derived table's column-alias list is rejected on a subquery** — `SELECT … FROM (SELECT 1, 2) s(a, b)` raises Msg 102 at the first alias name where real accepts it and renames the columns (probed 2026-07-30; `FROM (VALUES (1,2)) v(a, b)` works, so `ParseColumnAliasList` exists and is simply not reached from the subquery-derived-table path).
+  Found incidentally while writing select-list tests; unrelated to the select-list grammar.
+  → [`query.md`](query.md).
 - **Per-object creation-time `QUOTED_IDENTIFIER` capture not modeled** — real SQL Server stamps procedures / views / triggers / tables with the QI setting in effect at CREATE (`sys.sql_modules.uses_quoted_identifier`, `OBJECTPROPERTY(id, 'IsQuotedIdentOn')`) and executes bodies under the captured setting; the simulator re-parses bodies under the executing session's current setting.
   See [`grammar.md`](grammar.md).
   Rare legacy-pattern impact.

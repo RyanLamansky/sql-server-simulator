@@ -104,4 +104,70 @@ public sealed class SelectListSyntaxTests
         AreEqual(1, sim.ExecuteScalar("select 1 as x order by x"));
         AreEqual(1, sim.ExecuteScalar("select 1 as x where 1 = 1"));
     }
+
+    // === A keyword blocking a *later* element ===
+
+    /// <summary>
+    /// The same rule past the first element: a comma promises an element, so a
+    /// keyword standing there is Msg 156 rather than an early end to the list.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1, update(c1) from t", "update")]
+    [DataRow("select 1, delete(c1) from t", "delete")]
+    [DataRow("select 1, from t", "from")]
+    [DataRow("select 1, where", "where")]
+    [DataRow("select 1, order by c1", "order")]
+    public void KeywordAfterAComma_RaisesMsg156(string commandText, string keyword) =>
+        new Simulation().AssertSqlError(
+            $"create table t (c1 int); {commandText}", 156, $"Incorrect syntax near the keyword '{keyword}'.");
+
+    /// <summary>A comma with nothing after it at all reports at the comma.</summary>
+    [TestMethod]
+    public void TrailingComma_RaisesMsg102AtTheComma() =>
+        new Simulation().AssertSqlError("select 1,", 102, "Incorrect syntax near ','.");
+
+    // === Alias swallow ===
+
+    /// <summary>
+    /// One bare token after an element is its alias; a second is one too many.
+    /// The simulator used to read it as a further column, silently turning
+    /// <c>SELECT 1 xyz 2</c> into a two-column result.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1 xyz 2", "2")]
+    [DataRow("select 1 xyz abc", "abc")]
+    [DataRow("select 1 2", "2")]
+    [DataRow("select 1 as x 2", "2")]
+    [DataRow("select 1 x 2 y", "2")]          // reports the first offender
+    public void ValueAfterACompleteElement_RaisesMsg102(string commandText, string near) =>
+        new Simulation().AssertSqlError(commandText, 102, $"Incorrect syntax near '{near}'.");
+
+    /// <summary>
+    /// A string literal is a legal postfix alias, so the error lands on the
+    /// one after it — and names it without the literal's own quotes, matching
+    /// real's wording.
+    /// </summary>
+    [TestMethod]
+    public void StringLiteralAfterAnAliasedElement_RaisesMsg102WithoutQuotes() =>
+        new Simulation().AssertSqlError("select 'p' y 'q'", 102, "Incorrect syntax near 'q'.");
+
+    [TestMethod]
+    public void ThreeBareTokens_ReportTheThird()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int, b int)");
+        sim.AssertSqlError("select a b c from t", 102, "Incorrect syntax near 'c'.");
+    }
+
+    /// <summary>The single postfix alias each element is allowed still works.</summary>
+    [TestMethod]
+    public void SinglePostfixAlias_StillParses()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int, b int); insert t values (7, 8)");
+        AreEqual(7, sim.ExecuteScalar("select a b from t"));
+        AreEqual(7, sim.ExecuteScalar("select a as x from t"));
+        AreEqual(2, sim.ExecuteScalar("select s.y from (select 1 x, 2 y) s"));
+        AreEqual("lit", sim.ExecuteScalar("select 'lit' alias, a from t"));
+    }
 }

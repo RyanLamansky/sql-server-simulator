@@ -126,6 +126,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException SyntaxErrorNear(char c) => new($"Incorrect syntax near '{c}'.", 102, 15, 1);
 
     /// <summary>
+    /// Msg 102 naming a value the caller renders itself — for a string literal,
+    /// whose <c>Token.ToString()</c> carries the surrounding quotes that real's
+    /// message doesn't (real reports <c>near 'q'</c> for the literal
+    /// <c>'q'</c>, not <c>near ''q''</c>).
+    /// </summary>
+    internal static SimulatedSqlException SyntaxErrorNearValue(string value) => new($"Incorrect syntax near '{value}'.", 102, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1038: a select-list column alias resolved to
     /// the empty string — <c>AS ''</c>, <c>AS []</c>, <c>AS ""</c>, bare
     /// <c>''</c>, or the alias-on-left <c>'' = expr</c>. Shares SQL Server's

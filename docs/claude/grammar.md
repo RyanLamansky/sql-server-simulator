@@ -95,21 +95,27 @@ The application is **parse-time and NOT gated on skip-mode**, matching SQL Serve
 The per-statement dispatch normalizer advances one token past a parser that stopped on its last-consumed token (many statement parsers rely on this), so a lone *unexpected* trailing token after a statement was silently swallowed — `SELECT id FROM t LIMIT 2` parsed `LIMIT` as the source's alias and the normalizer dropped the dangling `2`.
 A general "any unconsumed trailing token → Msg 102" rule proved too invasive (dozens of statement parsers legitimately end on a last-consumed token; the parenthesized-join FROM form leaves its alias dangling).
 The narrow fix: a completed top-level SELECT that left the cursor on a **value literal** (`Numeric` / `Literal`) — which a well-formed SELECT never does — raises Msg 102, matching real for `SELECT … LIMIT n` and `SELECT … OFFSET n` (both Msg 102 without an ORDER BY on real).
-An identifier or other token still routes through the normalizer, so the alias-swallow over-permissiveness (`SELECT 1 xyz 2` parsing as two columns) remains a known latent gap outside this bundle's scope.
+An identifier or other token still routes through the normalizer; the alias-swallow case it used to leave open (`SELECT 1 xyz 2` parsing as two columns) is now caught inside the projection loop instead — see [Select-list element positions](#select-list-element-positions).
 
 `ALTER TABLE … ADD COLUMN c TYPE` is rejected with **Msg 156** near COLUMN (unlike `DROP COLUMN` / `ALTER COLUMN`, the ADD form names the column directly) — a prior "COLUMN is optional here" note was based on a mistaken probe; the live reference rejects it.
 
-## Empty select lists
+## Select-list element positions
 
-A select list has to project something.
-The projection parser treats a statement keyword as a boundary so back-to-back statements need no separating semicolon (`SELECT 1 UPDATE t SET …` is two statements), which is right once an element exists and wrong while the list is still empty — the list simply ended before it began, leaving a zero-column SELECT that surfaced an `ArgumentException` when a row materialized, or no error at all when the rowset was empty (`SELECT FROM t` over an empty table).
+The projection loop tracks one bit of state — `elementExpected`, true at the start and after a comma, false once an element and any alias it took are complete.
+Both of the grammar's position rules fall out of it, and both were over-permissive before it existed.
 
-Reaching an element-start position with nothing collected and a reserved keyword in the way now raises **Msg 156** naming that keyword, matching real for `UPDATE` / `DELETE` / `INSERT` / `FROM` / `WHERE` / `ORDER` (probe-confirmed; real echoes the keyword in the **source's own casing**, so `select update(c1)` reports `'update'`).
-`Selection.CanBeginProjectionElement` carries the exception list — the function-call heads (`LEFT` / `RIGHT` / `CONVERT` / `TRY_CONVERT` / `COALESCE` / `NULLIF`), `CASE`, `NULL`, the parens-less niladic constants, and the `DISTINCT` / `ALL` / `TOP` prefixes.
-End-of-input isn't a keyword, so a bare `SELECT` keeps its **Msg 102** near `'select'` — probe-confirmed that real distinguishes the two.
+**A keyword where an element belongs → Msg 156**, naming that keyword.
+The loop treats a statement keyword as a boundary so back-to-back statements need no separating semicolon (`SELECT 1 UPDATE t SET …` is two statements), which is right once an element exists and wrong while one is still owed.
+Without the check, `SELECT FROM t` parsed to a zero-column SELECT — an `ArgumentException` when a row materialized, and no error at all over an empty table — and `SELECT 1, FROM t` silently returned a single column.
+Probe-confirmed for `UPDATE` / `DELETE` / `INSERT` / `FROM` / `WHERE` / `ORDER`, in first and later positions alike; real echoes the keyword in the **source's own casing**, so `select update(c1)` reports `'update'`.
+`Selection.CanBeginProjectionElement` carries the exceptions — the function-call heads (`LEFT` / `RIGHT` / `CONVERT` / `TRY_CONVERT` / `COALESCE` / `NULLIF`), `CASE`, `NULL`, the parens-less niladic constants, and the `DISTINCT` / `ALL` / `TOP` prefixes.
 
-**Residual**: the guard only fires while the list is empty, so a keyword blocking a *later* element (`SELECT 1, UPDATE(c1) FROM t`) still reports Msg 102 near `'('` where real reports Msg 156 near the keyword.
-Catching that needs an element-expected flag threaded through the loop's alias-continue paths, which re-enter the same switch with an element already collected.
+**A value where only a separator belongs → Msg 102**, at that token.
+Each element takes at most one postfix alias, so the token after it must be a comma, a clause keyword, or the end: `SELECT 1 xyz 2` is an error at the `2`, not a second column.
+The loop re-enters the element switch after an alias arm, which is exactly where `elementExpected` is false, so the check costs nothing extra.
+A string literal is a legal alias, and the error names the *next* token without the literal's own quotes (`SELECT 'p' y 'q'` → `near 'q'`, via `SyntaxErrorNearValue`).
+
+Two end-of-input cases stay on Msg 102 and are distinguished by what preceded them: a bare `SELECT` reports near `'select'`, while a comma that promised an element the input never supplied reports near `','`.
 
 ## Divergences
 

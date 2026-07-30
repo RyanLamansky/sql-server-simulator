@@ -930,21 +930,32 @@ internal sealed partial class Selection
             }
         }
 
+        // Whether the next token should begin a select-list element: true at
+        // the start and after a comma, false once an element (and any alias it
+        // took) is complete.
+        var elementExpected = true;
         do
         {
-            // A select list must project something. Reaching an element-start
-            // position with nothing collected and a keyword in the way means
-            // the list never began — real reports Msg 156 naming that keyword
-            // (probe-confirmed for UPDATE / DELETE / INSERT / FROM / WHERE /
-            // ORDER), where the statement-boundary arms below would otherwise
-            // end the projection and leave a zero-column SELECT behind.
-            // Only checked while empty: once an element is parsed, those same
-            // keywords are the legitimate clause / next-statement terminators,
-            // and the alias-continue re-enters this switch with the element
-            // already collected. End-of-input isn't a keyword, so a bare
-            // SELECT keeps its Msg 102.
-            if (expressions.Count == 0 && context.Token is ReservedKeyword blocking && !CanBeginProjectionElement(blocking))
+            // A keyword standing where an element belongs means the list never
+            // began (or a comma promised one that never arrived): real reports
+            // Msg 156 naming that keyword, where the statement-boundary arms
+            // below would otherwise end the projection and leave a short or
+            // zero-column SELECT behind. End-of-input isn't a keyword, so a
+            // bare SELECT keeps its Msg 102.
+            if (elementExpected && context.Token is ReservedKeyword blocking && !CanBeginProjectionElement(blocking))
                 throw SimulatedSqlException.SyntaxErrorNearKeyword(blocking);
+
+            // The mirror case: this switch is re-entered after an alias was
+            // taken, so a further value token is one too many for a single
+            // element — `SELECT 1 xyz 2` is Msg 102 at the `2`, not a second
+            // column. Only a comma or a clause keyword may follow a complete,
+            // aliased element (probe-confirmed).
+            if (!elementExpected && StartsProjectionElement(context.Token))
+            {
+                throw context.Token is Literal { Value.Type.Category: SqlTypeCategory.String } offendingLiteral
+                    ? SimulatedSqlException.SyntaxErrorNearValue(offendingLiteral.Value.AsString)
+                    : SimulatedSqlException.SyntaxErrorNear(context);
+            }
 
             switch (context.Token)
             {
@@ -1018,6 +1029,9 @@ internal sealed partial class Selection
                 case Operator { Character: ',' }:
                     if (expressions.Count == 0)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
+                    // Reached when a comma follows an aliased element, whose
+                    // alias arm re-entered this switch. Still expecting one.
+                    elementExpected = true;
                     continue;
                 case Operator { Character: ')' }:
                     if (depth == 0)
@@ -1107,6 +1121,11 @@ internal sealed partial class Selection
                     break;
             }
 
+            // An element was produced above. Only the comma arms below put the
+            // loop back into element-expected state; the alias arms leave it
+            // here, which is what makes a second value token an error.
+            elementExpected = false;
+
             switch (context.Token)
             {
                 case null:
@@ -1120,6 +1139,7 @@ internal sealed partial class Selection
                     goto ExitWhileTokenLoop;
 
                 case Operator { Character: ',' }:
+                    elementExpected = true;
                     continue;
 
                 // A `)` at the lookahead-after-expression position closes the
@@ -1239,6 +1259,13 @@ internal sealed partial class Selection
             throw SimulatedSqlException.SyntaxErrorNear(context);
         } while (context.GetNextOptional() is not null);
     ExitWhileTokenLoop:
+
+        // A comma that promised an element the input never supplied — real
+        // reports Msg 102 at the comma itself. Reached when end-of-statement
+        // followed the comma directly; a comma followed by a *keyword* raised
+        // Msg 156 at the top of the loop instead.
+        if (elementExpected && expressions.Count > 0)
+            throw SimulatedSqlException.SyntaxErrorNear(',');
 
         if (topExpression is not null && fromClause.OffsetExpression is not null)
             throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
@@ -2345,6 +2372,15 @@ internal sealed partial class Selection
             rows: [],
             lateralPlan: ForValuesConstructor(schema, columnNames, tuples));
     }
+
+    /// <summary>
+    /// Whether <paramref name="token"/> is one the projection switch would
+    /// read as the start of an element. Used to reject a second value where
+    /// only a separator may follow — the keyword cases are handled separately
+    /// because most of them legitimately end the list.
+    /// </summary>
+    private static bool StartsProjectionElement(Token? token) =>
+        token is Name or Numeric or Literal or AtPrefixedString;
 
     /// <summary>
     /// Whether <paramref name="keyword"/> can open a projection element.
