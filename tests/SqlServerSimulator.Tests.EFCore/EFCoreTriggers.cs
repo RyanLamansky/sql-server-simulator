@@ -99,6 +99,14 @@ public sealed class EFCoreTriggers
         // generated identity values to the EF entity. Verify the
         // round-trip — EF reads Id back from the database after the
         // trigger fires, and the in-memory entity reflects it.
+        //
+        // The body must not SELECT. A trigger body's result sets are the
+        // firing statement's on real SQL Server, so a body of `select 1`
+        // interleaves an extra result set with EF's identity reads and
+        // breaks SaveChanges there too — verified against SQL Server 2025,
+        // which returns four result sets for this two-entity batch. The
+        // fixture used to do exactly that and passed only because the
+        // simulator dropped body result sets.
         var simulation = new Simulation();
         simulation.ExecuteBatches(
             """
@@ -111,7 +119,7 @@ public sealed class EFCoreTriggers
             """
             create trigger tr_product_audit on Products after insert
             as
-                select 1
+                set nocount on
             """);
         using var context = new TriggerDbContext(simulation);
         var p1 = new Product { Name = "First", Price = 10 };

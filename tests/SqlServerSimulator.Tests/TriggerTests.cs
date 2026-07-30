@@ -41,6 +41,86 @@ public sealed class TriggerTests
         return rows;
     }
 
+    // === Trigger-body result sets ===
+
+    /// <summary>
+    /// A body <c>SELECT</c> is the firing statement's result set on real, so
+    /// it reaches the client rather than being drained at the call site.
+    /// </summary>
+    [TestMethod]
+    public void BodySelect_SurfacesAsTheStatementsResultSet()
+    {
+        using var connection = Seeded();
+        _ = connection.CreateCommand("create trigger tr on t_target after insert as begin select 'from-trigger' as src, id from inserted; end").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("insert t_target values (1, 10)").ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("from-trigger", reader.GetString(0));
+        AreEqual(1, reader.GetInt32(1));
+        IsFalse(reader.Read());
+    }
+
+    /// <summary>Several body SELECTs arrive in body order.</summary>
+    [TestMethod]
+    public void SeveralBodySelects_ArriveInOrder()
+    {
+        using var connection = Seeded();
+        _ = connection.CreateCommand("create trigger tr on t_target after insert as begin select 'one' as a; select 'two' as b; end").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("insert t_target values (1, 10)").ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("one", reader.GetString(0));
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read());
+        AreEqual("two", reader.GetString(0));
+        IsFalse(reader.NextResult());
+    }
+
+    /// <summary>
+    /// Every firing trigger contributes its result sets. Which one goes first
+    /// is deliberately not asserted — SQL Server leaves multi-trigger order
+    /// unspecified without <c>sp_settriggerorder</c>, which isn't modeled.
+    /// </summary>
+    [TestMethod]
+    public void SeveralTriggers_EachContributeAResultSet()
+    {
+        using var connection = Seeded();
+        _ = connection.CreateCommand("create trigger tr_a on t_target after insert as begin select 'first' as a; end").ExecuteNonQuery();
+        _ = connection.CreateCommand("create trigger tr_b on t_target after insert as begin select 'second' as a; end").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("insert t_target values (1, 10)").ExecuteReader();
+        var seen = new List<string>();
+        do
+        {
+            while (reader.Read())
+                seen.Add(reader.GetString(0));
+        } while (reader.NextResult());
+        seen.Sort(StringComparer.Ordinal);
+        CollectionAssert.AreEqual(new[] { "first", "second" }, seen);
+    }
+
+    /// <summary>An INSTEAD OF body's SELECT surfaces the same way.</summary>
+    [TestMethod]
+    public void InsteadOfBodySelect_Surfaces()
+    {
+        using var connection = Seeded();
+        _ = connection.CreateCommand("create trigger tr on t_target instead of insert as begin select 'instead' as a; end").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("insert t_target values (1, 10)").ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("instead", reader.GetString(0));
+    }
+
+    /// <summary>
+    /// The body's own DML contributes no result set and — importantly — no
+    /// rows-affected: forwarding those would inflate the firing statement's
+    /// reported total, which is what an ORM reads back.
+    /// </summary>
+    [TestMethod]
+    public void BodyDml_ContributesNoResultSetAndNoRowCount()
+    {
+        using var connection = Seeded();
+        _ = connection.CreateCommand("create trigger tr on t_target after insert as begin insert audit_log values ('ins', 1, null, null); end").ExecuteNonQuery();
+        AreEqual(1, connection.CreateCommand("insert t_target values (1, 10)").ExecuteNonQuery());
+        HasCount(1, ReadAuditLog(connection));
+    }
+
     // === AFTER INSERT ===
 
     [TestMethod]

@@ -502,6 +502,18 @@ internal sealed class BatchContext
     public TriggerFrame? TriggerFrame;
 
     /// <summary>
+    /// Result sets a trigger body produced while the current statement ran,
+    /// waiting to be handed to the client after that statement's own outcome.
+    /// A trigger fires from inside the DML executor, which returns a single
+    /// outcome, so the body's <c>SELECT</c>s can't be yielded in place — real
+    /// surfaces them as the firing statement's result sets, in trigger
+    /// registration order (probe-confirmed).
+    /// Only query results are buffered: forwarding the body's rows-affected
+    /// counts too would inflate the statement's reported total.
+    /// </summary>
+    public List<SimulatedStatementOutcome>? PendingTriggerResultSets;
+
+    /// <summary>
     /// Whether execution-time permission checks apply to statements dispatched
     /// in this batch. False inside a static module body (procedure / view /
     /// TVF / scalar-UDF / trigger) — ownership chaining suppresses checks on

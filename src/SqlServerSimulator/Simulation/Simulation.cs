@@ -1544,6 +1544,16 @@ public sealed partial class Simulation
 
         foreach (var o in outcomes!)
             yield return o;
+
+        // Result sets any trigger this statement fired produced, in the order
+        // the bodies ran. Drained here rather than inside the DML executor,
+        // which has only one outcome to return.
+        if (batch.PendingTriggerResultSets is { Count: > 0 } triggerResults)
+        {
+            batch.PendingTriggerResultSets = null;
+            foreach (var o in triggerResults)
+                yield return o;
+        }
     }
 
     /// <summary>

@@ -31,7 +31,8 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) ship at the parse
 - **INSERTED / DELETED pseudo-tables** — bare 1-part names resolve through the new `TriggerFrame.Inserted` / `TriggerFrame.Deleted` slots ahead of the schema / temp-table dispatch.
   Both pseudo-tables are always materialized (matching real SQL Server): an INSERT trigger sees an empty `deleted`, a DELETE trigger sees an empty `inserted`, an UPDATE trigger sees both populated.
   Pseudo-tables are `HeapTable` instances flagged `IsTableVariable` so writes don't touch the regular transaction undo log; columns are shared by reference from the parent table (for table parents) or the view's `OutputColumns` (for view parents).
-- **Multiple triggers per table** — all enabled AFTER triggers matching the firing action run in registration order (schema-dict insertion order).
+- **Multiple triggers per table** — every enabled AFTER trigger matching the firing action runs.
+  Relative order follows the per-schema dictionary's enumeration, which is **not** guaranteed to be creation order and isn't asserted anywhere; SQL Server leaves multi-trigger order unspecified too, without `sp_settriggerorder` (not modeled).
   At most one INSTEAD OF per action per target.
 - **TRIGGER_NESTLEVEL()** — no-arg form only; returns the current trigger nesting depth (0 outside any trigger, 1 at top-level DML's first trigger fire, 2+ when nested).
   One-arg form (filter by trigger object id) deferred.
@@ -69,6 +70,19 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) ship at the parse
   `Simulation.Update.cs` and `Simulation.Delete.cs` thread the per-target INSTEAD OF detection through their `CommitUpdate` / `CommitDelete` helpers; for view targets with INSTEAD OF, INSERTED / DELETED are projected through `View.BaseColumnOrdinals` via a `ProjectThroughView` helper.
   `Simulation.Merge.cs` detects per-action INSTEAD OF at the top of `CommitMerge` and routes each pending list (inserts, updates, deletes) independently through trigger-fire or heap-write paths.
 - **Connection state**: [`SimulatedDbConnection.FiringTriggerIds`](../../src/SqlServerSimulator/SimulatedDbConnection.cs) (recursion guard) + `TriggerNestLevel` (surfaced by `TRIGGER_NESTLEVEL()`).
+
+## Trigger-body result sets
+
+A `SELECT` in a trigger body **is** the firing statement's result set — real hands it to the client, and several body SELECTs (or several firing triggers) each contribute one, so a plain `INSERT` can return rows.
+
+The body runs inside the DML executor, which returns a single outcome, so the sets can't be yielded in place.
+`RunTriggerBodies` buffers them on `BatchContext.PendingTriggerResultSets` and `DispatchOneStatement` drains that after the statement's own outcome.
+Only **query** results are buffered: the body's rows-affected counts stay discarded, because forwarding them would inflate the total the firing statement reports — the number an ORM reads back from `SaveChanges`.
+
+Order across several triggers isn't asserted anywhere: SQL Server leaves it unspecified without `sp_settriggerorder`, which isn't modeled.
+
+**This is why a trigger body shouldn't SELECT.** A body of `SELECT 1` interleaves an extra result set with whatever the caller expected, and that breaks EF Core's trigger-safe `SaveChanges` shape (`SET NOCOUNT ON; INSERT …; SELECT [Id] …`) on real SQL Server just as it does here — verified against SQL Server 2025, which returns four result sets for a two-entity batch under such a trigger.
+`EFCoreTriggers.HasTrigger_SaveChanges_RetrievesGeneratedIdentity` used exactly that body and passed only while the simulator was dropping body result sets; its trigger is now a no-op.
 
 ## Trigger atomic scope
 
@@ -157,10 +171,7 @@ Event types parse as bare identifiers and store verbatim in `DdlTrigger.EventTyp
 - **`is_nested_triggers_on = OFF`** — cross-table cascading triggers always fire (depth-limited only by `MaxNestingLevel`).
 - **`@@NESTLEVEL` independence** — the simulator collapses UDF / procedure / trigger depth into a single counter (`SimulatedDbConnection.NestingLevel`).
   `TRIGGER_NESTLEVEL()` reads its own dedicated `TriggerNestLevel` counter, so it's accurate, but `@@NESTLEVEL` (not modeled at all) wouldn't have the right value if added.
-- **Trigger-body result sets** — a `SELECT` inside a trigger body emits a result set in real SQL Server (probe-confirmed).
-  The simulator's trigger invocation drains and discards yielded result sets at the call site (rare pattern in apps; revisit if needed).
-  A body that needs to publish a reading has to write it to a table instead — which is what `ColumnsUpdatedTests` does.
-- **`sp_settriggerorder`** — not modeled; firing order is registration order rather than user-controllable.
+- **`sp_settriggerorder`** — not modeled; firing order is whatever the per-schema dictionary enumerates rather than user-controllable.
 
 ## EF Core reach
 

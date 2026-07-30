@@ -48,10 +48,10 @@ partial class Simulation
         int affectedRowCount,
         IReadOnlyList<int>? updatedColumnOrdinals = null)
     {
-        // Find matching AFTER triggers across all schemas. Ordering uses
-        // schema-dict insertion order — stable for a single connection's
-        // CREATE TRIGGER sequence (SQL Server doesn't guarantee order
-        // unless sp_settriggerorder is used).
+        // Find matching AFTER triggers across all schemas. Relative order is
+        // whatever the schema dict enumerates — not necessarily creation
+        // order, and nothing depends on it: SQL Server leaves multi-trigger
+        // order unspecified too, without sp_settriggerorder.
         var matching = new List<Trigger>();
         foreach (var schema in outerBatch.CurrentDatabase.Schemas.Values)
         {
@@ -266,9 +266,15 @@ partial class Simulation
                         };
                         var parser = innerBatch.Parser;
                         parser.MoveNextOptional();
-                        foreach (var _ in DispatchStatementsUntil(innerBatch, endKeyword: null))
+                        foreach (var bodyOutcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
                         {
-                            // discard
+                            // A body SELECT is the firing statement's result
+                            // set on real, so buffer it for the dispatcher to
+                            // yield once the statement completes. Rows-affected
+                            // outcomes stay discarded — the body's counts are
+                            // not the statement's.
+                            if (bodyOutcome is SimulatedQueryResult)
+                                (outerBatch.PendingTriggerResultSets ??= []).Add(bodyOutcome);
                         }
                         // Real aborts the batch when any error of severity >= 11
                         // was raised while the body ran, even one the body's own
