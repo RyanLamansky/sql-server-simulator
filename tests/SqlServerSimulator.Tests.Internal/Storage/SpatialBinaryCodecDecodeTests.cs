@@ -1,30 +1,34 @@
 using System.Buffers.Binary;
-using SqlServerSimulator.Storage.Bacpac;
+using SqlServerSimulator.Storage.Spatial;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator.Storage;
 
 /// <summary>
-/// Decoder fidelity tests for <see cref="SpatialWkbDecoder"/>. Covers the
+/// Decode-direction fidelity tests for <see cref="SpatialBinaryCodec"/>. Cover the
 /// simple-point shortcut, the single-LineString shortcut, the full-form
 /// shapes (Polygon, MultiPolygon, GeometryCollection), and the bailout
-/// paths (Z/M, truncated, unknown version, unsupported shape type).
+/// paths (truncated, unknown version, unsupported shape type), plus the
+/// Z-bearing shortcut body.
 /// </summary>
 [TestClass]
-public sealed class SpatialWkbDecoderTests
+public sealed class SpatialBinaryCodecDecodeTests
 {
+    private static string? DecodeToWkt(byte[] bytes, bool isGeography) =>
+        SpatialBinaryCodec.TryDecode(bytes, isGeography) is { } value ? SpatialWktWriter.Write(value, includeZM: true) : null;
+
     [TestMethod]
     public void SimplePoint_Geography_AxisInversion()
     {
         var wkb = BuildSimplePoint(srid: 4326, firstCoord: 47.6, secondCoord: -122.3);
-        AreEqual("POINT (-122.3 47.6)", SpatialWkbDecoder.TryDecode(wkb, isGeography: true));
+        AreEqual("POINT (-122.3 47.6)", DecodeToWkt(wkb, isGeography: true));
     }
 
     [TestMethod]
     public void SimplePoint_Geometry_NoAxisInversion()
     {
         var wkb = BuildSimplePoint(srid: 0, firstCoord: 1.5, secondCoord: 2.5);
-        AreEqual("POINT (1.5 2.5)", SpatialWkbDecoder.TryDecode(wkb, isGeography: false));
+        AreEqual("POINT (1.5 2.5)", DecodeToWkt(wkb, isGeography: false));
     }
 
     [TestMethod]
@@ -32,7 +36,7 @@ public sealed class SpatialWkbDecoderTests
     {
         var original = -122.13469409942627;
         var wkb = BuildSimplePoint(srid: 4326, firstCoord: 47.642438, secondCoord: original);
-        var wkt = SpatialWkbDecoder.TryDecode(wkb, isGeography: true);
+        var wkt = DecodeToWkt(wkb, isGeography: true);
         IsNotNull(wkt);
         var openParen = wkt.IndexOf('(');
         var space = wkt.IndexOf(' ', openParen);
@@ -49,7 +53,7 @@ public sealed class SpatialWkbDecoderTests
         // takes the full layout). Points: (lat=0, long=0) → (lat=1, long=2).
         var wkb = BuildShortcutLineSegment(srid: 4326, (0, 0), (1, 2));
         // Geography axis inversion: (lat, long) → (long lat).
-        AreEqual("LINESTRING (0 0, 2 1)", SpatialWkbDecoder.TryDecode(wkb, isGeography: true));
+        AreEqual("LINESTRING (0 0, 2 1)", DecodeToWkt(wkb, isGeography: true));
     }
 
     [TestMethod]
@@ -62,7 +66,7 @@ public sealed class SpatialWkbDecoderTests
             points: [(0, 0), (10, 0), (10, 10), (0, 0)],
             figurePointStarts: [0],
             shapes: [(parent: -1, figOffset: 0, type: 0x03)]);
-        AreEqual("POLYGON ((0 0, 10 0, 10 10, 0 0))", SpatialWkbDecoder.TryDecode(wkb, isGeography: false));
+        AreEqual("POLYGON ((0 0, 10 0, 10 10, 0 0))", DecodeToWkt(wkb, isGeography: false));
     }
 
     [TestMethod]
@@ -77,7 +81,7 @@ public sealed class SpatialWkbDecoderTests
             figurePointStarts: [0, 5],
             shapes: [(parent: -1, figOffset: 0, type: 0x03)]);
         AreEqual("POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0), (2 2, 4 2, 4 4, 2 4, 2 2))",
-            SpatialWkbDecoder.TryDecode(wkb, isGeography: false));
+            DecodeToWkt(wkb, isGeography: false));
     }
 
     [TestMethod]
@@ -96,7 +100,7 @@ public sealed class SpatialWkbDecoderTests
                 (parent: 0, figOffset: 0, type: 0x03),     // child Polygon 1
                 (parent: 0, figOffset: 1, type: 0x03)]);   // child Polygon 2
         AreEqual("MULTIPOLYGON (((0 0, 1 0, 0 1, 0 0)), ((5 5, 6 5, 5 6, 5 5)))",
-            SpatialWkbDecoder.TryDecode(wkb, isGeography: false));
+            DecodeToWkt(wkb, isGeography: false));
     }
 
     [TestMethod]
@@ -111,19 +115,26 @@ public sealed class SpatialWkbDecoderTests
                 (parent: 0, figOffset: 0, type: 0x01),     // child Point
                 (parent: 0, figOffset: 1, type: 0x02)]);   // child LineString
         AreEqual("GEOMETRYCOLLECTION (POINT (1 2), LINESTRING (10 20, 30 40))",
-            SpatialWkbDecoder.TryDecode(wkb, isGeography: false));
+            DecodeToWkt(wkb, isGeography: false));
     }
 
     [TestMethod]
     public void Truncated_Payload_ReturnsNull()
-        => IsNull(SpatialWkbDecoder.TryDecode(new byte[3], isGeography: true));
+        => IsNull(DecodeToWkt(new byte[3], isGeography: true));
 
     [TestMethod]
-    public void ZorM_Bits_ReturnsNull()
+    public void ZBit_ReadsThirdOrdinateFromShortcutBody()
     {
-        var wkb = BuildSimplePoint(srid: 4326, firstCoord: 0, secondCoord: 0);
-        wkb[5] = 0x08 | 0x01; // IsSinglePoint + HasZ — Z/M not supported.
-        IsNull(SpatialWkbDecoder.TryDecode(wkb, isGeography: true));
+        // A Z-bearing single point carries its ordinates interleaved after the
+        // header rather than in the per-ordinate arrays the full layout uses.
+        var wkb = new byte[30];
+        BinaryPrimitives.WriteInt32LittleEndian(wkb.AsSpan(0, 4), 0);
+        wkb[4] = 0x01;
+        wkb[5] = 0x08 | 0x01; // IsSinglePoint + HasZ
+        BinaryPrimitives.WriteDoubleLittleEndian(wkb.AsSpan(6, 8), 1);
+        BinaryPrimitives.WriteDoubleLittleEndian(wkb.AsSpan(14, 8), 2);
+        BinaryPrimitives.WriteDoubleLittleEndian(wkb.AsSpan(22, 8), 3);
+        AreEqual("POINT (1 2 3)", DecodeToWkt(wkb, isGeography: false));
     }
 
     [TestMethod]
@@ -131,7 +142,7 @@ public sealed class SpatialWkbDecoderTests
     {
         var wkb = BuildSimplePoint(srid: 4326, firstCoord: 0, secondCoord: 0);
         wkb[4] = 0xFF;
-        IsNull(SpatialWkbDecoder.TryDecode(wkb, isGeography: true));
+        IsNull(DecodeToWkt(wkb, isGeography: true));
     }
 
     [TestMethod]
@@ -143,7 +154,7 @@ public sealed class SpatialWkbDecoderTests
             points: [(0, 0)],
             figurePointStarts: [0],
             shapes: [(parent: -1, figOffset: 0, type: 0x99)]);
-        IsNull(SpatialWkbDecoder.TryDecode(wkb, isGeography: false));
+        IsNull(DecodeToWkt(wkb, isGeography: false));
     }
 
     /// <summary>

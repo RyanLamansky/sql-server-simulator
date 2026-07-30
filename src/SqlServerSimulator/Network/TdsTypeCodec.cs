@@ -2,7 +2,6 @@ using System.Buffers.Binary;
 using System.Data;
 using System.Numerics;
 using SqlServerSimulator.Storage;
-using SqlServerSimulator.Storage.Bacpac;
 
 namespace SqlServerSimulator.Network;
 
@@ -623,7 +622,7 @@ internal static class TdsTypeCodec
                 else
                 {
                     var isGeography = spatial is GeographySqlType;
-                    WritePlpChunks(writer, SpatialWkbEncoder.Encode(value.AsString, isGeography, isGeography ? 4326 : 0));
+                    WritePlpChunks(writer, value.AsSpatial.Encoded(isGeography));
                 }
 
                 break;

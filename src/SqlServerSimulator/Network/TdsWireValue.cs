@@ -102,9 +102,9 @@ internal static class TdsWireValue
             SqlType type = isGeography ? SqlType.Geography : SqlType.Geometry;
             if (bytes is null)
                 return SqlValue.Null(type);
-            var wkt = Storage.Bacpac.SpatialWkbDecoder.TryDecode(bytes, isGeography)
+            var instance = Storage.Spatial.SpatialBinaryCodec.TryDecode(bytes, isGeography)
                 ?? throw SimulatedSqlException.RpcInvalidUdtInstance(ordinal, parameterName, typeName);
-            return isGeography ? SqlValue.FromGeography(wkt) : SqlValue.FromGeometry(wkt);
+            return SqlValue.FromSpatial(instance, isGeography);
         }
 
         throw SimulatedSqlException.RpcClrTypeDoesNotExist(ordinal, db.Length == 0 ? currentDatabase : db, typeName);

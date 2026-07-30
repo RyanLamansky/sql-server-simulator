@@ -2,6 +2,7 @@ using System.Data.SqlTypes;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using SqlServerSimulator.Storage.Spatial;
 
 namespace SqlServerSimulator.Storage;
 
@@ -103,28 +104,31 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     }
 
     /// <summary>
-    /// Non-NULL SQL <c>geography</c> value. Stored as raw-WKT (UTF-16 LE on
-    /// disk, .NET string in memory) — degraded-mode encoding for the
-    /// skip-with-diagnostic bacpac stance. Identity preserved through
-    /// <see cref="SqlType.Geography"/>.
+    /// Non-NULL SQL <c>geography</c> value. Carries the parsed instance; the
+    /// storage and wire bytes are SQL Server's spatial UDT serialization,
+    /// produced on demand by <see cref="Spatial.SpatialBinaryCodec"/>.
+    /// Identity preserved through <see cref="SqlType.Geography"/>.
     /// </summary>
-    public static SqlValue FromGeography(string value)
+    public static SqlValue FromGeography(SpatialGeometry value)
     {
         ArgumentNullException.ThrowIfNull(value);
         return new(SqlType.Geography, 0, value, isNull: false);
     }
 
     /// <summary>
-    /// Non-NULL SQL <c>geometry</c> value. Stored as raw-WKT (UTF-16 LE on
-    /// disk, .NET string in memory) — degraded-mode encoding for the
-    /// skip-with-diagnostic bacpac stance. Identity preserved through
+    /// Non-NULL SQL <c>geometry</c> value. See <see cref="FromGeography"/> for
+    /// the representation; identity is preserved through
     /// <see cref="SqlType.Geometry"/>.
     /// </summary>
-    public static SqlValue FromGeometry(string value)
+    public static SqlValue FromGeometry(SpatialGeometry value)
     {
         ArgumentNullException.ThrowIfNull(value);
         return new(SqlType.Geometry, 0, value, isNull: false);
     }
+
+    /// <summary>Non-NULL spatial value of whichever type <paramref name="isGeography"/> selects.</summary>
+    public static SqlValue FromSpatial(SpatialGeometry value, bool isGeography) =>
+        isGeography ? FromGeography(value) : FromGeometry(value);
 
     /// <summary>
     /// Non-NULL SQL <c>sql_variant</c> value wrapping <paramref name="inner"/>.
@@ -561,8 +565,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         : type == SqlType.Text ? FromText(value)
         : type == SqlType.NText ? FromNText(value)
         : type == SqlType.Xml ? FromXml(value)
-        : type == SqlType.Geography ? FromGeography(value)
-        : type == SqlType.Geometry ? FromGeometry(value)
+        : type is SpatialSqlType spatial ? FromSpatial(SpatialWktReader.Read(value, SpatialGeometry.DefaultSridFor(spatial.IsGeography), spatial.IsGeography), spatial.IsGeography)
         : type is CharSqlType ? FromChar(type, value)
         : type is NCharSqlType ? FromNChar(type, value)
         : throw new ArgumentException($"{type} is not a string type.", nameof(type));
@@ -597,9 +600,18 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// <summary>Returns the value as <see cref="string"/>. Throws if NULL or if not a string-typed value.</summary>
     public string AsString => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
-        : this.Type.Category != SqlTypeCategory.String
-            ? throw new InvalidOperationException($"Value is {this.Type}, not a string type.")
-            : (string)this.reference!;
+        : this.reference is SpatialGeometry spatial
+            // A spatial value's string form is its WKT, Z and M included —
+            // what real returns from CAST(… AS nvarchar(max)) and ToString().
+            ? SpatialWktWriter.Write(spatial, includeZM: true)
+            : this.Type.Category != SqlTypeCategory.String
+                ? throw new InvalidOperationException($"Value is {this.Type}, not a string type.")
+                : (string)this.reference!;
+
+    /// <summary>Returns the parsed spatial instance. Throws if NULL or not a <c>geography</c> / <c>geometry</c> value.</summary>
+    public SpatialGeometry AsSpatial => this.IsNull
+        ? throw new InvalidOperationException("Value is NULL.")
+        : this.reference as SpatialGeometry ?? throw new InvalidOperationException($"Value is {this.Type}, not a spatial type.");
 
     /// <summary>Returns the value as <see cref="byte"/><c>[]</c>. Throws if NULL or not a binary/varbinary/image/rowversion value. For rowversion, allocates a fresh 8-byte big-endian buffer on each call (the in-memory rep is the raw <see cref="long"/> counter); the row-encoding hot path goes through <see cref="RowVersionSqlType.Encode"/> instead, which writes the bytes directly into the row buffer.</summary>
     public byte[] AsBytes => this.IsNull

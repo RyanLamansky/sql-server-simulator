@@ -84,8 +84,8 @@ internal sealed class HierarchyIdMethodCall : Expression
         // .ToString() is a method on hierarchyid AND on geography / geometry;
         // the parser dispatches both shapes through this class because the
         // name overlaps. When the receiver turns out to be spatial at runtime,
-        // return the stored WKT directly (matching the skip-with-diagnostic
-        // spatial stance in SpatialMethodCall).
+        // return the instance's WKT directly, the same rendering
+        // SpatialMethodCall produces.
         if (this.method == HierarchyIdMethod.ToStringMethod && receiver.Type is SpatialSqlType)
         {
             return receiver.IsNull ? SqlValue.Null(NVarcharSqlType.Get(-1, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault)) : SqlValue.FromNVarchar(receiver.AsString);

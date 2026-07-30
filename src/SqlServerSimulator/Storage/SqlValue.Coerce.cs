@@ -1,4 +1,5 @@
 using System.Globalization;
+using SqlServerSimulator.Storage.Spatial;
 
 namespace SqlServerSimulator.Storage;
 
@@ -97,6 +98,13 @@ internal readonly partial struct SqlValue
         // (binary's zero-padding survives TrimEnd(' ') because nulls aren't
         // spaces). Implementation routes through the existing
         // <see cref="CoerceBinaryToStringWithStyle"/> at style 0.
+        // varbinary / binary → geography / geometry deserializes the UDT byte
+        // form, so it has to precede the general binary-to-string branch below:
+        // the spatial types sit in the string category, and reinterpreting
+        // their bytes as text is what real does not do.
+        if (this.Type is VarbinarySqlType or BinarySqlType && target is SpatialSqlType binaryToSpatial)
+            return FromSpatial(SpatialBinaryCodec.Decode(this.AsBytes, binaryToSpatial.IsGeography), binaryToSpatial.IsGeography);
+
         if (this.Type is VarbinarySqlType or BinarySqlType && SqlType.IsStringCategory(target))
             return this.CoerceBinaryToStringWithStyle(target, 0);
 
@@ -133,6 +141,17 @@ internal readonly partial struct SqlValue
         // <c>CAST('abc' AS VARBINARY(10)) = 0x616263</c> (no padding),
         // <c>CAST('abc' AS BINARY(10)) = 0x61626300000000000000</c> (padded),
         // <c>CAST(N'abc' AS VARBINARY(10)) = 0x610062006300</c> (UTF-16 LE).
+        // geography / geometry ↔ varbinary / binary: a spatial value's byte
+        // form is SQL Server's UDT serialization, not its WKT text, so the
+        // cast round-trips through the binary codec. This has to precede the
+        // string-category branch below because the spatial types sit in that
+        // category. The inbound direction raises real's own version failure
+        // (Msg 6522 / 24210) on bytes it can't read.
+        if (this.Type is SpatialSqlType spatialToVarbinary && target is VarbinarySqlType)
+            return FromVarbinary(this.AsSpatial.Encoded(spatialToVarbinary.IsGeography));
+        if (this.Type is SpatialSqlType spatialToBinary && target is BinarySqlType spatialBinaryTarget)
+            return FromBinary(spatialBinaryTarget, this.AsSpatial.Encoded(spatialToBinary.IsGeography));
+
         if (SqlType.IsStringCategory(this.Type) && target is VarbinarySqlType)
             return FromVarbinary(EncodeStringForBinary(this.AsString, this.Type));
         if (SqlType.IsStringCategory(this.Type) && target is BinarySqlType targetStringToBinary)

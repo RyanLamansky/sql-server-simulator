@@ -346,9 +346,9 @@ internal abstract class Expression
                             // covering OGC + Microsoft-extension methods on
                             // geography / geometry values. Parses cleanly so
                             // CREATE VIEW / CREATE PROCEDURE bodies that reference
-                            // spatial methods store verbatim; runtime evaluation
-                            // throws NotSupportedException except for .ToString()
-                            // which returns the stored WKT (see SpatialMethodCall).
+                            // spatial methods store verbatim; the members whose
+                            // evaluation isn't built raise at Run (see
+                            // SpatialMethodCall).
                             if (SpatialMethodCall.IsKnownMethodName(name.Value))
                             {
                                 var checkpoint = context.SaveCheckpoint();
@@ -359,6 +359,22 @@ internal abstract class Expression
                                     continue;
                                 }
                                 context.RestoreCheckpoint(checkpoint);
+                            }
+                            // Spatial property shape: <expr>.STX / .Lat / .STSrid
+                            // — no argument list, so nothing distinguishes it from
+                            // a dotted column name by syntax alone. Dispatching is
+                            // therefore limited to receivers that can't be a table
+                            // qualifier: a constructor call, a variable, a
+                            // parenthesized expression. A spatial *column*'s
+                            // property (`Location.Lat`) still reads as a two-part
+                            // column name and needs binder support to tell apart.
+                            // Method names reach here too when written without an
+                            // argument list, which is the shape real reports as a
+                            // missing property (Msg 6592).
+                            if (expression is not Reference && SpatialMethodCall.IsKnownMemberName(name.Value))
+                            {
+                                expression = SpatialMethodCall.Property(expression, name.Value);
+                                continue;
                             }
                             if (expression is not Reference reference)
                                 throw SimulatedSqlException.SyntaxErrorNear(context);

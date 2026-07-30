@@ -306,7 +306,7 @@ The RPC framing lives in `TdsRpc.cs` (`DecodeClrUdt` / `DecodeSqlVariant`); the 
 Probed against SQL Server 2025 + SqlClient 7.0.2.
 
 - **CLR UDT (`0xF0`)** — the client UDT_INFO is **three B_VARCHARs** (db / schema / type; SqlClient fills only the type from `SqlParameter.UdtTypeName`, db + schema empty) with **neither** the leading `USHORT` max byte size **nor** the assembly-qualified name the server's COLMETADATA form carries — a shorter shape than the write side.
-  The value is PLP: OrdPath bytes for `hierarchyid` (stored verbatim via `SqlValue.FromHierarchyIdBytes`), the MS spatial binary for `geography` / `geometry` (decoded back to WKT via `SpatialWkbDecoder.TryDecode`).
+  The value is PLP: OrdPath bytes for `hierarchyid` (stored verbatim via `SqlValue.FromHierarchyIdBytes`), the UDT serialization for `geography` / `geometry` (decoded to the parsed instance via `SpatialBinaryCodec.TryDecode`).
   NULL is the PLP `0xFF…` sentinel.
   Type name resolves case-insensitively.
   SqlClient serializes a typed `SqlGeography` / `SqlHierarchyId` **or** a raw `byte[]` value to the identical wire form.
@@ -362,7 +362,7 @@ Specifics:
   See [`catalog-views.md`](catalog-views.md) for the type model.
 - **`geography` / `geometry`** (UDTTYPE `0xF0`, MS-TDS 2.2.5.5.2): COLMETADATA is a ushort max-byte-size (`0xFFFF` = max) then three B_VARCHAR names (db / schema / type — the db name goes empty because the static codec can't reach the session's current database; schema is `sys`, type is `geography`/`geometry`) and the US_VARCHAR assembly-qualified name (`Microsoft.SqlServer.Types.SqlGeography/SqlGeometry, …, Version=11.0.0.0, …, PublicKeyToken=89845dcd8080cc91`, probe-matched to SQL Server 2025).
   SqlClient surfaces the column as `SqlDbType.Udt`; with `Microsoft.SqlServer.Types` absent (the DacFx case) `GetValue` throws but `GetSqlBytes`/`GetBytes` return the raw bytes.
-  The value is PLP (like `varbinary(max)`) carrying the CLR-UDT serialization synthesized from the stored WKT by `SpatialWkbEncoder` — see [`spatial.md`](spatial.md).
+  The value is PLP (like `varbinary(max)`) carrying the CLR-UDT serialization of the stored instance, produced by `SpatialBinaryCodec` — see [`spatial.md`](spatial.md).
   Removing these from the reject list is what unblocked DacFx bacpac export of WWI's four `geography` columns.
 - **`hierarchyid`** (UDTTYPE `0xF0`): the same UDT arm as spatial but with hierarchyid's fixed max byte size **892** (not the `0xFFFF` max sentinel — probe-confirmed via `GetSchemaTable` `ColumnSize`), schema `sys`, type `hierarchyid`, and the `Microsoft.SqlServer.Types.SqlHierarchyId, …, Version=11.0.0.0, …, PublicKeyToken=89845dcd8080cc91` AQN.
   Value is PLP carrying the value's canonical OrdPath bytes verbatim (`SqlValue.AsHierarchyIdBytes`, zero-copy — hierarchyid stores that byte form; see [`hierarchyid.md`](hierarchyid.md)); NULL is the PLP `0xFF…` sentinel.

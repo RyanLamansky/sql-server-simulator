@@ -438,9 +438,9 @@ public class BacpacLoaderTests
     [TestMethod]
     public void GeographyColumn_PointBytes_DecodeTo_PointWkt()
     {
-        // Microsoft spatial UDT simple-point wire form → POINT (long lat)
-        // WKT through the SpatialWkbDecoder. The decoder inverts axes for
-        // geography vs geometry, so the WKT prints longitude first.
+        // Microsoft spatial UDT simple-point wire form → the parsed instance,
+        // via SpatialBinaryCodec. The codec inverts axes for geography vs
+        // geometry, so the WKT prints longitude first.
         var pointBytes = BacpacBuilder.MakeGeographyPoint(latitude: 47.61, longitude: -122.20);
 
         using var bacpac = BacpacBuilder.Create()

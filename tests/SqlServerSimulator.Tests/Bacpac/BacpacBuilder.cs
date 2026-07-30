@@ -776,7 +776,7 @@ public sealed partial class BacpacBuilder
     /// Builds Microsoft's geography full-shape wire form for a single-ring
     /// polygon. The ring is given as <c>(latitude, longitude)</c> pairs and
     /// must close (last point equals first); the loader's
-    /// <c>SpatialWkbDecoder</c> reads back <c>POLYGON ((long lat, …))</c>
+    /// <c>SpatialBinaryCodec</c> reads back <c>POLYGON ((long lat, …))</c>
     /// WKT with axis order inverted vs storage. Use for exercising the
     /// full-shape decoder path (numPoints/figures/shapes tables) that the
     /// simple-point shortcut bypasses.

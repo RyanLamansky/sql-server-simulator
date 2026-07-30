@@ -3,6 +3,7 @@ using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
+using SqlServerSimulator.Storage.Spatial;
 
 namespace SqlServerSimulator;
 
@@ -498,6 +499,8 @@ partial class Simulation
         var slot = context.Batch.GetVariableSlot(variableToken.Value);
 
         context.MoveNextRequired();
+        if (context.Token is Operator { Character: '.' })
+            return TryParseSetSpatialProperty(context, slot);
         if (TryConsumeAssignmentOperator(context) is not char assignOp)
             return false;
 
@@ -510,6 +513,45 @@ partial class Simulation
             : TwoSidedExpression.FromCompoundOp(assignOp, new VariableReference(variableToken, context), rhs);
         var rhsValue = assignedExpr.Run(new RuntimeContext(NoColumnResolver, context.Batch));
         slot.Value = Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength);
+        return true;
+    }
+
+    /// <summary>
+    /// Parses <c>SET @g.STSrid = expr</c> — the one assignable member of a
+    /// spatial value. Cursor enters on the <c>.</c>.
+    /// </summary>
+    /// <remarks>
+    /// Every other spatial property is read-only, which real reports as
+    /// Msg 6595; a name that isn't a member at all reports Msg 6592. A NULL
+    /// right-hand side surfaces as the bare .NET argument failure real emits
+    /// with no 24xxx code, and an SRID outside 0..999999 as Msg 24100.
+    /// </remarks>
+    private static bool TryParseSetSpatialProperty(ParserContext context, VariableSlot slot)
+    {
+        if (context.GetNextRequired() is not Name member)
+            return false;
+        context.MoveNextRequired();
+        if (context.Token is not Operator { Character: '=' })
+            return false;
+        context.MoveNextRequired();
+        var rhs = Expression.Parse(context);
+        if (context.Batch.IsSkipping)
+            return true;
+        if (slot.DeclaredType is not SpatialSqlType spatial)
+            return false;
+        if (!member.Value.Equals("STSrid", StringComparison.Ordinal))
+        {
+            throw SpatialMethodCall.IsKnownMemberName(member.Value)
+                ? SimulatedSqlException.ClrPropertyReadOnly(member.Value, spatial.ClrTypeName)
+                : SimulatedSqlException.ClrPropertyNotFound(member.Value, spatial.ClrTypeName);
+        }
+
+        var assigned = rhs.Run(new RuntimeContext(NoColumnResolver, context.Batch));
+        if (assigned.IsNull)
+            throw SimulatedSqlException.SpatialSridCannotBeNull(spatial.IsGeography);
+        var srid = SpatialGeometry.ValidateSrid(assigned.CoerceTo(SqlType.Int32).AsInt32, spatial.IsGeography);
+        if (!slot.Value.IsNull)
+            slot.Value = SqlValue.FromSpatial(slot.Value.AsSpatial.WithSrid(srid), spatial.IsGeography);
         return true;
     }
 

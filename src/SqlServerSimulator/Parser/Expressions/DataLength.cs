@@ -1,5 +1,4 @@
 ﻿using SqlServerSimulator.Storage;
-using SqlServerSimulator.Storage.Bacpac;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
@@ -38,7 +37,7 @@ internal sealed class DataLength(ParserContext context) : Expression
         // bytes, so GetVariableByteCount already reports the real DATALENGTH.
         var byteCount = value.Type switch
         {
-            SpatialSqlType spatial => SpatialWkbEncoder.Encode(value.AsString, spatial is GeographySqlType, spatial is GeographySqlType ? 4326 : 0).Length,
+            SpatialSqlType spatial => value.AsSpatial.Encoded(spatial.IsGeography).Length,
             { IsFixedLength: true } => value.Type.FixedLength,
             _ => value.Type.GetVariableByteCount(value),
         };

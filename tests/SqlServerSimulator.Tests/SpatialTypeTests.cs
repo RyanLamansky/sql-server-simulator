@@ -4,13 +4,15 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Behavioral tests for the skip-with-diagnostic <c>geography</c> /
-/// <c>geometry</c> surface — column round-trip, sys.types / sys.columns
-/// identity, OGC method NotSupportedException at execute, static-call
-/// construction (<c>geography::Parse</c> / <c>geometry::Point</c>),
-/// CREATE SPATIAL INDEX parse-and-discard, and the three catalog views
+/// Behavioral tests for the <c>geography</c> / <c>geometry</c> surface —
+/// column round-trip, sys.types / sys.columns identity, static-call
+/// construction (<c>geography::Parse</c> / <c>geometry::Point</c>), the
+/// measures and predicates that still raise at execute, CREATE SPATIAL INDEX
+/// parse-and-discard, and the three catalog views
 /// (<c>sys.spatial_indexes</c> / <c>sys.spatial_index_tessellations</c> /
-/// <c>sys.spatial_reference_systems</c>).
+/// <c>sys.spatial_reference_systems</c>). The value model itself — WKT
+/// canonicalization, SRID, Z/M, EMPTY, the binary form and the accessor
+/// members — lives in <see cref="SpatialValueTests"/>.
 /// </summary>
 [TestClass]
 public sealed class SpatialTypeTests
@@ -21,7 +23,7 @@ public sealed class SpatialTypeTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.loc (id int, g geography)");
         _ = sim.ExecuteNonQuery("insert dbo.loc values (1, geography::Parse('POINT(-122.34 47.65)'))");
-        AreEqual("POINT(-122.34 47.65)", sim.ExecuteScalar("select g from dbo.loc where id = 1"));
+        AreEqual("POINT (-122.34 47.65)", sim.ExecuteScalar("select g from dbo.loc where id = 1"));
     }
 
     [TestMethod]
@@ -30,7 +32,7 @@ public sealed class SpatialTypeTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.shape (id int, g geometry)");
         _ = sim.ExecuteNonQuery("insert dbo.shape values (1, geometry::STGeomFromText('POINT(0 0)', 0))");
-        AreEqual("POINT(0 0)", sim.ExecuteScalar("select g from dbo.shape where id = 1"));
+        AreEqual("POINT (0 0)", sim.ExecuteScalar("select g from dbo.shape where id = 1"));
     }
 
     [TestMethod]
@@ -80,7 +82,7 @@ public sealed class SpatialTypeTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.loc (id int, g geography)");
         _ = sim.ExecuteNonQuery("insert dbo.loc values (1, geography::Parse(N'LINESTRING(0 0, 1 1)'))");
-        AreEqual("LINESTRING(0 0, 1 1)", sim.ExecuteScalar("select g from dbo.loc where id = 1"));
+        AreEqual("LINESTRING (0 0, 1 1)", sim.ExecuteScalar("select g from dbo.loc where id = 1"));
     }
 
     [TestMethod]
@@ -100,7 +102,7 @@ public sealed class SpatialTypeTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.loc (id int, g geography)");
         _ = sim.ExecuteNonQuery("insert dbo.loc values (1, geography::Parse('POINT(-122.34 47.65)'))");
-        AreEqual("POINT(-122.34 47.65)", sim.ExecuteScalar("select g.ToString() from dbo.loc"));
+        AreEqual("POINT (-122.34 47.65)", sim.ExecuteScalar("select g.ToString() from dbo.loc"));
     }
 
     [TestMethod]
@@ -114,13 +116,12 @@ public sealed class SpatialTypeTests
     }
 
     [TestMethod]
-    public void GeometryMethodCall_STAsText_ThrowsAtExecute()
+    public void GeometryMethodCall_STAsText_RendersCanonicalWkt()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.shape (id int, g geometry)");
         _ = sim.ExecuteNonQuery("insert dbo.shape values (1, geometry::STGeomFromText('POINT(0 0)', 0))");
-        var ex = Throws<NotSupportedException>(() => _ = sim.ExecuteScalar("select g.STAsText() from dbo.shape"));
-        Assert.Contains("STAsText", ex.Message);
+        AreEqual("POINT (0 0)", sim.ExecuteScalar("select g.STAsText() from dbo.shape"));
     }
 
     [TestMethod]
@@ -134,17 +135,29 @@ public sealed class SpatialTypeTests
     }
 
     [TestMethod]
-    public void CreateView_WithSpatialMethod_Succeeds_FailsAtExecute()
+    public void CreateView_WithSpatialMethod_ProjectsThroughView()
     {
         var sim = new Simulation();
         sim.ExecuteBatches(
             "create table dbo.loc (id int, g geography)",
             "insert dbo.loc values (1, geography::Parse('POINT(0 0)'))",
             "create view dbo.v_loc as select id, g.STAsText() as wkt from dbo.loc");
-        // View created successfully — the spatial method call parsed cleanly.
         AreEqual("v_loc", sim.ExecuteScalar("select name from sys.views where object_id = object_id('dbo.v_loc')"));
-        // ...but execute fails since .STAsText() throws at Run.
-        _ = Throws<NotSupportedException>(() => _ = sim.ExecuteScalar("select wkt from dbo.v_loc"));
+        AreEqual("POINT (0 0)", sim.ExecuteScalar("select wkt from dbo.v_loc"));
+    }
+
+    [TestMethod]
+    public void CreateView_WithUnmodeledSpatialMethod_Succeeds_FailsAtExecute()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.loc (id int, g geography)",
+            "insert dbo.loc values (1, geography::Parse('POINT(0 0)'))",
+            "create view dbo.v_area as select id, g.STArea() as a from dbo.loc");
+        // View created successfully — the spatial method call parsed cleanly.
+        AreEqual("v_area", sim.ExecuteScalar("select name from sys.views where object_id = object_id('dbo.v_area')"));
+        // ...but execute fails, since STArea has no evaluation yet.
+        _ = Throws<NotSupportedException>(() => _ = sim.ExecuteScalar("select a from dbo.v_area"));
     }
 
     [TestMethod]
@@ -229,7 +242,7 @@ public sealed class SpatialTypeTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.loc (id int, g geography)");
         _ = sim.ExecuteNonQuery("insert dbo.loc values (1, geography::Parse('POINT(0 0)'))");
-        AreEqual("POINT(0 0)", sim.ExecuteScalar("select cast(g as nvarchar(max)) from dbo.loc"));
+        AreEqual("POINT (0 0)", sim.ExecuteScalar("select cast(g as nvarchar(max)) from dbo.loc"));
     }
 
     [TestMethod]
@@ -248,8 +261,8 @@ public sealed class SpatialTypeTests
             "select cast(geography::Point(cast(null as float), 1, 4326) as nvarchar(max))"));
 
     [TestMethod]
-    public void GeographyParse_NoArgs_Throws()
-        => _ = Throws<Exception>(() => new Simulation().ExecuteScalar("select geography::Parse()"));
+    public void GeographyParse_NoArgs_RaisesArityError()
+        => new Simulation().AssertSqlError("select geography::Parse()", 174, "The Parse function requires 1 argument(s).");
 
     [TestMethod]
     public void GeometryStaticCall_MissingOpenParen_Throws()

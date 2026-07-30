@@ -214,13 +214,15 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException UnrecognizedBuiltInFunction(string name) => new($"'{name}' is not a recognized built-in function name.", 195, 15, 10);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 174 — fired when a built-in function is called
-    /// with the wrong number of arguments (e.g. <c>ISNULL(x)</c> or
-    /// <c>ISNULL(a, b, c)</c>). The function name is rendered lowercase in
-    /// the message regardless of source casing — probe-confirmed.
+    /// Mimics SQL Server's Msg 174 — fired when a function is called with the
+    /// wrong number of arguments (e.g. <c>ISNULL(x)</c> or
+    /// <c>ISNULL(a, b, c)</c>). Callers pass the spelling real reports:
+    /// built-ins render lowercase regardless of source casing
+    /// (probe-confirmed), while the <c>geography::</c> / <c>geometry::</c>
+    /// constructors keep the caller's casing.
     /// </summary>
-    internal static SimulatedSqlException FunctionRequiresNArguments(string functionLowerName, int argumentCount) =>
-        new($"The {functionLowerName} function requires {argumentCount} argument(s).", 174, 15, 1);
+    internal static SimulatedSqlException FunctionRequiresNArguments(string functionName, int argumentCount) =>
+        new($"The {functionName} function requires {argumentCount} argument(s).", 174, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server error 280 — <c>TEXTPTR</c> was applied to something

@@ -146,7 +146,7 @@ internal static class BcpRowReader
         Xml,
         /// <summary>
         /// Geography: read the length + N bytes, try
-        /// <see cref="SpatialWkbDecoder.TryDecode"/> for any 2D shape
+        /// <see cref="Spatial.SpatialBinaryCodec.TryDecode"/> for any 2D shape
         /// (Point / LineString / Polygon / Multi* / GeometryCollection).
         /// Z/M-bearing shapes and shapes the decoder can't handle fall
         /// back to <c>SqlValue.Null</c> — the row loads without breaking
@@ -193,11 +193,11 @@ internal static class BcpRowReader
             EightBytePayload.NVarcharMax => SqlValue.FromNVarchar(Encoding.Unicode.GetString(data)),
             EightBytePayload.VarbinaryMax => SqlValue.FromVarbinary(data),
             EightBytePayload.Xml => SqlValue.FromXml(Encoding.Unicode.GetString(data)),
-            EightBytePayload.Geography => SpatialWkbDecoder.TryDecode(data, isGeography: true) is { } gwkt
-                ? SqlValue.FromGeography(gwkt)
+            EightBytePayload.Geography => Spatial.SpatialBinaryCodec.TryDecode(data, isGeography: true) is { } geographyValue
+                ? SqlValue.FromGeography(geographyValue)
                 : SqlValue.Null(type),
-            EightBytePayload.Geometry => SpatialWkbDecoder.TryDecode(data, isGeography: false) is { } mwkt
-                ? SqlValue.FromGeometry(mwkt)
+            EightBytePayload.Geometry => Spatial.SpatialBinaryCodec.TryDecode(data, isGeography: false) is { } geometryValue
+                ? SqlValue.FromGeometry(geometryValue)
                 : SqlValue.Null(type),
             EightBytePayload.HierarchyId => SqlValue.FromHierarchyIdBytes(data),
             _ => throw new InvalidOperationException($"unknown EightBytePayload {kind}"),

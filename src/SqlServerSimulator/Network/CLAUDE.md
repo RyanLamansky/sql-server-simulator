@@ -69,12 +69,12 @@ These notes are the local implementation contracts.
   Oracles: `SqlVariantWireTests`, `SqlVariantRpcParameterTests`, `TvpVariantUdtColumnTests`.
 - **`geography` / `geometry` (UDTTYPE `0xF0`)**: result-column-only.
   COLMETADATA = ushort max-byte-size (`0xFFFF`) + three B_VARCHAR names (db empty — the static codec can't reach the session db; schema `sys`; type name) + US_VARCHAR assembly-qualified name (`SpatialAssemblyQualifiedName`, probe-matched).
-  Value is PLP carrying `SpatialWkbEncoder.Encode(wkt, isGeography, srid)` output (srid default 4326 geography / 0 geometry — `SqlValue` carries no per-value SRID).
+  Value is PLP carrying the stored instance's UDT serialization (`SpatialGeometry.Encoded`), which carries the value's own SRID.
   SqlClient reads it as `SqlDbType.Udt`; DacFx pulls raw bytes via `GetSqlBytes`/`GetBytes` (`GetValue` needs the absent `Microsoft.SqlServer.Types`).
-  Oracle: `SpatialWireTests`; encoder byte-parity in `SpatialWkbEncoderTests` (Tests.Internal).
+  Oracle: `SpatialWireTests`; codec byte-parity in `SpatialBinaryCodecEncodeTests` (Tests.Internal).
   **`hierarchyid` shares this UDT arm** — max byte size 892 (not `0xFFFF`), `SqlHierarchyId` AQN, PLP value = the stored canonical OrdPath bytes verbatim (`value.AsHierarchyIdBytes`, zero-copy; `DataLength` reads the same bytes' length).
   Oracle: `HierarchyIdWireTests`, `HierarchyIdOrdPathTests`.
-  UDT **input** *parameters* decode (`TdsRpc.DecodeClrUdt` → `TdsWireValue.BuildUdtValue`): the client UDT_INFO is three B_VARCHARs (db/schema/type, no max-size, no AQN — shorter than COLMETADATA) + PLP value; hierarchyid OrdPath bytes bind verbatim, spatial WKB decodes via `SpatialWkbDecoder.TryDecode`, resolved case-insensitively into a pre-built `SqlValue` (unknown type → Msg 8064, invalid spatial bytes → Msg 8023).
+  UDT **input** *parameters* decode (`TdsRpc.DecodeClrUdt` → `TdsWireValue.BuildUdtValue`): the client UDT_INFO is three B_VARCHARs (db/schema/type, no max-size, no AQN — shorter than COLMETADATA) + PLP value; hierarchyid OrdPath bytes bind verbatim, spatial bytes decode via `SpatialBinaryCodec.TryDecode`, resolved case-insensitively into a pre-built `SqlValue` (unknown type → Msg 8064, invalid spatial bytes → Msg 8023).
   **UDT columns inside a TVP** decode through the same builder (`TdsColumnDecoder`: 0xF0 + three B_VARCHARs + PLP value).
   **Output** direction writes back as a RETURNVALUE carrying the **COLMETADATA-shaped** UDT_INFO (max byte size + db/schema/type + AQN — richer than the client request form) + PLP value, from `SimulatedDbParameter.OutputSqlValue`.
   A LOB-backed UDT TVP column (`geography`/`geometry`) round-trips via both the `sp_executesql` text path and a stored-proc READONLY parameter (the proc-parameter copy re-homes off-row values — docs/claude/table-valued-parameters.md).

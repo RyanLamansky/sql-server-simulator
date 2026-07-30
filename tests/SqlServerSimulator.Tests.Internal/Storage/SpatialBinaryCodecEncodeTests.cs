@@ -1,22 +1,25 @@
 using System.Buffers.Binary;
-using SqlServerSimulator.Storage.Bacpac;
+using SqlServerSimulator.Storage.Spatial;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator.Storage;
 
 /// <summary>
-/// Byte-parity + round-trip tests for <see cref="SpatialWkbEncoder"/>. Expected
-/// byte strings are hard-coded from a live SQL Server 2025 reference probe
-/// (2026-07-16): <c>CAST(geography::STGeomFromText(N'…', srid) AS
-/// varbinary(max))</c> per shape class, plus two genuine WWI-Standard
+/// Byte-parity + round-trip tests for <see cref="SpatialBinaryCodec"/>'s
+/// encode direction. Expected byte strings are hard-coded from a live SQL
+/// Server 2025 reference probe (2026-07-16):
+/// <c>CAST(geography::STGeomFromText(N'…', srid) AS varbinary(max))</c> per
+/// shape class, plus two genuine WWI-Standard
 /// <c>Application.StateProvinces.Border</c> values (a Polygon and a
 /// MultiPolygon). Encoder output must equal those bytes, and a real byte
-/// payload must survive <see cref="SpatialWkbDecoder"/> → WKT →
-/// <see cref="SpatialWkbEncoder"/> unchanged.
+/// payload must survive a decode → re-encode round trip unchanged.
 /// </summary>
 [TestClass]
-public sealed class SpatialWkbEncoderTests
+public sealed class SpatialBinaryCodecEncodeTests
 {
+    private static string EncodeHex(string wkt, bool isGeography, int srid) =>
+        Convert.ToHexString(SpatialBinaryCodec.Encode(SpatialWktReader.Read(wkt, srid, isGeography), isGeography));
+
     // Live-probed CAST(... AS varbinary(max)) bytes, keyed by the WKT + SRID
     // that produced them. Geography SRID 4326, geometry SRID 0.
     [TestMethod]
@@ -35,14 +38,14 @@ public sealed class SpatialWkbEncoderTests
     [DataRow("GEOMETRYCOLLECTION (POINT (1 1), LINESTRING (2 2, 3 3))", false, 0, "00000000010403000000000000000000F03F000000000000F03F0000000000000040000000000000004000000000000008400000000000000840020000000100000000010100000003000000FFFFFFFF0000000007000000000000000001000000000100000002")]
     [DataRow("GEOMETRYCOLLECTION (MULTIPOINT ((0 0), (1 1)), POINT (2 2))", false, 0, "0000000001040300000000000000000000000000000000000000000000000000F03F000000000000F03F000000000000004000000000000000400300000001000000000101000000010200000005000000FFFFFFFF0000000007000000000000000004010000000000000001010000000100000001000000000200000001")]
     public void Encode_MatchesLiveServerBytes(string wkt, bool isGeography, int srid, string expectedHex) =>
-        AreEqual(expectedHex, Convert.ToHexString(SpatialWkbEncoder.Encode(wkt, isGeography, srid)));
+        AreEqual(expectedHex, EncodeHex(wkt, isGeography, srid));
 
     [TestMethod]
     public void Encode_UsesGeographyDefaultSrid_4326()
     {
         // Encoder writes the SRID it is handed; the wire codec supplies 4326 for
         // geography. Confirm the leading SRID dword when 4326 is passed.
-        var bytes = SpatialWkbEncoder.Encode("POINT (-122.35 47.65)", isGeography: true, srid: 4326);
+        var bytes = SpatialBinaryCodec.Encode(SpatialWktReader.Read("POINT (-122.35 47.65)", 4326, isGeography: true), isGeography: true);
         AreEqual(4326, BinaryPrimitives.ReadInt32LittleEndian(bytes));
     }
 
@@ -55,21 +58,20 @@ public sealed class SpatialWkbEncoderTests
     public void RealPayload_RoundTripsThroughDecoderThenEncoder(bool isGeography, string hex)
     {
         var real = Convert.FromHexString(hex);
-        var wkt = SpatialWkbDecoder.TryDecode(real, isGeography);
-        IsNotNull(wkt);
-        var srid = BinaryPrimitives.ReadInt32LittleEndian(real);
-        AreEqual(hex, Convert.ToHexString(SpatialWkbEncoder.Encode(wkt, isGeography, srid)));
+        var decoded = SpatialBinaryCodec.TryDecode(real, isGeography);
+        IsNotNull(decoded);
+        AreEqual(hex, Convert.ToHexString(SpatialBinaryCodec.Encode(decoded, isGeography)));
     }
 
     [TestMethod]
     public void Encode_ToleratesNoSpaceAfterKeyword() =>
         AreEqual(
-            Convert.ToHexString(SpatialWkbEncoder.Encode("POINT (1 2)", isGeography: false, srid: 0)),
-            Convert.ToHexString(SpatialWkbEncoder.Encode("POINT(1 2)", isGeography: false, srid: 0)));
+            EncodeHex("POINT (1 2)", isGeography: false, srid: 0),
+            EncodeHex("POINT(1 2)", isGeography: false, srid: 0));
 
     [TestMethod]
     public void Encode_ToleratesBareMultiPointMembers() =>
         AreEqual(
-            Convert.ToHexString(SpatialWkbEncoder.Encode("MULTIPOINT ((0 0), (1 1))", isGeography: false, srid: 0)),
-            Convert.ToHexString(SpatialWkbEncoder.Encode("MULTIPOINT (0 0, 1 1)", isGeography: false, srid: 0)));
+            EncodeHex("MULTIPOINT ((0 0), (1 1))", isGeography: false, srid: 0),
+            EncodeHex("MULTIPOINT (0 0, 1 1)", isGeography: false, srid: 0));
 }

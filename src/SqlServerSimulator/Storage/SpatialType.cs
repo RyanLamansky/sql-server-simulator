@@ -1,28 +1,38 @@
-using System.Text;
+using SqlServerSimulator.Storage.Spatial;
 
 namespace SqlServerSimulator.Storage;
 
 /// <summary>
 /// Shared base for <see cref="GeographySqlType"/> + <see cref="GeometrySqlType"/>.
-/// Both store the constructed WKT (Well-Known Text) form of the spatial value
-/// as raw UTF-16 LE — the simulator's degraded-mode encoding for the
-/// skip-with-diagnostic bacpac stance. <see cref="IsLob"/> is true so the
-/// row encoder routes payload through the off-row LOB chain, matching
+/// A value of either stores SQL Server's spatial UDT serialization — the same
+/// bytes real writes — produced from the parsed instance by
+/// <see cref="SpatialBinaryCodec"/>. <see cref="IsLob"/> is true so the row
+/// encoder routes the payload through the off-row LOB chain, matching
 /// <c>nvarchar(MAX)</c>.
 /// </summary>
 /// <remarks>
-/// Real SQL Server stores spatial values as a binary CLR-UDT internal
-/// (WKB-derived). The simulator keeps the WKT instead so <c>.ToString()</c>
-/// works without an OGC engine and CAST to varchar/varbinary round-trips
-/// reversibly. <see cref="HierarchyIdSqlType"/> documents the same
-/// "byte form is simulator-specific; replaced when the BACPAC loader bundle
-/// implements wire-format encoding" deferral.
+/// The in-memory representation is the parsed <see cref="SpatialGeometry"/>,
+/// not the bytes: instance methods read the shape tree directly, and the byte
+/// form is materialized only at the storage, <c>varbinary</c>-cast and wire
+/// boundaries. <see cref="SqlType.ClrType"/> stays <see cref="string"/>
+/// because the in-process reader surfaces a spatial column as its WKT.
 /// </remarks>
 internal abstract class SpatialSqlType() : SqlType(SqlTypeCategory.String)
 {
     public override Type ClrType => typeof(string);
 
     public override bool IsFixedLength => false;
+
+    /// <summary>True for <c>geography</c> — selects the round-earth axis order and the latitude-domain check.</summary>
+    public abstract bool IsGeography { get; }
+
+    /// <summary>
+    /// The CLR type name real reports in its member-not-found errors
+    /// (Msg 6592 / 6506), which name the client-side spatial classes.
+    /// </summary>
+    public string ClrTypeName => this.IsGeography
+        ? "Microsoft.SqlServer.Types.SqlGeography"
+        : "Microsoft.SqlServer.Types.SqlGeometry";
 
     /// <summary>
     /// True — spatial values store off-row in a LOB chain. Routes column
@@ -31,53 +41,63 @@ internal abstract class SpatialSqlType() : SqlType(SqlTypeCategory.String)
     /// </summary>
     public override bool IsLob => true;
 
-    public override int GetVariableByteCount(SqlValue value) => Encoding.Unicode.GetByteCount(value.AsString);
+    public override int GetVariableByteCount(SqlValue value) => value.AsSpatial.Encoded(this.IsGeography).Length;
 
-    public override int Encode(SqlValue value, Span<byte> destination) => Encoding.Unicode.GetBytes(value.AsString, destination);
+    public override int Encode(SqlValue value, Span<byte> destination)
+    {
+        var bytes = value.AsSpatial.Encoded(this.IsGeography);
+        bytes.CopyTo(destination);
+        return bytes.Length;
+    }
+
+    public override SqlValue Decode(ReadOnlySpan<byte> source) =>
+        SqlValue.FromSpatial(SpatialBinaryCodec.Decode(source, this.IsGeography), this.IsGeography);
+
+    /// <summary>
+    /// Accepts either the WKT text or the UDT bytes: an ADO.NET parameter can
+    /// arrive as a string from in-process code or as the serialization from a
+    /// wire client.
+    /// </summary>
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromSpatial(
+        raw switch
+        {
+            byte[] bytes => SpatialBinaryCodec.Decode(bytes, this.IsGeography),
+            string text => SpatialWktReader.Read(text, SpatialGeometry.DefaultSridFor(this.IsGeography), this.IsGeography),
+            _ => throw new ArgumentException($"Cannot convert {raw.GetType()} to {this.SqlServerName}.", nameof(raw)),
+        },
+        this.IsGeography);
 }
 
 /// <summary>
-/// SQL Server's <c>geography</c> type — round-earth spatial values bound to
-/// a Spatial Reference Identifier (SRID, default 4326). The simulator ships
-/// the type identity (<c>system_type_id = 240</c>, <c>user_type_id = 130</c>),
-/// raw-WKT round-trip, and the parse-cleanly + throw-at-execute method-call
-/// surface. OGC + Microsoft-extension instance methods raise
-/// <see cref="NotSupportedException"/> at <c>Run</c> except <c>.ToString()</c>,
-/// which returns the stored WKT.
+/// SQL Server's <c>geography</c> type — round-earth spatial values bound to a
+/// Spatial Reference Identifier (SRID, default 4326). Identity is
+/// <c>system_type_id = 240</c>, <c>user_type_id = 130</c>.
 /// </summary>
 /// <remarks>
-/// Construction via <c>geography::Parse(wkt)</c> /
-/// <c>geography::STGeomFromText(wkt, srid)</c> works at parse + execute;
-/// the result is a <c>geography</c>-typed value carrying the WKT string.
-/// Real OGC predicates (<c>.STDistance</c>, <c>.STIntersects</c>, etc.) parse
-/// cleanly so CREATE VIEW / CREATE PROCEDURE bodies that reference them store
-/// verbatim, matching the skip-with-diagnostic stance documented in
-/// <c>docs/claude/spatial.md</c>.
+/// Coordinates are held in WKT order (longitude, latitude) like every other
+/// spatial value; the reversed (latitude, longitude) order is a property of
+/// the binary serialization alone, applied by
+/// <see cref="SpatialBinaryCodec"/>.
 /// </remarks>
 internal sealed class GeographySqlType() : SpatialSqlType
 {
     public override string SqlServerName => "geography";
 
-    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromGeography(Encoding.Unicode.GetString(source));
-
-    public override SqlValue ConvertParameter(object raw) => SqlValue.FromGeography((string)raw);
+    public override bool IsGeography => true;
 
     public override string ToString() => "geography";
 }
 
 /// <summary>
-/// SQL Server's <c>geometry</c> type — flat-Earth spatial values. Same
-/// implementation strategy as <see cref="GeographySqlType"/>; identity is
+/// SQL Server's <c>geometry</c> type — flat-earth spatial values. Identity is
 /// <c>system_type_id = 240</c>, <c>user_type_id = 129</c>. See
-/// <see cref="GeographySqlType"/> for the method-call dispatch contract.
+/// <see cref="GeographySqlType"/> for the shared representation.
 /// </summary>
 internal sealed class GeometrySqlType() : SpatialSqlType
 {
     public override string SqlServerName => "geometry";
 
-    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromGeometry(Encoding.Unicode.GetString(source));
-
-    public override SqlValue ConvertParameter(object raw) => SqlValue.FromGeometry((string)raw);
+    public override bool IsGeography => false;
 
     public override string ToString() => "geometry";
 }
