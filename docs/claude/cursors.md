@@ -13,7 +13,7 @@ Behavior probed against SQL Server 2025.
 - **`Simulation.Cursor.cs`** — the `DECLARE CURSOR` grammar (SQL-92 + T-SQL extended), `OPEN` / `FETCH` / `CLOSE` / `DEALLOCATE` dispatch, the `FETCH` direction parser, and the `WHERE CURRENT OF` helpers (`ParseWhereCurrentOf` / `CursorRowMatches`) shared by UPDATE / DELETE.
 - **`Selection.Cursor.cs`** — `EnumerateForCursor` (live RID-free enumeration over the base heap, reusing `ResolveAcrossTuple` + `ComputeOrderKeys`) and the `CursorRow` / key-comparison helpers, kept inside `Selection` where the private projection / ORDER BY machinery and `UpdatabilityProfile` live.
 - **`Parser/Expressions/CursorScalars.cs`** — `@@FETCH_STATUS`, `@@CURSOR_ROWS`, `CURSOR_STATUS(scope, name)`.
-- **`Errors/SimulatedSqlException.CursorErrors.cs`** — Msg 16905 / 16915 / 16916 / 16917 / 16924 / 16925 / 16929 / 16931 / 16932 (FOR UPDATE OF) / 16947+16934+3621 (OPTIMISTIC conflict chain) / 16950 (unallocated cursor variable) — all probe-confirmed verbatim.
+- **`Errors/SimulatedSqlException.CursorErrors.cs`** — Msg 16905 / 16911 / 16915 / 16916 / 16917 / 16924 / 16925 / 16929 / 16931 / 16932 (FOR UPDATE OF) / 16947+16934+3621 (OPTIMISTIC conflict chain) / 16950 (unallocated cursor variable) — all probe-confirmed verbatim.
   TYPE_WARNING's Msg 16956 rides the `BatchContext.AppendInfoError` info pipeline, not this factory set.
 
 The dispatch routes `Keyword.Declare` to cursor handling when the token after `DECLARE` isn't `@`-prefixed (cursor names are bare identifiers; that's the only non-`@` DECLARE form).
@@ -26,6 +26,7 @@ Handle→cursor mapping, the scrollopt/ccopt option translation, and the probed 
 
 The effective type is resolved at DECLARE from the requested keywords **and** whether the SELECT is updatable — a query that isn't a single base table is forced to STATIC, matching SQL Server's silent conversion.
 With an updatable query: explicit `STATIC` / `INSENSITIVE` / `FAST_FORWARD` → STATIC; `KEYSET` → KEYSET; `DYNAMIC` → DYNAMIC; unspecified → KEYSET when `SCROLL` was asked for, DYNAMIC for the forward-only default.
+Sensitivity and scrollability are separate: naming any of the three implies `SCROLL`, while the *defaulted* DYNAMIC of a bare cursor stays forward-only.
 The base table is **not** required to have a unique key — the row's stable heap address (delivered by `Heap.UpdateAt`'s in-place / forwarding-pointer machinery) is the fallback identity.
 Probe-confirmed: real SQL Server's KEYSET on a no-unique-key heap also opens with a positive `@@CURSOR_ROWS`, so this matches rather than diverges.
 
@@ -50,9 +51,13 @@ Either way the row's visible address is unchanged, so KEYSET re-reads and positi
 
 `FETCH [NEXT|PRIOR|FIRST|LAST|ABSOLUTE n|RELATIVE n] [FROM] <cursor> [INTO @v,…]`.
 
-- **Scrollability**: forward-only cursors (DYNAMIC default, `FORWARD_ONLY`, `FAST_FORWARD`) allow only `NEXT`; STATIC / KEYSET and any `SCROLL` cursor allow all six.
-  A scroll fetch on a forward-only cursor → **Msg 16925** (`"The fetch type Absolute cannot be used with dynamic cursors."`, direction title-cased).
-  DYNAMIC never supports `ABSOLUTE` / `RELATIVE` even when SCROLL.
+- **Scrollability**: naming a sensitivity implies `SCROLL` — `STATIC`, `KEYSET` *and* `DYNAMIC` all scroll unless `FORWARD_ONLY` / `FAST_FORWARD` says otherwise (probe-confirmed).
+  A cursor that names none is forward-only and allows only `NEXT`.
+- **`ABSOLUTE` on a dynamic-sensitivity cursor** → **Msg 16925** (`"The fetch type Absolute cannot be used with dynamic cursors."`, direction title-cased).
+  Real checks this *before* scrollability, so a bare `FORWARD_ONLY` cursor — which defaults to dynamic sensitivity — reports 16925 for `ABSOLUTE` and 16911 for everything else.
+- **Any other non-`NEXT` direction on a non-scrollable cursor** → **Msg 16911** (`"fetch: The fetch type prior cannot be used with forward only cursors."`), whose direction name is **lower-cased**, unlike 16925's.
+- **`RELATIVE` is legal on a scrollable DYNAMIC cursor** and walks the live set one row at a time, since there's no stable ordinal to jump to; a zero offset re-reads the current row.
+  `ABSOLUTE` is the only direction dynamic sensitivity rejects.
 - **INTO** assigns the projected columns to the variables (coerced to each declared type).
   A count mismatch raises **Msg 16924** regardless of whether the FETCH lands on a row.
   On a successful fetch the variables are written; on `-1` (past end) they retain their prior value (probe-confirmed).

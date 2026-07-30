@@ -123,41 +123,8 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
-        SqlType ResolveTypeBoth(MultiPartName name)
-        {
-            if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, targetAlias)
-                || context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, defaultTargetName))
-            {
-                for (var i = 0; i < targetColumns.Length; i++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(targetColumns[i].Name, name.Leaf))
-                        return targetColumns[i].Type;
-                }
-            }
-            if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
-            {
-                for (var i = 0; i < sourceColumnNames.Length; i++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
-                        return sourceSchema[i];
-                }
-            }
-            // Unqualified: try target then source.
-            if (name.Count == 1)
-            {
-                for (var i = 0; i < targetColumns.Length; i++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(targetColumns[i].Name, name.Leaf))
-                        return targetColumns[i].Type;
-                }
-                for (var i = 0; i < sourceColumnNames.Length; i++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
-                        return sourceSchema[i];
-                }
-            }
-            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
-        }
+        SqlType ResolveTypeBoth(MultiPartName name) => ResolveMergeColumnType(
+            context, name, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceSchema);
 
         // Walk the ON's expression tree with the two-sided resolver so any
         // column reference type-checks correctly at parse time.
@@ -490,6 +457,57 @@ partial class Simulation
     /// <item>Within MATCHED and NOT MATCHED BY SOURCE families, an unconditional clause cannot be followed by a conditional one (Msg 5324).</item>
     /// </list>
     /// </summary>
+    /// <summary>
+    /// Types a column reference against the MERGE's own two sides: the target
+    /// (by alias, by the target's own name, or unqualified) and then the
+    /// source. Installed as <see cref="ParserContext.OuterTypeResolver"/> while
+    /// the ON predicate and the WHEN clauses parse, so a correlated subquery
+    /// inside either binds to a MERGE column rather than failing to resolve.
+    /// </summary>
+    private static SqlType ResolveMergeColumnType(
+        ParserContext context,
+        MultiPartName name,
+        string targetAlias,
+        string defaultTargetName,
+        HeapColumn[] targetColumns,
+        string sourceAlias,
+        string[] sourceColumnNames,
+        SqlType[] sourceSchema)
+    {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        if (collation.Equals(name.ImmediateQualifier, targetAlias) || collation.Equals(name.ImmediateQualifier, defaultTargetName))
+        {
+            foreach (var column in targetColumns)
+            {
+                if (collation.Equals(column.Name, name.Leaf))
+                    return column.Type;
+            }
+        }
+        if (collation.Equals(name.ImmediateQualifier, sourceAlias))
+        {
+            for (var i = 0; i < sourceColumnNames.Length; i++)
+            {
+                if (collation.Equals(sourceColumnNames[i], name.Leaf))
+                    return sourceSchema[i];
+            }
+        }
+        // Unqualified: try target then source.
+        if (name.Count == 1)
+        {
+            foreach (var column in targetColumns)
+            {
+                if (collation.Equals(column.Name, name.Leaf))
+                    return column.Type;
+            }
+            for (var i = 0; i < sourceColumnNames.Length; i++)
+            {
+                if (collation.Equals(sourceColumnNames[i], name.Leaf))
+                    return sourceSchema[i];
+            }
+        }
+        throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
+    }
+
     private static List<WhenClause> ParseMergeWhenClauses(
         ParserContext context,
         HeapTable destinationTable,
@@ -509,40 +527,8 @@ partial class Simulation
         // user-facing column shape is OutputColumns; base shape otherwise.
         var targetColumns = sourceView?.OutputColumns ?? destinationTable.Columns;
 
-        SqlType ResolveType(MultiPartName name)
-        {
-            if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, targetAlias)
-                || context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, defaultTargetName))
-            {
-                for (var i = 0; i < targetColumns.Length; i++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(targetColumns[i].Name, name.Leaf))
-                        return targetColumns[i].Type;
-                }
-            }
-            if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
-            {
-                for (var i = 0; i < sourceColumnNames.Length; i++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
-                        return sourceSchema[i];
-                }
-            }
-            if (name.Count == 1)
-            {
-                for (var i = 0; i < targetColumns.Length; i++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(targetColumns[i].Name, name.Leaf))
-                        return targetColumns[i].Type;
-                }
-                for (var i = 0; i < sourceColumnNames.Length; i++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
-                        return sourceSchema[i];
-                }
-            }
-            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
-        }
+        SqlType ResolveType(MultiPartName name) => ResolveMergeColumnType(
+            context, name, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceSchema);
 
         while (context.Token is ReservedKeyword { Keyword: Keyword.When })
         {
@@ -1600,7 +1586,7 @@ partial class Simulation
                 var oldRows = new List<SqlValue[]>(pendingDeletes.Count);
                 foreach (var (_, _, oldValues, _) in pendingDeletes)
                     oldRows.Add(oldValues);
-                EnforceIncomingForeignKeys(destinationTable, oldRows, affectedNewValues: null, context, "DELETE", depth: 0);
+                EnforceIncomingForeignKeysOnDelete(destinationTable, oldRows, context, "DELETE", depth: 0);
             }
             if (!insteadOfUpdate && pendingUpdates.Count > 0)
             {

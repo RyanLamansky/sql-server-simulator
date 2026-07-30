@@ -236,6 +236,24 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 - **Workload-harness divergence reporting quirks** (`.vs/workload/Program.cs`, local-only) — the parity report's example line rebuilds parameters from the op seed and can mismatch the actual divergent instance, and divergent instances aren't re-run single-threaded to classify transient-vs-stable.
   Both made the shared-plan-state hunt slower than it needed to be (the fixed bug class itself — instance-bound aggregate/window results, baked TOP/OFFSET counts, frozen RAND, unstamped replay clock — is documented in [`plan-cache.md`](plan-cache.md)'s shared-plan contract section).
 
+## Live-but-untested surfaces
+
+Measured 2026-07-30 (`dotnet test --collect:"XPlat Code Coverage"` → reportgenerator; 90.7% line / 79.2% branch / 92.2% method).
+These are reachable code paths no test exercises — not gaps in behavior, gaps in the safety net.
+Of the ~990 lines in fully-uncovered methods, ~376 are `DebugDisplay` / `ToString` debugger helpers and ~48 are `Stream` boilerplate overrides, both of which are deliberately not worth testing; what remains is this list.
+
+- **BCP import of `datetimeoffset` / `smalldatetime`** (`BcpRowReader`), and **`sql_variant` over the wire** carrying `datetime2` / `datetimeoffset` / `smalldatetime` / an ANSI string (`TdsWireValue`).
+- **`TdsColumnDecoder`'s `time` / `xml` / `money` / `smalldatetime` / `datetime` / ANSI-string readers** — the remote-read path, so a linked-server round-trip of those types would cover them.
+- **`sp_cursorprepare`** (`TdsSession.CursorPrepare`).
+- **The foreign-key scan fallback** (`FkTuplesMatch` + `EnumerateChildRows`) — reached only when `TryMapFkColumnsToStorage` fails, so the seek path covers every tested FK.
+- **`ClrAssemblyMetadata.ComputePublicKeyToken` / `DescribeReference`** — strong-named assembly identity and the assembly-reference description.
+
+Covered since the first measurement, each of which turned out to be hiding a behavior bug rather than just a missing test: `INFORMATION_SCHEMA.PARAMETERS` (no scalar-function return row, wrong `CHARACTER_MAXIMUM_LENGTH` rule, `sysname` not resolved to its base type), the DYNAMIC cursor's scroll directions (`DECLARE … CURSOR DYNAMIC` was treated as forward-only, `RELATIVE` was rejected outright, and the forward-only rejection used Msg 16925's wording instead of Msg 16911's), and the public `SimulatedDbParameterCollection` indexers plus `SimulatedSqlResultSet.HasRows`.
+
+Worth re-measuring after a large bundle rather than routinely, and worth acting on when it does run: **nothing this pass surfaced was merely an untested-but-correct path.**
+It found two pieces of dead code — a duplicated MERGE type resolver, and an unreachable ON-UPDATE-CASCADE branch whose stub threw an exception saying so — and every gap that was then covered turned out to be hiding a behavior bug.
+Uncovered code here has consistently meant *wrong* code, not just unwatched code.
+
 ## Design choices to revisit
 
 Shipped intentionally and correct under their documented contract, but the original rationale may have aged.

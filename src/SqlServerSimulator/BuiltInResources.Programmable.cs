@@ -251,6 +251,7 @@ internal static partial class BuiltInResources
         // only for string types.
         var modeIn = SqlValue.FromVarchar("IN");
         var modeInOut = SqlValue.FromVarchar("INOUT");
+        var modeOut = SqlValue.FromVarchar("OUT");
         Iso("PARAMETERS",
         [
             new("SPECIFIC_CATALOG", SqlType.SystemName, 128, true),
@@ -262,7 +263,7 @@ internal static partial class BuiltInResources
             new("DATA_TYPE", SqlType.SystemName, 128, true),
             new("CHARACTER_MAXIMUM_LENGTH", SqlType.Int32, null, true),
         ], (batch, database) =>
-            EnumerateInformationSchemaParameters(batch, database, modeIn, modeInOut));
+            EnumerateInformationSchemaParameters(batch, database, modeIn, modeInOut, modeOut));
 
         // INFORMATION_SCHEMA.VIEWS: ISO-standard 6-column shape. Probe-
         // confirmed: VIEW_DEFINITION is NULL only for WITH ENCRYPTION views
@@ -1132,7 +1133,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(i + 1),
                         nullString,
                         col.Nullable ? yesNullable : noNullable,
-                        SqlValue.FromSystemName(col.Type.SqlServerName),
+                        IsoDataTypeName(col.Type),
                         charLength is int cl ? SqlValue.FromInt32(cl) : nullInt32,
                         octetLength is int ol ? SqlValue.FromInt32(ol) : nullInt32,
                         numericPrecision is byte np ? SqlValue.FromByte(np) : nullByte,
@@ -1266,7 +1267,7 @@ internal static partial class BuiltInResources
             foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
             {
                 var dataType = fn is ScalarFunction scalarFn
-                    ? SqlValue.FromSystemName(scalarFn.ReturnType.SqlServerName)
+                    ? IsoDataTypeName(scalarFn.ReturnType)
                     : tableDataType;
                 var name = SqlValue.FromSystemName(fn.Name);
                 yield return [
@@ -1307,7 +1308,8 @@ internal static partial class BuiltInResources
         Parser.BatchContext batch,
         Database database,
         SqlValue modeIn,
-        SqlValue modeInOut)
+        SqlValue modeInOut,
+        SqlValue modeOut)
     {
         _ = batch;
         var catalog = SqlValue.FromSystemName(database.Name);
@@ -1327,15 +1329,30 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(i + 1),
                         param.IsOutput ? modeInOut : modeIn,
                         SqlValue.FromSystemName("@" + param.Name),
-                        SqlValue.FromSystemName(param.Type.SqlServerName),
-                        param.Type.Category == SqlTypeCategory.String && param.DeclaredMaxLength is int len && len > 0
-                            ? SqlValue.FromInt32(len)
-                            : nullInt,
+                        IsoDataTypeName(param.Type),
+                        ParameterCharacterLength(param.Type) is int len ? SqlValue.FromInt32(len) : nullInt,
                     ];
                 }
             }
             foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
             {
+                // A scalar function's return value is row 0, named by the empty
+                // string and reported as an OUT parameter (probe-confirmed).
+                // Table-valued functions have no such row.
+                if (fn is ScalarFunction scalar)
+                {
+                    yield return [
+                        catalog,
+                        schemaName,
+                        SqlValue.FromSystemName(fn.Name),
+                        SqlValue.FromInt32(0),
+                        modeOut,
+                        SqlValue.FromSystemName(string.Empty),
+                        IsoDataTypeName(scalar.ReturnType),
+                        ParameterCharacterLength(scalar.ReturnType) is int returnLen ? SqlValue.FromInt32(returnLen) : nullInt,
+                    ];
+                }
+
                 for (var i = 0; i < fn.Parameters.Length; i++)
                 {
                     var param = fn.Parameters[i];
@@ -1346,13 +1363,48 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(i + 1),
                         modeIn,
                         SqlValue.FromSystemName("@" + param.Name),
-                        SqlValue.FromSystemName(param.Type.SqlServerName),
-                        nullInt,
+                        IsoDataTypeName(param.Type),
+                        ParameterCharacterLength(param.Type) is int paramLen ? SqlValue.FromInt32(paramLen) : nullInt,
                     ];
                 }
             }
         }
     }
+
+    /// <summary>
+    /// The type name the INFORMATION_SCHEMA views report. These resolve an
+    /// alias to the type it stands for, so a <c>sysname</c> column or
+    /// parameter surfaces as <c>nvarchar</c> — probe-confirmed against SQL
+    /// Server 2025 for both COLUMNS and PARAMETERS. The <c>sys.*</c> catalog
+    /// views keep the alias instead, which is why this doesn't live on
+    /// <see cref="SqlType.SqlServerName"/>.
+    /// </summary>
+    private static SqlValue IsoDataTypeName(SqlType type) =>
+        SqlValue.FromSystemName(type == SqlType.SystemName ? "nvarchar" : type.SqlServerName);
+
+    /// <summary>
+    /// INFORMATION_SCHEMA.PARAMETERS' CHARACTER_MAXIMUM_LENGTH: the declared
+    /// length for the string and binary families — character count, not bytes —
+    /// the MAX sentinel <c>-1</c> for a MAX-declared type and for <c>xml</c>,
+    /// and NULL for everything else. Probe-confirmed against SQL Server 2025:
+    /// the binary family reports a length here even though the column is named
+    /// for characters, and the legacy LOB types report their documented
+    /// sentinels.
+    /// </summary>
+    private static int? ParameterCharacterLength(SqlType type) => type switch
+    {
+        _ when type == SqlType.Text || type == SqlType.Image => 2147483647,
+        _ when type == SqlType.NText => 1073741823,
+        _ when type == SqlType.SystemName => 128,
+        CharSqlType c => c.length,
+        NCharSqlType nc => nc.length,
+        BinarySqlType b => b.length,
+        VarcharSqlType v => v.length,
+        NVarcharSqlType n => n.length,
+        VarbinarySqlType vb => vb.length,
+        XmlSqlType => SqlType.MaxLengthSentinel,
+        _ => null,
+    };
 
     /// <summary>
     /// Rows for <c>INFORMATION_SCHEMA.VIEWS</c>: per-view ISO-shape entries.

@@ -41,23 +41,26 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Walks every incoming <see cref="ForeignKey"/> after a DELETE / UPDATE
-    /// modified rows of <paramref name="parentTable"/>. Each affected parent
-    /// row triggers a scan of the FK's child table; the FK's referential
-    /// action drives the response (NO ACTION → Msg 547, CASCADE → recursive
-    /// DELETE / UPDATE, SET NULL → null the child's FK columns, SET DEFAULT →
-    /// replace with column DEFAULT).
+    /// Walks every incoming <see cref="ForeignKey"/> after a DELETE removed
+    /// rows of <paramref name="parentTable"/>. Each affected parent row
+    /// triggers a scan of the FK's child table; the FK's delete action drives
+    /// the response (NO ACTION → Msg 547, CASCADE → recursive DELETE,
+    /// SET NULL → null the child's FK columns, SET DEFAULT → replace with
+    /// column DEFAULT).
     /// </summary>
-    /// <param name="parentTable">The parent (referenced) table whose rows were affected.</param>
-    /// <param name="affectedOldValues">Pre-mutation values for each affected parent row, in full-ordinal order.</param>
-    /// <param name="affectedNewValues">Post-mutation values for UPDATE (same row in same position); null for DELETE.</param>
+    /// <param name="parentTable">The parent (referenced) table whose rows were deleted.</param>
+    /// <param name="affectedOldValues">Values of each affected parent row, in full-ordinal order.</param>
     /// <param name="context">Outer parser context; the cascading recursion uses the same connection / batch / undo log.</param>
-    /// <param name="verb">The triggering DML verb (<c>DELETE</c> / <c>UPDATE</c>) for Msg 547 wording.</param>
+    /// <param name="verb">The triggering DML verb for Msg 547 wording.</param>
     /// <param name="depth">Current cascade recursion depth — caps at <see cref="MaxCascadeDepth"/>.</param>
-    private static void EnforceIncomingForeignKeys(
+    /// <remarks>
+    /// UPDATE on the parent goes through <see cref="EnforceIncomingFkOnUpdate"/>
+    /// instead, which threads the parent's pre- and post-values together so
+    /// ON UPDATE CASCADE can write the new key into each child row.
+    /// </remarks>
+    private static void EnforceIncomingForeignKeysOnDelete(
         HeapTable parentTable,
-        IReadOnlyList<SqlValue[]> affectedOldValues,
-        IReadOnlyList<SqlValue[]>? affectedNewValues,
+        List<SqlValue[]> affectedOldValues,
         ParserContext context,
         string verb,
         int depth)
@@ -74,37 +77,10 @@ partial class Simulation
             // when the FK declared ON DELETE CASCADE.
             if (fk.IsDisabled)
                 continue;
-            // UPDATE on parent: skip the FK entirely when none of the FK's
-            // referenced columns actually changed value. Compares pre/post on
-            // the FK's referenced ordinals; an unchanged tuple is a no-op for
-            // referential integrity.
-            var keyChangedRows = affectedNewValues is null
-                ? affectedOldValues
-                : FilterRowsWithKeyChange(fk.ReferencedColumnOrdinals, affectedOldValues, affectedNewValues);
-            if (keyChangedRows.Count == 0)
+            if (affectedOldValues.Count == 0)
                 continue;
-
-            var action = affectedNewValues is null ? fk.DeleteAction : fk.UpdateAction;
-            ApplyFkActionForKeySet(fk, keyChangedRows, action, context, verb, depth);
+            ApplyFkActionForKeySet(fk, affectedOldValues, fk.DeleteAction, context, verb, depth);
         }
-    }
-
-    private static List<SqlValue[]> FilterRowsWithKeyChange(int[] referencedOrdinals, IReadOnlyList<SqlValue[]> oldRows, IReadOnlyList<SqlValue[]> newRows)
-    {
-        var result = new List<SqlValue[]>(oldRows.Count);
-        for (var r = 0; r < oldRows.Count; r++)
-        {
-            for (var i = 0; i < referencedOrdinals.Length; i++)
-            {
-                var ord = referencedOrdinals[i];
-                if (!oldRows[r][ord].Equals(newRows[r][ord]))
-                {
-                    result.Add(oldRows[r]);
-                    break;
-                }
-            }
-        }
-        return result;
     }
 
     private static void ApplyFkActionForKeySet(
@@ -130,10 +106,7 @@ partial class Simulation
             case ReferentialAction.NoAction:
                 throw BuildParentSideViolation(fk, context, verb);
             case ReferentialAction.Cascade:
-                if (verb == "DELETE")
-                    CascadeDeleteChildRows(fk, matchingChildRows, context, depth);
-                else
-                    CascadeUpdateChildKeys(fk, matchingChildRows, affectedParentOldRows, context, depth);
+                CascadeDeleteChildRows(fk, matchingChildRows, context, depth);
                 break;
             case ReferentialAction.SetNull:
                 CascadeSetChildKeysToValue(fk, matchingChildRows, useDefault: false, context, depth);
@@ -352,28 +325,7 @@ partial class Simulation
         var oldRows = new List<SqlValue[]>(matchingChildRows.Count);
         foreach (var (_, _, full) in matchingChildRows)
             oldRows.Add(full);
-        EnforceIncomingForeignKeys(childTable, oldRows, affectedNewValues: null, context, "DELETE", depth + 1);
-    }
-
-    private static void CascadeUpdateChildKeys(
-        ForeignKey fk,
-        List<(int PageIndex, int SlotIndex, SqlValue[] FullValues)> matchingChildRows,
-        IReadOnlyList<SqlValue[]> affectedParentOldRows,
-        ParserContext context,
-        int depth)
-    {
-        // ON UPDATE CASCADE: rewrite the child's FK columns to match the
-        // updated parent value. The new parent values for each old parent
-        // tuple are inferred from the caller's affectedNewValues; but the
-        // ApplyFkActionForKeySet entry point doesn't carry those forward —
-        // for the UPDATE path we re-find the parent's new value by scanning
-        // the old/new arrays from the caller via a closure pattern (avoided
-        // here for simplicity). Real-world ON UPDATE CASCADE chains touch
-        // PK/UQ columns only — and SQL Server's most common deployment uses
-        // surrogate identity PKs that aren't updated. The simulator's UPDATE
-        // path passes the parent's new tuple through a captured side-channel
-        // (see <see cref="EnforceIncomingFkOnUpdate"/>).
-        throw new NotSupportedException("ON UPDATE CASCADE through the EnforceIncomingForeignKeys entry isn't reachable — use EnforceIncomingFkOnUpdate which threads the new values explicitly.");
+        EnforceIncomingForeignKeysOnDelete(childTable, oldRows, context, "DELETE", depth + 1);
     }
 
     /// <summary>

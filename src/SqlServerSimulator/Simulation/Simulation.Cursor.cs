@@ -172,8 +172,14 @@ partial class Simulation
                     : scroll ? CursorSensitivity.Keyset : CursorSensitivity.Dynamic;
 
         var readOnly = sensitivity == CursorSensitivity.Static || reqFastForward || readOnlyOption;
+        // Naming a sensitivity implies SCROLL unless FORWARD_ONLY says otherwise
+        // — probe-confirmed for DYNAMIC as well as STATIC / KEYSET. A cursor
+        // that names none defaults to dynamic sensitivity *and* forward-only,
+        // so the check is on the requested keyword, not the resolved
+        // sensitivity.
         var scrollable = scroll
-            || ((sensitivity is CursorSensitivity.Static or CursorSensitivity.Keyset) && !forwardOnly && !reqFastForward);
+            || ((sensitivity is CursorSensitivity.Static or CursorSensitivity.Keyset || reqDynamic)
+                && !forwardOnly && !reqFastForward);
 
         // Concurrency model (updatable cursors only): SCROLL_LOCKS holds a
         // cursor-scoped U lock on the fetched row; OPTIMISTIC detects out-of-

@@ -410,7 +410,7 @@ partial class Simulation
                     oldRows.Add(oldFull);
             }
             if (oldRows.Count > 0)
-                EnforceIncomingForeignKeys(table, oldRows, affectedNewValues: null, context, "DELETE", depth: 0);
+                EnforceIncomingForeignKeysOnDelete(table, oldRows, context, "DELETE", depth: 0);
         }
 
         if (output is not null)

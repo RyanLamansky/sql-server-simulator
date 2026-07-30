@@ -636,4 +636,103 @@ public sealed class CursorTests
         AreEqual("a", reader.GetString(1));
         IsFalse(reader.Read());
     }
+
+    /// <summary>
+    /// Naming a sensitivity implies SCROLL — probe-confirmed for DYNAMIC as
+    /// well as STATIC / KEYSET, so <c>DECLARE c CURSOR DYNAMIC</c> scrolls
+    /// backwards without the SCROLL keyword.
+    /// </summary>
+    [TestMethod]
+    [DataRow("dynamic")]
+    [DataRow("static")]
+    [DataRow("keyset")]
+    [DataRow("scroll dynamic")]
+    public void NamedSensitivity_ScrollsWithoutTheScrollKeyword(string declaration)
+        => AreEqual(1, new Simulation().ExecuteScalar($"""
+            create table t (id int primary key);
+            insert t values (1), (2), (3);
+            declare c cursor {declaration} for select id from t order by id;
+            open c;
+            declare @i int;
+            fetch next from c into @i;
+            fetch next from c into @i;
+            fetch prior from c into @i;
+            select @i;
+            close c;
+            deallocate c;
+            """));
+
+    /// <summary>
+    /// A dynamic cursor walks FIRST / LAST / PRIOR / RELATIVE over the live
+    /// set. RELATIVE is legal here — only ABSOLUTE isn't, since there is no
+    /// stable ordinal to position by. Probe-confirmed.
+    /// </summary>
+    [TestMethod]
+    [DataRow("fetch last from c into @i", 4)]
+    [DataRow("fetch first from c into @i", 1)]
+    [DataRow("fetch relative 2 from c into @i", 3)]
+    [DataRow("fetch relative -1 from c into @i", 1)]
+    [DataRow("fetch relative 0 from c into @i", 1)]
+    public void DynamicCursor_SupportsEveryDirectionButAbsolute(string fetch, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table t (id int primary key);
+            insert t values (1), (2), (3), (4);
+            declare c cursor dynamic for select id from t order by id;
+            open c;
+            declare @i int;
+            fetch next from c into @i;
+            {fetch};
+            select @i;
+            close c;
+            deallocate c;
+            """));
+
+    /// <summary>
+    /// Walking past the start leaves the cursor before the first row with
+    /// <c>@@FETCH_STATUS</c> -1, and a following NEXT returns to the first row.
+    /// Probe-confirmed.
+    /// </summary>
+    [TestMethod]
+    public void DynamicCursor_PriorPastStart_ReportsNoRowThenResumes()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int primary key);
+            insert t values (1), (2), (3);
+            """);
+        AreEqual("1/-1", sim.ExecuteScalar("""
+            declare c cursor dynamic for select id from t order by id;
+            open c;
+            declare @i int;
+            fetch next from c into @i;
+            fetch prior from c into @i;
+            select cast(@i as varchar(9)) + '/' + cast(@@fetch_status as varchar(4));
+            close c;
+            deallocate c;
+            """));
+    }
+
+    /// <summary>
+    /// A cursor that names no sensitivity is forward-only, and a scrolling
+    /// direction there raises Msg 16911 — whose wording differs from the
+    /// dynamic-cursor Msg 16925 in both prefix and casing. ABSOLUTE is checked
+    /// first, so it reports 16925 even on a forward-only cursor. All
+    /// probe-confirmed verbatim.
+    /// </summary>
+    [TestMethod]
+    [DataRow("", "prior", 16911, "fetch: The fetch type prior cannot be used with forward only cursors.")]
+    [DataRow("", "last", 16911, "fetch: The fetch type last cannot be used with forward only cursors.")]
+    [DataRow("", "relative 2", 16911, "fetch: The fetch type relative cannot be used with forward only cursors.")]
+    [DataRow("forward_only dynamic", "first", 16911, "fetch: The fetch type first cannot be used with forward only cursors.")]
+    [DataRow("", "absolute 2", 16925, "The fetch type Absolute cannot be used with dynamic cursors.")]
+    [DataRow("dynamic", "absolute 2", 16925, "The fetch type Absolute cannot be used with dynamic cursors.")]
+    public void NonScrollableFetch_RaisesTheDirectionsOwnError(string declaration, string fetch, int error, string message)
+        => new Simulation().AssertSqlError($"""
+            create table t (id int primary key);
+            insert t values (1), (2), (3);
+            declare c cursor {declaration} for select id from t order by id;
+            open c;
+            declare @i int;
+            fetch {fetch} from c into @i;
+            """, error, message);
 }

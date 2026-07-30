@@ -713,4 +713,90 @@ public sealed class InformationSchemaTests
         while (reader.Read()) names.Add(reader.GetString(0));
         CollectionAssert.AreEqual(new[] { "id", "nm" }, names);
     }
+
+    /// <summary>
+    /// <c>INFORMATION_SCHEMA.PARAMETERS</c> — one row per declared parameter,
+    /// plus an ordinal-0 row carrying a <i>scalar</i> function's return value.
+    /// Probe-confirmed against SQL Server 2025 (2026-07-30): the return row is
+    /// PARAMETER_MODE <c>OUT</c> with an empty name, OUTPUT procedure
+    /// parameters report <c>INOUT</c>, and table-valued functions have no
+    /// return row at all.
+    /// </summary>
+    [TestMethod]
+    public void Parameters_ProjectsDeclaredParametersAndScalarReturn()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create procedure dbo.p @a int, @b varchar(30), @c int output as select 1",
+            "create function dbo.f (@x int, @s nvarchar(10)) returns nvarchar(25) as begin return N'x' end",
+            "create function dbo.tvf (@a int) returns table as return (select @a as id)");
+        var rows = ReadParameterRows(sim);
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "f/0/OUT/[]/nvarchar/25",
+                "f/1/IN/[@x]/int/NULL",
+                "f/2/IN/[@s]/nvarchar/10",
+                "p/1/IN/[@a]/int/NULL",
+                "p/2/IN/[@b]/varchar/30",
+                "p/3/INOUT/[@c]/int/NULL",
+                "tvf/1/IN/[@a]/int/NULL",
+            },
+            rows);
+    }
+
+    /// <summary>
+    /// CHARACTER_MAXIMUM_LENGTH covers the binary family as well as the string
+    /// one, reports the MAX sentinel -1 for a MAX-declared type and for
+    /// <c>xml</c>, and is NULL for everything else. Probe-confirmed.
+    /// </summary>
+    [TestMethod]
+    public void Parameters_ReportsCharacterMaximumLengthPerTypeFamily()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create procedure dbo.e @a varchar(max), @b varbinary(20), @c char(5), @d decimal(9,3), @e nvarchar(max), @f xml, @g varbinary(max), @h sysname as select 1");
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "e/1/IN/[@a]/varchar/-1",
+                "e/2/IN/[@b]/varbinary/20",
+                "e/3/IN/[@c]/char/5",
+                "e/4/IN/[@d]/decimal/NULL",
+                "e/5/IN/[@e]/nvarchar/-1",
+                "e/6/IN/[@f]/xml/-1",
+                "e/7/IN/[@g]/varbinary/-1",
+                "e/8/IN/[@h]/nvarchar/128",
+            },
+            ReadParameterRows(sim));
+    }
+
+    /// <summary>
+    /// The ISO views resolve an alias to the type it stands for, so
+    /// <c>sysname</c> surfaces as <c>nvarchar</c> — unlike <c>sys.types</c>,
+    /// which keeps the alias. Probe-confirmed for COLUMNS and PARAMETERS.
+    /// </summary>
+    [TestMethod]
+    public void Columns_ReportsSysnameAsItsBaseType()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.sn (a sysname, b nvarchar(128))");
+        AreEqual("nvarchar/128", sim.ExecuteScalar(
+            "select DATA_TYPE + '/' + cast(CHARACTER_MAXIMUM_LENGTH as varchar(9)) from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 'sn' and COLUMN_NAME = 'a'"));
+    }
+
+    private static List<string> ReadParameterRows(Simulation sim)
+    {
+        using var reader = sim.ExecuteReader("""
+            select SPECIFIC_NAME + '/' + cast(ORDINAL_POSITION as varchar(3)) + '/' + PARAMETER_MODE + '/[' +
+                   isnull(PARAMETER_NAME, '<null>') + ']/' + DATA_TYPE + '/' +
+                   isnull(cast(CHARACTER_MAXIMUM_LENGTH as varchar(12)), 'NULL')
+            from INFORMATION_SCHEMA.PARAMETERS
+            order by SPECIFIC_NAME, ORDINAL_POSITION
+            """);
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add(reader.GetString(0));
+        return rows;
+    }
 }

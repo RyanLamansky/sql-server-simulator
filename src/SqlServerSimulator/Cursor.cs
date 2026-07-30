@@ -310,7 +310,7 @@ internal sealed class Cursor(
         {
             CursorSensitivity.Static => this.FetchStatic(direction, offset),
             CursorSensitivity.Keyset => this.FetchKeyset(batch, direction, offset),
-            _ => this.FetchDynamic(batch, direction),
+            _ => this.FetchDynamic(batch, direction, offset),
         };
 
         // OPTIMISTIC: snapshot the landed row's live bytes so a later positioned
@@ -328,18 +328,30 @@ internal sealed class Cursor(
     }
 
     /// <summary>
-    /// Forward-only cursors allow only NEXT; DYNAMIC never supports the
-    /// absolute-positioning forms — both raise Msg 16925 (probe-confirmed).
+    /// A dynamic-sensitivity cursor can't position by ordinal, so ABSOLUTE
+    /// raises Msg 16925 — real checks that before scrollability, which is why
+    /// a bare FORWARD_ONLY cursor reports it too. Anything other than NEXT on
+    /// a cursor that isn't scrollable raises Msg 16911. RELATIVE is legal on a
+    /// scrollable dynamic cursor; only ABSOLUTE isn't (probe-confirmed).
     /// </summary>
     private void EnsureDirectionAllowed(FetchDirection direction)
     {
-        if ((direction != FetchDirection.Next && !this.Scrollable)
-            || (this.Sensitivity == CursorSensitivity.Dynamic
-                && direction is FetchDirection.Absolute or FetchDirection.Relative))
-        {
+        if (this.Sensitivity == CursorSensitivity.Dynamic && direction == FetchDirection.Absolute)
             throw SimulatedSqlException.CursorFetchTypeNotAllowed(direction.ToString());
-        }
+        if (direction != FetchDirection.Next && !this.Scrollable)
+            throw SimulatedSqlException.CursorFetchTypeForwardOnly(LowercaseDirection(direction));
     }
+
+    /// <summary>Direction name as Msg 16911 spells it.</summary>
+    private static string LowercaseDirection(FetchDirection direction) => direction switch
+    {
+        FetchDirection.Absolute => "absolute",
+        FetchDirection.First => "first",
+        FetchDirection.Last => "last",
+        FetchDirection.Next => "next",
+        FetchDirection.Prior => "prior",
+        _ => "relative",
+    };
 
     private (int, SqlValue[]?) FetchStatic(FetchDirection direction, long offset)
     {
@@ -412,7 +424,7 @@ internal sealed class Cursor(
         return true;
     }
 
-    private (int, SqlValue[]?) FetchDynamic(BatchContext batch, FetchDirection direction)
+    private (int, SqlValue[]?) FetchDynamic(BatchContext batch, FetchDirection direction, long offset)
     {
         var live = this.Selection.EnumerateForCursor(batch);
         var target = direction switch
@@ -420,6 +432,7 @@ internal sealed class Cursor(
             FetchDirection.First => live.Count > 0 ? live[0] : null,
             FetchDirection.Last => live.Count > 0 ? live[^1] : null,
             FetchDirection.Prior => this.DynamicPrior(live),
+            FetchDirection.Relative => this.DynamicRelative(live, offset),
             _ => this.DynamicNext(live), // Next
         };
 
@@ -434,6 +447,41 @@ internal sealed class Cursor(
         this.dynamicAfterLast = false;
         this.CurrentRid = target.Rid;
         return (0, target.Values);
+    }
+
+    /// <summary>
+    /// RELATIVE on a dynamic cursor walks the live set one row at a time,
+    /// since there is no stable ordinal to jump to. A zero offset re-reads the
+    /// row the cursor sits on; walking off either end leaves the cursor there,
+    /// exactly as the single-step forms do.
+    /// </summary>
+    private Selection.CursorRow? DynamicRelative(List<Selection.CursorRow> live, long offset)
+    {
+        if (offset == 0)
+            return this.dynamicLast is null ? null : this.DynamicCurrent(live);
+
+        Selection.CursorRow? target = null;
+        for (var i = 0L; i < Math.Abs(offset); i++)
+        {
+            target = offset > 0 ? this.DynamicNext(live) : this.DynamicPrior(live);
+            if (target is null)
+                return null;
+            this.dynamicLast = target;
+            this.dynamicBeforeFirst = false;
+            this.dynamicAfterLast = false;
+        }
+        return target;
+    }
+
+    /// <summary>The live row the cursor currently sits on, or null once it has moved off the set.</summary>
+    private Selection.CursorRow? DynamicCurrent(List<Selection.CursorRow> live)
+    {
+        foreach (var row in live)
+        {
+            if (this.Selection.CompareCursorRows(row, this.dynamicLast!) == 0)
+                return row;
+        }
+        return null;
     }
 
     private Selection.CursorRow? DynamicNext(List<Selection.CursorRow> live)

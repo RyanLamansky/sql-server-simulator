@@ -43,13 +43,26 @@ partial class SimulatedSqlException
         new("Cursorfetch: The number of variables declared in the INTO list must match that of selected columns.", 16924, 16, 1);
 
     /// <summary>
-    /// Msg 16925: a scrolling <c>FETCH</c> direction (anything but <c>NEXT</c>)
-    /// was issued against a forward-only / dynamic cursor that doesn't support
-    /// it. Probe-confirmed verbatim: <c>"The fetch type Absolute cannot be used
-    /// with dynamic cursors."</c> — the direction name is title-cased.
+    /// Msg 16925: <c>FETCH ABSOLUTE</c> against a dynamic-sensitivity cursor,
+    /// which can't position by ordinal. Probe-confirmed verbatim:
+    /// <c>"The fetch type Absolute cannot be used with dynamic cursors."</c> —
+    /// the direction name is title-cased, and real reports this ahead of the
+    /// forward-only check, so a bare <c>FORWARD_ONLY</c> cursor (which defaults
+    /// to dynamic sensitivity) gets this rather than
+    /// <see cref="CursorFetchTypeForwardOnly"/>.
     /// </summary>
     internal static SimulatedSqlException CursorFetchTypeNotAllowed(string fetchType) =>
         new($"The fetch type {fetchType} cannot be used with dynamic cursors.", 16925, 16, 1);
+
+    /// <summary>
+    /// Msg 16911: a scrolling <c>FETCH</c> direction was issued against a
+    /// cursor that isn't scrollable. Probe-confirmed verbatim, including the
+    /// <c>fetch: </c> prefix and the <em>lower-cased</em> direction name —
+    /// which is where this differs from
+    /// <see cref="CursorFetchTypeNotAllowed"/>'s title case.
+    /// </summary>
+    internal static SimulatedSqlException CursorFetchTypeForwardOnly(string lowercaseFetchType) =>
+        new($"fetch: The fetch type {lowercaseFetchType} cannot be used with forward only cursors.", 16911, 16, 1);
 
     /// <summary>
     /// Msg 16929: <c>UPDATE … WHERE CURRENT OF</c> / <c>DELETE … WHERE CURRENT

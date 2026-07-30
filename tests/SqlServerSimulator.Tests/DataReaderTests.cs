@@ -448,4 +448,37 @@ public sealed class DataReaderTests
         using var reader = OpenReader("select 42 as v");
         _ = Throws<InvalidOperationException>(() => _ = reader.GetValue(0));
     }
+
+    /// <summary>
+    /// <c>HasRows</c> peeks one row ahead without consuming it, stays true once
+    /// rows have been seen, and is false for an empty result — matching
+    /// SqlClient's contract.
+    /// </summary>
+    [TestMethod]
+    public void HasRows_PeeksWithoutConsuming()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int); insert t values (1), (2)");
+        using var reader = sim.ExecuteReader("select id from t order by id");
+        IsTrue(reader.HasRows);
+        IsTrue(reader.HasRows);
+        IsTrue(reader.Read());
+        AreEqual(1, reader.GetInt32(0));
+        IsTrue(reader.HasRows);
+        IsTrue(reader.Read());
+        AreEqual(2, reader.GetInt32(0));
+        IsFalse(reader.Read());
+        IsTrue(reader.HasRows);
+    }
+
+    /// <inheritdoc cref="HasRows_PeeksWithoutConsuming"/>
+    [TestMethod]
+    public void HasRows_EmptyResult_IsFalse()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int)");
+        using var reader = sim.ExecuteReader("select id from t");
+        IsFalse(reader.HasRows);
+        IsFalse(reader.Read());
+    }
 }

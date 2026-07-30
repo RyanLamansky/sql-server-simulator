@@ -212,4 +212,45 @@ public sealed class DbParameterCollectionTests
     [TestMethod]
     public void SyncRoot_NotNull() =>
         IsNotNull(new Simulation().CreateOpenConnection().CreateCommand().Parameters.SyncRoot);
+
+    /// <summary>
+    /// The strongly-typed indexers shadow the <see cref="DbParameterCollection"/>
+    /// ones so a consumer that downcasts reaches <see cref="SimulatedDbParameter"/>
+    /// without a cast — the same shape SqlClient exposes.
+    /// </summary>
+    [TestMethod]
+    public void TypedIndexers_GetAndSetByPositionAndName()
+    {
+        using var connection = new Simulation().CreateDbConnection();
+        using var command = connection.CreateCommand();
+        var first = command.CreateParameter();
+        first.ParameterName = "@a";
+        first.Value = 1;
+        _ = command.Parameters.Add(first);
+
+        var byIndex = command.Parameters[0];
+        AreEqual("@a", byIndex.ParameterName);
+        AreEqual("@a", command.Parameters["@a"].ParameterName);
+
+        var replacement = command.CreateParameter();
+        replacement.ParameterName = "@a";
+        replacement.Value = 2;
+        command.Parameters[0] = replacement;
+        AreEqual(2, command.Parameters["@a"].Value);
+
+        var third = command.CreateParameter();
+        third.ParameterName = "@a";
+        third.Value = 3;
+        command.Parameters["@a"] = third;
+        AreEqual(3, command.Parameters[0].Value);
+    }
+
+    /// <summary>An unknown name is an argument failure, not a null return.</summary>
+    [TestMethod]
+    public void TypedIndexer_UnknownName_Throws()
+    {
+        using var connection = new Simulation().CreateDbConnection();
+        using var command = connection.CreateCommand();
+        _ = Throws<ArgumentException>(() => _ = command.Parameters["@nope"]);
+    }
 }

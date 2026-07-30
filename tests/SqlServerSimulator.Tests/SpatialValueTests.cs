@@ -369,6 +369,13 @@ public sealed class SpatialValueTests
             6595,
             "Could not assign to property 'STX' for type 'Microsoft.SqlServer.Types.SqlGeometry' in assembly 'Microsoft.SqlServer.Types' because it is read only.");
 
+    /// <summary>Geography's <c>ReorientObject()</c> reverses ring orientation, which is what flips a polygon's inside and outside.</summary>
+    [TestMethod]
+    public void ReorientObject_ReversesRingOrder()
+        => AreEqual(
+            "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))",
+            Eval("geography::Parse('POLYGON((0 0,1 0,1 1,0 1,0 0))').ReorientObject().ToString()"));
+
     /// <summary>Real accepts the curved kinds; the simulator names them as unbuilt rather than rejecting them as unknown labels.</summary>
     [TestMethod]
     public void CurvedShapes_ReportUnmodeled()

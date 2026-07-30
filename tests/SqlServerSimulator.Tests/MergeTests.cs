@@ -563,4 +563,96 @@ public sealed class MergeTests
             using @nosuch as s on s.id = t.id
             when matched then update set v = 1;
             """, 1087);
+
+    /// <summary>
+    /// A subquery inside the ON predicate correlates to the MERGE's own source
+    /// and target, which is what the two-sided outer type resolver exists for.
+    /// Probe-confirmed against SQL Server 2025 (2026-07-30).
+    /// </summary>
+    [TestMethod]
+    public void OnPredicate_CorrelatedSubquery_BindsMergeColumns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(MergeCorrelationSetup);
+        _ = sim.ExecuteNonQuery("""
+            merge tgt as t using src as s on t.id = s.id and exists (select 1 from lookup u where u.v = s.val)
+            when matched then update set t.x = s.val;
+            """);
+        Assert.AreEqual(100, sim.ExecuteScalar("select x from tgt where id = 1"));
+        Assert.AreEqual(20, sim.ExecuteScalar("select x from tgt where id = 2"));
+    }
+
+    /// <inheritdoc cref="OnPredicate_CorrelatedSubquery_BindsMergeColumns"/>
+    [TestMethod]
+    public void WhenClause_CorrelatedSubquery_BindsMergeColumns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(MergeCorrelationSetup);
+        _ = sim.ExecuteNonQuery("""
+            merge tgt as t using src as s on t.id = s.id
+            when matched and exists (select 1 from lookup u where u.v = s.val) then update set t.x = s.val
+            when not matched by target then insert (id, x) values (s.id, s.val);
+            """);
+        Assert.AreEqual(100, sim.ExecuteScalar("select x from tgt where id = 1"));
+        Assert.AreEqual(20, sim.ExecuteScalar("select x from tgt where id = 2"));
+        Assert.AreEqual(300, sim.ExecuteScalar("select x from tgt where id = 3"));
+    }
+
+    /// <inheritdoc cref="OnPredicate_CorrelatedSubquery_BindsMergeColumns"/>
+    [TestMethod]
+    public void UpdateSet_ScalarSubquery_BindsMergeColumns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(MergeCorrelationSetup);
+        _ = sim.ExecuteNonQuery("""
+            merge tgt as t using src as s on t.id = s.id
+            when matched then update set t.x = (select max(u.v) from lookup u where u.v >= s.val);
+            """);
+        Assert.AreEqual(100, sim.ExecuteScalar("select x from tgt where id = 1"));
+        Assert.AreEqual(DBNull.Value, sim.ExecuteScalar("select x from tgt where id = 2"));
+    }
+
+    /// <summary>
+    /// A subquery whose own projection is an outer MERGE column forces the
+    /// column's <i>static</i> type to resolve through the two-sided outer
+    /// resolver, where the predicate cases above only need its runtime value.
+    /// Probe-confirmed against SQL Server 2025 (2026-07-30) — note real
+    /// compiles a batch against the tables that existed before it, so the
+    /// setup has to run as its own batch to reproduce.
+    /// </summary>
+    [TestMethod]
+    public void Subquery_ProjectingOuterColumn_ResolvesStaticType()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(MergeCorrelationSetup);
+        _ = sim.ExecuteNonQuery("""
+            merge tgt as t using src as s on t.id = s.id
+            when matched then update set t.x = (select top 1 s.val from lookup u);
+            """);
+        Assert.AreEqual(100, sim.ExecuteScalar("select x from tgt where id = 1"));
+        Assert.AreEqual(200, sim.ExecuteScalar("select x from tgt where id = 2"));
+    }
+
+    /// <inheritdoc cref="Subquery_ProjectingOuterColumn_ResolvesStaticType"/>
+    [TestMethod]
+    public void Subquery_ProjectingOuterTargetColumn_ResolvesStaticType()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(MergeCorrelationSetup);
+        _ = sim.ExecuteNonQuery("""
+            merge tgt as t using src as s on t.id = (select top 1 s.id from lookup u)
+            when matched then update set t.x = (select top 1 val from lookup u);
+            """);
+        Assert.AreEqual(100, sim.ExecuteScalar("select x from tgt where id = 1"));
+        Assert.AreEqual(200, sim.ExecuteScalar("select x from tgt where id = 2"));
+    }
+
+    private const string MergeCorrelationSetup = """
+        create table tgt (id int primary key, x int);
+        create table src (id int, val int);
+        create table lookup (v int);
+        insert tgt values (1, 10), (2, 20);
+        insert src values (1, 100), (2, 200), (3, 300);
+        insert lookup values (100);
+        """;
 }
