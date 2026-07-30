@@ -259,6 +259,165 @@ public sealed class TriggerTests
         AssertMsg334(connection, "if 1 = 0 insert t_target output inserted.id values (3, 30)");
     }
 
+    // === sp_settriggerorder ===
+
+    private static DbConnection SeededWithThreeTriggers()
+    {
+        var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table t_target (id int primary key, v int);
+            create table fire_log (seq int identity(1,1), who varchar(10));
+            """).ExecuteNonQuery();
+        foreach (var name in new[] { "a", "b", "c" })
+            _ = connection.CreateCommand($"create trigger tr_{name} on t_target after insert as insert fire_log(who) values ('{name}')").ExecuteNonQuery();
+        return connection;
+    }
+
+    private static string FiringOrder(DbConnection connection)
+    {
+        _ = connection.CreateCommand("delete fire_log").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t_target values (1, 10)").ExecuteNonQuery();
+        _ = connection.CreateCommand("delete t_target").ExecuteNonQuery();
+        return (string)connection.CreateCommand("select string_agg(who, '') within group (order by seq) from fire_log").ExecuteScalar()!;
+    }
+
+    /// <summary>
+    /// First runs first and Last runs last. Only those two positions are
+    /// asserted — the middle is unordered on real too, without further
+    /// sp_settriggerorder calls.
+    /// </summary>
+    [TestMethod]
+    public void SetTriggerOrder_PinsFirstAndLast()
+    {
+        using var connection = SeededWithThreeTriggers();
+        _ = connection.CreateCommand("exec sp_settriggerorder @triggername='tr_c', @order='First', @stmttype='INSERT'").ExecuteNonQuery();
+        _ = connection.CreateCommand("exec sp_settriggerorder @triggername='tr_a', @order='Last', @stmttype='INSERT'").ExecuteNonQuery();
+        var order = FiringOrder(connection);
+        StartsWith("c", order);
+        EndsWith("a", order);
+        AreEqual(3, order.Length);
+    }
+
+    /// <summary>The OBJECTPROPERTY read-backs are how the setting is observed.</summary>
+    [TestMethod]
+    public void SetTriggerOrder_SurfacesThroughObjectProperty()
+    {
+        using var connection = SeededWithThreeTriggers();
+        _ = connection.CreateCommand("exec sp_settriggerorder @triggername='tr_c', @order='First', @stmttype='INSERT'").ExecuteNonQuery();
+        object? Prop(string trigger, string property) =>
+            connection.CreateCommand($"select objectproperty(object_id('{trigger}'), '{property}')").ExecuteScalar();
+        AreEqual(1, Prop("tr_c", "ExecIsFirstInsertTrigger"));
+        AreEqual(0, Prop("tr_c", "ExecIsLastInsertTrigger"));
+        AreEqual(0, Prop("tr_b", "ExecIsFirstInsertTrigger"));
+        // Ordering is per action: pinning INSERT leaves UPDATE alone.
+        AreEqual(0, Prop("tr_c", "ExecIsFirstUpdateTrigger"));
+        // NULL for anything that isn't a trigger.
+        AreEqual(DBNull.Value, Prop("t_target", "ExecIsFirstInsertTrigger"));
+    }
+
+    [TestMethod]
+    public void SetTriggerOrder_NoneClearsTheSlot()
+    {
+        using var connection = SeededWithThreeTriggers();
+        _ = connection.CreateCommand("exec sp_settriggerorder @triggername='tr_c', @order='First', @stmttype='INSERT'").ExecuteNonQuery();
+        _ = connection.CreateCommand("exec sp_settriggerorder @triggername='tr_c', @order='None', @stmttype='INSERT'").ExecuteNonQuery();
+        AreEqual(0, connection.CreateCommand("select objectproperty(object_id('tr_c'), 'ExecIsFirstInsertTrigger')").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A second claimant for an occupied slot is refused; re-pinning the
+    /// trigger that already holds it is not a conflict.
+    /// </summary>
+    [TestMethod]
+    public void SetTriggerOrder_DuplicateSlot_RaisesMsg15130()
+    {
+        using var connection = SeededWithThreeTriggers();
+        _ = connection.CreateCommand("exec sp_settriggerorder @triggername='tr_c', @order='First', @stmttype='INSERT'").ExecuteNonQuery();
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand("exec sp_settriggerorder @triggername='tr_b', @order='First', @stmttype='INSERT'").ExecuteNonQuery());
+        AreEqual(15130, ex.Number);
+        AreEqual("There already exists a 'First' trigger for 'INSERT'.", ex.Message);
+        // The incumbent may be re-pinned.
+        _ = connection.CreateCommand("exec sp_settriggerorder @triggername='tr_c', @order='First', @stmttype='INSERT'").ExecuteNonQuery();
+    }
+
+    /// <summary>Msg 15130 echoes both words as the caller wrote them.</summary>
+    [TestMethod]
+    public void SetTriggerOrder_Msg15130_EchoesCallerCasing()
+    {
+        using var connection = SeededWithThreeTriggers();
+        _ = connection.CreateCommand("exec sp_settriggerorder @triggername='tr_c', @order='last', @stmttype='insert'").ExecuteNonQuery();
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand("exec sp_settriggerorder @triggername='tr_b', @order='last', @stmttype='insert'").ExecuteNonQuery());
+        AreEqual("There already exists a 'last' trigger for 'insert'.", ex.Message);
+    }
+
+    /// <summary>Msg 15125, by contrast, lowercases the action.</summary>
+    [TestMethod]
+    public void SetTriggerOrder_ActionTheTriggerLacks_RaisesMsg15125()
+    {
+        using var connection = SeededWithThreeTriggers();
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand("exec sp_settriggerorder @triggername='tr_a', @order='First', @stmttype='UPDATE'").ExecuteNonQuery());
+        AreEqual(15125, ex.Number);
+        AreEqual("Trigger 'tr_a' is not a trigger for 'update'.", ex.Message);
+    }
+
+    [TestMethod]
+    public void SetTriggerOrder_InsteadOfTrigger_RaisesMsg15133()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (id int primary key)").ExecuteNonQuery();
+        _ = connection.CreateCommand("create trigger tr_io on t instead of update as set nocount on").ExecuteNonQuery();
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand("exec sp_settriggerorder @triggername='tr_io', @order='First', @stmttype='UPDATE'").ExecuteNonQuery());
+        AreEqual(15133, ex.Number);
+        AreEqual("INSTEAD OF trigger 'tr_io' cannot be associated with an order.", ex.Message);
+    }
+
+    [TestMethod]
+    public void SetTriggerOrder_UnknownTrigger_RaisesMsg15165()
+    {
+        using var connection = SeededWithThreeTriggers();
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand("exec sp_settriggerorder @triggername='dbo.nope', @order='First', @stmttype='INSERT'").ExecuteNonQuery());
+        AreEqual(15165, ex.Number);
+        AreEqual("Could not find object 'dbo.nope' or you do not have permission.", ex.Message);
+    }
+
+    [TestMethod]
+    [DataRow("@order='Middle', @stmttype='INSERT'")]
+    [DataRow("@order='First', @stmttype='MERGE'")]
+    public void SetTriggerOrder_InvalidArgument_RaisesMsg15600(string args)
+    {
+        using var connection = SeededWithThreeTriggers();
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand($"exec sp_settriggerorder @triggername='tr_a', {args}").ExecuteNonQuery());
+        AreEqual(15600, ex.Number);
+        AreEqual("An invalid parameter or option was specified for procedure 'sys.sp_settriggerorder'.", ex.Message);
+    }
+
+    /// <summary>Positional, schema-qualified and lowercase forms all bind.</summary>
+    [TestMethod]
+    public void SetTriggerOrder_AcceptsPositionalQualifiedAndLowercaseForms()
+    {
+        using var connection = SeededWithThreeTriggers();
+        _ = connection.CreateCommand("exec sp_settriggerorder 'dbo.tr_a', 'First', 'INSERT'").ExecuteNonQuery();
+        AreEqual(1, connection.CreateCommand("select objectproperty(object_id('tr_a'), 'ExecIsFirstInsertTrigger')").ExecuteScalar());
+        _ = connection.CreateCommand("exec sp_settriggerorder @triggername='tr_a', @order='none', @stmttype='insert', @namespace=NULL").ExecuteNonQuery();
+        AreEqual(0, connection.CreateCommand("select objectproperty(object_id('tr_a'), 'ExecIsFirstInsertTrigger')").ExecuteScalar());
+    }
+
+    /// <summary>ALTER TRIGGER replaces the object, so the order goes with it.</summary>
+    [TestMethod]
+    public void AlterTrigger_ResetsTheOrder()
+    {
+        using var connection = SeededWithThreeTriggers();
+        _ = connection.CreateCommand("exec sp_settriggerorder @triggername='tr_a', @order='Last', @stmttype='INSERT'").ExecuteNonQuery();
+        _ = connection.CreateCommand("alter trigger tr_a on t_target after insert as insert fire_log(who) values ('a')").ExecuteNonQuery();
+        AreEqual(0, connection.CreateCommand("select objectproperty(object_id('tr_a'), 'ExecIsLastInsertTrigger')").ExecuteScalar());
+    }
+
     // === AFTER INSERT ===
 
     [TestMethod]

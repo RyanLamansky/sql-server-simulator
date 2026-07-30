@@ -443,6 +443,53 @@ partial class SimulatedSqlException
         new($"An invalid parameter or option was specified for procedure '{procLabel}'.", 15600, 15, 1);
 
     /// <summary>
+    /// Msg 15600 for <c>sp_settriggerorder</c> — an <c>@order</c> outside
+    /// First / Last / None, or an <c>@stmttype</c> outside INSERT / UPDATE /
+    /// DELETE. Shares the wording every system-procedure parameter miss uses.
+    /// </summary>
+    internal static SimulatedSqlException InvalidTriggerOrderParameter() =>
+        new("An invalid parameter or option was specified for procedure 'sys.sp_settriggerorder'.", 15600, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15165: <c>sp_settriggerorder</c> named an
+    /// object that doesn't resolve. Real folds "missing" and "no permission"
+    /// into one message so the two are indistinguishable to the caller.
+    /// Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException CouldNotFindObjectOrNoPermission(string name) =>
+        new($"Could not find object '{name}' or you do not have permission.", 15165, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15125: the trigger named doesn't handle the
+    /// requested statement type. The action is **lowercased** in the message
+    /// whatever case the caller passed — unlike Msg 15130, which echoes both
+    /// words verbatim (probe-confirmed against SQL Server 2025).
+    /// </summary>
+#pragma warning disable CA1308 // Real lowercases this action; the message text is the contract.
+    internal static SimulatedSqlException TriggerIsNotATriggerForAction(string triggerName, string action) =>
+        new($"Trigger '{triggerName}' is not a trigger for '{action.ToLowerInvariant()}'.", 15125, 16, 1);
+#pragma warning restore CA1308
+
+    /// <summary>
+    /// Mimics SQL Server error 15130: a <c>First</c> (or <c>Last</c>) trigger
+    /// is already registered for that action on the same table. Both the order
+    /// word and the statement type are echoed **as the caller wrote them**
+    /// (probe-confirmed: passing lowercase yields
+    /// <c>'first' … 'insert'</c>). Re-ordering the trigger that already holds
+    /// the slot is not a conflict.
+    /// </summary>
+    internal static SimulatedSqlException TriggerOrderAlreadyExists(string order, string statementType) =>
+        new($"There already exists a '{order}' trigger for '{statementType}'.", 15130, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15133: <c>INSTEAD OF</c> triggers have no
+    /// ordering — at most one exists per action, so First / Last are
+    /// meaningless. Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException InsteadOfTriggerCannotBeOrdered(string triggerName) =>
+        new($"INSTEAD OF trigger '{triggerName}' cannot be associated with an order.", 15133, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 15015: <c>sp_dropserver</c> referenced a
     /// linked-server name that isn't registered. Wording probe-confirmed
     /// against SQL Server 2025 — the server name appears in single quotes;

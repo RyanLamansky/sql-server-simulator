@@ -167,6 +167,24 @@ internal sealed class ObjectProperty : Expression
                 "EXECISQUOTEDIDENTON" => IsSqlModule(obj) ? 1 : null,
                 _ => null,
             },
+            // The sp_settriggerorder read-backs, split by name length: the
+            // Last… spellings are one character shorter than the First… ones.
+            // NULL for a non-trigger, matching real (probe-confirmed against a
+            // table's object_id).
+            23 => upper switch
+            {
+                "EXECISLASTDELETETRIGGER" => TriggerOrderFlag(obj, TriggerActions.Delete, first: false),
+                "EXECISLASTINSERTTRIGGER" => TriggerOrderFlag(obj, TriggerActions.Insert, first: false),
+                "EXECISLASTUPDATETRIGGER" => TriggerOrderFlag(obj, TriggerActions.Update, first: false),
+                _ => null,
+            },
+            24 => upper switch
+            {
+                "EXECISFIRSTDELETETRIGGER" => TriggerOrderFlag(obj, TriggerActions.Delete, first: true),
+                "EXECISFIRSTINSERTTRIGGER" => TriggerOrderFlag(obj, TriggerActions.Insert, first: true),
+                "EXECISFIRSTUPDATETRIGGER" => TriggerOrderFlag(obj, TriggerActions.Update, first: true),
+                _ => null,
+            },
             _ => null,
         };
     }
@@ -177,6 +195,16 @@ internal sealed class ObjectProperty : Expression
     /// and the function family. Module-scoped OBJECTPROPERTY names return
     /// NULL for everything else.
     /// </summary>
+    /// <summary>
+    /// 1 / 0 when <paramref name="obj"/> is a trigger holding (or not holding)
+    /// the requested ordering slot for <paramref name="action"/>; NULL for
+    /// anything that isn't a trigger.
+    /// </summary>
+    private static int? TriggerOrderFlag(object? obj, TriggerActions action, bool first) =>
+        obj is not Trigger trigger
+            ? null
+            : ((first ? trigger.FirstForActions : trigger.LastForActions) & action) != 0 ? 1 : 0;
+
     private static bool IsSqlModule(SchemaObject obj) =>
         obj is Procedure or View or Trigger or ScalarFunction or InlineTableValuedFunction or MultiStatementTableValuedFunction;
 

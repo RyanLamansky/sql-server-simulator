@@ -71,11 +71,30 @@ partial class Simulation
         if (matching.Count == 0)
             return;
 
+        // sp_settriggerorder pins at most one trigger to each end for this
+        // action; everything else keeps the dictionary's own order, which is
+        // as unspecified here as it is on real.
+        if (matching.Count > 1)
+        {
+            matching.Sort((x, y) => TriggerOrderRank(x, action).CompareTo(TriggerOrderRank(y, action)));
+        }
+
         var insertedPseudo = MaterializePseudoTable(targetTable.Columns, "inserted", insertedRows ?? [], outerBatch);
         var deletedPseudo = MaterializePseudoTable(targetTable.Columns, "deleted", deletedRows ?? [], outerBatch);
         var mask = BuildColumnsUpdatedMask(targetTable, targetTable.Columns.Length, action, updatedColumnOrdinals);
         RunTriggerBodies(outerBatch, matching, insertedPseudo, deletedPseudo, affectedRowCount, mask);
     }
+
+    /// <summary>
+    /// Sort rank for a firing action: <c>-1</c> for the trigger pinned first,
+    /// <c>1</c> for the one pinned last, <c>0</c> otherwise. <c>List.Sort</c>
+    /// is unstable, but only the two pinned ends carry a meaningful position —
+    /// the middle is unordered on real too.
+    /// </summary>
+    private static int TriggerOrderRank(Trigger trigger, TriggerActions action) =>
+        (trigger.FirstForActions & action) != 0 ? -1
+        : (trigger.LastForActions & action) != 0 ? 1
+        : 0;
 
     /// <summary>
     /// Builds the <c>COLUMNS_UPDATED()</c> bitmask for one trigger fire.

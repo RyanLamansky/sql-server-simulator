@@ -48,6 +48,9 @@ internal static partial class BuiltInResources
         // (Alembic's rename_table / alter_column, SSMS) emit it. Mutates
         // catalog state and surfaces the sev-10 "Caution" info message.
         "sp_rename",
+        // sp_settriggerorder: pins a trigger first / last among the AFTER
+        // triggers an action runs; see docs/claude/triggers.md.
+        "sp_settriggerorder",
         // xp_msver returns a version/host-info table (SSMS calls it on connect);
         // xp_qv is the AlwaysOn-availability probe; xp_instance_regread reads
         // instance registry defaults.

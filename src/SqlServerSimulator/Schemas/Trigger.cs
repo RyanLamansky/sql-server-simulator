@@ -124,6 +124,21 @@ internal sealed class Trigger(
     public bool IsDisabled;
 
     /// <summary>
+    /// Actions this trigger was made the <c>First</c> trigger for via
+    /// <c>sp_settriggerorder</c>, and likewise <see cref="LastForActions"/>.
+    /// Ordering is per action and independent — making a multi-action trigger
+    /// first for INSERT leaves its UPDATE position alone — and at most one
+    /// trigger per table may hold each slot for each action (Msg 15130).
+    /// <c>ALTER TRIGGER</c> clears both, matching real (probe-confirmed).
+    /// Surfaces through <c>OBJECTPROPERTY(id, 'ExecIsFirstInsertTrigger')</c>
+    /// and its five siblings.
+    /// </summary>
+    public TriggerActions FirstForActions;
+
+    /// <summary>See <see cref="FirstForActions"/>.</summary>
+    public TriggerActions LastForActions;
+
+    /// <summary>
     /// The trigger's <c>WITH EXECUTE AS { CALLER | SELF | OWNER | 'user' }</c>
     /// clause, or <see langword="null"/> for the default (CALLER). Captured at
     /// CREATE TRIGGER time and pushed/popped as an impersonation frame around

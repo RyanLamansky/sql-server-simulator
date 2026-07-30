@@ -31,8 +31,8 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) ship at the parse
 - **INSERTED / DELETED pseudo-tables** — bare 1-part names resolve through the new `TriggerFrame.Inserted` / `TriggerFrame.Deleted` slots ahead of the schema / temp-table dispatch.
   Both pseudo-tables are always materialized (matching real SQL Server): an INSERT trigger sees an empty `deleted`, a DELETE trigger sees an empty `inserted`, an UPDATE trigger sees both populated.
   Pseudo-tables are `HeapTable` instances flagged `IsTableVariable` so writes don't touch the regular transaction undo log; columns are shared by reference from the parent table (for table parents) or the view's `OutputColumns` (for view parents).
-- **Multiple triggers per table** — every enabled AFTER trigger matching the firing action runs.
-  Relative order follows the per-schema dictionary's enumeration, which is **not** guaranteed to be creation order and isn't asserted anywhere; SQL Server leaves multi-trigger order unspecified too, without `sp_settriggerorder` (not modeled).
+- **Multiple triggers per table** — every enabled AFTER trigger matching the firing action runs, ordered by `sp_settriggerorder` at the two ends (see [Firing order](#firing-order)).
+  Unpinned triggers follow the per-schema dictionary's enumeration, which is **not** guaranteed to be creation order and isn't asserted anywhere; SQL Server leaves the middle unspecified too.
   At most one INSTEAD OF per action per target.
 - **TRIGGER_NESTLEVEL()** — no-arg form only; returns the current trigger nesting depth (0 outside any trigger, 1 at top-level DML's first trigger fire, 2+ when nested).
   One-arg form (filter by trigger object id) deferred.
@@ -88,6 +88,33 @@ Probe-confirmed rules, two of which the message text doesn't say:
 Every one of them tests the same `OutputProjection.HasTarget`, so `OUTPUT … INTO` is the escape on all four — including MERGE, which only gained it when the projections converged (see [`dml.md`](dml.md)).
 
 This is the rule behind EF Core's `HasTrigger` annotation: declaring a trigger makes EF abandon its `OUTPUT INSERTED` emit shape, because that shape is illegal against a triggered table.
+
+## Firing order
+
+`sp_settriggerorder @triggername, @order, @stmttype [, @namespace]` pins a trigger to the front or back of the AFTER triggers a given action runs on its table.
+Named and positional argument forms both bind, `@order` / `@stmttype` are case-insensitive, and the name may be bare or schema-qualified.
+`@namespace` (DATABASE / SERVER scope, for DDL triggers) is accepted and ignored — those don't fire yet.
+
+Only the two ends are ordered: `First` runs first, `Last` runs last, and everything between keeps the dictionary's arbitrary order, which real leaves unspecified as well.
+Ordering is **per action** and independent — pinning a multi-action trigger first for INSERT leaves its UPDATE position alone — and `@order = 'None'` clears both slots for that action.
+`ALTER TRIGGER` replaces the object and so resets its order (probe-confirmed).
+
+State lives on `Trigger.FirstForActions` / `LastForActions`; `Simulation.TriggerOrderRank` turns it into the sort `FireTriggers` applies.
+
+**Read-back** is `OBJECTPROPERTY(id, 'ExecIsFirstInsertTrigger')` and its five siblings (`Last`, and the `Update` / `Delete` actions) — 1 / 0 for a trigger, NULL for anything else.
+Note the `Last…` spellings are one character shorter than the `First…` ones, which matters because the property dispatch switches on name length.
+
+Rejections, all probe-confirmed against SQL Server 2025:
+
+| Situation | Error |
+| --- | --- |
+| Slot already held by a *different* trigger | **Msg 15130** — `There already exists a 'First' trigger for 'INSERT'.`, echoing **both words as the caller wrote them** |
+| Trigger doesn't handle that action | **Msg 15125** — `Trigger 'tr_a' is not a trigger for 'update'.`, **lowercasing** the action |
+| INSTEAD OF trigger | **Msg 15133** — at most one exists per action, so ordering is meaningless |
+| Name doesn't resolve | **Msg 15165** — folds "missing" and "no permission" into one message |
+| `@order` / `@stmttype` outside the accepted set | **Msg 15600** |
+
+Re-pinning the trigger that already holds a slot is not a conflict.
 
 ## Trigger-body result sets
 
@@ -189,7 +216,6 @@ Event types parse as bare identifiers and store verbatim in `DdlTrigger.EventTyp
 - **`is_nested_triggers_on = OFF`** — cross-table cascading triggers always fire (depth-limited only by `MaxNestingLevel`).
 - **`@@NESTLEVEL` independence** — the simulator collapses UDF / procedure / trigger depth into a single counter (`SimulatedDbConnection.NestingLevel`).
   `TRIGGER_NESTLEVEL()` reads its own dedicated `TriggerNestLevel` counter, so it's accurate, but `@@NESTLEVEL` (not modeled at all) wouldn't have the right value if added.
-- **`sp_settriggerorder`** — not modeled; firing order is whatever the per-schema dictionary enumerates rather than user-controllable.
 
 ## EF Core reach
 

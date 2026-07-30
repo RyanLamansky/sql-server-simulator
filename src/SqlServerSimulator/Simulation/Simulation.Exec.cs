@@ -140,6 +140,7 @@ partial class Simulation
             "sp_pkeys" => InvokeSpPkeys(batch),
             "sp_releaseapplock" => InvokeSpReleaseAppLock(batch, returnCodeVar),
             "sp_rename" => InvokeSpRename(batch),
+            "sp_settriggerorder" => InvokeSpSetTriggerOrder(batch),
             "sp_set_session_context" => InvokeSpSetSessionContext(batch),
             "sp_statistics_100" => InvokeSpStatistics100(batch),
             "sp_stored_procedures" => InvokeSpStoredProcedures(batch),

@@ -41,8 +41,8 @@ The subsections that follow carry the areas with work in flight.
 - **Spatial method evaluation** — the OGC pipeline (`.STDistance` / `.STIntersects` / `.STArea` / …), WKT/WKB parse validation, SRID tracking and transformation, `sys.spatial_reference_systems` seed rows, `ALTER SPATIAL INDEX`; storage, byte-identical CAST/wire encoding, and the index DDL ship → [`spatial.md`](spatial.md#known-gaps).
 - **XML mutation and XQuery beyond the path subset** — `.modify()` XML-DML plus its `UPDATE … SET` integration, FLWOR / comparison / boolean / arithmetic operators, value predicates, constructors, XSD validation against `xml(collection)` bindings, `ALTER XML SCHEMA COLLECTION ADD` → [`xml.md`](xml.md#known-gaps).
 - **DDL trigger firing** — `CREATE TRIGGER … ON DATABASE` parses, stores, and projects into `sys.triggers` / `sys.trigger_events` / `sys.trigger_event_types`, but no DDL event dispatches to it, so no body ever runs → [`triggers.md`](triggers.md).
-- **Trigger-body ordering and nesting options** — `sp_settriggerorder` firing order, `RECURSIVE_TRIGGERS ON`, and `is_nested_triggers_on = OFF`.
-  The `UPDATE()` / `COLUMNS_UPDATED()` intrinsics and trigger-body result sets ship → [`triggers.md`](triggers.md#trigger-body-result-sets).
+- **Trigger nesting options** — `RECURSIVE_TRIGGERS ON` and `is_nested_triggers_on = OFF`.
+  The `UPDATE()` / `COLUMNS_UPDATED()` intrinsics, trigger-body result sets, and `sp_settriggerorder` firing order all ship → [`triggers.md`](triggers.md#firing-order).
 - **`EXEC … WITH RESULT SETS`** — the result-set-override option falls through to a syntax error; the `INSERT … EXEC` it is usually paired with ships → [`programmable.md`](programmable.md), [`dml.md`](dml.md#insert--exec).
 - **Multi-source cursors** — a cursor over a JOIN / derived table / view is forced STATIC where real is DYNAMIC, costing mid-loop change visibility, `@@CURSOR_ROWS = -1`, and positioned DML; it needs per-source row identity carried through the join driver plus live re-execution → [`cursors.md`](cursors.md).
 - **Temporal query forms and retention** — `FOR SYSTEM_TIME BETWEEN … AND …` / `FROM … TO …` / `CONTAINED IN (…)`, `HISTORY_RETENTION_PERIOD` pruning, auto-named history tables, and base-vs-history column-shape validation at `SET (SYSTEM_VERSIONING = ON)` → [`temporal-tables.md`](temporal-tables.md#not-modeled).
@@ -51,6 +51,13 @@ The subsections that follow carry the areas with work in flight.
 - **Column grants on views aren't honored** — `GRANT SELECT (col) ON <view>` is accepted and then denies the *granted* column too (Msg 229 at object level), where real allows it; column-level SELECT / UPDATE / REFERENCES on **tables** ship → [`permissions.md`](permissions.md#known-gaps).
 - **`GRANT … ON SERVER` / `ON LOGIN::` securables and application roles** — server-scope permission *names* and server roles ship → [`permissions.md`](permissions.md#known-gaps).
 - **Multi-statement plan caching** — the cache keys single-SELECT batches, so every SaveChanges INSERT-then-`SELECT SCOPE_IDENTITY()` round trip re-parses → [`plan-cache.md`](plan-cache.md).
+  **Measured 2026-07-30 before building, and the headroom is smaller than this entry used to imply.** Against a 200-row table, one process per case, 20k warm + best of 5×20k: a cache **hit** costs 14.4 µs/op, the same SELECT forced to always miss costs 26.8, and `SET NOCOUNT ON; SELECT` — never cached — costs 20.1.
+  So the cache is worth ~46% where it applies, but the ceiling on extending it to the two-statement shape is ~5.7 µs/op (~28%), and collecting it means making **every** statement kind produce a replayable plan: batches are parsed-and-executed statement by statement, and `Selection` is the only reusable plan object today.
+  Worth re-scoping rather than building as stated.
+  **A token-stream cache was considered and measured out** (2026-07-30): tokenizing the shapes costs 1.27 µs for the lone SELECT (12 tokens), 1.62 µs for `SET NOCOUNT ON; SELECT` (16), and 2.08 µs for EF's three-statement SaveChanges batch (34) — roughly **10% of the ~12.4 µs parse cost** and ~5-8% of the whole operation.
+  The remaining 90% is the parser proper (expression trees, name resolution, schema binding, projection planning), so caching tokens recovers almost nothing and only caching *parsed plans* addresses the real cost.
+  Don't re-pitch the token cache without new evidence.
+  **Benchmark note**: naive in-process A/B here is worthless — measuring the cases in one process made results order-dependent by up to 2× (whichever case ran first absorbed tiered-JIT warmup; "fixed text" read 28.3 µs first and 14.5 µs last). One case per process is the only shape that reproduced.
 
 ### TDS network endpoint — follow-up phases
 
