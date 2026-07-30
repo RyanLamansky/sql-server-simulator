@@ -1053,7 +1053,7 @@ internal static partial class BuiltInResources
                         continue;
                     var columnIds = identity.Constraint is { } key
                         ? ResolveConstraintColumnIds(key, table)
-                        : IndexKeyColumnIds(identity.Index!);
+                        : IndexKeyColumnIds(identity.Index!, table);
                     foreach (var row in EmitStatsColumns(tableObjectId, SqlValue.FromInt32(identity.IndexId), columnIds))
                         yield return row;
                 }
@@ -1067,7 +1067,7 @@ internal static partial class BuiltInResources
                 var viewObjectId = SqlValue.FromInt32(view.ObjectId);
                 foreach (var identity in view.IndexIdentities())
                 {
-                    foreach (var row in EmitStatsColumns(viewObjectId, SqlValue.FromInt32(identity.IndexId), IndexKeyColumnIds(identity.Index!)))
+                    foreach (var row in EmitStatsColumns(viewObjectId, SqlValue.FromInt32(identity.IndexId), IndexKeyColumnIds(identity.Index!, table: null)))
                         yield return row;
                 }
             }
@@ -1076,8 +1076,8 @@ internal static partial class BuiltInResources
         static int[] ResolveConstraintColumnIds(KeyConstraint key, HeapTable table) =>
             [.. key.StorageOrdinals.Select(o => StorageOrdinalToColumnId(table, o))];
 
-        static int[] IndexKeyColumnIds(Storage.Index index) =>
-            [.. index.KeyColumns.Select(static c => c.ColumnOrdinal + 1)];
+        static int[] IndexKeyColumnIds(Storage.Index index, HeapTable? table) =>
+            [.. index.KeyColumns.Select(c => FullOrdinalToColumnId(table, c.ColumnOrdinal))];
     }
 
     /// <summary>
@@ -1135,7 +1135,7 @@ internal static partial class BuiltInResources
                     }
                     else
                     {
-                        foreach (var row in IndexColumnRows(tableObjectId, indexIdValue, identity.Index!))
+                        foreach (var row in IndexColumnRows(tableObjectId, indexIdValue, identity.Index!, table))
                             yield return row;
                     }
                 }
@@ -1149,7 +1149,7 @@ internal static partial class BuiltInResources
                         tableObjectId,
                         SqlValue.FromInt32(xmlIndex.ObjectId),
                         SqlValue.FromInt32(1),
-                        SqlValue.FromInt32(xmlIndex.ColumnOrdinal + 1),
+                        SqlValue.FromInt32(FullOrdinalToColumnId(table, xmlIndex.ColumnOrdinal)),
                         zeroByte,
                         zeroByte,
                         falseBit,
@@ -1170,13 +1170,13 @@ internal static partial class BuiltInResources
                 var viewObjectId = SqlValue.FromInt32(view.ObjectId);
                 foreach (var identity in view.IndexIdentities())
                 {
-                    foreach (var row in IndexColumnRows(viewObjectId, SqlValue.FromInt32(identity.IndexId), identity.Index!))
+                    foreach (var row in IndexColumnRows(viewObjectId, SqlValue.FromInt32(identity.IndexId), identity.Index!, table: null))
                         yield return row;
                 }
             }
         }
 
-        IEnumerable<SqlValue[]> IndexColumnRows(SqlValue objectId, SqlValue indexIdValue, Storage.Index index)
+        IEnumerable<SqlValue[]> IndexColumnRows(SqlValue objectId, SqlValue indexIdValue, Storage.Index index, HeapTable? table)
         {
             for (var i = 0; i < index.KeyColumns.Length; i++)
             {
@@ -1185,7 +1185,7 @@ internal static partial class BuiltInResources
                     objectId,
                     indexIdValue,
                     SqlValue.FromInt32(i + 1),
-                    SqlValue.FromInt32(keyCol.ColumnOrdinal + 1),
+                    SqlValue.FromInt32(FullOrdinalToColumnId(table, keyCol.ColumnOrdinal)),
                     SqlValue.FromByte((byte)(i + 1)),
                     zeroByte,
                     keyCol.IsDescending ? trueBit : falseBit,
@@ -1200,7 +1200,7 @@ internal static partial class BuiltInResources
                     objectId,
                     indexIdValue,
                     SqlValue.FromInt32(index.KeyColumns.Length + i + 1),
-                    SqlValue.FromInt32(index.IncludedColumnOrdinals[i] + 1),
+                    SqlValue.FromInt32(FullOrdinalToColumnId(table, index.IncludedColumnOrdinals[i])),
                     zeroByte,
                     zeroByte,
                     falseBit,
@@ -1239,19 +1239,28 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// Converts a storage ordinal back to the 1-based <c>column_id</c>
-    /// reported by <c>sys.columns</c>. The simulator's column_id is the
-    /// 1-based full-column ordinal (matching real SQL Server), so we walk
-    /// <see cref="HeapTable.StorageOrdinals"/> looking for the full
-    /// ordinal that maps to the given storage ordinal.
+    /// Converts a storage ordinal back to the stable <c>column_id</c>
+    /// reported by <c>sys.columns</c>. Delegates to the shared authority in
+    /// <see cref="Parser.Expressions.IndexLookup"/> so the storage-ordinal →
+    /// column_id mapping has one implementation.
     /// </summary>
-    private static int StorageOrdinalToColumnId(HeapTable table, int storageOrdinal)
-    {
-        for (var i = 0; i < table.StorageOrdinals.Length; i++)
-        {
-            if (table.StorageOrdinals[i] == storageOrdinal)
-                return i + 1;
-        }
-        return storageOrdinal + 1;
-    }
+    private static int StorageOrdinalToColumnId(HeapTable table, int storageOrdinal) =>
+        Parser.Expressions.IndexLookup.StorageOrdinalToColumnId(table, storageOrdinal);
+
+    /// <summary>
+    /// Maps a full-column ordinal (a position in <see cref="HeapTable.Columns"/>,
+    /// which is what <see cref="Storage.IndexKeyColumn.ColumnOrdinal"/> and
+    /// <see cref="Storage.Index.IncludedColumnOrdinals"/> carry) to the stable
+    /// <c>column_id</c> the catalog reports. The two diverge only after
+    /// <c>ALTER TABLE DROP COLUMN</c>, which shifts positions and leaves ids
+    /// alone.
+    /// <paramref name="table"/> is <c>null</c> for an indexed view's index,
+    /// whose ordinals address <c>View.OutputColumns</c> — a view's columns
+    /// can't be dropped individually, so ordinal + 1 stays correct there and
+    /// matches what <c>sys.columns</c> reports for the same view.
+    /// </summary>
+    private static int FullOrdinalToColumnId(HeapTable? table, int fullOrdinal) =>
+        table is not null && (uint)fullOrdinal < (uint)table.Columns.Length
+            ? table.Columns[fullOrdinal].ColumnId
+            : fullOrdinal + 1;
 }

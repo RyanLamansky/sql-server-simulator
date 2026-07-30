@@ -349,7 +349,7 @@ partial class Simulation
         if (positionedCursor is null)
             CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
 
-        return CommitUpdate(context, table, affected, output, sourceView);
+        return CommitUpdate(context, table, affected, output, [.. assignments.Select(a => a.Ordinal)], sourceView);
     }
 
     /// <summary>
@@ -507,7 +507,7 @@ partial class Simulation
 
         ApplyDmlTopCap(top, affected, context.Batch);
 
-        return CommitUpdate(context, table, affected, output, sourceView: null);
+        return CommitUpdate(context, table, affected, output, [.. assignments.Select(a => a.Ordinal)], sourceView: null);
     }
 
     /// <summary>
@@ -541,6 +541,7 @@ partial class Simulation
         HeapTable table,
         List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
         MutationOutputProjection? output,
+        IReadOnlyList<int> updatedColumnOrdinals,
         View? sourceView = null)
     {
         if (context.Batch.IsSkipping)
@@ -550,7 +551,14 @@ partial class Simulation
         var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Update);
 
         if (affected.Count == 0)
+        {
+            // AFTER triggers still fire when the statement matched nothing —
+            // real runs the body with empty INSERTED / DELETED and @@ROWCOUNT
+            // 0, and UPDATE(col) still reports the SET-clause columns
+            // (probe-confirmed for UPDATE / DELETE / INSERT…SELECT / MERGE).
+            FireAfterUpdateTriggers(context, table, affected, updatedColumnOrdinals);
             return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, Array.Empty<byte[]>());
+        }
 
         // SNAPSHOT isolation write-conflict: each affected row must have
         // a live version no newer than my snapshot, otherwise Msg 3960
@@ -642,11 +650,11 @@ partial class Simulation
             // OUTPUT INTO @t suppresses the result set (probe-confirmed).
             if (!output.HasTarget)
             {
-                FireAfterUpdateTriggers(context, table, affected);
+                FireAfterUpdateTriggers(context, table, affected, updatedColumnOrdinals);
                 return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
             }
         }
-        FireAfterUpdateTriggers(context, table, affected);
+        FireAfterUpdateTriggers(context, table, affected, updatedColumnOrdinals);
         return new SimulatedNonQuery(affected.Count);
     }
 
@@ -781,7 +789,8 @@ partial class Simulation
     private static void FireAfterUpdateTriggers(
         ParserContext context,
         HeapTable table,
-        List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected)
+        List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
+        IReadOnlyList<int> updatedColumnOrdinals)
     {
         if (!HasAfterTrigger(context.Batch, table, TriggerActions.Update))
             return;
@@ -795,7 +804,7 @@ partial class Simulation
         context.Connection.LastStatementRowCount = affected.Count;
         context.Batch.Connection.Simulation.FireTriggers(
             context.Batch, table, TriggerActions.Update,
-            insertedRows, deletedRows, affectedRowCount: affected.Count);
+            insertedRows, deletedRows, affectedRowCount: affected.Count, updatedColumnOrdinals);
     }
 
     /// <summary>

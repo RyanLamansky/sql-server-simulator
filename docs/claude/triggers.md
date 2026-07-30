@@ -41,6 +41,10 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) ship at the parse
 - **Trigger-error rollback** — a body-side `THROW` (or any uncaught exception) propagates up.
   For AFTER triggers, the firing DML's statement-atomic undo log walks back, reverting the heap insert/update/delete.
   For INSTEAD OF, the heap was never written, so propagation simply surfaces the error to the caller.
+- **The body runs inside the firing statement's atomic scope** — see [Trigger atomic scope](#trigger-atomic-scope).
+- **`UPDATE(col)` / `COLUMNS_UPDATED()`** — see [Change-detection intrinsics](#change-detection-intrinsics).
+- **AFTER triggers fire on a zero-row DML** — an UPDATE / DELETE matching nothing, an `INSERT … SELECT` producing nothing, and a MERGE with no source rows all still run the body, with empty `INSERTED` / `DELETED` and `@@ROWCOUNT` 0 (probe-confirmed for all four shapes).
+  `UPDATE(col)` still reports the SET-clause columns there, because the reading is a property of the statement rather than of the rows.
 - **Direct-recursion suppression** — matches real SQL Server's default `RECURSIVE_TRIGGERS OFF`.
   The connection's `FiringTriggerIds` set tracks in-flight trigger ObjectIds; the dispatcher skips fires whose ObjectId is already in flight.
   Trigger T can still cause trigger U to fire via cross-table DML; only same-trigger recursion is blocked.
@@ -65,6 +69,54 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) ship at the parse
   `Simulation.Update.cs` and `Simulation.Delete.cs` thread the per-target INSTEAD OF detection through their `CommitUpdate` / `CommitDelete` helpers; for view targets with INSTEAD OF, INSERTED / DELETED are projected through `View.BaseColumnOrdinals` via a `ProjectThroughView` helper.
   `Simulation.Merge.cs` detects per-action INSTEAD OF at the top of `CommitMerge` and routes each pending list (inserts, updates, deletes) independently through trigger-fire or heap-write paths.
 - **Connection state**: [`SimulatedDbConnection.FiringTriggerIds`](../../src/SqlServerSimulator/SimulatedDbConnection.cs) (recursion guard) + `TriggerNestLevel` (surfaced by `TRIGGER_NESTLEVEL()`).
+
+## Trigger atomic scope
+
+A trigger body has no atomic scope of its own.
+Real rolls back the firing statement and everything its triggers wrote as a single unit, so an audit-log INSERT in a body whose later statement throws does **not** survive — and neither does one written by a stored procedure the body called.
+
+Mechanically, `Simulation.RunMutation` gives every mutation statement an undo log and commits it on the statement's own success.
+Inside a trigger that would let each body statement commit independently, so the body instead **joins the firing statement's log**: `SimulatedDbConnection.TriggerStatementUndoLog` (paired with `TriggerStatementVersionEntries` for the MVCC side) is published by `RunTriggerBodies` for the duration of the bodies and consumed by `RunMutation`, which then skips both the commit and the version-finalize — the firing statement does those once, for the whole unit.
+The state is session-scoped rather than per-`BatchContext` precisely because it has to reach modules the body calls, each of which runs in a child batch of its own.
+A nested fire re-publishes the same log it already joined, so the save/restore nests harmlessly.
+
+Only the auto-commit path needed this: under an explicit transaction every statement already shares `SimulatedDbTransaction.UndoLog`, and the firing statement's marker covers the trigger's writes.
+That path was already correct and is locked down by `TriggerAtomicScopeTests` alongside the rest.
+
+### Msg 3616 — the body's own TRY / CATCH doesn't rescue it
+
+An error of severity **11 or higher** raised while a body runs aborts the batch and rolls the unit back *even when the body's own `TRY` / `CATCH` handled it*, surfacing:
+
+> Msg 3616, Level 16, State 1 — `An error was raised during trigger execution. The batch has been aborted and the user transaction, if any, has been rolled back.`
+
+Severity ≤ 10 is informational and leaves the unit intact (a caught `RAISERROR(…, 10, 1)` keeps both the body's writes and the firing statement's).
+An error the body leaves *un*handled propagates with its own number instead — an outer `CATCH` sees `ERROR_NUMBER()` 51000 for a body-side `THROW 51000`, with `ERROR_PROCEDURE()` naming the trigger — so Msg 3616 fires only for the swallowed case.
+An error caught inside a stored procedure the body called counts too, which is why `SimulatedDbConnection.TriggerBodyErrorRaised` is connection-scoped; it's saved and cleared per body so a handled error in one trigger doesn't condemn the next.
+
+## Change-detection intrinsics
+
+`UPDATE(column)` and `COLUMNS_UPDATED()` report **which columns the firing statement named**, not which values actually changed:
+
+| Firing action | `UPDATE(col)` | `COLUMNS_UPDATED()` |
+| --- | --- | --- |
+| INSERT (any column list) | true for every column | every bit through the watermark |
+| UPDATE | true for SET-clause columns | those columns' bits |
+| DELETE | false for every column | **zero-length** varbinary (`DATALENGTH` 0) |
+
+Probe-confirmed consequences: `UPDATE SET a = a` reports `a` updated; an UPDATE matching **no rows** still fires the trigger and still reports its SET columns; an INSERT naming one column reports every column; and a MERGE reports per branch (its INSERT branch behaves like an INSERT, its UPDATE branch like an UPDATE).
+For MERGE the mask is the union of every `WHEN MATCHED THEN UPDATE` clause's targets whether or not that clause fired — consistent with the reading being statement-static.
+
+**Bitmask layout.** Column_id *N* occupies bit `(N-1) % 8` of byte `(N-1) / 8`, least-significant bit first, over `ceil(MaxColumnIdUsed / 8)` bytes.
+The mask is keyed on the **stable `column_id`**, so a dropped column keeps its bit position and the length doesn't shrink — see [stable column ids](catalog-views.md#stable-column-ids).
+
+**Where they live.** `COLUMNS_UPDATED()` is a value expression and resolves through `ResolveBuiltIn` ([`ColumnsUpdated.cs`](../../src/SqlServerSimulator/Parser/Expressions/ColumnsUpdated.cs)); `UPDATE(col)` is a **`BooleanExpression`** ([`UpdatePredicate.cs`](../../src/SqlServerSimulator/Parser/Expressions/UpdatePredicate.cs)) dispatched from `BooleanExpression.ParseAtom`, because real raises **Msg 156** for `SELECT UPDATE(c1)` — modeling it as a bit-returning built-in would accept a shape real rejects.
+The per-fire mask rides on `TriggerFrame.ColumnsUpdatedMask`, built by `Simulation.BuildColumnsUpdatedMask` at fire time.
+
+Error paths (probe-confirmed): an unknown column raises **Msg 207**; use outside any trigger raises **Msg 140** (`"Can only use IF UPDATE within a CREATE TRIGGER statement."`); a qualified name (`UPDATE(t.c1)`) raises Msg 102 near `'.'` and the no-arg `UPDATE()` raises Msg 102 near `')'`.
+`COLUMNS_UPDATED()` is deliberately asymmetric — outside a trigger it returns **NULL** rather than raising.
+
+`UPDATE(col)` resolves its column to a `column_id` when the body parses, which for the simulator is each fire rather than at CREATE TRIGGER; real resolves at CREATE and raises Msg 207 there.
+That's the same deferred module-body validation every other trigger-body name reference has.
 
 ## DDL triggers — `CREATE TRIGGER … ON DATABASE`
 
@@ -105,13 +157,9 @@ Event types parse as bare identifiers and store verbatim in `DdlTrigger.EventTyp
 - **`is_nested_triggers_on = OFF`** — cross-table cascading triggers always fire (depth-limited only by `MaxNestingLevel`).
 - **`@@NESTLEVEL` independence** — the simulator collapses UDF / procedure / trigger depth into a single counter (`SimulatedDbConnection.NestingLevel`).
   `TRIGGER_NESTLEVEL()` reads its own dedicated `TriggerNestLevel` counter, so it's accurate, but `@@NESTLEVEL` (not modeled at all) wouldn't have the right value if added.
-- **Trigger body's DML inside the parent's atomic scope** — minor fidelity gap: when a trigger body runs multiple statements and the second one throws, the first statement's writes (e.g. into an audit log) don't roll back because the trigger body's child `BatchContext` allocates fresh per-statement undo logs rather than sharing the parent statement's log.
-  Real SQL Server rolls back the entire parent + trigger atomic unit.
-  Common idioms (single-statement triggers, body-side `THROW` before any side effects) work correctly; multi-statement bodies with mid-body throws after side effects are the gap.
 - **Trigger-body result sets** — a `SELECT` inside a trigger body emits a result set in real SQL Server (probe-confirmed).
   The simulator's trigger invocation drains and discards yielded result sets at the call site (rare pattern in apps; revisit if needed).
-- **`UPDATE()`** / `COLUMNS_UPDATED()` intrinsics — not modeled.
-  Trigger bodies that need per-column change detection have to compare INSERTED vs DELETED manually.
+  A body that needs to publish a reading has to write it to a table instead — which is what `ColumnsUpdatedTests` does.
 - **`sp_settriggerorder`** — not modeled; firing order is registration order rather than user-controllable.
 
 ## EF Core reach

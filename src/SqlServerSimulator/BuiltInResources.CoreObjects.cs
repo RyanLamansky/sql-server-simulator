@@ -128,6 +128,11 @@ internal static partial class BuiltInResources
             // emit the TEXTIMAGE_ON clause; 0 suppresses it, matching the
             // single-filegroup model.
             new("lob_data_space_id", SqlType.Int32, null, false),
+            // The high-water mark of column ids handed out for this table.
+            // Equals the column count until a DROP COLUMN, after which it
+            // stays put while the count falls — and the next added column
+            // takes watermark + 1 rather than reusing the hole.
+            new("max_column_id_used", SqlType.Int32, null, true),
             // Transactional / merge replication isn't modeled, so no table is an
             // article — is_replicated is a constant 0 (nullable in real SQL
             // Server). SMO's Table property-bag query projects tbl.is_replicated
@@ -197,9 +202,10 @@ internal static partial class BuiltInResources
                         falseTableFlag,
                         SqlValue.FromByte(0),
                         lockEscalationTable,
-                        SqlValue.Null(SqlType.Int32),
-                        SqlValue.FromInt32(0),
-                        falseTableFlag,
+                        SqlValue.Null(SqlType.Int32), // filestream_data_space_id
+                        SqlValue.FromInt32(0), // lob_data_space_id
+                        SqlValue.FromInt32(t.MaxColumnIdUsed),
+                        falseTableFlag, // is_replicated
                         falseTableFlag, // lock_on_bulk_load
                         falseTableFlag, // is_merge_published
                         falseTableFlag, // is_schema_published
@@ -466,7 +472,9 @@ internal static partial class BuiltInResources
                     yield return [
                         objectId,
                         SqlValue.FromSystemName(col.Name),
-                        SqlValue.FromInt32(i + 1),
+                        // The stable id, not the loop position: DROP COLUMN
+                        // leaves a permanent hole in the id sequence.
+                        SqlValue.FromInt32(col.ColumnId),
                         SqlValue.FromByte(col.Type.SystemTypeId),
                         SqlValue.FromInt32(col.Type.UserTypeId),
                         SqlValue.FromInt16(maxLength),

@@ -245,6 +245,10 @@ internal abstract class BooleanExpression
                 => throw new NotSupportedException(
                     $"Full-text search predicates ({predicate.Keyword.ToString().ToUpperInvariant()}) are not modeled."),
             ReservedKeyword { Keyword: Keyword.Exists } => ParseExists(context),
+            // `UPDATE(col)` is a trigger-body predicate, not a scalar — real
+            // raises Msg 156 for `SELECT UPDATE(col)`, so it binds here rather
+            // than in ResolveBuiltIn.
+            ReservedKeyword { Keyword: Keyword.Update } => Expressions.UpdatePredicate.Parse(context),
             _ => ParseComparison(Expression.Parse(context), context),
         };
     }

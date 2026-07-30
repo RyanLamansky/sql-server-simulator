@@ -146,12 +146,16 @@ partial class Simulation
         var originalKeyCount = table.KeyConstraints.Count;
         var originalCheckCount = table.CheckConstraints.Count;
         var originalFkCount = table.OutgoingForeignKeys.Count;
+        var originalMaxColumnId = table.MaxColumnIdUsed;
 
         var combined = new HeapColumn[existingCount + newColumns.Length];
         Array.Copy(table.Columns, combined, existingCount);
         Array.Copy(newColumns, 0, combined, existingCount, newColumns.Length);
         table.Columns = combined;
         table.RecomputeStorageProjections();
+        // Each added column takes the next id past the watermark, so it never
+        // reuses the id of a previously dropped column (probe-confirmed).
+        table.AssignColumnIds();
 
         try
         {
@@ -186,9 +190,11 @@ partial class Simulation
         }
         catch
         {
-            // Roll back partial schema mutation on any post-mutate failure.
+            // Roll back partial schema mutation on any post-mutate failure —
+            // including the watermark, so a failed ADD doesn't consume ids.
             table.Columns = originalColumns;
             table.RecomputeStorageProjections();
+            table.MaxColumnIdUsed = originalMaxColumnId;
             while (table.KeyConstraints.Count > originalKeyCount)
                 table.KeyConstraints.RemoveAt(table.KeyConstraints.Count - 1);
             while (table.CheckConstraints.Count > originalCheckCount)
@@ -818,6 +824,10 @@ partial class Simulation
             collation: newCollationStored)
         {
             DefaultConstraint = existingCol.DefaultConstraint,
+            // ALTER COLUMN replaces the HeapColumn instance but not the
+            // column's catalog identity — real keeps column_id across a type
+            // change (probe-confirmed), as it does across sp_rename.
+            ColumnId = existingCol.ColumnId,
         };
 
         // Validate + rewrite. Even when the encoded bytes don't change (e.g.

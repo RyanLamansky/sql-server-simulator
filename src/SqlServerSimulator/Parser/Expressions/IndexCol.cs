@@ -60,10 +60,12 @@ internal sealed class IndexCol : Expression
         if (IndexLookup.GetKeyColumn(resolved.Constraint, resolved.Index, keyId) is not { } keyCol)
             return SqlValue.Null(SqlType.SystemName);
 
-        var columnId = IndexLookup.StorageOrdinalToColumnId(table, keyCol.StorageOrdinal);
-        return columnId < 1 || columnId > table.Columns.Length
+        // INDEX_COL reports the column's *name*, so this indexes back into
+        // Columns and wants the ordinal rather than the stable column_id.
+        var fullOrdinal = IndexLookup.StorageOrdinalToFullOrdinal(table, keyCol.StorageOrdinal);
+        return (uint)fullOrdinal >= (uint)table.Columns.Length
             ? SqlValue.Null(SqlType.SystemName)
-            : SqlValue.FromSystemName(table.Columns[columnId - 1].Name);
+            : SqlValue.FromSystemName(table.Columns[fullOrdinal].Name);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;

@@ -64,17 +64,38 @@ internal static class IndexLookup
     }
 
     /// <summary>
-    /// Returns the 1-based declaration ordinal (i.e. <c>sys.columns.column_id</c>)
-    /// for the given storage ordinal on <paramref name="table"/>, or 0 if
-    /// the storage ordinal isn't found.
+    /// Returns the stable <c>sys.columns.column_id</c> for the given storage
+    /// ordinal on <paramref name="table"/>. Not the column's position in
+    /// <see cref="HeapTable.Columns"/>: <c>ALTER TABLE DROP COLUMN</c> shifts
+    /// positions and leaves ids alone, so the two diverge after a drop.
+    /// Falls back to <c>storageOrdinal + 1</c> when the storage ordinal isn't
+    /// present, which is the pre-column-id behavior for callers holding a
+    /// stale ordinal.
     /// </summary>
     public static int StorageOrdinalToColumnId(HeapTable table, int storageOrdinal)
+    {
+        var fullOrdinal = StorageOrdinalToFullOrdinal(table, storageOrdinal);
+        return (uint)fullOrdinal < (uint)table.Columns.Length
+            ? table.Columns[fullOrdinal].ColumnId
+            : storageOrdinal + 1;
+    }
+
+    /// <summary>
+    /// Returns the position in <see cref="HeapTable.Columns"/> of the column
+    /// stored at <paramref name="storageOrdinal"/>, or <c>-1</c> when the
+    /// storage ordinal isn't present. Distinct from
+    /// <see cref="StorageOrdinalToColumnId"/>: callers indexing back into
+    /// <see cref="HeapTable.Columns"/> want this, callers reporting catalog
+    /// metadata want the column_id, and the two part ways after
+    /// <c>ALTER TABLE DROP COLUMN</c>.
+    /// </summary>
+    public static int StorageOrdinalToFullOrdinal(HeapTable table, int storageOrdinal)
     {
         for (var i = 0; i < table.StorageOrdinals.Length; i++)
         {
             if (table.StorageOrdinals[i] == storageOrdinal)
-                return i + 1;
+                return i;
         }
-        return storageOrdinal + 1;
+        return -1;
     }
 }

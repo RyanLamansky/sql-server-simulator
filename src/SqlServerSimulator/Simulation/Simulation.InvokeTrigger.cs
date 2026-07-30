@@ -45,7 +45,8 @@ partial class Simulation
         TriggerActions action,
         List<SqlValue[]>? insertedRows,
         List<SqlValue[]>? deletedRows,
-        int affectedRowCount)
+        int affectedRowCount,
+        IReadOnlyList<int>? updatedColumnOrdinals = null)
     {
         // Find matching AFTER triggers across all schemas. Ordering uses
         // schema-dict insertion order — stable for a single connection's
@@ -72,7 +73,59 @@ partial class Simulation
 
         var insertedPseudo = MaterializePseudoTable(targetTable.Columns, "inserted", insertedRows ?? [], outerBatch);
         var deletedPseudo = MaterializePseudoTable(targetTable.Columns, "deleted", deletedRows ?? [], outerBatch);
-        RunTriggerBodies(outerBatch, matching, insertedPseudo, deletedPseudo, affectedRowCount);
+        var mask = BuildColumnsUpdatedMask(targetTable, targetTable.Columns.Length, action, updatedColumnOrdinals);
+        RunTriggerBodies(outerBatch, matching, insertedPseudo, deletedPseudo, affectedRowCount, mask);
+    }
+
+    /// <summary>
+    /// Builds the <c>COLUMNS_UPDATED()</c> bitmask for one trigger fire.
+    /// DELETE yields an empty array (probe-confirmed: <c>DATALENGTH</c> 0,
+    /// not a run of zero bytes); INSERT sets every bit through the table's
+    /// column-id watermark regardless of which columns the statement named,
+    /// including the bits of columns since dropped; UPDATE sets exactly the
+    /// columns <paramref name="updatedColumnOrdinals"/> names.
+    /// </summary>
+    /// <param name="table">
+    /// The trigger's parent table, or <c>null</c> when the parent is a view —
+    /// a view's columns carry no stable ids and can't be dropped individually,
+    /// so its ordinals stand in for column ids.
+    /// </param>
+    /// <param name="columnCount">Pseudo-table column count, the view-parent watermark.</param>
+    /// <param name="action">The DML action firing the trigger.</param>
+    /// <param name="updatedColumnOrdinals">
+    /// Full-column ordinals (positions in <see cref="HeapTable.Columns"/>)
+    /// assigned by the statement's SET clause. Only read for UPDATE.
+    /// </param>
+    private static byte[] BuildColumnsUpdatedMask(HeapTable? table, int columnCount, TriggerActions action, IReadOnlyList<int>? updatedColumnOrdinals)
+    {
+        if (action == TriggerActions.Delete)
+            return [];
+
+        var watermark = table?.MaxColumnIdUsed ?? columnCount;
+        var mask = new byte[(watermark + 7) / 8];
+        void Set(int columnId)
+        {
+            if (columnId >= 1 && (columnId - 1) / 8 < mask.Length)
+                mask[(columnId - 1) / 8] |= (byte)(1 << ((columnId - 1) % 8));
+        }
+
+        if (action == TriggerActions.Insert)
+        {
+            for (var id = 1; id <= watermark; id++)
+                Set(id);
+            return mask;
+        }
+
+        if (updatedColumnOrdinals is not null)
+        {
+            foreach (var ordinal in updatedColumnOrdinals)
+            {
+                if ((uint)ordinal >= (uint)(table?.Columns.Length ?? columnCount))
+                    continue;
+                Set(table is null ? ordinal + 1 : table.Columns[ordinal].ColumnId);
+            }
+        }
+        return mask;
     }
 
     /// <summary>
@@ -104,7 +157,8 @@ partial class Simulation
         HeapColumn[] pseudoColumns,
         List<SqlValue[]>? insertedRows,
         List<SqlValue[]>? deletedRows,
-        int affectedRowCount)
+        int affectedRowCount,
+        IReadOnlyList<int>? updatedColumnOrdinals = null)
     {
         Trigger? matched = null;
         foreach (var schema in outerBatch.CurrentDatabase.Schemas.Values)
@@ -125,7 +179,8 @@ partial class Simulation
 
         var insertedPseudo = MaterializePseudoTable(pseudoColumns, "inserted", insertedRows ?? [], outerBatch);
         var deletedPseudo = MaterializePseudoTable(pseudoColumns, "deleted", deletedRows ?? [], outerBatch);
-        RunTriggerBodies(outerBatch, [matched], insertedPseudo, deletedPseudo, affectedRowCount);
+        var mask = BuildColumnsUpdatedMask(parent as HeapTable, pseudoColumns.Length, action, updatedColumnOrdinals);
+        RunTriggerBodies(outerBatch, [matched], insertedPseudo, deletedPseudo, affectedRowCount, mask);
         return true;
     }
 
@@ -140,7 +195,8 @@ partial class Simulation
         List<Trigger> triggers,
         HeapTable insertedPseudo,
         HeapTable deletedPseudo,
-        int affectedRowCount)
+        int affectedRowCount,
+        byte[] columnsUpdatedMask)
     {
         var connection = outerBatch.Connection;
 
@@ -152,67 +208,93 @@ partial class Simulation
         // around the trigger fires preserves the outer caller's view.
         var outerScopeIdentity = connection.LastIdentity;
 
-        foreach (var trigger in triggers)
+        // Publish the firing statement's atomic scope for the duration of the
+        // bodies, so every mutation underneath — the body's own statements and
+        // any module it calls — joins it rather than committing independently.
+        // A nested fire re-publishes the same log it already joined, so the
+        // save/restore nests harmlessly.
+        var outerTriggerLog = connection.TriggerStatementUndoLog;
+        var outerTriggerVersionEntries = connection.TriggerStatementVersionEntries;
+        connection.TriggerStatementUndoLog = outerBatch.CurrentUndoLog;
+        connection.TriggerStatementVersionEntries = outerBatch.CurrentStatementVersionEntries;
+
+        try
         {
-            // Direct-recursion guard. Trigger T currently firing → skip
-            // re-fires of T (the body's DML may still fire other triggers
-            // — only same-trigger recursion is blocked).
-            if (!connection.FiringTriggerIds.Add(trigger.ObjectId))
-                continue;
-
-            if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
+            foreach (var trigger in triggers)
             {
-                _ = connection.FiringTriggerIds.Remove(trigger.ObjectId);
-                throw SimulatedSqlException.MaximumNestingLevelExceeded();
-            }
+                // Direct-recursion guard. Trigger T currently firing → skip
+                // re-fires of T (the body's DML may still fire other triggers
+                // — only same-trigger recursion is blocked).
+                if (!connection.FiringTriggerIds.Add(trigger.ObjectId))
+                    continue;
 
-            connection.LastStatementRowCount = affectedRowCount;
-
-            var triggerFrame = new TriggerFrame(trigger, insertedPseudo, deletedPseudo);
-            var savedImpersonationDepth = connection.Security.ImpersonationDepth;
-            BatchContext? innerBatch = null;
-            try
-            {
-                connection.NestingLevel++;
-                connection.TriggerNestLevel++;
-                // Module WITH EXECUTE AS: run the body as the impersonated
-                // principal (OWNER / SELF → dbo, CALLER → no-op, named user →
-                // that principal); unwound in the finally below.
-                PushModuleExecuteAsFrame(connection, trigger.ExecuteAsClause, connection.CurrentDatabase);
-                if (!string.IsNullOrEmpty(trigger.BodyText))
+                if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
                 {
-                    using var bodyCommand = new SimulatedDbCommand(this, connection);
+                    _ = connection.FiringTriggerIds.Remove(trigger.ObjectId);
+                    throw SimulatedSqlException.MaximumNestingLevelExceeded();
+                }
+
+                connection.LastStatementRowCount = affectedRowCount;
+
+                var triggerFrame = new TriggerFrame(trigger, insertedPseudo, deletedPseudo, columnsUpdatedMask);
+                var savedImpersonationDepth = connection.Security.ImpersonationDepth;
+                var savedBodyErrorRaised = connection.TriggerBodyErrorRaised;
+                BatchContext? innerBatch = null;
+                try
+                {
+                    connection.NestingLevel++;
+                    connection.TriggerNestLevel++;
+                    connection.TriggerBodyErrorRaised = false;
+                    // Module WITH EXECUTE AS: run the body as the impersonated
+                    // principal (OWNER / SELF → dbo, CALLER → no-op, named user →
+                    // that principal); unwound in the finally below.
+                    PushModuleExecuteAsFrame(connection, trigger.ExecuteAsClause, connection.CurrentDatabase);
+                    if (!string.IsNullOrEmpty(trigger.BodyText))
+                    {
+                        using var bodyCommand = new SimulatedDbCommand(this, connection);
 #pragma warning disable CA2100 // trigger.BodyText is the simulator's own captured body span
-                    bodyCommand.CommandText = trigger.BodyText;
+                        bodyCommand.CommandText = trigger.BodyText;
 #pragma warning restore CA2100
-                    innerBatch = new BatchContext(bodyCommand, triggerFrame)
-                    {
-                        // Trigger-body errors report a CREATE-relative line and
-                        // carry the trigger's UNQUALIFIED name (probe-confirmed:
-                        // ERROR_PROCEDURE / SqlError.Procedure = "tr", not
-                        // "dbo.tr" — the one asymmetry from stored procedures).
-                        LineOffset = trigger.BodyLineOffset,
-                        ErrorProcedureName = trigger.Name,
-                    };
-                    var parser = innerBatch.Parser;
-                    parser.MoveNextOptional();
-                    foreach (var _ in DispatchStatementsUntil(innerBatch, endKeyword: null))
-                    {
-                        // discard
+                        innerBatch = new BatchContext(bodyCommand, triggerFrame)
+                        {
+                            // Trigger-body errors report a CREATE-relative line and
+                            // carry the trigger's UNQUALIFIED name (probe-confirmed:
+                            // ERROR_PROCEDURE / SqlError.Procedure = "tr", not
+                            // "dbo.tr" — the one asymmetry from stored procedures).
+                            LineOffset = trigger.BodyLineOffset,
+                            ErrorProcedureName = trigger.Name,
+                        };
+                        var parser = innerBatch.Parser;
+                        parser.MoveNextOptional();
+                        foreach (var _ in DispatchStatementsUntil(innerBatch, endKeyword: null))
+                        {
+                            // discard
+                        }
+                        // Real aborts the batch when any error of severity >= 11
+                        // was raised while the body ran, even one the body's own
+                        // TRY / CATCH swallowed — the swallow doesn't save it.
+                        if (connection.TriggerBodyErrorRaised)
+                            throw SimulatedSqlException.ErrorRaisedDuringTriggerExecution();
                     }
                 }
+                finally
+                {
+                    connection.NestingLevel--;
+                    connection.TriggerNestLevel--;
+                    // Local temp tables the trigger body created are dropped at
+                    // trigger exit (probe-confirmed Msg 208 afterward — module-
+                    // scoped lifetime, same as procs / dynamic SQL).
+                    innerBatch?.DropScopedTempTables();
+                    connection.Security.RevertTo(savedImpersonationDepth);
+                    connection.TriggerBodyErrorRaised = savedBodyErrorRaised;
+                    _ = connection.FiringTriggerIds.Remove(trigger.ObjectId);
+                }
             }
-            finally
-            {
-                connection.NestingLevel--;
-                connection.TriggerNestLevel--;
-                // Local temp tables the trigger body created are dropped at
-                // trigger exit (probe-confirmed Msg 208 afterward — module-
-                // scoped lifetime, same as procs / dynamic SQL).
-                innerBatch?.DropScopedTempTables();
-                connection.Security.RevertTo(savedImpersonationDepth);
-                _ = connection.FiringTriggerIds.Remove(trigger.ObjectId);
-            }
+        }
+        finally
+        {
+            connection.TriggerStatementUndoLog = outerTriggerLog;
+            connection.TriggerStatementVersionEntries = outerTriggerVersionEntries;
         }
 
         connection.LastIdentity = outerScopeIdentity;

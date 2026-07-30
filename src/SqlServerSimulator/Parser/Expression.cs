@@ -1309,6 +1309,7 @@ internal abstract class Expression
             15 => uppercaseName switch
             {
                 "BINARY_CHECKSUM" => new Checksum(context, isBinary: true),
+                "COLUMNS_UPDATED" => new ColumnsUpdatedFunction(context),
                 "ERROR_PROCEDURE" => new ErrorProcedureFunction(context),
                 "NEWSEQUENTIALID" => new NewSequentialId(context),
                 "PERCENTILE_CONT" => WindowExpression.ParsePercentile(context, WindowKind.PercentileCont),

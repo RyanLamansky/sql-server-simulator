@@ -915,8 +915,8 @@ internal static partial class BuiltInResources
                 {
                     for (var i = 0; i < key.StorageOrdinals.Length; i++)
                     {
-                        var columnId = StorageOrdinalToColumnId(table, key.StorageOrdinals[i]);
-                        yield return Row(key.Name, table.Columns[columnId - 1].Name, i + 1);
+                        var keyColumn = table.StoredColumns[key.StorageOrdinals[i]];
+                        yield return Row(key.Name, keyColumn.Name, i + 1);
                     }
                 }
                 foreach (var fk in table.OutgoingForeignKeys.OrderBy(f => f.ObjectId))
@@ -966,6 +966,9 @@ internal static partial class BuiltInResources
         }
     }
 
+    private static int StorageOrdinalToFullOrdinal(HeapTable table, int storageOrdinal) =>
+        Parser.Expressions.IndexLookup.StorageOrdinalToFullOrdinal(table, storageOrdinal);
+
     /// <summary>
     /// The name of the PRIMARY KEY / UNIQUE constraint on <paramref name="fk"/>'s
     /// referenced table whose column set equals the FK's referenced columns, or
@@ -980,7 +983,11 @@ internal static partial class BuiltInResources
         {
             if (key.StorageOrdinals.Length != wanted.Length)
                 continue;
-            var keyFull = key.StorageOrdinals.Select(o => StorageOrdinalToColumnId(referenced, o) - 1).OrderBy(o => o);
+            // ReferencedColumnOrdinals are full-column ordinals (positions in
+            // HeapTable.Columns), so the key's storage ordinals have to come
+            // back as ordinals too — not column_ids, which stop tracking
+            // position once a column is dropped.
+            var keyFull = key.StorageOrdinals.Select(o => StorageOrdinalToFullOrdinal(referenced, o)).OrderBy(o => o);
             if (keyFull.SequenceEqual(wanted))
                 return key.Name;
         }

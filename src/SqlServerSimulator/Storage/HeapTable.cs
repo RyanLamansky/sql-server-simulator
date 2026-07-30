@@ -51,7 +51,39 @@ internal sealed class HeapTable : SchemaObject
         this.Schema = schema;
         this.StorageOrdinals = storageOrdinals;
         this.Heap.ReclaimColumns = HasOffRowCapableColumn(storedColumns) ? storedColumns : null;
+        this.AssignColumnIds();
     }
+
+    /// <summary>
+    /// Seeds <see cref="HeapColumn.ColumnId"/> for every column that doesn't
+    /// already carry one and raises <see cref="MaxColumnIdUsed"/> to cover the
+    /// result. A column that arrives pre-assigned keeps its id: the trigger
+    /// pseudo-tables (<c>INSERTED</c> / <c>DELETED</c>) are constructed over
+    /// the parent table's own <see cref="HeapColumn"/> instances, so
+    /// renumbering here would rewrite the parent's catalog identity.
+    /// </summary>
+    public void AssignColumnIds()
+    {
+        foreach (var column in this.Columns)
+        {
+            if (column.ColumnId == 0)
+                column.ColumnId = ++this.MaxColumnIdUsed;
+            else if (column.ColumnId > this.MaxColumnIdUsed)
+                this.MaxColumnIdUsed = column.ColumnId;
+        }
+    }
+
+    /// <summary>
+    /// Highest <see cref="HeapColumn.ColumnId"/> ever handed out for this
+    /// table — <c>sys.tables.max_column_id_used</c>. Monotonic: dropping a
+    /// column leaves the watermark where it was, so the ids of dropped columns
+    /// are never reissued (probe-confirmed — a three-column table that loses
+    /// its middle column still reports 3, and the next added column takes 4).
+    /// Also fixes the width of the <c>COLUMNS_UPDATED()</c> bitmask, which
+    /// spans ids <c>1..MaxColumnIdUsed</c> and therefore keeps a bit position
+    /// for each dropped column.
+    /// </summary>
+    public int MaxColumnIdUsed;
 
     /// <summary>
     /// Whether any stored column can land off-row — a LOB-typed column or any

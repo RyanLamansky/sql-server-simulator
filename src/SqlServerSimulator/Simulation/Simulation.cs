@@ -1498,6 +1498,14 @@ public sealed partial class Simulation
                 batch.ErrorSignaled = true;
             }
             connection.LastErrorNumber = caught.Number;
+            // Any error of severity >= 11 raised while a trigger body runs
+            // aborts the firing statement at trigger exit (Msg 3616) even
+            // though this CATCH swallowed it — real doesn't let a body's own
+            // TRY / CATCH rescue the statement that fired it (probe-confirmed,
+            // including for a module the body called; severity <= 10 is
+            // informational and leaves the unit intact).
+            if (connection.TriggerNestLevel > 0 && caught.Class >= 11)
+                connection.TriggerBodyErrorRaised = true;
 
             // The parser threw mid-statement, so the cursor is at an
             // unpredictable position. Advance to the next statement boundary
@@ -2258,7 +2266,12 @@ public sealed partial class Simulation
     private static SimulatedStatementOutcome RunMutation(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> body)
     {
         var tx = context.Connection.CurrentTransaction;
-        var log = tx?.UndoLog ?? new UndoLog();
+        // Inside a trigger, join the firing statement's scope instead of
+        // opening one: the parent statement and everything its triggers wrote
+        // roll back as a single unit. Under an explicit transaction the shared
+        // tx.UndoLog already gives that, so this is the auto-commit path.
+        var enclosingTriggerLog = tx is null ? context.Connection.TriggerStatementUndoLog : null;
+        var log = tx?.UndoLog ?? enclosingTriggerLog ?? new UndoLog();
         var marker = log.Position;
         // Table variables get a parallel per-statement undo log so multi-row
         // mutations roll back atomically on mid-statement failure (probe-
@@ -2274,14 +2287,20 @@ public sealed partial class Simulation
         // atomic mid-execution failure can discard only the entries this
         // statement added.
         var versionEntriesMarker = tx?.PendingVersionEntries.Count ?? 0;
-        var statementVersionEntries = tx is null ? new List<PendingVersionEntry>() : null;
+        // Null when this statement joined an enclosing scope — the success and
+        // failure paths below both key on it, so a joined statement neither
+        // commits the shared log nor finalizes its versions. The statement
+        // that fired the trigger does both, once, for the whole unit.
+        var statementVersionEntries = tx is null && enclosingTriggerLog is null ? new List<PendingVersionEntry>() : null;
 
         var savedLog = context.Batch.CurrentUndoLog;
         var savedTableVarLog = context.Batch.CurrentTableVarUndoLog;
         var savedStatementVersionEntries = context.Batch.CurrentStatementVersionEntries;
         context.Batch.CurrentUndoLog = log;
         context.Batch.CurrentTableVarUndoLog = tableVarLog;
-        context.Batch.CurrentStatementVersionEntries = statementVersionEntries;
+        context.Batch.CurrentStatementVersionEntries = enclosingTriggerLog is null
+            ? statementVersionEntries
+            : context.Connection.TriggerStatementVersionEntries;
         try
         {
             var outcome = body(context);

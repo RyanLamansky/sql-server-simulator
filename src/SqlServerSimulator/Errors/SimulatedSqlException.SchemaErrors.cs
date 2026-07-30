@@ -248,6 +248,19 @@ partial class SimulatedSqlException
         new($"Cannot create trigger '{triggerName}' on {parentKind} '{parentName}' because an INSTEAD OF {actionName} trigger already exists on this object.", 2111, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 3616: an error of severity 11 or higher was
+    /// raised while a trigger body ran and the body's own <c>TRY</c> /
+    /// <c>CATCH</c> handled it. Real still aborts the batch and rolls back the
+    /// firing statement together with everything the trigger wrote — handling
+    /// the error inside the body doesn't rescue it (probe-confirmed verbatim
+    /// against SQL Server 2025). An error the body leaves *un*handled
+    /// propagates with its own number instead, so this fires only for the
+    /// swallowed case.
+    /// </summary>
+    internal static SimulatedSqlException ErrorRaisedDuringTriggerExecution() =>
+        new("An error was raised during trigger execution. The batch has been aborted and the user transaction, if any, has been rolled back.", 3616, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 11700: <c>CREATE SEQUENCE</c> declared
     /// <c>INCREMENT BY 0</c>. Probe-confirmed verbatim wording against
     /// SQL Server 2025.

@@ -24,6 +24,23 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     // schema version so cached plans referencing the old name re-resolve.
     public string Name = name;
 
+    /// <summary>
+    /// Stable 1-based identity of this column within its owning table —
+    /// <c>sys.columns.column_id</c>. Distinct from the column's position in
+    /// <see cref="HeapTable.Columns"/>: <c>ALTER TABLE DROP COLUMN</c> shifts
+    /// positions but leaves ids alone, so a table that lost its second column
+    /// keeps ids <c>1, 3, 4</c> and the next added column takes
+    /// <see cref="HeapTable.MaxColumnIdUsed"/><c> + 1</c> rather than filling
+    /// the hole (probe-confirmed against SQL Server 2025, along with ids
+    /// surviving <c>ALTER COLUMN</c> and <c>sp_rename</c>).
+    /// <c>0</c> until the column joins a table; the
+    /// <see cref="HeapTable"/> constructor assigns it, preserving any id
+    /// already present so the trigger pseudo-tables — which share the parent's
+    /// <see cref="HeapColumn"/> instances by reference — don't renumber the
+    /// parent's columns.
+    /// </summary>
+    public int ColumnId;
+
     public readonly SqlType Type = type;
 
     public readonly int? MaxLength = maxLength;

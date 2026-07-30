@@ -1205,7 +1205,7 @@ partial class Simulation
         }
 
         // Phase C: commit mutations.
-        return CommitMerge(context, destinationTable, sourceView, pendingInserts, pendingUpdates, pendingDeletes, output);
+        return CommitMerge(context, destinationTable, sourceView, pendingInserts, pendingUpdates, pendingDeletes, output, whenClauses);
     }
 
     /// <summary>
@@ -1449,10 +1449,27 @@ partial class Simulation
         List<(SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingInserts,
         List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingUpdates,
         List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)> pendingDeletes,
-        MergeOutputProjection? output)
+        MergeOutputProjection? output,
+        List<WhenClause> whenClauses)
     {
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
+
+        // UPDATE(col) / COLUMNS_UPDATED() report the statement's SET-clause
+        // membership rather than what any row actually changed, so the mask
+        // is the union of every WHEN MATCHED THEN UPDATE clause's targets
+        // whether or not that clause fired.
+        var updatedColumnOrdinals = new List<int>();
+        foreach (var clause in whenClauses)
+        {
+            if (clause.Action != MergeActionKind.Update || clause.Assignments is null)
+                continue;
+            foreach (var (ordinal, _) in clause.Assignments)
+            {
+                if (!updatedColumnOrdinals.Contains(ordinal))
+                    updatedColumnOrdinals.Add(ordinal);
+            }
+        }
 
         // Per-action INSTEAD OF detection. INSTEAD OF triggers live on the
         // view when the target is a view, otherwise on the base table.
@@ -1659,7 +1676,7 @@ partial class Simulation
                 _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
                     context.Batch, insteadOfTarget, TriggerActions.Update,
                     pseudoColumns, insertedViewRows, deletedViewRows,
-                    affectedRowCount: pendingUpdates.Count);
+                    affectedRowCount: pendingUpdates.Count, updatedColumnOrdinals);
             }
             else if (HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Update))
             {
@@ -1667,7 +1684,7 @@ partial class Simulation
                 context.Batch.Connection.Simulation.FireTriggers(
                     context.Batch, destinationTable, TriggerActions.Update,
                     insertedRows: insertedRows, deletedRows: deletedRows,
-                    affectedRowCount: pendingUpdates.Count);
+                    affectedRowCount: pendingUpdates.Count, updatedColumnOrdinals);
             }
         }
         if (pendingDeletes.Count > 0)

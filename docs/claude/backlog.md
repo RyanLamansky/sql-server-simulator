@@ -41,7 +41,8 @@ The subsections that follow carry the areas with work in flight.
 - **Spatial method evaluation** — the OGC pipeline (`.STDistance` / `.STIntersects` / `.STArea` / …), WKT/WKB parse validation, SRID tracking and transformation, `sys.spatial_reference_systems` seed rows, `ALTER SPATIAL INDEX`; storage, byte-identical CAST/wire encoding, and the index DDL ship → [`spatial.md`](spatial.md#known-gaps).
 - **XML mutation and XQuery beyond the path subset** — `.modify()` XML-DML plus its `UPDATE … SET` integration, FLWOR / comparison / boolean / arithmetic operators, value predicates, constructors, XSD validation against `xml(collection)` bindings, `ALTER XML SCHEMA COLLECTION ADD` → [`xml.md`](xml.md#known-gaps).
 - **DDL trigger firing** — `CREATE TRIGGER … ON DATABASE` parses, stores, and projects into `sys.triggers` / `sys.trigger_events` / `sys.trigger_event_types`, but no DDL event dispatches to it, so no body ever runs → [`triggers.md`](triggers.md).
-- **Trigger-body intrinsics and ordering** — `UPDATE()` / `COLUMNS_UPDATED()`, `sp_settriggerorder` firing order, `RECURSIVE_TRIGGERS ON`, `is_nested_triggers_on = OFF`, and trigger-body result sets (drained and discarded at the call site) → [`triggers.md`](triggers.md#not-modeled).
+- **Trigger-body ordering and nesting options** — `sp_settriggerorder` firing order, `RECURSIVE_TRIGGERS ON`, `is_nested_triggers_on = OFF`, and trigger-body result sets (drained and discarded at the call site).
+  The `UPDATE()` / `COLUMNS_UPDATED()` intrinsics ship → [`triggers.md`](triggers.md#change-detection-intrinsics).
 - **`EXEC … WITH RESULT SETS`** — the result-set-override option falls through to a syntax error; the `INSERT … EXEC` it is usually paired with ships → [`programmable.md`](programmable.md), [`dml.md`](dml.md#insert--exec).
 - **Multi-source cursors** — a cursor over a JOIN / derived table / view is forced STATIC where real is DYNAMIC, costing mid-loop change visibility, `@@CURSOR_ROWS = -1`, and positioned DML; it needs per-source row identity carried through the join driver plus live re-execution → [`cursors.md`](cursors.md).
 - **Temporal query forms and retention** — `FOR SYSTEM_TIME BETWEEN … AND …` / `FROM … TO …` / `CONTAINED IN (…)`, `HISTORY_RETENTION_PERIOD` pruning, auto-named history tables, and base-vs-history column-shape validation at `SET (SYSTEM_VERSIONING = ON)` → [`temporal-tables.md`](temporal-tables.md#not-modeled).
@@ -172,6 +173,11 @@ Tracked elsewhere and over-permissive in the same sense: the recursive-CTE part 
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
+- **A statement keyword opening a select-list item leaks `ArgumentException`** — `SELECT UPDATE(c1)` terminates the select list at the keyword, leaving a zero-column SELECT that surfaces `ArgumentException: Row must have at least one column`.
+  Real raises **Msg 156** (`"Incorrect syntax near the keyword 'UPDATE'."`, probed 2026-07-30).
+  `SELECT DELETE(c1)` behaves identically, so this is the general select-list shape rather than anything specific to the `UPDATE(col)` predicate.
+  A non-SQL-shaped exception escaping the parser is the objectionable part; the fix is a select-list guard reporting Msg 156 when a statement keyword opens an item.
+  See [`grammar.md`](grammar.md).
 - **Per-object creation-time `QUOTED_IDENTIFIER` capture not modeled** — real SQL Server stamps procedures / views / triggers / tables with the QI setting in effect at CREATE (`sys.sql_modules.uses_quoted_identifier`, `OBJECTPROPERTY(id, 'IsQuotedIdentOn')`) and executes bodies under the captured setting; the simulator re-parses bodies under the executing session's current setting.
   See [`grammar.md`](grammar.md).
   Rare legacy-pattern impact.
@@ -218,10 +224,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   `LEFT` / `RIGHT` (Msg 8115) and `DATEADD` (Msg 517) harden the same argument, so the shape to copy exists.
   Real's response is per-function (clamp, compute as bigint, or a value-class error), which is why one shared guard wouldn't be faithful and the handling stayed point-local — closing it is a per-function decision.
   See [`scalars.md`](scalars.md#known-gap-out-of-int-range-integer-arguments).
-- **Trigger-body statements sit outside the parent's atomic scope** — when a trigger body runs several statements and a later one throws, the earlier statements' writes (an audit-log insert, typically) survive, because the body's child `BatchContext` allocates fresh per-statement undo logs instead of sharing the parent statement's log.
-  Real rolls back the whole parent + trigger unit.
-  Single-statement bodies and a body-side `THROW` before any side effect behave correctly.
-  See [`triggers.md`](triggers.md#not-modeled).
 - **MVCC history keeps one version per UPDATE, not one per committed transaction** — real collapses intra-transaction intermediate states so only the pre- and post-transaction states are visible.
   Visibility matches for the common single-UPDATE-per-transaction case; a snapshot landing between two UPDATEs of one transaction sees a state real never exposes.
   See [`locking.md`](locking.md#known-mvcc-limitations).

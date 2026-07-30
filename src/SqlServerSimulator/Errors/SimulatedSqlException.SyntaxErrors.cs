@@ -38,6 +38,16 @@ partial class SimulatedSqlException
         new($"The integer value {literal} is out of range.", 1080, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 140: <c>UPDATE(column)</c> used outside a
+    /// trigger body. Probe-confirmed verbatim, including the wording naming
+    /// the <c>IF UPDATE</c> form. <c>COLUMNS_UPDATED()</c> is deliberately
+    /// *not* covered — it returns NULL in the same position rather than
+    /// raising.
+    /// </summary>
+    internal static SimulatedSqlException UpdateOnlyWithinCreateTrigger() =>
+        new("Can only use IF UPDATE within a CREATE TRIGGER statement.", 140, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 105: a string literal or quote-delimited
     /// identifier opened with <c>'</c> or <c>"</c> was never closed before
     /// end of input. Real SQL Server echoes the scanned body in the message

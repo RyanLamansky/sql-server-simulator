@@ -412,6 +412,27 @@ Real always reports Windows ids, while the ICU mapping behind `TimeZoneInfo` yie
 **Divergence**: `Kamchatka Standard Time` and `Mid-Atlantic Standard Time` are deprecated Windows zones that Microsoft retains with obsolete DST rules and that have no IANA equivalent, so they report their standard offset with `is_currently_dst = 0` where real reports the DST-shifted offset.
 The other 139 match.
 
+## Stable column ids
+
+`sys.columns.column_id` is a **stable identity**, not the column's position in `HeapTable.Columns`.
+The two coincide until a `DROP COLUMN`, which shifts positions and leaves ids alone.
+Probe-confirmed rules:
+
+- Dropping a column leaves a **permanent hole** — a three-column table that loses its middle column keeps ids `1, 3`.
+- `sys.tables.max_column_id_used` is a **monotonic watermark**: it doesn't shrink on DROP, and a newly added column takes `watermark + 1` rather than filling the hole (drop `c9` from a nine-column table and the next column added is id **10**).
+  The watermark never resets, so ids keep climbing even as the live column count falls.
+- `ALTER COLUMN` (a type change) and `sp_rename` both **preserve** the id.
+
+**Storage**: `HeapColumn.ColumnId` plus `HeapTable.MaxColumnIdUsed`, seeded by `HeapTable.AssignColumnIds`.
+Assignment **preserves an id that's already set**, which matters because the trigger pseudo-tables (`INSERTED` / `DELETED`) are constructed over the parent table's own `HeapColumn` instances — renumbering there would rewrite the parent's catalog identity.
+`ALTER TABLE ADD` re-runs the same seeding to give new columns `watermark + 1`, and rolls the watermark back if the add fails.
+
+**Reading it back**: `IndexLookup.StorageOrdinalToColumnId` is the single storage-ordinal → column_id authority.
+Its sibling `StorageOrdinalToFullOrdinal` returns the **position** instead, and the distinction is load-bearing — callers indexing back into `HeapTable.Columns` (`INDEX_COL`, the FK referenced-key matcher, `INFORMATION_SCHEMA.KEY_COLUMN_USAGE`) want the ordinal, while everything reporting catalog metadata wants the id.
+Index key / INCLUDE columns carry full ordinals, so `sys.index_columns` / `sys.stats_columns` map them through `FullOrdinalToColumnId`; an **indexed view's** index passes `table: null` there and keeps `ordinal + 1`, since a view's columns can't be dropped individually and its `sys.columns` ids are contiguous.
+
+The `COLUMNS_UPDATED()` bitmask is keyed on these ids and sized from the watermark, so a dropped column keeps its bit position — see [`triggers.md`](triggers.md#change-detection-intrinsics).
+
 ## Metadata scalars
 
 Function-form metadata queries that read from the same underlying state as the catalog-view rows.

@@ -472,6 +472,46 @@ public sealed class SimulatedDbConnection : DbConnection
     internal int TriggerNestLevel;
 
     /// <summary>
+    /// The undo log of the statement that fired the trigger currently
+    /// running on this connection, or <c>null</c> outside any trigger.
+    /// A trigger body doesn't get an atomic scope of its own: real SQL Server
+    /// rolls back the firing statement and everything its triggers wrote as a
+    /// single unit, so mutations underneath a trigger join this log instead of
+    /// taking a throwaway one they'd commit on their own success
+    /// (probe-confirmed — an audit-log INSERT in a body whose later statement
+    /// throws does not survive, and neither does one written by a stored
+    /// procedure the body called).
+    /// Session-scoped rather than per-<see cref="Parser.BatchContext"/>
+    /// precisely because it has to reach those nested modules, each of which
+    /// runs in a child batch of its own.
+    /// Only consulted in auto-commit: under an explicit transaction every
+    /// statement already shares <c>SimulatedDbTransaction.UndoLog</c>, and the
+    /// firing statement's marker covers the trigger's writes.
+    /// </summary>
+    internal Storage.UndoLog? TriggerStatementUndoLog;
+
+    /// <summary>
+    /// The pending-version list of the statement that fired the currently
+    /// running trigger, paired with <see cref="TriggerStatementUndoLog"/> so
+    /// MVCC row versions created underneath a trigger are finalized or
+    /// discarded with the firing statement rather than on their own.
+    /// </summary>
+    internal List<Storage.PendingVersionEntry>? TriggerStatementVersionEntries;
+
+    /// <summary>
+    /// Set when an error of severity 11 or higher was raised while the
+    /// currently running trigger body executed and a <c>TRY</c> / <c>CATCH</c>
+    /// swallowed it. The trigger dispatcher reads it when the body returns and
+    /// raises Msg 3616, because real aborts the batch and rolls the unit back
+    /// regardless of the body having handled the error itself
+    /// (probe-confirmed). Saved and cleared per body so a handled error in one
+    /// trigger doesn't condemn the next.
+    /// Connection-scoped so an error caught inside a stored procedure the body
+    /// called still counts, matching real.
+    /// </summary>
+    internal bool TriggerBodyErrorRaised;
+
+    /// <summary>
     /// Last identity value produced by an INSERT on this connection — the
     /// source for both <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c>. SQL
     /// Server scopes these per session/scope; the simulator collapses both

@@ -778,4 +778,88 @@ public sealed class AlterTableColumnTests
             """);
         AreEqual(42, sim.ExecuteScalar("select v from t"));
     }
+
+    // === Stable column ids (sys.columns.column_id / sys.tables.max_column_id_used) ===
+
+    private static string ColumnIds(Simulation sim) =>
+        (string)sim.ExecuteScalar("""
+            select string_agg(cast(name as varchar(20)) + '=' + cast(column_id as varchar), ',')
+            from sys.columns where object_id = object_id('w_t')
+            """)!;
+
+    /// <summary>
+    /// Dropping a column leaves a permanent hole: the survivors keep their
+    /// ids and the watermark doesn't shrink (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void DropColumn_LeavesAHoleInColumnIds()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table w_t (c1 int, c2 int, c3 int); alter table w_t drop column c2");
+        AreEqual("c1=1,c3=3", ColumnIds(sim));
+        AreEqual(3, sim.ExecuteScalar("select max_column_id_used from sys.tables where object_id = object_id('w_t')"));
+    }
+
+    /// <summary>An added column takes watermark + 1 rather than filling a hole.</summary>
+    [TestMethod]
+    public void AddColumn_TakesTheNextIdPastTheWatermark()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table w_t (c1 int, c2 int, c3 int);
+            alter table w_t drop column c2;
+            alter table w_t add c4 int null
+            """);
+        AreEqual("c1=1,c3=3,c4=4", ColumnIds(sim));
+        AreEqual(4, sim.ExecuteScalar("select max_column_id_used from sys.tables where object_id = object_id('w_t')"));
+    }
+
+    /// <summary>
+    /// The watermark never resets, so ids keep climbing past every dropped
+    /// column even when the live column count falls.
+    /// </summary>
+    [TestMethod]
+    public void Watermark_NeverResets_AcrossRepeatedDropAndAdd()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table w_t (c1 int, c2 int, c3 int);
+            alter table w_t drop column c2;
+            alter table w_t add c4 int null;
+            alter table w_t drop column c3, c4;
+            alter table w_t add c9 int null
+            """);
+        AreEqual("c1=1,c9=5", ColumnIds(sim));
+        AreEqual(5, sim.ExecuteScalar("select max_column_id_used from sys.tables where object_id = object_id('w_t')"));
+    }
+
+    /// <summary>A type change replaces the column but not its catalog identity.</summary>
+    [TestMethod]
+    public void AlterColumn_PreservesColumnId()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table w_t (c1 int, c2 int, c3 int);
+            alter table w_t drop column c2;
+            alter table w_t alter column c1 bigint
+            """);
+        AreEqual("c1=1,c3=3", ColumnIds(sim));
+    }
+
+    [TestMethod]
+    public void RenameColumn_PreservesColumnId()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table w_t (c1 int, c2 int, c3 int); alter table w_t drop column c2");
+        _ = sim.ExecuteNonQuery("exec sp_rename 'w_t.c3', 'renamed', 'column'");
+        AreEqual("c1=1,renamed=3", ColumnIds(sim));
+    }
+
+    /// <summary>A fresh table's watermark is simply its column count.</summary>
+    [TestMethod]
+    public void FreshTable_WatermarkIsTheColumnCount()
+        => AreEqual(3, new Simulation().ExecuteScalar("""
+            create table w_t (c1 int, c2 int, c3 int);
+            select max_column_id_used from sys.tables where object_id = object_id('w_t')
+            """));
 }
