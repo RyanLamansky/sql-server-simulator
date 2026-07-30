@@ -66,7 +66,11 @@ public sealed class SessionIdentityTests
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
         {
-            await using var connection = new SqlConnection(Connect(listener, "solo", "P@ss1word"));
+            // ConnectRetryInterval=1: SqlClient counts 4060 a transient fault
+            // and retries the login once, sleeping the interval first — the
+            // 10-second default would set this assembly's wall-clock floor.
+            // The minimum keeps the retry exercised for a tenth of the wait.
+            await using var connection = new SqlConnection(Connect(listener, "solo", "P@ss1word", ";ConnectRetryInterval=1"));
             await connection.OpenAsync(TestContext.CancellationToken);
         });
         AreEqual(4060, ex.Number);

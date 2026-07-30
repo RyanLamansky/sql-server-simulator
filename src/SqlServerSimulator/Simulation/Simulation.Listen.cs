@@ -11,8 +11,8 @@ public sealed partial class Simulation
     /// Opens a loopback TCP endpoint speaking the SQL Server wire protocol,
     /// so unmodified SQL Server clients on the same machine can connect to
     /// this simulation with only a connection-string change. The endpoint
-    /// presents an ephemeral self-signed TLS certificate, so connection
-    /// strings must include <c>TrustServerCertificate=true</c>. While no
+    /// presents a self-signed TLS certificate, so connection strings must
+    /// include <c>TrustServerCertificate=true</c>. While no
     /// logins have been created, any credentials are accepted; once
     /// <c>CREATE LOGIN</c> has registered one or more logins (through any
     /// connection to this simulation), the endpoint requires a matching
@@ -74,10 +74,9 @@ public sealed partial class Simulation
     /// credential model of the loopback listener would accept anyone.
     /// Authentication is the only enforcement: the simulator has no
     /// authorization model, so every login that connects has unrestricted
-    /// access to every database, and the ephemeral self-signed TLS
-    /// certificate (connection strings need
-    /// <c>TrustServerCertificate=true</c>) does not authenticate the server
-    /// to the client. Treat the endpoint as development tooling for trusted
+    /// access to every database, and the self-signed TLS certificate
+    /// (connection strings need <c>TrustServerCertificate=true</c>) does not
+    /// authenticate the server to the client. Treat the endpoint as development tooling for trusted
     /// networks, not a hardened server.
     /// </summary>
     /// <param name="port">
@@ -159,8 +158,10 @@ public sealed partial class Simulation
         if (suppliedCertificate is { HasPrivateKey: false })
             throw new ArgumentException("The supplied server certificate must include a private key — the TLS handshake cannot be completed with the public part alone.");
 
-        var ownsCertificate = suppliedCertificate is null;
-        var certificate = suppliedCertificate ?? await Task.Run(TdsServerCertificate.Create, cancellationToken).ConfigureAwait(false);
+        // Task.Run because materializing the shared certificate the first
+        // time generates an RSA key pair, which would otherwise block the
+        // caller's thread; every later listen finds it already built.
+        var certificate = suppliedCertificate ?? await Task.Run(() => TdsServerCertificate.Shared, cancellationToken).ConfigureAwait(false);
         Socket? primaryListener = null;
         Socket? secondaryListener = null;
         try
@@ -190,14 +191,12 @@ public sealed partial class Simulation
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            return new SimulatedNetworkListener(this, primaryListener, secondaryListener, certificate, ownsCertificate, boundPort);
+            return new SimulatedNetworkListener(this, primaryListener, secondaryListener, certificate, boundPort);
         }
         catch
         {
             primaryListener?.Dispose();
             secondaryListener?.Dispose();
-            if (ownsCertificate)
-                certificate.Dispose();
             throw;
         }
     }

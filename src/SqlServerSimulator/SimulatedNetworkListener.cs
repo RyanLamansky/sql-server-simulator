@@ -10,10 +10,11 @@ namespace SqlServerSimulator;
 /// unmodified SQL Server clients connect to a simulation with only a
 /// connection-string change. Created by the listen methods on the simulation
 /// type; accepts loopback connections only. The endpoint presents the TLS
-/// certificate supplied through the listen options, or an ephemeral
-/// self-signed one when none was supplied — the latter requires clients to
-/// connect with <c>TrustServerCertificate=true</c>. Credentials are accepted
-/// without validation.
+/// certificate supplied through the listen options, or a self-signed one
+/// shared by every listener in the process when none was supplied — the
+/// latter requires clients to connect with
+/// <c>TrustServerCertificate=true</c>. Credentials are accepted without
+/// validation.
 /// </summary>
 /// <remarks>
 /// Disposal is immediate and waits for nothing: the listening sockets close,
@@ -42,25 +43,22 @@ public sealed class SimulatedNetworkListener : IDisposable, IAsyncDisposable
 
     private readonly Socket primaryListener;
     private readonly Socket? secondaryListener;
-    private readonly X509Certificate2 certificate;
-
     /// <summary>
-    /// True when the listener generated <see cref="certificate"/> itself and
-    /// must dispose it; false when the certificate was supplied through the
-    /// listen options, whose caller retains ownership.
+    /// The certificate presented to clients, private key included. Never
+    /// disposed here: it is either the caller's, supplied through the listen
+    /// options, or the process-wide default shared with every other listener.
     /// </summary>
-    private readonly bool ownsCertificate;
+    private readonly X509Certificate2 certificate;
 
     private readonly CancellationTokenSource stopSource = new();
     private readonly ConcurrentDictionary<TdsSession, byte> sessions = new();
     private int disposed;
 
-    internal SimulatedNetworkListener(Simulation simulation, Socket primaryListener, Socket? secondaryListener, X509Certificate2 certificate, bool ownsCertificate, int port)
+    internal SimulatedNetworkListener(Simulation simulation, Socket primaryListener, Socket? secondaryListener, X509Certificate2 certificate, int port)
     {
         this.primaryListener = primaryListener;
         this.secondaryListener = secondaryListener;
         this.certificate = certificate;
-        this.ownsCertificate = ownsCertificate;
         this.ServerCertificate = X509CertificateLoader.LoadCertificate(certificate.Export(X509ContentType.Cert));
         this.Port = port;
 
@@ -84,8 +82,6 @@ public sealed class SimulatedNetworkListener : IDisposable, IAsyncDisposable
         foreach (var session in this.sessions.Keys)
             session.Abort();
 
-        if (this.ownsCertificate)
-            this.certificate.Dispose();
         this.ServerCertificate.Dispose();
         this.stopSource.Dispose();
     }

@@ -4,25 +4,34 @@ using System.Security.Cryptography.X509Certificates;
 namespace SqlServerSimulator.Network;
 
 /// <summary>
-/// Generates the ephemeral self-signed certificate a listener presents during
-/// the TLS handshake. Clients connect with <c>TrustServerCertificate=true</c>;
-/// the certificate exists only in memory and dies with the listener.
+/// The self-signed certificate a listener presents during the TLS handshake
+/// when the host supplied none of its own. It authenticates nothing: clients
+/// connect with <c>TrustServerCertificate=true</c>, or pin the public part the
+/// listener exports.
 /// </summary>
 internal static class TdsServerCertificate
 {
-    public static X509Certificate2 Create() =>
-        X509CertificateLoader.LoadPkcs12(CreatePkcs12(), password: null);
+    /// <summary>
+    /// The certificate every listener without a supplied one presents,
+    /// created on first use and reused for the life of the process. Creating
+    /// one means generating an RSA-2048 key pair, which costs far more than
+    /// standing up the listener around it — so a host that creates many
+    /// listeners, such as a test suite with one per case, would otherwise pay
+    /// that price over and over. Sharing also matches a real server, which
+    /// presents one identity rather than a fresh one per endpoint. Never
+    /// disposed: it lives as long as the process, and a listener disposing it
+    /// would break every other listener.
+    /// </summary>
+    public static X509Certificate2 Shared => shared.Value;
+
+    private static readonly Lazy<X509Certificate2> shared = new(Create, LazyThreadSafetyMode.ExecutionAndPublication);
 
     /// <summary>
-    /// PKCS#12 bytes (no password) for a fresh certificate. Exposed
-    /// separately from <see cref="Create"/> because the bytes must be
-    /// captured before <see cref="X509CertificateLoader"/> touches
-    /// a platform key store: Windows marks a loaded private key
-    /// non-exportable, so a store-loaded certificate cannot be re-exported
-    /// as PKCS#12 ("Key not valid for use in specified state") — callers
-    /// persisting the certificate write these bytes instead.
+    /// Generates a fresh certificate, paying for a new RSA key pair on every
+    /// call. Anything that just needs the endpoint's default certificate wants
+    /// <see cref="Shared"/> instead.
     /// </summary>
-    public static byte[] CreatePkcs12()
+    public static X509Certificate2 Create()
     {
         using var rsa = RSA.Create(2048);
         var request = new CertificateRequest("CN=SqlServerSimulator", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
@@ -31,6 +40,6 @@ internal static class TdsServerCertificate
         // SslStream requires a certificate whose private key is loadable by
         // the platform TLS stack; round-tripping through PKCS#12 guarantees
         // that on every OS, where the CreateSelfSigned result alone does not.
-        return selfSigned.Export(X509ContentType.Pkcs12);
+        return X509CertificateLoader.LoadPkcs12(selfSigned.Export(X509ContentType.Pkcs12), password: null);
     }
 }

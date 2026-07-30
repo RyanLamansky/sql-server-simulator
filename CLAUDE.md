@@ -70,7 +70,9 @@ CI matrix: Debug + Release.
 `obj/` permission errors mean building outside the dev container; `rm -rf obj/ bin/` clears them.
 Line endings are LF everywhere: `.gitattributes` `eol=lf` forces an LF working tree on Windows and Linux alike, and `.editorconfig` `end_of_line = lf` makes IDE0055 enforce it — so a CRLF checkout fails the formatter, and the fix is `git add --renormalize .` (not disabling the rule).
 
-A round trip is dominated by MSBuild's solution evaluation across the 10 projects, not by compilation or by the tests themselves — so `--filter` on the csproj path saves nothing.
+MSBuild's share of a round trip is a modest fixed cost and the tests themselves are the bulk of it — `SqlServerSimulator.Tests` most of all — so `--filter` saves real time on the csproj path too.
+That balance depends on generated directories staying out of MSBuild's default item globs (`DefaultItemExcludes` in the root `Directory.Build.props`): the globs walk a project folder on every evaluation, so a grown `TestResults` tree becomes the dominant cost of even a no-op build.
+`dotnet msbuild <proj> /profileevaluation:<file>` names the offending glob if a round trip ever goes mysteriously slow.
 
 **Inner loop: invoke the built test DLL directly**, which skips MSBuild entirely:
 
@@ -78,9 +80,10 @@ A round trip is dominated by MSBuild's solution evaluation across the 10 project
 dotnet test tests/SqlServerSimulator.Tests/bin/Debug/net10.0/SqlServerSimulator.Tests.dll --filter "FullyQualifiedName~Foo"
 ```
 
-That's roughly an order of magnitude faster than `dotnet test <csproj> --no-build --filter`.
+That's somewhat faster than `dotnet test <csproj> --no-build --filter`, which pays MSBuild's fixed cost on top; either serves a tight loop.
 Rebuild the one project (`dotnet build src/SqlServerSimulator/SqlServerSimulator.csproj`) when the DLL goes stale; full `dotnet build` + `dotnet test` is the pre-commit checkpoint.
-Absolute timings swing widely with the host filesystem — measure locally rather than trusting a number here — and the per-assembly `Duration:` in test output is execution time only, excluding the harness cost that dominates.
+Absolute timings swing widely with the host filesystem — measure locally rather than trusting a number here — and the per-assembly `Duration:` in test output is execution time only, excluding process start and test discovery.
+Under method-level parallelism an assembly's wall clock can be no shorter than its slowest single test, so one multi-second wait sets the floor for the whole project.
 
 **No large binary files in the repo** (bacpacs included — the WWI/AW `.bacpac` fixtures live gitignored under `.vs/`, local-only).
 Tests get their data by scripting the key shapes in-code (`CREATE TABLE` + inserts, `BacpacBuilder` for import tests), never by committing a fixture blob.

@@ -148,8 +148,17 @@ public sealed class AuthenticationTests
 
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
         {
+            // ConnectRetryInterval=1, the minimum: SqlClient counts 4060 a
+            // transient fault and retries the login once (ConnectRetryCount
+            // defaults to 1), sleeping the interval first. The 10-second
+            // default would pin this whole assembly's wall clock to one test's
+            // wait. Shortening the interval rather than setting
+            // ConnectRetryCount=0 keeps the retry itself exercised, so the
+            // listener still has to serve a second login attempt after
+            // rejecting the first; the surfaced error collection is identical
+            // under either setting.
             await using var connection = new SqlConnection(
-                $"Server=127.0.0.1,{listener.Port};User ID=sa;Password=anything;Database=no_such_db;TrustServerCertificate=True;Pooling=False;Connect Timeout=15");
+                $"Server=127.0.0.1,{listener.Port};User ID=sa;Password=anything;Database=no_such_db;TrustServerCertificate=True;Pooling=False;Connect Timeout=15;ConnectRetryInterval=1");
             await connection.OpenAsync(TestContext.CancellationToken);
         });
 

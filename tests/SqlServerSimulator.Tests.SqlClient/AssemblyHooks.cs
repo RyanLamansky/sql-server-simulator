@@ -1,16 +1,22 @@
+using SqlServerSimulator.Network;
+
 namespace SqlServerSimulator;
 
 [TestClass]
 public static class AssemblyHooks
 {
     /// <summary>
-    /// Triggers JIT compilation of the most common path among all tests, improving
-    /// the accuracy of their timings. Also functions as a sanity check against the
-    /// simulator being completely broken.
+    /// Warms what would otherwise be first touched in the middle of the parallel
+    /// run: the process-wide certificate every listener presents, whose creation
+    /// generates an RSA key pair, and JIT compilation of the most common path among
+    /// all tests. The latter also improves the accuracy of their timings and
+    /// functions as a sanity check against the simulator being completely broken.
     /// </summary>
     [AssemblyInitialize]
     public static void HotPath(TestContext _)
     {
+        Assert.IsTrue(TdsServerCertificate.Shared.HasPrivateKey);
+
         if (System.Diagnostics.Debugger.IsAttached)
             return;
 

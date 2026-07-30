@@ -61,7 +61,7 @@ public sealed class NetworkListenerTests
     }
 
     // The options overloads mirror the port-only ones' defaults, so leaving
-    // both unset binds 1433 presenting a generated ephemeral certificate.
+    // both unset binds 1433 presenting the endpoint's default certificate.
     [TestMethod]
     public void Options_Defaults_MatchPortOnlyOverloads()
     {
@@ -82,6 +82,37 @@ public sealed class NetworkListenerTests
         await connection.OpenAsync(TestContext.CancellationToken);
         await using var command = new SqlCommand("select 3", connection);
         AreEqual(3, await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    // The default certificate is created once per process, not per listener or
+    // per simulation: creating it means generating an RSA key pair, which costs
+    // more than the listener around it, so a host standing up many listeners
+    // would otherwise pay that price repeatedly.
+    [TestMethod]
+    public async Task DefaultCertificate_SharedAcrossListenersAndSimulations()
+    {
+        await using var first = await new Simulation().ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var second = await new Simulation().ListenLocalAsync(0, TestContext.CancellationToken);
+        AreEqual(first.ServerCertificate.Thumbprint, second.ServerCertificate.Thumbprint);
+    }
+
+    // Sharing only works if no listener disposes the default certificate, so
+    // the next listener must still complete a handshake with it — a connection
+    // is the assertion, since a disposed private key fails at TLS, not before.
+    [TestMethod]
+    public async Task DefaultCertificate_SurvivesListenerDispose()
+    {
+        var simulation = new Simulation();
+        var first = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        var thumbprint = first.ServerCertificate.Thumbprint;
+        await first.DisposeAsync();
+
+        await using var second = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        AreEqual(thumbprint, second.ServerCertificate.Thumbprint);
+        await using var connection = new SqlConnection(ConnectionString(second));
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await using var command = new SqlCommand("select 4", connection);
+        AreEqual(4, await command.ExecuteScalarAsync(TestContext.CancellationToken));
     }
 
     // BindAddress belongs to ListenNetworkAsync: honoring it on the loopback

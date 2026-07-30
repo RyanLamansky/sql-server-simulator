@@ -89,4 +89,4 @@ These notes are the local implementation contracts.
   SqlClient ignores `TrustServerCertificate` under `Encrypt=Strict` — strict clients pin via the `ServerCertificate` connection-string keyword against the listener's exported `ServerCertificate` property.
   Oracle: `StrictEncryptionTests`.
 - **Oracle**: `SqlServerSimulator.Tests.SqlClient` (real SqlClient over loopback) is the regression contract for this directory; `SqlServerSimulator.Tests.Smo` drives real SMO (`Microsoft.SqlServer.SqlManagementObjects`, the library behind SSMS Object Explorer + Script-As) against a listener over one shared WWI-shaped fixture — the permanent home of the SSMS-shakedown surface; `EFCoreOverWire` in `*.Tests.EFCore` covers vanilla `UseSqlServer`.
-  For nontrivial expected values use the dual-read pattern (same query in-process and over the wire against one `Simulation`).
+  Conventions for writing those loopback tests — default shape, the `Wire` helpers, the dual-read pattern for nontrivial expected values — live in [`tests/SqlServerSimulator.Tests.SqlClient/CLAUDE.md`](../../../tests/SqlServerSimulator.Tests.SqlClient/CLAUDE.md).
