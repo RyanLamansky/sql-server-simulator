@@ -77,6 +77,7 @@ Type matrix probe-confirmed against AdventureWorks2025 hex-dumps:
 | Same types NULLABLE | 1-byte length prefix (= type width) + raw bytes | `0xFF` |
 | `bit` (NOT NULL or NULL, with-or-without UDDT alias) | 1-byte length prefix (= 1) + 1 raw byte | `0xFF` |
 | Length-prefixed fixed (`uniqueidentifier`, `decimal`/`numeric`, `money`, `smallmoney`, `datetime2(N)`, `time(N)`, `datetimeoffset(N)`) — always 1-byte-prefix even NOT NULL | 1-byte length prefix (= width) + raw bytes | `0xFF` |
+| `time(N)` / `datetime2(N)` / `datetimeoffset(N)` specifically | **always the maximum width** — 5 / 8 / 10 bytes — with the value scaled to 7 fractional digits whatever N is | `0xFF` |
 | UDDT-aliased columns of any base type (e.g. `dbo.Flag` over bit, `dbo.OrderNumber` over nvarchar) | shaped as if nullable (1-byte / 2-byte / 8-byte prefix per base family) regardless of declared nullability | per base-family NULL sentinel |
 | Variable-length bounded (`nvarchar(N)`, `varchar(N)`, `nchar(N)`, `char(N)`, `varbinary(N)`, `binary(N)`) | 2-byte LE byte-length prefix + bytes | `0xFFFF` |
 | MAX types (`varchar(MAX)`, `nvarchar(MAX)`, `varbinary(MAX)`), `xml`, CLR-UDT family (`hierarchyid`, `geography`, `geometry`) | 8-byte LE length prefix + N bytes inline (NOT the TDS-PLP chunked encoding) | `0xFFFFFFFFFFFFFFFF` (-1 signed) |
@@ -87,6 +88,17 @@ Type matrix probe-confirmed against AdventureWorks2025 hex-dumps:
   Probe against AW's plain-bit `Production.Document.FolderFlag` (the only non-UDDT bit column in AW) confirmed.
 - MAX types + xml + CLR-UDT all share the **simple inline** 8-byte-prefix shape, NOT the chunked PLP form used in TDS network traffic.
   Probe-confirmed via `ProductPhoto.ThumbNailPhoto` (1077 bytes inline, no chunk markers) and `HumanResources.JobCandidate.Resume` xml (9086 bytes likewise inline).
+
+### The variable-precision temporal family
+
+DacFx writes `time(N)` / `datetime2(N)` / `datetimeoffset(N)` at their **maximum** width, with the value scaled to 7 fractional digits, regardless of the column's declared precision — so a `datetime2(0)` column occupies the same 8 bytes as a `datetime2(7)` one and carries 100-nanosecond units either way.
+Reading them at the per-precision width (3/4/5 time bytes) desynchronizes the row and fails the whole table's data file.
+
+That went unnoticed for a long time because **AdventureWorks and WideWorldImporters use precision 7 exclusively**, where the declared and maximum widths coincide.
+It was found by exporting a purpose-built table with precisions 0, 3 and 7 side by side via `sqlpackage /Action:Export` and importing the result — the anchor bytes now live in `BacpacLoaderTests.TemporalBcpEncoding_MatchesRealDacFxBytes`, which pins `BacpacBuilder`'s encoder to that export so the harness and the reader can't drift into agreeing with each other.
+
+`datetimeoffset` additionally stores its date and time as the instant in **UTC**, not in the recorded offset's local time: `2024-03-15 13:45:12 +05:30` writes `08:15:12` on 2024-03-15 with offset `+330`.
+A large enough offset moves the payload onto a different calendar day than the local value.
 
 **Wire-format gaps** (none seen in AW or WWI):
 - `text` / `ntext` / `image` legacy LOB family — likely same 8-byte-prefix shape as MAX, but not confirmed.

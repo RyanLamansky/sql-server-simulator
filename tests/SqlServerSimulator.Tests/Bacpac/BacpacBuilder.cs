@@ -640,6 +640,12 @@ public sealed partial class BacpacBuilder
             case "time":
                 EncodeTime(stream, column.Nullable, args, value);
                 return;
+            case "datetimeoffset":
+                EncodeDateTimeOffset(stream, column.Nullable, args, value);
+                return;
+            case "smalldatetime":
+                EncodeFixedRaw(stream, column.Nullable, 4, value, buf => WriteSmallDateTime(buf, (DateTime)value!));
+                return;
             case "varchar" or "nvarchar" or "char" or "nchar" or "sysname" when !isMax:
                 Encode2BytePrefixedString(stream, value as string);
                 return;
@@ -920,6 +926,17 @@ public sealed partial class BacpacBuilder
         stream.Write(value);
     }
 
+    /// <summary>
+    /// <c>smalldatetime</c>: 2-byte LE days since 1900-01-01 + 2-byte LE
+    /// minutes since midnight.
+    /// </summary>
+    private static void WriteSmallDateTime(Span<byte> buf, DateTime dt)
+    {
+        var epoch = new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        BinaryPrimitives.WriteUInt16LittleEndian(buf[..2], checked((ushort)dt.Date.Subtract(epoch).Days));
+        BinaryPrimitives.WriteUInt16LittleEndian(buf[2..4], checked((ushort)(dt.TimeOfDay.Ticks / TimeSpan.TicksPerMinute)));
+    }
+
     private static void WriteDateTime(Span<byte> buf, DateTime dt)
     {
         // SQL Server datetime: 4-byte int32 days since 1900-01-01 + 4-byte uint32 1/300-second ticks since midnight.
@@ -1003,21 +1020,14 @@ public sealed partial class BacpacBuilder
     }
 
     /// <summary>
-    /// Encodes a datetime2(N) value: variable-byte LE ticks-since-midnight
-    /// at the precision's unit + 3-byte LE days-since-0001-01-01.
-    /// Width = 6 / 7 / 8 bytes for precision 0-2 / 3-4 / 5-7.
+    /// Encodes <c>datetime2(N)</c> the way DacFx does: always the maximum
+    /// 8-byte width — 5-byte LE count of 100-nanosecond units since midnight
+    /// plus 3-byte LE days-since-0001-01-01 — with the value scaled to 7
+    /// fractional digits whatever the column's declared precision.
     /// </summary>
     private static void EncodeDateTime2(Stream stream, bool nullable, string args, object? value)
     {
-        // args is the precision number ("7" / "3" / etc.) per ParseSqlType.
-        var precision = string.IsNullOrEmpty(args) ? 7 : int.Parse(args.Trim(), System.Globalization.CultureInfo.InvariantCulture);
-        var timeBytes = precision switch
-        {
-            <= 2 => 3,
-            <= 4 => 4,
-            _ => 5,
-        };
-        var totalBytes = timeBytes + 3;
+        _ = args;
         if (nullable)
         {
             if (value is null)
@@ -1025,49 +1035,57 @@ public sealed partial class BacpacBuilder
                 stream.WriteByte(0xFF);
                 return;
             }
-            stream.WriteByte((byte)totalBytes);
+            stream.WriteByte(8);
         }
-        var dt = (DateTime)value!;
-        var ticksPerUnit = precision switch
+        WriteDateTime2Body(stream, (DateTime)value!);
+    }
+
+    /// <summary>
+    /// Encodes <c>datetimeoffset(N)</c> as DacFx does: the maximum 10-byte
+    /// width, whose date and time carry the instant in <b>UTC</b>, followed by
+    /// a 2-byte LE signed minutes-from-UTC offset.
+    /// </summary>
+    private static void EncodeDateTimeOffset(Stream stream, bool nullable, string args, object? value)
+    {
+        _ = args;
+        if (nullable)
         {
-            0 => TimeSpan.TicksPerSecond,
-            1 => TimeSpan.TicksPerSecond / 10,
-            2 => TimeSpan.TicksPerSecond / 100,
-            3 => TimeSpan.TicksPerMillisecond,
-            4 => TimeSpan.TicksPerMillisecond / 10,
-            5 => TimeSpan.TicksPerMillisecond / 100,
-            6 => 10L,
-            _ => 1L,
-        };
-        var days = DateOnly.FromDateTime(dt).DayNumber;
-        var timeOfDayTicks = dt.TimeOfDay.Ticks;
-        var unitTicks = timeOfDayTicks / ticksPerUnit;
-        Span<byte> buf = stackalloc byte[totalBytes];
-        for (var i = 0; i < timeBytes; i++)
-        {
-            buf[i] = (byte)(unitTicks & 0xFF);
-            unitTicks >>= 8;
+            if (value is null)
+            {
+                stream.WriteByte(0xFF);
+                return;
+            }
+            stream.WriteByte(10);
         }
-        buf[timeBytes] = (byte)(days & 0xFF);
-        buf[timeBytes + 1] = (byte)((days >> 8) & 0xFF);
-        buf[timeBytes + 2] = (byte)((days >> 16) & 0xFF);
+        var dto = (DateTimeOffset)value!;
+        WriteDateTime2Body(stream, dto.UtcDateTime);
+        Span<byte> offsetBytes = stackalloc byte[2];
+        BinaryPrimitives.WriteInt16LittleEndian(offsetBytes, checked((short)dto.Offset.TotalMinutes));
+        stream.Write(offsetBytes);
+    }
+
+    /// <summary>The 8-byte datetime2 body shared by datetime2 and datetimeoffset.</summary>
+    private static void WriteDateTime2Body(Stream stream, DateTime value)
+    {
+        var days = value.Date.Subtract(new DateTime(1, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)).Days;
+        var ticks = value.TimeOfDay.Ticks;
+        Span<byte> buf = stackalloc byte[8];
+        for (var i = 0; i < 5; i++)
+            buf[i] = (byte)(ticks >> (8 * i));
+        buf[5] = (byte)days;
+        buf[6] = (byte)(days >> 8);
+        buf[7] = (byte)(days >> 16);
         stream.Write(buf);
     }
 
     /// <summary>
-    /// Encodes a <c>time(N)</c> value: precision-derived 3/4/5-byte LE
-    /// little-endian count of ticks-at-precision-unit. Matches the time-bytes
-    /// portion of datetime2 (no trailing day count).
+    /// Encodes <c>time(N)</c> as DacFx does: the maximum 5-byte width holding
+    /// a LE count of 100-nanosecond units since midnight, scaled to 7
+    /// fractional digits regardless of declared precision.
     /// </summary>
     private static void EncodeTime(Stream stream, bool nullable, string args, object? value)
     {
-        var precision = string.IsNullOrEmpty(args) ? 7 : int.Parse(args.Trim(), System.Globalization.CultureInfo.InvariantCulture);
-        var width = precision switch
-        {
-            <= 2 => 3,
-            <= 4 => 4,
-            _ => 5,
-        };
+        _ = args;
         if (nullable)
         {
             if (value is null)
@@ -1075,27 +1093,12 @@ public sealed partial class BacpacBuilder
                 stream.WriteByte(0xFF);
                 return;
             }
-            stream.WriteByte((byte)width);
+            stream.WriteByte(5);
         }
         var span = value is TimeOnly to ? to.ToTimeSpan() : (TimeSpan)value!;
-        var ticksPerUnit = precision switch
-        {
-            0 => TimeSpan.TicksPerSecond,
-            1 => TimeSpan.TicksPerSecond / 10,
-            2 => TimeSpan.TicksPerSecond / 100,
-            3 => TimeSpan.TicksPerMillisecond,
-            4 => TimeSpan.TicksPerMillisecond / 10,
-            5 => TimeSpan.TicksPerMillisecond / 100,
-            6 => 10L,
-            _ => 1L,
-        };
-        var unitTicks = span.Ticks / ticksPerUnit;
-        Span<byte> buf = stackalloc byte[width];
-        for (var i = 0; i < width; i++)
-        {
-            buf[i] = (byte)(unitTicks & 0xFF);
-            unitTicks >>= 8;
-        }
+        Span<byte> buf = stackalloc byte[5];
+        for (var i = 0; i < 5; i++)
+            buf[i] = (byte)(span.Ticks >> (8 * i));
         stream.Write(buf);
     }
 

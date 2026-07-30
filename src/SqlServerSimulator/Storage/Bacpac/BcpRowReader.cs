@@ -103,9 +103,16 @@ internal static class BcpRowReader
         // (probe-confirmed via AW HumanResources.Shift on 2026-05-15: time(7)
         // NOT NULL = 5 raw bytes, no prefix). Width comes from the
         // precision-specific singleton fields.
-        if (type is TimeSqlType tt) return ReadFixedRaw(ref stream, nullable, tt.timeBytes, type, b => DecodeTime(b, type));
-        if (type is DateTime2SqlType dt2t) return ReadFixedRaw(ref stream, nullable, dt2t.timeBytes + 3, type, b => DecodeDateTime2(b, type));
-        if (type is DateTimeOffsetSqlType dtot) return ReadFixedRaw(ref stream, nullable, dtot.timeBytes + 5, type, b => DecodeDateTimeOffset(b, type));
+        // DacFx writes time / datetime2 / datetimeoffset at their *maximum*
+        // width with the value scaled to 7 fractional digits, whatever the
+        // column's declared precision — verified against a sqlpackage export
+        // carrying precisions 0, 3 and 7 side by side. Every bacpac exercised
+        // before this used precision-7 columns only, where the declared and
+        // maximum widths coincide, which is why the per-precision width read
+        // correctly there and nowhere else.
+        if (type is TimeSqlType) return ReadFixedRaw(ref stream, nullable, 5, type, b => DecodeTime(b, type));
+        if (type is DateTime2SqlType) return ReadFixedRaw(ref stream, nullable, 8, type, b => DecodeDateTime2(b, type));
+        if (type is DateTimeOffsetSqlType) return ReadFixedRaw(ref stream, nullable, 10, type, b => DecodeDateTimeOffset(b, type));
 
         // 8-byte LE length-prefix types (MAX text/binary, xml, CLR-UDT family).
         // 0xFFFFFFFFFFFFFFFF = NULL; otherwise N bytes inline (no TDS-PLP
@@ -297,28 +304,28 @@ internal static class BcpRowReader
         long ticks = 0;
         for (var i = dateOffset - 1; i >= 0; i--)
             ticks = (ticks << 8) | bytes[i];
-        var precision = ((DateTime2SqlType)type).precision;
-        var ticksPerUnit = TicksPerPrecisionUnit(precision);
-        var dt = DateOnly.FromDayNumber(days).ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified)
-            .AddTicks(ticks * ticksPerUnit);
+        var dt = DateOnly.FromDayNumber(days).ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified).AddTicks(ticks);
         return SqlValue.FromDateTime2(type, dt);
     }
 
     /// <summary>
-    /// time(N): variable-byte LE fractional-second ticks (no date part).
+    /// time(N): 5-byte LE count of 100-nanosecond units since midnight, with
+    /// no date part. Always the maximum width — see the dispatch above.
     /// </summary>
     private static SqlValue DecodeTime(ReadOnlySpan<byte> bytes, SqlType type)
     {
         long ticks = 0;
         for (var i = bytes.Length - 1; i >= 0; i--)
             ticks = (ticks << 8) | bytes[i];
-        var precision = ((TimeSqlType)type).precision;
-        return SqlValue.FromTime(type, TimeSpan.FromTicks(ticks * TicksPerPrecisionUnit(precision)));
+        return SqlValue.FromTime(type, TimeSpan.FromTicks(ticks));
     }
 
     /// <summary>
     /// datetimeoffset(N): datetime2 layout + 2-byte LE signed minutes offset
-    /// from UTC.
+    /// from UTC. The date and time carry the instant in <b>UTC</b>, not in the
+    /// stored offset's local time — probe-confirmed against a DacFx export,
+    /// where <c>2024-03-15 13:45:12 +05:30</c> writes 08:15:12 with offset
+    /// +330.
     /// </summary>
     private static SqlValue DecodeDateTimeOffset(ReadOnlySpan<byte> bytes, SqlType type)
     {
@@ -329,24 +336,9 @@ internal static class BcpRowReader
         long ticks = 0;
         for (var i = dateOffset - 1; i >= 0; i--)
             ticks = (ticks << 8) | datetime2Bytes[i];
-        var precision = ((DateTimeOffsetSqlType)type).precision;
-        var dt = DateOnly.FromDayNumber(days).ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified)
-            .AddTicks(ticks * TicksPerPrecisionUnit(precision));
-        var offset = TimeSpan.FromMinutes(minutesOffset);
-        return SqlValue.FromDateTimeOffset(type, new DateTimeOffset(dt, offset));
+        var utc = DateOnly.FromDayNumber(days).ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified).AddTicks(ticks);
+        return SqlValue.FromDateTimeOffset(type, new DateTimeOffset(utc, TimeSpan.Zero).ToOffset(TimeSpan.FromMinutes(minutesOffset)));
     }
-
-    private static long TicksPerPrecisionUnit(int precision) => precision switch
-    {
-        0 => TimeSpan.TicksPerSecond,
-        1 => TimeSpan.TicksPerSecond / 10,
-        2 => TimeSpan.TicksPerSecond / 100,
-        3 => TimeSpan.TicksPerMillisecond,
-        4 => TimeSpan.TicksPerMillisecond / 10,
-        5 => TimeSpan.TicksPerMillisecond / 100,
-        6 => 10,
-        _ => 1,
-    };
 
     private static SqlValue ReadVarchar2(ref PushbackStream stream, SqlType type)
     {

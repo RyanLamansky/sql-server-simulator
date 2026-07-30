@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator.Bacpac;
@@ -1995,4 +1996,113 @@ public class BacpacLoaderTests
              WHERE t.name = 'Doc' AND c.name = 'Body';
             """));
     }
+
+    /// <summary>
+    /// Byte parity against a genuine DacFx export. The expected strings come
+    /// from <c>sqlpackage /Action:Export</c> of a table carrying every
+    /// temporal type at several precisions (2026-07-30), read straight out of
+    /// the resulting <c>.BCP</c> file.
+    /// </summary>
+    /// <remarks>
+    /// This is the anchor that keeps <see cref="BacpacBuilder"/> and
+    /// <c>BcpRowReader</c> from agreeing with each other while both disagree
+    /// with DacFx — which is exactly how the max-width encoding of
+    /// <c>time</c> / <c>datetime2</c> / <c>datetimeoffset</c> went unnoticed:
+    /// every bacpac exercised before used precision 7, where the declared and
+    /// maximum widths coincide.
+    /// </remarks>
+    [TestMethod]
+    [DataRow("date", "2024-03-15", "038F460B")]
+    [DataRow("smalldatetime", "2024-03-15 13:45:00", "0434B13903")]
+    [DataRow("datetime", "2024-03-15 13:45:12.347", "0834B1000048A6E200")]
+    [DataRow("time(0)", "13:45:12", "0500A4734773")]
+    [DataRow("time(3)", "13:45:12.345", "059048A84773")]
+    [DataRow("time(7)", "13:45:12.3456789", "051563A84773")]
+    [DataRow("datetime2(0)", "2024-03-15 13:45:12", "0800A47347738F460B")]
+    [DataRow("datetime2(3)", "2024-03-15 13:45:12.345", "089048A847738F460B")]
+    [DataRow("datetime2(7)", "2024-03-15 13:45:12.3456789", "081563A847738F460B")]
+    [DataRow("datetimeoffset(0)", "2024-03-15 13:45:12 +05:30", "0A0068BB2D458F460B4A01")]
+    [DataRow("datetimeoffset(3)", "2024-03-15 13:45:12.345 -08:00", "0A9088CB55B68F460B20FE")]
+    [DataRow("datetimeoffset(7)", "2024-03-15 13:45:12.3456789 +14:00", "0A15735419C78E460B4803")]
+    public void TemporalBcpEncoding_MatchesRealDacFxBytes(string sqlType, string literal, string expectedHex)
+    {
+        using var stream = new MemoryStream();
+        BacpacBuilder.EncodeBcpValue(stream, new ColumnDef("V", sqlType, Nullable: true), ParseTemporal(sqlType, literal));
+        AreEqual(expectedHex, Convert.ToHexString(stream.ToArray()));
+    }
+
+    /// <summary>
+    /// The whole temporal family survives a bacpac round trip at every
+    /// precision, including the offset a <c>datetimeoffset</c> carries — whose
+    /// payload is the instant in UTC rather than in local time.
+    /// </summary>
+    [TestMethod]
+    public void TemporalTypes_RoundTripThroughBcp()
+    {
+        var date = new DateOnly(2024, 3, 15);
+        var small = new DateTime(2024, 3, 15, 13, 45, 0, DateTimeKind.Unspecified);
+        var time = new TimeSpan(0, 13, 45, 12, 345).Add(TimeSpan.FromTicks(6789));
+        var stamp = new DateTime(2024, 3, 15, 13, 45, 12, 345, DateTimeKind.Unspecified).AddTicks(6789);
+        var offset = new DateTimeOffset(stamp, TimeSpan.FromMinutes(330));
+
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "T", t => t
+                .Column("Id", "int")
+                .Column("D", "date")
+                .Column("Sdt", "smalldatetime")
+                .Column("T7", "time(7)")
+                .Column("D27", "datetime2(7)")
+                .Column("O7", "datetimeoffset(7)")
+                .Row(1, date, small, time, stamp, offset))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT D, Sdt, T7, D27, O7 FROM T;";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(date.ToDateTime(TimeOnly.MinValue), reader.GetDateTime(0));
+        AreEqual(small, reader.GetDateTime(1));
+        AreEqual(time, reader.GetValue(2));
+        AreEqual(stamp, reader.GetDateTime(3));
+        AreEqual(offset, reader.GetValue(4));
+    }
+
+    /// <summary>
+    /// A <c>datetimeoffset</c> whose offset pushes the UTC instant onto a
+    /// different calendar day still round-trips — the payload's date is the
+    /// UTC one, so a naive local-time read would land a day out.
+    /// </summary>
+    [TestMethod]
+    public void DateTimeOffset_AcrossDayBoundary_RoundTrips()
+    {
+        var offset = new DateTimeOffset(new DateTime(2024, 3, 15, 13, 45, 12, DateTimeKind.Unspecified), TimeSpan.FromHours(14));
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "T", t => t
+                .Column("Id", "int")
+                .Column("O", "datetimeoffset(7)")
+                .Row(1, offset))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT O FROM T;";
+        AreEqual(offset, command.ExecuteScalar());
+    }
+
+    private static object ParseTemporal(string sqlType, string literal) =>
+        sqlType.StartsWith("datetimeoffset", StringComparison.Ordinal)
+            ? DateTimeOffset.Parse(literal, CultureInfo.InvariantCulture)
+            : sqlType.StartsWith("time", StringComparison.Ordinal)
+                ? TimeSpan.Parse(literal, CultureInfo.InvariantCulture)
+                : DateTime.Parse(literal, CultureInfo.InvariantCulture, DateTimeStyles.None);
 }

@@ -242,13 +242,13 @@ Measured 2026-07-30 (`dotnet test --collect:"XPlat Code Coverage"` → reportgen
 These are reachable code paths no test exercises — not gaps in behavior, gaps in the safety net.
 Of the ~990 lines in fully-uncovered methods, ~376 are `DebugDisplay` / `ToString` debugger helpers and ~48 are `Stream` boilerplate overrides, both of which are deliberately not worth testing; what remains is this list.
 
-- **BCP import of `datetimeoffset` / `smalldatetime`** (`BcpRowReader`), and **`sql_variant` over the wire** carrying `datetime2` / `datetimeoffset` / `smalldatetime` / an ANSI string (`TdsWireValue`).
+- **`sql_variant` over the wire** carrying `datetime2` / `datetimeoffset` / `smalldatetime` / an ANSI string (`TdsWireValue`).
 - **`TdsColumnDecoder`'s `time` / `xml` / `money` / `smalldatetime` / `datetime` / ANSI-string readers** — the remote-read path, so a linked-server round-trip of those types would cover them.
 - **`sp_cursorprepare`** (`TdsSession.CursorPrepare`).
 - **The foreign-key scan fallback** (`FkTuplesMatch` + `EnumerateChildRows`) — reached only when `TryMapFkColumnsToStorage` fails, so the seek path covers every tested FK.
 - **`ClrAssemblyMetadata.ComputePublicKeyToken` / `DescribeReference`** — strong-named assembly identity and the assembly-reference description.
 
-Covered since the first measurement, each of which turned out to be hiding a behavior bug rather than just a missing test: `INFORMATION_SCHEMA.PARAMETERS` (no scalar-function return row, wrong `CHARACTER_MAXIMUM_LENGTH` rule, `sysname` not resolved to its base type), the DYNAMIC cursor's scroll directions (`DECLARE … CURSOR DYNAMIC` was treated as forward-only, `RELATIVE` was rejected outright, and the forward-only rejection used Msg 16925's wording instead of Msg 16911's), and the public `SimulatedDbParameterCollection` indexers plus `SimulatedSqlResultSet.HasRows`.
+Covered since the first measurement, each of which turned out to be hiding a behavior bug rather than just a missing test: the BCP temporal family (DacFx writes `time` / `datetime2` / `datetimeoffset` at maximum width scaled to 7 digits, and `datetimeoffset` in UTC — reading them per-precision failed the entire table's data file, invisible while only precision-7 fixtures existed), `INFORMATION_SCHEMA.PARAMETERS` (no scalar-function return row, wrong `CHARACTER_MAXIMUM_LENGTH` rule, `sysname` not resolved to its base type), the DYNAMIC cursor's scroll directions (`DECLARE … CURSOR DYNAMIC` was treated as forward-only, `RELATIVE` was rejected outright, and the forward-only rejection used Msg 16925's wording instead of Msg 16911's), and the public `SimulatedDbParameterCollection` indexers plus `SimulatedSqlResultSet.HasRows`.
 
 Worth re-measuring after a large bundle rather than routinely, and worth acting on when it does run: **nothing this pass surfaced was merely an untested-but-correct path.**
 It found two pieces of dead code — a duplicated MERGE type resolver, and an unreachable ON-UPDATE-CASCADE branch whose stub threw an exception saying so — and every gap that was then covered turned out to be hiding a behavior bug.
