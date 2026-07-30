@@ -106,13 +106,14 @@ partial class SimulatedSqlException
         new($"Argument {argumentIndex} of the {functionName} function does not match any of the expressions in the GROUP BY clause.", 8161, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 8156 — raised when a PIVOT's <c>IN</c> list
-    /// names the same pivot value twice (each value becomes an output column,
-    /// so a repeat is a duplicate column). <paramref name="pivotAlias"/> is
-    /// the alias given to the PIVOT table source.
+    /// Mimics SQL Server's Msg 8156 — the same output column name given twice
+    /// for one table source. Raised by a PIVOT whose <c>IN</c> list repeats a
+    /// value (each becomes an output column) and by a derived table whose
+    /// column-alias list repeats a name. <paramref name="alias"/> is the alias
+    /// given to that source.
     /// </summary>
-    internal static SimulatedSqlException PivotColumnSpecifiedMultipleTimes(string column, string pivotAlias) =>
-        new($"The column '{column}' was specified multiple times for '{pivotAlias}'.", 8156, 16, 1);
+    internal static SimulatedSqlException ColumnSpecifiedMultipleTimes(string column, string alias) =>
+        new($"The column '{column}' was specified multiple times for '{alias}'.", 8156, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 8167 — raised when the columns in an
@@ -373,6 +374,25 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException NoColumnNameSpecified(int columnPosition, string alias) =>
         new($"No column name was specified for column {columnPosition} of '{alias}'.", 8155, 16, 2);
+
+    /// <summary>
+    /// Msg 8155 for a derived table with several unnamed columns and no
+    /// column-alias list. Real reports one error per unnamed column in a
+    /// single exception rather than stopping at the first (probe-confirmed:
+    /// <c>(SELECT 1, 2) s</c> reports columns 1 and 2), so the whole run is
+    /// reproduced for <c>Errors</c> and <c>Message</c> parity.
+    /// </summary>
+    internal static SimulatedSqlException NoColumnNamesSpecified(IReadOnlyList<int> columnPositions, string alias)
+    {
+        var errors = new SimulatedError[columnPositions.Count];
+        var lines = new string[columnPositions.Count];
+        for (var i = 0; i < columnPositions.Count; i++)
+        {
+            lines[i] = $"No column name was specified for column {columnPositions[i]} of '{alias}'.";
+            errors[i] = new SimulatedError(@class: 16, lineNumber: 0, lines[i], 8155, procedure: "", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 2);
+        }
+        return new(string.Join('\n', lines), errors);
+    }
 
     /// <summary>
     /// Mimics SQL Server error 10709: the rows of a table value constructor

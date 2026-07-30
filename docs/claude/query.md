@@ -59,6 +59,27 @@
   EF emits `ISNULL` only for `??` with a CAST; bare `??` emits `COALESCE`.
   Neither IIF nor NULLIF is EF-emitted (LINQ ternary → CASE) — load-bearing for `FromSqlInterpolated`.
 
+## Derived-table column-alias list
+
+`FROM (SELECT …) s(a, b)` renames every output column of the derived table, overriding whatever the inner projection called them.
+The same list applies to an `APPLY`'s derived table (`CROSS APPLY (SELECT t.a) x(v)`), and the `(VALUES …) v(a, b)` and `WITH c(m, n) AS (…)` forms route to the same `ParseColumnAliasList` by their own paths.
+
+`Selection.ResolveDerivedTableColumnNames` is the shared gate. Probe-confirmed rules:
+
+| Shape | Result |
+| --- | --- |
+| List shorter than the projection | **Msg 8158** — `'s' has more columns than were specified in the column list.` |
+| List longer than the projection | **Msg 8159** — `'s' has fewer columns…` |
+| A name repeated in the list | **Msg 8156** — `The column 'a' was specified multiple times for 's'.` |
+| Empty list `s()` | **Msg 102** near `')'` |
+| No list, and a column has no name of its own | **Msg 8155**, one error per unnamed column |
+
+The Msg 8155 case reports the whole run rather than stopping at the first, so `(SELECT 1, 2) s` raises a single exception carrying two errors — `SimulatedSqlException.NoColumnNamesSpecified` builds it, and `Errors` / `Message` match real's.
+Before this shipped the simulator returned empty-named columns there, and resolved them to the wrong values.
+
+The 8155 check needs the alias for its message, so it only runs when the source has one.
+An **unaliased** derived table is still accepted, where real requires the alias — a separate over-permissive gap.
+
 ## Pagination (`OFFSET ... FETCH`)
 - OFFSET requires ORDER BY (else Msg 102).
 - FETCH alone (no preceding OFFSET) → **Msg 153**.

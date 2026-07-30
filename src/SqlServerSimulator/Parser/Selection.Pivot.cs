@@ -119,7 +119,7 @@ internal sealed partial class Selection
             foreach (var prior in seenValues)
             {
                 if (BuiltInToken.Equals(prior, pivotValue))
-                    throw SimulatedSqlException.PivotColumnSpecifiedMultipleTimes(pivotValue, alias);
+                    throw SimulatedSqlException.ColumnSpecifiedMultipleTimes(pivotValue, alias);
             }
             seenValues.Add(pivotValue);
 

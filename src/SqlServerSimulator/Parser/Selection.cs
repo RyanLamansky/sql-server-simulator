@@ -1740,6 +1740,7 @@ internal sealed partial class Selection
             lateralColumns[ci] = new HeapColumn(string.Empty, schema[ci], maxLength: null, nullable: true);
 
         var alias = ConsumeOptionalAlias(context);
+        columnNames = ResolveDerivedTableColumnNames(context, columnNames, alias);
 
         return new FromSource(
             qualifier: alias,
@@ -2196,10 +2197,11 @@ internal sealed partial class Selection
                 // qualified-reference check (the existing simulator
                 // accepts derived tables without alias, unlike real SQL).
                 var derivedQualifier = ConsumeOptionalAlias(context);
+                var derivedNames = ResolveDerivedTableColumnNames(context, derivedSelection.ColumnNames, derivedQualifier);
 
                 return new FromSource(
                     qualifier: derivedQualifier,
-                    columnNames: derivedSelection.ColumnNames,
+                    columnNames: derivedNames,
                     columns: derivedColumns,
                     storedSchema: derivedColumns,
                     storageOrdinals: null,
@@ -2397,6 +2399,58 @@ internal sealed partial class Selection
             or Keyword.Current_Timestamp or Keyword.Current_Date or Keyword.Current_User
             or Keyword.Session_User or Keyword.System_user or Keyword.User
             or Keyword.Distinct or Keyword.All or Keyword.Top;
+
+    /// <summary>
+    /// Applies a derived table's optional column-alias list —
+    /// <c>(SELECT …) s(a, b)</c> — which renames every output column,
+    /// overriding whatever the inner projection called them. Entered with the
+    /// cursor wherever <see cref="ConsumeOptionalAlias"/> left it; consumes
+    /// the list when one is present and returns the effective names.
+    /// </summary>
+    /// <remarks>
+    /// Probe-confirmed against SQL Server 2025: a list shorter than the
+    /// projection is <strong>Msg 8158</strong>, longer is <strong>Msg
+    /// 8159</strong>, and a repeated name is <strong>Msg 8156</strong>.
+    /// With no list, every column must already have a name — an unnamed one is
+    /// <strong>Msg 8155</strong>, reported once per unnamed column.
+    /// The 8155 check needs the alias for its message, so it only runs when the
+    /// source has one; the simulator otherwise tolerates an unaliased derived
+    /// table that real rejects outright, which is a separate gap.
+    /// </remarks>
+    private static string[] ResolveDerivedTableColumnNames(ParserContext context, string[] projectedNames, string? qualifier)
+    {
+        if (qualifier is null)
+            return projectedNames;
+
+        if (context.Token is not Operator { Character: '(' })
+        {
+            List<int>? unnamed = null;
+            for (var i = 0; i < projectedNames.Length; i++)
+            {
+                if (string.IsNullOrEmpty(projectedNames[i]))
+                    (unnamed ??= []).Add(i + 1);
+            }
+            return unnamed is null
+                ? projectedNames
+                : throw SimulatedSqlException.NoColumnNamesSpecified(unnamed, qualifier);
+        }
+
+        var renamed = ParseColumnAliasList(context);
+        if (projectedNames.Length > renamed.Length)
+            throw SimulatedSqlException.HasMoreColumnsThanColumnList(qualifier);
+        if (projectedNames.Length < renamed.Length)
+            throw SimulatedSqlException.HasFewerColumnsThanColumnList(qualifier);
+
+        for (var i = 0; i < renamed.Length; i++)
+        {
+            for (var j = 0; j < i; j++)
+            {
+                if (Collation.Baseline.Equals(renamed[i], renamed[j]))
+                    throw SimulatedSqlException.ColumnSpecifiedMultipleTimes(renamed[i], qualifier);
+            }
+        }
+        return renamed;
+    }
 
     /// <summary>
     /// Parses a parenthesized column-alias list <c>(col, col, …)</c> — the
