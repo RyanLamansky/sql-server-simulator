@@ -810,8 +810,17 @@ public sealed class IndexSeekTests
         // The journal is bounded; a single insert that overruns the cap drops the
         // oldest events and advances the dropped-through generation past the warm
         // cache's, forcing a rebuild — which still returns the correct row.
+        //
+        // A non-unique index rather than TableT's PRIMARY KEY: key enforcement
+        // seeks per inserted row, which replays the journal as the bulk runs and
+        // leaves the cache current, so a keyed table never reaches the cap here.
+        // The index still accelerates the probe, which is what this asserts on.
         var (trace, rows) = WarmMutateProbe(
-            TableT,
+            """
+            create table t (id int not null, val int not null);
+            create index ix_id on t (id);
+            insert t values (1, 5), (2, 50), (3, 500)
+            """,
             "select val from t where id = 1",
             "insert t (id, val) select value, value * 10 from generate_series(1000, 1800)",
             "select val from t where id = 1500");
@@ -1955,6 +1964,20 @@ public sealed class IndexSeekTests
     // the mutation target seek; a full scan touches the cache not at all. The
     // mutation loop re-runs the full WHERE per row, so the seek only narrows. ----
 
+    /// <summary>
+    /// Asserts the traced statement resolved the seek cache. Which way it
+    /// resolved isn't the point and isn't stable: key-uniqueness enforcement
+    /// seeks on every insert into a keyed table, so a setup INSERT has already
+    /// built the entry and the mutation seek replays the journal rather than
+    /// building. Touching the cache at all is the discriminator — a full scan
+    /// doesn't. (The journal-invalidation tests above assert <c>CacheBuild</c>
+    /// specifically, because a rebuild is exactly what they're about.)
+    /// </summary>
+    private static void AssertCacheResolved(List<string> trace) =>
+        IsTrue(
+            trace.Contains("CacheBuild") || trace.Contains("CacheReplay"),
+            $"expected a cache build or replay; trace was [{string.Join(", ", trace)}]");
+
     private static List<string> ExecTraced(SimulatedDbConnection c, string sql)
     {
         IndexSeekDiagnostics.Sink = [];
@@ -1981,7 +2004,7 @@ public sealed class IndexSeekTests
     public void UpdateByPrimaryKey_SeeksTarget()
     {
         var c = FreshT();
-        Contains("CacheBuild", ExecTraced(c, "update t set val = 999 where id = 2"));
+        AssertCacheResolved(ExecTraced(c, "update t set val = 999 where id = 2"));
         AreEqual(999, Convert.ToInt32(ReadVal(c, "select val from t where id = 2")));
         AreEqual("5,500", Seq(ReadRows(c, "select val from t where id <> 2 order by id")));
     }
@@ -1990,7 +2013,7 @@ public sealed class IndexSeekTests
     public void DeleteByPrimaryKey_SeeksTarget()
     {
         var c = FreshT();
-        Contains("CacheBuild", ExecTraced(c, "delete from t where id = 2"));
+        AssertCacheResolved(ExecTraced(c, "delete from t where id = 2"));
         AreEqual("1,3", Seq(ReadRows(c, "select id from t order by id")));
     }
 
@@ -1998,7 +2021,7 @@ public sealed class IndexSeekTests
     public void DeleteByRange_RangeSeeksTarget()
     {
         var c = FreshT();
-        Contains("CacheBuild", ExecTraced(c, "delete from t where id >= 2"));
+        AssertCacheResolved(ExecTraced(c, "delete from t where id >= 2"));
         AreEqual("1", Seq(ReadRows(c, "select id from t order by id")));
     }
 
@@ -2006,7 +2029,7 @@ public sealed class IndexSeekTests
     public void DeleteByInList_SeeksTarget()
     {
         var c = FreshT();
-        Contains("CacheBuild", ExecTraced(c, "delete from t where id in (1, 3)"));
+        AssertCacheResolved(ExecTraced(c, "delete from t where id in (1, 3)"));
         AreEqual("2", Seq(ReadRows(c, "select id from t order by id")));
     }
 
@@ -2018,7 +2041,7 @@ public sealed class IndexSeekTests
         var c = new Simulation().CreateDbConnection();
         c.Open();
         Exec(c, PrefixRangeT);
-        Contains("CacheBuild", ExecTraced(c, "update t set v = 0 where a = 1 and b >= 20"));
+        AssertCacheResolved(ExecTraced(c, "update t set v = 0 where a = 1 and b >= 20"));
         AreEqual("100,0,0,0,500,600", Seq(ReadRows(c, "select v from t order by a, b")));
     }
 
@@ -2028,7 +2051,7 @@ public sealed class IndexSeekTests
         var c = new Simulation().CreateDbConnection();
         c.Open();
         Exec(c, PrefixRangeT);
-        Contains("CacheBuild", ExecTraced(c, "delete from t where a = 1 and b between 20 and 30"));
+        AssertCacheResolved(ExecTraced(c, "delete from t where a = 1 and b between 20 and 30"));
         AreEqual("100,400,500,600", Seq(ReadRows(c, "select v from t order by a, b")));
     }
 
@@ -2101,7 +2124,7 @@ public sealed class IndexSeekTests
             when matched then update set v = s.v
             when not matched then insert (id, v) values (s.id, s.v);
             """);
-        Contains("CacheBuild", trace);
+        AssertCacheResolved(trace);
         AreEqual(4, Convert.ToInt32(ReadVal(c, "select count(*) from tgt")));
         AreEqual(200, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 2"))); // matched → updated
         AreEqual(400, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 4"))); // not matched → inserted
@@ -2113,16 +2136,16 @@ public sealed class IndexSeekTests
     {
         var c = FreshTarget();
         // A NOT MATCHED BY SOURCE clause must visit every target to find the
-        // unmatched ones, but the match phase still seeks (CacheBuild): the seek
-        // builds matchedByTarget, then one heap pass applies MATCHED to the hits
-        // and BY-SOURCE DELETE to the rest — no per-target source loop.
+        // unmatched ones, but the match phase still seeks: the seek builds
+        // matchedByTarget, then one heap pass applies MATCHED to the hits and
+        // BY-SOURCE DELETE to the rest — no per-target source loop.
         var trace = ExecTraced(c, """
             merge tgt as t
             using (values (2, 200)) as s(id, v) on t.id = s.id
             when matched then update set v = s.v
             when not matched by source then delete;
             """);
-        Contains("CacheBuild", trace);
+        AssertCacheResolved(trace);
         AreEqual("2", Seq(ReadRows(c, "select id from tgt order by id"))); // 1 and 3 deleted
         AreEqual(200, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 2")));
     }
@@ -2162,7 +2185,7 @@ public sealed class IndexSeekTests
             using (values (1, 100), (2, 200)) as s(id, v) on t.id = s.id and t.active = 1
             when matched then update set v = s.v;
             """);
-        Contains("CacheBuild", trace);
+        AssertCacheResolved(trace);
         AreEqual(100, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 1")));
         AreEqual(20, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 2")));
     }

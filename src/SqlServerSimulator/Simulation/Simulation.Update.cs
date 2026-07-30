@@ -1,4 +1,3 @@
-using System.Text;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
@@ -1147,12 +1146,26 @@ partial class Simulation
 
             foreach (var constraint in table.KeyConstraints)
             {
+                if (!KeyTupleMoved(constraint.StorageOrdinals, myStored, affected[i], table))
+                    continue;
+
                 for (var j = 0; j < affected.Count; j++)
                 {
                     if (i == j)
                         continue;
                     if (KeyTuplesEqualStored(myStored, storedSnapshots[j], constraint))
-                        throw KeyViolationForUpdate(table, constraint, myStored);
+                        throw KeyConstraintViolation(table, constraint, myStored);
+                }
+
+                if (TryPrepareKeySeek(table, constraint.StorageOrdinals, myStored, out var commons, out var probe))
+                {
+                    foreach (var (p, s, _) in HeapSeekCache.For(table.Heap)
+                        .MatchingRows(table.Heap, storedColumns, constraint.StorageOrdinals, commons, probe))
+                    {
+                        if (!affectedAddrs.Contains((p, s)))
+                            throw KeyConstraintViolation(table, constraint, myStored);
+                    }
+                    continue;
                 }
 
                 foreach (var (p, s, bytes) in table.Heap.EnumerateRowsWithAddress())
@@ -1171,7 +1184,7 @@ partial class Simulation
                         }
                     }
                     if (allEqual)
-                        throw KeyViolationForUpdate(table, constraint, myStored);
+                        throw KeyConstraintViolation(table, constraint, myStored);
                 }
             }
         }
@@ -1224,8 +1237,20 @@ partial class Simulation
             {
                 if (!index.IsUnique)
                     continue;
-                if (index.Filter is not null && Simulation.EvaluateIndexFilter(index.Filter, table, myFull, batch) != true)
+                if (index.Filter is { } rowFilter)
+                {
+                    if (Simulation.EvaluateIndexFilter(rowFilter, table, myFull, batch) != true)
+                        continue;
+                }
+                // A standing key skips its own check (see KeyTupleMoved) — for an
+                // unfiltered index only, which is why this is the else arm: a
+                // filter can read columns outside the key, so a row whose key
+                // stood still can still have moved into the filtered set and
+                // collided there.
+                else if (!KeyTupleMoved(index.KeyStorageOrdinals, myStored, affected[i], table))
+                {
                     continue;
+                }
 
                 for (var j = 0; j < affected.Count; j++)
                 {
@@ -1234,30 +1259,41 @@ partial class Simulation
                     if (index.Filter is { } f2 && Simulation.EvaluateIndexFilter(f2, table, affected[j].FullNew, batch) != true)
                         continue;
                     if (UniqueKeyEqualsStored(myStored, storedSnapshots[j], index))
-                        throw UniqueIndexViolationForUpdate(index, qualifiedTableName, myStored);
+                        throw UniqueIndexViolation(index, qualifiedTableName, myStored);
+                }
+
+                if (TryPrepareKeySeek(table, index.KeyStorageOrdinals, myStored, out var commons, out var probe))
+                {
+                    foreach (var (p, s, bytes) in HeapSeekCache.For(table.Heap)
+                        .MatchingRows(table.Heap, storedColumns, index.KeyStorageOrdinals, commons, probe))
+                    {
+                        if (affectedAddrs.Contains((p, s)))
+                            continue;
+                        if (index.Filter is { } seekFilter
+                            && Simulation.EvaluateIndexFilter(seekFilter, table, DecodeFullRow(table, bytes, ref existingRowValues), batch) != true)
+                        {
+                            continue;
+                        }
+
+                        throw UniqueIndexViolation(index, qualifiedTableName, myStored);
+                    }
+                    continue;
                 }
 
                 foreach (var (p, s, bytes) in table.Heap.EnumerateRowsWithAddress())
                 {
                     if (affectedAddrs.Contains((p, s)))
                         continue;
-                    if (index.Filter is { } filter)
+                    if (index.Filter is { } filter
+                        && Simulation.EvaluateIndexFilter(filter, table, DecodeFullRow(table, bytes, ref existingRowValues), batch) != true)
                     {
-                        existingRowValues ??= new SqlValue[table.Columns.Length];
-                        for (var c = 0; c < table.Columns.Length; c++)
-                        {
-                            var storageOrd = table.StorageOrdinals[c];
-                            existingRowValues[c] = storageOrd >= 0
-                                ? RowDecoder.DecodeColumn(storedColumns, bytes, storageOrd, lobStore)
-                                : SqlValue.Null(table.Columns[c].Type);
-                        }
-                        if (Simulation.EvaluateIndexFilter(filter, table, existingRowValues, batch) != true)
-                            continue;
+                        continue;
                     }
+
                     var allEqual = true;
-                    for (var k = 0; k < index.KeyColumns.Length; k++)
+                    for (var k = 0; k < index.KeyStorageOrdinals.Length; k++)
                     {
-                        var ord = index.KeyColumns[k].StorageOrdinal;
+                        var ord = index.KeyStorageOrdinals[k];
                         var existing = RowDecoder.DecodeColumn(storedColumns, bytes, ord, lobStore);
                         if (!existing.Equals(myStored[ord]))
                         {
@@ -1266,7 +1302,7 @@ partial class Simulation
                         }
                     }
                     if (allEqual)
-                        throw UniqueIndexViolationForUpdate(index, qualifiedTableName, myStored);
+                        throw UniqueIndexViolation(index, qualifiedTableName, myStored);
                 }
             }
         }
@@ -1283,12 +1319,55 @@ partial class Simulation
         return true;
     }
 
-    private static SimulatedSqlException UniqueIndexViolationForUpdate(Storage.Index index, string qualifiedTableName, SqlValue[] storedValues)
+    /// <summary>
+    /// Whether the UPDATE moved this row's key tuple over
+    /// <paramref name="storageOrdinals"/>. A row whose key stood still needs no
+    /// uniqueness check of its own: it was unique before the statement,
+    /// non-affected rows don't change, and a collision with a row whose key
+    /// <i>did</i> move surfaces when that row is checked (every affected row
+    /// stays a comparison target either way). That skip is what keeps a bulk
+    /// UPDATE which never touches the key off the affected-vs-affected walk —
+    /// measured at 2.2 s for 20 000 rows on a keyed table against 33 ms on a
+    /// keyless one before it.
+    /// <para>
+    /// The pre-update key comes from <paramref name="row"/>'s <c>FullOld</c>
+    /// when the caller captured whole old rows (an OUTPUT clause, a trigger,
+    /// MERGE's matched updates), and otherwise straight off the row's heap slot:
+    /// validation runs before the rewrite phase, so the slot still holds the old
+    /// bytes, and only the key columns need decoding. The plain UPDATE path
+    /// captures nothing, which is the shape that matters here, so reading the
+    /// slot is what makes the skip fire at all rather than a no-op.
+    /// A negative page index is the sentinel address of a row that doesn't exist
+    /// yet (MERGE's pending inserts) — no pre-update state, so it counts as
+    /// moved and gets the full check, as does a slot that can't be read.
+    /// </para>
+    /// </summary>
+    private static bool KeyTupleMoved(
+        int[] storageOrdinals,
+        SqlValue[] newStored,
+        (int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld) row,
+        HeapTable table)
     {
-        var key = new SqlValue[index.KeyColumns.Length];
-        for (var i = 0; i < index.KeyColumns.Length; i++)
-            key[i] = storedValues[index.KeyColumns[i].StorageOrdinal];
-        return SimulatedSqlException.ViolationOfUniqueIndex(index.Name, qualifiedTableName, Simulation.FormatIndexKeyValues(key));
+        if (row.FullOld is { } fullOld)
+        {
+            var oldStored = ProjectStoredValues(table, fullOld);
+            foreach (var ordinal in storageOrdinals)
+            {
+                if (!newStored[ordinal].Equals(oldStored[ordinal]))
+                    return true;
+            }
+            return false;
+        }
+
+        if (row.PageIndex < 0 || table.Heap.ReadSlotBytes(row.PageIndex, row.SlotIndex) is not { } oldBytes)
+            return true;
+
+        foreach (var ordinal in storageOrdinals)
+        {
+            if (!newStored[ordinal].Equals(RowDecoder.DecodeColumn(table.StoredColumns, oldBytes, ordinal, table.Heap)))
+                return true;
+        }
+        return false;
     }
 
     private static bool KeyTuplesEqualStored(SqlValue[] a, SqlValue[] b, KeyConstraint constraint)
@@ -1302,15 +1381,4 @@ partial class Simulation
         return true;
     }
 
-    private static SimulatedSqlException KeyViolationForUpdate(HeapTable table, KeyConstraint constraint, SqlValue[] storedValues)
-    {
-        var sb = new StringBuilder();
-        for (var i = 0; i < constraint.StorageOrdinals.Length; i++)
-        {
-            if (i > 0)
-                _ = sb.Append(", ");
-            _ = sb.Append(FormatKeyValue(storedValues[constraint.StorageOrdinals[i]]));
-        }
-        return SimulatedSqlException.ViolationOfKeyConstraint(constraint.ViolationKindWord, constraint.Name, table.Name, sb.ToString());
-    }
 }

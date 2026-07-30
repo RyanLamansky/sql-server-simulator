@@ -243,17 +243,86 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Linear-scans the table's heap for a row whose key tuple equals the new
-    /// row's, raising Msg 2627 with the offending constraint's name on the
-    /// first match. Skips when the table has no PK/UNIQUE constraints.
-    /// SqlValue equality already handles SQL Server's NULLs-equal-for-UNIQUE
-    /// rule (two NULLs collide; one NULL and one non-NULL don't), so the loop
-    /// just delegates per column. Comparison is collation-aware for string
-    /// columns thanks to <see cref="SqlValue.Equals(SqlValue)"/>'s ANSI-padded
-    /// path. <paramref name="storedRowValues"/> is the row's values in
+    /// Prepares a key-uniqueness seek of <paramref name="table"/>'s heap for the
+    /// key tuple <paramref name="storageOrdinals"/> names in
+    /// <paramref name="storedRowValues"/>: resolves the per-component promoted
+    /// types the seek entry keys on (each key column's own stored type, matching
+    /// the foreign-key path's convention) and builds the probe.
+    /// <see langword="false"/> means the caller has to fall back to the full
+    /// scan — a key column has no storage slot, or a key component is NULL,
+    /// which the seek's NULL-free buckets can't answer for a rule under which
+    /// two NULLs collide.
+    /// <para>
+    /// Every other heap seeks, small ones included: a minimum-size gate was
+    /// measured and dropped. It won nowhere — 500 keyed tables seeded 1 / 3 / 10
+    /// / 50 rows each came out within noise either way — because building a
+    /// bucket entry over a heap that small is nearly free, and it cost 26% at
+    /// 200 rows per table and up to 1.9× per insert on a few-hundred-row narrow
+    /// table, whose rows all still fit the page it exempted. It saved no memory
+    /// either: a table big enough for its index to matter is past any such
+    /// threshold by definition, so the gate only ever exempted indexes that were
+    /// trivially small, while making enforcement allocate <i>more</i> (every
+    /// scan comparison decodes a value).
+    /// </para>
+    /// </summary>
+    private static bool TryPrepareKeySeek(
+        HeapTable table, int[] storageOrdinals, SqlValue[] storedRowValues, out SqlType[] commons, out SqlValueKey probe)
+    {
+        (commons, probe) = ([], default);
+        var types = new SqlType[storageOrdinals.Length];
+        for (var i = 0; i < storageOrdinals.Length; i++)
+        {
+            if (storageOrdinals[i] < 0)
+                return false;
+            types[i] = table.StoredColumns[storageOrdinals[i]].Type;
+        }
+
+        if (!TryBuildSeekProbe(storedRowValues, storageOrdinals, types, out probe))
+            return false;
+
+        commons = types;
+        return true;
+    }
+
+    /// <summary>
+    /// Decodes a whole existing row image into full-ordinal order — the shape a
+    /// filtered index's WHERE predicate evaluates against. Reuses
+    /// <paramref name="buffer"/> across rows (allocated on first call), since
+    /// the predicate reads each row's values before the next decode overwrites
+    /// them. Columns with no storage slot (non-persisted computed) surface as
+    /// typed NULLs.
+    /// </summary>
+    private static SqlValue[] DecodeFullRow(HeapTable table, ReadOnlySpan<byte> rowBytes, ref SqlValue[]? buffer)
+    {
+        buffer ??= new SqlValue[table.Columns.Length];
+        for (var c = 0; c < table.Columns.Length; c++)
+        {
+            var storageOrdinal = table.StorageOrdinals[c];
+            buffer[c] = storageOrdinal >= 0
+                ? RowDecoder.DecodeColumn(table.StoredColumns, rowBytes, storageOrdinal, table.Heap)
+                : SqlValue.Null(table.Columns[c].Type);
+        }
+        return buffer;
+    }
+
+    /// <summary>
+    /// Finds a row whose key tuple equals the new row's, raising Msg 2627 with
+    /// the offending constraint's name. Skips when the table has no PK/UNIQUE
+    /// constraints. Each constraint either seeks the shared per-<c>Heap</c>
+    /// cache — whose candidates come back verified against live bytes, so a hit
+    /// <i>is</i> the duplicate — or, when <see cref="TryPrepareKeySeek"/>
+    /// declines, joins the scan pass below.
+    /// SqlValue equality handles SQL Server's NULLs-equal-for-UNIQUE
+    /// rule (two NULLs collide; one NULL and one non-NULL don't), and the seek's
+    /// key equality is the same comparison per component — including the
+    /// collation-aware, ANSI-padded string path of
+    /// <see cref="SqlValue.Equals(SqlValue)"/>, which
+    /// <see cref="SqlValue.GetHashCode"/> is built to agree with so a
+    /// case-insensitive duplicate lands in the bucket its collision needs.
+    /// <paramref name="storedRowValues"/> is the row's values in
     /// storage-ordinal order (the output of <see cref="ProjectStoredValues"/>);
-    /// existing rows are decoded one key column at a time so we don't pay the
-    /// cost of materializing whole rows for tables that have just a small
+    /// the scan decodes existing rows one key column at a time so we don't pay
+    /// the cost of materializing whole rows for tables that have just a small
     /// composite key.
     /// </summary>
     private static void EnforceKeyConstraints(HeapTable destinationTable, SqlValue[] storedRowValues)
@@ -261,12 +330,31 @@ partial class Simulation
         if (destinationTable.KeyConstraints.Count == 0)
             return;
 
+        List<KeyConstraint>? scanned = null;
+        foreach (var constraint in destinationTable.KeyConstraints)
+        {
+            if (!TryPrepareKeySeek(destinationTable, constraint.StorageOrdinals, storedRowValues, out var commons, out var probe))
+            {
+                (scanned ??= []).Add(constraint);
+                continue;
+            }
+
+            if (HeapSeekCache.For(destinationTable.Heap).AnyRowMatches(
+                    destinationTable.Heap, destinationTable.StoredColumns, constraint.StorageOrdinals, commons, probe))
+            {
+                throw KeyConstraintViolation(destinationTable, constraint, storedRowValues);
+            }
+        }
+
+        if (scanned is null)
+            return;
+
         var storedColumns = destinationTable.StoredColumns;
         var lobStore = destinationTable.Heap;
 
         foreach (var rowBytes in destinationTable.Heap.EnumerateRows())
         {
-            foreach (var constraint in destinationTable.KeyConstraints)
+            foreach (var constraint in scanned)
             {
                 var allEqual = true;
                 for (var i = 0; i < constraint.StorageOrdinals.Length; i++)
@@ -280,18 +368,34 @@ partial class Simulation
                     }
                 }
                 if (allEqual)
-                {
-                    var sb = new StringBuilder();
-                    for (var i = 0; i < constraint.StorageOrdinals.Length; i++)
-                    {
-                        if (i > 0)
-                            _ = sb.Append(", ");
-                        _ = sb.Append(FormatKeyValue(storedRowValues[constraint.StorageOrdinals[i]]));
-                    }
-                    throw SimulatedSqlException.ViolationOfKeyConstraint(constraint.ViolationKindWord, constraint.Name, destinationTable.Name, sb.ToString());
-                }
+                    throw KeyConstraintViolation(destinationTable, constraint, storedRowValues);
             }
         }
+    }
+
+    /// <summary>Msg 2627 for <paramref name="constraint"/>, rendering the
+    /// offending key tuple the way SQL Server does. Shared by the INSERT and
+    /// UPDATE enforcement paths.</summary>
+    private static SimulatedSqlException KeyConstraintViolation(HeapTable table, KeyConstraint constraint, SqlValue[] storedValues)
+    {
+        var sb = new StringBuilder();
+        for (var i = 0; i < constraint.StorageOrdinals.Length; i++)
+        {
+            if (i > 0)
+                _ = sb.Append(", ");
+            _ = sb.Append(FormatKeyValue(storedValues[constraint.StorageOrdinals[i]]));
+        }
+        return SimulatedSqlException.ViolationOfKeyConstraint(constraint.ViolationKindWord, constraint.Name, table.Name, sb.ToString());
+    }
+
+    /// <summary>Msg 2601 for <paramref name="index"/>. Shared by the INSERT and
+    /// UPDATE enforcement paths.</summary>
+    private static SimulatedSqlException UniqueIndexViolation(Storage.Index index, string qualifiedTableName, SqlValue[] storedValues)
+    {
+        var key = new SqlValue[index.KeyStorageOrdinals.Length];
+        for (var i = 0; i < key.Length; i++)
+            key[i] = storedValues[index.KeyStorageOrdinals[i]];
+        return SimulatedSqlException.ViolationOfUniqueIndex(index.Name, qualifiedTableName, FormatIndexKeyValues(key));
     }
 
     /// <summary>
@@ -299,8 +403,10 @@ partial class Simulation
     /// raises Msg 2601 on the first key-tuple collision against existing
     /// rows. When an index has a <c>Index.Filter</c>, only rows for
     /// which the filter evaluates true on both sides participate in the
-    /// uniqueness check (filtered-unique-index semantic). Mirrors
-    /// <see cref="EnforceKeyConstraints"/>'s linear-scan shape; called
+    /// uniqueness check (filtered-unique-index semantic) — the seek narrows the
+    /// candidates by key and the filter is then evaluated on each candidate's
+    /// own decoded row, so a filtered index seeks like any other. Mirrors
+    /// <see cref="EnforceKeyConstraints"/>'s seek-or-scan shape; called
     /// alongside it after a successful row build.
     /// </summary>
     private static void EnforceUniqueIndexes(HeapTable destinationTable, SqlValue[] rowValues, SqlValue[] storedRowValues, BatchContext batch)
@@ -332,26 +438,34 @@ partial class Simulation
             if (index.Filter is not null && Simulation.EvaluateIndexFilter(index.Filter, destinationTable, rowValues, batch) != true)
                 continue;
 
+            if (TryPrepareKeySeek(destinationTable, index.KeyStorageOrdinals, storedRowValues, out var commons, out var probe))
+            {
+                foreach (var (_, _, bytes) in HeapSeekCache.For(lobStore)
+                    .MatchingRows(lobStore, storedColumns, index.KeyStorageOrdinals, commons, probe))
+                {
+                    if (index.Filter is { } seekFilter
+                        && Simulation.EvaluateIndexFilter(seekFilter, destinationTable, DecodeFullRow(destinationTable, bytes, ref existingRowValues), batch) != true)
+                    {
+                        continue;
+                    }
+
+                    throw UniqueIndexViolation(index, qualifiedTableName, storedRowValues);
+                }
+                continue;
+            }
+
             foreach (var rowBytes in destinationTable.Heap.EnumerateRows())
             {
-                if (index.Filter is { } filter)
+                if (index.Filter is { } filter
+                    && Simulation.EvaluateIndexFilter(filter, destinationTable, DecodeFullRow(destinationTable, rowBytes, ref existingRowValues), batch) != true)
                 {
-                    existingRowValues ??= new SqlValue[destinationTable.Columns.Length];
-                    for (var c = 0; c < destinationTable.Columns.Length; c++)
-                    {
-                        var storageOrd = destinationTable.StorageOrdinals[c];
-                        existingRowValues[c] = storageOrd >= 0
-                            ? RowDecoder.DecodeColumn(storedColumns, rowBytes, storageOrd, lobStore)
-                            : SqlValue.Null(destinationTable.Columns[c].Type);
-                    }
-                    if (Simulation.EvaluateIndexFilter(filter, destinationTable, existingRowValues, batch) != true)
-                        continue;
+                    continue;
                 }
 
                 var allEqual = true;
-                for (var i = 0; i < index.KeyColumns.Length; i++)
+                for (var i = 0; i < index.KeyStorageOrdinals.Length; i++)
                 {
-                    var ord = index.KeyColumns[i].StorageOrdinal;
+                    var ord = index.KeyStorageOrdinals[i];
                     var existing = RowDecoder.DecodeColumn(storedColumns, rowBytes, ord, lobStore);
                     if (!existing.Equals(storedRowValues[ord]))
                     {
@@ -360,12 +474,7 @@ partial class Simulation
                     }
                 }
                 if (allEqual)
-                {
-                    var key = new SqlValue[index.KeyColumns.Length];
-                    for (var i = 0; i < index.KeyColumns.Length; i++)
-                        key[i] = storedRowValues[index.KeyColumns[i].StorageOrdinal];
-                    throw SimulatedSqlException.ViolationOfUniqueIndex(index.Name, qualifiedTableName, Simulation.FormatIndexKeyValues(key));
-                }
+                    throw UniqueIndexViolation(index, qualifiedTableName, storedRowValues);
             }
         }
     }

@@ -288,7 +288,7 @@ Entries name the *area*, not every member — each doc's own headings are its ca
 - **`sp_addextendedproperty` / `fn_listextendedproperty` / `sys.extended_properties`** → [`extended-properties.md`](docs/claude/extended-properties.md).
 - **`CREATE/ALTER/DROP SEQUENCE`, `NEXT VALUE FOR`, `sys.sequences`** → [`sequences.md`](docs/claude/sequences.md).
 - **DML + DDL triggers** (`CREATE TRIGGER` incl. `ON DATABASE`, `INSERTED`/`DELETED`, `TRIGGER_NESTLEVEL`, `sys.triggers`) → [`triggers.md`](docs/claude/triggers.md).
-- **CHECK / PRIMARY KEY / UNIQUE enforcement** (Msg 547 / 8141 peer-reference gate, Msg 2627 vs 2601, NULLs-equal UNIQUE) → [`constraints.md`](docs/claude/constraints.md).
+- **CHECK / PRIMARY KEY / UNIQUE enforcement** (Msg 547 / 8141 peer-reference gate, Msg 2627 vs 2601, NULLs-equal UNIQUE), and the **seek-backed duplicate detection** behind it — enforcement shares the per-`Heap` seek cache with reads and FK checks, declining to a scan for a NULL key component, and skipping an UPDATE row whose key stood still → [`constraints.md`](docs/claude/constraints.md).
 - **`FOREIGN KEY` + referential actions, `sys.foreign_keys`** → [`foreign-keys.md`](docs/claude/foreign-keys.md).
 - **`PERIOD FOR SYSTEM_TIME`, `FOR SYSTEM_TIME ALL/AS OF`, history sibling, `temporal_type`** → [`temporal-tables.md`](docs/claude/temporal-tables.md).
 - **`ALTER TABLE` ADD/DROP/ALTER COLUMN + CONSTRAINT (incl. trust toggling)** → [`alter-table.md`](docs/claude/alter-table.md).

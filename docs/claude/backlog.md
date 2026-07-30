@@ -172,6 +172,12 @@ Tracked elsewhere and over-permissive in the same sense: the recursive-CTE part 
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
+- **A key-moving bulk UPDATE still walks the affected rows pairwise** — key-uniqueness enforcement seeks the heap side now (see [`constraints.md`](constraints.md#key-uniqueness-enforcement-seeks-rather-than-scans)), and a row whose key stood still skips its check entirely, so the common bulk shapes are linear.
+  What's left is O(affected²): when a statement moves the key on *every* affected row (`UPDATE t SET id = id + 1000000`), each moved row is compared against every other affected row.
+  Measured on a 20 000-row PK table: 2 582 ms for the key-moving statement against 31 ms for a standing-key one, and quadratic in shape (76 ms at 2 000 rows, 672 ms at 8 000).
+  The fix is to index the affected rows' new keys once per constraint — a `Dictionary<SqlValueKey, int>` probe instead of the inner walk, which `SqlValueKey`'s equality already matches exactly (same per-component `SqlValue.Equals`, same NULLs-collide folding), so the reported key tuple and constraint don't change.
+  The unique-*index* counterpart needs the map built over filter-passing rows only, since a filtered index's membership is per row.
+  Home: `EnforceKeyConstraintsForUpdate` / `EnforceUniqueIndexesForUpdate` (`Simulation.Update.cs`).
 - **`IGNORE_DUP_KEY = ON` parses but isn't honored** — the option is accepted on both `CREATE UNIQUE INDEX … WITH (…)` and the `UNIQUE (…) WITH (…)` constraint form and then has no effect, so an INSERT carrying a duplicate raises **Msg 2601** where real skips that row and continues.
   Probe-confirmed against SQL Server 2025: the duplicate is dropped and the statement succeeds with the rest inserted (`INSERT … VALUES (2),(1),(3)` over an existing `1` inserts 2 and 3, `@@ROWCOUNT = 2`, `@@ERROR = 0`), and a severity-10 **Msg 3604** (`Duplicate key was ignored.`) rides the info-message stream **once per statement** regardless of how many rows were skipped.
   The downgrade is INSERT-only — an `UPDATE` into a duplicate still raises Msg 2601 on real.

@@ -186,7 +186,7 @@ partial class Simulation
     private static bool ReferencedRowExists(ForeignKey fk, SqlValue[] childFull)
     {
         if (TryMapFkColumnsToStorage(fk.ReferencedTable, fk.ReferencedColumnOrdinals, out var refStorageOrdinals, out var commons)
-            && TryBuildFkProbe(childFull, fk.ChildColumnOrdinals, commons, out var probe))
+            && TryBuildSeekProbe(childFull, fk.ChildColumnOrdinals, commons, out var probe))
         {
             return HeapSeekCache.For(fk.ReferencedTable.Heap)
                 .AnyRowMatches(fk.ReferencedTable.Heap, fk.ReferencedTable.StoredColumns, refStorageOrdinals, commons, probe);
@@ -238,7 +238,17 @@ partial class Simulation
     // Builds a seek probe key from one side's row values at the paired ordinals,
     // coerced to the seeked side's key types. Returns false when any value is
     // NULL — no row matches a NULL key under FK equality semantics.
-    private static bool TryBuildFkProbe(SqlValue[] sourceFull, int[] sourceOrdinals, SqlType[] commons, out SqlValueKey probe)
+    /// <summary>
+    /// Builds the seek-cache probe key for <paramref name="sourceOrdinals"/>'
+    /// slots of <paramref name="sourceFull"/>, coercing each component to the
+    /// entry's promoted type. Returns <see langword="false"/> when any component
+    /// is NULL: a NULL component never joins a seek bucket
+    /// (<c>HeapSeekCache</c> drops NULL keys at build time), so the caller has
+    /// to decide what a NULL means for it — no parent match for a foreign key,
+    /// a fall-back to the full scan for key-uniqueness enforcement, whose
+    /// NULLs-collide rule the buckets can't express.
+    /// </summary>
+    private static bool TryBuildSeekProbe(SqlValue[] sourceFull, int[] sourceOrdinals, SqlType[] commons, out SqlValueKey probe)
     {
         var components = new SqlValue[sourceOrdinals.Length];
         for (var i = 0; i < sourceOrdinals.Length; i++)
@@ -273,7 +283,7 @@ partial class Simulation
             var seen = new HashSet<(int, int)>();
             for (var p = 0; p < parentKeyRows.Count; p++)
             {
-                if (!TryBuildFkProbe(parentKeyRows[p], fk.ReferencedColumnOrdinals, commons, out var probe))
+                if (!TryBuildSeekProbe(parentKeyRows[p], fk.ReferencedColumnOrdinals, commons, out var probe))
                     continue;
                 foreach (var (page, slot, bytes) in cache.MatchingRows(fk.ChildTable.Heap, fk.ChildTable.StoredColumns, childStorageOrdinals, commons, probe))
                 {

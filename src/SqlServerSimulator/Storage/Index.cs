@@ -65,6 +65,18 @@ internal sealed class Index(
     public readonly IndexKeyColumn[] KeyColumns = keyColumns;
 
     /// <summary>
+    /// <see cref="KeyColumns"/>' storage ordinals alone, in declaration order —
+    /// the prefix shape the per-<c>Heap</c> seek cache keys an entry on.
+    /// Materialized once here so the per-row uniqueness seek doesn't rebuild it
+    /// out of <see cref="KeyColumns"/> on every inserted or updated row.
+    /// Mutable for the same reason <c>KeyConstraint.StorageOrdinals</c> is:
+    /// <c>ALTER TABLE … DROP COLUMN</c> shifts every later storage slot down and
+    /// remaps both in place, in one loop, so this can't drift from
+    /// <see cref="KeyColumns"/>.
+    /// </summary>
+    public readonly int[] KeyStorageOrdinals = BuildKeyStorageOrdinals(keyColumns);
+
+    /// <summary>
     /// INCLUDE-clause column storage ordinals, in declaration order. Empty
     /// when no INCLUDE was specified. A non-persisted computed column has
     /// no storage slot, so its entry is <c>-1</c> — ambiguous across
@@ -98,6 +110,14 @@ internal sealed class Index(
     /// given.
     /// </summary>
     public readonly string? FilterDefinition = filterDefinition;
+
+    private static int[] BuildKeyStorageOrdinals(IndexKeyColumn[] keyColumns)
+    {
+        var ordinals = new int[keyColumns.Length];
+        for (var i = 0; i < keyColumns.Length; i++)
+            ordinals[i] = keyColumns[i].StorageOrdinal;
+        return ordinals;
+    }
 }
 
 /// <summary>

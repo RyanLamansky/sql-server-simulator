@@ -463,10 +463,11 @@ partial class Simulation
             for (var i = 0; i < ix.KeyColumns.Length; i++)
             {
                 var keyCol = ix.KeyColumns[i];
-                ix.KeyColumns[i] = new IndexKeyColumn(
-                    keyCol.StorageOrdinal < 0 ? keyCol.StorageOrdinal : oldStorageToNew[keyCol.StorageOrdinal],
-                    oldFullToNew[keyCol.ColumnOrdinal],
-                    keyCol.IsDescending);
+                var storageOrdinal = keyCol.StorageOrdinal < 0 ? keyCol.StorageOrdinal : oldStorageToNew[keyCol.StorageOrdinal];
+                ix.KeyColumns[i] = new IndexKeyColumn(storageOrdinal, oldFullToNew[keyCol.ColumnOrdinal], keyCol.IsDescending);
+                // The projected copy the seek path reads moves in lockstep — it
+                // is the same ordinal, materialized once at construction.
+                ix.KeyStorageOrdinals[i] = storageOrdinal;
             }
             for (var i = 0; i < ix.IncludedColumns.Length; i++)
             {

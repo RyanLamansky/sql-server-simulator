@@ -6,10 +6,60 @@ Sibling deep-dives: [`foreign-keys.md`](foreign-keys.md) (the FK family in full)
   Inline column-level CHECK may only reference its owning column — peer refs raise **Msg 8141** at CREATE TABLE (probe-confirmed).
   The walker is structural (`Expression.VisitColumnReferences` + `BooleanExpression.VisitOperandExpressions`); coverage spans the common containers (`Reference`, `Parenthesized`, `TwoSidedExpression`, `Cast`, `Length`) — peer refs in rarer ones (`DATEPART`, `SUBSTRING`, nested `CASE`) escape the CREATE check and surface at INSERT.
   Table-level CHECK has no peer restriction.
-- `PRIMARY KEY` / `UNIQUE` / secondary `CREATE INDEX`: linear scan (O(N) per insert), no B-tree; reads and `UPDATE`/`DELETE`/`MERGE` target scans get **incrementally-maintained** per-`Heap` seek acceleration (equality / IN / leading-column range / equality-prefix+range continuation / ORDER BY elimination / keyset).
-  Seek shapes, mutation/MERGE seeking, journal mechanics, decline rules, residual-WHERE invariant in [`indexes.md`](indexes.md).
+- `PRIMARY KEY` / `UNIQUE` / secondary `CREATE INDEX`: no B-tree; reads, `UPDATE`/`DELETE`/`MERGE` target scans, **and key-uniqueness enforcement itself** go through the **incrementally-maintained** per-`Heap` seek acceleration (equality / IN / leading-column range / equality-prefix+range continuation / ORDER BY elimination / keyset).
+  Seek shapes, mutation/MERGE seeking, journal mechanics, decline rules, residual-WHERE invariant in [`indexes.md`](indexes.md); the enforcement seek's own decline rules are [below](#key-uniqueness-enforcement-seeks-rather-than-scans).
   Violations: PK/UNIQUE *constraints* raise Msg 2627; unique *indexes* raise Msg 2601.
   UNIQUE treats NULLs as equal (the signature SQL Server divergence from ANSI).
 - `FOREIGN KEY`: inline / table-level / named forms; all four referential actions on `ON DELETE`/`ON UPDATE`; enforced at INSERT/UPDATE/DELETE/MERGE; full `sys.foreign_keys` / `sys.foreign_key_columns`.
   Enforcement **seeks the shared `HeapSeekCache`** (live-byte verified, no residual WHERE).
   Referential-action, cascade-cycle, PK/UNIQUE-target, NULL-skip rules + Msg numbers in [`foreign-keys.md`](foreign-keys.md).
+
+## Key-uniqueness enforcement seeks rather than scans
+
+Four enforcement paths ask the same question — *does a live row already carry this key tuple?* — and all four answer it by seeking the shared per-`Heap` cache, the way foreign-key parent-existence already did:
+`EnforceKeyConstraints` / `EnforceUniqueIndexes` (`Simulation.Coerce.cs`, reached from INSERT, the TVP row materializer, and BCP bulk load) and `EnforceKeyConstraintsForUpdate` / `EnforceUniqueIndexesForUpdate` (`Simulation.Update.cs`, reached from UPDATE and MERGE).
+
+`TryPrepareKeySeek` is the shared gate.
+It resolves the per-component promoted types the seek entry keys on — each key column's own stored type, the same convention `TryMapFkColumnsToStorage` uses — and builds the probe through `TryBuildSeekProbe`, which both families share.
+A seek hit *is* the duplicate: `HeapSeekCache.AnyRowMatches` / `MatchingRows` verify every candidate against live bytes and skip tombstoned slots, so unlike the query path there's no residual WHERE to lean on.
+Correctness rests on `SqlValueKey`'s per-component equality being the same comparison the scan made — `SqlValue.Equals`, including its collation-aware ANSI-padded string path — and on `SqlValue.GetHashCode` folding case and trailing spaces to agree with it, so a case-insensitive or trailing-space duplicate lands in the bucket its collision needs.
+
+Two conditions decline the seek and fall back to the full scan, which stays the oracle:
+
+- **A NULL key component.**
+  The cache drops NULL keys at build time (they can never satisfy `=`), so its buckets can't express UNIQUE's NULLs-collide rule — a NULL probe has to scan or a second NULL would insert silently.
+  Non-NULL probes are unaffected: an existing NULL row can't collide with them anyway, so its absence from the buckets is free.
+- **A key column with no storage slot**, which the seek can't decode.
+
+Size is deliberately *not* a third condition.
+A minimum-heap-size gate was built, measured and dropped: it won nowhere — 500 keyed tables seeded 1 / 3 / 10 / 50 rows each landed within run-to-run noise with and without it, since building a bucket entry over a heap that small is nearly free — and it cost 26% at 200 rows per table and up to 1.9× per insert on a few-hundred-row narrow table, whose rows all still fit inside the single page it exempted.
+The memory argument for it doesn't survive either: a table big enough for its bucket index to matter is past any such threshold by definition, so the gate only ever exempted indexes that were trivially small, while making enforcement allocate *more* (every scan comparison decodes a value — 224 MiB against 177 MiB over a 300-table × 100-row fixture).
+The whole-suite timing can't see the difference in either direction; it sits under the ±3% run-to-run noise.
+
+A filtered unique index seeks like any other: the key narrows the candidates, then the filter is evaluated on each candidate's own decoded row (`DecodeFullRow`), so only filter-passing rows on both sides participate.
+
+### The UPDATE path also skips rows whose key stood still
+
+`KeyTupleMoved` drops an affected row's own uniqueness check when the UPDATE didn't move its key tuple: the row was unique before the statement, non-affected rows don't change, and a collision with a row whose key *did* move is caught when that row is checked, since every affected row stays a comparison target either way.
+Without it a bulk UPDATE walked the affected rows pairwise even when it never touched the key.
+
+The pre-update key comes from the captured old row when there is one (OUTPUT clause, trigger present, MERGE's matched updates) and otherwise straight off the row's heap slot — validation runs before the rewrite phase, so the slot still holds the old bytes and only the key columns need decoding.
+`FullOld` is null on the plain UPDATE path, which is exactly the shape that matters, so reading the slot is what makes the skip fire at all rather than a no-op.
+A sentinel `(-1, i)` address (MERGE's pending inserts, which have no pre-update state) and an unreadable slot both count as moved and take the full check.
+
+The skip is taken for an **unfiltered** index only: a filter can read columns outside the key, so a row whose key stood still can still have moved into the filtered set and collided there (`Update_MovingIntoFilteredSetWithStandingKey_Raises`).
+
+`Index.KeyStorageOrdinals` is the projection the seek keys on, materialized at index construction.
+`ALTER TABLE … DROP COLUMN` shifts every later storage slot down and remaps it in the same loop that rewrites `Index.KeyColumns`, so the two can't drift — a stale copy there decodes the wrong column, which is how it first went wrong.
+
+**Cost.** Enforcement was O(N) per row, so loading N rows into a keyed table was quadratic: 50 000 single-row inserts into a `PRIMARY KEY` table took 48.9 s, rising through 0.20 ms/insert at 5 000 rows to 1.93 ms at 50 000.
+Seeking makes it flat — the same load is ~1.2 s (**~40×**), and per-insert cost holds at ~0.005–0.014 ms across 1 000 → 50 000 rows, matching a keyless heap's.
+A bulk UPDATE that doesn't touch the key went from 2 163 ms to ~100 ms on 20 000 rows (**~20×**), which is parity with the same statement on a keyless table (94 ms).
+The price is the seek entry's memory (a bucket per distinct key, rid lists) and journal maintenance on any keyed table that grows past a page — the same structure a point-lookup query would have built anyway.
+
+One quadratic term is left, and it's the affected-vs-affected walk rather than anything heap-side: an UPDATE that moves the key on **every** affected row (`SET id = id + 1000000`) still compares each moved row against every other affected row, measured at 2 582 ms for 20 000 rows against 31 ms for the standing-key statement.
+Tracked in [`backlog.md`](backlog.md).
+
+Because enforcement now seeks per row, a bulk INSERT into a keyed table replays the mutation journal as it goes and leaves the cache current, so such a table no longer reaches the journal cap that would force a rebuild (`IndexSeekTests.BulkInsertBeyondJournalCap_FallsBackToRebuild` uses a non-unique index for exactly that reason).
+
+`KeyUniquenessSeekTests` is the regression suite: every other key-constraint suite works on tables of a few rows and therefore exercises the scan, so these run the same semantics past the threshold — Msg 2627 / 2601 wording, composite full-vs-partial keys, NULLs-collide, case-insensitive and trailing-space duplicates, filtered indexes on both sides, re-insert after DELETE and after ROLLBACK, UPDATE into an existing key, a non-key UPDATE not colliding with itself, mass key shift (`SET id = id + 1`) succeeding while one into untouched rows raises, MERGE, and the DROP COLUMN ordinal shift.
