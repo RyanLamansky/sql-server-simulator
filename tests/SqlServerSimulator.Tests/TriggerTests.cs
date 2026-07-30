@@ -121,6 +121,144 @@ public sealed class TriggerTests
         HasCount(1, ReadAuditLog(connection));
     }
 
+    // === Msg 334: a client-returning OUTPUT on a triggered target ===
+
+    private const string Msg334 =
+        "The target table 't_target' of the DML statement cannot have any enabled triggers if the statement contains an OUTPUT clause without INTO clause.";
+
+    private static DbConnection SeededWithTrigger()
+    {
+        var connection = Seeded();
+        _ = connection.CreateCommand("insert t_target values (1, 10), (2, 20)").ExecuteNonQuery();
+        _ = connection.CreateCommand("create trigger tr on t_target after insert, update, delete as begin set nocount on; end").ExecuteNonQuery();
+        return connection;
+    }
+
+    private static void AssertMsg334(DbConnection connection, string commandText)
+    {
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(commandText).ExecuteNonQuery());
+        AreEqual(334, ex.Number);
+        AreEqual(Msg334, ex.Message);
+    }
+
+    /// <summary>
+    /// Both the OUTPUT rows and the trigger's own result sets would be the
+    /// statement's output, so real refuses the combination outright.
+    /// </summary>
+    [TestMethod]
+    public void ClientReturningOutput_OnTriggeredTarget_RaisesMsg334()
+    {
+        using var connection = SeededWithTrigger();
+        AssertMsg334(connection, "insert t_target output inserted.id values (3, 30)");
+        AssertMsg334(connection, "update t_target set v = 5 output inserted.id where id = 1");
+        AssertMsg334(connection, "delete t_target output deleted.id where id = 2");
+        AssertMsg334(connection, "merge t_target using (values (1, 1)) as s (id, v) on t_target.id = s.id when matched then update set v = 9 output inserted.id;");
+    }
+
+    /// <summary>Sending OUTPUT to a destination instead is fine.</summary>
+    [TestMethod]
+    public void OutputIntoDestination_OnTriggeredTarget_IsAllowed()
+    {
+        using var connection = SeededWithTrigger();
+        _ = connection.CreateCommand("create table sink (id int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t_target output inserted.id into sink values (3, 30)").ExecuteNonQuery();
+        AreEqual(1, connection.CreateCommand("select count(*) from sink").ExecuteScalar());
+    }
+
+    /// <summary>A plain DML on the same table is unaffected.</summary>
+    [TestMethod]
+    public void NoOutputClause_OnTriggeredTarget_IsAllowed()
+    {
+        using var connection = SeededWithTrigger();
+        AreEqual(1, connection.CreateCommand("insert t_target values (3, 30)").ExecuteNonQuery());
+    }
+
+    /// <summary>
+    /// The gate is a trigger for the statement's own action, despite the
+    /// message's "any enabled triggers" wording (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void OnlyATriggerForTheStatementsOwnAction_Blocks()
+    {
+        using var connection = Seeded();
+        _ = connection.CreateCommand("insert t_target values (1, 10)").ExecuteNonQuery();
+        _ = connection.CreateCommand("create trigger tr on t_target after insert as begin set nocount on; end").ExecuteNonQuery();
+        // UPDATE and DELETE have no trigger of their own, so their OUTPUT passes.
+        _ = connection.CreateCommand("update t_target set v = 5 output inserted.id where id = 1").ExecuteNonQuery();
+        _ = connection.CreateCommand("delete t_target output deleted.id where id = 1").ExecuteNonQuery();
+        AssertMsg334(connection, "insert t_target output inserted.id values (2, 20)");
+    }
+
+    [TestMethod]
+    public void DisabledTrigger_DoesNotBlockOutput()
+    {
+        using var connection = SeededWithTrigger();
+        _ = connection.CreateCommand("disable trigger tr on t_target").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t_target output inserted.id values (3, 30)").ExecuteNonQuery();
+    }
+
+    /// <summary>An INSTEAD OF trigger counts the same as an AFTER one.</summary>
+    [TestMethod]
+    public void InsteadOfTrigger_BlocksOutputToo()
+    {
+        using var connection = Seeded();
+        _ = connection.CreateCommand("create trigger tr on t_target instead of insert as begin set nocount on; end").ExecuteNonQuery();
+        AssertMsg334(connection, "insert t_target output inserted.id values (1, 10)");
+    }
+
+    /// <summary>
+    /// MERGE is gated per WHEN branch, not on the statement as a whole: only
+    /// the actions it actually performs consult the trigger set, so an
+    /// INSERT-only MERGE is unaffected by an UPDATE trigger and vice versa
+    /// (probe-confirmed across the six trigger-action / branch combinations).
+    /// </summary>
+    [TestMethod]
+    [DataRow("update", "when not matched then insert (id, v) values (s.id, s.v)", false)]
+    [DataRow("update", "when matched then update set v = s.v", true)]
+    [DataRow("insert", "when matched then update set v = s.v", false)]
+    [DataRow("insert", "when not matched then insert (id, v) values (s.id, s.v)", true)]
+    [DataRow("delete", "when matched then update set v = s.v", false)]
+    public void Merge_IsGatedPerWhenBranch(string triggerAction, string whenClause, bool blocked)
+    {
+        using var connection = Seeded();
+        _ = connection.CreateCommand("insert t_target values (1, 10)").ExecuteNonQuery();
+        _ = connection.CreateCommand($"create trigger tr on t_target after {triggerAction} as begin set nocount on; end").ExecuteNonQuery();
+        var merge = $"merge t_target using (values (1, 99)) as s (id, v) on t_target.id = s.id {whenClause} output inserted.id;";
+        if (blocked)
+        {
+            AssertMsg334(connection, merge);
+        }
+        else
+        {
+            _ = connection.CreateCommand(merge).ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>A MERGE performing both actions is blocked by either trigger.</summary>
+    [TestMethod]
+    public void Merge_WithBothBranches_IsBlockedByEitherTrigger()
+    {
+        using var connection = Seeded();
+        _ = connection.CreateCommand("insert t_target values (1, 10)").ExecuteNonQuery();
+        _ = connection.CreateCommand("create trigger tr on t_target after update as begin set nocount on; end").ExecuteNonQuery();
+        AssertMsg334(connection, """
+            merge t_target using (values (1, 99)) as s (id, v) on t_target.id = s.id
+            when matched then update set v = s.v
+            when not matched then insert (id, v) values (s.id, s.v)
+            output inserted.id;
+            """);
+    }
+
+    /// <summary>
+    /// It's a compile-time rule: real raises it from a branch that never runs.
+    /// </summary>
+    [TestMethod]
+    public void UnTakenBranch_StillRaisesMsg334()
+    {
+        using var connection = SeededWithTrigger();
+        AssertMsg334(connection, "if 1 = 0 insert t_target output inserted.id values (3, 30)");
+    }
+
     // === AFTER INSERT ===
 
     [TestMethod]
@@ -466,6 +604,13 @@ public sealed class TriggerTests
         // ON 1=0 WHEN NOT MATCHED THEN INSERT … OUTPUT INSERTED. Verify the
         // trigger dispatch wired into Simulation.Merge.cs fires under that
         // shape (the regular-INSERT path is covered separately).
+        //
+        // The OUTPUT is dropped from the shape here: real refuses a
+        // client-returning OUTPUT on a table with an enabled trigger
+        // (Msg 334), which is exactly why EF switches emit shape once
+        // HasTrigger is declared, and the simulator can't yet express the
+        // OUTPUT … INTO form for MERGE. What this test is for — the INSERT
+        // branch reaching trigger dispatch — doesn't depend on OUTPUT.
         using var connection = Seeded();
         _ = connection.CreateCommand("""
             create trigger tr_t on t_target after insert
@@ -473,17 +618,10 @@ public sealed class TriggerTests
                 insert audit_log(action, id, oldv, newv)
                 select 'M', id, null, v from inserted
             """).ExecuteNonQuery();
-        using (var reader = connection.CreateCommand("""
+        _ = connection.CreateCommand("""
             merge t_target using (values (1, 100), (2, 200)) as src (id, v) on 1 = 0
-            when not matched then insert (id, v) values (src.id, src.v)
-            output inserted.id;
-            """).ExecuteReader())
-        {
-            var inserted = new List<int>();
-            while (reader.Read())
-                inserted.Add(reader.GetInt32(0));
-            HasCount(2, inserted);
-        }
+            when not matched then insert (id, v) values (src.id, src.v);
+            """).ExecuteNonQuery();
 
         var log = ReadAuditLog(connection);
         HasCount(2, log);

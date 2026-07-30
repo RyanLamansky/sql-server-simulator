@@ -180,9 +180,14 @@ partial class Simulation
         if (leadingView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             throw new NotSupportedException($"UPDATE … OUTPUT through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
         if (leadingTable is not null)
+        {
             output = TryParseOutputClauseForMutation(context, leadingTable, allowInserted: true, allowDeleted: true);
+            RejectClientOutputOnTriggeredTarget(context.Batch, leadingTable, TriggerActions.Update, leadingIdent.ToString(), output is { HasTarget: false });
+        }
         else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
+        {
             throw new NotSupportedException("OUTPUT with alias-form multi-source UPDATE isn't modeled — re-emit with the table name as the target if OUTPUT is required.");
+        }
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
         {

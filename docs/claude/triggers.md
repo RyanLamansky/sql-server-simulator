@@ -71,6 +71,23 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) ship at the parse
   `Simulation.Merge.cs` detects per-action INSTEAD OF at the top of `CommitMerge` and routes each pending list (inserts, updates, deletes) independently through trigger-fire or heap-write paths.
 - **Connection state**: [`SimulatedDbConnection.FiringTriggerIds`](../../src/SqlServerSimulator/SimulatedDbConnection.cs) (recursion guard) + `TriggerNestLevel` (surfaced by `TRIGGER_NESTLEVEL()`).
 
+## `OUTPUT` on a triggered target — Msg 334
+
+A DML statement whose `OUTPUT` clause returns rows **to the client** (no `INTO`) can't target a table carrying an enabled trigger: both would be the statement's result set, and real refuses the combination rather than interleaving them.
+
+> Msg 334, Level 16 — `The target table 'dbo.m' of the DML statement cannot have any enabled triggers if the statement contains an OUTPUT clause without INTO clause.`
+
+Probe-confirmed rules, two of which the message text doesn't say:
+
+- The gate is a trigger for the statement's **own action**, not "any enabled trigger" as the wording claims — an INSERT-only trigger blocks `INSERT … OUTPUT` but leaves `UPDATE … OUTPUT` alone.
+- The target is echoed **as written**: `dbo.m` when qualified, `m` when bare, and MERGE reports its *alias*.
+- INSTEAD OF counts alongside AFTER; a disabled trigger doesn't; `OUTPUT … INTO` is exempt.
+- It's **compile-time** — it fires from an un-taken `IF` branch.
+
+`Simulation.RejectClientOutputOnTriggeredTarget` is the shared gate, called from the INSERT / UPDATE / DELETE / MERGE parse sites (MERGE checks once per WHEN clause, since its actions are per-branch).
+
+This is the rule behind EF Core's `HasTrigger` annotation: declaring a trigger makes EF abandon its `OUTPUT INSERTED` emit shape, because that shape is illegal against a triggered table.
+
 ## Trigger-body result sets
 
 A `SELECT` in a trigger body **is** the firing statement's result set — real hands it to the client, and several body SELECTs (or several firing triggers) each contribute one, so a plain `INSERT` can return rows.

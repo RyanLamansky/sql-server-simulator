@@ -179,6 +179,33 @@ partial class Simulation
         // OUTPUT.
         var output = TryParseMergeOutputClause(context, destinationTable, sourceView, sourceAlias, sourceColumnNames, sourceSchema);
 
+        // Msg 334 applies per action the MERGE actually performs, and the
+        // message echoes the target as written — its alias when one was given
+        // (probe-confirmed: `MERGE dbo.m AS t …` reports 't'), otherwise the
+        // name from the statement.
+        // MERGE's output parser has no INTO variant, so any OUTPUT here
+        // returns rows to the client.
+        if (output is not null)
+        {
+            var mergeTarget = context.Batch.CurrentDatabase.Collation.Equals(targetAlias, defaultTargetName)
+                ? destinationName.ToString()
+                : targetAlias;
+            foreach (var clause in whenClauses)
+            {
+                RejectClientOutputOnTriggeredTarget(
+                    context.Batch,
+                    (SchemaObject?)sourceView ?? destinationTable,
+                    clause.Action switch
+                    {
+                        MergeActionKind.Insert => TriggerActions.Insert,
+                        MergeActionKind.Delete => TriggerActions.Delete,
+                        _ => TriggerActions.Update,
+                    },
+                    mergeTarget,
+                    outputReturnsToClient: true);
+            }
+        }
+
         // Required trailing ; — but the dispatch loop may have already
         // consumed it (statement separators are flexible). If the cursor
         // sits on either ; or end-of-batch, accept; otherwise raise Msg 10713.

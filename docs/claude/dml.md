@@ -27,7 +27,9 @@
   The MERGE form keeps the per-action NULL-fill semantic for `INSERTED.* / DELETED.*` (DELETED columns are NULL on a WHEN NOT MATCHED INSERT row; INSERTED columns are NULL on a WHEN MATCHED DELETE row).
   Unbound qualifier on `.*` raises Msg 4104, same as `<qualifier>.<col>`.
   The expansion runs before `Expression.Parse`, so the alias-suffix shape (`INSERTED.* AS x`) inherits real SQL Server's Msg 102 rejection naturally — the cursor advances past `*` to either `,` or the end-of-OUTPUT terminator.
-  `OUTPUT … INTO @t [(cols)]` ships for INSERT/UPDATE/DELETE/MERGE — see [Table variables](table-variables.md).
+  `OUTPUT … INTO @t [(cols)]` ships for INSERT / UPDATE / DELETE — see [Table variables](table-variables.md).
+  **Not for MERGE**: its output parser has no `INTO` branch, so the clause is left unconsumed and the statement dies on the trailing-semicolon check (Msg 10713).
+  That gap became reachable with [Msg 334](triggers.md#output-on-a-triggered-target--msg-334), which leaves a MERGE against a triggered target with no legal way to emit OUTPUT at all.
 - **`OUTPUT … INTO` against a target with an IDENTITY column** follows real's rules exactly (probe-confirmed matrix).
   The positional (no column list) form fills the target's **non-identity** columns, so the projection is measured against that narrower count: equal succeeds and the identity column generates its own value; fewer is **Msg 213**; more would have to write the identity column and is **Msg 8101**, whose message names the OUTPUT target *schema-qualified* (`'dbo.dest'`, or the bare `'#tmp'` form for a temp table).
   An explicit column list naming the identity column is **Msg 544** — and `SET IDENTITY_INSERT <target> ON` does **not** unlock it.

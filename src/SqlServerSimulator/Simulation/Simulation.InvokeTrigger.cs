@@ -325,6 +325,31 @@ partial class Simulation
     internal static bool HasInsteadOfTrigger(BatchContext batch, SchemaObject parent, TriggerActions action) =>
         HasTrigger(batch, parent, action, TriggerTiming.InsteadOf);
 
+    /// <summary>
+    /// Raises Msg 334 when a DML statement's <c>OUTPUT</c> clause returns rows
+    /// to the client and <paramref name="parent"/> carries an enabled trigger
+    /// for <paramref name="action"/>. A no-op when the statement has no OUTPUT
+    /// or sends it <c>INTO</c> a destination.
+    /// </summary>
+    /// <param name="batch">The executing batch, for the trigger lookup.</param>
+    /// <param name="parent">The DML target, or <c>null</c> when unresolved.</param>
+    /// <param name="action">The statement's own DML action.</param>
+    /// <param name="targetAsWritten">
+    /// The target exactly as the statement names it — real echoes the written
+    /// reference, and MERGE echoes its alias.
+    /// </param>
+    /// <param name="outputReturnsToClient">
+    /// True when an OUTPUT clause was given without <c>INTO</c>.
+    /// </param>
+    internal static void RejectClientOutputOnTriggeredTarget(
+        BatchContext batch, SchemaObject? parent, TriggerActions action, string targetAsWritten, bool outputReturnsToClient)
+    {
+        if (!outputReturnsToClient || parent is null)
+            return;
+        if (HasTrigger(batch, parent, action, TriggerTiming.After) || HasTrigger(batch, parent, action, TriggerTiming.InsteadOf))
+            throw SimulatedSqlException.OutputWithoutIntoOnTriggeredTarget(targetAsWritten);
+    }
+
     private static bool HasTrigger(BatchContext batch, SchemaObject parent, TriggerActions action, TriggerTiming timing)
     {
         // In-flight triggers are excluded — for AFTER, this matters only

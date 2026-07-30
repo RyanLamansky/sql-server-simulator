@@ -35,7 +35,7 @@ partial class Simulation
             Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
 
         if (context.Batch.TryResolveView(destinationName, out var destinationView))
-            return ProcessViewInsert(destinationView, context, top);
+            return ProcessViewInsert(destinationView, context, top, destinationName);
         if (!context.Batch.TryResolveTable(destinationName, out var destinationTable))
         {
             throw BatchContext.IsTableVariableName(destinationName.Leaf)
@@ -50,7 +50,7 @@ partial class Simulation
         // table-X via TABLOCK*); row-X is taken per inserted row in
         // ProcessHeapInsert.
         _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
-        return ProcessHeapInsert(destinationTable, context, top);
+        return ProcessHeapInsert(destinationTable, context, top, destinationName);
     }
 
     /// <summary>
@@ -66,18 +66,18 @@ partial class Simulation
     /// from <see cref="View.RejectionReason"/>. OUTPUT with a view target
     /// is rejected at the inner site (NotSupportedException).
     /// </summary>
-    private static SimulatedStatementOutcome ProcessViewInsert(View destinationView, ParserContext context, Selection.DmlTopLimit? top)
+    private static SimulatedStatementOutcome ProcessViewInsert(View destinationView, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName)
     {
         if (!context.Batch.IsSkipping)
             PermissionEnforcement.CheckObject(context.Batch, "INSERT", destinationView.ObjectId, destinationView.SchemaId, destinationView.Name, destinationView.Schema.Name);
-        return ProcessViewInsertCore(destinationView, context, top);
+        return ProcessViewInsertCore(destinationView, context, top, destinationName);
     }
 
-    private static SimulatedStatementOutcome ProcessViewInsertCore(View destinationView, ParserContext context, Selection.DmlTopLimit? top) =>
+    private static SimulatedStatementOutcome ProcessViewInsertCore(View destinationView, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName) =>
         HasInsteadOfTrigger(context.Batch, destinationView, TriggerActions.Insert)
             ? ProcessInsteadOfInsertOnView(destinationView, context, top)
             : destinationView.BaseTable is { } baseTable
-                ? ProcessHeapInsert(baseTable, context, top, destinationView)
+                ? ProcessHeapInsert(baseTable, context, top, destinationName, destinationView)
                 : throw (destinationView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
                     ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{destinationView.Schema.Name}.{destinationView.Name}")
                     : SimulatedSqlException.CannotUpdateNonUpdatableView($"{destinationView.Schema.Name}.{destinationView.Name}"));
@@ -198,7 +198,7 @@ partial class Simulation
     /// <c>ExecuteReader</c>); otherwise a plain <see cref="SimulatedNonQuery"/>
     /// is returned.
     /// </summary>
-    private static SimulatedStatementOutcome ProcessHeapInsert(HeapTable destinationTable, ParserContext context, Selection.DmlTopLimit? top, View? destinationView = null)
+    private static SimulatedStatementOutcome ProcessHeapInsert(HeapTable destinationTable, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName, View? destinationView = null)
     {
         RejectDisabledClusteredIndex(destinationTable);
         // Direct INSERT into a history sibling is rejected — history rows
@@ -273,6 +273,8 @@ partial class Simulation
             throw new NotSupportedException($"INSERT … OUTPUT through a view ('{destinationView.Schema.Name}.{destinationView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
 
         var output = TryParseOutputClause(context, destinationTable, sourceColumnNames: null);
+        RejectClientOutputOnTriggeredTarget(
+            context.Batch, (SchemaObject?)destinationView ?? destinationTable, TriggerActions.Insert, destinationName.ToString(), output is { HasTarget: false });
 
         // OUTPUT combined with an INSERT … EXEC source is rejected outright
         // (Msg 483) — probe-confirmed. The check runs regardless of skip

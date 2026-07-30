@@ -155,10 +155,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **Cross-collation comparison / concatenation binds per row, not at compile time** — `c1.x = c2.x` across differently-collated columns raises Msg 468 once a row is evaluated, but the same statement over an **empty** rowset passes silently where real rejects it during compilation (probe-confirmed: real's is an uncatchable bind-time failure).
   Set operations bind at compile time and match real exactly; this is the residual, and closing it means carrying collation through the static type path at every comparison site.
   → [`collations.md`](collations.md#known-gaps).
-- **`OUTPUT` without `INTO` is accepted on a triggered table** — real raises **Msg 334** (`"The target table 'dbo.m' of the DML statement cannot have any enabled triggers if the statement contains an OUTPUT clause without INTO clause."`) for INSERT / UPDATE / DELETE / MERGE, and the simulator runs the statement.
-  Probed 2026-07-30: the gate is an **enabled trigger for the statement's own action** despite the message saying "any enabled triggers" — an INSERT-only trigger blocks `INSERT … OUTPUT` but not `UPDATE … OUTPUT`; a disabled trigger and an `OUTPUT … INTO` both pass.
-  The message echoes the target **as written** (`dbo.m` when qualified, `m` when bare, and MERGE's *alias* `t`), so closing this means carrying that reference to the four DML commit sites rather than rebuilding a qualified name.
-  → [`triggers.md`](triggers.md), [`dml.md`](dml.md).
 - **Statement-permission gates stop at the modeled set** — CREATE TABLE / VIEW / PROCEDURE / FUNCTION / SEQUENCE / ROLE / USER / SCHEMA, ALTER TABLE, DROP TABLE and DROP USER are checked; other CREATE / ALTER / DROP statements run unchecked, as does `ALTER` / `CREATE OR ALTER` of an existing module.
   → [`permissions.md`](permissions.md#known-gaps).
 - **Non-Framework CLR assemblies load** — real resolves every `AssemblyRef` against a fixed .NET Framework catalog and raises **Msg 6503** otherwise (probe-confirmed for .NET 10 and for .NET Standard 2.0); the simulator runs on .NET so all of them bind, which is also what lets the tests emit a fixture assembly without a Framework toolchain.
@@ -167,6 +163,9 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **An unaliased derived table is accepted** — `SELECT * FROM (SELECT 1 x)` parses, where real requires the alias and raises **Msg 102** (`"Incorrect syntax near ')'."`, probed 2026-07-30).
   The column-alias list and its Msg 8155 / 8156 / 8158 / 8159 rules ship (see [`query.md`](query.md#derived-table-column-alias-list)); the missing-alias check is what remains, and the 8155 check is gated on having an alias because its message names one.
   → [`query.md`](query.md).
+- **`MERGE … OUTPUT … INTO` isn't supported** — the MERGE output parser has no `INTO` branch, so the clause is left unconsumed and the statement dies on the trailing-semicolon check (Msg 10713).
+  Found 2026-07-30 while adding Msg 334, which makes the gap reachable: MERGE now has no legal way to emit OUTPUT against a triggered target, where real allows the INTO form.
+  → [`dml.md`](dml.md).
 - **Module body validation deferred to first execution** — a TVP parameter's **Msg 10700** and the **Msg 111** batch-first rule surface at EXEC where real validates at CREATE.
   → [`table-valued-parameters.md`](table-valued-parameters.md#fidelity-gaps-remaining), [`programmable.md`](programmable.md).
 Tracked elsewhere and over-permissive in the same sense: the recursive-CTE part restrictions Msg 460 / 461 / 462 / 467 / 465 (CLAUDE.md's Not-modeled-yet).

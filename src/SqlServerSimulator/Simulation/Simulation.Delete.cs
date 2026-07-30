@@ -75,9 +75,14 @@ partial class Simulation
         if (leadingView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             throw new NotSupportedException($"DELETE … OUTPUT through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
         if (leadingTable is not null)
+        {
             output = TryParseOutputClauseForMutation(context, leadingTable, allowInserted: false, allowDeleted: true);
+            RejectClientOutputOnTriggeredTarget(context.Batch, leadingTable, TriggerActions.Delete, leadingIdent.ToString(), output is { HasTarget: false });
+        }
         else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
+        {
             throw new NotSupportedException("OUTPUT with alias-form multi-source DELETE isn't modeled — re-emit with the table name as the target if OUTPUT is required.");
+        }
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
         {

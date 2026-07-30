@@ -248,6 +248,27 @@ partial class SimulatedSqlException
         new($"Cannot create trigger '{triggerName}' on {parentKind} '{parentName}' because an INSTEAD OF {actionName} trigger already exists on this object.", 2111, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 334: a DML statement whose <c>OUTPUT</c> clause
+    /// returns rows to the client (no <c>INTO</c>) targets a table carrying an
+    /// enabled trigger. Both channels would be the statement's result set, and
+    /// real refuses the combination rather than interleaving them.
+    /// </summary>
+    /// <remarks>
+    /// Probe-confirmed against SQL Server 2025, including two things the
+    /// message text doesn't say. The gate is a trigger for the statement's
+    /// <b>own action</b> — an INSERT-only trigger blocks
+    /// <c>INSERT … OUTPUT</c> but not <c>UPDATE … OUTPUT</c> — despite the
+    /// wording claiming "any enabled triggers"; and <paramref name="target"/>
+    /// is the target <b>as written</b>, so a qualified reference reports
+    /// <c>dbo.m</c>, a bare one <c>m</c>, and MERGE reports its alias.
+    /// INSTEAD OF counts alongside AFTER, a disabled trigger doesn't, and
+    /// <c>OUTPUT … INTO</c> is exempt. The check is compile-time: it fires
+    /// from an un-taken <c>IF</c> branch too.
+    /// </remarks>
+    internal static SimulatedSqlException OutputWithoutIntoOnTriggeredTarget(string target) =>
+        new($"The target table '{target}' of the DML statement cannot have any enabled triggers if the statement contains an OUTPUT clause without INTO clause.", 334, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 3616: an error of severity 11 or higher was
     /// raised while a trigger body ran and the body's own <c>TRY</c> /
     /// <c>CATCH</c> handled it. Real still aborts the batch and rolls back the
