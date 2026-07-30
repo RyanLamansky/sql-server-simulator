@@ -200,6 +200,7 @@ partial class Simulation
     /// </summary>
     private static SimulatedStatementOutcome ProcessHeapInsert(HeapTable destinationTable, ParserContext context, Selection.DmlTopLimit? top, View? destinationView = null)
     {
+        RejectDisabledClusteredIndex(destinationTable);
         // Direct INSERT into a history sibling is rejected — history rows
         // are populated only by the engine via UPDATE / DELETE on the parent.
         if (destinationTable.IsHistoryTable)

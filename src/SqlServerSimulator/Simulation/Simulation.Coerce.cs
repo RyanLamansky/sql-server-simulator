@@ -245,6 +245,36 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Raises Msg 8655 when <paramref name="table"/> carries a <i>disabled
+    /// clustered</i> index. On real the clustered index <b>is</b> the table's
+    /// storage, so disabling it makes the data unreachable: every query and every
+    /// DML against the table fails, naming the offending index
+    /// (probe-confirmed for SELECT and INSERT alike). A disabled
+    /// <i>nonclustered</i> index only stops being enforced and searched — the
+    /// table stays fully usable — so it isn't grounds for this.
+    /// <para>
+    /// DDL is deliberately not gated: <c>ALTER INDEX … REBUILD</c> and
+    /// <c>DROP INDEX</c> keep working on a locked table, which is how real
+    /// recovers it, so this is called from the query row-source and the DML target
+    /// paths rather than from table resolution.
+    /// </para>
+    /// </summary>
+    internal static void RejectDisabledClusteredIndex(HeapTable table)
+    {
+        foreach (var constraint in table.KeyConstraints)
+        {
+            if (constraint.IsDisabled && constraint.IsClustered)
+                throw SimulatedSqlException.QueryProcessorDisabledIndex(constraint.Name, table.Name);
+        }
+
+        foreach (var index in table.Indexes)
+        {
+            if (index.IsDisabled && index.IsClustered)
+                throw SimulatedSqlException.QueryProcessorDisabledIndex(index.Name, table.Name);
+        }
+    }
+
+    /// <summary>
     /// What key-uniqueness enforcement decided about a candidate row.
     /// </summary>
     private enum RowKeyVerdict
@@ -370,6 +400,10 @@ partial class Simulation
         List<KeyConstraint>? scanned = null;
         foreach (var constraint in destinationTable.KeyConstraints)
         {
+            // ALTER INDEX … DISABLE takes the backing index out of service, and
+            // while it's out the constraint isn't enforced (probe-confirmed).
+            if (constraint.IsDisabled)
+                continue;
             if (!TryPrepareKeySeek(destinationTable, constraint.StorageOrdinals, storedRowValues, out var commons, out var probe))
             {
                 (scanned ??= []).Add(constraint);
@@ -462,7 +496,7 @@ partial class Simulation
         var hasUnique = false;
         foreach (var ix in destinationTable.Indexes)
         {
-            if (ix.IsUnique)
+            if (ix.IsUnique && !ix.IsDisabled)
             {
                 hasUnique = true;
                 break;
@@ -478,7 +512,7 @@ partial class Simulation
 
         foreach (var index in destinationTable.Indexes)
         {
-            if (!index.IsUnique)
+            if (!index.IsUnique || index.IsDisabled)
                 continue;
             if (index.Filter is not null && Simulation.EvaluateIndexFilter(index.Filter, destinationTable, rowValues, batch) != true)
                 continue;

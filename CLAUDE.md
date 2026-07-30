@@ -293,7 +293,7 @@ Entries name the *area*, not every member — each doc's own headings are its ca
 - **`FOREIGN KEY` + referential actions, `sys.foreign_keys`** → [`foreign-keys.md`](docs/claude/foreign-keys.md).
 - **`PERIOD FOR SYSTEM_TIME`, `FOR SYSTEM_TIME ALL/AS OF`, history sibling, `temporal_type`** → [`temporal-tables.md`](docs/claude/temporal-tables.md).
 - **`ALTER TABLE` ADD/DROP/ALTER COLUMN + CONSTRAINT (incl. trust toggling)** → [`alter-table.md`](docs/claude/alter-table.md).
-- **`CREATE INDEX`** (UNIQUE / CLUSTERED / INCLUDE / filtered), inline indexes in CREATE TABLE, indexed views and their creation gates, `sys.indexes`, `DBCC SHOW_STATISTICS` → [`indexes.md`](docs/claude/indexes.md).
+- **`CREATE INDEX`** (UNIQUE / CLUSTERED / INCLUDE / filtered), inline indexes in CREATE TABLE, indexed views and their creation gates, `ALTER INDEX SET` / `DISABLE` / `REBUILD` and the disabled-index rules (unenforced uniqueness, the Msg 8655 clustered lockout, Msg 1973 / 1505), `sys.indexes`, `DBCC SHOW_STATISTICS` → [`indexes.md`](docs/claude/indexes.md).
 - **Table hints (`WITH (NOLOCK …)`) + statement `OPTION (…)` hints** → [`query-hints.md`](docs/claude/query-hints.md).
 - **Heap page lifecycle** (reclamation/reuse, tail-only shrink, `DBCC SHRINKDATABASE`/`SHRINKFILE`) → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **Per-`Simulation` plan cache** — single-SELECT `Selection` reuse, the four-part cache key, `SchemaVersion`-stamped invalidation, and the inline-in-SELECT-arm promotion seam → [`plan-cache.md`](docs/claude/plan-cache.md).
@@ -351,7 +351,7 @@ Entries that raise a *real* SQL Server error deliberately are **not** here; they
   See [`programmable.md`](docs/claude/programmable.md).
 - **PRINT semantic gaps** — Msg 1046 subquery-in-operand not raised; non-string formatting uses `CoerceTo(varchar(8000))` not PRINT style 0; 8000/4000-byte truncation not enforced.
   The `InfoMessage` surface ships (`SimulatedDbConnection.InfoMessage`).
-- **`ALTER INDEX` beyond `SET`** — `REBUILD` / `REORGANIZE` / `DISABLE` / `RESUME` / `PAUSE` / `ABORT` raise `NotSupportedException` (no B-tree to rebuild, no disabled-index state); the `SET (…)` form ships — see [`constraints.md`](docs/claude/constraints.md).
+- **`ALTER INDEX REORGANIZE` / `RESUME` / `PAUSE` / `ABORT`** — raise `NotSupportedException` naming the form; the `SET (…)` / `DISABLE` / `REBUILD` forms ship, including the Msg 8655 lockout a disabled *clustered* index imposes on its table — see [`indexes.md`](docs/claude/indexes.md).
 - **`ALTER TABLE` shapes not built**: DROP PERIOD FOR SYSTEM_TIME, REBUILD, SWITCH PARTITION, `ALTER COLUMN ADD/DROP {PERSISTED|MASKED|ROWGUIDCOL|SPARSE}`, multi-constraint ADD.
   Modeled shapes in [`alter-table.md`](docs/claude/alter-table.md).
 - **`hierarchyid` OrdPath tiers outside ordinals −4168..5199** — the wider 6-byte tiers aren't in the encoder/decoder table, so `Parse`/`ToString` of one raises `NotSupportedException`; storage/BACPAC round-trip those bytes opaquely.

@@ -89,14 +89,36 @@ partial class Simulation
         var tableName = BatchContext.ParseObjectName(context);
         context.MoveNextRequired();
 
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.Set })
+        var form = context.Token switch
         {
-            throw new NotSupportedException(
-                $"ALTER INDEX '{(alterAll ? "ALL" : indexName)}' supports only the SET (…) form; "
-                + "REBUILD / REORGANIZE / DISABLE / RESUME / PAUSE / ABORT aren't modeled.");
-        }
+            ReservedKeyword { Keyword: Keyword.Set } => AlterIndexForm.Set,
+            UnquotedString { ContextualKeyword: ContextualKeyword.Disable } => AlterIndexForm.Disable,
+            UnquotedString { ContextualKeyword: ContextualKeyword.Rebuild } => AlterIndexForm.Rebuild,
+            _ => throw new NotSupportedException(
+                $"ALTER INDEX '{(alterAll ? "ALL" : indexName)}' supports the SET (…) / DISABLE / REBUILD forms; "
+                + "REORGANIZE / RESUME / PAUSE / ABORT aren't modeled."),
+        };
 
-        var ignoreDupKey = ParseAlterIndexSetOptions(context);
+        bool? ignoreDupKey = null;
+        if (form == AlterIndexForm.Set)
+        {
+            ignoreDupKey = ParseAlterIndexSetOptions(context);
+        }
+        else
+        {
+            // REBUILD takes an optional PARTITION = ALL and its own WITH (…)
+            // option block; neither describes anything a heap has.
+            context.MoveNextOptional();
+            if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Partition })
+            {
+                context.MoveNextRequired();
+                if (context.Token is not Operator { Character: '=' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+                context.MoveNextOptional();
+            }
+            _ = ParseOptionalIndexWithClause(context);
+        }
 
         if (context.Batch.IsSkipping)
             return true;
@@ -114,7 +136,7 @@ partial class Simulation
             {
                 if (collation.Equals(constraint.Name, indexName))
                 {
-                    ApplyIgnoreDupKeyToConstraint(constraint, ignoreDupKey);
+                    ApplyToConstraint(table, constraint, form, ignoreDupKey);
                     return true;
                 }
             }
@@ -123,7 +145,7 @@ partial class Simulation
             {
                 if (collation.Equals(index.Name, indexName))
                 {
-                    ApplyIgnoreDupKeyToIndex(index, ignoreDupKey, table.Name);
+                    ApplyToIndex(context, table, index, form, ignoreDupKey);
                     return true;
                 }
             }
@@ -136,34 +158,82 @@ partial class Simulation
         // an IGNORE_DUP_KEY set over ALL raises Msg 1979 before touching
         // anything. Nothing is mutated before every target has been accepted.
         foreach (var constraint in table.KeyConstraints)
-            ApplyIgnoreDupKeyToConstraint(constraint, ignoreDupKey);
+            ApplyToConstraint(table, constraint, form, ignoreDupKey);
         foreach (var index in table.Indexes)
-            ApplyIgnoreDupKeyToIndex(index, ignoreDupKey, table.Name);
+            ApplyToIndex(context, table, index, form, ignoreDupKey);
         return true;
     }
 
-    /// <summary>
-    /// Rejects any attempt to change a constraint-backed index's
-    /// <c>IGNORE_DUP_KEY</c> (Msg 1979). A SET that doesn't mention the option
-    /// at all is a no-op here rather than an error, so
-    /// <c>ALTER INDEX ALL … SET (ALLOW_ROW_LOCKS = ON)</c> still succeeds on a
-    /// table carrying a PRIMARY KEY — probe-confirmed.
-    /// </summary>
-    private static void ApplyIgnoreDupKeyToConstraint(KeyConstraint constraint, bool? ignoreDupKey)
+    private enum AlterIndexForm
     {
-        if (ignoreDupKey is not null)
-            throw SimulatedSqlException.IgnoreDupKeyOnConstraintIndex(constraint.Name);
+        Set,
+        Disable,
+        Rebuild,
     }
 
-    private static void ApplyIgnoreDupKeyToIndex(Storage.Index index, bool? ignoreDupKey, string tableName)
+    /// <summary>
+    /// Applies the form to a PRIMARY KEY / UNIQUE constraint's backing index.
+    /// DISABLE and REBUILD are allowed here — real permits taking a constraint's
+    /// index out of service, and while it's out the constraint isn't enforced at
+    /// all (probe-confirmed) — but changing <c>IGNORE_DUP_KEY</c> is not
+    /// (Msg 1979). A SET that doesn't mention that option is a no-op rather than
+    /// an error, so <c>ALTER INDEX ALL … SET (ALLOW_ROW_LOCKS = ON)</c> still
+    /// succeeds on a table carrying a PRIMARY KEY.
+    /// </summary>
+    private static void ApplyToConstraint(
+        HeapTable table, KeyConstraint constraint, AlterIndexForm form, bool? ignoreDupKey)
     {
-        if (ignoreDupKey is not bool value)
-            return;
-        if (!index.IsUnique)
-            throw SimulatedSqlException.IgnoreDupKeyOnNonUniqueIndexAlter(index.Name);
-        if (index.Filter is not null)
-            throw SimulatedSqlException.IgnoreDupKeyOnFilteredIndex("alter", index.Name, tableName);
-        index.IgnoreDupKey = value;
+        switch (form)
+        {
+            case AlterIndexForm.Disable:
+                constraint.IsDisabled = true;
+                break;
+            case AlterIndexForm.Rebuild:
+                if (constraint.IsDisabled)
+                    ValidateExistingRowsForKeyConstraint(table, constraint);
+                constraint.IsDisabled = false;
+                break;
+            default:
+                if (constraint.IsDisabled)
+                    throw SimulatedSqlException.OperationOnDisabledIndex(constraint.Name, table.Name);
+                if (ignoreDupKey is not null)
+                    throw SimulatedSqlException.IgnoreDupKeyOnConstraintIndex(constraint.Name);
+                break;
+        }
+    }
+
+    private static void ApplyToIndex(
+        ParserContext context, HeapTable table, Storage.Index index, AlterIndexForm form, bool? ignoreDupKey)
+    {
+        switch (form)
+        {
+            case AlterIndexForm.Disable:
+                index.IsDisabled = true;
+                break;
+            case AlterIndexForm.Rebuild:
+                // Rows that accumulated while the index was out of service are
+                // re-validated on the way back in, exactly as a fresh CREATE
+                // UNIQUE INDEX would be: Msg 1505 on a duplicate. A REBUILD of an
+                // index that was never disabled is a no-op success.
+                if (index.IsDisabled && index.IsUnique)
+                {
+                    ValidateExistingRowsForUniqueIndex(
+                        table, index, context.Batch, $"{Database.DefaultSchemaName}.{table.Name}");
+                }
+                index.IsDisabled = false;
+                break;
+            default:
+                if (index.IsDisabled)
+                    throw SimulatedSqlException.OperationOnDisabledIndex(index.Name, table.Name);
+                if (ignoreDupKey is not bool value)
+                    return;
+                if (!index.IsUnique)
+                    throw SimulatedSqlException.IgnoreDupKeyOnNonUniqueIndexAlter(index.Name);
+                if (index.Filter is not null)
+                    throw SimulatedSqlException.IgnoreDupKeyOnFilteredIndex("alter", index.Name, table.Name);
+                index.IgnoreDupKey = value;
+                break;
+        }
     }
 
     /// <summary>

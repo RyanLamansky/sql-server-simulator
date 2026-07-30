@@ -55,7 +55,8 @@ Missing index → **Msg 2727** (Level 11); missing table → **Msg 1088** (State
 
 `FILLFACTOR` is a reserved keyword where every other option name is an ordinary identifier, so the option name is read off `Token.Source` rather than as an identifier token.
 
-**Not modeled yet**: the `REBUILD` / `REORGANIZE` / `DISABLE` / `RESUME` / `PAUSE` / `ABORT` forms raise `NotSupportedException` naming the form — there is no B-tree to rebuild and no disabled-index state. A *disabled* unique index isn't enforced at all on real, which is worth knowing when reading probe transcripts: an `ALTER INDEX … DISABLE` earlier in a script silently stops later duplicate checks.
+The `DISABLE` / `REBUILD` forms ship too — see [`indexes.md`](indexes.md#disabled-indexes-alter-index--disable--rebuild); `REORGANIZE` / `RESUME` / `PAUSE` / `ABORT` raise `NotSupportedException`.
+A disabled index isn't enforced at all, so an `ALTER INDEX … DISABLE` earlier in a script silently stops later duplicate checks — worth knowing when reading probe transcripts, since it is exactly what made one of this feature's own probes look like a divergence.
 
 `IgnoreDupKeyTests` is the regression suite.
 

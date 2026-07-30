@@ -65,5 +65,17 @@ internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] s
     /// </summary>
     public readonly bool IgnoreDupKey = ignoreDupKey;
 
+    /// <summary>
+    /// Whether <c>ALTER INDEX … DISABLE</c> has taken the constraint's backing
+    /// index out of service — real allows that on a constraint even though it
+    /// refuses to change the constraint's IGNORE_DUP_KEY (Msg 1979). While
+    /// disabled the constraint isn't enforced at all; REBUILD restores it and
+    /// re-validates (Msg 1505 on a duplicate). A disabled clustered constraint
+    /// index locks the table (Msg 8655), which is the common case since a
+    /// PRIMARY KEY defaults clustered.
+    /// See <c>docs/claude/indexes.md</c>.
+    /// </summary>
+    public bool IsDisabled;
+
     public string ViolationKindWord => this.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE KEY";
 }

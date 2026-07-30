@@ -97,7 +97,10 @@ partial class Simulation
         // The multi-table-alias form's target is determined later via the
         // FROM clause; that path's X acquisition is deferred to phase 1b.
         if (leadingTable is not null)
+        {
+            RejectDisabledClusteredIndex(leadingTable);
             _ = context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: true);
+        }
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
@@ -1148,6 +1151,8 @@ partial class Simulation
             for (var c = 0; c < table.KeyConstraints.Count; c++)
             {
                 var constraint = table.KeyConstraints[c];
+                if (constraint.IsDisabled)
+                    continue;
                 if (!KeyTupleMoved(constraint.StorageOrdinals, myStored, affected[i], table))
                     continue;
 
@@ -1204,7 +1209,7 @@ partial class Simulation
         var hasUnique = false;
         foreach (var ix in table.Indexes)
         {
-            if (ix.IsUnique)
+            if (ix.IsUnique && !ix.IsDisabled)
             {
                 hasUnique = true;
                 break;
@@ -1235,7 +1240,7 @@ partial class Simulation
             for (var x = 0; x < table.Indexes.Count; x++)
             {
                 var index = table.Indexes[x];
-                if (!index.IsUnique)
+                if (!index.IsUnique || index.IsDisabled)
                     continue;
                 if (index.Filter is { } rowFilter)
                 {

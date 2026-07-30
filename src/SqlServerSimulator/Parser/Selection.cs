@@ -2027,6 +2027,11 @@ internal sealed partial class Selection
                     throw SimulatedSqlException.InvalidObjectName(objectName);
                 }
 
+                // A disabled clustered index makes the table unreachable on real,
+                // so a query naming it fails before anything else about the source
+                // is considered.
+                Simulation.RejectDisabledClusteredIndex(heapTable);
+
                 var heapColumnNames = new string[heapTable.Columns.Length];
                 for (var ci = 0; ci < heapColumnNames.Length; ci++)
                     heapColumnNames[ci] = heapTable.Columns[ci].Name;

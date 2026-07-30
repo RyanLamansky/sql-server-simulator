@@ -25,7 +25,7 @@ A missing index still raises **Msg 3701** through the same path as the `name ON 
 
 The simulator has no B-tree storage, so an index never constrains inserts (UNIQUE aside) and isn't a stored ordered structure.
 UNIQUE indexes participate in INSERT / UPDATE / MERGE enforcement alongside `KeyConstraint`.
-The `WITH (...)` clause is parsed parens-balanced and discarded — none of `FILLFACTOR` / `PAD_INDEX` / `IGNORE_DUP_KEY` / `ONLINE` / `SORT_IN_TEMPDB` / etc. alter behavior.
+The `WITH (...)` clause is scanned for `IGNORE_DUP_KEY` — the one option with a semantic, see [`constraints.md`](constraints.md#ignore_dup_key) — and otherwise parsed parens-balanced and discarded: none of `FILLFACTOR` / `PAD_INDEX` / `ONLINE` / `SORT_IN_TEMPDB` / etc. alter behavior.
 The trailing `ON <filegroup>` placement clause (e.g. `ON [PRIMARY]`) is also parsed and discarded — no filegroup model.
 The same two trailers are accepted on inline `CONSTRAINT … PRIMARY KEY | UNIQUE` clauses inside CREATE TABLE and on `ALTER TABLE … ADD CONSTRAINT … PRIMARY KEY | UNIQUE (cols)`, plus `) ON [PRIMARY] [TEXTIMAGE_ON [PRIMARY]]` at the end of CREATE TABLE — the full SSMS-scripting verbosity surface.
 
@@ -43,6 +43,36 @@ The parser collects each into a `PendingInlineIndex` (name, `CLUSTERED`/`NONCLUS
 After the `HeapTable` is built, `AddInlineIndexes` (`Simulation.CreateIndex.cs`) resolves the columns and appends the same `Index` a standalone CREATE INDEX would (catalog metadata + seek acceleration; no UNIQUE / INCLUDE / filter — the inline grammar exposes none).
 Column resolution, name-collision (Msg 2714 / 1911 wording via `IndexAlreadyExists` / `IndexColumnMissing`), and one-clustered-per-table (Msg 1902) run inside the CREATE TABLE atomic block, so a bad inline index rolls the table back.
 Inline indexes are **CREATE TABLE only** — table variables / table types leave the `INDEX` keyword to the column path, which rejects it.
+
+## Disabled indexes (`ALTER INDEX … DISABLE` / `… REBUILD`)
+
+`DISABLE` takes an index out of service and `REBUILD` puts it back; both live in `Simulation.AlterIndex.cs` alongside the `SET` form, and the state is `Index.IsDisabled` / `KeyConstraint.IsDisabled` (real allows disabling a constraint's backing index even though it refuses to change that constraint's `IGNORE_DUP_KEY` — Msg 1979).
+Probed against SQL Server 2025 throughout.
+
+While an index is disabled:
+
+- **Its uniqueness isn't enforced at all** — duplicates insert freely, and for an `IGNORE_DUP_KEY` index they're *stored* rather than skipped, so no Msg 3604 either.
+  The three enforcement loops skip disabled entries.
+- **A nonclustered one leaves the table fully usable**, reads and writes alike.
+- **A clustered one locks the whole table**: every query and every DML raises **Msg 8655** naming the index, because on real the clustered index *is* the table's storage.
+  `RejectDisabledClusteredIndex` is the gate, called from the base-table query row source (`Selection`) and the four DML targets (`ProcessHeapInsert`, UPDATE, DELETE, MERGE).
+  DDL is deliberately **not** gated — `ALTER INDEX … REBUILD` and `DROP INDEX` keep working on a locked table, which is how real recovers it, so the gate sits at those entry points rather than at table resolution.
+  Since a `PRIMARY KEY` defaults clustered, `ALTER INDEX ALL … DISABLE` is the usual way a table ends up locked, and `ALL … REBUILD` is the way back.
+- **`SET (…)` against it raises Msg 1973**.
+- It can still be dropped.
+
+`REBUILD` re-validates the rows that accumulated while the index was out, exactly as a fresh `CREATE UNIQUE INDEX` would: **Msg 1505** if any duplicate got in, naming the index (or constraint) whose key collided.
+Once rebuilt, enforcement returns with the wording of whatever declared it — Msg 2601 for an index, **Msg 2627** for a constraint.
+A `REBUILD` of an index that was never disabled is a no-op success, and the form accepts `PARTITION = ALL` plus its own `WITH (…)` block, both discarded.
+`sys.indexes.is_disabled` projects the flag.
+
+**A divergence worth naming**: the seek acceleration below does *not* consult `IsDisabled`.
+Real's optimizer ignores a disabled index, but here the seek is a pure accelerator keyed on heap + column ordinals with a residual filter, never an index object, so skipping it couldn't change a result — only a plan, which the simulator doesn't expose.
+The observable surface (enforcement, the lockout, the catalog) is what's modeled.
+
+**Not modeled yet**: `REORGANIZE` / `RESUME` / `PAUSE` / `ABORT` raise `NotSupportedException` naming the form.
+
+`DisabledIndexTests` is the regression suite.
 
 ## Equality-seek acceleration
 

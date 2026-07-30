@@ -597,7 +597,7 @@ internal static partial class BuiltInResources
         SqlValue[] RowForIdentity(SqlValue objectId, IndexIdentity identity)
         {
             var typeDesc = identity.Type switch { 0 => heapDesc, 1 => clusteredDesc, _ => nonClusteredDesc };
-            SqlValue name, isUnique, isPrimaryKey, isUniqueConstraint, hasFilter, filterDefinition, ignoreDupKey;
+            SqlValue name, isUnique, isPrimaryKey, isUniqueConstraint, hasFilter, filterDefinition, ignoreDupKey, isDisabled;
             if (identity.Constraint is { } key)
             {
                 var isPk = key.Kind == KeyConstraintKind.PrimaryKey;
@@ -608,6 +608,7 @@ internal static partial class BuiltInResources
                 hasFilter = falseBit;
                 filterDefinition = nullFilter;
                 ignoreDupKey = key.IgnoreDupKey ? trueBit : falseBit;
+                isDisabled = key.IsDisabled ? trueBit : falseBit;
             }
             else if (identity.Index is { } index)
             {
@@ -618,6 +619,7 @@ internal static partial class BuiltInResources
                 hasFilter = index.Filter is not null ? trueBit : falseBit;
                 filterDefinition = index.FilterDefinition is { } def ? SqlValue.FromNVarchar(def) : nullFilter;
                 ignoreDupKey = index.IgnoreDupKey ? trueBit : falseBit;
+                isDisabled = index.IsDisabled ? trueBit : falseBit;
             }
             else
             {
@@ -628,6 +630,7 @@ internal static partial class BuiltInResources
                 hasFilter = falseBit;
                 filterDefinition = nullFilter;
                 ignoreDupKey = falseBit;
+                isDisabled = falseBit;
             }
             return BuildIndexRow(
                 name: name,
@@ -642,13 +645,14 @@ internal static partial class BuiltInResources
                 hasFilter: hasFilter,
                 filterDefinition: filterDefinition,
                 ignoreDupKey: ignoreDupKey,
+                isDisabled: isDisabled,
                 falseBit, trueBit, zeroByte);
         }
 
         SqlValue[] BuildIndexRow(
             SqlValue name, SqlValue objectId, SqlValue indexId, SqlValue type, SqlValue typeDesc,
             SqlValue isUnique, SqlValue dataSpaceId, SqlValue isPrimaryKey, SqlValue isUniqueConstraint,
-            SqlValue hasFilter, SqlValue filterDefinition, SqlValue ignoreDupKey,
+            SqlValue hasFilter, SqlValue filterDefinition, SqlValue ignoreDupKey, SqlValue isDisabled,
             SqlValue isPadded, SqlValue allowLocks, SqlValue fillFactor) =>
             [
                 name,
@@ -663,7 +667,7 @@ internal static partial class BuiltInResources
                 isUniqueConstraint,
                 fillFactor,
                 isPadded,
-                falseBit, // is_disabled
+                isDisabled,
                 falseBit, // is_hypothetical
                 falseBit, // is_ignored_in_optimization
                 allowLocks, // allow_row_locks

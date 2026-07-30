@@ -74,6 +74,7 @@ enum ContextualKeyword
     Range,
     Read_Committed_Snapshot,
     ReadOnly,
+    Rebuild,
     Recompile,
     Replication,
     Restart,

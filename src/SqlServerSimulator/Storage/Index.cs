@@ -124,6 +124,18 @@ internal sealed class Index(
     /// </summary>
     public bool IgnoreDupKey = ignoreDupKey;
 
+    /// <summary>
+    /// Whether <c>ALTER INDEX … DISABLE</c> has taken this index out of service.
+    /// A disabled UNIQUE index stops being enforced entirely — duplicates insert
+    /// freely — and <c>ALTER INDEX … REBUILD</c> puts it back, re-validating the
+    /// rows that accumulated meanwhile (Msg 1505 if any duplicate did).
+    /// A disabled <b>clustered</b> index goes further and locks the whole table:
+    /// every query and DML against it raises Msg 8655.
+    /// Surfaces as <c>sys.indexes.is_disabled</c>.
+    /// See <c>docs/claude/indexes.md</c>.
+    /// </summary>
+    public bool IsDisabled;
+
     private static int[] BuildKeyStorageOrdinals(IndexKeyColumn[] keyColumns)
     {
         var ordinals = new int[keyColumns.Length];

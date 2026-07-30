@@ -85,6 +85,7 @@ partial class Simulation
             Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
         // Phase 1b: acquire table-IX on the MERGE target; row-X on each
         // affected row at mutation time.
+        RejectDisabledClusteredIndex(destinationTable);
         _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
 
         // Optional target alias: AS <alias> or bare <alias>.

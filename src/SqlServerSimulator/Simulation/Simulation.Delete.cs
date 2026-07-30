@@ -61,7 +61,10 @@ partial class Simulation
         // BEGIN TRAN is active. Skipped when leadingTable is null (multi-
         // source alias form — target determined post-FROM, deferred to 1b).
         if (leadingTable is not null)
+        {
+            RejectDisabledClusteredIndex(leadingTable);
             _ = context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: true);
+        }
 
         // OUTPUT requires a known target. INSERTED isn't a valid qualifier
         // in DELETE OUTPUT (probe-confirmed Msg 4104). Alias-form multi-

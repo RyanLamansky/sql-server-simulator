@@ -461,14 +461,16 @@ public sealed class IgnoreDupKeyTests
             """, 102);
 
     [TestMethod]
-    public void AlterIndex_RebuildForm_IsNotModeled()
+    public void AlterIndex_ReorganizeForm_IsNotModeled()
     {
+        // SET / DISABLE / REBUILD ship (the latter two in DisabledIndexTests);
+        // the rest of the ALTER INDEX grammar doesn't.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("""
             create table t (id int not null, u int);
             create unique index ux on t(u)
             """);
-        var exception = Throws<NotSupportedException>(() => simulation.ExecuteNonQuery("alter index ux on t rebuild"));
-        Contains("REBUILD", exception.Message);
+        var exception = Throws<NotSupportedException>(() => simulation.ExecuteNonQuery("alter index ux on t reorganize"));
+        Contains("REORGANIZE", exception.Message);
     }
 }

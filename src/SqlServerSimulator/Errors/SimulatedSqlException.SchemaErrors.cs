@@ -1119,6 +1119,24 @@ partial class SimulatedSqlException
         new($"'{optionName}' is not a recognized ALTER INDEX option.", 155, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 1973: an operation that a disabled index can't
+    /// take — <c>SET (…)</c> or <c>REORGANIZE</c> against one. Probe-confirmed
+    /// verbatim.
+    /// </summary>
+    internal static SimulatedSqlException OperationOnDisabledIndex(string indexName, string tableName) =>
+        new($"Cannot perform the specified operation on disabled index '{indexName}' on table '{tableName}'.", 1973, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8655: a table carrying a <i>disabled clustered</i>
+    /// index can't be queried or modified at all, because the clustered index
+    /// <i>is</i> the table's storage on real. Probe-confirmed verbatim for both
+    /// SELECT and INSERT. DDL is exempt — <c>ALTER INDEX … REBUILD</c> and
+    /// <c>DROP INDEX</c> still work, which is how the table is recovered.
+    /// </summary>
+    internal static SimulatedSqlException QueryProcessorDisabledIndex(string indexName, string tableName) =>
+        new($"The query processor is unable to produce a plan because the index '{indexName}' on table or view '{tableName}' is disabled.", 8655, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1902: a <c>CREATE CLUSTERED INDEX</c> targeted a
     /// table that already carries a clustered index (a clustered PRIMARY KEY /
     /// UNIQUE constraint or a prior clustered index). Probe-confirmed verbatim
