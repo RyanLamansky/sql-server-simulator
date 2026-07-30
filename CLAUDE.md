@@ -243,6 +243,7 @@ MAX-string family flows through plain `UseSqlServer`.
 Raising real SQL Server's own error **is** modeled behavior.
 These are coverage, not gaps: accepting the statement instead would regress fidelity, and the simulator accepting what real rejects is the more dangerous divergence direction (see the over-permissive section of [`backlog.md`](docs/claude/backlog.md)).
 
+- `IGNORE_DUP_KEY` where real forbids it: a non-unique `CREATE INDEX` → **Msg 1916**, a filtered unique index → **Msg 10618**, an index on a view → **Msg 1990**, and via `ALTER INDEX … SET` a non-unique index → **Msg 1915** or a constraint-backed one → **Msg 1979** (real accepts the option in a constraint's own declaration but refuses to change it later) — see [`constraints.md`](docs/claude/constraints.md).
 - `text` / `ntext` / `image` in comparison (Msg 402), ORDER BY / DISTINCT (Msg 306), and aggregates (Msg 8117 from MAX/MIN).
 - `bit` paired with `bit` in arithmetic — **Msg 402** for `+` / `-` / `%`, **Msg 8117** for `*` / `/` (bitwise `&` / `|` / `^` and a mixed `bit + int` stay legal) — see [`arithmetic.md`](docs/claude/arithmetic.md).
 - A column list on a permission that has no column form (everything but `SELECT` / `UPDATE` / `REFERENCES`) → **Msg 1020** — see [`permissions.md`](docs/claude/permissions.md).
@@ -288,7 +289,7 @@ Entries name the *area*, not every member — each doc's own headings are its ca
 - **`sp_addextendedproperty` / `fn_listextendedproperty` / `sys.extended_properties`** → [`extended-properties.md`](docs/claude/extended-properties.md).
 - **`CREATE/ALTER/DROP SEQUENCE`, `NEXT VALUE FOR`, `sys.sequences`** → [`sequences.md`](docs/claude/sequences.md).
 - **DML + DDL triggers** (`CREATE TRIGGER` incl. `ON DATABASE`, `INSERTED`/`DELETED`, `TRIGGER_NESTLEVEL`, `sys.triggers`) → [`triggers.md`](docs/claude/triggers.md).
-- **CHECK / PRIMARY KEY / UNIQUE enforcement** (Msg 547 / 8141 peer-reference gate, Msg 2627 vs 2601, NULLs-equal UNIQUE), and the **seek-backed duplicate detection** behind it — enforcement shares the per-`Heap` seek cache with reads and FK checks, declining to a scan for a NULL key component, and skipping an UPDATE row whose key stood still → [`constraints.md`](docs/claude/constraints.md).
+- **CHECK / PRIMARY KEY / UNIQUE enforcement** (Msg 547 / 8141 peer-reference gate, Msg 2627 vs 2601, NULLs-equal UNIQUE), **`IGNORE_DUP_KEY`** (duplicate-row skip + the once-per-statement severity-0 Msg 3604, `ALTER INDEX … SET`, and the Msg 1916 / 1915 / 10618 / 1990 / 1979 rejections), and the **seek-backed duplicate detection** behind it — enforcement shares the per-`Heap` seek cache with reads and FK checks, declining to a scan for a NULL key component, and skipping an UPDATE row whose key stood still → [`constraints.md`](docs/claude/constraints.md).
 - **`FOREIGN KEY` + referential actions, `sys.foreign_keys`** → [`foreign-keys.md`](docs/claude/foreign-keys.md).
 - **`PERIOD FOR SYSTEM_TIME`, `FOR SYSTEM_TIME ALL/AS OF`, history sibling, `temporal_type`** → [`temporal-tables.md`](docs/claude/temporal-tables.md).
 - **`ALTER TABLE` ADD/DROP/ALTER COLUMN + CONSTRAINT (incl. trust toggling)** → [`alter-table.md`](docs/claude/alter-table.md).
@@ -350,6 +351,7 @@ Entries that raise a *real* SQL Server error deliberately are **not** here; they
   See [`programmable.md`](docs/claude/programmable.md).
 - **PRINT semantic gaps** — Msg 1046 subquery-in-operand not raised; non-string formatting uses `CoerceTo(varchar(8000))` not PRINT style 0; 8000/4000-byte truncation not enforced.
   The `InfoMessage` surface ships (`SimulatedDbConnection.InfoMessage`).
+- **`ALTER INDEX` beyond `SET`** — `REBUILD` / `REORGANIZE` / `DISABLE` / `RESUME` / `PAUSE` / `ABORT` raise `NotSupportedException` (no B-tree to rebuild, no disabled-index state); the `SET (…)` form ships — see [`constraints.md`](docs/claude/constraints.md).
 - **`ALTER TABLE` shapes not built**: DROP PERIOD FOR SYSTEM_TIME, REBUILD, SWITCH PARTITION, `ALTER COLUMN ADD/DROP {PERSISTED|MASKED|ROWGUIDCOL|SPARSE}`, multi-constraint ADD.
   Modeled shapes in [`alter-table.md`](docs/claude/alter-table.md).
 - **`hierarchyid` OrdPath tiers outside ordinals −4168..5199** — the wider 6-byte tiers aren't in the encoder/decoder table, so `Parse`/`ToString` of one raises `NotSupportedException`; storage/BACPAC round-trip those bytes opaquely.

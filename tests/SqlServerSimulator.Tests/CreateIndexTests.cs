@@ -156,9 +156,12 @@ public sealed class CreateIndexTests
 
     [TestMethod]
     public void CreateIndex_WithOptionsClause_Accepted()
+        // IGNORE_DUP_KEY is deliberately absent: it's the one option here with a
+        // semantic, and real rejects it on a non-unique index (Msg 1916 — see
+        // IgnoreDupKeyTests). Every other option is accepted and discarded.
         => AreEqual(1, new Simulation().ExecuteScalar("""
             create table t (id int not null primary key, a int);
-            create index ix_a on t(a) with (fillfactor = 80, ignore_dup_key = on);
+            create index ix_a on t(a) with (fillfactor = 80, pad_index = on, statistics_norecompute = off);
             select count(*) from sys.indexes where name = 'ix_a'
             """));
 

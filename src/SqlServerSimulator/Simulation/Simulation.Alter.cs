@@ -37,6 +37,8 @@ partial class Simulation
                 return TryParseAlterSchemaTransfer(context);
             case ReservedKeyword { Keyword: Keyword.Table }:
                 return TryParseAlterTable(context);
+            case ReservedKeyword { Keyword: Keyword.Index }:
+                return TryParseAlterIndex(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Role }:
                 return TryParseAlterRole(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Login }:

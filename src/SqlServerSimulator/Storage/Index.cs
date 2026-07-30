@@ -44,7 +44,8 @@ internal sealed class Index(
     int[] includedColumns,
     int[] includedColumnOrdinals,
     BooleanExpression? filter,
-    string? filterDefinition)
+    string? filterDefinition,
+    bool ignoreDupKey)
 {
     // Mutable: EXEC sp_rename (INDEX rename) reassigns the name in place; the
     // index keeps its identity and surfaces the new name through sys.indexes.
@@ -110,6 +111,18 @@ internal sealed class Index(
     /// given.
     /// </summary>
     public readonly string? FilterDefinition = filterDefinition;
+
+    /// <summary>
+    /// <c>IGNORE_DUP_KEY</c>: an INSERT whose row would duplicate this index's
+    /// key skips that row and continues, instead of raising Msg 2601. Only
+    /// meaningful on a UNIQUE index — real rejects the option on a non-unique or
+    /// filtered one, so this is false for both. Mutable because
+    /// <c>ALTER INDEX … SET (IGNORE_DUP_KEY = …)</c> toggles it in place, the
+    /// same way <see cref="Name"/> is mutable for <c>sp_rename</c>.
+    /// Surfaces as <c>sys.indexes.ignore_dup_key</c>.
+    /// See <c>docs/claude/constraints.md</c>.
+    /// </summary>
+    public bool IgnoreDupKey = ignoreDupKey;
 
     private static int[] BuildKeyStorageOrdinals(IndexKeyColumn[] keyColumns)
     {

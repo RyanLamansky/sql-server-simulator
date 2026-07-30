@@ -19,7 +19,7 @@ internal enum KeyConstraintKind
 /// declaration ordinals) so the enforcement loop can decode key columns
 /// directly from row bytes via <see cref="RowDecoder"/>.
 /// </summary>
-internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals, int objectId, bool isClustered)
+internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals, int objectId, bool isClustered, bool ignoreDupKey)
 {
     public readonly KeyConstraintKind Kind = kind;
 
@@ -55,5 +55,15 @@ internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] s
     /// violations; the constraint type itself is still spelled <c>UNIQUE</c>
     /// in DDL.
     /// </summary>
+    /// <summary>
+    /// <c>IGNORE_DUP_KEY</c> as declared in the constraint's <c>WITH (…)</c>
+    /// clause: an INSERT whose row would duplicate this key skips that row and
+    /// continues, instead of raising Msg 2627. Readonly because real refuses to
+    /// change it afterwards — <c>ALTER INDEX … SET</c> on a constraint-backed
+    /// index raises Msg 1979 — even though it accepts the option at declaration.
+    /// See <c>docs/claude/constraints.md</c>.
+    /// </summary>
+    public readonly bool IgnoreDupKey = ignoreDupKey;
+
     public string ViolationKindWord => this.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE KEY";
 }

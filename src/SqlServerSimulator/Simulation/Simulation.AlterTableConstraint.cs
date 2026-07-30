@@ -202,7 +202,9 @@ partial class Simulation
     /// </summary>
     private static bool ParseAddKeyConstraint(ParserContext context, MultiPartName tableName, string? explicitName)
     {
-        var (kind, clustered) = ParseInlineKeyKindAndModifiers(context);
+        // As in CREATE TABLE's table-level form, the WITH clause comes after
+        // the column list and is read below, not by this lookahead.
+        var (kind, clustered, _) = ParseInlineKeyKindAndModifiers(context);
         if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var columnNames = new List<string>();
@@ -220,9 +222,9 @@ partial class Simulation
         context.MoveNextOptional();
 
         // SSMS emits `ADD CONSTRAINT name UNIQUE NONCLUSTERED (cols) WITH
-        // (PAD_INDEX = OFF, …) ON [PRIMARY]`. Both trailers are no-ops in
-        // the simulator (no B-tree storage, no filegroup model).
-        SkipOptionalIndexWithClause(context);
+        // (PAD_INDEX = OFF, …) ON [PRIMARY]`. The filegroup trailer is a no-op
+        // (no filegroup model); of the index options only IGNORE_DUP_KEY lands.
+        var ignoreDupKey = ParseOptionalIndexWithClause(context);
         SkipOptionalFilegroupClause(context);
 
         if (context.Batch.IsSkipping)
@@ -298,7 +300,7 @@ partial class Simulation
                 throw SimulatedSqlException.MoreThanOneClusteredIndex(table.Name, existingClustered);
         }
 
-        var constraint = new KeyConstraint(kind, name, storageOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered);
+        var constraint = new KeyConstraint(kind, name, storageOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered, ignoreDupKey);
         ValidateExistingRowsForKeyConstraint(table, constraint);
         table.KeyConstraints.Add(constraint);
         return true;

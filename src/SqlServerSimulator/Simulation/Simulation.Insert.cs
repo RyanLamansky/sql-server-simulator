@@ -360,6 +360,10 @@ partial class Simulation
         var outputRows = output is null ? null : new List<byte[]>(sourceRows.Count);
         var hasInsertTriggers = !insteadOfActive && HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Insert);
         var triggerRows = (hasInsertTriggers || insteadOfActive) ? new List<SqlValue[]>(sourceRows.Count) : null;
+        // Rows actually written. Equals sourceRows.Count unless an
+        // IGNORE_DUP_KEY key dropped a duplicate, which real excludes from
+        // rows-affected and @@ROWCOUNT alike (probe-confirmed).
+        var insertedCount = 0;
         for (var rowIndex = 0; rowIndex < sourceRows.Count; rowIndex++)
         {
             var sourceRow = sourceRows[rowIndex];
@@ -527,8 +531,18 @@ partial class Simulation
                 if (!insteadOfActive)
                 {
                     var storedValues = ProjectStoredValues(destinationTable, rowValues);
-                    EnforceKeyConstraints(destinationTable, storedValues);
-                    EnforceUniqueIndexes(destinationTable, rowValues, storedValues, context.Batch);
+                    // A duplicate against an IGNORE_DUP_KEY key drops this row and
+                    // the statement carries on: no heap write, no OUTPUT row, no
+                    // trigger row, and it doesn't count toward rows-affected.
+                    // Real does emit the identity value it burned on the way (the
+                    // sequence is consumed whether or not the row lands), which is
+                    // why lastIdentityValue is already assigned above.
+                    if (EnforceKeyConstraints(destinationTable, storedValues, context.Batch) == RowKeyVerdict.SkipDuplicate
+                        || EnforceUniqueIndexes(destinationTable, rowValues, storedValues, context.Batch) == RowKeyVerdict.SkipDuplicate)
+                    {
+                        continue;
+                    }
+
                     EnforceOutgoingForeignKeys(destinationTable, [rowValues], context, "INSERT");
                     var (pageIndex, slotIndex) = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
                     if (IsLockableTable(destinationTable))
@@ -546,6 +560,7 @@ partial class Simulation
                 }
 
                 triggerRows?.Add((SqlValue[])rowValues.Clone());
+                insertedCount++;
             }
         }
 
@@ -592,7 +607,7 @@ partial class Simulation
         // has no target, the projected rows flow back as a result set.
         return output is { HasTarget: false } o2
             ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!)
-            : new SimulatedNonQuery(sourceRows.Count);
+            : new SimulatedNonQuery(insertedCount);
     }
 
     /// <summary>

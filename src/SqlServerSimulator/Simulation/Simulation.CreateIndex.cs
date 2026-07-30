@@ -132,11 +132,16 @@ partial class Simulation
         }
 
         // WITH (option = value, …) followed by an optional ON <filegroup>.
-        // Both are parsed and discarded — the simulator has no B-tree
-        // storage and no filegroup model, so none of the options are
-        // semantically meaningful.
-        SkipOptionalIndexWithClause(context);
+        // The filegroup clause is discarded (no filegroup model) and so is every
+        // index option except IGNORE_DUP_KEY, the one with a semantic here.
+        var ignoreDupKey = ParseOptionalIndexWithClause(context);
         SkipOptionalFilegroupClause(context);
+
+        // Probe-confirmed to precede every name-resolution error, including a
+        // missing table, so it fires here rather than after the target binds —
+        // and, being a statement-shape check, regardless of skip state.
+        if (ignoreDupKey && !isUnique)
+            throw SimulatedSqlException.IgnoreDupKeyOnNonUniqueIndex();
 
         if (context.Batch.IsSkipping)
             return true;
@@ -149,6 +154,8 @@ partial class Simulation
             // unique-clustered gates and records the index on the View.
             if (context.Batch.TryResolveView(targetTableName, out var view))
             {
+                if (ignoreDupKey)
+                    throw SimulatedSqlException.IgnoreDupKeyOnViewIndex();
                 context.Batch.Connection.Simulation.CreateIndexOnView(context, view, indexName, isUnique, isClustered, keyColumns, includeColumnNames, filter, filterDefinition);
                 return true;
             }
@@ -156,6 +163,12 @@ partial class Simulation
         }
 
         var qualifiedTableName = FormatQualifiedTableName(targetTableName, table);
+
+        // Unlike Msg 1916, this one names the table, so it can only be raised
+        // once the target has bound — probe-confirmed: a filtered index over a
+        // missing table reports the missing object instead.
+        if (ignoreDupKey && filter is not null)
+            throw SimulatedSqlException.IgnoreDupKeyOnFilteredIndex("create", indexName, table.Name);
 
         foreach (var existing in table.Indexes)
         {
@@ -204,7 +217,8 @@ partial class Simulation
             resolvedIncludeColumns,
             resolvedIncludeOrdinals,
             filter,
-            filterDefinition);
+            filterDefinition,
+            ignoreDupKey);
 
         if (isUnique)
             ValidateExistingRowsForUniqueIndex(table, index, context.Batch, qualifiedTableName);
@@ -261,7 +275,9 @@ partial class Simulation
                 [],
                 [],
                 filter: null,
-                filterDefinition: null));
+                filterDefinition: null,
+                // The inline CREATE TABLE index grammar exposes no WITH clause.
+                ignoreDupKey: false));
         }
     }
 

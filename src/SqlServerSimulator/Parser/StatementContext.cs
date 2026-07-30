@@ -60,6 +60,17 @@ internal sealed class StatementContext
     public int StartLine;
 
     /// <summary>
+    /// Latched once an <c>IGNORE_DUP_KEY</c> index or constraint has made this
+    /// statement skip a duplicate row, so the severity-0 Msg 3604 rides the
+    /// info-message stream exactly once however many rows were dropped —
+    /// probe-confirmed against real, which emits one message for three skipped
+    /// rows and none at all when nothing was skipped. Per statement rather than
+    /// per batch because that is the scope real resets it at.
+    /// See <c>docs/claude/constraints.md</c>.
+    /// </summary>
+    public bool ReportedIgnoredDuplicate;
+
+    /// <summary>
     /// 0-based character offset within the batch text where this statement's
     /// leading token starts (taken from <see cref="Token.StartIndex"/> of the
     /// leading token at dispatch time). The <c>CREATE</c> / <c>ALTER</c>

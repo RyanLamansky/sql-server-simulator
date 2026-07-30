@@ -14,6 +14,51 @@ Sibling deep-dives: [`foreign-keys.md`](foreign-keys.md) (the FK family in full)
   Enforcement **seeks the shared `HeapSeekCache`** (live-byte verified, no residual WHERE).
   Referential-action, cascade-cycle, PK/UNIQUE-target, NULL-skip rules + Msg numbers in [`foreign-keys.md`](foreign-keys.md).
 
+## `IGNORE_DUP_KEY`
+
+Declared on a UNIQUE index or a PRIMARY KEY / UNIQUE constraint, the option turns a duplicate row into a *skip*: the INSERT drops that row, keeps going with the rest, and reports success.
+Every behavior below was probed against SQL Server 2025.
+
+**Where it may be declared** — a unique index (`CREATE UNIQUE INDEX … WITH (IGNORE_DUP_KEY = ON)`), a table-level `PRIMARY KEY (…)` / `UNIQUE (…) WITH (…)` constraint, the same constraints inline on a column (`id int primary key with (…)`), and `ALTER TABLE … ADD CONSTRAINT … WITH (…)`.
+It stores on `Index.IgnoreDupKey` / `KeyConstraint.IgnoreDupKey` and surfaces as `sys.indexes.ignore_dup_key`.
+`ParseOptionalIndexWithClause` reads it out of the option list while still skipping every other option unexamined, so scripted DDL keeps flowing.
+
+**What the skip does.** The row isn't written, doesn't reach `OUTPUT`, doesn't reach a trigger's `INSERTED`, and doesn't count: rows-affected and `@@ROWCOUNT` report only the rows that landed, and `@@ERROR` stays 0.
+A severity-**0** Msg 3604 (`Duplicate key was ignored.`) rides the info-message stream **once per statement** however many rows were dropped, and not at all when none were — latched on `StatementContext.ReportedIgnoredDuplicate`, which the dispatch loop clears per statement.
+An identity value is still consumed by a row that gets dropped.
+The option is per key, not per table: a row duplicating a lenient index's key is skipped while one duplicating a strict index's key on the same table still raises.
+A duplicate *within* one `VALUES` list is skipped the same way as one against an existing row, and `INSERT … SELECT` behaves identically.
+
+Enforcement signals the skip by returning `RowKeyVerdict.SkipDuplicate` rather than throwing, so which callers honor it is visible at the call sites: the INSERT statement and BCP bulk load act on it, while **UPDATE and MERGE never ask** — real keeps raising Msg 2601 / 2627 on both, including MERGE's `WHEN NOT MATCHED THEN INSERT`, so the update-path enforcers are unchanged.
+
+**Where real refuses it** (all faithful rejections, so the simulator raises them too):
+
+| declaration | error |
+| --- | --- |
+| non-unique `CREATE INDEX` | **Msg 1916**, `"CREATE INDEX options nonunique and ignore_dup_key are mutually exclusive."` — a statement-shape check, probe-confirmed to fire ahead of table, column and duplicate-name resolution, so it names nothing |
+| filtered unique index | **Msg 10618**, `"Cannot create filtered index … "` — names the table, so it can only raise once the target has bound |
+| index on a view | **Msg 1990** |
+| `ALTER INDEX … SET` on a non-unique index | **Msg 1915** — a different number *and* wording from CREATE's 1916 |
+| `ALTER INDEX … SET` on a filtered index | **Msg 10618** with the verb `alter` in place of `create` |
+| `ALTER INDEX … SET` on a constraint-backed index | **Msg 1979** — real accepts the option in a constraint's own declaration but refuses to change it afterwards |
+
+Because filtered unique indexes reject the option outright, there is no filtered-plus-`IGNORE_DUP_KEY` interaction to model anywhere.
+
+### `ALTER INDEX … SET`
+
+`Simulation.AlterIndex.cs` implements `ALTER INDEX { name | ALL } ON <table> SET ( option [, …] )`.
+`IGNORE_DUP_KEY` is honored; `ALLOW_ROW_LOCKS` / `ALLOW_PAGE_LOCKS` / `OPTIMIZE_FOR_SEQUENTIAL_KEY` / `STATISTICS_NORECOMPUTE` / `COMPRESSION_DELAY` / `FILLFACTOR` are recognized by name and discarded.
+The list is validated **strictly** here, unlike CREATE INDEX's tolerant `WITH (…)`, because real is strict too: an unknown name raises **Msg 155**, and a value that isn't `ON` / `OFF` (or a numeric where one belongs) is **Msg 102**, as is an empty list.
+A named target resolves against the table's indexes *and* its key constraints — that's what makes Msg 1979 reachable.
+`ALL` fans out over every index and aborts on the first refusal, so a table carrying any key constraint can't have the option set table-wide; a SET that never mentions `IGNORE_DUP_KEY` has nothing to refuse and sweeps cleanly.
+Missing index → **Msg 2727** (Level 11); missing table → **Msg 1088** (State 9, the object name in double quotes).
+
+`FILLFACTOR` is a reserved keyword where every other option name is an ordinary identifier, so the option name is read off `Token.Source` rather than as an identifier token.
+
+**Not modeled yet**: the `REBUILD` / `REORGANIZE` / `DISABLE` / `RESUME` / `PAUSE` / `ABORT` forms raise `NotSupportedException` naming the form — there is no B-tree to rebuild and no disabled-index state. A *disabled* unique index isn't enforced at all on real, which is worth knowing when reading probe transcripts: an `ALTER INDEX … DISABLE` earlier in a script silently stops later duplicate checks.
+
+`IgnoreDupKeyTests` is the regression suite.
+
 ## Key-uniqueness enforcement seeks rather than scans
 
 Four enforcement paths ask the same question — *does a live row already carry this key tuple?* — and all four answer it by seeking the shared per-`Heap` cache, the way foreign-key parent-existence already did:

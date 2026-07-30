@@ -172,12 +172,6 @@ Tracked elsewhere and over-permissive in the same sense: the recursive-CTE part 
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
-- **`IGNORE_DUP_KEY = ON` parses but isn't honored** — the option is accepted on both `CREATE UNIQUE INDEX … WITH (…)` and the `UNIQUE (…) WITH (…)` constraint form and then has no effect, so an INSERT carrying a duplicate raises **Msg 2601** where real skips that row and continues.
-  Probe-confirmed against SQL Server 2025: the duplicate is dropped and the statement succeeds with the rest inserted (`INSERT … VALUES (2),(1),(3)` over an existing `1` inserts 2 and 3, `@@ROWCOUNT = 2`, `@@ERROR = 0`), and a severity-10 **Msg 3604** (`Duplicate key was ignored.`) rides the info-message stream **once per statement** regardless of how many rows were skipped.
-  The downgrade is INSERT-only — an `UPDATE` into a duplicate still raises Msg 2601 on real.
-  `sys.indexes.ignore_dup_key` also reports `0` for a declared-ON index where real reports `1`, so the flag has to be stored before either the behavior or the catalog column can be right.
-  The *under*-permissive direction — a valid INSERT failing.
-  Home: `KeyConstraint` / `Index` (the stored flag), the INSERT duplicate-detection path (the skip + info message), `BuiltInResources` (the catalog column).
 - **Per-object creation-time `QUOTED_IDENTIFIER` capture not modeled** — real SQL Server stamps procedures / views / triggers / tables with the QI setting in effect at CREATE (`sys.sql_modules.uses_quoted_identifier`, `OBJECTPROPERTY(id, 'IsQuotedIdentOn')`) and executes bodies under the captured setting; the simulator re-parses bodies under the executing session's current setting.
   See [`grammar.md`](grammar.md).
   Rare legacy-pattern impact.

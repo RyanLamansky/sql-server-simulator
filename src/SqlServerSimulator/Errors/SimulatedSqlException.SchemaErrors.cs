@@ -1053,6 +1053,72 @@ partial class SimulatedSqlException
         new($"The operation failed because an index or statistics with name '{indexName}' already exists on table '{qualifiedTableName}'.", 1913, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 1916: <c>IGNORE_DUP_KEY</c> was set on a
+    /// <c>CREATE INDEX</c> that isn't UNIQUE. Probe-confirmed verbatim, including
+    /// the lowercase option name and State 4, and probe-confirmed to fire ahead of
+    /// table / column / duplicate-name resolution — it is a statement-shape check,
+    /// so the message names nothing.
+    /// </summary>
+    internal static SimulatedSqlException IgnoreDupKeyOnNonUniqueIndex() =>
+        new("CREATE INDEX options nonunique and ignore_dup_key are mutually exclusive.", 1916, 16, 4);
+
+    /// <summary>
+    /// Mimics SQL Server error 1915: <c>ALTER INDEX … SET (IGNORE_DUP_KEY = ON)</c>
+    /// against a non-unique index. Distinct number <i>and</i> wording from the
+    /// CREATE-time <see cref="IgnoreDupKeyOnNonUniqueIndex"/> (1916) — both
+    /// probe-confirmed.
+    /// </summary>
+    internal static SimulatedSqlException IgnoreDupKeyOnNonUniqueIndexAlter(string indexName) =>
+        new($"Cannot alter a non-unique index with ignore_dup_key index option. Index '{indexName}' is non-unique.", 1915, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10618: <c>IGNORE_DUP_KEY = ON</c> on a filtered
+    /// index. The verb differs between the two paths — <c>"Cannot create
+    /// filtered index"</c> at CREATE, <c>"Cannot alter filtered index"</c> at
+    /// ALTER — under one message number; both probe-confirmed.
+    /// </summary>
+    internal static SimulatedSqlException IgnoreDupKeyOnFilteredIndex(string verb, string indexName, string tableName) =>
+        new($"Cannot {verb} filtered index '{indexName}' on table '{tableName}' because the statement sets the IGNORE_DUP_KEY option to ON. Rewrite the statement so that it does not use the IGNORE_DUP_KEY option.", 10618, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1990: <c>IGNORE_DUP_KEY</c> on an index over a
+    /// view. Probe-confirmed verbatim; names neither the view nor the index.
+    /// </summary>
+    internal static SimulatedSqlException IgnoreDupKeyOnViewIndex() =>
+        new("Cannot define an index on a view with ignore_dup_key index option. Remove ignore_dup_key option and verify that view definition does not allow duplicates, or do not index view.", 1990, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1979: <c>ALTER INDEX … SET (IGNORE_DUP_KEY = …)</c>
+    /// against the index backing a PRIMARY KEY or UNIQUE constraint. Real accepts
+    /// the option in the constraint's own declaration but refuses to change it
+    /// afterwards — both halves probe-confirmed.
+    /// </summary>
+    internal static SimulatedSqlException IgnoreDupKeyOnConstraintIndex(string indexName) =>
+        new($"Cannot use index option ignore_dup_key to alter index '{indexName}' as it enforces a primary or unique constraint.", 1979, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2727: <c>ALTER INDEX</c> named an index the table
+    /// doesn't carry. Probe-confirmed verbatim, at the unusual Level 11.
+    /// </summary>
+    internal static SimulatedSqlException CannotFindIndex(string indexName) =>
+        new($"Cannot find index '{indexName}'.", 2727, 11, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1088: <c>ALTER INDEX … ON &lt;table&gt;</c> named a
+    /// missing object. Probe-confirmed verbatim (the object name is wrapped in
+    /// double quotes, unlike most resolution errors' single quotes) at State 9.
+    /// </summary>
+    internal static SimulatedSqlException CannotFindObjectForAlterIndex(string objectName) =>
+        new($"Cannot find the object \"{objectName}\" because it does not exist or you do not have permissions.", 1088, 16, 9);
+
+    /// <summary>
+    /// Mimics SQL Server error 155: an unrecognized option name inside
+    /// <c>ALTER INDEX … SET (…)</c>. Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException UnrecognizedAlterIndexOption(string optionName) =>
+        new($"'{optionName}' is not a recognized ALTER INDEX option.", 155, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1902: a <c>CREATE CLUSTERED INDEX</c> targeted a
     /// table that already carries a clustered index (a clustered PRIMARY KEY /
     /// UNIQUE constraint or a prior clustered index). Probe-confirmed verbatim

@@ -245,8 +245,12 @@ partial class Simulation
                 EnforceCheckConstraints(table, rowValues, batch);
 
             var storedValues = ProjectStoredValues(table, rowValues);
-            EnforceKeyConstraints(table, storedValues);
-            EnforceUniqueIndexes(table, rowValues, storedValues, batch);
+            if (EnforceKeyConstraints(table, storedValues, batch) == RowKeyVerdict.SkipDuplicate
+                || EnforceUniqueIndexes(table, rowValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate)
+            {
+                continue;
+            }
+
             if (plan.CheckConstraints)
                 EnforceOutgoingForeignKeys(table, [rowValues], context, "INSERT");
 

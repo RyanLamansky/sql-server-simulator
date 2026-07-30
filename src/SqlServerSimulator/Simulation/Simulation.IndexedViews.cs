@@ -88,7 +88,10 @@ partial class Simulation
             resolvedIncludeColumns,
             resolvedIncludeOrdinals,
             filter,
-            filterDefinition);
+            filterDefinition,
+            // Unreachable with the option set: an index over a view carrying
+            // IGNORE_DUP_KEY is rejected with Msg 1990 before this point.
+            ignoreDupKey: false);
 
         if (isUnique)
         {

@@ -1301,6 +1301,7 @@ public sealed partial class Simulation
         batch.CurrentStatement.StartLine = batch.Parser.Token?.LineNumber ?? 1;
         batch.CurrentStatement.StartIndex = batch.Parser.Token?.StartIndex ?? 0;
         batch.CurrentStatement.SuppressErrorReset = false;
+        batch.CurrentStatement.ReportedIgnoredDuplicate = false;
         // Classify the statement as row-returning from its leading token so a
         // failure under continue-on-error surfaces the way real SQL Server
         // frames it: a SELECT (bare / CTE-prefixed / parenthesized) or VALUES
