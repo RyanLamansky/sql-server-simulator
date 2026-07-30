@@ -221,25 +221,167 @@ public sealed class ConvertTests
     public void Convert_StringToDateWithStyle(int style, string input) =>
         AreEqual(new DateTime(2026, 5, 13), ExecuteScalar($"select convert(date, '{input}', {style})"));
 
-    // General styles run SQL Server's flexible parser: separators (/ - .) are
-    // interchangeable and ISO year-first is accepted, with the trailing pair
-    // ordered by the style family. Each input below resolves to 2026-05-13.
+    // Separators (/ - .) are interchangeable within a style, so a style parses
+    // its own layout whichever of the three the input uses.
     [TestMethod]
-    [DataRow(101, "2026-05-13")]   // mdy + ISO year-first (the AdventureWorks shape)
-    [DataRow(101, "2026/05/13")]
     [DataRow(101, "05-13-2026")]   // mdy, dash where the style documents slash
-    [DataRow(0, "2026-05-13")]     // default style, ISO
-    [DataRow(120, "2026-05-13")]   // ODBC canonical
+    [DataRow(0, "2026-05-13")]     // the default style is the permissive one
+    [DataRow(120, "2026-05-13")]   // ODBC canonical, the style's own layout
     [DataRow(102, "2026/05/13")]   // ymd, slash where the style documents dot
     [DataRow(110, "05/13/2026")]   // mdy, slash where the style documents dash
-    public void Convert_StringToDate_GeneralStyle_SeparatorAndIsoFlexible(int style, string input) =>
+    public void Convert_StringToDate_SeparatorsAreInterchangeable(int style, string input) =>
         AreEqual(new DateTime(2026, 5, 13), ExecuteScalar($"select convert(date, '{input}', {style})"));
 
+    /// <summary>
+    /// The legacy targets accept a year-leading form under a four-digit style
+    /// and keep the trailing pair in the style's own order, so 103 reads
+    /// 2003-04-05 as 5 April rather than 4 May. The modern targets take only
+    /// the style's own layout and reject the same string — see
+    /// <see cref="Convert_StringToDate_ModernTarget_RejectsYearFirstUnderMdyDmyStyle"/>.
+    /// </summary>
     [TestMethod]
-    [DataRow(103, "2003-04-05")]   // dmy + year-first → trailing pair is day-month → May 4
+    [DataRow(101, "2026-05-13", 5, 13)]
+    [DataRow(101, "2026/05/13", 5, 13)]
+    [DataRow(103, "2003-04-05", 5, 4)]   // dmy + year-first → trailing pair is day-month
+    [DataRow(104, "2003.04.05", 5, 4)]
+    public void Convert_StringToDateTime_YearFirstUnderFourDigitStyle(int style, string input, int month, int day)
+    {
+        var year = input.StartsWith("2026", StringComparison.Ordinal) ? 2026 : 2003;
+        AreEqual(new DateTime(year, month, day), ExecuteScalar($"select convert(datetime, '{input}', {style})"));
+    }
+
+    /// <summary>
+    /// The same strings the legacy targets accept above: a modern target reads
+    /// only the style's own layout, so a year-leading form under an mdy / dmy
+    /// style is Msg 241 (probe-confirmed — this is not a leniency difference
+    /// but a different grammar).
+    /// </summary>
+    [TestMethod]
+    [DataRow(101, "2026-05-13")]
+    [DataRow(101, "2026/05/13")]
+    [DataRow(103, "2003-04-05")]
     [DataRow(104, "2003.04.05")]
-    public void Convert_StringToDate_DmyYearFirst_OrdersTrailingDayMonth(int style, string input) =>
-        AreEqual(new DateTime(2003, 5, 4), ExecuteScalar($"select convert(date, '{input}', {style})"));
+    public void Convert_StringToDate_ModernTarget_RejectsYearFirstUnderMdyDmyStyle(int style, string input) =>
+        new Simulation().AssertSqlError($"select convert(date, '{input}', {style})", 241);
+
+    // === Per-style input grammar (two target families) ===
+
+    /// <summary>
+    /// A style admits exactly one year width — the published table's
+    /// "with century" / "without century" split — so the century restriction
+    /// is a rejection, not a reinterpretation.
+    /// </summary>
+    [TestMethod]
+    [DataRow(101, "01/02/99")]     // four-digit style, two-digit input
+    [DataRow(1, "01/02/1999")]     // two-digit style, four-digit input
+    [DataRow(103, "02/01/99")]
+    [DataRow(3, "02/01/1999")]
+    public void Convert_StringToDateTime_WrongYearWidthForStyle_RaisesMsg241(int style, string input) =>
+        new Simulation().AssertSqlError($"select convert(datetime, '{input}', {style})", 241);
+
+    [TestMethod]
+    [DataRow(1, "01/02/99")]
+    [DataRow(101, "01/02/1999")]
+    public void Convert_StringToDateTime_MatchingYearWidth_Parses(int style, string input) =>
+        AreEqual(new DateTime(1999, 1, 2), ExecuteScalar($"select convert(datetime, '{input}', {style})"));
+
+    /// <summary>
+    /// A style whose published output carries a month name or is time-only
+    /// parses no separator-bearing numeric date at all, whatever that output
+    /// looks like — style 23 rejects its own <c>yyyy-mm-dd</c> shape under a
+    /// legacy target.
+    /// </summary>
+    [TestMethod]
+    [DataRow(100, "01/02/1999")]
+    [DataRow(9, "01/02/1999")]
+    [DataRow(23, "1999-01-02")]
+    [DataRow(13, "02/01/1999")]
+    public void Convert_StringToDateTime_StyleWithNoNumericGrammar_RaisesMsg241(int style, string input) =>
+        new Simulation().AssertSqlError($"select convert(datetime, '{input}', {style})", 241);
+
+    /// <summary>
+    /// Style 23 does read ISO under a modern target: the modern family takes
+    /// the style's own layout, which for 23 is <c>yyyy-mm-dd</c>.
+    /// </summary>
+    [TestMethod]
+    public void Convert_StringToDate_Style23_ReadsIsoOnTheModernTarget() =>
+        AreEqual(new DateTime(1999, 1, 2), ExecuteScalar("select convert(date, '1999-01-02', 23)"));
+
+    /// <summary>
+    /// The forms every style reads regardless of its numeric grammar.
+    /// </summary>
+    [TestMethod]
+    [DataRow(100, "19990102")]
+    [DataRow(100, "990102")]
+    [DataRow(9, "Jan 2 1999")]
+    [DataRow(13, "2 Jan 1999")]
+    [DataRow(23, "Jan 2, 1999")]
+    public void Convert_StringToDateTime_SharedForms_AreStyleIndependent(int style, string input) =>
+        AreEqual(new DateTime(1999, 1, 2), ExecuteScalar($"select convert(datetime, '{input}', {style})"));
+
+    /// <summary>
+    /// The legacy family reserves the <c>T</c> separator for styles 0 / 126 /
+    /// 127; the modern family takes it under every style, independent of that
+    /// style's numeric grammar.
+    /// </summary>
+    [TestMethod]
+    public void Convert_StringToDateTime_TSeparator_IsLegacyIsoStylesOnly()
+    {
+        var sim = new Simulation();
+        AreEqual(new DateTime(1999, 1, 2, 10, 0, 0), sim.ExecuteScalar("select convert(datetime, '1999-01-02T10:00:00', 0)"));
+        AreEqual(new DateTime(1999, 1, 2, 10, 0, 0), sim.ExecuteScalar("select convert(datetime, '1999-01-02T10:00:00', 126)"));
+        // A four-digit style reports the out-of-range Msg 242 here, a
+        // two-digit or no-numeric one Msg 241 (probe-confirmed).
+        _ = sim.AssertSqlError("select convert(datetime, '1999-01-02T10:00:00', 101)", 242);
+        _ = sim.AssertSqlError("select convert(datetime, '1999-01-02T10:00:00', 1)", 241);
+        _ = sim.AssertSqlError("select convert(datetime, '1999-01-02T10:00:00', 100)", 241);
+        // Modern target: accepted under a style that reads no numeric date.
+        AreEqual(new DateTime(1999, 1, 2), sim.ExecuteScalar("select convert(date, '1999-01-02T10:00:00', 3)"));
+    }
+
+    /// <summary>ISO 8601 wants its <c>T</c>, so legacy 126 / 127 reject a space.</summary>
+    [TestMethod]
+    public void Convert_StringToDateTime_Style126_RejectsSpaceSeparatedTime() =>
+        new Simulation().AssertSqlError("select convert(datetime, '1999-01-02 10:00:00', 126)", 241);
+
+    /// <summary>
+    /// An input matching the style's layout whose field value is out of range
+    /// is Msg 242 on a legacy target, distinct from a shape the style can't
+    /// read at all (Msg 241) and from the modern targets (always 241).
+    /// </summary>
+    [TestMethod]
+    public void Convert_StringToDateTime_OutOfRangeFieldUnderMatchingLayout_RaisesMsg242()
+    {
+        var sim = new Simulation();
+        _ = sim.AssertSqlError("select convert(datetime, '05/13/2026', 103)", 242);   // day-first → month 13
+        _ = sim.AssertSqlError("select convert(datetime, '01/02/99', 2)", 242);       // y-m-d → day 99
+        _ = sim.AssertSqlError("select convert(datetime, '01/02/1999', 2)", 241);     // not style 2's layout at all
+        _ = sim.AssertSqlError("select convert(date, '05/13/2026', 103)", 241);       // modern targets stay on 241
+    }
+
+    /// <summary><c>smalldatetime</c> reports its own Msg 295 for a format failure.</summary>
+    [TestMethod]
+    public void Convert_StringToSmallDateTime_FormatFailure_RaisesMsg295()
+    {
+        var sim = new Simulation();
+        _ = sim.AssertSqlError("select convert(smalldatetime, '01/02/1999', 1)", 295);
+        // An out-of-range field is still Msg 242 on this target.
+        _ = sim.AssertSqlError("select convert(smalldatetime, '99.01.02', 0)", 242);
+    }
+
+    /// <summary>
+    /// A trailing <c>Z</c> is universal on the modern targets but legacy-side
+    /// belongs to the permissive default and to 127, whose own output carries
+    /// it — legacy 126 rejects it.
+    /// </summary>
+    [TestMethod]
+    public void Convert_StringToDateLike_ZoneSuffix_IsStyleAndFamilyGated()
+    {
+        var sim = new Simulation();
+        AreEqual(new DateTime(1999, 1, 2, 10, 0, 0), sim.ExecuteScalar("select convert(datetime, '1999-01-02T10:00:00Z', 0)"));
+        AreEqual(new DateTime(1999, 1, 2, 10, 0, 0), sim.ExecuteScalar("select convert(datetime, '1999-01-02T10:00:00Z', 127)"));
+        _ = sim.AssertSqlError("select convert(datetime, '1999-01-02T10:00:00Z', 126)", 241);
+    }
 
     [TestMethod]
     [DataRow("Apr 5 2003")]

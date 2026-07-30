@@ -498,123 +498,372 @@ internal readonly partial struct SqlValue
     }
 
     /// <summary>
-    /// String → date-like coercion with a CONVERT style hint, mirroring SQL
-    /// Server's flexible string-to-datetime parser (probed against SQL Server
-    /// 2025, 2026-05-27).
+    /// String → date-like coercion with a CONVERT style hint. Every style
+    /// carries its own input grammar, and the grammar additionally depends on
+    /// whether the target is a legacy or a modern date type — probed
+    /// exhaustively against SQL Server 2025 (40 styles × 19 input shapes × 6
+    /// targets). See <c>docs/claude/casting.md</c> for the tables.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <strong>Strict styles</strong> (<c>12</c> <c>yymmdd</c>, <c>112</c>
-    /// <c>yyyymmdd</c>, <c>23</c> <c>yyyy-mm-dd</c>, <c>126</c>/<c>127</c>
-    /// ISO 8601) pin an exact format; a string that's a valid date by some
-    /// OTHER format raises Msg 9807, a non-date raises Msg 241.
+    /// There are exactly two grammars. The <strong>legacy</strong> family
+    /// (<c>datetime</c> / <c>smalldatetime</c>) reads a style's numeric date as
+    /// an order (<see cref="DatePartOrder"/>) plus a year width, where the
+    /// width is the published table's "with century" / "without century"
+    /// split — <c>CONVERT(datetime, '01/02/99', 101)</c> fails because 101 is a
+    /// four-digit-year style and <c>… '01/02/1999', 1)</c> because 1 is a
+    /// two-digit one. Four-digit legacy styles additionally accept a
+    /// year-leading form, with the remaining pair still in the style's own
+    /// order, which is why style 103 reads <c>1999-01-02</c> as 2 Jan.
     /// </para>
     /// <para>
-    /// <strong>General styles</strong> route through .NET's flexible parser:
-    /// separators (<c>/ - .</c>) are interchangeable, and numeric / ISO
-    /// year-first / month-name forms plus an optional trailing time all parse.
-    /// The only family distinction is date-part order for ambiguous numeric
-    /// dates — the dmy set (<see cref="IsDayMonthYearStyle"/>) reads day-first
-    /// (<c>en-GB</c>), every other style month-first (<c>en-US</c>); a leading
-    /// 4-digit token is the year, with the trailing pair following the family
-    /// order. Known leniency divergences: the 2-digit-vs-4-digit-year
-    /// with/without-century restriction isn't enforced, and a <c>T</c>-separated
-    /// time is accepted under general styles (real SQL Server reserves it for
-    /// 126/127). See [`docs/claude/casting.md`].
+    /// The <strong>modern</strong> family (<c>date</c> / <c>datetime2</c> /
+    /// <c>time</c> / <c>datetimeoffset</c>) instead accepts only the style's
+    /// <em>own published output layout</em>: style 101 takes
+    /// <c>mm/dd/yyyy</c> but not year-first, style 120 takes
+    /// <c>yyyy-mm-dd</c> but not <c>mm/dd/yyyy</c>, and style 23 — which reads
+    /// nothing numeric under the legacy family — takes ISO. It also accepts a
+    /// <c>T</c> separator under every style, where the legacy family reserves
+    /// <c>T</c> for 0 / 126 / 127.
+    /// </para>
+    /// <para>
+    /// Independently of both, most styles accept a set of <em>shared</em>
+    /// forms: separatorless <c>yyyyMMdd</c> / <c>yyMMdd</c>, the English
+    /// month-name spellings, and a bare time (anchored to 1900-01-01).
+    /// Legacy 127 accepts none of them; 130 / 131 exclude the month-name ones.
     /// </para>
     /// </remarks>
     internal SqlValue CoerceStringToDateLikeWithStyle(SqlType target, int style)
     {
-        var input = this.AsString;
+        // datetime / smalldatetime share one grammar; date / datetime2 / time /
+        // datetimeoffset share the other (probe-confirmed: the four modern
+        // targets differ from the legacy pair in exactly the same 88 cells).
+        var legacyFamily = target is DateTimeSqlType or SmallDateTimeSqlType;
+        var grammar = GrammarForStyle(style, legacyFamily);
+        // A trailing `Z` is universal in the modern family; the legacy one
+        // takes it only under the permissive default style and under 127, the
+        // style whose own output carries the UTC suffix — 126 rejects it
+        // (probe-confirmed).
+        var allowsZoneSuffix = !legacyFamily || style is 0 or 127;
 
-        var strictFormats = StrictStyleDateFormats(style);
-        if (strictFormats is not null)
+        // `smalldatetime` reports its own Msg 295 for a format failure where
+        // every other target reports Msg 241; an out-of-range *value* is
+        // Msg 242 on all of them (probe-confirmed).
+        SimulatedSqlException Fail(bool outOfRange) =>
+            outOfRange && legacyFamily ? SimulatedSqlException.OutOfRangeDateTimeConversion(target)
+            : target is SmallDateTimeSqlType ? SimulatedSqlException.ConversionFailedSmallDateTimeFromString()
+            : SimulatedSqlException.ConversionFailedDateTimeFromString();
+        var input = this.AsString.Trim();
+
+        // A bare time anchors to 1900-01-01 and is accepted under every style.
+        if (TryParseBareTime(input, out var timeOnly))
+            return FromDateTime2(SqlType.GetDateTime2(7), timeOnly).CoerceTo(target);
+
+        var (datePart, timePart, separator) = SplitDateAndTime(input);
+
+        // The legacy family reserves `T` for the ISO styles. Which error it
+        // reports depends on whether the style could read the date half at all
+        // (probe-confirmed: style 101 gives the out-of-range Msg 242, styles 1
+        // and 100 give Msg 241).
+        if (separator == 'T' && !grammar.AllowsIsoT)
         {
-            // AssumeUniversal + AdjustToUniversal keeps the wall-clock reading
-            // for style 127's `Z` UTC suffix regardless of host timezone.
-            const DateTimeStyles StrictParseStyles = DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal;
-            if (DateTime.TryParseExact(input, strictFormats, CultureInfo.InvariantCulture, StrictParseStyles, out var exact))
-                return FromDateTime2(SqlType.GetDateTime2(7), exact).CoerceTo(target);
-            if (DateTime.TryParse(input, CultureInfo.InvariantCulture, StrictParseStyles, out _))
-                throw SimulatedSqlException.InputCharacterStringStyleMismatch(style);
-            throw SimulatedSqlException.ConversionFailedDateTimeFromString();
+            throw Fail(grammar.Order != DatePartOrder.None && grammar.FourDigitYear);
         }
 
-        var dayMonthYear = IsDayMonthYearStyle(style);
-        var culture = dayMonthYear ? GbCulture : UsCulture;
-        const DateTimeStyles ParseStyles = DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.NoCurrentDateDefault;
+        if (TryParseSharedForm(grammar, datePart, timePart, allowsZoneSuffix, out var shared))
+            return FromDateTime2(SqlType.GetDateTime2(7), shared).CoerceTo(target);
 
-        // Separatorless yyyyMMdd is accepted under every general style but
-        // isn't recognized by the flexible parser.
-        if (DateTime.TryParseExact(input.Trim(), "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var basic))
-            return FromDateTime2(SqlType.GetDateTime2(7), basic).CoerceTo(target);
-
-        // dmy + year-first: the flexible en-GB parse reads a leading 4-digit
-        // token then month-first, so force day-first on the trailing pair to
-        // match SQL Server (e.g. style 103 reads '2003-04-05' as 2003-05-04).
-        if (dayMonthYear
-            && DateTime.TryParseExact(input.Trim(), DayMonthYearFirstFormats, CultureInfo.InvariantCulture, ParseStyles, out var dmyYearFirst))
+        // An unambiguous ISO 8601 date-with-`T` is accepted under every style
+        // in the modern family, independent of that style's numeric grammar —
+        // `CONVERT(date, '1999-01-02T10:00:00', 3)` succeeds where the plain
+        // `1999-01-02` under style 3 does not.
+        if (!legacyFamily && separator == 'T'
+            && DateTime.TryParseExact(datePart, "yyyy-MM-dd", UsCulture, DateTimeStyles.None, out var isoDate)
+            && TryAttachTime(isoDate, timePart, allowsZoneSuffix, out var isoWithTime))
         {
-            return FromDateTime2(SqlType.GetDateTime2(7), dmyYearFirst).CoerceTo(target);
+            return FromDateTime2(SqlType.GetDateTime2(7), isoWithTime).CoerceTo(target);
         }
 
-        if (DateTime.TryParse(input, culture, ParseStyles, out var parsed))
+        // The mirror rule for legacy 126 / 127: ISO 8601 wants its `T`, so a
+        // space-separated time is rejected for their numeric form.
+        if (separator == ' ' && grammar.RequiresIsoDash)
+            throw Fail(outOfRange: false);
+
+        if (TryParseStyleNumericForm(grammar, datePart, timePart, allowsZoneSuffix, out var numeric, out var wrongWidthOnly, out var outOfRange))
+            return FromDateTime2(SqlType.GetDateTime2(7), numeric).CoerceTo(target);
+
+        // A numeric date the style has no grammar for at all — as opposed to
+        // one that merely got the year width wrong — reports the style-mismatch
+        // Msg 9807 on the modern targets. The legacy targets funnel every
+        // failure to Msg 241 instead (probe-confirmed both ways).
+        throw !legacyFamily && grammar.Order == DatePartOrder.None && !wrongWidthOnly && LooksNumericDate(datePart)
+            ? SimulatedSqlException.InputCharacterStringStyleMismatch(style)
+            : Fail(outOfRange);
+    }
+
+    /// <summary>Order of the date parts a style's numeric form uses.</summary>
+    private enum DatePartOrder
+    {
+        /// <summary>The style accepts no separator-bearing numeric date at all.</summary>
+        None,
+        Mdy,
+        Dmy,
+        /// <summary>Year leads, at the style's own width.</summary>
+        Ymd,
+    }
+
+    /// <summary>
+    /// One style's string-input grammar for one target family.
+    /// <see cref="TwoDigitYear"/> / <see cref="FourDigitYear"/> are the
+    /// "without century" / "with century" halves of SQL Server's style table;
+    /// a style admits exactly one except style 0, which takes either.
+    /// </summary>
+    private readonly record struct StyleDateGrammar(
+        DatePartOrder Order,
+        bool TwoDigitYear,
+        bool FourDigitYear,
+        bool AllowsYearFirstAlternative,
+        bool AllowsIsoT,
+        bool RequiresIsoDash,
+        bool AllowsSharedForms,
+        bool AllowsMonthNames);
+
+    private static StyleDateGrammar GrammarForStyle(int style, bool legacyFamily) =>
+        legacyFamily ? LegacyGrammar(style) : ModernGrammar(style);
+
+    private static StyleDateGrammar LegacyGrammar(int style) => style switch
+    {
+        // The default style is the permissive one: either year width, and the
+        // only style outside 126 / 127 taking a `T` separator.
+        0 => new(DatePartOrder.Mdy, TwoDigitYear: true, FourDigitYear: true, AllowsYearFirstAlternative: true,
+                 AllowsIsoT: true, RequiresIsoDash: false, AllowsSharedForms: true, AllowsMonthNames: true),
+        1 or 10 => new(DatePartOrder.Mdy, true, false, false, false, false, true, true),
+        3 or 4 or 5 => new(DatePartOrder.Dmy, true, false, false, false, false, true, true),
+        2 or 11 => new(DatePartOrder.Ymd, true, false, false, false, false, true, true),
+        20 or 21 or 101 or 102 or 110 or 111 or 120 or 121 => new(DatePartOrder.Mdy, false, true, true, false, false, true, true),
+        103 or 104 or 105 => new(DatePartOrder.Dmy, false, true, true, false, false, true, true),
+        126 => new(DatePartOrder.Ymd, false, true, false, true, true, true, true),
+        // 127 is the one style rejecting the shared forms outright.
+        127 => new(DatePartOrder.Ymd, false, true, false, true, true, false, false),
+        // Hijri input isn't modeled; acceptance matches, the calendar doesn't.
+        130 or 131 => new(DatePartOrder.Mdy, false, true, true, false, false, true, false),
+        // Every remaining style reads only the shared forms — its own numeric
+        // layout is an *output* format that says nothing about what it parses.
+        _ => new(DatePartOrder.None, false, false, false, false, false, true, true),
+    };
+
+    /// <summary>
+    /// The modern family's grammar: the style's own output layout is the whole
+    /// numeric grammar (no year-first alternative), and `T` is universal.
+    /// </summary>
+    private static StyleDateGrammar ModernGrammar(int style)
+    {
+        var (order, fourDigit) = style switch
         {
-            // A bare time (no date component) anchors to 1900-01-01 — NoCurrentDateDefault
-            // leaves the date at 0001-01-01, which is below the datetime range anyway.
-            if (parsed is { Year: 1, Month: 1, Day: 1 })
-                parsed = DateTimeSqlType.BaseDate.Add(parsed.TimeOfDay);
-            return FromDateTime2(SqlType.GetDateTime2(7), parsed).CoerceTo(target);
+            1 => (DatePartOrder.Mdy, false),
+            101 or 110 or 22 => (DatePartOrder.Mdy, style != 22),
+            10 => (DatePartOrder.Mdy, false),
+            3 or 4 or 5 => (DatePartOrder.Dmy, false),
+            103 or 104 or 105 => (DatePartOrder.Dmy, true),
+            2 or 11 => (DatePartOrder.Ymd, false),
+            20 or 21 or 23 or 25 or 102 or 111 or 120 or 121 or 126 or 127 => (DatePartOrder.Ymd, true),
+            // Style 0 stays the permissive default in both families.
+            0 => (DatePartOrder.Mdy, true),
+            _ => (DatePartOrder.None, false),
+        };
+        return style == 0
+            ? new(DatePartOrder.Mdy, true, true, true, true, false, true, true)
+            : new(order, !fourDigit && order != DatePartOrder.None, fourDigit, false, true, false, true, style is not (130 or 131));
+    }
+
+    private static readonly string[] BareTimeFormats =
+    [
+        "H:mm", "H:mm:ss", "H:mm:ss.f", "H:mm:ss.ff", "H:mm:ss.fff", "H:mm:ss.ffff",
+        "H:mm:ss.fffff", "H:mm:ss.ffffff", "H:mm:ss.fffffff", "H:mm:ss:fff",
+        "h:mm tt", "h:mm:ss tt", "h:mmtt", "h:mm:sstt",
+    ];
+
+    private static readonly string[] MonthNameFormats =
+    [
+        "MMM d yyyy", "MMM d, yyyy", "d MMM yyyy", "MMMM d yyyy", "MMMM d, yyyy", "d MMMM yyyy",
+        "MMM d yy", "MMM d, yy", "d MMM yy", "MMMM d yy", "MMMM d, yy", "d MMMM yy",
+    ];
+
+    private static bool TryParseBareTime(string input, out DateTime result)
+    {
+        if (DateTime.TryParseExact(input, BareTimeFormats, UsCulture, DateTimeStyles.AllowWhiteSpaces, out var time))
+        {
+            result = DateTimeSqlType.BaseDate.Add(time.TimeOfDay);
+            return true;
         }
-        if (DateTime.TryParse(input, CultureInfo.InvariantCulture, ParseStyles, out _))
-            throw SimulatedSqlException.InputCharacterStringStyleMismatch(style);
-        throw SimulatedSqlException.ConversionFailedDateTimeFromString();
+        result = default;
+        return false;
+    }
+
+    /// <summary>
+    /// Splits a trailing time-of-day off the date portion, reporting which
+    /// character separated them so the caller can enforce the ISO-only
+    /// <c>T</c> rule. The separator is <c>'\0'</c> when the input is date-only.
+    /// Scans from the right, because the date half may itself contain spaces
+    /// (<c>Jan 2 1999 10:00</c>).
+    /// </summary>
+    private static (string Date, string Time, char Separator) SplitDateAndTime(string input)
+    {
+        var t = input.IndexOf('T', StringComparison.OrdinalIgnoreCase);
+        // A leading `T` would be a month name's letter, not a separator; the
+        // date half has to have some substance before it counts.
+        if (t > 0 && char.IsAsciiDigit(input[t - 1]) && t + 1 < input.Length && char.IsAsciiDigit(input[t + 1]))
+            return (input[..t], input[(t + 1)..], 'T');
+
+        for (var i = input.LastIndexOf(' '); i > 0; i = input.LastIndexOf(' ', i - 1))
+        {
+            var tail = input[(i + 1)..];
+            // Only a genuine clock reading ends the date half. An AM/PM marker
+            // is part of the time, so keep widening left past it.
+            if (tail.Contains(':', StringComparison.Ordinal)
+                && DateTime.TryParseExact(tail, BareTimeFormats, UsCulture, DateTimeStyles.AllowWhiteSpaces, out _))
+            {
+                return (input[..i], tail, ' ');
+            }
+        }
+        return (input, string.Empty, '\0');
+    }
+
+    /// <summary>
+    /// The forms accepted regardless of a style's numeric grammar:
+    /// separatorless <c>yyyyMMdd</c> / <c>yyMMdd</c> and the English
+    /// month-name spellings.
+    /// </summary>
+    private static bool TryParseSharedForm(StyleDateGrammar grammar, string datePart, string timePart, bool allowsZoneSuffix, out DateTime result)
+    {
+        result = default;
+        return grammar.AllowsSharedForms
+            && (datePart.Length is 8 or 6 && datePart.All(char.IsAsciiDigit)
+                ? DateTime.TryParseExact(datePart, datePart.Length == 8 ? "yyyyMMdd" : "yyMMdd", UsCulture, DateTimeStyles.None, out var compact)
+                    && TryAttachTime(compact, timePart, allowsZoneSuffix, out result)
+                : grammar.AllowsMonthNames
+                    && DateTime.TryParseExact(datePart, MonthNameFormats, UsCulture, DateTimeStyles.AllowWhiteSpaces, out var named)
+                    && TryAttachTime(named, timePart, allowsZoneSuffix, out result));
+    }
+
+    /// <summary>
+    /// Parses the separator-bearing numeric date a style's grammar admits.
+    /// <paramref name="wrongWidthOnly"/> reports that the shape was right for
+    /// this style but the year width wasn't, which keeps a century-restriction
+    /// failure on the Msg 241 path rather than the style-mismatch Msg 9807.
+    /// </summary>
+    private static bool TryParseStyleNumericForm(StyleDateGrammar grammar, string datePart, string timePart, bool allowsZoneSuffix, out DateTime result, out bool wrongWidthOnly, out bool outOfRange)
+    {
+        result = default;
+        wrongWidthOnly = false;
+        outOfRange = false;
+        if (grammar.Order == DatePartOrder.None || !LooksNumericDate(datePart))
+            return false;
+
+        // 126 / 127 under the legacy family pin the dash form; `yyyy/MM/dd` is
+        // rejected there but accepted under the modern one.
+        if (grammar.RequiresIsoDash && datePart.Contains('/', StringComparison.Ordinal))
+            return false;
+        if (grammar.RequiresIsoDash && datePart.Contains('.', StringComparison.Ordinal))
+            return false;
+
+        // Separators are interchangeable, so normalize to one and let the
+        // format list carry the ordering.
+        var normalized = datePart.Replace('-', '/').Replace('.', '/');
+        var yearFirst = normalized.Length > 4 && normalized[..4].All(char.IsAsciiDigit) && normalized[4] == '/';
+
+        string[] formats;
+        if (grammar.Order == DatePartOrder.Ymd)
+        {
+            if (!yearFirst && grammar.FourDigitYear)
+                return false;
+            formats = grammar.FourDigitYear ? ["yyyy/M/d"] : ["yy/M/d"];
+        }
+        else if (yearFirst)
+        {
+            // Only the legacy four-digit styles take a year-leading form, and
+            // the remaining pair stays in the style's own order.
+            if (!grammar.AllowsYearFirstAlternative)
+                return false;
+            formats = grammar.Order == DatePartOrder.Dmy ? ["yyyy/d/M"] : ["yyyy/M/d"];
+        }
+        else
+        {
+            formats = grammar.Order == DatePartOrder.Dmy ? ["d/M/yy", "d/M/yyyy"] : ["M/d/yy", "M/d/yyyy"];
+        }
+
+        if (!DateTime.TryParseExact(normalized, formats, UsCulture, DateTimeStyles.None, out var parsed))
+        {
+            // The layout was right for this style and only a field value was
+            // out of range (`05/13/2026` read day-first under 103, month 13):
+            // real reports the out-of-range Msg 242 rather than a format
+            // failure. A shape that doesn't fit the style at all stays 241.
+            outOfRange = MatchesLayoutShape(grammar, normalized);
+            return false;
+        }
+
+        // The century restriction. `yy` and `yyyy` are distinguished by the
+        // token's digit count, since TryParseExact's `yy` accepts four digits.
+        var yearToken = yearFirst || grammar.Order == DatePartOrder.Ymd
+            ? normalized[..normalized.IndexOf('/', StringComparison.Ordinal)]
+            : normalized[(normalized.LastIndexOf('/') + 1)..];
+        if (!(yearToken.Length == 4 ? grammar.FourDigitYear : grammar.TwoDigitYear))
+        {
+            wrongWidthOnly = true;
+            return false;
+        }
+
+        return TryAttachTime(parsed, timePart, allowsZoneSuffix, out result);
+    }
+
+    /// <summary>
+    /// Whether the input has this style's layout — three numeric tokens, the
+    /// year one at an accepted width and the other two no wider than two
+    /// digits — ignoring whether the field values are in range. That's the
+    /// line between an out-of-range value (Msg 242 on the legacy targets) and
+    /// a shape the style can't read at all (Msg 241): style 2 reads
+    /// <c>01/02/99</c> as a y-m-d with an impossible day and reports 242, but
+    /// <c>01/02/1999</c> isn't its layout at all and reports 241.
+    /// </summary>
+    private static bool MatchesLayoutShape(StyleDateGrammar grammar, string normalized)
+    {
+        var parts = normalized.Split('/');
+        if (parts.Length != 3 || !parts.All(t => t.Length > 0 && t.All(char.IsAsciiDigit)))
+            return false;
+        var yearIndex = grammar.Order == DatePartOrder.Ymd ? 0 : 2;
+        for (var i = 0; i < 3; i++)
+        {
+            if (i != yearIndex && parts[i].Length > 2)
+                return false;
+        }
+        return parts[yearIndex].Length == 4 ? grammar.FourDigitYear : grammar.TwoDigitYear;
+    }
+
+    private static bool LooksNumericDate(string datePart) =>
+        datePart.Length > 0
+        && datePart.All(c => char.IsAsciiDigit(c) || c is '/' or '-' or '.')
+        && datePart.Any(c => c is '/' or '-' or '.');
+
+    private static bool TryAttachTime(DateTime date, string timePart, bool allowsZoneSuffix, out DateTime result)
+    {
+        if (timePart.Length == 0)
+        {
+            result = date;
+            return true;
+        }
+        // The wall-clock reading is what SQL Server keeps for a `Z` suffix, so
+        // strip it rather than shifting.
+        var trimmed = allowsZoneSuffix ? timePart.Trim().TrimEnd('Z', 'z') : timePart.Trim();
+        if (!DateTime.TryParseExact(trimmed, BareTimeFormats, UsCulture, DateTimeStyles.AllowWhiteSpaces, out var time))
+        {
+            result = default;
+            return false;
+        }
+        result = date.Add(time.TimeOfDay);
+        return true;
     }
 
     private static readonly CultureInfo UsCulture = CultureInfo.GetCultureInfo("en-US");
-
-    private static readonly CultureInfo GbCulture = CultureInfo.GetCultureInfo("en-GB");
-
-    private static readonly string[] DayMonthYearFirstFormats = ["yyyy/d/M", "yyyy-d-M", "yyyy.d.M"];
-
-    /// <summary>
-    /// The day-month-year CONVERT styles. Every other (general) style orders
-    /// ambiguous numeric dates month-first.
-    /// </summary>
-    private static bool IsDayMonthYearStyle(int style) =>
-        style is 3 or 4 or 5 or 13 or 14 or 103 or 104 or 105 or 113 or 114 or 130 or 131;
-
-    /// <summary>
-    /// Exact format(s) for the strict CONVERT styles (basic <c>yymmdd</c> /
-    /// <c>yyyymmdd</c> and the ISO 8601 forms, each with an optional trailing
-    /// time), or null for the general flexible styles.
-    /// </summary>
-    private static string[]? StrictStyleDateFormats(int style) => style switch
-    {
-        12 => ["yyMMdd", "yyMMdd HH:mm:ss", "yyMMdd HH:mm:ss.fff"],
-        23 => ["yyyy-MM-dd", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm:ss.fff", "yyyy-MM-dd HH:mm:ss.fffffff"],
-        112 => ["yyyyMMdd", "yyyyMMdd HH:mm:ss", "yyyyMMdd HH:mm:ss.fff"],
-        126 or 127 =>
-        [
-            "yyyy-MM-ddTHH:mm:ss",
-            "yyyy-MM-ddTHH:mm:ss.f",
-            "yyyy-MM-ddTHH:mm:ss.ff",
-            "yyyy-MM-ddTHH:mm:ss.fff",
-            "yyyy-MM-ddTHH:mm:ss.ffff",
-            "yyyy-MM-ddTHH:mm:ss.fffff",
-            "yyyy-MM-ddTHH:mm:ss.ffffff",
-            "yyyy-MM-ddTHH:mm:ss.fffffff",
-            "yyyy-MM-ddTHH:mm:ssZ",
-            "yyyy-MM-ddTHH:mm:ss.fZ",
-            "yyyy-MM-ddTHH:mm:ss.ffZ",
-            "yyyy-MM-ddTHH:mm:ss.fffZ",
-            "yyyy-MM-ddTHH:mm:ss.ffffZ",
-            "yyyy-MM-ddTHH:mm:ss.fffffZ",
-            "yyyy-MM-ddTHH:mm:ss.ffffffZ",
-            "yyyy-MM-ddTHH:mm:ss.fffffffZ",
-        ],
-        _ => null,
-    };
 
     /// <summary>
     /// Parses a string into an integer-family <see cref="SqlValue"/> matching

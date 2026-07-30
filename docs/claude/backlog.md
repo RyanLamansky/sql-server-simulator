@@ -164,9 +164,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
   → [`grammar.md`](grammar.md).
 - **Module body validation deferred to first execution** — a TVP parameter's **Msg 10700** and the **Msg 111** batch-first rule surface at EXEC where real validates at CREATE.
   → [`table-valued-parameters.md`](table-valued-parameters.md#fidelity-gaps-remaining), [`programmable.md`](programmable.md).
-- **CONVERT style leniency** — the two-digit-vs-four-digit-year century restriction isn't enforced, and a `T`-separated time is accepted under general styles; real raises **Msg 241** for both (`CONVERT(datetime, '01/01/99', 101)` and `CONVERT(datetime, '2020-01-01T10:00:00', 100)`, probed 2026-07-29).
-  → [`casting.md`](casting.md).
-
 Tracked elsewhere and over-permissive in the same sense: the recursive-CTE part restrictions Msg 460 / 461 / 462 / 467 / 465 (CLAUDE.md's Not-modeled-yet).
 
 ## Fidelity gaps in shipped behavior

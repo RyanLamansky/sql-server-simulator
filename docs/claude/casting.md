@@ -150,20 +150,52 @@ Unknown styles (anything not in the published table) raise **Msg 281** with the 
 **Time-only source hour-padding quirk**: styles 0/9/100/109 emit single-digit hour WITHOUT leading-space padding (`2:25PM`), but styles 22/130/131 DO pad (` 2:25:36 PM`) — verified against SQL Server 2025.
 The rationale isn't documented; the simulator mirrors it.
 
-**String → date-like** (`SqlValue.CoerceStringToDateLikeWithStyle`): mirrors SQL Server's flexible string-to-datetime parser (probed against SQL Server 2025).
-On success re-encodes through `datetime2(7)` and narrows to the target; on failure, an input that's a valid date by some other format raises **Msg 9807** (`"The input character string does not follow style N, …"`), a non-date raises **Msg 241**.
-`TRY_CONVERT` swallows both.
-Two style classes:
+**String → date-like** (`SqlValue.CoerceStringToDateLikeWithStyle`): each style carries its own input grammar, and the grammar depends on the **target family** as well as the style.
+Probed exhaustively against SQL Server 2025 (2026-07-30): 40 styles × 22 input shapes × 6 targets for accepted values, plus a separate pass for error numbers.
 
-- **Strict styles** — `12` (`yymmdd`), `112` (`yyyymmdd`), `23` (`yyyy-mm-dd`), `126`/`127` (ISO 8601 with `T`): exact `TryParseExact` format match, no separator flexibility.
-  `CONVERT(date, '05/13/2026', 112)` → Msg 9807.
-- **General styles** (everything else) — route through `DateTime.TryParse` with a family culture.
-  Separators (`/ - .`) are interchangeable; numeric, ISO year-first, and English month-name forms (`Apr 5 2003`, `April 5, 2003`, `5 Apr 2003`) plus optional trailing time / AM-PM / bare time (anchored to 1900-01-01) all parse.
-  The **only** family distinction is date-part order for ambiguous numeric dates: the dmy set (`3`/`4`/`5`/`13`/`14`/`103`/`104`/`105`/`113`/`114`/`130`/`131` → `en-GB`) reads day-first, every other style (→ `en-US`) month-first.
-  A leading 4-digit token is the year, trailing pair in family order — so `2003-04-05` is Apr-5 under style 101 but May-4 under 103 (a 3-format `yyyy{sep}d{sep}M` pre-check supplies the dmy year-first ordering `TryParse` won't).
-  Separatorless `yyyyMMdd` is accepted under every general style.
+There are exactly **two** families, and within each the members are indistinguishable:
 
-**Known leniency divergences** (simulator accepts more than the live server, low-value edges): the 2-digit-vs-4-digit-year with/without-century restriction isn't enforced (`CONVERT(datetime, '04/05/03', 101)` succeeds; live rejects), and a `T`-separated time is accepted under general styles (live reserves `T` for 126/127, raising out-of-range otherwise).
+- **Legacy** — `datetime`, `smalldatetime`.
+- **Modern** — `date`, `datetime2`, `time`, `datetimeoffset` (all four differ from the legacy pair in exactly the same cells).
+
+**Shared forms**, accepted regardless of style or family: separatorless `yyyyMMdd` / `yyMMdd`, the English month-name spellings (`Jan 2 1999`, `2 Jan 1999`, `Jan 2, 1999`), and a bare time anchored to 1900-01-01.
+Legacy style 127 accepts none of them; 130 / 131 exclude the month-name ones.
+
+**Legacy numeric grammar** — a date-part order plus a year width, with separators (`/ - .`) interchangeable:
+
+| Order | Two-digit-year styles | Four-digit-year styles |
+| --- | --- | --- |
+| mdy | 1, 10 | 20, 21, 101, 102, 110, 111, 120, 121 |
+| dmy | 3, 4, 5 | 103, 104, 105 |
+| ymd (year leads) | 2, 11 | — |
+| ISO dash only | — | 126, 127 |
+| **none** | 6, 7, 8, 9, 12, 13, 14, 22, 23, 24, 25, 100, 106, 107, 108, 109, 112, 113, 114 | |
+
+The year width **is** the published table's "with century" / "without century" split, and it's a rejection rather than a reinterpretation: `CONVERT(datetime, '01/02/99', 101)` and `CONVERT(datetime, '01/02/1999', 1)` both raise Msg 241.
+A style in the *none* row parses no separator-bearing numeric date at all whatever its own output looks like — style 23 rejects its own `yyyy-mm-dd` shape here.
+Four-digit legacy styles additionally accept a **year-leading** form with the remaining pair still in the style's order, which is why 103 reads `2003-04-05` as 5 April.
+Style 0 is the permissive default: mdy at either width, and the only non-ISO style taking a `T`.
+
+**Modern numeric grammar** — each style accepts **only its own published output layout**, with no year-leading alternative:
+101 / 110 take `mm/dd/yyyy` but not year-first; 20 / 21 / 23 / 25 / 102 / 111 / 120 / 121 / 126 / 127 take `yyyy-mm-dd`; 22 takes `mm/dd/yy`; 1 / 10 mdy two-digit, 3 / 4 / 5 dmy two-digit, 103 / 104 / 105 dmy four-digit, 2 / 11 ymd two-digit; everything else reads no numeric date.
+So `CONVERT(date, '2026-05-13', 101)` raises Msg 241 where `CONVERT(datetime, …)` succeeds — a different grammar, not a leniency difference.
+The modern family also accepts an unambiguous ISO **date-with-`T`** under every style (`CONVERT(date, '1999-01-02T10:00:00', 3)` parses) independently of that style's numeric grammar.
+
+**`T` separator**: legacy reserves it for 0 / 126 / 127; modern accepts it everywhere.
+Conversely legacy 126 / 127 reject a *space*-separated time, since ISO 8601 wants the `T`.
+A trailing **`Z`** is universal on the modern targets, and legacy-side belongs to style 0 and style 127 (whose own output carries it) — legacy 126 rejects it.
+
+**Error selection**:
+
+| Situation | Error |
+| --- | --- |
+| Input matches the style's layout but a field is out of range (`05/13/2026` day-first under 103 → month 13) | **Msg 242**, legacy targets only |
+| Format failure, `smalldatetime` target | **Msg 295** |
+| Format failure, every other target | **Msg 241** |
+| A numeric date under a *none*-row style, modern target | **Msg 9807** (style mismatch) |
+
+The Msg 242 case is narrow: the token count, the year-token width and the two non-year tokens (≤ 2 digits) all have to fit the style, so style 2 reports 242 for `01/02/99` (y-m-d with an impossible day) but 241 for `01/02/1999`, which isn't its layout at all.
+`TRY_CONVERT` swallows all of them.
 
 **Default (no-style) path** (`SqlValue.Parse.cs` — `ParseDateTime2` / `ParseDate` / `TryParseLegacyDateTime`, distinct from the with-style parser above): a `CAST`/`CONVERT` to a date/time target with **no style argument** routes through a deliberately restrictive **language-neutral** exact-format parser, not the flexible culture-based one.
 Accepted: ISO `yyyy-MM-dd` / `yyyyMMdd`, ISO with `T`/space time and 1-7 fractional digits, and — since the Django shakedown — **year-first slash / dot** forms `yyyy/M/d` / `yyyy.M.d` (unambiguous: the 4-digit year leads, so no mdy/dmy assumption; the `.dates()`/`.datetimes()` truncation an ORM emits builds these).
