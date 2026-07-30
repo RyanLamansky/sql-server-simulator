@@ -236,6 +236,67 @@ public sealed class KeyUniquenessSeekTests
     }
 
     [TestMethod]
+    public void Update_TwoMovedRowsOntoTheSameKey_Raises()
+    {
+        // Both colliding rows are moved by the same statement and neither
+        // collides with anything already in the heap, so only the within-statement
+        // comparison can catch it.
+        var simulation = Seeded("create table t (id int constraint pk_t primary key, pad char(500))");
+        simulation.AssertSqlError("update t set id = 9001 where id in (5, 6)", 2627,
+            "Violation of PRIMARY KEY constraint 'pk_t'. Cannot insert duplicate key in object 'dbo.t'. The duplicate key value is (9001).");
+    }
+
+    [TestMethod]
+    public void Update_TwoMovedRowsOntoTheSameNullKey_Raises()
+    {
+        // NULLs collide under UNIQUE, and a NULL key can't be answered from the
+        // heap-side seek's buckets — so this leans entirely on the
+        // within-statement comparison carrying NULL keys.
+        var simulation = Seeded("create table t (id int constraint uq_t unique, pad char(500))");
+        simulation.AssertSqlError("update t set id = null where id in (5, 6)", 2627,
+            "Violation of UNIQUE KEY constraint 'uq_t'. Cannot insert duplicate key in object 'dbo.t'. The duplicate key value is (<NULL>).");
+    }
+
+    [TestMethod]
+    public void Update_TwoMovedRowsOntoTheSameCompositeKey_Raises()
+    {
+        var simulation = Seeded(
+            "create table t (id int not null, tag nvarchar(20) not null, pad char(500), constraint pk_t primary key (id, tag))",
+            "(id, tag, pad)",
+            "value, concat('t', value), 'x'");
+        simulation.AssertSqlError("update t set id = 9001, tag = 'z' where id in (5, 6)", 2627,
+            "Violation of PRIMARY KEY constraint 'pk_t'. Cannot insert duplicate key in object 'dbo.t'. The duplicate key value is (9001, z).");
+    }
+
+    [TestMethod]
+    public void Update_TwoMovedRowsOntoTheSameKeyInsideFilteredIndex_Raises()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"""
+            create table t (id int not null primary key, a int not null, flag int not null, pad char(500));
+            create unique index ix_a on t(a) where flag = 1;
+            insert t (id, a, flag, pad) select value, value, 1, 'x' from generate_series(1, {SeededRows})
+            """);
+        var exception = Throws<DbException>(() => simulation.ExecuteNonQuery("update t set a = 9001 where id in (5, 6)"));
+        AreEqual("2601", ErrorNumber(exception));
+    }
+
+    [TestMethod]
+    public void Update_TwoMovedRowsOntoTheSameKeyOutsideFilteredIndex_Succeeds()
+    {
+        // Same collision, but both rows sit outside the filter, so the index
+        // doesn't govern them — the membership pass has to exclude them from the
+        // within-statement comparison too, not just from the heap-side check.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"""
+            create table t (id int not null primary key, a int not null, flag int not null, pad char(500));
+            create unique index ix_a on t(a) where flag = 1;
+            insert t (id, a, flag, pad) select value, value, 0, 'x' from generate_series(1, {SeededRows})
+            """);
+        AreEqual(2, simulation.ExecuteNonQuery("update t set a = 9001 where id in (5, 6)"));
+    }
+
+    [TestMethod]
     public void Update_MovingIntoFilteredSetWithStandingKey_Raises()
     {
         // The key stands still while the row moves into the filtered index's

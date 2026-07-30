@@ -38,10 +38,23 @@ The whole-suite timing can't see the difference in either direction; it sits und
 
 A filtered unique index seeks like any other: the key narrows the candidates, then the filter is evaluated on each candidate's own decoded row (`DecodeFullRow`), so only filter-passing rows on both sides participate.
 
-### The UPDATE path also skips rows whose key stood still
+### The UPDATE path compares within the statement, then against the heap
+
+An affected row's new key has to clear two comparisons: against the other affected rows' new keys, and against the rows the statement isn't touching.
+The second is the seek described above, with `affectedAddrs` excluding the statement's own rows.
+The first goes through `AffectedKeyIndex` — the affected rows' new key tuples plus an occurrence count per distinct tuple, so "does another affected row carry this key?" is a hash probe.
+It is built at most once per constraint or index — on that constraint's first moved row, and not at all for a constraint no row moved.
+
+Two details keep the index faithful to the pairwise walk it replaces.
+`SqlValueKey` compares per component through `SqlValue.Equals` and folds two NULLs together — UNIQUE's NULLs-collide rule — and hashes to agree, so unlike the heap-side seek (whose buckets drop NULL keys) this index carries them and a NULL-bearing key still finds its duplicate inside the statement (`Update_TwoMovedRowsOntoTheSameNullKey_Raises`).
+And a filtered index counts only the affected rows inside its set, which `FilterMembership` decides once per row rather than once per pair as the walk did — so a collision among rows that all sit *outside* the filter is correctly not a violation (`Update_TwoMovedRowsOntoTheSameKeyOutsideFilteredIndex_Succeeds`).
+
+The row-major loop order is unchanged, so which of several simultaneous violations gets reported is the same as the walk's.
+
+#### Rows whose key stood still skip their own check
 
 `KeyTupleMoved` drops an affected row's own uniqueness check when the UPDATE didn't move its key tuple: the row was unique before the statement, non-affected rows don't change, and a collision with a row whose key *did* move is caught when that row is checked, since every affected row stays a comparison target either way.
-Without it a bulk UPDATE walked the affected rows pairwise even when it never touched the key.
+Without it a bulk UPDATE built the key index and seeked for every row even when it never touched the key.
 
 The pre-update key comes from the captured old row when there is one (OUTPUT clause, trigger present, MERGE's matched updates) and otherwise straight off the row's heap slot — validation runs before the rewrite phase, so the slot still holds the old bytes and only the key columns need decoding.
 `FullOld` is null on the plain UPDATE path, which is exactly the shape that matters, so reading the slot is what makes the skip fire at all rather than a no-op.
@@ -54,12 +67,10 @@ The skip is taken for an **unfiltered** index only: a filter can read columns ou
 
 **Cost.** Enforcement was O(N) per row, so loading N rows into a keyed table was quadratic: 50 000 single-row inserts into a `PRIMARY KEY` table took 48.9 s, rising through 0.20 ms/insert at 5 000 rows to 1.93 ms at 50 000.
 Seeking makes it flat — the same load is ~1.2 s (**~40×**), and per-insert cost holds at ~0.005–0.014 ms across 1 000 → 50 000 rows, matching a keyless heap's.
-A bulk UPDATE that doesn't touch the key went from 2 163 ms to ~100 ms on 20 000 rows (**~20×**), which is parity with the same statement on a keyless table (94 ms).
-The price is the seek entry's memory (a bucket per distinct key, rid lists) and journal maintenance on any keyed table that grows past a page — the same structure a point-lookup query would have built anyway.
-
-One quadratic term is left, and it's the affected-vs-affected walk rather than anything heap-side: an UPDATE that moves the key on **every** affected row (`SET id = id + 1000000`) still compares each moved row against every other affected row, measured at 2 582 ms for 20 000 rows against 31 ms for the standing-key statement.
-Tracked in [`backlog.md`](backlog.md).
+A bulk UPDATE on 20 000 rows went from 2 163 ms to ~50–75 ms when it leaves the key alone, and from 2 582 ms to ~90–185 ms when it moves the key on every row — the second being the affected-vs-affected comparison, quadratic until `AffectedKeyIndex` replaced the walk.
+Both now grow linearly: the key-moving statement lands at ~165 ms on 50 000 rows, where the quadratic shape predicted ~16 s.
+The price is the seek entry's memory (a bucket per distinct key, rid lists) and journal maintenance on any keyed table — the same structure a point-lookup query would have built anyway — plus, per key-moving UPDATE, one `SqlValueKey` per affected row.
 
 Because enforcement now seeks per row, a bulk INSERT into a keyed table replays the mutation journal as it goes and leaves the cache current, so such a table no longer reaches the journal cap that would force a rebuild (`IndexSeekTests.BulkInsertBeyondJournalCap_FallsBackToRebuild` uses a non-unique index for exactly that reason).
 
-`KeyUniquenessSeekTests` is the regression suite: every other key-constraint suite works on tables of a few rows and therefore exercises the scan, so these run the same semantics past the threshold — Msg 2627 / 2601 wording, composite full-vs-partial keys, NULLs-collide, case-insensitive and trailing-space duplicates, filtered indexes on both sides, re-insert after DELETE and after ROLLBACK, UPDATE into an existing key, a non-key UPDATE not colliding with itself, mass key shift (`SET id = id + 1`) succeeding while one into untouched rows raises, MERGE, and the DROP COLUMN ordinal shift.
+`KeyUniquenessSeekTests` is the regression suite, running the semantics on tables large enough to span pages: Msg 2627 / 2601 wording, composite full-vs-partial keys, NULLs-collide, case-insensitive and trailing-space duplicates, filtered indexes on both sides, re-insert after DELETE and after ROLLBACK, UPDATE into an existing key, a non-key UPDATE not colliding with itself, mass key shift (`SET id = id + 1`) succeeding while one into untouched rows raises, two moved rows landing on one key (plain, NULL, composite, and inside vs outside a filtered index), a moved key landing on a standing affected row, MERGE, and the DROP COLUMN ordinal shift.
