@@ -58,14 +58,14 @@ public sealed class ErrorSurfaceTests
     public async Task SyntaxError_Number102_Class15()
     {
         var simulation = new Simulation();
-        var oracle = CaptureInProc(simulation, "select from where");
+        var oracle = CaptureInProc(simulation, "select 1 +");
 
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
         {
-            await using var command = new SqlCommand("select from where", connection);
+            await using var command = new SqlCommand("select 1 +", connection);
             _ = await command.ExecuteReaderAsync(TestContext.CancellationToken);
         });
 

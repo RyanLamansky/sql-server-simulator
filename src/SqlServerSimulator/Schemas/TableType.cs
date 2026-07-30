@@ -49,7 +49,7 @@ internal sealed class TableType(
     int userTypeId,
     DateTime createDate,
     HeapColumn[] columns,
-    (KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey)[] pendingKeys,
+    (KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)[] pendingKeys,
     (string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)[] pendingChecks)
     : SchemaObject(name, typeTableObjectId, schema.SchemaId, createDate)
 {
@@ -80,7 +80,7 @@ internal sealed class TableType(
     /// <c>@t</c> name — matching probe: declaring two <c>@t</c> variables of
     /// the same type produces two distinct constraint-name hashes.
     /// </summary>
-    public readonly (KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey)[] PendingKeys = pendingKeys;
+    public readonly (KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)[] PendingKeys = pendingKeys;
 
     /// <summary>
     /// Pending CHECK specs captured at CREATE TYPE time. Resolved per clone

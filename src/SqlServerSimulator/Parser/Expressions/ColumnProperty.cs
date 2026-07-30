@@ -28,8 +28,11 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <item><description><c>CharMaxLen</c> — <c>N</c> for <c>varchar(N)</c> /
 /// <c>nvarchar(N)</c>; NULL for non-character types (matches real, which
 /// returns -1 on the catalog view but NULL through COLUMNPROPERTY).</description></item>
-/// <item><description><c>ColumnId</c> — 1-based declaration ordinal in
-/// <see cref="HeapTable.Columns"/>.</description></item>
+/// <item><description><c>ColumnId</c> — the stable
+/// <see cref="HeapColumn.ColumnId"/>, agreeing with
+/// <c>sys.columns.column_id</c> after a DROP COLUMN rather than tracking the
+/// column's shifted position (probe-confirmed that real reports the same
+/// value from both surfaces).</description></item>
 /// <item><description><c>UsesAnsiTrim</c> — 1 for character types (the
 /// simulator's ANSI-trim behavior is always on), 0 otherwise.</description></item>
 /// </list>
@@ -86,7 +89,7 @@ internal sealed class ColumnProperty : Expression
         for (var i = 0; i < table.Columns.Length; i++)
         {
             if (Collation.Baseline.Equals(table.Columns[i].Name, columnName))
-                return (table.Columns[i], i + 1);
+                return (table.Columns[i], table.Columns[i].ColumnId);
         }
         return (null, 0);
     }

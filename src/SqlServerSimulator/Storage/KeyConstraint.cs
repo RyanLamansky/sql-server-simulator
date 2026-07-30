@@ -19,13 +19,37 @@ internal enum KeyConstraintKind
 /// declaration ordinals) so the enforcement loop can decode key columns
 /// directly from row bytes via <see cref="RowDecoder"/>.
 /// </summary>
-internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals, int objectId, bool isClustered, bool ignoreDupKey)
+internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals, int objectId, bool isClustered, bool ignoreDupKey, bool[]? descending = null)
 {
     public readonly KeyConstraintKind Kind = kind;
 
     public readonly string Name = name;
 
     public readonly int[] StorageOrdinals = storageOrdinals;
+
+    /// <summary>
+    /// Per-key-column <c>DESC</c> flags, parallel to
+    /// <see cref="StorageOrdinals"/>; an all-ascending key may pass
+    /// <c>null</c> and reads as ascending throughout.
+    /// Captured from the <c>PRIMARY KEY (a DESC, b)</c> / <c>UNIQUE (…)</c>
+    /// column list at CREATE TABLE and ALTER TABLE ADD CONSTRAINT, and
+    /// surfaced as <c>sys.index_columns.is_descending_key</c> — the same
+    /// flag <see cref="Index"/> carries on <see cref="IndexKeyColumn"/> for a
+    /// CREATE INDEX key.
+    /// No runtime effect: the simulator stores rows unordered, so direction
+    /// is metadata a schema-diff or index-scripting tool reads.
+    /// Real rejects the direction on the *inline* column-level form
+    /// (<c>a int PRIMARY KEY DESC</c> → Msg 156), so only the table-level and
+    /// ALTER forms ever populate this.
+    /// </summary>
+    private readonly bool[]? descendingFlags = descending;
+
+    /// <summary>
+    /// Whether key column <paramref name="index"/> (a position in
+    /// <see cref="StorageOrdinals"/>) was declared <c>DESC</c>.
+    /// </summary>
+    public bool IsDescending(int index) =>
+        this.descendingFlags is { } flags && (uint)index < (uint)flags.Length && flags[index];
 
     /// <summary>
     /// Whether this constraint's backing index is the table's clustered index.

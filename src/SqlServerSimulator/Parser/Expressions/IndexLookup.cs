@@ -54,7 +54,7 @@ internal static class IndexLookup
         {
             return keyId > constraint.StorageOrdinals.Length
                 ? default((int, bool)?)
-                : (constraint.StorageOrdinals[keyId - 1], false);
+                : (constraint.StorageOrdinals[keyId - 1], constraint.IsDescending(keyId - 1));
         }
         return index is null
             ? null

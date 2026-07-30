@@ -208,12 +208,17 @@ partial class Simulation
         if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var columnNames = new List<string>();
+        var descending = new List<bool>();
         do
         {
             if (context.GetNextRequired() is not Name col)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             columnNames.Add(col.Value);
             context.MoveNextRequired();
+            // Direction is metadata only (no stored row order), but it
+            // surfaces as sys.index_columns.is_descending_key — probe-confirmed
+            // for the ALTER form as well as the CREATE TABLE one.
+            descending.Add(context.Token is ReservedKeyword { Keyword: Keyword.Desc });
             if (context.Token is ReservedKeyword { Keyword: Keyword.Asc or Keyword.Desc })
                 context.MoveNextRequired();
         } while (context.Token is Operator { Character: ',' });
@@ -300,7 +305,7 @@ partial class Simulation
                 throw SimulatedSqlException.MoreThanOneClusteredIndex(table.Name, existingClustered);
         }
 
-        var constraint = new KeyConstraint(kind, name, storageOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered, ignoreDupKey);
+        var constraint = new KeyConstraint(kind, name, storageOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered, ignoreDupKey, [.. descending]);
         ValidateExistingRowsForKeyConstraint(table, constraint);
         table.KeyConstraints.Add(constraint);
         return true;

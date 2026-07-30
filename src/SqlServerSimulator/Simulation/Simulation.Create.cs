@@ -87,7 +87,7 @@ partial class Simulation
 
         var heapColumns = new List<HeapColumn?>();
         var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)>();
-        var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey)>();
+        var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)>();
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)>();
         var pendingPeriod = new List<(string StartCol, string EndCol)>();
         var pendingForeignKeys = new List<PendingForeignKey>();
@@ -552,7 +552,7 @@ partial class Simulation
         bool isTableVariable,
         bool isTableType,
         List<HeapColumn?> heapColumns,
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey)> pendingKeys,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<(string StartCol, string EndCol)>? pendingPeriod = null,
@@ -685,7 +685,7 @@ partial class Simulation
         bool isTableType,
         List<HeapColumn?> heapColumns,
         List<bool> explicitNull,
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey)> pendingKeys,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<(string StartCol, string EndCol)>? pendingPeriod,
@@ -716,7 +716,7 @@ partial class Simulation
             if (context.Token is ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique })
             {
                 var (inlineKind, inlineClustered, inlineIgnoreDupKey) = ParseInlineKeyKindAndModifiers(context);
-                pendingKeys.Add((inlineKind, null, [computedIndex], inlineClustered, inlineIgnoreDupKey));
+                pendingKeys.Add((inlineKind, null, [computedIndex], inlineClustered, inlineIgnoreDupKey, []));
             }
             return;
         }
@@ -939,6 +939,13 @@ partial class Simulation
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } when inlineKeyKind is null:
                     (inlineKeyKind, inlineKeyClustered, inlineKeyIgnoreDupKey) = ParseInlineKeyKindAndModifiers(context);
+                    // The inline column-level form takes no direction — only
+                    // the table-level column list does. Real raises Msg 156
+                    // near the keyword for `a int PRIMARY KEY DESC`
+                    // (probe-confirmed), where the generic path would report
+                    // Msg 102.
+                    if (context.Token is ReservedKeyword { Keyword: Keyword.Asc or Keyword.Desc } directionKw)
+                        throw SimulatedSqlException.SyntaxErrorNearKeyword(directionKw);
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Check }:
                     var inlineCheck = ParseInlineCheckPredicate(context);
@@ -970,7 +977,7 @@ partial class Simulation
         var actualNullable = nullable ?? (identity is null);
 
         if (inlineKeyKind is KeyConstraintKind kind)
-            pendingKeys.Add((kind, inlineKeyName, [heapColumns.Count], inlineKeyClustered, inlineKeyIgnoreDupKey));
+            pendingKeys.Add((kind, inlineKeyName, [heapColumns.Count], inlineKeyClustered, inlineKeyIgnoreDupKey, []));
 
         if (identity is not null)
         {
@@ -1410,7 +1417,7 @@ partial class Simulation
     private static void ParseTableLevelConstraint(
         ParserContext context,
         List<HeapColumn?> heapColumns,
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey)> pendingKeys,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<PendingForeignKey>? pendingForeignKeys = null)
@@ -1446,6 +1453,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var ordinals = new List<int>();
+        var descending = new List<bool>();
         do
         {
             if (context.GetNextRequired() is not Name keyColumn)
@@ -1481,8 +1489,12 @@ partial class Simulation
                 throw SimulatedSqlException.InvalidColumnName(keyColumn.Value);
             ordinals.Add(found);
 
-            // Optional ASC/DESC after each column — accept and ignore.
+            // Optional ASC/DESC after each column. No runtime effect (rows are
+            // stored unordered), but the flag surfaces as
+            // sys.index_columns.is_descending_key the way a CREATE INDEX key's
+            // does — probe-confirmed for both PRIMARY KEY and UNIQUE.
             context.MoveNextRequired();
+            descending.Add(context.Token is ReservedKeyword { Keyword: Keyword.Desc });
             if (context.Token is ReservedKeyword { Keyword: Keyword.Asc or Keyword.Desc })
                 context.MoveNextRequired();
         } while (context.Token is Operator { Character: ',' });
@@ -1499,7 +1511,7 @@ partial class Simulation
         var ignoreDupKey = ParseOptionalIndexWithClause(context);
         SkipOptionalFilegroupClause(context);
 
-        pendingKeys.Add((kind, constraintName, [.. ordinals], clustered, ignoreDupKey));
+        pendingKeys.Add((kind, constraintName, [.. ordinals], clustered, ignoreDupKey, [.. descending]));
     }
 
     /// <summary>
@@ -1518,7 +1530,7 @@ partial class Simulation
     internal static KeyConstraint[] ResolveKeyConstraints(
         string tableName,
         IReadOnlyList<HeapColumn> heapColumns,
-        IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey)> pendingKeys,
+        IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
         Database database)
     {
         if (pendingKeys.Count == 0)
@@ -1569,7 +1581,7 @@ partial class Simulation
             }
 
             var isClustered = pending.Clustered ?? (pending.Kind == KeyConstraintKind.PrimaryKey);
-            resolved[c] = new KeyConstraint(pending.Kind, pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns), storageOrdinals, database.AllocateObjectId(), isClustered, pending.IgnoreDupKey);
+            resolved[c] = new KeyConstraint(pending.Kind, pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns), storageOrdinals, database.AllocateObjectId(), isClustered, pending.IgnoreDupKey, pending.Descending);
         }
 
         return resolved;

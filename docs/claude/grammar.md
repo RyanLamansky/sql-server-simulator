@@ -99,6 +99,18 @@ An identifier or other token still routes through the normalizer, so the alias-s
 
 `ALTER TABLE … ADD COLUMN c TYPE` is rejected with **Msg 156** near COLUMN (unlike `DROP COLUMN` / `ALTER COLUMN`, the ADD form names the column directly) — a prior "COLUMN is optional here" note was based on a mistaken probe; the live reference rejects it.
 
+## Empty select lists
+
+A select list has to project something.
+The projection parser treats a statement keyword as a boundary so back-to-back statements need no separating semicolon (`SELECT 1 UPDATE t SET …` is two statements), which is right once an element exists and wrong while the list is still empty — the list simply ended before it began, leaving a zero-column SELECT that surfaced an `ArgumentException` when a row materialized, or no error at all when the rowset was empty (`SELECT FROM t` over an empty table).
+
+Reaching an element-start position with nothing collected and a reserved keyword in the way now raises **Msg 156** naming that keyword, matching real for `UPDATE` / `DELETE` / `INSERT` / `FROM` / `WHERE` / `ORDER` (probe-confirmed; real echoes the keyword in the **source's own casing**, so `select update(c1)` reports `'update'`).
+`Selection.CanBeginProjectionElement` carries the exception list — the function-call heads (`LEFT` / `RIGHT` / `CONVERT` / `TRY_CONVERT` / `COALESCE` / `NULLIF`), `CASE`, `NULL`, the parens-less niladic constants, and the `DISTINCT` / `ALL` / `TOP` prefixes.
+End-of-input isn't a keyword, so a bare `SELECT` keeps its **Msg 102** near `'select'` — probe-confirmed that real distinguishes the two.
+
+**Residual**: the guard only fires while the list is empty, so a keyword blocking a *later* element (`SELECT 1, UPDATE(c1) FROM t`) still reports Msg 102 near `'('` where real reports Msg 156 near the keyword.
+Catching that needs an element-expected flag threaded through the loop's alias-continue paths, which re-enter the same switch with an element already collected.
+
 ## Divergences
 
 - **Per-object creation-time QI capture is NOT modeled.**

@@ -173,11 +173,8 @@ Tracked elsewhere and over-permissive in the same sense: the recursive-CTE part 
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
-- **A statement keyword opening a select-list item leaks `ArgumentException`** — `SELECT UPDATE(c1)` terminates the select list at the keyword, leaving a zero-column SELECT that surfaces `ArgumentException: Row must have at least one column`.
-  Real raises **Msg 156** (`"Incorrect syntax near the keyword 'UPDATE'."`, probed 2026-07-30).
-  `SELECT DELETE(c1)` behaves identically, so this is the general select-list shape rather than anything specific to the `UPDATE(col)` predicate.
-  A non-SQL-shaped exception escaping the parser is the objectionable part; the fix is a select-list guard reporting Msg 156 when a statement keyword opens an item.
-  See [`grammar.md`](grammar.md).
+- **A keyword blocking a non-first select-list element reports the wrong error** — `SELECT 1, UPDATE(c1) FROM t` raises Msg 102 near `'('` where real raises **Msg 156** near the keyword (probed 2026-07-30).
+  The empty-list case ships (see [`grammar.md`](grammar.md#empty-select-lists)); this residual needs an element-expected flag threaded through the projection loop's alias-continue paths, which re-enter the element switch with an element already collected.
 - **Per-object creation-time `QUOTED_IDENTIFIER` capture not modeled** — real SQL Server stamps procedures / views / triggers / tables with the QI setting in effect at CREATE (`sys.sql_modules.uses_quoted_identifier`, `OBJECTPROPERTY(id, 'IsQuotedIdentOn')`) and executes bodies under the captured setting; the simulator re-parses bodies under the executing session's current setting.
   See [`grammar.md`](grammar.md).
   Rare legacy-pattern impact.
@@ -197,9 +194,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 - **Result-set `fNullable` inference — remaining long tail** — the projection nullability that drives the COLMETADATA `fNullable` flag (see `Expression.ResultIsNullable`) covers the structural cases: direct refs, literals, ISNULL, CASE, and (added in the go-mssqldb pass) CONCAT / CONCAT_WS (always NOT NULL), IIF (both-arm rule), and VALUES row-constructor columns (OR over rows).
   Still over-claiming nullable vs real: (1) **per-function** signatures — `CEILING` / `FLOOR` / `ROUND` / `SIGN` / `GETDATE` project NOT NULL on real while `ABS` / `POWER` / `SQUARE` / `NEWID` / `RAND` stay nullable, an idiosyncratic per-builtin table with no clean rule; (2) **`@@`-variable** nullability (`@@ROWCOUNT` / `@@SPID` are NOT NULL on real); (3) **string `+` concatenation** of two non-null operands (real projects NOT NULL, but the resolver has no `BatchContext` to distinguish string-vs-arithmetic `+` — `1+1` stays nullable on real, so it can't blanket-propagate); (4) **constant-fold** cases where real eliminates a null arm — `NULLIF(1,2)`, no-ELSE `CASE WHEN <constant> …`, all-constant `COALESCE(NULL,5)` (realistic `COALESCE(agg,0)` already matches: nullable on both).
   All are metadata-only over-claims (nullable is the safe direction); low demand, no clean rule.
-- **`PRIMARY KEY (col DESC)` direction is parse-and-discard** — `KeyConstraint` tracks no per-column direction, so `sys.index_columns.is_descending_key` reports 0 where real reports 1 (probe-confirmed).
-  A schema-diff or index-scripting tool reading the column sees an ascending key; the stored rows are unordered either way, so only the metadata diverges.
-  See [`catalog-views.md`](catalog-views.md).
 - **`OBJECTPROPERTY(id, 'IsDeterministic')` doesn't analyze the body** — every scalar function reports 1, so a non-deterministic one (a `GETDATE()`-bearing UDF) over-reports; real evaluates determinism per module.
   `IsSchemaBound` likewise reports 0 for a schema-bound *function* (the flag is tracked on views only).
   See [`catalog-views.md`](catalog-views.md).

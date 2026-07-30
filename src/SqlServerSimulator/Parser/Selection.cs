@@ -932,6 +932,20 @@ internal sealed partial class Selection
 
         do
         {
+            // A select list must project something. Reaching an element-start
+            // position with nothing collected and a keyword in the way means
+            // the list never began — real reports Msg 156 naming that keyword
+            // (probe-confirmed for UPDATE / DELETE / INSERT / FROM / WHERE /
+            // ORDER), where the statement-boundary arms below would otherwise
+            // end the projection and leave a zero-column SELECT behind.
+            // Only checked while empty: once an element is parsed, those same
+            // keywords are the legitimate clause / next-statement terminators,
+            // and the alias-continue re-enters this switch with the element
+            // already collected. End-of-input isn't a keyword, so a bare
+            // SELECT keeps its Msg 102.
+            if (expressions.Count == 0 && context.Token is ReservedKeyword blocking && !CanBeginProjectionElement(blocking))
+                throw SimulatedSqlException.SyntaxErrorNearKeyword(blocking);
+
             switch (context.Token)
             {
                 case ReservedKeyword { Keyword: Keyword.From }:
@@ -2331,6 +2345,22 @@ internal sealed partial class Selection
             rows: [],
             lateralPlan: ForValuesConstructor(schema, columnNames, tuples));
     }
+
+    /// <summary>
+    /// Whether <paramref name="keyword"/> can open a projection element.
+    /// The reserved words that can are the function-call heads (<c>LEFT</c> /
+    /// <c>RIGHT</c> / <c>CONVERT</c> / <c>TRY_CONVERT</c> / <c>COALESCE</c> /
+    /// <c>NULLIF</c>), <c>CASE</c>, the parens-less niladic constants, and the
+    /// <c>NULL</c> literal — the same set the projection switch routes to
+    /// <see cref="Expression.Parse"/>. Everything else is a clause or
+    /// statement keyword that can only terminate a list, never begin one.
+    /// </summary>
+    private static bool CanBeginProjectionElement(ReservedKeyword keyword) =>
+        keyword.Keyword is Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert
+            or Keyword.Coalesce or Keyword.NullIf or Keyword.Case or Keyword.Null
+            or Keyword.Current_Timestamp or Keyword.Current_Date or Keyword.Current_User
+            or Keyword.Session_User or Keyword.System_user or Keyword.User
+            or Keyword.Distinct or Keyword.All or Keyword.Top;
 
     /// <summary>
     /// Parses a parenthesized column-alias list <c>(col, col, …)</c> — the

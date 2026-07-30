@@ -433,6 +433,15 @@ Index key / INCLUDE columns carry full ordinals, so `sys.index_columns` / `sys.s
 
 The `COLUMNS_UPDATED()` bitmask is keyed on these ids and sized from the watermark, so a dropped column keeps its bit position — see [`triggers.md`](triggers.md#change-detection-intrinsics).
 
+## Key column direction
+
+`ASC` / `DESC` on a key column is captured for `CREATE INDEX` (on `IndexKeyColumn.IsDescending`) and for `PRIMARY KEY` / `UNIQUE` constraints (on `KeyConstraint`, parallel to its `StorageOrdinals`), and surfaces identically from `sys.index_columns.is_descending_key` and `INDEXKEY_PROPERTY(…, 'IsDescending')`.
+
+It has **no runtime effect** — the simulator stores rows unordered either way — so this is metadata a schema-diff or index-scripting tool reads.
+
+Probe-confirmed shapes: the table-level `PRIMARY KEY (a DESC, b ASC)` and `UNIQUE (a DESC, b)` forms both record it, as does `ALTER TABLE … ADD CONSTRAINT … PRIMARY KEY (b DESC, a DESC)`.
+The **inline column-level** form takes no direction at all: real raises **Msg 156** near the keyword for `a int PRIMARY KEY DESC`, so the simulator rejects it there rather than silently accepting.
+
 ## Metadata scalars
 
 Function-form metadata queries that read from the same underlying state as the catalog-view rows.
@@ -464,7 +473,7 @@ The `TableHas*` flags read directly from the resolved `HeapTable`'s `KeyConstrai
 NULL `object_id` / NULL property / non-table object on a `TableHas*` query → NULL.
 
 **`COLUMNPROPERTY(table_id, column_name, property)`** (`Parser/Expressions/ColumnProperty.cs`): per-column metadata returning `int`.
-Properties (probe-confirmed): `AllowsNull` / `IsIdentity` / `IsComputed` (1/0 from `HeapColumn.Nullable` / `Identity` / `Computed`), `IsRowGuidCol` (1/0 from `HeapColumn.IsRowGuidCol`), `IsIdNotForRepl` (1 for an `IDENTITY … NOT FOR REPLICATION` column, else 0 — 0 on non-identity columns, probe-confirmed), `Precision` (decimal-equivalent for integer family, declared `N` for `varchar(N)` / `nvarchar(N)`, 19/10 for money/smallmoney), `Scale` (4 for money, declared scale for decimal, 0 otherwise), `CharMaxLen` (`N` for character types, NULL otherwise), `ColumnId` (1-based declaration ordinal), `UsesAnsiTrim` (1 for character types, 0 otherwise).
+Properties (probe-confirmed): `AllowsNull` / `IsIdentity` / `IsComputed` (1/0 from `HeapColumn.Nullable` / `Identity` / `Computed`), `IsRowGuidCol` (1/0 from `HeapColumn.IsRowGuidCol`), `IsIdNotForRepl` (1 for an `IDENTITY … NOT FOR REPLICATION` column, else 0 — 0 on non-identity columns, probe-confirmed), `Precision` (decimal-equivalent for integer family, declared `N` for `varchar(N)` / `nvarchar(N)`, 19/10 for money/smallmoney), `Scale` (4 for money, declared scale for decimal, 0 otherwise), `CharMaxLen` (`N` for character types, NULL otherwise), `ColumnId` (the [stable column id](#stable-column-ids), agreeing with `sys.columns.column_id` after a DROP COLUMN — probe-confirmed that real reports the same value from both surfaces), `UsesAnsiTrim` (1 for character types, 0 otherwise).
 Column lookup matches by name through `Collation.Baseline` (case-insensitive).
 NULL on any arg / unknown column / unknown property / unknown table → NULL.
 
@@ -481,9 +490,8 @@ NULL on any NULL arg / unknown index / out-of-range key (including ≤ 0) → NU
 
 **`INDEXKEY_PROPERTY(object_id, index_id, key_id, property)`** (`Parser/Expressions/IndexKeyProperty.cs`): per-key-column metadata on an index, returning `int`.
 Index / key resolution is identical to `INDEX_COL` (shared `IndexLookup` helpers).
-Properties: `ColumnId` (1-based `sys.columns.column_id` via `IndexLookup.StorageOrdinalToColumnId`), `IsDescending` (1 if DESC, 0 if ASC).
-PK / UQ constraints don't track per-column direction in the simulator's `KeyConstraint`, so they always report `IsDescending = 0`.
-**Divergence** (an earlier note claimed parity here): real *does* track it — `PRIMARY KEY (a DESC)` reports `sys.index_columns.is_descending_key = 1` (probe-confirmed), where the simulator reports 0 and the DESC keyword is parse-and-discard.
+Properties: `ColumnId` (the stable `sys.columns.column_id` via `IndexLookup.StorageOrdinalToColumnId`), `IsDescending` (1 if DESC, 0 if ASC).
+Reads the same per-column direction `sys.index_columns.is_descending_key` reports, so a `PRIMARY KEY (a DESC)` key column answers 1 from both surfaces — see [key column direction](#key-column-direction).
 NULL on any NULL arg / unknown object / unknown index / out-of-range key (INCLUDE positions included) / unknown property → NULL.
 
 **`STATS_DATE(object_id, stats_id)`** (`Parser/Expressions/StatsDate.cs`): returns the `datetime` of the last statistics refresh.

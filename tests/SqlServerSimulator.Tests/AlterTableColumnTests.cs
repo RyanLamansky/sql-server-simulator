@@ -862,4 +862,64 @@ public sealed class AlterTableColumnTests
             create table w_t (c1 int, c2 int, c3 int);
             select max_column_id_used from sys.tables where object_id = object_id('w_t')
             """));
+
+    // === PRIMARY KEY / UNIQUE column direction (sys.index_columns.is_descending_key) ===
+
+    /// <summary>
+    /// Direction has no runtime effect — rows are stored unordered either way
+    /// — so the assertion is the catalog flag a schema-diff tool reads.
+    /// </summary>
+    private static string KeyDirections(Simulation sim, string table) =>
+        (string)sim.ExecuteScalar($"""
+            select string_agg(cast(c.name as varchar(20)) + '=' + cast(ic.is_descending_key as varchar), ',')
+            from sys.index_columns ic
+            join sys.columns c on c.object_id = ic.object_id and c.column_id = ic.column_id
+            where ic.object_id = object_id('{table}')
+            """)!;
+
+    [TestMethod]
+    public void TableLevelPrimaryKey_RecordsColumnDirection()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int not null, b int not null, constraint pk_t primary key (a desc, b asc))");
+        AreEqual("a=1,b=0", KeyDirections(sim, "t"));
+    }
+
+    [TestMethod]
+    public void TableLevelUnique_RecordsColumnDirection()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int not null, b int not null, constraint uq_t unique (a desc, b))");
+        AreEqual("a=1,b=0", KeyDirections(sim, "t"));
+    }
+
+    [TestMethod]
+    public void AlterTableAddConstraint_RecordsColumnDirection()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int not null, b int not null);
+            alter table t add constraint pk_t primary key (b desc, a desc)
+            """);
+        AreEqual("b=1,a=1", KeyDirections(sim, "t"));
+    }
+
+    [TestMethod]
+    public void KeyWithoutDirection_ReportsAscending()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int not null, b int not null, constraint pk_t primary key (a, b))");
+        AreEqual("a=0,b=0", KeyDirections(sim, "t"));
+    }
+
+    /// <summary>
+    /// The inline column-level form takes no direction at all — real rejects
+    /// it where the table-level list accepts it.
+    /// </summary>
+    [TestMethod]
+    public void InlinePrimaryKey_RejectsDirection()
+        => new Simulation().AssertSqlError(
+            "create table t (a int not null primary key desc, b int)",
+            156,
+            "Incorrect syntax near the keyword 'desc'.");
 }

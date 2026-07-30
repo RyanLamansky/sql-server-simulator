@@ -1130,7 +1130,7 @@ internal static partial class BuiltInResources
                     var indexIdValue = SqlValue.FromInt32(identity.IndexId);
                     if (identity.Constraint is { } key)
                     {
-                        foreach (var row in EmitKeyConstraintColumns(tableObjectId, indexIdValue, key, table, falseBit, zeroByte, nullByte))
+                        foreach (var row in EmitKeyConstraintColumns(tableObjectId, indexIdValue, key, table, falseBit, trueBit, zeroByte, nullByte))
                             yield return row;
                     }
                     else
@@ -1219,7 +1219,7 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EmitKeyConstraintColumns(
         SqlValue tableObjectId, SqlValue indexIdValue, KeyConstraint constraint, HeapTable table,
-        SqlValue falseBit, SqlValue zeroByte, SqlValue nullByte)
+        SqlValue falseBit, SqlValue trueBit, SqlValue zeroByte, SqlValue nullByte)
     {
         for (var i = 0; i < constraint.StorageOrdinals.Length; i++)
         {
@@ -1230,7 +1230,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(StorageOrdinalToColumnId(table, constraint.StorageOrdinals[i])),
                 SqlValue.FromByte((byte)(i + 1)),
                 zeroByte,
-                falseBit,
+                constraint.IsDescending(i) ? trueBit : falseBit,
                 falseBit,
                 nullByte,
                 nullByte,
