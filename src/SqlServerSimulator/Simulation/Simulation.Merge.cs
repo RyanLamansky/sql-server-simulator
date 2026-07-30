@@ -183,9 +183,7 @@ partial class Simulation
         // message echoes the target as written — its alias when one was given
         // (probe-confirmed: `MERGE dbo.m AS t …` reports 't'), otherwise the
         // name from the statement.
-        // MERGE's output parser has no INTO variant, so any OUTPUT here
-        // returns rows to the client.
-        if (output is not null)
+        if (output is { HasTarget: false })
         {
             var mergeTarget = context.Batch.CurrentDatabase.Collation.Equals(targetAlias, defaultTargetName)
                 ? destinationName.ToString()
@@ -865,7 +863,7 @@ partial class Simulation
     /// and the <c>$action</c> pseudo-column (uppercase 'INSERT' /
     /// 'UPDATE' / 'DELETE' string).
     /// </summary>
-    private static MergeOutputProjection? TryParseMergeOutputClause(
+    private static OutputProjection? TryParseMergeOutputClause(
         ParserContext context,
         HeapTable destinationTable,
         View? sourceView,
@@ -971,9 +969,13 @@ partial class Simulation
         for (var i = 0; i < expressions.Count; i++)
             schema[i] = IsMergeActionRef(expressions[i]) ? NVarcharSqlType.Get(10, context.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault) : expressions[i].GetSqlType(context.Batch, ResolveOutputType);
 
-        return new MergeOutputProjection(
-            [.. expressions], [.. columnNames], schema,
-            destinationTable, sourceAlias, sourceColumnNames, context.Batch);
+        // MERGE reaches the same INTO parser the other three statements use;
+        // its own projection type predated that and never grew the branch.
+        var outputTarget = TryParseOutputIntoTarget(context, expressions.Count, destinationTable.Name);
+
+        return new OutputProjection(
+            [.. expressions], [.. columnNames], schema, destinationTable,
+            (sourceAlias, sourceColumnNames, sourceSchema), context.Batch, outputTarget);
     }
 
     /// <summary>
@@ -1038,7 +1040,7 @@ partial class Simulation
         SqlType[] sourceSchema,
         BooleanExpression onPredicate,
         List<WhenClause> whenClauses,
-        MergeOutputProjection? output)
+        OutputProjection? output)
     {
         var sourceRows = materializeSource(context.Batch);
         var sourceMatched = new bool[sourceRows.Count];
@@ -1476,7 +1478,7 @@ partial class Simulation
         List<(SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingInserts,
         List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingUpdates,
         List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)> pendingDeletes,
-        MergeOutputProjection? output,
+        OutputProjection? output,
         List<WhenClause> whenClauses)
     {
         if (context.Batch.IsSkipping)
@@ -1741,7 +1743,9 @@ partial class Simulation
         }
 
         context.Connection.LastStatementRowCount = totalAffected;
-        return output is not null
+        // An INTO target consumed the rows, so the statement is a non-query —
+        // the same suppression INSERT / UPDATE / DELETE apply.
+        return output is { HasTarget: false }
             ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!)
             : new SimulatedNonQuery(totalAffected);
     }
@@ -1831,7 +1835,7 @@ partial class Simulation
 
     /// <summary>
     /// Synthetic expression representing MERGE's <c>$action</c> pseudo-
-    /// column. Runtime evaluation goes through the <see cref="MergeOutputProjection.ProjectRow"/>
+    /// column. Runtime evaluation goes through the <see cref="OutputProjection.ProjectRow"/>
     /// per-row context which threads the action verb in directly; the
     /// <see cref="Expression.Run"/> override here exists only to satisfy
     /// the Expression contract and isn't called on the MERGE OUTPUT path.
@@ -1857,63 +1861,4 @@ partial class Simulation
             _ => false,
         };
 
-    /// <summary>
-    /// MERGE-flavored output projection. Mirrors <see cref="OutputProjection"/>'s
-    /// shape but resolves INSERTED + DELETED + source-alias + <c>$action</c>
-    /// references; the per-row caller supplies the action verb directly
-    /// rather than the projection inferring it.
-    /// </summary>
-    private sealed class MergeOutputProjection(
-        Expression[] expressions,
-        string[] columnNames,
-        SqlType[] schema,
-        HeapTable destinationTable,
-        string sourceAlias,
-        string[] sourceColumnNames,
-        BatchContext batch)
-    {
-        public readonly SqlType[] Schema = schema;
-        public readonly string[] ColumnNames = columnNames;
-
-        public byte[]? ProjectRow(SqlValue[]? insertedValues, SqlValue[]? deletedValues, SqlValue[]? sourceValues, string action)
-        {
-            SqlValue Resolve(MultiPartName name)
-            {
-                if (BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED"))
-                {
-                    for (var i = 0; i < destinationTable.Columns.Length; i++)
-                    {
-                        if (batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                            return insertedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : insertedValues[i];
-                    }
-                }
-                else if (BuiltInToken.Equals(name.ImmediateQualifier, "DELETED"))
-                {
-                    for (var i = 0; i < destinationTable.Columns.Length; i++)
-                    {
-                        if (batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                            return deletedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : deletedValues[i];
-                    }
-                }
-                else if (batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
-                {
-                    for (var i = 0; i < sourceColumnNames.Length; i++)
-                    {
-                        if (batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
-                            return sourceValues is null ? SqlValue.Null(this.Schema[0]) : sourceValues[i];
-                    }
-                }
-                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
-            }
-
-            var projected = new SqlValue[expressions.Length];
-            for (var i = 0; i < expressions.Length; i++)
-            {
-                projected[i] = IsMergeActionRef(expressions[i])
-                    ? SqlValue.FromNVarchar(action)
-                    : expressions[i].Run(new RuntimeContext(Resolve, batch));
-            }
-            return RowEncoder.EncodeRow(this.Schema, projected);
-        }
-    }
 }

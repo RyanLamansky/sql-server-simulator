@@ -27,9 +27,11 @@
   The MERGE form keeps the per-action NULL-fill semantic for `INSERTED.* / DELETED.*` (DELETED columns are NULL on a WHEN NOT MATCHED INSERT row; INSERTED columns are NULL on a WHEN MATCHED DELETE row).
   Unbound qualifier on `.*` raises Msg 4104, same as `<qualifier>.<col>`.
   The expansion runs before `Expression.Parse`, so the alias-suffix shape (`INSERTED.* AS x`) inherits real SQL Server's Msg 102 rejection naturally — the cursor advances past `*` to either `,` or the end-of-OUTPUT terminator.
-  `OUTPUT … INTO @t [(cols)]` ships for INSERT / UPDATE / DELETE — see [Table variables](table-variables.md).
-  **Not for MERGE**: its output parser has no `INTO` branch, so the clause is left unconsumed and the statement dies on the trailing-semicolon check (Msg 10713).
-  That gap became reachable with [Msg 334](triggers.md#output-on-a-triggered-target--msg-334), which leaves a MERGE against a triggered target with no legal way to emit OUTPUT at all.
+  `OUTPUT … INTO @t [(cols)]` ships for INSERT / UPDATE / DELETE / MERGE — see [Table variables](table-variables.md).
+  All four route through one `OutputProjection` and one `TryParseOutputIntoTarget`; an INTO target consumes the rows, so the statement reports as a non-query rather than leaving an empty result set behind.
+  For MERGE this is also the only legal way to emit OUTPUT against a table carrying an enabled trigger, since [Msg 334](triggers.md#output-on-a-triggered-target--msg-334) forbids the client-returning form.
+- **One projection type backs all four statements.** `Simulation.Output.cs`'s `OutputProjection` resolves `INSERTED` / `DELETED` and — for MERGE — the source alias and `$action`, with a reference to a side the statement doesn't have reading as a typed NULL rather than throwing.
+  It previously existed in three near-copies (`OutputProjection` for INSERT, `MutationOutputProjection` for UPDATE / DELETE, and a `MergeOutputProjection` inside `Simulation.Merge.cs`), and the MERGE fork was the one that never grew `outputTarget` — which is why `MERGE … OUTPUT … INTO` didn't work, why the docs claimed it did, and why the Msg 334 gate needed a MERGE-specific branch. All three are gone.
 - **`OUTPUT … INTO` against a target with an IDENTITY column** follows real's rules exactly (probe-confirmed matrix).
   The positional (no column list) form fills the target's **non-identity** columns, so the projection is measured against that narrower count: equal succeeds and the identity column generates its own value; fewer is **Msg 213**; more would have to write the identity column and is **Msg 8101**, whose message names the OUTPUT target *schema-qualified* (`'dbo.dest'`, or the bare `'#tmp'` form for a temp table).
   An explicit column list naming the identity column is **Msg 544** — and `SET IDENTITY_INSERT <target> ON` does **not** unlock it.

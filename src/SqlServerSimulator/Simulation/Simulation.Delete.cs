@@ -71,7 +71,7 @@ partial class Simulation
         // source DELETE with OUTPUT isn't modeled — see the matching
         // limitation in ParseUpdate. DELETE OUTPUT through a view is also
         // rejected (the DELETED.* would need view-output-column rebinding).
-        MutationOutputProjection? output = null;
+        OutputProjection? output = null;
         if (leadingView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             throw new NotSupportedException($"DELETE … OUTPUT through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
         if (leadingTable is not null)
@@ -106,7 +106,7 @@ partial class Simulation
     private static SimulatedStatementOutcome ExecuteDeleteAgainstTable(
         ParserContext context,
         HeapTable table,
-        MutationOutputProjection? output,
+        OutputProjection? output,
         Selection.DmlTopLimit? top,
         View? sourceView = null)
     {
@@ -243,7 +243,7 @@ partial class Simulation
         ParserContext context,
         MultiPartName leadingIdent,
         HeapTable? leadingTable,
-        MutationOutputProjection? output,
+        OutputProjection? output,
         Selection.DmlTopLimit? top)
     {
         var sourcesList = new List<FromSource>();
@@ -331,7 +331,7 @@ partial class Simulation
         ParserContext context,
         HeapTable table,
         List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> deleted,
-        MutationOutputProjection? output,
+        OutputProjection? output,
         View? sourceView = null)
     {
         if (context.Batch.IsSkipping)
@@ -429,7 +429,7 @@ partial class Simulation
 
     private static List<byte[]> ProjectDeleteOutput(
         List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> deleted,
-        MutationOutputProjection output)
+        OutputProjection output)
     {
         var rows = new List<byte[]>(deleted.Count);
         foreach (var (_, _, fullOld) in deleted)

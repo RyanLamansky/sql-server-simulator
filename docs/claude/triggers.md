@@ -85,6 +85,7 @@ Probe-confirmed rules, two of which the message text doesn't say:
 - It's **compile-time** — it fires from an un-taken `IF` branch.
 
 `Simulation.RejectClientOutputOnTriggeredTarget` is the shared gate, called from the INSERT / UPDATE / DELETE / MERGE parse sites (MERGE checks once per WHEN clause, since its actions are per-branch).
+Every one of them tests the same `OutputProjection.HasTarget`, so `OUTPUT … INTO` is the escape on all four — including MERGE, which only gained it when the projections converged (see [`dml.md`](dml.md)).
 
 This is the rule behind EF Core's `HasTrigger` annotation: declaring a trigger makes EF abandon its `OUTPUT INSERTED` emit shape, because that shape is illegal against a triggered table.
 

@@ -176,7 +176,7 @@ partial class Simulation
         // when this combination is attempted). OUTPUT through a view is
         // also rejected — the projected INSERTED.* / DELETED.* would need
         // view-output-column rebinding, which isn't modeled.
-        MutationOutputProjection? output = null;
+        OutputProjection? output = null;
         if (leadingView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             throw new NotSupportedException($"UPDATE … OUTPUT through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
         if (leadingTable is not null)
@@ -213,7 +213,7 @@ partial class Simulation
         ParserContext context,
         HeapTable table,
         List<(string ColumnName, Expression Expr)> rawAssignments,
-        MutationOutputProjection? output,
+        OutputProjection? output,
         Selection.DmlTopLimit? top,
         View? sourceView = null)
     {
@@ -434,7 +434,7 @@ partial class Simulation
         MultiPartName leadingIdent,
         HeapTable? leadingTable,
         List<(string ColumnName, Expression Expr)> rawAssignments,
-        MutationOutputProjection? output,
+        OutputProjection? output,
         Selection.DmlTopLimit? top)
     {
         var sourcesList = new List<FromSource>();
@@ -545,7 +545,7 @@ partial class Simulation
         ParserContext context,
         HeapTable table,
         List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
-        MutationOutputProjection? output,
+        OutputProjection? output,
         IReadOnlyList<int> updatedColumnOrdinals,
         View? sourceView = null)
     {
@@ -717,7 +717,7 @@ partial class Simulation
 
     private static List<byte[]> ProjectMutationOutput(
         List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
-        MutationOutputProjection output)
+        OutputProjection output)
     {
         var rows = new List<byte[]>(affected.Count);
         foreach (var (_, _, fullNew, fullOld) in affected)

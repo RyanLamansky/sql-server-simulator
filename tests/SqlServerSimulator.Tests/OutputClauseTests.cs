@@ -405,4 +405,109 @@ public class OutputClauseTests
             create table t (id int primary key, v int);
             insert t output foo.* values (1, 10)
             """, 4104);
+
+    // === MERGE … OUTPUT … INTO ===
+    //
+    // MERGE reached this by sharing the one projection type; its own fork
+    // never had an INTO branch, so the clause used to be left unconsumed and
+    // the statement died on the trailing-semicolon check (Msg 10713).
+
+    [TestMethod]
+    public void MergeOutputInto_TableVariable_CapturesRowsAndActionPerBranch()
+    {
+        var sim = new Simulation();
+        Assert.AreEqual("1=UPDATE,2=INSERT", sim.ExecuteScalar("""
+            create table m (id int primary key, v int);
+            insert m values (1, 10);
+            declare @o table (id int, act varchar(10));
+            merge m using (values (1, 99), (2, 20)) as s (id, v) on m.id = s.id
+            when matched then update set v = s.v
+            when not matched then insert (id, v) values (s.id, s.v)
+            output inserted.id, $action into @o;
+            select string_agg(cast(id as varchar) + '=' + act, ',') within group (order by id) from @o
+            """));
+    }
+
+    [TestMethod]
+    public void MergeOutputInto_RealTableWithColumnList_Writes()
+    {
+        var sim = new Simulation();
+        Assert.AreEqual("3,30,INSERT", sim.ExecuteScalar("""
+            create table m (id int primary key, v int);
+            create table sink (a int, b int, act varchar(10));
+            merge m using (values (3, 30)) as s (id, v) on m.id = s.id
+            when not matched then insert (id, v) values (s.id, s.v)
+            output inserted.id, inserted.v, $action into sink (a, b, act);
+            select cast(a as varchar) + ',' + cast(b as varchar) + ',' + act from sink
+            """));
+    }
+
+    /// <summary>DELETED and the source alias resolve into the target too.</summary>
+    [TestMethod]
+    public void MergeOutputInto_ResolvesDeletedAndSourceAlias()
+    {
+        var sim = new Simulation();
+        Assert.AreEqual("10|77", sim.ExecuteScalar("""
+            create table m (id int primary key, v int);
+            insert m values (1, 10);
+            declare @o table (oldv int, srcv int);
+            merge m using (values (1, 77)) as s (id, v) on m.id = s.id
+            when matched then update set v = s.v
+            output deleted.v, s.v into @o;
+            select cast(oldv as varchar) + '|' + cast(srcv as varchar) from @o
+            """));
+    }
+
+    /// <summary>
+    /// An INTO target consumes the rows, so the MERGE is a non-query — it must
+    /// not leave an empty result set behind the way it did before the
+    /// suppression was shared.
+    /// </summary>
+    [TestMethod]
+    public void MergeOutputInto_YieldsNoResultSet()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table m (id int primary key, v int)");
+        using var reader = sim.ExecuteReader("""
+            declare @o table (id int);
+            merge m using (values (1, 10)) as s (id, v) on m.id = s.id
+            when not matched then insert (id, v) values (s.id, s.v)
+            output inserted.id into @o;
+            """);
+        Assert.AreEqual(0, reader.FieldCount);
+    }
+
+    /// <summary>Without INTO, the rows still come back to the client.</summary>
+    [TestMethod]
+    public void MergeOutputWithoutInto_StillReturnsRows()
+    {
+        var sim = new Simulation();
+        Assert.AreEqual(4, sim.ExecuteScalar("""
+            create table m (id int primary key, v int);
+            merge m using (values (4, 40)) as s (id, v) on m.id = s.id
+            when not matched then insert (id, v) values (s.id, s.v)
+            output inserted.id;
+            """));
+    }
+
+    /// <summary>
+    /// And INTO is the legal way to emit OUTPUT against a triggered target,
+    /// which Msg 334 otherwise forbids — the combination that had no
+    /// expressible form until MERGE gained INTO.
+    /// </summary>
+    [TestMethod]
+    public void MergeOutputInto_IsAllowedAgainstATriggeredTarget()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table m (id int primary key, v int)",
+            "create trigger tr on m after insert as begin set nocount on; end");
+        Assert.AreEqual(6, sim.ExecuteScalar("""
+            declare @o table (id int);
+            merge m using (values (6, 60)) as s (id, v) on m.id = s.id
+            when not matched then insert (id, v) values (s.id, s.v)
+            output inserted.id into @o;
+            select id from @o
+            """));
+    }
 }

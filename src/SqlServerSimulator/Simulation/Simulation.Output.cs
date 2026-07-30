@@ -83,7 +83,7 @@ partial class Simulation
     /// gate which qualifier the call site permits — UPDATE allows both;
     /// DELETE allows only DELETED (INSERTED.col on DELETE is rejected at
     /// parse time with Msg 4104, matching the probed real-server
-    /// behavior). The returned <see cref="MutationOutputProjection"/> is
+    /// behavior). The returned <see cref="OutputProjection"/> is
     /// re-runnable once per affected row.
     /// </summary>
     /// <remarks>
@@ -97,7 +97,7 @@ partial class Simulation
     /// any star-form raise the same Msg 4104 (Msg 207 stays for the
     /// bare-name case to match SQL Server's probe-confirmed shape).
     /// </remarks>
-    private static MutationOutputProjection? TryParseOutputClauseForMutation(
+    private static OutputProjection? TryParseOutputClauseForMutation(
         ParserContext context,
         HeapTable table,
         bool allowInserted,
@@ -121,7 +121,7 @@ partial class Simulation
     }
 
     /// <summary>Body of <see cref="TryParseOutputClauseForMutation"/>.</summary>
-    private static MutationOutputProjection? ParseOutputClauseBody(
+    private static OutputProjection? ParseOutputClauseBody(
         ParserContext context,
         HeapTable table,
         bool allowInserted,
@@ -190,7 +190,7 @@ partial class Simulation
         for (var i = 0; i < expressions.Count; i++)
             schema[i] = expressions[i].GetSqlType(context.Batch, ResolveOutputType);
 
-        return new MutationOutputProjection(table, [.. expressions], [.. names], schema, context.Batch, outputTarget);
+        return new OutputProjection([.. expressions], [.. names], schema, table, source: null, context.Batch, outputTarget);
     }
 
     /// <summary>
@@ -390,76 +390,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Holds the parsed UPDATE / DELETE OUTPUT projection together with
-    /// its statically resolved schema. Re-runnable once per affected row
-    /// via <see cref="ProjectRow"/>; the row's <c>INSERTED</c> /
-    /// <c>DELETED</c> values are passed in per call (the inner resolver
-    /// dispatches on the qualifier).
-    /// </summary>
-    private sealed class MutationOutputProjection(
-        HeapTable table,
-        Expression[] expressions,
-        string[] columnNames,
-        SqlType[] schema,
-        BatchContext batch,
-        OutputTarget? outputTarget)
-    {
-        private readonly BatchContext batch = batch;
-
-        public readonly SqlType[] Schema = schema;
-
-        public readonly string[] ColumnNames = columnNames;
-
-        /// <summary>
-        /// True when this OUTPUT clause includes an <c>INTO @t</c> target.
-        /// The dispatching caller suppresses the per-row result-set yield in
-        /// this case and surfaces the statement as a non-query (matches real
-        /// SQL Server: <c>OUTPUT … INTO target</c> directs rows to the
-        /// target only, without returning them to the client).
-        /// </summary>
-        public bool HasTarget => outputTarget is not null;
-
-        /// <summary>
-        /// Encodes one OUTPUT row by running each parsed expression against
-        /// a per-row resolver that dispatches on <c>INSERTED.&lt;col&gt;</c>
-        /// (post-update / post-insert values) and <c>DELETED.&lt;col&gt;</c>
-        /// (pre-update / pre-delete values). Pass <see langword="null"/>
-        /// for whichever side doesn't apply (DELETE has no INSERTED row);
-        /// referencing the absent side is a parse-time error, so this
-        /// runtime path doesn't need to defend against it. Returns the
-        /// encoded projection-shape bytes when there's no INTO target;
-        /// returns <see langword="null"/> when an INTO target consumed the
-        /// row (caller skips the per-row result-set append in that case).
-        /// </summary>
-        public byte[]? ProjectRow(SqlValue[]? insertedValues, SqlValue[]? deletedValues)
-        {
-            SqlValue Resolve(MultiPartName reference)
-            {
-                var source = (BuiltInToken.Equals(reference.ImmediateQualifier, "INSERTED") ? insertedValues
-                    : BuiltInToken.Equals(reference.ImmediateQualifier, "DELETED") ? deletedValues
-                    : null)
-                    ?? throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
-                for (var i = 0; i < table.Columns.Length; i++)
-                {
-                    if (batch.CurrentDatabase.Collation.Equals(table.Columns[i].Name, reference.Leaf))
-                        return source[i];
-                }
-                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
-            }
-
-            var projected = new SqlValue[expressions.Length];
-            for (var i = 0; i < expressions.Length; i++)
-                projected[i] = expressions[i].Run(new RuntimeContext(Resolve, this.batch));
-            if (outputTarget is not null)
-            {
-                outputTarget.Append(projected);
-                return null;
-            }
-            return RowEncoder.EncodeRow(this.Schema, projected);
-        }
-    }
-
-    /// <summary>
     /// Detects the contextual <c>OUTPUT</c> keyword on the current token and,
     /// if present, parses the comma-separated projection list following the
     /// rules documented on <see cref="OutputProjection"/>. Returns
@@ -566,7 +496,7 @@ partial class Simulation
     /// MERGE source-alias plumbing is opt-in via the constructor.
     /// </summary>
     private sealed class OutputProjection(
-        List<Expression> expressions,
+        IReadOnlyList<Expression> expressions,
         string[] columnNames,
         SqlType[] schema,
         HeapTable destinationTable,
@@ -578,18 +508,42 @@ partial class Simulation
         public readonly string[] ColumnNames = columnNames;
         private readonly BatchContext batch = batch;
 
-        /// <summary>See <see cref="MutationOutputProjection.HasTarget"/>.</summary>
+        /// <summary>
+        /// True when this OUTPUT clause includes an <c>INTO</c> target.
+        /// The dispatching caller suppresses the per-row result-set yield in
+        /// this case and surfaces the statement as a non-query (matches real
+        /// SQL Server: <c>OUTPUT … INTO target</c> directs rows to the target
+        /// only, without returning them to the client).
+        /// </summary>
         public bool HasTarget => outputTarget is not null;
 
         /// <summary>
-        /// Evaluates each projection expression against the just-inserted row
-        /// (the <c>INSERTED</c> virtual table) and, for MERGE, the matching
-        /// source-row values addressed via the source alias. Returns the
-        /// encoded projection-shape bytes when there's no INTO target;
-        /// returns <see langword="null"/> when an INTO target consumed the
-        /// row (caller skips the per-row result-set append).
+        /// Encodes one OUTPUT row, running each parsed expression against a
+        /// per-row resolver over <c>INSERTED</c> / <c>DELETED</c> and — for
+        /// MERGE — the source alias. Returns the encoded projection bytes, or
+        /// <see langword="null"/> when an INTO target consumed the row (the
+        /// caller then skips its per-row result-set append).
         /// </summary>
-        public byte[]? ProjectRow(SqlValue[] insertedRow, SqlValue[]? sourceRowValues)
+        /// <param name="insertedValues">Post-image row, or null where the statement has none (DELETE).</param>
+        /// <param name="deletedValues">Pre-image row, or null where the statement has none (INSERT).</param>
+        /// <param name="sourceValues">MERGE's matched source row; null for the other statements.</param>
+        /// <param name="action">
+        /// MERGE's per-row <c>$action</c> verb, or null when the statement has
+        /// no <c>$action</c> to report.
+        /// </param>
+        /// <remarks>
+        /// A reference to a side the statement doesn't have reads as a typed
+        /// NULL rather than throwing. The parser already rejects the
+        /// statically impossible cases (INSERTED on DELETE, say), so this only
+        /// covers rows a path legitimately leaves unpopulated — a MERGE
+        /// branch's absent half, or an UPDATE whose caller didn't pre-capture
+        /// the old values.
+        /// </remarks>
+        public byte[]? ProjectRow(
+            SqlValue[]? insertedValues,
+            SqlValue[]? deletedValues,
+            SqlValue[]? sourceValues = null,
+            string? action = null)
         {
             SqlValue Resolve(MultiPartName name)
             {
@@ -597,16 +551,25 @@ partial class Simulation
                 {
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
                     {
-                        if (batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                            return insertedRow[i];
+                        if (this.batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                            return insertedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : insertedValues[i];
                     }
                 }
-                else if (source is var (sourceAlias, sourceCols, _) && sourceRowValues is not null && batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
+                else if (BuiltInToken.Equals(name.ImmediateQualifier, "DELETED"))
+                {
+                    for (var i = 0; i < destinationTable.Columns.Length; i++)
+                    {
+                        if (this.batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
+                            return deletedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : deletedValues[i];
+                    }
+                }
+                else if (source is var (sourceAlias, sourceCols, sourceTypes)
+                    && this.batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
                 {
                     for (var i = 0; i < sourceCols.Length; i++)
                     {
-                        if (batch.CurrentDatabase.Collation.Equals(sourceCols[i], name.Leaf))
-                            return sourceRowValues[i];
+                        if (this.batch.CurrentDatabase.Collation.Equals(sourceCols[i], name.Leaf))
+                            return sourceValues is null ? SqlValue.Null(sourceTypes[i]) : sourceValues[i];
                     }
                 }
                 throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
@@ -614,13 +577,16 @@ partial class Simulation
 
             var projected = new SqlValue[expressions.Count];
             for (var i = 0; i < expressions.Count; i++)
-                projected[i] = expressions[i].Run(new RuntimeContext(Resolve, this.batch));
-            if (outputTarget is not null)
             {
-                outputTarget.Append(projected);
-                return null;
+                projected[i] = action is not null && IsMergeActionRef(expressions[i])
+                    ? SqlValue.FromNVarchar(action)
+                    : expressions[i].Run(new RuntimeContext(Resolve, this.batch));
             }
-            return RowEncoder.EncodeRow(this.Schema, projected);
+
+            if (outputTarget is null)
+                return RowEncoder.EncodeRow(this.Schema, projected);
+            outputTarget.Append(projected);
+            return null;
         }
     }
 }

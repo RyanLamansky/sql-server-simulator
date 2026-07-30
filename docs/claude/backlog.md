@@ -163,9 +163,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **An unaliased derived table is accepted** — `SELECT * FROM (SELECT 1 x)` parses, where real requires the alias and raises **Msg 102** (`"Incorrect syntax near ')'."`, probed 2026-07-30).
   The column-alias list and its Msg 8155 / 8156 / 8158 / 8159 rules ship (see [`query.md`](query.md#derived-table-column-alias-list)); the missing-alias check is what remains, and the 8155 check is gated on having an alias because its message names one.
   → [`query.md`](query.md).
-- **`MERGE … OUTPUT … INTO` isn't supported** — the MERGE output parser has no `INTO` branch, so the clause is left unconsumed and the statement dies on the trailing-semicolon check (Msg 10713).
-  Found 2026-07-30 while adding Msg 334, which makes the gap reachable: MERGE now has no legal way to emit OUTPUT against a triggered target, where real allows the INTO form.
-  → [`dml.md`](dml.md).
 - **Module body validation deferred to first execution** — a TVP parameter's **Msg 10700** and the **Msg 111** batch-first rule surface at EXEC where real validates at CREATE.
   → [`table-valued-parameters.md`](table-valued-parameters.md#fidelity-gaps-remaining), [`programmable.md`](programmable.md).
 Tracked elsewhere and over-permissive in the same sense: the recursive-CTE part restrictions Msg 460 / 461 / 462 / 467 / 465 (CLAUDE.md's Not-modeled-yet).

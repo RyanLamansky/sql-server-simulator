@@ -557,7 +557,7 @@ partial class Simulation
 
                 if (output is { } o)
                 {
-                    var projectedBytes = o.ProjectRow(rowValues, sourceRowValues: null);
+                    var projectedBytes = o.ProjectRow(insertedValues: rowValues, deletedValues: null);
                     if (projectedBytes is not null)
                         outputRows!.Add(projectedBytes);
                 }
