@@ -419,16 +419,66 @@ public sealed class SpatialValueTests
             Eval("geometry::Parse('POLYGON((0 0,3 0,3 3,0 3,0 0))').STArea()"));
 
     /// <summary>
-    /// The round-earth measures stay unmodeled: real measures <c>geography</c>
-    /// along the great elliptic arc, which is a different curve from the
-    /// geodesic and not a coordinate swap over the planar code.
+    /// Round-earth length and distance measure along the <b>great elliptic
+    /// arc</b> — the curve real uses, which is not the geodesic. The expected
+    /// values are real's own (2026-07-31); the tolerance is relative because
+    /// the simulator computes the arc exactly while real carries ~6e-9 of its
+    /// own approximation error, worst over a quarter meridian.
     /// </summary>
     [TestMethod]
-    [DataRow("geography::Parse('LINESTRING(0 0, 0 1)').STLength()")]
-    [DataRow("geography::Parse('POLYGON((0 0,1 0,1 1,0 1,0 0))').STArea()")]
-    public void GeographyMeasures_ReportUnmodeled(string expression)
+    [DataRow("geography::Parse('LINESTRING(0 0, 0 1)').STLength()", 110574.38849340599)]
+    [DataRow("geography::Parse('LINESTRING(0 0, 1 0)').STLength()", 111319.49073588519)]
+    [DataRow("geography::Parse('LINESTRING(0 0, 1 1)').STLength()", 156899.5679650511)]
+    [DataRow("geography::Parse('LINESTRING(0 0,1 0,1 1)').STLength()", 221893.87922929117)]
+    [DataRow("geography::Parse('POLYGON((0 0,1 0,1 1,0 1,0 0))').STLength()", 443770.9170048034)]
+    [DataRow("geography::Parse('MULTILINESTRING((0 0,1 1),(2 2,3 3))').STLength()", 313728.8967557313)]
+    [DataRow("geography::Parse('POINT(0 0)').STDistance(geography::Parse('POINT(0 1)'))", 110574.38849340599)]
+    [DataRow("geography::Parse('POINT(-122.35 47.62)').STDistance(geography::Parse('POINT(2.35 48.86)'))", 8064123.530150785)]
+    [DataRow("geography::Parse('POINT(0 0)').STDistance(geography::Parse('POINT(0 90)'))", 10001965.67018311)]
+    [DataRow("geography::Parse('POINT(139.7 35.7)').STDistance(geography::Parse('POINT(-74.0 40.7)'))", 10872930.202557612)]
+    public void GreatEllipticMeasures_MatchRealWithinItsOwnError(string expression, double realValue)
     {
-        var ex = Throws<NotSupportedException>(() => Eval(expression));
-        Assert.Contains("great elliptic", ex.Message);
+        var actual = (double)Eval(expression)!;
+        var relative = Math.Abs(actual - realValue) / realValue;
+        Assert.IsLessThan(1e-8, relative, $"relative error {relative:E3} exceeds 1e-8 (got {actual:R}, real {realValue:R})");
+    }
+
+    /// <summary>
+    /// The great elliptic arc is <i>longer</i> than the geodesic on an oblique
+    /// path and identical along a meridian. Seattle→Paris is where the two
+    /// separate by metres — the measurement that identified the curve.
+    /// </summary>
+    [TestMethod]
+    public void GreatEllipticArc_ExceedsTheGeodesicOnObliquePaths()
+    {
+        // Vincenty geodesic for the same pair, computed independently.
+        const double Geodesic = 8064120.203344;
+        var actual = (double)Eval("geography::Parse('POINT(-122.35 47.62)').STDistance(geography::Parse('POINT(2.35 48.86)'))")!;
+        Assert.IsGreaterThan(3.0, actual - Geodesic, $"expected the great elliptic arc to exceed the geodesic by ~3.3 m, got {actual - Geodesic:F3}");
+    }
+
+    /// <summary>Planar <c>STDistance</c> is straight-line.</summary>
+    [TestMethod]
+    public void PlanarDistance_IsEuclidean()
+        => AreEqual(5.0, Eval("geometry::Parse('POINT(0 0)').STDistance(geometry::Parse('POINT(3 4)'))"));
+
+    /// <summary>
+    /// Operands in different spatial reference systems aren't comparable and
+    /// an empty operand has no position — real answers NULL to both rather
+    /// than raising. Probe-confirmed.
+    /// </summary>
+    [TestMethod]
+    [DataRow("geometry::Parse('POINT(0 0)').STDistance(geometry::STGeomFromText('POINT(3 4)',4326))")]
+    [DataRow("geometry::Parse('POINT EMPTY').STDistance(geometry::Parse('POINT(3 4)'))")]
+    [DataRow("geometry::Parse('POINT(0 0)').STDistance(geometry::Parse('POINT EMPTY'))")]
+    public void Distance_UncomparableOperands_ReadNull(string expression)
+        => AreEqual(DBNull.Value, Eval(expression));
+
+    /// <summary>Ellipsoidal polygon area is the remaining round-earth measure.</summary>
+    [TestMethod]
+    public void GeographyArea_ReportsUnmodeled()
+    {
+        var ex = Throws<NotSupportedException>(() => Eval("geography::Parse('POLYGON((0 0,1 0,1 1,0 1,0 0))').STArea()"));
+        Assert.Contains("ellipsoidal polygon area", ex.Message);
     }
 }

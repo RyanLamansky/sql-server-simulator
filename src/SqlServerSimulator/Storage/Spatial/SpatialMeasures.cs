@@ -56,6 +56,27 @@ internal static class SpatialMeasures
         return total;
     }
 
+    /// <summary>
+    /// Round-earth length in metres: every figure's consecutive vertices
+    /// joined by great elliptic arcs, summed the same way the planar walk
+    /// sums straight segments. A polygon's length is its boundary here too.
+    /// </summary>
+    public static double GeographyLength(SpatialShape shape)
+    {
+        var total = 0.0;
+        if (shape.Type is not (SpatialShapeType.Point or SpatialShapeType.MultiPoint))
+        {
+            foreach (var figure in shape.Figures)
+            {
+                for (var i = 1; i < figure.Length; i++)
+                    total += SpatialGreatElliptic.Distance(figure[i - 1], figure[i]);
+            }
+        }
+        foreach (var child in shape.Children)
+            total += GeographyLength(child);
+        return total;
+    }
+
     /// <summary>Shoelace sum over a closed ring; the sign carries the ring's orientation.</summary>
     private static double SignedRingArea(SpatialCoordinate[] ring)
     {

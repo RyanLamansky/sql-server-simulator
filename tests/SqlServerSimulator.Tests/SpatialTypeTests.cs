@@ -105,14 +105,28 @@ public sealed class SpatialTypeTests
         AreEqual("POINT (-122.34 47.65)", sim.ExecuteScalar("select g.ToString() from dbo.loc"));
     }
 
+    /// <summary>
+    /// <c>STDistance</c> between two points evaluates along the great elliptic
+    /// arc; the value itself is pinned in <see cref="SpatialValueTests"/>.
+    /// </summary>
     [TestMethod]
-    public void GeographyMethodCall_STDistance_ThrowsAtExecute()
+    public void GeographyMethodCall_STDistance_MeasuresBetweenPoints()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.loc (id int, g geography)");
         _ = sim.ExecuteNonQuery("insert dbo.loc values (1, geography::Parse('POINT(0 0)'))");
-        var ex = Throws<NotSupportedException>(() => _ = sim.ExecuteScalar("select g.STDistance(geography::Parse('POINT(1 1)')) from dbo.loc"));
-        Assert.Contains("STDistance", ex.Message);
+        var distance = (double)sim.ExecuteScalar("select g.STDistance(geography::Parse('POINT(0 1)')) from dbo.loc")!;
+        Assert.IsGreaterThan(110574.0, distance);
+        Assert.IsLessThan(110575.0, distance);
+    }
+
+    /// <summary>Distance between shapes that aren't both points needs closest-approach geometry.</summary>
+    [TestMethod]
+    public void GeographyMethodCall_STDistance_NonPointShapes_ThrowsAtExecute()
+    {
+        var ex = Throws<NotSupportedException>(() => _ = new Simulation().ExecuteScalar(
+            "select geography::Parse('LINESTRING(0 0,1 1)').STDistance(geography::Parse('POINT(1 1)'))"));
+        Assert.Contains("closest-approach", ex.Message);
     }
 
     [TestMethod]

@@ -81,6 +81,7 @@ internal sealed class SpatialMethodCall : Expression
         ["STAsBinary"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Binary),
         ["STAsText"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text),
         ["STDimension"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer),
+        ["STDistance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Float),
         ["STEndPoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
         ["STExteriorRing"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial),
         ["STGeometryN"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
@@ -116,7 +117,6 @@ internal sealed class SpatialMethodCall : Expression
         ["STCrosses"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean),
         ["STDifference"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
         ["STDisjoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
-        ["STDistance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Float),
         ["STEnvelope"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial),
         ["STEquals"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
         ["STIntersection"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
@@ -251,6 +251,7 @@ internal sealed class SpatialMethodCall : Expression
             "STAsBinary" => SqlValue.FromVarbinary(SpatialWkb.Write(value, includeZM: false)),
             "STAsText" => Text(runtime, SpatialWktWriter.Write(value, includeZM: false)),
             "STDimension" => SqlValue.FromInt32(root.Dimension),
+            "STDistance" => EvaluateDistance(runtime, value, geography),
             "STEndPoint" => Component(value, type, EndpointOf(root, first: false)),
             "STExteriorRing" => Component(value, type, RingAt(root, 1, interiorOnly: false)),
             "STGeometryN" => Component(value, type, GeometryAt(root, Index(runtime, geography, IndexKind.Geometry))),
@@ -261,9 +262,9 @@ internal sealed class SpatialMethodCall : Expression
             "STIsRing" => root.Type == SpatialShapeType.LineString
                 ? SqlValue.FromBoolean(IsClosed(root) && IsSimpleRing(root))
                 : SqlValue.Null(SqlType.Bit),
-            "STLength" => geography
-                ? throw GeographyMeasureNotModeled("STLength")
-                : SqlValue.FromDouble(SpatialMeasures.Length(root)),
+            "STLength" => SqlValue.FromDouble(geography
+                ? SpatialMeasures.GeographyLength(root)
+                : SpatialMeasures.Length(root)),
             "STNumGeometries" => SqlValue.FromInt32(GeometryCount(root)),
             "STNumInteriorRing" => SqlValue.FromInt32(root.Type == SpatialShapeType.Polygon ? Math.Max(0, root.Figures.Length - 1) : 0),
             "STNumPoints" => SqlValue.FromInt32(root.PointCount),
@@ -277,6 +278,41 @@ internal sealed class SpatialMethodCall : Expression
             _ => throw new NotSupportedException(
                 $"Spatial instance {(member.Form == MemberForm.Method ? "method" : "property")} '.{this.memberName}' is not modeled."),
         };
+    }
+
+    /// <summary>
+    /// <c>STDistance</c> between two points — round-earth along the great
+    /// elliptic arc, planar as straight-line. A NULL or empty operand yields
+    /// NULL, matching real. Distance between shapes that aren't both points
+    /// needs closest-approach geometry and stays unmodeled.
+    /// </summary>
+    private SqlValue EvaluateDistance(RuntimeContext runtime, SpatialGeometry value, bool isGeography)
+    {
+        if (this.arguments.Length == 0)
+            return SqlValue.Null(SqlType.Float);
+        var other = this.arguments[0].Run(runtime);
+        if (other.IsNull || other.Type is not SpatialSqlType)
+            return SqlValue.Null(SqlType.Float);
+        var otherValue = other.AsSpatial;
+        // Operands in different spatial reference systems aren't comparable;
+        // real answers NULL rather than raising (probe-confirmed).
+        if (otherValue.Srid != value.Srid)
+            return SqlValue.Null(SqlType.Float);
+        var root = value.Root;
+        var otherRoot = otherValue.Root;
+        if (root.IsEmpty || otherRoot.IsEmpty)
+            return SqlValue.Null(SqlType.Float);
+        if (root.SinglePoint is not { } from || otherRoot.SinglePoint is not { } to)
+        {
+            throw new NotSupportedException(
+                "Spatial instance method '.STDistance()' is modeled only between two points; other shapes need closest-approach geometry.");
+        }
+
+        if (isGeography)
+            return SqlValue.FromDouble(SpatialGreatElliptic.Distance(from, to));
+        var dx = to.X - from.X;
+        var dy = to.Y - from.Y;
+        return SqlValue.FromDouble(Math.Sqrt((dx * dx) + (dy * dy)));
     }
 
     private static SqlValue Text(RuntimeContext runtime, string value) =>
@@ -357,7 +393,7 @@ internal sealed class SpatialMethodCall : Expression
     /// <c>docs/claude/spatial.md</c>.
     /// </summary>
     private static NotSupportedException GeographyMeasureNotModeled(string member) =>
-        new($"Spatial instance method '.{member}()' is not modeled for geography (it measures along the great elliptic arc).");
+        new($"Spatial instance method '.{member}()' is not modeled for geography (it needs ellipsoidal polygon area).");
 
     private static string[] OgcAncestry(SpatialShapeType type) => type switch
     {

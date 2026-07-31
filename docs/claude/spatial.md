@@ -216,9 +216,11 @@ A shape of the wrong dimension measures **0**, not NULL: a Point has neither len
 **Divergence**: real accumulates a GeometryCollection's area with visible float noise — `GEOMETRYCOLLECTION(POLYGON((0 0,0 2,2 2,2 0,0 0)), LINESTRING(0 0,3 4))` measures `3.9999999999999076` where the simulator returns exactly `4`.
 Matching it would mean reproducing real's internal summation order; the same noise shows in `STCentroid` and `STPointOnSurface`.
 
-## The great elliptic arc
+## Round-earth measures: the great elliptic arc
 
-Real does **not** measure `geography` along the geodesic — the shortest path on the ellipsoid — which is the assumption any stock implementation starts from.
+`geography`'s `STLength()` and point-to-point `STDistance()` measure along the **great elliptic arc** — the curve cut from the ellipsoid by the plane through the two points and the ellipsoid's centre.
+Real does **not** use the geodesic, which is the assumption any stock implementation starts from, and the difference is measurable.
+
 Measured 2026-07-31 against a Vincenty geodesic (accurate to well under a millimetre at these distances):
 
 | Path | Vincenty geodesic | Real | Difference |
@@ -228,18 +230,26 @@ Measured 2026-07-31 against a Vincenty geodesic (accurate to well under a millim
 | equator → pole | 10001965.729312 | 10001965.670183 | 59 mm |
 | Seattle → Paris | 8064120.203344 | 8064123.530151 | **3.3 m** |
 
-The pattern identifies the curve: along a meridian, and from equator to pole, the great elliptic arc and the geodesic **coincide**, so the difference is rounding.
-On an oblique intercontinental path they genuinely diverge, and the 3.3 m gap is far too large for a geodesic implementation error.
-Real is measuring along the **great elliptic arc** — the curve cut by the plane through the two points and the ellipsoid's centre.
+The pattern identifies the curve.
+Along a meridian, and from equator to pole, the great elliptic arc and the geodesic **coincide** — so the difference there is rounding.
+On an oblique intercontinental path they genuinely part, and the great elliptic arc is the **longer** of the two, which is the direction real's value sits.
+Recomputing Seattle → Paris as a great elliptic arc closes the 3.3 m gap to **3.2 mm**.
 
-Closing this means computing that arc rather than reaching for Karney or Vincenty: convert both endpoints to geocentric Cartesian, take the central plane through them, derive the semi-axes of the ellipse it cuts, and integrate its arc length between the endpoints (an incomplete elliptic integral of the second kind).
-Ellipsoidal polygon area for `STArea` is the companion problem.
-The reference values above are the acceptance test.
+**Implementation** (`Storage/Spatial/SpatialGreatElliptic.cs`): convert both endpoints to geocentric Cartesian on the ellipsoid; take the central plane through them; restrict the ellipsoid's quadratic form `diag(1/a², 1/a², 1/b²)` to that plane, giving a 2×2 symmetric matrix whose principal axes are the section ellipse's semi-axes; find each endpoint's parameter angle on that ellipse; integrate `√(a₁²sin²t + a₂²cos²t)` between them — an incomplete elliptic integral of the second kind — by composite 20-node Gauss-Legendre.
+
+**Accuracy**: the arc is computed exactly, so the residual against real is *real's own* approximation.
+Across the probed set the worst relative error is **5.9e-9** (59 mm over a quarter meridian); Seattle → Paris lands within 3.2 mm, Tokyo → New York within 0.1 mm, and the equator is exact because that section is a circle.
+Tests assert a 1e-8 relative tolerance rather than equality.
+
+`STDistance` is modeled **between two points**; other shape pairs need closest-approach geometry and raise.
+Operands with different SRIDs, and an empty operand, both read NULL rather than raising — matching real.
+
 
 ## Not modeled yet
 
-- **Round-earth measures** — `geography`'s `STLength` / `STArea` / `STDistance`, plus `STCentroid` / `STPointOnSurface` / `EnvelopeAngle` / `EnvelopeCenter` for both types. The planar `geometry` measures ship (see [Planar measures](#planar-measures)).
-  See [The great elliptic arc](#the-great-elliptic-arc) for what the round-earth ones actually require — it is not the geodesic.
+- **Ellipsoidal polygon area** — `geography`'s `STArea`. The round-earth *length* and point-to-point *distance* ship (see [Round-earth measures](#round-earth-measures-the-great-elliptic-arc)); area is the companion problem and needs the spherical-excess-plus-ellipsoidal-correction treatment rather than the arc integral.
+- **`STDistance` between shapes that aren't both points**, which needs closest-approach geometry.
+- **`STCentroid` / `STPointOnSurface` / `EnvelopeAngle` / `EnvelopeCenter`.**
 - **Topological predicates** — `STIntersects` / `STContains` / `STWithin` / `STDisjoint` / `STTouches` / `STCrosses` / `STOverlaps` / `STEquals` / `STRelate`, and the validity pair `STIsValid` / `STIsSimple`.
   Real raises **24144** from most methods on a stored-but-invalid instance, which is part of the same DE-9IM machinery.
 - **Constructive operations** — `STUnion` / `STIntersection` / `STDifference` / `STSymDifference` / `STBuffer` / `STConvexHull` / `STBoundary` / `STEnvelope` / `MakeValid` / `Reduce` / `Filter` / `ShortestLineTo` / `BufferWithTolerance` / `BufferWithCurves` / `CurveToLineWithTolerance`.
