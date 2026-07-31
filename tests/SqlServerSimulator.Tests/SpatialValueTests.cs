@@ -383,4 +383,52 @@ public sealed class SpatialValueTests
         var ex = Throws<NotSupportedException>(() => Eval("geometry::Parse('CIRCULARSTRING(0 0, 1 1, 2 0)').ToString()"));
         Assert.Contains("CircularString", ex.Message);
     }
+
+    /// <summary>
+    /// Planar <c>STArea()</c> and <c>STLength()</c> over every shape kind.
+    /// Probe-confirmed against SQL Server 2025 (2026-07-31); a polygon's
+    /// length is its boundary, and a shape of the wrong dimension measures 0
+    /// rather than NULL.
+    /// </summary>
+    [TestMethod]
+    [DataRow("geometry::Parse('POLYGON((0 0,0 3,3 3,3 0,0 0))').STArea()", 9.0)]
+    [DataRow("geometry::Parse('POLYGON((0 0,0 3,3 3,3 0,0 0),(1 1,1 2,2 2,2 1,1 1))').STArea()", 8.0)]
+    [DataRow("geometry::Parse('POLYGON((0 0,4 0,4 3,0 0))').STArea()", 6.0)]
+    [DataRow("geometry::Parse('MULTIPOLYGON(((0 0,0 2,2 2,2 0,0 0)),((5 5,5 6,6 6,6 5,5 5)))').STArea()", 5.0)]
+    [DataRow("geometry::Parse('POINT(1 2)').STArea()", 0.0)]
+    [DataRow("geometry::Parse('POLYGON EMPTY').STArea()", 0.0)]
+    [DataRow("geometry::Parse('LINESTRING(0 0,3 4)').STLength()", 5.0)]
+    [DataRow("geometry::Parse('LINESTRING(0 0,3 4,3 0)').STLength()", 9.0)]
+    [DataRow("geometry::Parse('POLYGON((0 0,0 3,3 3,3 0,0 0))').STLength()", 12.0)]
+    [DataRow("geometry::Parse('MULTILINESTRING((0 0,3 4),(0 0,0 5))').STLength()", 10.0)]
+    [DataRow("geometry::Parse('GEOMETRYCOLLECTION(POLYGON((0 0,0 2,2 2,2 0,0 0)),LINESTRING(0 0,3 4))').STLength()", 13.0)]
+    [DataRow("geometry::Parse('POINT(1 2)').STLength()", 0.0)]
+    [DataRow("geometry::Parse('LINESTRING EMPTY').STLength()", 0.0)]
+    public void PlanarMeasures_MatchReal(string expression, double expected)
+        => AreEqual(expected, Eval(expression));
+
+    /// <summary>
+    /// Ring orientation doesn't change a planar area — the shoelace sum is
+    /// taken per ring in absolute value, so a clockwise polygon measures the
+    /// same as the counter-clockwise spelling of the same shape.
+    /// </summary>
+    [TestMethod]
+    public void PlanarArea_IgnoresRingOrientation()
+        => AreEqual(
+            Eval("geometry::Parse('POLYGON((0 0,0 3,3 3,3 0,0 0))').STArea()"),
+            Eval("geometry::Parse('POLYGON((0 0,3 0,3 3,0 3,0 0))').STArea()"));
+
+    /// <summary>
+    /// The round-earth measures stay unmodeled: real measures <c>geography</c>
+    /// along the great elliptic arc, which is a different curve from the
+    /// geodesic and not a coordinate swap over the planar code.
+    /// </summary>
+    [TestMethod]
+    [DataRow("geography::Parse('LINESTRING(0 0, 0 1)').STLength()")]
+    [DataRow("geography::Parse('POLYGON((0 0,1 0,1 1,0 1,0 0))').STArea()")]
+    public void GeographyMeasures_ReportUnmodeled(string expression)
+    {
+        var ex = Throws<NotSupportedException>(() => Eval(expression));
+        Assert.Contains("great elliptic", ex.Message);
+    }
 }

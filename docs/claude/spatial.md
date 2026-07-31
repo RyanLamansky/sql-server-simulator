@@ -206,10 +206,40 @@ Unspecified GRIDS levels surface as NULL; `level_*_grid_desc` translates 1/2/3 c
 
 `sys.types` rows for geography/geometry carry `system_type_id=240`, `user_type_id=130` / `129`; the `ResolveSimpleKeyword` arm + `GetSysColumnMetadata` `SpatialSqlType => (-1, 0, 0)` wiring is what lets `CREATE TABLE (g geography)` accept them.
 
+## Planar measures
+
+`geometry`'s `STArea()` and `STLength()` evaluate in `Storage/Spatial/SpatialMeasures.cs`, exactly and for every shape kind (probe-confirmed 2026-07-31).
+A polygon's area is its exterior ring less its interior rings, summed over Multi\* and GeometryCollection members; ring orientation is irrelevant because each ring's shoelace sum is taken absolute.
+A polygon's **length is its boundary** — the perimeter of all its rings — so the ring walk is shared with the line walk.
+A shape of the wrong dimension measures **0**, not NULL: a Point has neither length nor area.
+
+**Divergence**: real accumulates a GeometryCollection's area with visible float noise — `GEOMETRYCOLLECTION(POLYGON((0 0,0 2,2 2,2 0,0 0)), LINESTRING(0 0,3 4))` measures `3.9999999999999076` where the simulator returns exactly `4`.
+Matching it would mean reproducing real's internal summation order; the same noise shows in `STCentroid` and `STPointOnSurface`.
+
+## The great elliptic arc
+
+Real does **not** measure `geography` along the geodesic — the shortest path on the ellipsoid — which is the assumption any stock implementation starts from.
+Measured 2026-07-31 against a Vincenty geodesic (accurate to well under a millimetre at these distances):
+
+| Path | Vincenty geodesic | Real | Difference |
+| --- | --- | --- | --- |
+| (0,0) → (1,0), meridian | 110574.388558 | 110574.388493 | 0.065 mm |
+| (0,0) → (1,1), oblique | 156899.568291 | 156899.567965 | 0.33 mm |
+| equator → pole | 10001965.729312 | 10001965.670183 | 59 mm |
+| Seattle → Paris | 8064120.203344 | 8064123.530151 | **3.3 m** |
+
+The pattern identifies the curve: along a meridian, and from equator to pole, the great elliptic arc and the geodesic **coincide**, so the difference is rounding.
+On an oblique intercontinental path they genuinely diverge, and the 3.3 m gap is far too large for a geodesic implementation error.
+Real is measuring along the **great elliptic arc** — the curve cut by the plane through the two points and the ellipsoid's centre.
+
+Closing this means computing that arc rather than reaching for Karney or Vincenty: convert both endpoints to geocentric Cartesian, take the central plane through them, derive the semi-axes of the ellipse it cuts, and integrate its arc length between the endpoints (an incomplete elliptic integral of the second kind).
+Ellipsoidal polygon area for `STArea` is the companion problem.
+The reference values above are the acceptance test.
+
 ## Not modeled yet
 
-- **Measures** — `STArea` / `STLength` / `STDistance` / `STCentroid` / `STPointOnSurface` / `EnvelopeAngle` / `EnvelopeCenter`.
-  Real computes geography measures on the true WGS 84 ellipsoid, not a sphere (probe-confirmed: one degree of latitude at the equator is 110574.38849340599 m, the ellipsoidal meridian arc), so closing this needs a geodesic implementation rather than spherical trigonometry.
+- **Round-earth measures** — `geography`'s `STLength` / `STArea` / `STDistance`, plus `STCentroid` / `STPointOnSurface` / `EnvelopeAngle` / `EnvelopeCenter` for both types. The planar `geometry` measures ship (see [Planar measures](#planar-measures)).
+  See [The great elliptic arc](#the-great-elliptic-arc) for what the round-earth ones actually require — it is not the geodesic.
 - **Topological predicates** — `STIntersects` / `STContains` / `STWithin` / `STDisjoint` / `STTouches` / `STCrosses` / `STOverlaps` / `STEquals` / `STRelate`, and the validity pair `STIsValid` / `STIsSimple`.
   Real raises **24144** from most methods on a stored-but-invalid instance, which is part of the same DE-9IM machinery.
 - **Constructive operations** — `STUnion` / `STIntersection` / `STDifference` / `STSymDifference` / `STBuffer` / `STConvexHull` / `STBoundary` / `STEnvelope` / `MakeValid` / `Reduce` / `Filter` / `ShortestLineTo` / `BufferWithTolerance` / `BufferWithCurves` / `CurveToLineWithTolerance`.

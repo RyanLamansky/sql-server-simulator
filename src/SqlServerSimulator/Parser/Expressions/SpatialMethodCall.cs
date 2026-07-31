@@ -245,6 +245,9 @@ internal sealed class SpatialMethodCall : Expression
             "NumRings" => root.Type == SpatialShapeType.Polygon ? SqlValue.FromInt32(root.Figures.Length) : SqlValue.Null(SqlType.Int32),
             "ReorientObject" => SqlValue.FromSpatial(new SpatialGeometry(value.Srid, Reorient(root)), geography),
             "RingN" => Component(value, type, RingAt(root, Index(runtime, geography, IndexKind.Ring), interiorOnly: false)),
+            "STArea" => geography
+                ? throw GeographyMeasureNotModeled("STArea")
+                : SqlValue.FromDouble(SpatialMeasures.Area(root)),
             "STAsBinary" => SqlValue.FromVarbinary(SpatialWkb.Write(value, includeZM: false)),
             "STAsText" => Text(runtime, SpatialWktWriter.Write(value, includeZM: false)),
             "STDimension" => SqlValue.FromInt32(root.Dimension),
@@ -258,6 +261,9 @@ internal sealed class SpatialMethodCall : Expression
             "STIsRing" => root.Type == SpatialShapeType.LineString
                 ? SqlValue.FromBoolean(IsClosed(root) && IsSimpleRing(root))
                 : SqlValue.Null(SqlType.Bit),
+            "STLength" => geography
+                ? throw GeographyMeasureNotModeled("STLength")
+                : SqlValue.FromDouble(SpatialMeasures.Length(root)),
             "STNumGeometries" => SqlValue.FromInt32(GeometryCount(root)),
             "STNumInteriorRing" => SqlValue.FromInt32(root.Type == SpatialShapeType.Polygon ? Math.Max(0, root.Figures.Length - 1) : 0),
             "STNumPoints" => SqlValue.FromInt32(root.PointCount),
@@ -344,6 +350,15 @@ internal sealed class SpatialMethodCall : Expression
     /// kind plus every supertype. The root is <c>Geometry</c> for both spatial
     /// types; <c>Geography</c> is not a name real recognizes here.
     /// </summary>
+    /// <summary>
+    /// The round-earth measures need the great elliptic arc real measures
+    /// along — not the geodesic, and not a coordinate swap over the planar
+    /// code — so they stay unmodeled while the planar ones ship. See
+    /// <c>docs/claude/spatial.md</c>.
+    /// </summary>
+    private static NotSupportedException GeographyMeasureNotModeled(string member) =>
+        new($"Spatial instance method '.{member}()' is not modeled for geography (it measures along the great elliptic arc).");
+
     private static string[] OgcAncestry(SpatialShapeType type) => type switch
     {
         SpatialShapeType.Point => ["Point", "Geometry"],
