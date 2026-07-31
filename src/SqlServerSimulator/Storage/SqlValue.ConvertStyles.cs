@@ -413,13 +413,29 @@ internal readonly partial struct SqlValue
     /// digits; style 2 emits bare <c>"HHHH…"</c>. Any other style raises
     /// Msg 281 with <c>"varbinary"</c> as the source family name.
     /// </summary>
+    /// <summary>
+    /// Reinterprets bytes as UTF-16 LE, zero-padding a dangling odd byte into
+    /// a final character rather than letting the decoder substitute U+FFFD.
+    /// Probe-confirmed: real turns <c>0x010203</c> into two characters that
+    /// convert back to <c>0x01020300</c>, so the odd byte survives the round
+    /// trip where a replacement character would have destroyed it.
+    /// </summary>
+    private static string DecodeUtf16WithOddTailPadded(byte[] bytes)
+    {
+        if (bytes.Length % 2 == 0)
+            return Encoding.Unicode.GetString(bytes);
+        var padded = new byte[bytes.Length + 1];
+        bytes.CopyTo(padded, 0);
+        return Encoding.Unicode.GetString(padded);
+    }
+
     internal SqlValue CoerceBinaryToStringWithStyle(SqlType target, int style)
     {
         var bytes = this.AsBytes;
         var formatted = style switch
         {
             0 => target is NVarcharSqlType or NCharSqlType or SystemNameSqlType
-                ? Encoding.Unicode.GetString(bytes)
+                ? DecodeUtf16WithOddTailPadded(bytes)
                 : (target.Collation ?? Collation.Baseline).StorageEncoding.GetString(bytes),
             1 => "0x" + Convert.ToHexString(bytes),
             2 => Convert.ToHexString(bytes),

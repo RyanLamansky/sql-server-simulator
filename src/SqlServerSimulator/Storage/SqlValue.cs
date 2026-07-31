@@ -96,11 +96,22 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return new(type, 0, value, isNull: false);
     }
 
-    /// <summary>Non-NULL SQL <c>xml</c> value (encoded identically to <c>nvarchar(MAX)</c>; identity preserved through <see cref="SqlType.Xml"/>).</summary>
+    /// <summary>
+    /// Non-NULL SQL <c>xml</c> value (encoded identically to <c>nvarchar(MAX)</c>;
+    /// identity preserved through <see cref="SqlType.Xml"/>).
+    /// </summary>
+    /// <remarks>
+    /// A leading byte-order mark is dropped, which is what real SQL Server does
+    /// whenever a string becomes <c>xml</c> — probe-confirmed across a literal
+    /// INSERT, a parameter, <c>SqlBulkCopy</c> and an explicit CAST, and
+    /// specific to <c>xml</c>: an <c>nvarchar</c> column keeps the mark. Every
+    /// path that builds an xml value funnels through here, so the strip lives
+    /// at the constructor rather than at each conversion site.
+    /// </remarks>
     public static SqlValue FromXml(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
-        return new(SqlType.Xml, 0, value, isNull: false);
+        return new(SqlType.Xml, 0, value is ['\uFEFF', ..] ? value[1..] : value, isNull: false);
     }
 
     /// <summary>

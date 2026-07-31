@@ -150,6 +150,12 @@ Escaping is position-dependent:
 EXPLICIT mode, the `TYPE` option (typed-node embedding — the untyped escaped-text nesting is real's default and works), AUTO join-nesting, `BINARY BASE64`/`HEX` / `XMLSCHEMA` / `WITH NAMESPACES`, and PATH node functions beyond `text()`/`data()` (`comment()`, `processing-instruction()`, `node()`, `*`, `@*`) all raise `NotSupportedException` (or the noted Msg).
 See [`backlog.md`](backlog.md).
 
+## Leading byte-order mark
+
+A string that becomes `xml` loses a leading U+FEFF, wherever the conversion happens — a literal INSERT, a parameter, an explicit `CAST`, `SqlBulkCopy` and a TVP row all behave the same, probe-confirmed against SQL Server 2025 (2026-07-30).
+The same mark in an `nvarchar` column survives, so this belongs to the type conversion rather than to any input path; the strip therefore lives in `SqlValue.FromXml`, which every xml value funnels through.
+A mark that isn't leading is content and stays.
+
 ## Known gaps
 
 - **`.modify()`** XML-DML (`insert` / `replace value of` / `delete`) + its `UPDATE … SET` statement integration.

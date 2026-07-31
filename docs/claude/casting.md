@@ -1,5 +1,10 @@
 # CAST / CONVERT family
 
+## Odd-length binary reinterpreted as `nvarchar`
+
+`CAST(<varbinary> AS nvarchar)` reads the bytes as UTF-16 LE, and an odd byte count **zero-pads the dangling byte into a final character** rather than substituting U+FFFD — so `0x010203` converts back to `0x01020300` and the byte survives the round trip (probe-confirmed 2026-07-30).
+Substituting a replacement character would destroy it irreversibly.
+
 ## CAST/CONVERT to narrow `varchar` / `nvarchar` / `varbinary`
 Per-source-category rule applied after `SqlValue.CoerceTo`:
 - String / varbinary / date-time-family source → silent truncation.

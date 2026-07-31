@@ -501,4 +501,75 @@ public sealed class BulkCopyTests
         AreEqual(guid, reader.GetGuid(8));
         AreEqual(new DateTime(2020, 12, 31), reader.GetDateTime(9));
     }
+
+    /// <summary>
+    /// The temporal, ANSI-string, xml and money families a client can send in
+    /// a BulkLoadBCP stream. Every value here round-tripped identically
+    /// through a real SQL Server 2025 bulk copy (2026-07-30).
+    /// </summary>
+    [TestMethod]
+    public async Task VariablePrecisionAndAnsiTypes_RoundTripOverTheWire()
+    {
+        var (_, listener, connection) = await SetUpAsync(
+            """
+            create table t (
+              id int, t0 time(0), t3 time(3), t7 time(7), sdt smalldatetime,
+              o3 datetimeoffset(3), o7 datetimeoffset(7), x xml, vc varchar(40), ch char(6), sm smallmoney)
+            """,
+            TestContext.CancellationToken);
+        await using var listenerScope = listener;
+        await using var connectionScope = connection;
+
+        var t0 = new TimeSpan(0, 13, 45, 12);
+        var t3 = new TimeSpan(0, 13, 45, 12, 345);
+        var t7 = t3.Add(TimeSpan.FromTicks(6789));
+        var small = new DateTime(2024, 3, 15, 13, 45, 0);
+        var o3 = new DateTimeOffset(new DateTime(2024, 3, 15, 13, 45, 12, 345), TimeSpan.FromMinutes(-480));
+        var o7 = new DateTimeOffset(new DateTime(2024, 3, 15, 13, 45, 12, 345).AddTicks(6789), TimeSpan.FromMinutes(330));
+
+        var data = Table(
+            ("id", typeof(int)), ("t0", typeof(TimeSpan)), ("t3", typeof(TimeSpan)), ("t7", typeof(TimeSpan)),
+            ("sdt", typeof(DateTime)), ("o3", typeof(DateTimeOffset)), ("o7", typeof(DateTimeOffset)),
+            ("x", typeof(string)), ("vc", typeof(string)), ("ch", typeof(string)), ("sm", typeof(decimal)));
+        _ = data.Rows.Add(1, t0, t3, t7, small, o3, o7, "<r a=\"1\"><c>x</c></r>", "café ansi", "abc", 1.25m);
+        using (var bulk = new SqlBulkCopy(connection) { DestinationTableName = "t" })
+            await bulk.WriteToServerAsync(data, TestContext.CancellationToken);
+
+        await using var read = new SqlCommand("select t0, t3, t7, sdt, o3, o7, cast(x as nvarchar(max)), vc, ch, sm from t", connection);
+        await using var reader = await read.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual(t0, reader.GetValue(0));
+        AreEqual(t3, reader.GetValue(1));
+        AreEqual(t7, reader.GetValue(2));
+        AreEqual(small, reader.GetDateTime(3));
+        AreEqual(o3, reader.GetValue(4));
+        AreEqual(o7, reader.GetValue(5));
+        AreEqual("<r a=\"1\"><c>x</c></r>", reader.GetString(6));
+        AreEqual("café ansi", reader.GetString(7));
+        AreEqual("abc   ", reader.GetString(8));
+        AreEqual(1.25m, reader.GetDecimal(9));
+    }
+
+    /// <summary>
+    /// A byte-order mark leading an <c>xml</c> value is dropped, matching real
+    /// — while the same mark in an <c>nvarchar</c> column survives.
+    /// Probe-confirmed for bulk copy alongside the literal, parameter and CAST
+    /// paths (see <c>XmlTests</c>).
+    /// </summary>
+    [TestMethod]
+    public async Task BomLeadingXml_IsStripped_WhereNVarcharKeepsIt()
+    {
+        var (_, listener, connection) = await SetUpAsync(
+            "create table t (id int, x xml, nv nvarchar(max))", TestContext.CancellationToken);
+        await using var listenerScope = listener;
+        await using var connectionScope = connection;
+
+        var data = Table(("id", typeof(int)), ("x", typeof(string)), ("nv", typeof(string)));
+        _ = data.Rows.Add(1, "\uFEFF<a/>", "\uFEFF<a/>");
+        using (var bulk = new SqlBulkCopy(connection) { DestinationTableName = "t" })
+            await bulk.WriteToServerAsync(data, TestContext.CancellationToken);
+
+        AreEqual("<a/>", Scalar(connection, "select cast(x as nvarchar(max)) from t"));
+        AreEqual("\uFEFF<a/>", Scalar(connection, "select nv from t"));
+    }
 }

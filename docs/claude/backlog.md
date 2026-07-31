@@ -157,6 +157,13 @@ Low priority / niche — simulatable (as placeholder constants or a small model)
   The faithful fix splits the per-`(p, s)` `DecimalSqlType` singleton by declared keyword, forking the reference-identity space the row encoder, promote paths, and catalog surfaces key on — a medium refactor whose blast radius far exceeds the one metadata string it corrects, so it's deliberately deferred.
   Deliberate exclusion, don't re-pitch: `msdb.dbo.syspolicy_configuration.current_value` stays `nvarchar` — it's a *view-body* projection (not a resource column) mixing `int` rows with a `binary` GUID row, every consumer reads a single named row and CASTs it, so a variant migration there would only touch the view SQL text for no observable gain.
 
+## Fidelity gaps found alongside the above
+
+- **`FOREIGN KEY` on a PERSISTED computed column** — real accepts it (probe-confirmed 2026-07-30: the constraint enforces and the FK column resolves), and rejects only the non-persisted form with **Msg 1764**.
+  The simulator rejects both with Msg 207 (`Invalid column name`), because the FK column resolver doesn't see computed columns at all.
+  Closing it means letting the resolver bind a persisted computed column and adding the Msg 1764 rejection for the non-persisted one.
+  → [`foreign-keys.md`](foreign-keys.md).
+
 ## Over-permissive register
 
 The simulator accepting what real rejects is the more dangerous divergence direction — the query passes here and fails in production — and it is invisible to any sim-only failure list (see the reverse-delta note under the Django shakedown).
@@ -242,13 +249,11 @@ Measured 2026-07-30 (`dotnet test --collect:"XPlat Code Coverage"` → reportgen
 These are reachable code paths no test exercises — not gaps in behavior, gaps in the safety net.
 Of the ~990 lines in fully-uncovered methods, ~376 are `DebugDisplay` / `ToString` debugger helpers and ~48 are `Stream` boilerplate overrides, both of which are deliberately not worth testing; what remains is this list.
 
-- **`sql_variant` over the wire** carrying `datetime2` / `datetimeoffset` / `smalldatetime` / an ANSI string (`TdsWireValue`).
-- **`TdsColumnDecoder`'s `time` / `xml` / `money` / `smalldatetime` / `datetime` / ANSI-string readers** — the remote-read path, so a linked-server round-trip of those types would cover them.
-- **`sp_cursorprepare`** (`TdsSession.CursorPrepare`).
-- **The foreign-key scan fallback** (`FkTuplesMatch` + `EnumerateChildRows`) — reached only when `TryMapFkColumnsToStorage` fails, so the seek path covers every tested FK.
+- **`sp_cursorprepare`** (`TdsSession.CursorPrepare`) — SqlClient issues the `sp_cursoropen` family instead, so reaching it needs a driver that prepares a cursor explicitly.
+- **The foreign-key scan fallback** (`FkTuplesMatch` + `EnumerateChildRows`) — **structurally unreachable**, not merely untested: it runs only when an FK column has no storage slot, which is true only of a non-persisted computed column, and real rejects one in a FOREIGN KEY (Msg 1764). Left in place as a guard on the storage layout rather than deleted.
 - **`ClrAssemblyMetadata.ComputePublicKeyToken` / `DescribeReference`** — strong-named assembly identity and the assembly-reference description.
 
-Covered since the first measurement, each of which turned out to be hiding a behavior bug rather than just a missing test: the BCP temporal family (DacFx writes `time` / `datetime2` / `datetimeoffset` at maximum width scaled to 7 digits, and `datetimeoffset` in UTC — reading them per-precision failed the entire table's data file, invisible while only precision-7 fixtures existed), `INFORMATION_SCHEMA.PARAMETERS` (no scalar-function return row, wrong `CHARACTER_MAXIMUM_LENGTH` rule, `sysname` not resolved to its base type), the DYNAMIC cursor's scroll directions (`DECLARE … CURSOR DYNAMIC` was treated as forward-only, `RELATIVE` was rejected outright, and the forward-only rejection used Msg 16925's wording instead of Msg 16911's), and the public `SimulatedDbParameterCollection` indexers plus `SimulatedSqlResultSet.HasRows`.
+Covered since the first measurement, each of which turned out to be hiding a behavior bug rather than just a missing test: `SqlBulkCopy` / TVP rows carrying the `time` / `smalldatetime` / `datetimeoffset` / ANSI-string / `xml` families (which is where the xml byte-order-mark strip surfaced), the BCP temporal family (DacFx writes `time` / `datetime2` / `datetimeoffset` at maximum width scaled to 7 digits, and `datetimeoffset` in UTC — reading them per-precision failed the entire table's data file, invisible while only precision-7 fixtures existed), `INFORMATION_SCHEMA.PARAMETERS` (no scalar-function return row, wrong `CHARACTER_MAXIMUM_LENGTH` rule, `sysname` not resolved to its base type), the DYNAMIC cursor's scroll directions (`DECLARE … CURSOR DYNAMIC` was treated as forward-only, `RELATIVE` was rejected outright, and the forward-only rejection used Msg 16925's wording instead of Msg 16911's), and the public `SimulatedDbParameterCollection` indexers plus `SimulatedSqlResultSet.HasRows`.
 
 Worth re-measuring after a large bundle rather than routinely, and worth acting on when it does run: **nothing this pass surfaced was merely an untested-but-correct path.**
 It found two pieces of dead code — a duplicated MERGE type resolver, and an unreachable ON-UPDATE-CASCADE branch whose stub threw an exception saying so — and every gap that was then covered turned out to be hiding a behavior bug.

@@ -609,6 +609,9 @@ Probe-confirmed against SQL Server 2025:
   The `SqlValue` variant arms (`CompareTo` / `Equals` / `GetHashCode`) implement the rules, so ORDER BY, GROUP BY, DISTINCT, MIN/MAX, and hash joins all inherit them via `SqlValueKey`; a variant-vs-base equi-join key promotes to `sql_variant` (`Promote` → `CoerceTo` wraps the base side), so the hash fast path keys by the same family semantics.
   Oracle: `SqlVariantOrderingTests` (in-process; the one-side-variant comparison tests live there too).
 
+**Conversion to text uses style 0 for a temporal payload**, where the same base type converted directly uses its own ISO default — a `time` reads `1:45PM` through a variant and `13:45:12.345` without one, and `date` / `datetime2` / `datetimeoffset` behave the same way (probe-confirmed 2026-07-30).
+`datetime` and `smalldatetime` already default to style 0, so both routes agree there.
+
 ## Built-in TVF: `STRING_SPLIT`
 `STRING_SPLIT(input, separator [, enable_ordinal])` dispatches in `ParseSingleFromSource` alongside `OPENJSON` — case-insensitive name match before generic name resolution.
 Yields one row per substring split on the single-character separator.

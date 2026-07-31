@@ -365,30 +365,43 @@ internal sealed class TdsRpcRequest
         return new TdsRpcParameter(name, isOutput, DbType.DateTimeOffset, value, scale: scale);
     }
 
+    /// <summary>
+    /// DATETIMN carries both legacy temporal types, told apart by the declared
+    /// length: 4 bytes is <c>smalldatetime</c>, 8 is <c>datetime</c>.
+    /// </summary>
+    /// <remarks>
+    /// The 4-byte form binds a pre-built <see cref="SqlValue"/> rather than a
+    /// CLR <see cref="DateTime"/> plus <see cref="DbType.DateTime"/>, because
+    /// no <see cref="DbType"/> names <c>smalldatetime</c> and the distinction
+    /// is observable: storing the parameter into a <c>sql_variant</c> column
+    /// keeps <c>smalldatetime</c> as the base type on real, where a widened
+    /// <c>datetime</c> would report the wrong one.
+    /// </remarks>
     private static TdsRpcParameter DecodeDateTimeN(TdsValueReader reader, string name, bool isOutput)
     {
         var declaredLength = reader.ReadByte();
+        var isSmall = declaredLength == 4;
         var length = reader.ReadByte();
         if (length == 0)
-            return new TdsRpcParameter(name, isOutput, DbType.DateTime, null);
+        {
+            return isSmall
+                ? new TdsRpcParameter(name, isOutput, DbType.DateTime, SqlValue.Null(SqlType.SmallDateTime))
+                : new TdsRpcParameter(name, isOutput, DbType.DateTime, null);
+        }
 
         var payload = reader.ReadBytes(length);
-        DateTime value;
-        if (declaredLength == 4)
+        if (isSmall)
         {
-            var days = BinaryPrimitives.ReadUInt16LittleEndian(payload);
+            var smallDays = BinaryPrimitives.ReadUInt16LittleEndian(payload);
             var minutes = BinaryPrimitives.ReadUInt16LittleEndian(payload[2..]);
-            value = TdsWireValue.Epoch1900.AddDays(days).AddMinutes(minutes);
-        }
-        else
-        {
-            var days = BinaryPrimitives.ReadInt32LittleEndian(payload);
-            var thirds = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
-            var ticks = (((long)thirds * 10_000_000) + 150) / 300;
-            value = TdsWireValue.Epoch1900.AddDays(days).AddTicks(ticks);
+            var small = TdsWireValue.Epoch1900.AddDays(smallDays).AddMinutes(minutes);
+            return new TdsRpcParameter(name, isOutput, DbType.DateTime, SqlValue.FromSmallDateTime(small));
         }
 
-        return new TdsRpcParameter(name, isOutput, DbType.DateTime, value);
+        var days = BinaryPrimitives.ReadInt32LittleEndian(payload);
+        var thirds = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
+        var ticks = (((long)thirds * 10_000_000) + 150) / 300;
+        return new TdsRpcParameter(name, isOutput, DbType.DateTime, TdsWireValue.Epoch1900.AddDays(days).AddTicks(ticks));
     }
 
     private static TdsRpcParameter DecodeAnsiString(TdsValueReader reader, string name, bool isOutput, DbType dbType)

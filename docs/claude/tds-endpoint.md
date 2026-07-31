@@ -335,6 +335,9 @@ Commit (7) / rollback (8) map to the transaction object and answer ENVCHANGE 9 /
 ## Type wire codec
 
 Nullable wire variants throughout (INTN 0x26, BITN 0x68, FLTN 0x6D, MONEYN 0x6E, DATETIMN 0x6F, DECIMALN 0x6A, GUIDN 0x24) — legal for non-nullable data.
+**DATETIMN carries two types**, told apart by declared length: 4 bytes is `smalldatetime`, 8 is `datetime`.
+The 4-byte form binds a pre-built `SqlValue` rather than a CLR `DateTime` plus `DbType.DateTime`, since no `DbType` names `smalldatetime` and the difference is observable — storing such a parameter into a `sql_variant` column keeps `smalldatetime` as the base type on real, where a widened `datetime` reports the wrong one (probe-confirmed 2026-07-30).
+That is the same pre-built-value channel the CLR-UDT and `sql_variant` RPC parameters take.
 Fixed usertype 0 except rowversion's 0x50.
 Specifics:
 

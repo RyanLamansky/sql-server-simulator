@@ -247,6 +247,12 @@ partial class Simulation
     // child seek is index-gated by nothing more than "are the columns stored,"
     // so it amortizes across repeated cascades; otherwise one full child scan,
     // matching every row against every parent key.
+    //
+    // The scan is defensive rather than live: only a non-persisted computed
+    // column lacks a storage slot, and real rejects one in a FOREIGN KEY with
+    // Msg 1764 (a PERSISTED computed column is allowed and does have a slot),
+    // so no valid schema reaches it. Kept because the seek path's precondition
+    // is a property of the storage layout rather than of the constraint.
     private static IEnumerable<(int PageIndex, int SlotIndex, SqlValue[] ChildFull, int ParentIndex)> MatchChildRowsToParents(
         ForeignKey fk, IReadOnlyList<SqlValue[]> parentKeyRows)
     {

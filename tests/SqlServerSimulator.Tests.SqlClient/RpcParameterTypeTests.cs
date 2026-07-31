@@ -226,4 +226,53 @@ public sealed class RpcParameterTypeTests
         AreEqual(marker, reader.GetString(1));
         AreEqual("ok", reader.GetString(2));
     }
+
+    /// <summary>
+    /// DATETIMN's 4-byte form is <c>smalldatetime</c>, and the distinction
+    /// survives into a <c>sql_variant</c> destination — real reports
+    /// <c>smalldatetime</c> as the base type there, which a parameter widened
+    /// to <c>datetime</c> would get wrong. No <see cref="DbType"/> names the
+    /// type, so the decoder binds a pre-built value instead.
+    /// Probe-confirmed 2026-07-30.
+    /// </summary>
+    [TestMethod]
+    public async Task SmallDateTimeParameter_KeepsItsBaseTypeInAVariant()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table t (val sql_variant)");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        await using (var insert = new SqlCommand("insert t values (@v)", connection))
+        {
+            _ = insert.Parameters.Add(new SqlParameter("@v", SqlDbType.SmallDateTime) { Value = new DateTime(2024, 3, 15, 13, 45, 0) });
+            _ = await insert.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        }
+
+        await using var read = new SqlCommand(
+            "select cast(sql_variant_property(val, 'BaseType') as varchar(30)), cast(val as nvarchar(60)) from t", connection);
+        await using var reader = await read.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual("smalldatetime", reader.GetString(0));
+        AreEqual("Mar 15 2024  1:45PM", reader.GetString(1));
+    }
+
+    /// <summary>A NULL <c>smalldatetime</c> parameter binds as that type too.</summary>
+    [TestMethod]
+    public async Task NullSmallDateTimeParameter_BindsAsSmallDateTime()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table t (val smalldatetime null)");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        await using (var insert = new SqlCommand("insert t values (@v)", connection))
+        {
+            _ = insert.Parameters.Add(new SqlParameter("@v", SqlDbType.SmallDateTime) { Value = DBNull.Value });
+            _ = await insert.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        }
+
+        await using var read = new SqlCommand("select count(*) from t where val is null", connection);
+        AreEqual(1, await read.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
 }

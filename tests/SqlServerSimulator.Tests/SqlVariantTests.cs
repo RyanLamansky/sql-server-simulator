@@ -131,4 +131,45 @@ public sealed class SqlVariantTests
         AreEqual("Developer Edition (64-bit)", reader.GetValue(0));
         AreEqual("nvarchar", reader.GetValue(1));
     }
+
+    /// <summary>
+    /// Converting a variant's temporal payload to text uses style 0, where the
+    /// same base type converted directly uses its own ISO default — so a
+    /// <c>time</c> reads <c>1:45PM</c> through a variant and
+    /// <c>13:45:12.345</c> without one. Probe-confirmed against SQL Server
+    /// 2025 (2026-07-30) for every temporal base type; <c>datetime</c> and
+    /// <c>smalldatetime</c> already default to style 0, so both routes agree
+    /// there.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast('13:45:12.345' as time(3))", "13:45:12.345", "1:45PM")]
+    [DataRow("cast('2024-03-15 13:45:12.345 +05:30' as datetimeoffset(3))", "2024-03-15 13:45:12.345 +05:30", "Mar 15 2024  1:45PM +05:30")]
+    [DataRow("cast('2024-03-15 13:45:12.345' as datetime2(3))", "2024-03-15 13:45:12.345", "Mar 15 2024  1:45PM")]
+    [DataRow("cast('2024-03-15' as date)", "2024-03-15", "Mar 15 2024")]
+    [DataRow("cast('2024-03-15 13:45:12.345' as datetime)", "Mar 15 2024  1:45PM", "Mar 15 2024  1:45PM")]
+    public void VariantToText_UsesStyleZeroForTemporalPayloads(string expression, string direct, string throughVariant)
+    {
+        var sim = new Simulation();
+        AreEqual(direct, sim.ExecuteScalar($"select cast({expression} as nvarchar(60))"));
+        AreEqual(throughVariant, sim.ExecuteScalar($"select cast(cast({expression} as sql_variant) as nvarchar(60))"));
+    }
+
+    /// <summary>
+    /// An odd-length binary reinterpreted as <c>nvarchar</c> zero-pads its
+    /// dangling byte into a final character, so the byte survives a round trip
+    /// — real returns <c>0x01020300</c> for <c>0x010203</c>, where a Unicode
+    /// replacement character would have destroyed it. Probe-confirmed.
+    /// </summary>
+    [TestMethod]
+    public void OddLengthBinaryToNVarchar_ZeroPadsTheDanglingByte()
+    {
+        var sim = new Simulation();
+        AreEqual(2, sim.ExecuteScalar("select len(cast(0x010203 as nvarchar(60)))"));
+        CollectionAssert.AreEqual(
+            new byte[] { 0x01, 0x02, 0x03, 0x00 },
+            (byte[])sim.ExecuteScalar("select cast(cast(0x010203 as nvarchar(60)) as varbinary(60))")!);
+        CollectionAssert.AreEqual(
+            new byte[] { 0x01, 0x02, 0x03, 0x04 },
+            (byte[])sim.ExecuteScalar("select cast(cast(0x01020304 as nvarchar(60)) as varbinary(60))")!);
+    }
 }

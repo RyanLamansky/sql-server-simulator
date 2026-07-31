@@ -394,4 +394,47 @@ public sealed class XmlTests
         var sim = new Simulation();
         _ = sim.AssertSqlError("select XML_SCHEMA_NAMESPACE(NULL, N'x')", 8116);
     }
+
+    /// <summary>
+    /// A leading byte-order mark is dropped whenever a string becomes
+    /// <c>xml</c> — probe-confirmed against SQL Server 2025 (2026-07-30) for a
+    /// literal INSERT, a parameter, an explicit CAST and <c>SqlBulkCopy</c>
+    /// alike. An <c>nvarchar</c> column keeps the mark, so the rule belongs to
+    /// the type conversion rather than to the input path.
+    /// </summary>
+    [TestMethod]
+    public void LeadingBom_IsStrippedByXmlConversion()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int, x xml, nv nvarchar(max))");
+        _ = sim.ExecuteNonQuery("insert t values (1, N'\uFEFF<a/>', N'\uFEFF<a/>')");
+        _ = sim.ExecuteNonQuery("insert t values (2, cast(N'\uFEFF<a/>' as xml), N'-')");
+        AreEqual("<a/>", sim.ExecuteScalar("select cast(x as nvarchar(max)) from t where id = 1"));
+        AreEqual("<a/>", sim.ExecuteScalar("select cast(x as nvarchar(max)) from t where id = 2"));
+        AreEqual("\uFEFF<a/>", sim.ExecuteScalar("select nv from t where id = 1"));
+    }
+
+    /// <inheritdoc cref="LeadingBom_IsStrippedByXmlConversion"/>
+    [TestMethod]
+    public void LeadingBom_IsStrippedFromAParameter()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (x xml)");
+        using var connection = sim.CreateOpenConnection();
+        using (var insert = connection.CreateCommand("insert t values (@x)"))
+        {
+            var parameter = insert.CreateParameter();
+            parameter.ParameterName = "@x";
+            parameter.Value = "\uFEFF<a/>";
+            _ = insert.Parameters.Add(parameter);
+            _ = insert.ExecuteNonQuery();
+        }
+        AreEqual("<a/>", connection.CreateCommand("select cast(x as nvarchar(max)) from t").ExecuteScalar());
+    }
+
+    /// <summary>A mark that isn't leading is content, not an encoding marker, and survives.</summary>
+    [TestMethod]
+    public void NonLeadingBom_Survives()
+        => AreEqual("<a>x\uFEFFy</a>", new Simulation().ExecuteScalar(
+            "create table t (x xml); insert t values (N'<a>x\uFEFFy</a>'); select cast(x as nvarchar(max)) from t"));
 }

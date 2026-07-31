@@ -42,7 +42,22 @@ internal readonly partial struct SqlValue
         if (target is SqlVariantSqlType)
             return FromVariant(this);
         if (this.Type is SqlVariantSqlType)
-            return this.AsVariantInner.CoerceTo(target);
+        {
+            // A temporal payload converts to text with style 0, where the same
+            // base type converted directly uses its own ISO default — real
+            // gives '1:45PM' for a time inside a variant and '13:45:12.345'
+            // for the time itself (probe-confirmed for date / time /
+            // datetime2 / datetimeoffset). datetime and smalldatetime already
+            // default to style 0, so the two paths agree there.
+            var inner = this.AsVariantInner;
+            return SqlType.IsStringCategory(target) && !inner.IsNull && IsTemporal(inner.Type)
+                ? inner.CoerceDateTimeToStringWithStyle(target, 0)
+                : inner.CoerceTo(target);
+        }
+
+        static bool IsTemporal(SqlType type) =>
+            type == SqlType.Date || type == SqlType.DateTime || type == SqlType.SmallDateTime
+            || type is DateTime2SqlType or TimeSqlType or DateTimeOffsetSqlType;
 
         if (SqlType.IsIntegerCategory(this.Type) && SqlType.IsIntegerCategory(target))
         {
