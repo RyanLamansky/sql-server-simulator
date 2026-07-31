@@ -31,10 +31,10 @@ internal sealed class CharIndex : Expression
         // CHARINDEX's haystack (arg 2) implicit-coerces to varchar per real
         // (probe-confirmed 2026-05-22: CHARINDEX('2', 12345) = 2). Needle
         // (arg 1) stays strict — real rejects non-string with Msg 8116.
-        var h = StringScalars.CoerceToVarchar(haystack.Run(runtime), runtime.Batch, "charindex", argumentIndex: 2);
+        var h = StringScalars.CoerceToVarchar(haystack.Run(runtime), runtime.Batch, "charindex", argumentIndex: 2, allowLegacyLob: true);
         if (n.IsNull || h.IsNull)
             return SqlValue.Null(SqlType.Int32);
-        if (!SqlType.IsStringCategory(n.Type))
+        if (!SqlType.IsStringCategory(n.Type) || n.Type == SqlType.Text || n.Type == SqlType.NText)
             throw SimulatedSqlException.InvalidArgumentDataType(n.Type.SqlServerName, argumentIndex: 1, "charindex");
 
         var needleStr = n.AsString;
@@ -51,7 +51,7 @@ internal sealed class CharIndex : Expression
             var startValue = start.Run(runtime);
             if (startValue.IsNull)
                 return SqlValue.Null(SqlType.Int32);
-            startUnits = Math.Max(0, startValue.CoerceTo(SqlType.Int32).AsInt32 - 1);
+            startUnits = Math.Max(0, StringScalars.CoerceLengthArgument(startValue) - 1);
         }
         var startCu = isSc
             ? SupplementaryCharacters.CodepointToCodeUnit(haystackStr, startUnits)

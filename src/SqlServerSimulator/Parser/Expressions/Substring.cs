@@ -53,8 +53,8 @@ internal sealed class Substring : Expression
         if (!SqlType.IsStringCategory(s.Type))
             throw SimulatedSqlException.InvalidArgumentDataType(s.Type.SqlServerName, argumentIndex: 1, "substring");
 
-        var startIndex = startValue.CoerceTo(SqlType.Int32).AsInt32;
-        var len = lengthValue.CoerceTo(SqlType.Int32).AsInt32;
+        var startIndex = StringScalars.CoerceLengthArgument(startValue);
+        var len = StringScalars.CoerceLengthArgument(lengthValue);
         if (len < 0)
             throw SimulatedSqlException.NegativeLengthNotAllowed("substring", 8);
 

@@ -119,4 +119,25 @@ public sealed class DerivedTableColumnAliasTests
         CollectionAssert.AreEqual(new[] { "a", "b" }, ColumnNames(sim, "select * from (values (1, 2), (3, 4)) v(a, b)"));
         CollectionAssert.AreEqual(new[] { "m", "n" }, ColumnNames(sim, "with c(m, n) as (select 1, 2) select * from c"));
     }
+
+    /// <summary>
+    /// A derived table has no native name, so the alias is mandatory — real
+    /// reports Msg 102 near the closing <c>)</c> when it's missing
+    /// (probe-confirmed 2026-07-31).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from (select 1 x)")]
+    [DataRow("select x from (select 1 x)")]
+    [DataRow("select * from (select 1 x) join (select 2 y) on 1 = 1")]
+    public void DerivedTableWithoutAlias_RaisesSyntaxError(string sql)
+        => new Simulation().AssertSqlError(sql, 102, "Incorrect syntax near ')'.");
+
+    /// <summary>An aliased derived table still works, with or without a column list.</summary>
+    [TestMethod]
+    public void DerivedTableWithAlias_Projects()
+    {
+        var sim = new Simulation();
+        AreEqual(1, sim.ExecuteScalar("select x from (select 1 x) y"));
+        AreEqual(1, sim.ExecuteScalar("select a from (select 1) y(a)"));
+    }
 }

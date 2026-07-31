@@ -122,4 +122,37 @@ public sealed class SelectListStringAliasTests
     [TestMethod]
     public void As_EmptyBrackets_RaisesMsg1038()
         => _ = new Simulation().AssertSqlError("select 1 as []", 1038);
+
+    /// <summary>
+    /// Under DISTINCT an ORDER BY term must be in the select list. A
+    /// <i>qualified</i> term names a source column, so it only qualifies when
+    /// that same source column is projected — leaf-matching it against the
+    /// output aliases accepted <c>SELECT DISTINCT val AS id … ORDER BY t.id</c>,
+    /// which real rejects with Msg 145 (probe-confirmed 2026-07-31).
+    /// </summary>
+    [TestMethod]
+    public void DistinctOrderBy_QualifiedTermNotProjected_RaisesMsg145()
+        => new Simulation().AssertSqlError(
+            """
+            create table ob (id int, val int);
+            insert ob values (1, 10);
+            select distinct val as id from ob t order by t.id
+            """,
+            145,
+            "ORDER BY items must appear in the select list if SELECT DISTINCT is specified.");
+
+    /// <summary>
+    /// The legitimate shapes still bind: an unqualified term matching an output
+    /// alias, and a qualified term naming the *source* column behind a
+    /// projected one — which is what an ORM aliasing every output positionally
+    /// emits.
+    /// </summary>
+    [TestMethod]
+    public void DistinctOrderBy_ProjectedTermsStillBind()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table ob (id int, val int, nm varchar(10)); insert ob values (1, 10, 'a')");
+        AreEqual(10, sim.ExecuteScalar("select distinct val as id from ob order by id"));
+        AreEqual("a", sim.ExecuteScalar("select distinct nm as Col5 from ob c order by c.nm"));
+    }
 }

@@ -80,8 +80,13 @@ internal sealed partial class Selection
                 // is present — matching on the leaf alone silently sorted by
                 // the wrong column whenever a join brought a same-named
                 // column into scope (`ORDER BY child.id` binding to the
-                // projected `parent.id`).
-                if (name.ImmediateQualifier is null || distinct)
+                // projected `parent.id`). That holds under DISTINCT too: a
+                // qualified term there has to match a projected *source*
+                // reference (the check below) or it isn't in the select list at
+                // all, which is Msg 145 — leaf-matching it against the output
+                // names accepted `SELECT DISTINCT val AS id … ORDER BY t.id`,
+                // which real rejects (probe-confirmed 2026-07-31).
+                if (name.ImmediateQualifier is null)
                 {
                     for (var j = 0; j < outputColumnNames.Length; j++)
                     {
@@ -117,7 +122,9 @@ internal sealed partial class Selection
     /// an encoded <c>byte[]</c> row, decoding only the columns an ORDER BY item
     /// references rather than the whole tuple. References resolve against the
     /// inner plan's projected column names / ordinals only — there are no source
-    /// columns to fall back to (an unresolved name is Msg 207), matching the
+    /// columns to fall back to (an unresolved name is Msg 207 — real reserves
+    /// Msg 104 for a name that *is* a source column but isn't projected, which
+    /// needs the inner plan's full source column set to tell apart), matching the
     /// <see cref="ComputeOrderKeys"/> path this mirrors. <paramref name="columns"/>
     /// is the schema's cached <see cref="HeapColumn"/>[] so each per-column decode
     /// hits the RowLayout geometry cache.

@@ -335,6 +335,14 @@ partial class SimulatedSqlException
         new($"{style} is not a valid style number when converting from {sourceTypeWord} to a character string.", 281, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 2739: a local variable, parameter or the return
+    /// of a scalar function was declared as one of the legacy LOB types, which
+    /// only a column may be. Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException LegacyLobTypeInvalidForLocals() =>
+        new("The text, ntext, and image data types are invalid for local variables.", 2739, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 8116: an argument to a function has the wrong
     /// data type — currently surfaced for <c>CONVERT</c>'s third (style)
     /// argument when it isn't an integer.

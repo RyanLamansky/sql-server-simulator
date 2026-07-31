@@ -2192,11 +2192,11 @@ internal sealed partial class Selection
                 for (var ci = 0; ci < derivedColumns.Length; ci++)
                     derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: true);
 
-                // Derived tables have no native name; the alias is the
-                // qualifier when present, otherwise null disables the
-                // qualified-reference check (the existing simulator
-                // accepts derived tables without alias, unlike real SQL).
-                var derivedQualifier = ConsumeOptionalAlias(context);
+                // A derived table has no native name, so the alias is
+                // mandatory: real reports Msg 102 near the closing ')' when
+                // it's missing (probe-confirmed 2026-07-31).
+                var derivedQualifier = ConsumeOptionalAlias(context)
+                    ?? throw SimulatedSqlException.SyntaxErrorNearValue(")");
                 var derivedNames = ResolveDerivedTableColumnNames(context, derivedSelection.ColumnNames, derivedQualifier);
 
                 return new FromSource(
@@ -2413,9 +2413,6 @@ internal sealed partial class Selection
     /// 8159</strong>, and a repeated name is <strong>Msg 8156</strong>.
     /// With no list, every column must already have a name — an unnamed one is
     /// <strong>Msg 8155</strong>, reported once per unnamed column.
-    /// The 8155 check needs the alias for its message, so it only runs when the
-    /// source has one; the simulator otherwise tolerates an unaliased derived
-    /// table that real rejects outright, which is a separate gap.
     /// </remarks>
     private static string[] ResolveDerivedTableColumnNames(ParserContext context, string[] projectedNames, string? qualifier)
     {

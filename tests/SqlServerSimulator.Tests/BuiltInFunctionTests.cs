@@ -203,4 +203,79 @@ public sealed class BuiltInFunctionTests
         AreEqual("ALICE", connection.CreateCommand("select upper(name) from t").ExecuteScalar());
     }
 
+    /// <summary>
+    /// An integer argument outside <c>int</c> range raises Msg 8115 rather than
+    /// leaking .NET's narrowing exception. Probe-confirmed against SQL Server
+    /// 2025 (2026-07-31) for every function here.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select substring('abcdef', 1, 3000000000)")]
+    [DataRow("select substring('abcdef', 3000000000, 1)")]
+    [DataRow("select charindex('a', 'abc', 3000000000)")]
+    [DataRow("select stuff('abcdef', 3000000000, 1, 'x')")]
+    [DataRow("select stuff('abcdef', 1, 3000000000, 'x')")]
+    [DataRow("select replicate('a', 3000000000)")]
+    [DataRow("select space(3000000000)")]
+    [DataRow("select choose(3000000000, 'a', 'b')")]
+    [DataRow("select char(3000000000)")]
+    [DataRow("select nchar(3000000000)")]
+    [DataRow("select parsename('a.b', 3000000000)")]
+    [DataRow("select str(1.5, 3000000000, 2)")]
+    [DataRow("select left('abcdef', 3000000000)")]
+    [DataRow("select right('abcdef', 3000000000)")]
+    public void OutOfIntRangeArgument_RaisesArithmeticOverflow(string sql)
+        => new Simulation().AssertSqlError(sql, 8115, "Arithmetic overflow error converting expression to data type int.");
+
+    /// <summary>
+    /// No string function accepts a legacy LOB type as the operand it
+    /// transforms — real raises Msg 8116 naming the function and argument
+    /// (probe-confirmed 2026-07-31).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select len(cast('abc' as ntext))", "ntext", 1, "len")]
+    [DataRow("select len(cast('abc' as text))", "text", 1, "len")]
+    [DataRow("select left(cast('abc' as ntext), 2)", "ntext", 1, "left")]
+    [DataRow("select right(cast('abc' as text), 2)", "text", 1, "right")]
+    [DataRow("select upper(cast('abc' as ntext))", "ntext", 1, "upper")]
+    [DataRow("select lower(cast('abc' as text))", "text", 1, "lower")]
+    [DataRow("select ltrim(cast('abc' as ntext))", "ntext", 1, "ltrim")]
+    [DataRow("select reverse(cast('abc' as ntext))", "ntext", 1, "reverse")]
+    [DataRow("select replace(cast('abc' as ntext), 'a', 'b')", "ntext", 1, "replace")]
+    [DataRow("select replace('abc', cast('a' as ntext), 'b')", "ntext", 2, "replace")]
+    [DataRow("select replace('abc', 'a', cast('b' as ntext))", "ntext", 3, "replace")]
+    [DataRow("select charindex(cast('a' as ntext), 'abc')", "ntext", 1, "charindex")]
+    public void LegacyLobArgument_IsRejected(string sql, string typeName, int argument, string function)
+        => new Simulation().AssertSqlError(
+            sql, 8116, $"Argument data type {typeName} is invalid for argument {argument} of {function} function.");
+
+    /// <summary>
+    /// The exceptions are arguments that are read rather than transformed —
+    /// CHARINDEX's haystack and SUBSTRING's source both take a LOB, which is
+    /// how a legacy <c>text</c> column is meant to be read. Probe-confirmed.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select charindex('a', cast('abc' as ntext))", 1)]
+    [DataRow("select charindex('a', cast('abc' as text))", 1)]
+    public void LegacyLobSearchedArgument_IsAccepted(string sql, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(sql));
+
+    /// <inheritdoc cref="LegacyLobSearchedArgument_IsAccepted"/>
+    [TestMethod]
+    [DataRow("select substring(cast('abc' as ntext), 1, 2)")]
+    [DataRow("select substring(cast('abc' as text), 1, 2)")]
+    public void LegacyLobSubstring_IsAccepted(string sql)
+        => AreEqual("ab", new Simulation().ExecuteScalar(sql));
+
+    /// <summary>
+    /// The legacy LOB types are column-only; a local variable of one is
+    /// Msg 2739, which is why no string function ever sees one through a
+    /// variable. Probe-confirmed verbatim.
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @v text")]
+    [DataRow("declare @v ntext")]
+    [DataRow("declare @v image")]
+    public void LegacyLobLocalVariable_IsRejected(string sql)
+        => new Simulation().AssertSqlError(
+            sql, 2739, "The text, ntext, and image data types are invalid for local variables.");
 }

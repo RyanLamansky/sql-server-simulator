@@ -29,7 +29,7 @@ internal sealed class NCharFromCode(ParserContext context) : Expression
         var v = code.Run(runtime);
         if (v.IsNull)
             return SqlValue.Null(nchar1);
-        var n = v.CoerceTo(SqlType.Int32).AsInt32;
+        var n = StringScalars.CoerceLengthArgument(v);
         return n is < 0 or > 65535
             ? SqlValue.Null(nchar1)
             : SqlValue.FromNChar(nchar1, ((char)n).ToString());

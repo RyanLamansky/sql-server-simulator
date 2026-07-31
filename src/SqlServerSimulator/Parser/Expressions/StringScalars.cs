@@ -30,8 +30,17 @@ internal static class StringScalars
     /// caller surfaces the same error wording real SQL Server uses for
     /// genuinely-unsupported operands.
     /// </summary>
-    public static SqlValue CoerceToVarchar(SqlValue value, BatchContext batch, string functionLowerName, int argumentIndex = 1)
+    public static SqlValue CoerceToVarchar(SqlValue value, BatchContext batch, string functionLowerName, int argumentIndex = 1, bool allowLegacyLob = false)
     {
+        // The legacy LOB text types are string-category but a string function
+        // refuses one, raising Msg 8116 that names the function and argument
+        // (probe-confirmed 2026-07-31 across LEN / LEFT / RIGHT / UPPER /
+        // LOWER / LTRIM / REVERSE / REPLACE / SUBSTRING / STUFF / CHARINDEX).
+        // The exception is an argument that is searched rather than
+        // transformed — CHARINDEX's haystack takes an ntext document happily —
+        // which opts out via <paramref name="allowLegacyLob"/>.
+        if (!allowLegacyLob && (value.Type == SqlType.Text || value.Type == SqlType.NText))
+            throw SimulatedSqlException.InvalidArgumentDataType(value.Type.SqlServerName, argumentIndex, functionLowerName);
         if (SqlType.IsStringCategory(value.Type))
             return value;
         if (!IsCoerceableToVarchar(value.Type))
@@ -41,9 +50,12 @@ internal static class StringScalars
     }
 
     /// <summary>
-    /// Narrows a LEFT / RIGHT length argument to <c>int</c>. A value outside
-    /// int range (e.g. a bigint literal) raises Msg 8115 — matching SQL
-    /// Server — instead of leaking .NET's <see cref="OverflowException"/>.
+    /// Narrows a scalar function's integer argument — a length, position,
+    /// count, index or code point — to <c>int</c>. A value outside int range
+    /// raises Msg 8115 the way real does, instead of leaking .NET's
+    /// <see cref="OverflowException"/>. Probe-confirmed 2026-07-31 for
+    /// SUBSTRING / CHARINDEX / STUFF / REPLICATE / SPACE / CHOOSE / CHAR /
+    /// NCHAR alongside the LEFT / RIGHT pair that first needed it.
     /// </summary>
     public static int CoerceLengthArgument(SqlValue count)
     {

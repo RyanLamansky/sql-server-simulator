@@ -54,8 +54,8 @@ internal sealed class Stuff : Expression
         if (startValue.IsNull || lengthValue.IsNull)
             return SqlValue.Null(resultType);
 
-        var startIndex = startValue.CoerceTo(SqlType.Int32).AsInt32;
-        var len = lengthValue.CoerceTo(SqlType.Int32).AsInt32;
+        var startIndex = StringScalars.CoerceLengthArgument(startValue);
+        var len = StringScalars.CoerceLengthArgument(lengthValue);
         var s = inputValue.AsString;
         // STUFF indexes/lengths are code-unit-based under non-SC and
         // codepoint-based under _SC_. Under _SC_ a delete count of 1

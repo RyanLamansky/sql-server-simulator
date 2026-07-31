@@ -102,7 +102,10 @@ Getting there took eleven roots, and the pattern worth keeping is that failures 
 - **Qualifier-blindness in name resolution** was the single largest class — a leaf-only match binds to the wrong column whenever a join brings a same-named one into scope, silently. It was wrong in four resolvers ([`query.md`](query.md#order-by-term-resolution)).
 - The rest: outer-scope correlation from the select list, `UPDATE … SET` subqueries, parenthesized set-op branches, `OUTPUT … INTO` destination coercion, DISTINCT over a grouped projection, collation-aware `REPLACE` / `CHARINDEX`, aggregate re-homing across scopes, and `sys.time_zone_info`.
 
-**Two residual over-permissive cases** from the ORDER BY work, both recorded rather than shipped silently: under `DISTINCT` a qualified term is still leaf-matched against the output names (`SELECT DISTINCT val AS id … ORDER BY t.id` accepted where real raises Msg 145), and a set-op ORDER BY term naming an unprojected column raises Msg 207 where real raises Msg 104.
+**One residual over-permissive case** from the ORDER BY work: a set-op ORDER BY term naming an unprojected column raises Msg 207 where real raises **Msg 104**.
+Sharpened 2026-07-31 — real reserves 104 for a name that *is* a column of an underlying source but isn't projected, and still gives 207 for a name that exists nowhere, so telling them apart needs the inner plan's full source column set threaded into `ComputeTopLevelOrderKeys` (which today sees only the source column behind each *projected* column).
+A blanket 104 was tried and reverted: it fixed the unprojected case and broke the nonexistent one.
+The DISTINCT counterpart (qualified term leaf-matched against the output names) is fixed.
 
 **Over-permissive validation — the simulator *accepts* what real *rejects*.** This is the more dangerous divergence direction (an app query works on the simulator and breaks on real), and it is invisible to a sim-only failure list: surface it with the *reverse* delta `comm -13 <sim fails> <real fails>`, where real-only failures mean the simulator over-passes. **Whole-suite audits should always run the reverse delta — a green "matches real" claim requires both directions.**
 
@@ -178,9 +181,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **Non-Framework CLR assemblies load** — real resolves every `AssemblyRef` against a fixed .NET Framework catalog and raises **Msg 6503** otherwise (probe-confirmed for .NET 10 and for .NET Standard 2.0); the simulator runs on .NET so all of them bind, which is also what lets the tests emit a fixture assembly without a Framework toolchain.
   → [`clr-assemblies.md`](clr-assemblies.md#divergences).
 - **`REGEXP_LIKE` isn't reserved at compatibility level 170** — detail under the Django shakedown above; closing it belongs with the native predicate.
-- **An unaliased derived table is accepted** — `SELECT * FROM (SELECT 1 x)` parses, where real requires the alias and raises **Msg 102** (`"Incorrect syntax near ')'."`, probed 2026-07-30).
-  The column-alias list and its Msg 8155 / 8156 / 8158 / 8159 rules ship (see [`query.md`](query.md#derived-table-column-alias-list)); the missing-alias check is what remains, and the 8155 check is gated on having an alias because its message names one.
-  → [`query.md`](query.md).
 - **Module body validation deferred to first execution** — a TVP parameter's **Msg 10700** and the **Msg 111** batch-first rule surface at EXEC where real validates at CREATE.
   → [`table-valued-parameters.md`](table-valued-parameters.md#fidelity-gaps-remaining), [`programmable.md`](programmable.md).
 Tracked elsewhere and over-permissive in the same sense: the recursive-CTE part restrictions Msg 460 / 461 / 462 / 467 / 465 (CLAUDE.md's Not-modeled-yet).
@@ -228,10 +228,13 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   This is a broad, mechanical owner-indirection refactor landing on the most regression-sensitive subsystem (lock manager × GC timing × threading).
   Payoff is bounded (EF disposes scrupulously; only buggy consumer code leaks), so it's **deliberately deferred** as high-risk / low-frequency.
   Eventual home: [`locking.md`](locking.md).
-- **Raw `OverflowException` on out-of-`int`-range scalar arguments** — a length / position / count / code-point argument beyond `int` range surfaces the .NET narrowing exception instead of a SQL-shaped error: `SUBSTRING` (length), `CHARINDEX` (start), `STUFF` (start / length), `REPLICATE` / `SPACE` (count), `CHOOSE` (index), `CHAR` / `NCHAR` (code point).
-  `LEFT` / `RIGHT` (Msg 8115) and `DATEADD` (Msg 517) harden the same argument, so the shape to copy exists.
-  Real's response is per-function (clamp, compute as bigint, or a value-class error), which is why one shared guard wouldn't be faithful and the handling stayed point-local — closing it is a per-function decision.
-  See [`scalars.md`](scalars.md#known-gap-out-of-int-range-integer-arguments).
+- **Raw `OverflowException` on out-of-`int`-range arguments — the long tail.** The scalar-function arguments are fixed (Msg 8115 via `StringScalars.CoerceLengthArgument`; see [`scalars.md`](scalars.md#integer-arguments-outside-int-range)).
+  What remains is every *other* `CoerceTo(SqlType.Int32).AsInt32` site: bit manipulation (`GET_BIT` / `SET_BIT` / shifts), the catalog-id scalars (`COL_NAME` / `COLUMNPROPERTY` / …), and CONVERT's style argument.
+  Each still leaks the .NET exception for an out-of-range argument.
+- **Assignment-time integer overflow reports the wrong error** — `INSERT` of 300 into a `tinyint` column raises Msg 8115 (`converting expression to data type tinyint`) where real raises **Msg 220** (`Arithmetic overflow error for data type tinyint, value = 300.`).
+  Probe-confirmed 2026-07-31, along with the split that makes it tricky: an explicit `CAST` of a *runtime* value gives 8115 on real, so the message depends on the path rather than the type.
+  A blanket change in `SqlValue.Coerce` was tried and reverted for breaking the CAST cases.
+- **`POWER` overflow reports the wrong error** — `POWER(2, 10000)` raises Msg 232 (`Arithmetic overflow error for type int, value = Infinity.`) where real raises **Msg 8115** naming `float` (probe-confirmed 2026-07-31).
 - **MVCC history keeps one version per UPDATE, not one per committed transaction** — real collapses intra-transaction intermediate states so only the pre- and post-transaction states are visible.
   Visibility matches for the common single-UPDATE-per-transaction case; a snapshot landing between two UPDATEs of one transaction sees a state real never exposes.
   See [`locking.md`](locking.md#known-mvcc-limitations).

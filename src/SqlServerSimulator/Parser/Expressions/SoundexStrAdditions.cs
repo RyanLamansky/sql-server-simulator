@@ -173,8 +173,8 @@ internal sealed class Str : Expression
         if (v.IsNull)
             return SqlValue.Null(resultType);
         var num = v.CoerceTo(SqlType.Float).AsDouble;
-        var length = this.lengthArg is null ? 10 : this.lengthArg.Run(runtime).CoerceTo(SqlType.Int32).AsInt32;
-        var decimals = this.decimalsArg is null ? 0 : this.decimalsArg.Run(runtime).CoerceTo(SqlType.Int32).AsInt32;
+        var length = this.lengthArg is null ? 10 : StringScalars.CoerceLengthArgument(this.lengthArg.Run(runtime));
+        var decimals = this.decimalsArg is null ? 0 : StringScalars.CoerceLengthArgument(this.decimalsArg.Run(runtime));
         if (length < 1)
             length = 1;
         if (decimals < 0)

@@ -236,13 +236,22 @@ The rules below describe the *runtime* value; the width bounds it.
   Culture defaults to en-US; invalid culture name silently falls back to en-US.
   .NET `FormatException` (e.g. `decimal.ToString("D5")`) → NULL; unrecognized custom-format tokens that .NET passes through (e.g. `int.ToString("qq qq")`) are echoed verbatim.
 
-## Known gap: out-of-`int`-range integer arguments
+## Integer arguments outside `int` range
 
-A length / position / count / code-point argument that exceeds `int` range surfaces a raw .NET `OverflowException` from the `int` narrowing instead of the function's normal result.
-Affected: `SUBSTRING` (length), `CHARINDEX` (start), `STUFF` (start / length — preempts the documented out-of-range-returns-NULL handling above), `REPLICATE` (count), `SPACE` (count), `CHOOSE` (index), `CHAR` / `NCHAR` (code point).
-`LEFT` / `RIGHT` (Msg 8115) and `DATEADD` (Msg 517) harden this argument; the rest don't.
-Left point-local deliberately: real SQL Server's response is per-function (clamp, compute as bigint, or a value-class error), so a single shared error wouldn't be faithful, and the trigger is pathological — no realistic query or EF emission passes a count / position outside `int` range.
-A value held in a variable could reach it; the failure is a clean abort, just not the SQL-Server-shaped one.
+A length / position / count / index / code-point argument beyond `int` range raises **Msg 8115** (`Arithmetic overflow error converting expression to data type int.`) rather than leaking .NET's narrowing exception, via `StringScalars.CoerceLengthArgument`.
+Probe-confirmed 2026-07-31 for SUBSTRING, CHARINDEX, STUFF, REPLICATE, SPACE, CHOOSE, CHAR, NCHAR, PARSENAME and STR alongside the LEFT / RIGHT pair that first needed it.
+
+Other integer-argument sites — bit manipulation, the catalog-id scalars, CONVERT's style argument — still narrow with a raw `checked` cast; the same treatment applies when one is next touched.
+
+## Legacy LOB arguments
+
+No string function accepts `text` or `ntext` as the operand it **transforms**: real raises **Msg 8116** naming the function and argument position, and so does the simulator (probe-confirmed 2026-07-31 across LEN / LEFT / RIGHT / UPPER / LOWER / LTRIM / REVERSE / REPLACE / STUFF).
+REPLACE rejects one in all three of its arguments.
+
+An argument that is **read** rather than transformed accepts a LOB, which is how a legacy `text` column is meant to be consumed — CHARINDEX's haystack and SUBSTRING's source both take one.
+`StringScalars.CoerceToVarchar`'s `allowLegacyLob` flag marks those.
+
+The types are column-only besides: a local variable declared `text` / `ntext` / `image` raises **Msg 2739** (`The text, ntext, and image data types are invalid for local variables.`), which is why no string function ever sees one through a variable.
 
 ## EF.Functions-driven type-check / random scalars: `ISNUMERIC` / `ISDATE` / `RAND`
 - **`ISNUMERIC(expression)`** returns `int` (1 / 0); NULL → 0 (not NULL).

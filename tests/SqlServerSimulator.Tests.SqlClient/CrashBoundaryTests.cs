@@ -65,11 +65,12 @@ public sealed class CrashBoundaryTests
     /// test sharing that connection failed too.
     /// </summary>
     /// <remarks>
-    /// The forcing case is a genuine one rather than a hook: an out-of-int-range
-    /// scalar argument still surfaces the raw .NET narrowing exception (see the
-    /// out-of-int-range entry in <c>docs/claude/scalars.md</c>). What is asserted
-    /// here is the wire behavior, not that shape — when those arguments gain
-    /// SQL-shaped errors this test should move to another unmodeled statement.
+    /// The forcing case is a genuine one rather than a hook: a statement whose
+    /// feature isn't built raises a bare <see cref="NotSupportedException"/>
+    /// that no handler anticipates. What is asserted here is the wire
+    /// behavior — severity 16, a diagnosable message, session intact — not the
+    /// particular statement, so when this one gains an implementation any other
+    /// unmodeled statement serves.
     /// </remarks>
     [TestMethod]
     public async Task UnexpectedStatementFault_ReportsSeverity16AndKeepsTheSession()
@@ -78,14 +79,16 @@ public sealed class CrashBoundaryTests
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
-        await using (var faulting = new SqlCommand("select substring('abc', 1, 9999999999999)", connection))
+        await using (var faulting = new SqlCommand("begin distributed transaction", connection))
         {
             var exception = await Assert.ThrowsExactlyAsync<SqlException>(
                 async () => await faulting.ExecuteScalarAsync(TestContext.CancellationToken));
             AreEqual(50000, exception.Number);
             AreEqual((byte)16, exception.Class);
-            // The type is named so a simulator defect stays diagnosable.
-            Contains("unhandled OverflowException", exception.Message);
+            // An unmodeled feature names itself; an unanticipated exception
+            // type would instead be reported as "unhandled <Type>", which is
+            // what makes a simulator defect findable.
+            Contains("isn't modeled", exception.Message);
         }
 
         AreEqual(System.Data.ConnectionState.Open, connection.State);

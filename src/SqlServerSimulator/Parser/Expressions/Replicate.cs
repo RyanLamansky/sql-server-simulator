@@ -40,7 +40,7 @@ internal sealed class Replicate : Expression
         var countValue = this.count.Run(runtime);
         if (countValue.IsNull)
             return SqlValue.Null(resultType);
-        var times = countValue.CoerceTo(SqlType.Int32).AsInt32;
+        var times = StringScalars.CoerceLengthArgument(countValue);
         if (times < 0)
             return SqlValue.Null(resultType);
 

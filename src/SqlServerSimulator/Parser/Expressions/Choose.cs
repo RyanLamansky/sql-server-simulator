@@ -36,7 +36,7 @@ internal sealed class Choose : Expression
         var idxValue = this.indexExpr.Run(runtime);
         if (idxValue.IsNull)
             return SqlValue.Null(resultType);
-        var idx = idxValue.CoerceTo(SqlType.Int32).AsInt32;
+        var idx = StringScalars.CoerceLengthArgument(idxValue);
         if (idx < 1 || idx > this.values.Length)
             return SqlValue.Null(resultType);
         var picked = this.values[idx - 1].Run(runtime);

@@ -91,7 +91,7 @@ internal sealed class ParseName : Expression
         var index = this.indexArg.Run(runtime);
         if (name.IsNull || index.IsNull)
             return SqlValue.Null(SqlType.SystemName);
-        var n = index.CoerceTo(SqlType.Int32).AsInt32;
+        var n = StringScalars.CoerceLengthArgument(index);
         if (n is < 1 or > 4)
             return SqlValue.Null(SqlType.SystemName);
         var parts = name.CoerceTo(SqlType.NVarchar).AsString.Split('.');

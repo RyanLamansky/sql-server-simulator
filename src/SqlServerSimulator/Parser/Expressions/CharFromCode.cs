@@ -29,7 +29,7 @@ internal sealed class CharFromCode(ParserContext context) : Expression
         var v = code.Run(runtime);
         if (v.IsNull)
             return SqlValue.Null(char1);
-        var n = v.CoerceTo(SqlType.Int32).AsInt32;
+        var n = StringScalars.CoerceLengthArgument(v);
         if (n is < 0 or > 255)
             return SqlValue.Null(char1);
         ReadOnlySpan<byte> oneByte = [(byte)n];

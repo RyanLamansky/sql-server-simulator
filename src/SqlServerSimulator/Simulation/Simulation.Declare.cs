@@ -163,7 +163,12 @@ partial class Simulation
 
         var (resolved, maxLength, _) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale, 1, variableName);
-        return (resolved, maxLength);
+        // The legacy LOB types are column-only — real refuses them for a local
+        // variable outright (probe-confirmed), which is why no string function
+        // ever sees one through a variable.
+        return resolved == SqlType.Text || resolved == SqlType.NText || resolved == SqlType.Image
+            ? throw SimulatedSqlException.LegacyLobTypeInvalidForLocals()
+            : (resolved, maxLength);
     }
 
     /// <summary>

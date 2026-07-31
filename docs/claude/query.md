@@ -61,6 +61,10 @@
 
 ## Derived-table column-alias list
 
+A derived table's **alias is mandatory** — `SELECT * FROM (SELECT 1 x)` raises **Msg 102** (`Incorrect syntax near ')'.`), matching real (probe-confirmed 2026-07-31).
+The column-alias list stays optional; without one every projected column must already have a name (Msg 8155).
+
+
 `FROM (SELECT …) s(a, b)` renames every output column of the derived table, overriding whatever the inner projection called them.
 The same list applies to an `APPLY`'s derived table (`CROSS APPLY (SELECT t.a) x(v)`), and the `(VALUES …) v(a, b)` and `WITH c(m, n) AS (…)` forms route to the same `ParseColumnAliasList` by their own paths.
 
@@ -118,7 +122,7 @@ Matching on the leaf alone silently sorted by the wrong column whenever a join b
 
 `DISTINCT` keeps its own rule: the term must appear in the select list, and a miss is Msg 145 rather than a source fallback.
 The term may name the **source column behind a projected one** rather than its output alias (`SELECT DISTINCT c.name AS Col5 … ORDER BY c.name`), which is the only spelling left when an ORM aliases every output positionally.
-**Divergence**: under DISTINCT the qualified form is still matched by leaf against the output names, so `SELECT DISTINCT val AS id … ORDER BY t.id` is accepted where real raises Msg 145 (the qualified source column isn't selected) — over-permissive, and the non-DISTINCT path is the one that carries the source-reference rule.
+Under DISTINCT the qualified form follows the same source-reference rule as the non-DISTINCT path: it must name a source column that is itself projected, and a miss is Msg 145 rather than a leaf match against the output aliases (tightened 2026-07-31 — `SELECT DISTINCT val AS id … ORDER BY t.id` is an error, while `ORDER BY c.nm` over `SELECT DISTINCT nm AS Col5` is legal).
 
 ## Result drain / ORDER BY representation
 The FROM-bearing SELECT projection paths — streaming, buffered (ORDER BY / DISTINCT), windowed, and aggregate — all yield already-projected `SqlValue[]` rows, so `SimulatedSqlResultSet` serves the reader and TDS cursors directly with no encode-then-re-decode round-trip (see the `SimulatedSqlResultSet` doc + [`data-reader.md`](data-reader.md)).
