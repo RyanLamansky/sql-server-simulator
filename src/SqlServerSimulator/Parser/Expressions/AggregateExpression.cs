@@ -151,6 +151,7 @@ internal sealed class AggregateExpression : Expression
     /// </summary>
     private static AggregateExpression Register(ParserContext context, AggregateExpression expression)
     {
+        context.RecursiveBranchConstructs.GroupingOrAggregate = true;
         context.AggregatesParsed++;
         context.AggregateCollector?.Add(expression);
         return expression;

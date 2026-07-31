@@ -429,6 +429,35 @@ partial class SimulatedSqlException
         new($"Recursive common table expression '{cteName}' does not contain a top-level UNION ALL operator.", 252, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 460: the recursive member used SELECT DISTINCT.
+    /// Probe-confirmed verbatim 2026-07-31.
+    /// </summary>
+    internal static SimulatedSqlException RecursiveCteDistinctNotAllowed(string cteName) =>
+        new($"DISTINCT operator is not allowed in the recursive part of a recursive common table expression '{cteName}'.", 460, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 462: the recursive member used an outer join.
+    /// Probe-confirmed verbatim 2026-07-31.
+    /// </summary>
+    internal static SimulatedSqlException RecursiveCteOuterJoinNotAllowed(string cteName) =>
+        new($"Outer join is not allowed in the recursive part of a recursive common table expression '{cteName}'.", 462, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 467: the recursive member used GROUP BY, HAVING
+    /// or an aggregate. Probe-confirmed verbatim 2026-07-31.
+    /// </summary>
+    internal static SimulatedSqlException RecursiveCteGroupingNotAllowed(string cteName) =>
+        new($"GROUP BY, HAVING, or aggregate functions are not allowed in the recursive part of a recursive common table expression '{cteName}'.", 467, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 461: the recursive member of a recursive CTE
+    /// used TOP, OFFSET or FETCH, which would make the recursion's row set
+    /// depend on an unordered limit. Probe-confirmed verbatim 2026-07-31.
+    /// </summary>
+    internal static SimulatedSqlException RecursiveCteTopNotAllowed(string cteName) =>
+        new($"The TOP or OFFSET operator is not allowed in the recursive part of a recursive common table expression '{cteName}'.", 461, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 253: a single recursive branch references the
     /// CTE more than once. Each recursive branch must contain exactly one
     /// self-reference.

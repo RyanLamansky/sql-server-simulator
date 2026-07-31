@@ -239,6 +239,21 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool RejectNextValueFor;
 
     /// <summary>
+    /// Constructs seen while parsing one branch of a WITH body, recorded
+    /// rather than rejected on sight: a branch only becomes the <i>recursive
+    /// member</i> — where SQL Server forbids them — once its parse turns up a
+    /// self-reference, which can come after the construct itself. The WITH
+    /// parser resets this per branch and raises afterwards.
+    /// </summary>
+    /// <remarks>
+    /// Real applies the restriction to the recursive member's whole text, so
+    /// a DISTINCT or aggregate inside a nested subquery counts too
+    /// (probe-confirmed 2026-07-31) — which is why these are set at the parse
+    /// sites rather than read off the branch's own plan.
+    /// </remarks>
+    public RecursiveMemberConstructs RecursiveBranchConstructs;
+
+    /// <summary>
     /// When true, <see cref="Expression.Parse(ParserContext)"/>'s postfix
     /// loop treats a bare <c>:</c> (not followed by a second <c>:</c>) as
     /// end-of-expression rather than a syntax error. Lets the

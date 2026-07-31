@@ -338,4 +338,75 @@ public sealed class CommonTableExpressionTests
             rows.Add((reader.GetInt32(0), reader.GetInt32(1)));
         CollectionAssert.AreEqual(new[] { (1, 30), (2, 30), (3, 30) }, rows);
     }
+
+    /// <summary>
+    /// SQL Server forbids a set of constructs in a recursive CTE's recursive
+    /// member. All probe-confirmed verbatim against SQL Server 2025
+    /// (2026-07-31); previously the simulator accepted every one, which is the
+    /// dangerous direction — the query runs here and fails in production.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select distinct n+1 from c where n < 3", 460, "DISTINCT operator is not allowed in the recursive part of a recursive common table expression 'c'.")]
+    [DataRow("select top 1 n+1 from c where n < 3", 461, "The TOP or OFFSET operator is not allowed in the recursive part of a recursive common table expression 'c'.")]
+    [DataRow("select n+1 from c where n < 3 group by n", 467, "GROUP BY, HAVING, or aggregate functions are not allowed in the recursive part of a recursive common table expression 'c'.")]
+    [DataRow("select max(n)+1 from c where n < 3", 467, "GROUP BY, HAVING, or aggregate functions are not allowed in the recursive part of a recursive common table expression 'c'.")]
+    public void RecursiveMember_RejectsForbiddenConstructs(string recursiveMember, int error, string message)
+        => new Simulation().AssertSqlError(
+            $"with c as (select 1 n union all {recursiveMember}) select count(*) from c", error, message);
+
+    /// <summary>
+    /// An outer join in the recursive member is Msg 462. Driven off a table so
+    /// the join has a second source that isn't the CTE — two CTE references
+    /// would be Msg 253 instead.
+    /// </summary>
+    [TestMethod]
+    public void RecursiveMember_RejectsOuterJoin()
+        => new Simulation().AssertSqlError(
+            """
+            create table rt (id int, parent int);
+            insert rt values (1, null), (2, 1);
+            with c as (
+                select id, parent from rt where parent is null
+                union all
+                select r.id, r.parent from rt r left join c on c.id = r.parent)
+            select count(*) from c
+            """,
+            462,
+            "Outer join is not allowed in the recursive part of a recursive common table expression 'c'.");
+
+    /// <summary>
+    /// The restriction covers the recursive member's whole text, so a
+    /// construct inside a nested subquery or derived table counts too —
+    /// probe-confirmed, and the reason these are recorded at their parse sites
+    /// rather than read off the member's own plan.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select n+1 from c where n in (select distinct 1 x)", 460)]
+    [DataRow("select n+1 from c where n < (select top 1 3 x)", 461)]
+    [DataRow("select n+1 from c where n < (select max(v) from (select 3 v) t)", 467)]
+    [DataRow("select n+1 from c cross join (select distinct 1 y) z where n < 3", 460)]
+    public void RecursiveMember_RestrictionReachesNestedScopes(string recursiveMember, int error)
+        => _ = new Simulation().AssertSqlError(
+            $"with c as (select 1 n union all {recursiveMember}) select count(*) from c", error);
+
+    /// <summary>The anchor member has no such restrictions — only the recursive one does.</summary>
+    [TestMethod]
+    public void AnchorMember_AllowsTheSameConstructs()
+    {
+        var sim = new Simulation();
+        AreEqual(3, sim.ExecuteScalar("with c as (select distinct 1 n union all select n+1 from c where n < 3) select count(*) from c"));
+        AreEqual(3, sim.ExecuteScalar("with c as (select top 1 1 n union all select n+1 from c where n < 3) select count(*) from c"));
+        AreEqual(3, sim.ExecuteScalar("with c as (select max(n) n from (select 1 n) t union all select n+1 from c where n < 3) select count(*) from c"));
+    }
+
+    /// <summary>A non-recursive CTE keeps every construct — the restriction is recursion-specific.</summary>
+    [TestMethod]
+    public void NonRecursiveCte_AllowsTheSameConstructs()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table nr (id int); insert nr values (1), (1), (2)");
+        AreEqual(2, sim.ExecuteScalar("with c as (select distinct id from nr) select count(*) from c"));
+        AreEqual(1, sim.ExecuteScalar("with c as (select top 1 id from nr) select count(*) from c"));
+        AreEqual(2, sim.ExecuteScalar("with c as (select id from nr group by id) select count(*) from c"));
+    }
 }

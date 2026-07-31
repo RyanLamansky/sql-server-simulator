@@ -143,10 +143,13 @@ partial class Simulation
                 }
 
                 binding.SelfReferenceCountInCurrentBranch = 0;
+                context.RecursiveBranchConstructs = default;
                 var branch = Selection.ParseIntersectChain(context, depth: 1, outerTypeResolver: null, isFirstBranch: false);
                 var selfRefCount = binding.SelfReferenceCountInCurrentBranch;
                 if (selfRefCount > 1)
                     throw SimulatedSqlException.RecursiveCteMultipleReferences(binding.Name);
+                if (selfRefCount > 0)
+                    RejectRecursiveMemberConstructs(context.RecursiveBranchConstructs, binding.Name);
 
                 branches.Add((branch, selfRefCount > 0, kind));
             }
@@ -255,5 +258,22 @@ partial class Simulation
             if (context.Token is not Operator { Character: ',' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
+    }
+    /// <summary>
+    /// Raises the error SQL Server gives for a construct the recursive member
+    /// of a recursive CTE may not contain. Probe-confirmed 2026-07-31,
+    /// including that the restriction reaches into the member's nested
+    /// subqueries and derived tables rather than stopping at its own SELECT.
+    /// </summary>
+    private static void RejectRecursiveMemberConstructs(RecursiveMemberConstructs seen, string cteName)
+    {
+        if (seen.Distinct)
+            throw SimulatedSqlException.RecursiveCteDistinctNotAllowed(cteName);
+        if (seen.TopOrOffset)
+            throw SimulatedSqlException.RecursiveCteTopNotAllowed(cteName);
+        if (seen.OuterJoin)
+            throw SimulatedSqlException.RecursiveCteOuterJoinNotAllowed(cteName);
+        if (seen.GroupingOrAggregate)
+            throw SimulatedSqlException.RecursiveCteGroupingNotAllowed(cteName);
     }
 }

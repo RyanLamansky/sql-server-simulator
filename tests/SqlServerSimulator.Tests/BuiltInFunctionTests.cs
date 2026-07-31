@@ -278,4 +278,18 @@ public sealed class BuiltInFunctionTests
     public void LegacyLobLocalVariable_IsRejected(string sql)
         => new Simulation().AssertSqlError(
             sql, 2739, "The text, ntext, and image data types are invalid for local variables.");
+
+    /// <summary>
+    /// POWER reports an overflow differently per result type — probe-confirmed
+    /// 2026-07-31 and not obviously principled: an infinite intermediate names
+    /// <c>float</c> whatever the declared type, a <c>bigint</c> result names
+    /// the type, and an <c>int</c> result gives the value-bearing Msg 232.
+    /// </summary>
+    [TestMethod]
+    public void PowerOverflow_ReportsPerResultType()
+    {
+        new Simulation().AssertSqlError("select power(2, 10000)", 8115, "Arithmetic overflow error converting expression to data type float.");
+        new Simulation().AssertSqlError("select power(cast(2 as bigint), 200)", 8115, "Arithmetic overflow error converting expression to data type bigint.");
+        Assert.Contains("Arithmetic overflow error for type int", new Simulation().AssertSqlError("select power(2, 62)", 232).Message);
+    }
 }

@@ -48,19 +48,31 @@ internal sealed class Power : Expression
             throw SimulatedSqlException.InvalidFloatingPointOperation();
 
         var raw = Math.Pow(bd, ed);
-        return resultType.Category switch
-        {
-            SqlTypeCategory.Approximate => double.IsInfinity(raw)
-                ? throw SimulatedSqlException.ArithmeticOverflow("float")
-                : SqlValue.FromDouble(raw),
-            SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimalOrMoney(resultType, (decimal)raw),
-            _ => CoerceIntegerResult(raw, resultType),
-        };
+        // An infinite intermediate is reported against float, whatever the
+        // declared result type — real gives Msg 8115 naming float for
+        // POWER(2, 10000) even though the result type is int
+        // (probe-confirmed 2026-07-31). A finite value out of the result
+        // type's range is the type-specific Msg 232 below.
+        return double.IsInfinity(raw)
+            ? throw SimulatedSqlException.ArithmeticOverflow("float")
+            : resultType.Category switch
+            {
+                SqlTypeCategory.Approximate => SqlValue.FromDouble(raw),
+                SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimalOrMoney(resultType, (decimal)raw),
+                _ => CoerceIntegerResult(raw, resultType),
+            };
     }
 
+    /// <summary>
+    /// An out-of-range result reports differently per type, probe-confirmed
+    /// 2026-07-31 and not obviously principled: a <c>bigint</c> result gives
+    /// Msg 8115 naming the type, while an <c>int</c> result gives the
+    /// value-bearing Msg 232. An infinite intermediate is handled before this
+    /// and names <c>float</c> either way.
+    /// </summary>
     private static SqlValue CoerceIntegerResult(double raw, SqlType resultType) => resultType == SqlType.BigInt
         ? raw is < long.MinValue or > long.MaxValue
-            ? throw SimulatedSqlException.ArithmeticOverflowForType("bigint", raw.ToString("F6", System.Globalization.CultureInfo.InvariantCulture))
+            ? throw SimulatedSqlException.ArithmeticOverflow("bigint")
             : SqlValue.FromInt64((long)raw)
         : raw is < int.MinValue or > int.MaxValue
             ? throw SimulatedSqlException.ArithmeticOverflowForType("int", raw.ToString("F6", System.Globalization.CultureInfo.InvariantCulture))

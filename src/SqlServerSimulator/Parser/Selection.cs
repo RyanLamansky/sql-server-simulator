@@ -823,6 +823,7 @@ internal sealed partial class Selection
         {
             case ReservedKeyword { Keyword: Keyword.Distinct }:
                 distinct = true;
+                context.RecursiveBranchConstructs.Distinct = true;
                 firstToken = context.GetNextRequired();
                 break;
             case ReservedKeyword { Keyword: Keyword.All }:
@@ -842,6 +843,7 @@ internal sealed partial class Selection
             context.RejectNextValueFor = true;
             try
             {
+                context.RecursiveBranchConstructs.TopOrOffset = true;
                 topExpression = Expression.ParsePrimary(context.MoveNextRequiredReturnSelf());
             }
             finally
@@ -2508,6 +2510,7 @@ internal sealed partial class Selection
                     context.MoveNextRequired();
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.RecursiveBranchConstructs.OuterJoin = true;
                 kind = JoinKind.Left;
                 return true;
 
@@ -2517,6 +2520,7 @@ internal sealed partial class Selection
                     context.MoveNextRequired();
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.RecursiveBranchConstructs.OuterJoin = true;
                 kind = JoinKind.Right;
                 return true;
 
@@ -2526,6 +2530,7 @@ internal sealed partial class Selection
                     context.MoveNextRequired();
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.RecursiveBranchConstructs.OuterJoin = true;
                 kind = JoinKind.Full;
                 return true;
 
@@ -2695,11 +2700,13 @@ internal sealed partial class Selection
             {
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.RecursiveBranchConstructs.GroupingOrAggregate = true;
                 ParseGroupByList(context, fromClause);
             }
 
             if (context.Token is ReservedKeyword { Keyword: Keyword.Having })
             {
+                context.RecursiveBranchConstructs.GroupingOrAggregate = true;
                 fromClause.Having = BooleanExpression.Parse(context.MoveNextRequiredReturnSelf());
             }
         }
@@ -3110,6 +3117,7 @@ internal sealed partial class Selection
         context.MoveNextRequired();
         var offsetExpression = Expression.Parse(context);
         _ = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, context.Batch);
+        context.RecursiveBranchConstructs.TopOrOffset = true;
         fromClause.OffsetExpression = offsetExpression;
 
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Row or ContextualKeyword.Rows })
