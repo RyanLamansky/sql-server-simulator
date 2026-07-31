@@ -94,8 +94,11 @@ partial class Simulation
 
     /// <summary>
     /// Coerces an INSERT source value to the destination column's type,
-    /// converting any overflow into the SQL Server-shaped Msg 8115. Truncation
-    /// of strings/bytes is handled separately by <see cref="EnforceMaxLength"/>
+    /// converting any overflow into the SQL Server-shaped error — the
+    /// source-type-keyed Msg 220 / 232 / 237 family via
+    /// <see cref="SimulatedSqlException.TryConversionOverflow"/>, or the
+    /// generic Msg 8115 where the chooser declines. Truncation of
+    /// strings/bytes is handled separately by <see cref="EnforceMaxLength"/>
     /// before this method runs.
     /// </summary>
     private static SqlValue CoerceForInsert(SqlValue source, SqlType targetType)
@@ -106,7 +109,8 @@ partial class Simulation
         }
         catch (OverflowException)
         {
-            throw SimulatedSqlException.ArithmeticOverflow(targetType.ToString()!);
+            throw SimulatedSqlException.TryConversionOverflow(source, targetType)
+                ?? SimulatedSqlException.ArithmeticOverflow(targetType.ToString()!);
         }
     }
 

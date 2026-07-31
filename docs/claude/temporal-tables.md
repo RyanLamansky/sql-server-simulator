@@ -1,6 +1,6 @@
 # System-versioned temporal tables
 
-Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW START / END`, `WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))`, the auto-created history sibling, `FOR SYSTEM_TIME ALL / AS OF` query syntax, or related `HeapTable` / `HeapColumn` metadata.
+Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW START / END`, `WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))`, the auto-created history sibling, the `FOR SYSTEM_TIME` query forms, or related `HeapTable` / `HeapColumn` metadata.
 
 ## What's modeled
 
@@ -23,11 +23,28 @@ Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW STA
 - **DELETE** on a system-versioned parent: pre-delete full row captured (`needsFullForHistory` forced true), then history row written with ROW END = UtcNow before tombstoning the current row.
 - **`SELECT *`** excludes hidden columns (probe-confirmed: real SQL Server omits `IsHidden` columns from star expansion).
   Explicit references continue to bind by name, including in INSERT column lists and OUTPUT clauses (EF Core 10 emits `OUTPUT INSERTED.[PeriodEnd], INSERTED.[PeriodStart]` and lists period columns by name in tracked-entity SELECTs).
-- **`FROM <table> FOR SYSTEM_TIME ALL [AS] <alias>`** unions current + history rows.
-  **`FROM <table> FOR SYSTEM_TIME AS OF <expr> [AS] <alias>`** filters parent + history rows where `ROW START <= <expr> < ROW END`.
-  The expression is evaluated once on iteration start (no per-row re-evaluation, matching SQL Server's "constant per query" contract); column references inside the expression raise Msg 207.
-  ISO 8601 string literals with trailing `Z` (UTC marker — EF Core 10 emits this) are accepted by datetime2 coercion.
-  The remaining temporal-query forms (`BETWEEN ... AND ...`, `FROM ... TO ...`, `CONTAINED IN (..., ...)`) raise `NotSupportedException` until an application needs them.
+- **`FROM <table> FOR SYSTEM_TIME <form> [AS] <alias>`** — all five forms ship, each a filter over the union of the parent's and the history sibling's rows.
+  Writing `s` for a row version's ROW START and `e` for its ROW END:
+
+  | Form | Rows it takes |
+  | --- | --- |
+  | `ALL` | every version |
+  | `AS OF t` | `s <= t < e` |
+  | `BETWEEN t1 AND t2` | `s <= t2 AND e > t1` — active anywhere in the closed range |
+  | `FROM t1 TO t2` | `s < t2 AND e > t1` — same, upper endpoint exclusive |
+  | `CONTAINED IN (t1, t2)` | `s >= t1 AND e <= t2` — whole validity period inside, both endpoints inclusive |
+
+  Probe-confirmed against SQL Server 2025 on the boundary the range forms disagree about: for versions `v1 = [T1, T2)` and `v2 = [T2, T3)`, `BETWEEN T2 AND T2` takes `v2` alone (the version *ending* at `T2` is out, the one *starting* there is in) while `FROM T2 TO T2` takes nothing, and `CONTAINED IN (T1, T2)` takes `v1` alone.
+  A current version's ROW END is max datetime2, so `CONTAINED IN` reaches it only when `t2` is that same value.
+  A misordered range (`t2 < t1`) is not an error — the predicate simply can't hold, and all three forms return no rows.
+  A NULL bound likewise returns no rows.
+- **Zero-duration versions are invisible to every form**, `ALL` included: a row updated more than once inside one transaction leaves a history row whose ROW START equals its ROW END, and real hides it from `FOR SYSTEM_TIME` while a direct `SELECT` against the history table still returns it.
+  Probe-confirmed on both an engine-produced row (two UPDATEs in one transaction) and a hand-written one.
+  The simulator freezes ROW START per statement rather than per transaction, so it reaches the same state when two mutations land on the same clock tick — which is why the tests separate mutations by a `WAITFOR` / sleep.
+- **Time arguments are a literal or a variable**, which is all real's grammar admits: a function call (`AS OF SYSUTCDATETIME()`), a parenthesized subquery, or a column reference is **Msg 102** (or **Msg 156** when the offending token is a reserved keyword, e.g. `BETWEEN 't' TO 't'`).
+  They're evaluated once on iteration start — no per-row re-evaluation, matching SQL Server's "constant per query" contract.
+  ISO 8601 string literals with a trailing `Z` (UTC marker — EF Core 10 emits this) are accepted by datetime2 coercion; an unparseable string raises **Msg 241**.
+  The argument's type is gated the way real gates it, as a comparison against the period columns: strings and the date/time family convert, `time` and binary raise **Msg 402** (`The data types datetime2 and time are incompatible in the greater than operator.`), and everything else — integer, decimal, money, float, bit, uniqueidentifier — raises **Msg 206** (`Operand type clash: datetime2 is incompatible with int`).
 - **DROP TABLE** on a system-versioned parent or its history sibling raises Msg 13552; caller must `ALTER TABLE ... SET (SYSTEM_VERSIONING = OFF)` first.
 - **`ALTER TABLE [schema.]name SET (SYSTEM_VERSIONING = OFF)`** flips the parent's `HeapTable.SystemVersioning` to `null` and the history sibling's `HeapTable.IsHistoryTable` to `false` — both tables revert to plain regular status, and `DROP TABLE` on either now succeeds.
   Period definition and GENERATED ALWAYS / HIDDEN column metadata stay intact on the parent (probe-confirmed against SQL Server 2025: `sys.tables.temporal_type` flips to 0 on both, `history_table_id` clears to NULL, but the parent's `sys.columns.generated_always_type_desc` keeps `AS_ROW_START` / `AS_ROW_END` and `is_hidden` stays `True`).
@@ -53,22 +70,22 @@ Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW STA
 - **Parser scope:** `ParseColumnList`'s `pendingPeriod: List<(string StartCol, string EndCol)>?` carries the period names through column-list parsing; `ResolvePeriodColumns` (in `Simulation.Create.cs`) validates and resolves to ordinals.
   `ParseSystemVersioningOption` parses the trailing `WITH (...)` clause and returns the history table name.
   `BuildHistoryTable` mirrors the parent column shape into the history sibling.
-- **Query scope:** `Selection.ParseOptionalForSystemTime` peeks for `FOR SYSTEM_TIME` between the FROM source's table name and any alias, returns `null` when absent (cursor restored), or a row enumerator wrapping `parent.Rows + history.Rows` (ALL) / `TemporalAsOfRowSource` (AS OF) when present.
+- **Query scope:** `Selection.ParseOptionalForSystemTime` peeks for `FOR SYSTEM_TIME` between the FROM source's table name and any alias, and returns `null` when absent (cursor restored) or a `TemporalRowSource` when present.
+  That one row source serves all five forms — a `TemporalQueryKind` discriminator plus up to two bound expressions, parsed by `ParseTemporalTimeArgument` (the literal-or-variable grammar) and evaluated once per enumeration.
 
 ## EF Core 10 emit shape
 
 `ModelBuilder.Entity<T>().ToTable("Customers", b => b.IsTemporal())` defaults the period columns to **`PeriodStart`** and **`PeriodEnd`** (not `ValidFrom` / `ValidTo` — that's the SQL Server documentation convention but not EF's default).
 Tests bootstrap their tables with EF's expected names.
 INSERT emits `INSERT INTO [tbl] ([cols-without-period]) OUTPUT INSERTED.[PeriodEnd], INSERTED.[PeriodStart] VALUES (...)`; UPDATE emits `UPDATE [tbl] SET [col] = @p OUTPUT INSERTED.[PeriodEnd], INSERTED.[PeriodStart] WHERE [Id] = @p`; tracked-entity SELECTs explicitly list period columns by name.
-`.TemporalAll()` → `FROM [tbl] FOR SYSTEM_TIME ALL AS [c]`; `.TemporalAsOf(@t)` → `FROM [tbl] FOR SYSTEM_TIME AS OF '<iso-literal-with-Z>' AS [c]`.
+`.TemporalAll()` → `FROM [tbl] FOR SYSTEM_TIME ALL AS [c]`; `.TemporalAsOf(t)` → `FROM [tbl] FOR SYSTEM_TIME AS OF '<iso-literal-with-Z>' AS [c]`.
+`.TemporalBetween(t1, t2)` / `.TemporalFromTo(t1, t2)` / `.TemporalContainedIn(t1, t2)` emit the matching range clause with both endpoints as ISO literals.
 
 ## Not modeled
 
 - **`HISTORY_RETENTION_PERIOD`** option on `SYSTEM_VERSIONING = ON`.
   Real SQL Server prunes history rows beyond the retention period; the simulator stores history forever.
 - **Auto-named history** (`SYSTEM_VERSIONING = ON` without `(HISTORY_TABLE = ...)`).
-- **`FOR SYSTEM_TIME BETWEEN ... AND ...`** / **`FROM ... TO ...`** / **`CONTAINED IN (..., ...)`** query forms.
-  Only `ALL` and `AS OF <expr>` ship.
 - **Column-shape match validation** between base and history on `ALTER ... SET (SYSTEM_VERSIONING = ON ...)`.
   Real SQL Server validates same column count + names + types + nullability + period-column wiring; the simulator establishes the link unconditionally (matching CREATE WITH SYSTEM_VERSIONING = ON, which builds the history from the base and so doesn't need separate validation).
   Mismatched-shape history tables will surface at query time rather than at ALTER time.

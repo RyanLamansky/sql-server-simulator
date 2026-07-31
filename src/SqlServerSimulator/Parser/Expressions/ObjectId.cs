@@ -20,8 +20,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// Type codes today: <c>'U'</c> (user table), <c>'V'</c> (view, including the
 /// registered <c>sys.*</c> / <c>INFORMATION_SCHEMA.*</c> catalog views),
 /// <c>'P'</c> (stored procedure), <c>'FN'</c> / <c>'IF'</c> (scalar / inline-TVF
-/// functions), <c>'TR'</c> (DML trigger). Other documented codes (<c>'TF'</c>,
-/// FK / DEFAULT constraint codes, …) return NULL pending those features.
+/// functions), <c>'TR'</c> (DML trigger), <c>'SN'</c> (synonym). Other
+/// documented codes (<c>'TF'</c>, FK / DEFAULT constraint codes, …) return NULL
+/// pending those features.
 /// </para>
 /// <para>
 /// Divergence from real SQL Server on temp tables: <c>OBJECT_ID('#foo')</c>
@@ -70,7 +71,7 @@ internal sealed class ObjectId : Expression
             // 'IF' (inline table-valued function), 'V' (view), 'P' (stored
             // procedure), 'TR' (DML trigger). Other documented codes (TF /
             // ...) return NULL pending those features.
-            if (!BuiltInToken.EqualsAny(typeFilter, "U", "FN", "IF", "V", "P", "TR"))
+            if (!BuiltInToken.EqualsAny(typeFilter, "U", "FN", "IF", "V", "P", "TR", "SN"))
                 return SqlValue.Null(SqlType.Int32);
         }
 
@@ -89,6 +90,19 @@ internal sealed class ObjectId : Expression
                 ? SqlValue.FromInt32(resultId)
                 : SqlValue.Null(SqlType.Int32);
         SqlValue Gate(int objectId, int schemaId) => GateAs(objectId, objectId, schemaId);
+
+        // A synonym answers with its OWN id and is never followed to its base:
+        // probe-confirmed that OBJECT_ID('syn', 'U') is NULL even when the base
+        // is a table, so the synonym check has to precede (and short-circuit)
+        // the kind-specific branches below, whose resolvers apply the redirect.
+        if (runtime.Batch.TryResolveSynonym(parsed, out var synonym))
+        {
+            return typeFilter is null || BuiltInToken.Equals(typeFilter, "SN")
+                ? Gate(synonym.ObjectId, synonym.SchemaId)
+                : SqlValue.Null(SqlType.Int32);
+        }
+        if (typeFilter is not null && BuiltInToken.Equals(typeFilter, "SN"))
+            return SqlValue.Null(SqlType.Int32);
 
         // 'FN' / 'IF' / 'TF' / no filter: try function resolution. With a
         // specific filter the function must match that kind (scalar vs.

@@ -452,15 +452,17 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool InsertExecActive;
 
     /// <summary>
-    /// ObjectIds of triggers currently mid-fire on this connection. The
-    /// DML dispatcher consults this set before firing a trigger and skips
-    /// any whose ObjectId is already in flight — matches SQL Server's
-    /// default <c>RECURSIVE_TRIGGERS OFF</c> behavior (direct same-trigger
-    /// recursion is suppressed; trigger-to-other-trigger chains still fire).
-    /// Probe-confirmed: an update inside a trigger doesn't re-fire that
-    /// same trigger, even though the table-level update otherwise would.
+    /// The triggers mid-fire on this connection, innermost last: each frame
+    /// carries the trigger's ObjectId and whether it's an AFTER trigger. The
+    /// DML dispatcher reads it to decide whether a trigger fires at all —
+    /// <c>Simulation.CanFireTrigger</c> holds the rules. A stack rather than a
+    /// set because both rules are positional: direct recursion is the
+    /// <em>innermost</em> frame naming the same trigger (real re-fires a
+    /// trigger that's further up the stack — probe-confirmed indirect
+    /// recursion), and the <c>nested triggers</c> server option asks whether
+    /// any AFTER frame is present.
     /// </summary>
-    internal readonly HashSet<int> FiringTriggerIds = [];
+    internal readonly List<(int ObjectId, bool IsAfter)> FiringTriggers = [];
 
     /// <summary>
     /// Current trigger nesting depth — incremented each time a trigger

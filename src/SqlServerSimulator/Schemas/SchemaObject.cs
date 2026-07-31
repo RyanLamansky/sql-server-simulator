@@ -6,7 +6,8 @@ namespace SqlServerSimulator.Schemas;
 /// Common metadata base for every named, schema-resident database object —
 /// <see cref="HeapTable"/>, <see cref="View"/>,
 /// <see cref="Procedure"/>, <see cref="UserDefinedFunction"/>,
-/// <see cref="Sequence"/>, <see cref="TableType"/>, <see cref="Trigger"/>.
+/// <see cref="Sequence"/>, <see cref="TableType"/>, <see cref="Trigger"/>,
+/// <see cref="Synonym"/>.
 /// The base unifies the fields every concrete type was previously
 /// declaring independently (and that <c>sys.objects</c> /
 /// <c>OBJECT_ID()</c> need to project): <see cref="Name"/>,
@@ -84,7 +85,8 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     /// (USER_TABLE), <c>'V '</c> (VIEW), <c>'P '</c> (SQL_STORED_PROCEDURE),
     /// <c>'FN'</c> (SQL_SCALAR_FUNCTION), <c>'IF'</c>
     /// (SQL_INLINE_TABLE_VALUED_FUNCTION), <c>'TR'</c> (SQL_TRIGGER),
-    /// <c>'SO'</c> (SEQUENCE_OBJECT), <c>'TT'</c> (TYPE_TABLE).
+    /// <c>'SO'</c> (SEQUENCE_OBJECT), <c>'TT'</c> (TYPE_TABLE),
+    /// <c>'SN'</c> (SYNONYM).
     /// Constants only — concrete types never compute these dynamically.
     /// </summary>
     public abstract string ObjectTypeCode { get; }
@@ -107,4 +109,15 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     /// was an <c>ALTER</c> / <c>CREATE OR ALTER</c>, mirroring SQL Server.
     /// </summary>
     public string? DefinitionText;
+
+    /// <summary>
+    /// True for the object kinds that carry a T-SQL module body — the set
+    /// <c>sys.sql_modules</c> emits a row for, and the set whose null
+    /// <see cref="DefinitionText"/> therefore means <c>WITH ENCRYPTION</c>
+    /// rather than "no text at all". A CLR routine is excluded: it has no
+    /// T-SQL body, so real SQL Server gives it no <c>sys.sql_modules</c> row
+    /// (probe-confirmed) and <c>sp_helptext</c> answers Msg 15197 for it.
+    /// </summary>
+    public static bool IsSqlModule(SchemaObject? obj) =>
+        obj is Procedure or View or Trigger or (UserDefinedFunction and not ClrScalarFunction);
 }

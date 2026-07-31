@@ -161,7 +161,7 @@ internal sealed class SpatialStaticCall : Expression
         index >= this.arguments.Length
             ? SpatialGeometry.DefaultSridFor(isGeography)
             : Argument(runtime, index) is { } value
-                ? SpatialGeometry.ValidateSrid(value.CoerceTo(SqlType.Int32).AsInt32, isGeography)
+                ? SpatialGeometry.ValidateSrid(ScalarArguments.CoerceToInt(value), isGeography)
                 : null;
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.type;

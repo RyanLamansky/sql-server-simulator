@@ -460,6 +460,35 @@ public sealed class AlterTableColumnTests
     }
 
     [TestMethod]
+    // Same source-type-keyed family as CAST and column assignment
+    // (probe-confirmed 2026-07-31): a bigint source keeps the generic
+    // Msg 8115, a float source reports the value-bearing Msg 232.
+    public void AlterColumn_BigintToInt_Overflow_Raises8115()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (v bigint);
+            insert t values (3000000000)
+            """);
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v int"));
+        AreEqual("8115", ex.Data["HelpLink.EvtID"]);
+        Assert.Contains("data type int", ex.Message);
+    }
+
+    [TestMethod]
+    public void AlterColumn_FloatToTinyint_Overflow_Raises232WithValue()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (v float);
+            insert t values (300)
+            """);
+        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v tinyint"));
+        AreEqual("232", ex.Data["HelpLink.EvtID"]);
+        Assert.Contains("value = 300.000000", ex.Message);
+    }
+
+    [TestMethod]
     public void AlterColumn_VarcharToInt_BadData_Raises245()
     {
         var sim = new Simulation();

@@ -362,11 +362,15 @@ partial class Simulation
                 pending.Name,
                 resolvedType,
                 maxLength: computedMaxLength,
-                nullable: pending.Nullable,
+                nullable: pending.Nullable && !IsPendingPrimaryKeyOrdinal(pendingKeys, pending.Index),
                 computedExpression: pending.Expression,
                 isPersisted: pending.Persisted,
                 computedDefinition: pending.Definition);
         }
+
+        // No CHECK predicate may read a non-persisted computed column —
+        // Msg 1764, ahead of the Msg 8141 walk. Same as CREATE TABLE.
+        RejectChecksOverNonPersistedComputedColumns(context.Batch.CurrentDatabase.Collation, fullName, heapColumns, pendingChecks);
 
         // Inline column-level CHECK predicates may only reference their
         // owning column — Msg 8141. Same structural walk as CREATE TABLE.

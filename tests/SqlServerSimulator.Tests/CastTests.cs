@@ -47,13 +47,19 @@ public sealed class CastTests
         _ = new Simulation().AssertSqlError("select cast(cast(1e30 as float) as decimal(9,2))", 8115);
 
     [TestMethod]
-    [DataRow("select cast(300 as tinyint)", "tinyint", "300")]
-    [DataRow("select cast(99999 as smallint)", "smallint", "99999")]
-    [DataRow("select cast(-1 as tinyint)", "tinyint", "-1")]
-    [DataRow("select convert(tinyint, 300)", "tinyint", "300")]
-    [DataRow("select cast(cast(70000 as int) as smallint)", "smallint", "70000")]
-    public void Cast_IntegerNarrowingOverflow_RaisesMsg220WithValue(string sql, string type, string value) =>
-        AreEqual($"Arithmetic overflow error for data type {type}, value = {value}.", AssertSqlError(sql, 220).Message);
+    // The Msg 220 state is target-keyed: tinyint 2, smallint 1
+    // (probe-confirmed 2026-07-31).
+    [DataRow("select cast(300 as tinyint)", "tinyint", "300", (byte)2)]
+    [DataRow("select cast(99999 as smallint)", "smallint", "99999", (byte)1)]
+    [DataRow("select cast(-1 as tinyint)", "tinyint", "-1", (byte)2)]
+    [DataRow("select convert(tinyint, 300)", "tinyint", "300", (byte)2)]
+    [DataRow("select cast(cast(70000 as int) as smallint)", "smallint", "70000", (byte)1)]
+    public void Cast_IntegerNarrowingOverflow_RaisesMsg220WithValue(string sql, string type, string value, byte state)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 220);
+        AreEqual($"Arithmetic overflow error for data type {type}, value = {value}.", ex.Message);
+        AreEqual(state, ex.State);
+    }
 
     [TestMethod]
     // bigint source can exceed real's 32-bit %ld slot, so it keeps the generic
@@ -63,6 +69,53 @@ public sealed class CastTests
     [DataRow("select cast(300.0 as tinyint)")]
     public void Cast_NonIntegerNarrowNarrowingOverflow_RaisesMsg8115(string sql) =>
         Contains("Arithmetic overflow", AssertSqlError(sql, 8115).Message);
+
+    /// <summary>
+    /// float/real sources report the value-bearing Msg 232 with six
+    /// fractional digits, state keyed by target (tinyint 1, smallint 2,
+    /// int 3); a bigint target keeps the generic Msg 8115. Probe-confirmed
+    /// against SQL Server 2025 (2026-07-31).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select cast(cast(300 as float) as tinyint)", "tinyint", "300.000000", (byte)1)]
+    [DataRow("select cast(cast(300 as real) as tinyint)", "tinyint", "300.000000", (byte)1)]
+    [DataRow("select cast(cast(70000 as float) as smallint)", "smallint", "70000.000000", (byte)2)]
+    [DataRow("select cast(cast(3000000000.5 as float) as int)", "int", "3000000000.500000", (byte)3)]
+    public void Cast_FloatOverflow_RaisesMsg232WithValue(string sql, string type, string value, byte state)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 232);
+        AreEqual($"Arithmetic overflow error for type {type}, value = {value}.", ex.Message);
+        AreEqual(state, ex.State);
+    }
+
+    [TestMethod]
+    public void Cast_FloatOverflow_BigintTarget_RaisesMsg8115() =>
+        Contains("bigint", AssertSqlError("select cast(cast(1e19 as float) as bigint)", 8115).Message);
+
+    /// <summary>
+    /// money splinters per target — Msg 232 state 11 for tinyint, Msg 220
+    /// state 7 for smallint with the value in money's ×10000 tick
+    /// representation, Msg 237 for int — while smallmoney keeps the generic
+    /// Msg 8115 everywhere. Probe-confirmed against SQL Server 2025
+    /// (2026-07-31).
+    /// </summary>
+    [TestMethod]
+    public void Cast_MoneyOverflow_SplintersPerTarget()
+    {
+        var tiny = new Simulation().AssertSqlError("select cast(cast(400 as money) as tinyint)", 232);
+        AreEqual("Arithmetic overflow error for type tinyint, value = 400.000000.", tiny.Message);
+        AreEqual((byte)11, tiny.State);
+
+        var small = new Simulation().AssertSqlError("select cast(cast(70000 as money) as smallint)", 220);
+        AreEqual("Arithmetic overflow error for data type smallint, value = 700000000.", small.Message);
+        AreEqual((byte)7, small.State);
+
+        AreEqual(
+            "There is insufficient result space to convert a money value to int.",
+            AssertSqlError("select cast(cast(99999999999 as money) as int)", 237).Message);
+
+        Contains("tinyint", AssertSqlError("select cast(cast(300 as smallmoney) as tinyint)", 8115).Message);
+    }
 
     [TestMethod]
     public void TryCast_IntegerNarrowingOverflow_ReturnsNull() =>
@@ -97,6 +150,15 @@ public sealed class CastTests
     [TestMethod]
     public void Cast_StringOverflow_SmallInt_RaisesMsg244WithINT2() =>
         AssertSqlMessage("select cast('99999' as smallint)", "The conversion of the varchar value '99999' overflowed an INT2 column. Use a larger integer column.");
+
+    [TestMethod]
+    // Msg 244's state is target-keyed: INT1 1, INT2 2 (probe-confirmed
+    // 2026-07-31).
+    public void Cast_StringOverflow_StateIsTargetKeyed()
+    {
+        AreEqual((byte)1, new Simulation().AssertSqlError("select cast('300' as tinyint)", 244).State);
+        AreEqual((byte)2, new Simulation().AssertSqlError("select cast('99999' as smallint)", 244).State);
+    }
 
     [TestMethod]
     public void Cast_StringOverflow_Int_RaisesMsg248() =>
@@ -595,6 +657,9 @@ public sealed class CastTests
     [DataRow("try_cast(99999 as tinyint)")]                   // Msg 244
     [DataRow("try_cast(2147483648 as int)")]                  // Msg 8115
     [DataRow("try_cast(123.456 as decimal(3,1))")]            // Msg 8115
+    [DataRow("try_cast(cast(300 as float) as tinyint)")]      // Msg 232
+    [DataRow("try_cast(cast(99999999999 as money) as int)")]  // Msg 237
+    [DataRow("try_cast(cast(70000 as money) as smallint)")]   // Msg 220 (money ticks)
     [DataRow("try_cast('9999-12-31 23:59:59.999' as datetime)")] // Msg 242
     public void TryCast_ConversionFailure_ReturnsNull(string expression) =>
         IsInstanceOfType<DBNull>(ExecuteScalar($"select {expression}"));

@@ -11,7 +11,7 @@ Two equivalent declaration shapes accepted in `CREATE TABLE`:
 -- Inline (single-column FK on the column being declared):
 CREATE TABLE c (
   id      int NOT NULL PRIMARY KEY,
-  p_id    int NOT NULL [CONSTRAINT fk_c_to_p] REFERENCES p (id) [ON DELETE action] [ON UPDATE action]
+  p_id    int NOT NULL [CONSTRAINT fk_c_to_p] [FOREIGN KEY] REFERENCES p (id) [ON DELETE action] [ON UPDATE action]
 );
 
 -- Table-level (single or multi-column FK):
@@ -24,6 +24,7 @@ CREATE TABLE c (
 ```
 
 The referenced column list defaults to the parent table's PRIMARY KEY columns when omitted: `REFERENCES p` ≡ `REFERENCES p(<pk-columns>)`.
+`FOREIGN KEY` ahead of the inline form's `REFERENCES` is a noise phrase real accepts and the simulator consumes (`ConsumeOptionalForeignKeyNoisePhrase`); the FK is single-column either way, since the inline form's column is the one being declared.
 
 Action variants:
 
@@ -74,8 +75,8 @@ For each FK:
 
 `ReferencedRowExists` **seeks** the parent rather than scanning it: the referenced columns are always a PK/UNIQUE key, so it probes the parent's per-`Heap` [`HeapSeekCache`](indexes.md) on those columns (the parent's own index, incrementally maintained) and verifies each candidate against live bytes — there's no residual WHERE to discard the cache's stale-entry false-positives, so the verify is mandatory.
 Bulk child inserts against a large parent drop from O(children × parent) to one parent-index build plus O(1) per insert (measured ~67× faster for 2 000 inserts against a 20 000-row parent, and the ratio grows with parent size).
-A computed (non-stored) referenced column falls back to the full scan.
 The full→storage ordinal map is `HeapTable.StorageOrdinals[fullOrdinal]`.
+Every column an FK can legally name is stored — a PERSISTED computed column has a storage slot and a non-persisted one is rejected at declaration (see [Computed columns in a foreign key](#computed-columns-in-a-foreign-key)) — so the seek path always applies and the scan fallback beside it is a guard on the storage layout rather than a live branch.
 
 ### Parent side (DELETE / UPDATE / MERGE-DELETE / MERGE-UPDATE)
 
@@ -97,6 +98,38 @@ For each FK:
 
 Statement-level atomicity continues to apply: a Msg 547 raised mid-cascade unwinds via the undo log, leaving the entire statement's mutations reverted.
 Cascade chains recurse up to `MaxCascadeDepth` (32) and then raise `NotSupportedException`.
+
+## Computed columns in a foreign key
+
+CHECK constraints over computed columns follow the same 8183-vs-1764 split — see [`constraints.md`](constraints.md#computed-columns-in-a-check-constraint).
+
+A **PERSISTED** computed column is a legal referencing column, in all three declaration forms — the inline column tail (`cc AS base + 1 PERSISTED [CONSTRAINT n] [FOREIGN KEY] REFERENCES p(id)`), the table-level list, and `ALTER TABLE … ADD CONSTRAINT`.
+It has a storage slot, so enforcement reads its stored value like any other column and takes the same seek path: an INSERT or an UPDATE of the columns the expression reads re-evaluates it and raises Msg 547 against the parent (the UPDATE need never name the FK column), a NO ACTION parent DELETE raises Msg 547 naming the computed column, and `ON DELETE CASCADE` removes the whole child row.
+
+It is also a legal *referenced* column when it carries the PRIMARY KEY / UNIQUE the FK needs — the parent-side seek probes its stored value, and Msg 547 names it.
+
+A **non-persisted** computed column is rejected at declaration, with the message depending on which form declared it (probe-confirmed split):
+
+| Form | Error |
+|------|-------|
+| Inline column tail | **Msg 8183** — `Only UNIQUE or PRIMARY KEY constraints can be created on computed columns, while CHECK, FOREIGN KEY, and NOT NULL constraints require that computed columns be persisted.` (real rejects at parse, before the constraint reaches resolution) |
+| Table-level list, `ALTER TABLE … ADD CONSTRAINT` | **Msg 1764** — `Computed Column '<col>' in table '<table>' is invalid for use in 'FOREIGN KEY CONSTRAINT' because it is not persisted.` (note real's capitalized "Computed Column") |
+
+The referential actions are then restricted to the ones that never *write* the computed column:
+
+| Declared action | Result |
+|-----------------|--------|
+| `ON DELETE NO ACTION` / `ON DELETE CASCADE` | Accepted — CASCADE removes the whole row rather than writing the column. |
+| `ON DELETE SET NULL` / `ON DELETE SET DEFAULT` | **Msg 1765** — `Foreign key '<fk>' creation failed. Only NO ACTION and CASCADE referential delete actions are allowed for referencing computed column '<col>'.` |
+| `ON UPDATE NO ACTION` | Accepted. |
+| `ON UPDATE CASCADE` / `SET NULL` / `SET DEFAULT` | **Msg 1715** — `Foreign key '<fk>' creation failed. Only NO ACTION referential update action is allowed for referencing computed column '<col>'.` (CASCADE is rejected here where the ON DELETE side accepts it, because an update cascade has to write the column) |
+
+Probed precedence among the four: **Msg 1776** (no matching parent key) beats **1764**, which beats **1765**, which beats **1715**.
+`ResolveForeignKeys` applies the three computed-column gates in that order, after the referenced-key check and before the SET DEFAULT / cascade-cycle ones.
+Placing them there covers `CREATE TABLE`'s table-level form, `ALTER TABLE … ADD CONSTRAINT`, and the `ALTER TABLE DROP COLUMN` ordinal-shift re-resolution from one site; the inline form's Msg 8183 fires earlier, in `ParseComputedColumnInlineConstraint`.
+As with Msg 1776, real's trailing informational **Msg 1750** (`Could not create constraint or index. See previous errors.`) is collapsed away.
+
+Real also rejects a *non-persisted* computed **referenced** column with **Msg 1784**, which the simulator never reaches: `UNIQUE` on a non-persisted computed column is itself unbuilt (`NotSupportedException`), so the parent key that FK would need can't exist.
 
 ## DROP TABLE protection
 

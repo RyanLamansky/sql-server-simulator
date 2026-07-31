@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -52,7 +53,7 @@ public partial class Simulation
         // NULL timeout falls back to the session default, like an omitted
         // parameter (probe-confirmed rc=0 with @LockTimeout=NULL).
         var timeout = args.HasTimeout && !args.Timeout.IsNull
-            ? args.Timeout.CoerceTo(SqlType.Int32).AsInt32
+            ? ScalarArguments.CoerceProcedureParameter(args.Timeout, SqlType.Int32)
             : connection.LockTimeoutMillis;
         if (timeout < -1)
             throw SimulatedSqlException.InvalidAppLockTimeout();

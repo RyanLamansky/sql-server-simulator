@@ -50,6 +50,27 @@ internal static class StringScalars
     }
 
     /// <summary>
+    /// Raises Msg 8116 when <paramref name="value"/> carries one of the legacy
+    /// LOB types, naming the type, the 1-based <paramref name="argumentIndex"/>
+    /// and <paramref name="functionLowerName"/>. Companion to
+    /// <see cref="CoerceToVarchar"/> for the string scalars that read their
+    /// argument through <see cref="SqlValue.CoerceTo"/> directly instead of
+    /// through the shared coercion helper. Probe-confirmed 2026-07-31 across
+    /// TRIM / ASCII / UNICODE / SOUNDEX / DIFFERENCE / TRANSLATE / PATINDEX /
+    /// STRING_ESCAPE / STRING_AGG.
+    /// <para><paramref name="allowAnsiText"/> covers <c>DIFFERENCE</c>, the one
+    /// member of the family whose argument takes a <c>text</c> column — real
+    /// converts it to <c>varchar</c> implicitly and refuses only <c>ntext</c>
+    /// and <c>image</c>, where its own <c>SOUNDEX</c> refuses all three.</para>
+    /// </summary>
+    public static void RejectLegacyLob(SqlValue value, string functionLowerName, int argumentIndex = 1, bool allowAnsiText = false)
+    {
+        var type = value.Type;
+        if (type is NTextSqlType or ImageSqlType || (!allowAnsiText && type is TextSqlType))
+            throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex, functionLowerName);
+    }
+
+    /// <summary>
     /// Narrows a scalar function's integer argument — a length, position,
     /// count, index or code point — to <c>int</c>. A value outside int range
     /// raises Msg 8115 the way real does, instead of leaking .NET's
@@ -57,17 +78,7 @@ internal static class StringScalars
     /// SUBSTRING / CHARINDEX / STUFF / REPLICATE / SPACE / CHOOSE / CHAR /
     /// NCHAR alongside the LEFT / RIGHT pair that first needed it.
     /// </summary>
-    public static int CoerceLengthArgument(SqlValue count)
-    {
-        try
-        {
-            return count.CoerceTo(SqlType.Int32).AsInt32;
-        }
-        catch (OverflowException)
-        {
-            throw SimulatedSqlException.ArithmeticOverflow(SqlType.Int32.SqlServerName);
-        }
-    }
+    public static int CoerceLengthArgument(SqlValue count) => ScalarArguments.CoerceToInt(count);
 
     /// <summary>
     /// Returns the projection-schema string type for a string scalar
@@ -91,13 +102,16 @@ internal static class StringScalars
     /// space (the legacy one-argument behavior). A supplied set is evaluated
     /// to its characters; a NULL argument returns <see langword="null"/> to
     /// signal a NULL result (probe-confirmed against SQL Server 2025). The
-    /// characters form a set, not a substring.
+    /// characters form a set, not a substring. A legacy LOB set raises Msg 8116
+    /// naming argument 2, the position the character set occupies in both
+    /// functions.
     /// </summary>
-    public static char[]? ResolveTrimCharacters(Expression? trimChars, RuntimeContext runtime)
+    public static char[]? ResolveTrimCharacters(Expression? trimChars, RuntimeContext runtime, string functionLowerName)
     {
         if (trimChars is null)
             return [' '];
         var value = trimChars.Run(runtime);
+        RejectLegacyLob(value, functionLowerName, argumentIndex: 2);
         return value.IsNull ? null : value.AsString.ToCharArray();
     }
 

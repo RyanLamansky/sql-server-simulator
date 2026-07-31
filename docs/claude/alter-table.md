@@ -59,8 +59,10 @@ Default (`WITH CHECK`) scans the live heap before mutating:
 | `PRIMARY KEY` / `UNIQUE` | no duplicate key tuples in existing rows | Msg 1505 (`CREATE UNIQUE INDEX statement terminated …`) |
 | `FOREIGN KEY` | child column exists | Msg 1769 |
 | `FOREIGN KEY` | referenced columns form PK / UQ on parent | Msg 1776 |
+| `FOREIGN KEY` | a computed child column is PERSISTED, and its referential actions never write it | Msg 1764 / 1765 / 1715 — see [`foreign-keys.md`](foreign-keys.md#computed-columns-in-a-foreign-key) |
 | `FOREIGN KEY` | cascade graph doesn't form a cycle / multiple paths | Msg 1785 |
 | `FOREIGN KEY` | every non-NULL existing FK tuple matches a parent row | Msg 547 with `"ALTER TABLE statement"` prefix |
+| `CHECK` | the predicate reads no non-persisted computed column | Msg 1764 — see [`constraints.md`](constraints.md#computed-columns-in-a-check-constraint); raised even under `WITH NOCHECK`, which only skips the data scan |
 | `CHECK` | every existing row passes (UNKNOWN passes) | Msg 547 with `"ALTER TABLE statement"` prefix |
 | `DEFAULT` | column exists | Msg 1752 |
 | `DEFAULT` | column doesn't already have a DEFAULT | Msg 1781 |
@@ -214,7 +216,7 @@ ALTER TABLE [schema.]table ADD [COLUMN] col TYPE [(N | MAX [, scale])]
 ```
 
 Inline column-level constraints (CHECK / UNIQUE / PRIMARY KEY / REFERENCES, with or without `CONSTRAINT name`) all parse through the shared `ParseOneColumnIntoLists` helper that backs CREATE TABLE.
-Computed columns via `col AS expr [PERSISTED [NOT NULL]]` are supported and resolve against the combined (existing + new) column view.
+Computed columns via `col AS expr [PERSISTED [NOT NULL]] [inline constraints]` are supported and resolve against the combined (existing + new) column view — which is also the view the added column's inline CHECK is validated against, so a predicate reaching a non-persisted computed column already on the table raises Msg 1764 (see [`constraints.md`](constraints.md#computed-columns-in-a-check-constraint)).
 
 The optional `COLUMN` keyword between `ADD` and the column name is accepted (probe-confirmed real SQL Server accepts both shapes); the simulator's grammar recognizes `COLUMN` as a reserved keyword here.
 
@@ -243,6 +245,8 @@ The simulator matches.
 | **2705** | Duplicate column name — against any existing column or another column in the same multi-column ADD. |
 | **4901** | NOT NULL without DEFAULT / IDENTITY / ROWVERSION on a non-empty table. |
 | **8111** | Existing PrimaryKeyOnNullableColumn for inline `PRIMARY KEY` on an explicit-`NULL` column (inherited from CREATE TABLE shared parser). |
+| **8183** | Inline `CHECK` / `REFERENCES` / `NOT NULL` on a computed column added without `PERSISTED`. |
+| **1764** | An added column's inline `CHECK` reading a non-persisted computed column, its own or one already on the table. |
 | **1505** | Inline `UNIQUE` constraint when existing rows have duplicate values — the resolver runs the existing-data validation on the combined column set. |
 | **547** | Inline FK / CHECK rejecting existing rows during the post-mutation enforcement scan. |
 

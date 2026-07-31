@@ -249,6 +249,18 @@ internal sealed class Database
     public bool ReadCommittedSnapshot;
 
     /// <summary>
+    /// <c>RECURSIVE_TRIGGERS</c> per-database setting. Default <c>false</c>;
+    /// flipped by <c>ALTER DATABASE … SET RECURSIVE_TRIGGERS { ON | OFF }</c>
+    /// and surfaced as <c>sys.databases.is_recursive_triggers_on</c>. When
+    /// <c>false</c>, an AFTER trigger whose body's DML would re-fire that same
+    /// trigger is skipped (direct recursion); when <c>true</c> the re-fire
+    /// happens, bounded only by the 32-level nesting cap. Indirect recursion —
+    /// the trigger firing again underneath another table's trigger — happens
+    /// either way, and INSTEAD OF triggers never self-recurse regardless.
+    /// </summary>
+    public bool RecursiveTriggers;
+
+    /// <summary>
     /// Active SNAPSHOT-isolation transactions whose snapshot Xid is still
     /// load-bearing — every entry's <see cref="SimulatedDbTransaction.SnapshotXid"/>
     /// is non-null and the tx hasn't reached Commit / Rollback / Dispose yet.

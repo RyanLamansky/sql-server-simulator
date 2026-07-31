@@ -240,4 +240,187 @@ public sealed class ComputedColumnTests
         _ = sim.ExecuteNonQuery("alter table dbo.t add c as (a * b)");
         Assert.AreEqual("(a * b)", sim.ExecuteScalar("select definition from sys.computed_columns where name = 'c'"));
     }
+
+    // --- CHECK constraints over computed columns ---
+
+    /// <summary>
+    /// An inline CHECK on a PERSISTED computed column is enforced against the
+    /// stored value: an INSERT whose expression falls outside the predicate
+    /// raises Msg 547, and so does an UPDATE of the underlying column that
+    /// drives the expression out of range without naming the computed column.
+    /// </summary>
+    [TestMethod]
+    public void Check_InlineOnPersistedComputed_EnforcedOnInsertAndUpdate()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int, cc as a + 1 persisted check (cc > 0));
+            insert t (a) values (5)
+            """);
+        var insertEx = sim.AssertSqlError("insert t (a) values (-5)", 547);
+        Assert.Contains("CHECK constraint", insertEx.Message);
+        var updateEx = sim.AssertSqlError("update t set a = -9", 547);
+        Assert.Contains("UPDATE statement conflicted", updateEx.Message);
+        Assert.AreEqual(6, sim.ExecuteScalar("select cc from t"));
+    }
+
+    [TestMethod]
+    public void Check_InlineOnNonPersistedComputed_RaisesMsg8183()
+        => new Simulation().AssertSqlError("create table t (a int, cc as a + 1 check (cc > 0))", 8183,
+            "Only UNIQUE or PRIMARY KEY constraints can be created on computed columns, while CHECK, FOREIGN KEY, and NOT NULL constraints require that computed columns be persisted.");
+
+    /// <summary>
+    /// The unnamed inline form auto-names as a column-level CHECK
+    /// (<c>CK__&lt;table&gt;__&lt;column&gt;__&lt;hex&gt;</c>), the same shape a
+    /// regular column's inline CHECK gets; the named form keeps its name.
+    /// </summary>
+    [TestMethod]
+    public void Check_InlineOnPersistedComputed_NamingFollowsTheColumnLevelShape()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int, cc as a + 1 persisted check (cc > 0));
+            create table u (a int, cc as a + 1 persisted constraint ck_u check (cc > 0))
+            """);
+        Assert.StartsWith("CK__t__cc__", (string)sim.ExecuteScalar(
+            "select name from sys.check_constraints where object_name(parent_object_id) = 't'")!);
+        Assert.AreEqual("ck_u", sim.ExecuteScalar(
+            "select name from sys.check_constraints where object_name(parent_object_id) = 'u'"));
+    }
+
+    /// <summary>
+    /// A computed column takes several inline constraints in any order — real
+    /// accepts <c>PERSISTED PRIMARY KEY CHECK (…)</c>, the reverse order, and
+    /// the doubly-named <c>CONSTRAINT … CHECK (…) CONSTRAINT … UNIQUE</c> pair.
+    /// </summary>
+    [TestMethod]
+    public void Check_InlineOnComputed_CoexistsWithKeyConstraint()
+        => Assert.AreEqual(3, new Simulation().ExecuteScalar("""
+            create table t (a int, cc as a + 1 persisted primary key check (cc > 0));
+            create table u (a int, cc as a + 1 persisted check (cc > 0) primary key);
+            create table v (a int, cc as a + 1 persisted constraint ck_v check (cc > 0) constraint uq_v unique);
+            select count(*) from sys.check_constraints
+            """));
+
+    [TestMethod]
+    public void Check_InlineOnPersistedComputed_ReferencingPeer_RaisesMsg8141()
+        => _ = new Simulation().AssertSqlError(
+            "create table t (a int, b int, cc as a + 1 persisted check (cc > b))", 8141);
+
+    /// <summary>
+    /// A CHECK predicate may not read a non-persisted computed column, in any
+    /// of the forms that reach constraint resolution — Msg 1764, with real's
+    /// capitalized "Computed Column" and the 'CHECK CONSTRAINT' kind. The
+    /// inline case here sits on a *persisted* column and reaches a
+    /// non-persisted peer, which real reports as Msg 1764 rather than the
+    /// Msg 8141 peer-reference error (probe-confirmed precedence).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (a int, cc as a + 1, constraint ck_t check (cc > 0))")]
+    [DataRow("create table t (a int, cc as a + 1, check (cc > 0))")]
+    [DataRow("create table t (a int, cc as a + 1, c2 as a + 2 persisted check (cc > 0))")]
+    public void Check_OverNonPersistedComputed_RaisesMsg1764(string createTable)
+        => new Simulation().AssertSqlError(createTable, 1764,
+            "Computed Column 'cc' in table 't' is invalid for use in 'CHECK CONSTRAINT' because it is not persisted.");
+
+    [TestMethod]
+    public void Check_TableLevelOverPersistedComputed_Enforced()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int, cc as a + 1 persisted, constraint ck_t check (cc > 0))");
+        _ = sim.AssertSqlError("insert t (a) values (-5)", 547);
+    }
+
+    /// <summary>
+    /// <c>ALTER TABLE … ADD CONSTRAINT … CHECK</c> applies the same Msg 1764
+    /// gate, and <c>WITH NOCHECK</c> doesn't excuse it — real rejects the
+    /// declaration itself, not just the data validation it skips.
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter table t add constraint ck_t check (cc > 0)")]
+    [DataRow("alter table t with nocheck add constraint ck_t check (cc > 0)")]
+    public void Check_AlterTableAddOverNonPersistedComputed_RaisesMsg1764(string alterTable)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int, cc as a + 1)");
+        sim.AssertSqlError(alterTable, 1764,
+            "Computed Column 'cc' in table 't' is invalid for use in 'CHECK CONSTRAINT' because it is not persisted.");
+        Assert.AreEqual(0, sim.ExecuteScalar("select count(*) from sys.check_constraints"));
+    }
+
+    [TestMethod]
+    public void Check_AlterTableAddOverPersistedComputed_Enforced()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int, cc as a + 1 persisted);
+            alter table t add constraint ck_t check (cc > 0)
+            """);
+        _ = sim.AssertSqlError("insert t (a) values (-5)", 547);
+    }
+
+    /// <summary>
+    /// <c>ALTER TABLE … ADD</c> of a computed column carries the inline CHECK
+    /// through the shared column parser, with the same persistence gate — and
+    /// the added column's predicate is checked against the columns already on
+    /// the table too.
+    /// </summary>
+    [TestMethod]
+    public void Check_AlterTableAddComputedColumn_InlineCheckEnforced()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int);
+            alter table t add cc as a + 1 persisted check (cc > 0)
+            """);
+        _ = sim.AssertSqlError("insert t (a) values (-5)", 547);
+    }
+
+    [TestMethod]
+    public void Check_AlterTableAddNonPersistedComputedColumn_InlineCheck_RaisesMsg8183()
+        => _ = new Simulation().AssertSqlError(
+            "create table t (a int); alter table t add cc as a + 1 check (cc > 0)", 8183);
+
+    [TestMethod]
+    public void Check_AlterTableAddComputedColumn_InlineCheckOverNonPersistedPeer_RaisesMsg1764()
+        => new Simulation().AssertSqlError(
+            "create table t (a int, cc as a + 1); alter table t add c2 as a + 2 persisted check (cc > 0)", 1764,
+            "Computed Column 'cc' in table 't' is invalid for use in 'CHECK CONSTRAINT' because it is not persisted.");
+
+    /// <summary>
+    /// Table variables and table types route through the same column parser,
+    /// so both gates reach them: an inline CHECK on a persisted computed
+    /// column is enforced, and a table-level CHECK over a non-persisted one
+    /// raises Msg 1764 naming the variable / type.
+    /// </summary>
+    [TestMethod]
+    public void Check_TableVariable_InlineOnPersistedComputed_Enforced()
+        => _ = new Simulation().AssertSqlError("""
+            declare @t table (a int, cc as a + 1 persisted check (cc > 0));
+            insert @t (a) values (-5)
+            """, 547);
+
+    [TestMethod]
+    public void Check_TableVariable_OverNonPersistedComputed_RaisesMsg1764()
+        => new Simulation().AssertSqlError("declare @t table (a int, cc as a + 1, check (cc > 0))", 1764,
+            "Computed Column 'cc' in table '@t' is invalid for use in 'CHECK CONSTRAINT' because it is not persisted.");
+
+    [TestMethod]
+    public void Check_TableType_OverNonPersistedComputed_RaisesMsg1764()
+        => new Simulation().AssertSqlError("create type tt as table (a int, cc as a + 1, check (cc > 0))", 1764,
+            "Computed Column 'cc' in table 'tt' is invalid for use in 'CHECK CONSTRAINT' because it is not persisted.");
+
+    /// <summary>
+    /// <c>PERSISTED NOT NULL</c> is the one nullability form a computed column
+    /// accepts, and it composes with an inline CHECK; the NOT NULL is enforced
+    /// with Msg 515 when the expression evaluates to NULL.
+    /// </summary>
+    [TestMethod]
+    public void Check_InlineOnPersistedNotNullComputed_BothEnforced()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int, cc as a + 1 persisted not null check (cc > 0))");
+        _ = sim.AssertSqlError("insert t (a) values (-5)", 547);
+        _ = sim.AssertSqlError("insert t (a) values (null)", 515);
+    }
 }

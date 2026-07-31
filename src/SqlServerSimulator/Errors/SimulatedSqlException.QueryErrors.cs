@@ -317,6 +317,19 @@ partial class SimulatedSqlException
         new("ORDER BY items must appear in the select list if SELECT DISTINCT is specified.", 145, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 104: a top-level <c>ORDER BY</c> over a
+    /// UNION / INTERSECT / EXCEPT chain names something other than a projected
+    /// column — a source column the select list left out, or any expression
+    /// over one. The combined stream carries only the projected columns, so
+    /// there is nothing else to sort by. Distinct from the Msg 207 a name that
+    /// binds nowhere in the first branch's FROM scope raises: real emits that
+    /// binding failure first and this second, so the first-error contract
+    /// makes the two mutually exclusive here.
+    /// </summary>
+    internal static SimulatedSqlException OrderByItemNotInSelectListWithSetOperator() =>
+        new("ORDER BY items must appear in the select list if the statement contains a UNION, INTERSECT or EXCEPT operator.", 104, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 306: a <c>text</c>, <c>ntext</c>, or
     /// <c>image</c> column appeared in a context that requires comparison or
     /// sorting (ORDER BY, GROUP BY, DISTINCT, or as an operand the simulator

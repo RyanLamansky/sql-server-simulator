@@ -148,20 +148,19 @@ internal sealed class Schema
 
     /// <summary>
     /// Synonyms hosted by this schema. Created via <c>CREATE SYNONYM
-    /// [schema.]name FOR base</c>, resolved at FROM-source binding time by
-    /// redirecting a reference to the synonym onto its base table / view
-    /// (see <see cref="Synonym"/>). Shares the object-name namespace with
-    /// tables / views / … for the CREATE-collision check (Msg 2714); the
-    /// reverse collision (creating a table over an existing synonym name) and
-    /// catalog projection are not modeled.
+    /// [schema.]name FOR base</c>, resolved at binding time by redirecting a
+    /// reference to the synonym onto its base object (see <see cref="Synonym"/>).
+    /// Shares the object-name namespace with tables / views / … in both
+    /// directions (Msg 2714) and projects through <c>sys.synonyms</c> /
+    /// <c>sys.objects</c>.
     /// </summary>
     public readonly ConcurrentDictionary<string, Synonym> Synonyms;
 
     /// <summary>
     /// Yields every <see cref="SchemaObject"/> in this schema's
     /// object-name namespace (heap tables, views, UDFs, procedures,
-    /// sequences, triggers) — the set whose leaf names must be unique
-    /// (Msg 2714 on CREATE collision). <see cref="TableTypes"/> are
+    /// sequences, triggers, synonyms) — the set whose leaf names must be
+    /// unique (Msg 2714 on CREATE collision). <see cref="TableTypes"/> are
     /// deliberately omitted: probe-confirmed that table-type names occupy
     /// a separate namespace from this set. Used by sys.objects projection
     /// and by the CREATE-time auto-name-collision check.
@@ -174,6 +173,7 @@ internal sealed class Schema
         foreach (var p in this.Procedures.Values) yield return p;
         foreach (var s in this.Sequences.Values) yield return s;
         foreach (var tr in this.Triggers.Values) yield return tr;
+        foreach (var sn in this.Synonyms.Values) yield return sn;
     }
 
     /// <summary>
@@ -182,14 +182,29 @@ internal sealed class Schema
     /// Used by every CREATE path to raise Msg 2714 before allocating an
     /// ObjectId or writing into the relevant dict.
     /// </summary>
-    public bool HasNameInSharedNamespace(string leaf)
+    public bool HasNameInSharedNamespace(string leaf) => this.TryFindInSharedNamespace(leaf, out _);
+
+    /// <summary>
+    /// Collation-aware lookup of <paramref name="leaf"/> across this schema's
+    /// object-name namespace (<see cref="SchemaObjects"/>), handing back the
+    /// matched object. The name-uniqueness rule that
+    /// <see cref="HasNameInSharedNamespace"/> enforces makes the match unique,
+    /// so enumeration order doesn't matter.
+    /// </summary>
+    public bool TryFindInSharedNamespace(
+        string leaf, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out SchemaObject? found)
     {
         var collation = this.Database.Collation;
         foreach (var obj in this.SchemaObjects())
         {
             if (collation.Equals(obj.Name, leaf))
+            {
+                found = obj;
                 return true;
+            }
         }
+
+        found = null;
         return false;
     }
 }

@@ -8,8 +8,9 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Parses <c>CREATE FUNCTION schema.name (@p1 type [= default], ...)</c>
-    /// followed by either:
+    /// Parses <c>CREATE [OR ALTER] FUNCTION schema.name (@p1 type [= default], ...)</c>
+    /// — and, via <paramref name="isAlter"/>, the identically-shaped
+    /// <c>ALTER FUNCTION</c> — followed by either:
     /// <list type="bullet">
     /// <item><c>RETURNS &lt;scalar-type&gt; [WITH RETURNS NULL ON NULL INPUT]
     /// AS BEGIN ... END</c> — scalar UDF, stored as a
@@ -53,19 +54,31 @@ partial class Simulation
     /// via <see cref="Expression.ResultIsNullable"/>, but isn't wired
     /// through to the TVF schema-inference path).
     /// </para>
+    /// <para>
+    /// <strong>ALTER</strong>: the replacement keeps the function's
+    /// <see cref="SchemaObject.ObjectId"/>, <see cref="SchemaObject.CreateDate"/>
+    /// and granted permissions, and advances
+    /// <see cref="SchemaObject.ModifyDate"/>. The function's <em>kind</em> is
+    /// fixed at creation — an ALTER body that writes a different one (scalar ↔
+    /// inline TVF ↔ multi-statement TVF) raises <strong>Msg 2010</strong>, the
+    /// same error a name held by an unrelated object kind gets. Bare
+    /// <c>ALTER FUNCTION</c> on a name nothing holds raises
+    /// <strong>Msg 208</strong>.
+    /// </para>
     /// </remarks>
-    private static bool TryParseCreateFunction(ParserContext context)
+    private static bool TryParseCreateFunction(ParserContext context, bool isAlter, bool createOrAlter)
     {
+        // CREATE OR ALTER reports under the plain CREATE label (probe-confirmed
+        // — real names the statement by the verb it started with).
         if (context.Batch.BlockDepth > 0 || context.Batch.HasDispatchedStatement)
-            throw SimulatedSqlException.MustBeFirstStatementInBatch("CREATE FUNCTION");
+            throw SimulatedSqlException.MustBeFirstStatementInBatch(isAlter ? "ALTER FUNCTION" : "CREATE FUNCTION");
 
         context.MoveNextRequired();
         if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var functionName = BatchContext.ParseObjectName(context);
-        if (!context.Batch.TryResolveSchema(functionName, out var schema))
-            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(functionName.ImmediateQualifier ?? Database.DefaultSchemaName);
+        var schema = ResolveModuleSchema(context, functionName, isAlter);
 
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -93,11 +106,25 @@ partial class Simulation
         // TVF; otherwise the existing scalar path.
         return context.Token switch
         {
-            AtPrefixedString => ParseMultiStatementTvfTail(context, schema, functionName, parameters),
-            ReservedKeyword { Keyword: Keyword.Table } => ParseInlineTvfTail(context, schema, functionName, parameters),
-            _ => ParseScalarTail(context, schema, functionName, parameters),
+            AtPrefixedString => ParseMultiStatementTvfTail(context, schema, functionName, parameters, isAlter, createOrAlter),
+            ReservedKeyword { Keyword: Keyword.Table } => ParseInlineTvfTail(context, schema, functionName, parameters, isAlter, createOrAlter),
+            _ => ParseScalarTail(context, schema, functionName, parameters, isAlter, createOrAlter),
         };
     }
+
+    /// <summary>
+    /// Runs the shared CREATE / ALTER / CREATE OR ALTER existence rules for a
+    /// function tail, narrowing the stored object to <typeparamref name="T"/>
+    /// first: a function of any <em>other</em> kind reaches
+    /// <see cref="ResolveModuleAlterTarget"/> as absent, which is what turns a
+    /// kind-changing ALTER into Msg 2010.
+    /// </summary>
+    private static T? ResolveFunctionAlterTarget<T>(
+        ParserContext context, Schema schema, MultiPartName functionName, bool isAlter, bool createOrAlter)
+        where T : UserDefinedFunction =>
+        (T?)ResolveModuleAlterTarget(
+            context, schema, functionName, isAlter, createOrAlter,
+            schema.Functions.TryGetValue(functionName.Leaf, out var existing) ? existing as T : null);
 
     /// <summary>
     /// Parses the multi-statement TVF tail: <c>@r TABLE (cols) [WITH option ...]
@@ -119,7 +146,7 @@ partial class Simulation
     /// here too (Msg 102, inherited from the column-list parser's
     /// <c>isTableVariable: true</c> branch).
     /// </remarks>
-    private static bool ParseMultiStatementTvfTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters)
+    private static bool ParseMultiStatementTvfTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, bool isAlter, bool createOrAlter)
     {
         var returnVariableName = ((AtPrefixedString)context.Token!).Value;
         context.MoveNextRequired(); // consume @r
@@ -196,29 +223,30 @@ partial class Simulation
         if (context.Batch.IsSkipping || !hasResolvedColumns)
             return true;
 
-        // DDL gate: db-scope CREATE FUNCTION + ALTER on the target schema
-        // (Msg 262 state 18 with the function as Procedure attribution, else
-        // Msg 2760).
-        PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
+        // DDL gate on a plain create: db-scope CREATE FUNCTION + ALTER on the
+        // target schema (Msg 262 state 18 with the function as Procedure
+        // attribution, else Msg 2760).
+        if (!isAlter && !createOrAlter)
+            PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
 
-        if (schema.HasNameInSharedNamespace(functionName.Leaf))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(functionName.Leaf);
+        var replaced = ResolveFunctionAlterTarget<MultiStatementTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
 
-        var objectId = context.CurrentDatabase.AllocateObjectId();
         var function = new MultiStatementTableValuedFunction(
             schema,
             functionName.Leaf,
-            objectId,
+            replaced?.ObjectId ?? context.CurrentDatabase.AllocateObjectId(),
             [.. parameters],
             returnVariableName,
             outputColumns,
             keyConstraints,
             checkConstraints,
             bodyText,
-            createDate: context.Batch.CurrentStatement.UtcNow)
+            createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter: false, createOrAlter: false),
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
         };
+        if (replaced is not null)
+            function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Functions[functionName.Leaf] = function;
         return true;
     }
@@ -230,7 +258,7 @@ partial class Simulation
     /// entry: the type-name token (right after the <c>RETURNS</c> keyword
     /// the outer parser already advanced past).
     /// </summary>
-    private static bool ParseScalarTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters)
+    private static bool ParseScalarTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, bool isAlter, bool createOrAlter)
     {
         var returnType = ParseFunctionReturnType(context);
 
@@ -296,7 +324,7 @@ partial class Simulation
         // registered CLR assembly rather than in T-SQL.
         context.MoveNextRequired();
         if (context.Token is ReservedKeyword { Keyword: Keyword.External })
-            return ParseClrScalarTail(context, schema, functionName, parameters, returnType);
+            return ParseClrScalarTail(context, schema, functionName, parameters, returnType, isAlter, createOrAlter);
 
         // BEGIN/END required for scalar UDF bodies. Capture span between
         // outer BEGIN (exclusive) and matching END (exclusive) using token-
@@ -351,28 +379,29 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        // DDL gate: db-scope CREATE FUNCTION + ALTER on the target schema
-        // (Msg 262 state 18 with the function as Procedure attribution, else
-        // Msg 2760).
-        PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
+        // DDL gate on a plain create: db-scope CREATE FUNCTION + ALTER on the
+        // target schema (Msg 262 state 18 with the function as Procedure
+        // attribution, else Msg 2760).
+        if (!isAlter && !createOrAlter)
+            PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
 
-        if (schema.HasNameInSharedNamespace(functionName.Leaf))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(functionName.Leaf);
+        var replaced = ResolveFunctionAlterTarget<ScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
 
-        var objectId = context.CurrentDatabase.AllocateObjectId();
         var function = new ScalarFunction(
             schema,
             functionName.Leaf,
-            objectId,
+            replaced?.ObjectId ?? context.CurrentDatabase.AllocateObjectId(),
             [.. parameters],
             returnType,
             returnsNullOnNullInput,
             bodyText,
-            createDate: context.Batch.CurrentStatement.UtcNow)
+            createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter: false, createOrAlter: false),
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
         };
+        if (replaced is not null)
+            function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Functions[functionName.Leaf] = function;
         return true;
     }
@@ -388,7 +417,7 @@ partial class Simulation
     /// INPUT</c> in the <c>WITH</c> slot of a TVF raises Msg 487 (probe-
     /// confirmed — that option is scalar-only).
     /// </summary>
-    private static bool ParseInlineTvfTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters)
+    private static bool ParseInlineTvfTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, bool isAlter, bool createOrAlter)
     {
         context.MoveNextRequired(); // step past TABLE
 
@@ -432,28 +461,29 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        // DDL gate: db-scope CREATE FUNCTION + ALTER on the target schema
-        // (Msg 262 state 18 with the function as Procedure attribution, else
-        // Msg 2760).
-        PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
+        // DDL gate on a plain create: db-scope CREATE FUNCTION + ALTER on the
+        // target schema (Msg 262 state 18 with the function as Procedure
+        // attribution, else Msg 2760).
+        if (!isAlter && !createOrAlter)
+            PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
 
-        if (schema.HasNameInSharedNamespace(functionName.Leaf))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(functionName.Leaf);
+        var replaced = ResolveFunctionAlterTarget<InlineTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
 
         var outputColumns = InferInlineTvfOutputColumns(context, [.. parameters], bodyText, functionName.Leaf);
 
-        var objectId = context.CurrentDatabase.AllocateObjectId();
         var function = new InlineTableValuedFunction(
             schema,
             functionName.Leaf,
-            objectId,
+            replaced?.ObjectId ?? context.CurrentDatabase.AllocateObjectId(),
             [.. parameters],
             outputColumns,
             bodyText,
-            createDate: context.Batch.CurrentStatement.UtcNow)
+            createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter: false, createOrAlter: false),
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
         };
+        if (replaced is not null)
+            function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Functions[functionName.Leaf] = function;
         return true;
     }

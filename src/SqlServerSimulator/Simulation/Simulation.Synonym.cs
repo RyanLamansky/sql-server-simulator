@@ -1,6 +1,7 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
@@ -9,10 +10,13 @@ partial class Simulation
     /// <summary>
     /// Parses <c>CREATE SYNONYM [schema.]name FOR base_object</c>. Cursor on
     /// entry: the <c>SYNONYM</c> word (matched by the CREATE dispatcher). The
-    /// synonym is stored as a name indirection to <c>base_object</c>; FROM-
-    /// source resolution redirects a reference to the synonym onto its base
-    /// table / view (see <see cref="BatchContext.TryResolveTable"/>). A name
-    /// already taken in the schema's object namespace raises Msg 2714.
+    /// synonym is stored as a name indirection to <c>base_object</c>;
+    /// resolution redirects a reference to the synonym onto its base object
+    /// (see <see cref="BatchContext.TryResolveTable"/>). A name already taken
+    /// in the schema's object namespace raises Msg 2714. The base object is
+    /// not resolved here — real binds it lazily, so a synonym over a missing
+    /// (or cross-database) base creates successfully and raises Msg 5313 at
+    /// first use.
     /// </summary>
     private static bool TryParseCreateSynonym(ParserContext context)
     {
@@ -31,17 +35,19 @@ partial class Simulation
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(synonymName.Count >= 2 ? synonymName.ImmediateQualifier! : Database.DefaultSchemaName);
 
         var leaf = synonymName.Leaf;
-        if (schema.HasNameInSharedNamespace(leaf) || schema.Synonyms.ContainsKey(leaf))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
-
-        _ = schema.Synonyms.TryAdd(leaf, new Synonym(leaf, baseObject));
-        return true;
+        var synonym = new Synonym(schema, leaf, context.CurrentDatabase.AllocateObjectId(), context.Batch.CurrentStatement.UtcNow, baseObject);
+        return schema.HasNameInSharedNamespace(leaf) || !schema.Synonyms.TryAdd(leaf, synonym)
+            ? throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf)
+            : true;
     }
 
     /// <summary>
     /// Parses <c>DROP SYNONYM [IF EXISTS] [schema.]name</c>. Cursor on entry:
-    /// the <c>SYNONYM</c> word (matched by the DROP dispatcher). A missing
-    /// synonym without <c>IF EXISTS</c> raises Msg 3701 (State 5).
+    /// the <c>SYNONYM</c> word (matched by the DROP dispatcher). A name that
+    /// belongs to an object of another kind raises Msg 3705 naming that kind
+    /// (probe-confirmed, and <c>IF EXISTS</c> doesn't suppress it — the object
+    /// does exist); a missing synonym without <c>IF EXISTS</c> raises Msg 3701
+    /// (State 5).
     /// </summary>
     private static bool TryParseDropSynonym(ParserContext context)
     {
@@ -61,9 +67,51 @@ partial class Simulation
             return true;
 
         var leaf = synonymName.Leaf;
-        var removed = context.Batch.TryResolveSchema(synonymName, out var schema) && schema.Synonyms.TryRemove(leaf, out _);
-        return removed || ifExists
+        if (!context.Batch.TryResolveSchema(synonymName, out var schema))
+            return ifExists ? true : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(leaf);
+        RejectDropOfOtherKind(schema, synonymName, "SYNONYM");
+        return schema.Synonyms.TryRemove(leaf, out _) || ifExists
             ? true
             : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(leaf);
     }
+
+    /// <summary>
+    /// Raises Msg 3705 when <paramref name="name"/> names an object of a kind
+    /// other than <paramref name="attemptedDropKind"/> — the cross-kind
+    /// rejection real applies between <c>DROP TABLE</c> and <c>DROP SYNONYM</c>
+    /// in both directions. No-op when the name is free or already the right
+    /// kind, so the caller's own missing-object path (Msg 3701) still runs.
+    /// </summary>
+    private static void RejectDropOfOtherKind(Schema schema, MultiPartName name, string attemptedDropKind)
+    {
+        var collation = schema.Database.Collation;
+        foreach (var candidate in schema.SchemaObjects())
+        {
+            if (!collation.Equals(candidate.Name, name.Leaf))
+                continue;
+            var (noun, dropKind) = DropWordsFor(candidate);
+            if (!dropKind.Equals(attemptedDropKind, StringComparison.Ordinal))
+                throw SimulatedSqlException.CannotUseDropWithObjectKind(attemptedDropKind, name.ToString(), noun, dropKind);
+            return;
+        }
+    }
+
+    /// <summary>
+    /// The noun real SQL Server uses for an object kind in the Msg 3705 body,
+    /// paired with the <c>DROP</c> form that would succeed. Probe-confirmed per
+    /// kind; note a table-valued function reads "table valued function" but is
+    /// still dropped with <c>DROP FUNCTION</c>.
+    /// </summary>
+    private static (string Noun, string DropKind) DropWordsFor(SchemaObject obj) => obj switch
+    {
+        HeapTable => ("table", "TABLE"),
+        View => ("view", "VIEW"),
+        Procedure => ("procedure", "PROCEDURE"),
+        InlineTableValuedFunction or MultiStatementTableValuedFunction => ("table valued function", "FUNCTION"),
+        UserDefinedFunction => ("function", "FUNCTION"),
+        Sequence => ("sequence", "SEQUENCE"),
+        Trigger => ("trigger", "TRIGGER"),
+        Synonym => ("synonym", "SYNONYM"),
+        _ => throw new InvalidOperationException($"No DROP wording is mapped for schema-object kind {obj.GetType().Name}."),
+    };
 }

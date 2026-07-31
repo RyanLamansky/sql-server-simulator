@@ -11,6 +11,28 @@ namespace SqlServerSimulator.Parser;
 internal sealed partial class Selection
 {
     /// <summary>
+    /// True on the plan a set operator produced. A trailing ORDER BY binds
+    /// differently there — only a projected column or an in-range ordinal is
+    /// legal (Msg 104) — so the flag is what tells
+    /// <see cref="ApplyTopLevelOrderBy"/> apart from the FROM-less single
+    /// SELECT that reaches the same seam.
+    /// </summary>
+    internal bool IsSetOperationResult;
+
+    /// <summary>
+    /// The FROM sources of the branch whose projections this plan's output
+    /// columns come from — the leftmost branch of a set-op chain, since that's
+    /// where the combined result takes its column names. A top-level ORDER BY
+    /// binds against exactly this scope on real (probe-confirmed: a column of
+    /// the *second* branch alone is Msg 207, and a joined table or derived
+    /// table in the first branch is in scope), so it's what separates a
+    /// present-but-unprojected column from a name that exists nowhere.
+    /// Null on plan shapes that don't record their sources — validation is
+    /// skipped there rather than guessed at.
+    /// </summary>
+    internal FromSource[]? BranchFromSources;
+
+    /// <summary>
     /// Combines two SELECT plans via a set operator (UNION / UNION ALL /
     /// INTERSECT / EXCEPT). Validates that the branches have the same
     /// column count (Msg 205), promotes per-column types via
@@ -147,9 +169,12 @@ internal sealed partial class Selection
         }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema)
         {
             // The combined result takes the first branch's output names, so it
-            // takes that branch's projections too — a top-level ORDER BY
-            // resolves names against them (see ApplyTopLevelOrderBy).
+            // takes that branch's projections — and the FROM scope they read —
+            // too; a top-level ORDER BY resolves names against both (see
+            // ApplyTopLevelOrderBy).
             ProjectionExpressions = left.ProjectionExpressions,
+            BranchFromSources = left.BranchFromSources,
+            IsSetOperationResult = true,
             ColumnIntegerLiteralDigits = combinedDigits,
             ColumnReportsNumeric = combinedReportsNumeric,
         };
@@ -270,39 +295,94 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Wraps a Selection (typically the combined result of a set-op
-    /// chain) with a top-level ORDER BY pass. References resolve against
-    /// the inner plan's projected column names and ordinals only — there
-    /// are no source columns to fall back to. (Single-SELECT queries
-    /// with ORDER BY take a different path: ORDER BY stays inside the
-    /// branch's projection so it can reference non-projected source
-    /// columns, matching SQL Server's documented behavior.)
+    /// Binds a top-level ORDER BY over a set-op chain the way real does, at
+    /// parse time (probe-confirmed: the errors fire on empty tables). Each term
+    /// is legal only as an in-range ordinal or a bare reference to a projected
+    /// column — by output alias, or by the source column behind one. Anything
+    /// else is an error, and *which* error is the point of the pass: real binds
+    /// every column name the term uses against the first branch's FROM scope
+    /// and reports that failure first (Msg 207 for a name no source has, Msg
+    /// 4104 when the qualifier itself names no source), falling to Msg 104 only
+    /// once every name binds. So <c>ORDER BY name</c> over
+    /// <c>SELECT id … UNION …</c> is Msg 104 while <c>ORDER BY nosuch</c> is
+    /// Msg 207, and an expression over a bound name (<c>ORDER BY id + 1</c>,
+    /// <c>ORDER BY LEN(name)</c>, <c>ORDER BY (SELECT 1)</c>) is Msg 104
+    /// because the combined stream carries no such column to sort by.
     /// </summary>
-    /// <summary>
-    /// Maps each projected column to the source column name behind it, or null
-    /// when the projection isn't a plain column reference. An alias wrapper is
-    /// unwrapped first — <c>num AS Col2</c> is a reference to <c>num</c> named
-    /// <c>Col2</c>, and a top-level ORDER BY over a set operation may use
-    /// either name.
-    /// </summary>
-    private static string?[]? SourceColumnNamesOf(Expression[]? projections, int columnCount)
+    /// <remarks>
+    /// An output alias is in scope for a *bare* term only: real rejects
+    /// <c>ORDER BY zz + 1</c> over <c>SELECT id + 1 AS zz … UNION …</c> with
+    /// Msg 207 on <c>zz</c>, so the alias never enters the binding walk.
+    /// A term's subquery binds in its own scope, which its own parse already
+    /// did — <see cref="Expression.VisitColumnReferences"/> not descending into
+    /// one is what keeps this walk out of it.
+    /// A constant term (<c>ORDER BY 'x'</c>) lands on Msg 104 here; real
+    /// reserves Msg 408 for it, which the simulator doesn't model on either the
+    /// set-op or the single-SELECT path.
+    /// </remarks>
+    private static void ValidateSetOpOrderByTerms(
+        List<OrderBySpec> orderBy,
+        string[] columnNames,
+        MultiPartName?[]? projectionSources,
+        FromSource[] sources)
     {
-        if (projections is null || projections.Length != columnCount)
-            return null;
-
-        string?[]? names = null;
-        for (var i = 0; i < projections.Length; i++)
+        foreach (var spec in orderBy)
         {
-            var expression = projections[i] is Expressions.NamedExpression named ? named.Inner : projections[i];
-            if (expression is not Expressions.Reference reference)
+            if (spec.IsOrdinal)
+            {
+                if (spec.Ordinal < 1 || spec.Ordinal > columnNames.Length)
+                    throw SimulatedSqlException.OrderByPositionOutOfRange(spec.Ordinal);
                 continue;
-            names ??= new string?[columnCount];
-            names[i] = reference.ReferencedName.Leaf;
-        }
+            }
 
-        return names;
+            var term = spec.Expr!;
+            if (term is Expressions.Reference alias && OutputNameOrdinalOf(alias.ReferencedName, columnNames) >= 0)
+                continue;
+
+            term.VisitColumnReferences(name =>
+            {
+                if (FindSourceColumn(sources, name).SourceIndex >= 0)
+                    return;
+                throw name.ImmediateQualifier is { } qualifier && !QualifiesAnySource(sources, qualifier)
+                    ? SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString())
+                    : SimulatedSqlException.InvalidColumnName(name);
+            });
+
+            if (term is Expressions.Reference projected && ProjectionSourceOrdinalOf(projected.ReferencedName, projectionSources) >= 0)
+                continue;
+
+            throw SimulatedSqlException.OrderByItemNotInSelectListWithSetOperator();
+        }
     }
 
+    /// <summary>
+    /// Whether any FROM source answers to <paramref name="qualifier"/> — the
+    /// split between real's Msg 4104 (nothing in scope carries the prefix) and
+    /// Msg 207 (the prefix binds but the column doesn't).
+    /// </summary>
+    private static bool QualifiesAnySource(FromSource[] sources, string qualifier)
+    {
+        foreach (var source in sources)
+        {
+            if (BuiltInToken.Equals(source.Qualifier, qualifier))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Wraps a Selection (typically the combined result of a set-op chain) with
+    /// a top-level ORDER BY pass. References resolve against the inner plan's
+    /// projected columns and ordinals only — there are no source columns in the
+    /// combined stream to fall back to, which
+    /// <see cref="ValidateSetOpOrderByTerms"/> enforces up front. (Single-SELECT
+    /// queries with ORDER BY take a different path: ORDER BY stays inside the
+    /// branch's projection so it can reference non-projected source columns,
+    /// matching SQL Server's documented behavior. A FROM-less single SELECT
+    /// reaches this seam anyway, which is why the validation gates on
+    /// <see cref="IsSetOperationResult"/>.)
+    /// </summary>
     private static Selection ApplyTopLevelOrderBy(Selection inner, List<OrderBySpec> orderBy, Expression? offsetExpression, Expression? fetchExpression)
     {
         var schema = inner.Schema;
@@ -312,11 +392,19 @@ internal sealed partial class Selection
         // hit RowLayout's identity-keyed geometry cache (see RowDecoder.ColumnsFor).
         var keyColumns = RowDecoder.ColumnsFor(schema);
 
-        // Per output column, the source column name behind it when the
-        // projection is a plain column reference (`num AS Col2` → "num"), so a
-        // top-level ORDER BY can name either form. Null entries are
-        // computed projections, which have no source name to match.
-        var sourceColumnNames = SourceColumnNamesOf(inner.ProjectionExpressions, columnNames.Length);
+        // Per output column, the column reference behind it when the projection
+        // is a plain one (`num AS Col2` → `num`), so a top-level ORDER BY can
+        // name either form. Null entries are computed projections, which have
+        // no source reference to match.
+        var projectionSources = inner.ProjectionExpressions is { } projections && projections.Length == columnNames.Length
+            ? ProjectionSourceReferences(projections)
+            : null;
+
+        // A skip-mode placeholder source stands in for a table real would defer
+        // the whole statement's binding on, so no ORDER BY name in scope can be
+        // a compile error.
+        if (inner.IsSetOperationResult && inner.BranchFromSources is { } branchSources && !AnyPlaceholderSource(branchSources))
+            ValidateSetOpOrderByTerms(orderBy, columnNames, projectionSources, branchSources);
 
         return new Selection(schema, columnNames,
             hasOrderBy: true,
@@ -346,7 +434,7 @@ internal sealed partial class Selection
                 // only the ORDER BY columns off each row, not the full tuple.
                 var keyed = new List<(byte[] Row, SqlValue[] Keys)>(allRows.Count);
                 foreach (var rowBytes in allRows)
-                    keyed.Add((rowBytes, ComputeTopLevelOrderKeys(orderBy, columnNames, keyColumns, sourceColumnNames, rowBytes, batch)));
+                    keyed.Add((rowBytes, ComputeTopLevelOrderKeys(orderBy, columnNames, keyColumns, projectionSources, rowBytes, batch)));
 
                 keyed.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
                 ordered = keyed.Select(r => r.Row);

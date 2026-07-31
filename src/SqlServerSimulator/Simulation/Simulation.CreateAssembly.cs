@@ -153,7 +153,9 @@ partial class Simulation
         Schema schema,
         MultiPartName functionName,
         List<UdfParameter> parameters,
-        SqlType returnType)
+        SqlType returnType,
+        bool isAlter,
+        bool createOrAlter)
     {
         if (context.GetNextRequired() is not Name nameWord || !nameWord.Value.Equals("NAME", StringComparison.OrdinalIgnoreCase))
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -167,10 +169,10 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
+        if (!isAlter && !createOrAlter)
+            PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
 
-        if (schema.HasNameInSharedNamespace(functionName.Leaf))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(functionName.Leaf);
+        var replaced = ResolveFunctionAlterTarget<ClrScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
 
         var database = context.CurrentDatabase;
         var assemblyName = externalName[0];
@@ -201,17 +203,20 @@ partial class Simulation
                 throw SimulatedSqlException.ClrParameterTypeMismatch("CREATE FUNCTION", functionName.Leaf, "@" + parameters[i].Name);
         }
 
-        schema.Functions[functionName.Leaf] = new ClrScalarFunction(
+        var clrFunction = new ClrScalarFunction(
             schema,
             functionName.Leaf,
-            database.AllocateObjectId(),
+            replaced?.ObjectId ?? database.AllocateObjectId(),
             [.. parameters],
             returnType,
             assembly,
             className,
             methodName,
             method,
-            context.Batch.CurrentStatement.UtcNow);
+            replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow);
+        if (replaced is not null)
+            clrFunction.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+        schema.Functions[functionName.Leaf] = clrFunction;
         return true;
     }
 

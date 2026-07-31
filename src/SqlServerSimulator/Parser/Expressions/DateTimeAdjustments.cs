@@ -143,7 +143,11 @@ internal sealed class SwitchOffset : Expression
                 : sign * ((int.Parse(s[..colonIdx], System.Globalization.CultureInfo.InvariantCulture) * 60)
                     + int.Parse(s[(colonIdx + 1)..], System.Globalization.CultureInfo.InvariantCulture));
         }
-        return v.CoerceTo(SqlType.Int32).AsInt32;
+        // The minute offset is declared smallint, so an out-of-range one
+        // reports that narrowing rather than an int one — Msg 8115 naming
+        // smallint for a bigint argument, the value-bearing Msg 220 for an
+        // int argument (probe-confirmed 2026-07-31).
+        return ScalarArguments.CoerceToSmallInt(v);
     }
 
     /// <summary>

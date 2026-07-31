@@ -21,6 +21,7 @@ internal sealed class Reverse(ParserContext context) : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var raw = source.Run(runtime);
+        StringScalars.RejectLegacyLob(raw, "reverse");
         if (raw.IsNull)
             return SqlValue.Null(StringScalars.ResolveResultType(raw.Type, runtime.Batch));
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "reverse");

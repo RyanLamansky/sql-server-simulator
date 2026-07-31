@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -222,8 +223,8 @@ partial class Simulation
             {
                 switch (positional++)
                 {
-                    case 0: dataType = DatatypeInfoArgValue(arg, 0); break;
-                    case 1: odbcVer = DatatypeInfoArgValue(arg, 2); break;
+                    case 0: dataType = DatatypeInfoArgValue(arg, 0, SqlType.Int32); break;
+                    case 1: odbcVer = DatatypeInfoArgValue(arg, 2, SqlType.TinyInt); break;
                     default: throw SimulatedSqlException.InvalidProcedureParameters("sp_datatype_info_100");
                 }
 
@@ -232,8 +233,8 @@ partial class Simulation
 
             switch (arg.Name)
             {
-                case var n when BuiltInToken.Equals(n, "data_type"): dataType = DatatypeInfoArgValue(arg, 0); break;
-                case var n when BuiltInToken.Equals(n, "ODBCVer"): odbcVer = DatatypeInfoArgValue(arg, 2); break;
+                case var n when BuiltInToken.Equals(n, "data_type"): dataType = DatatypeInfoArgValue(arg, 0, SqlType.Int32); break;
+                case var n when BuiltInToken.Equals(n, "ODBCVer"): odbcVer = DatatypeInfoArgValue(arg, 2, SqlType.TinyInt); break;
                 default: throw SimulatedSqlException.InvalidProcedureParameters("sp_datatype_info_100");
             }
         }
@@ -241,6 +242,6 @@ partial class Simulation
         return (dataType, odbcVer < 3 ? 2 : 3);
     }
 
-    private static int DatatypeInfoArgValue(ProcArgument arg, int fallback) =>
-        arg.IsDefault || arg.Value.IsNull ? fallback : arg.Value.CoerceTo(SqlType.Int32).AsInt32;
+    private static int DatatypeInfoArgValue(ProcArgument arg, int fallback, SqlType target) =>
+        arg.IsDefault || arg.Value.IsNull ? fallback : ScalarArguments.CoerceProcedureParameter(arg.Value, target);
 }

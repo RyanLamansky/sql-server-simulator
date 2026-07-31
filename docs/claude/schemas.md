@@ -20,8 +20,7 @@ Probed against SQL Server 2025.
 - **`CREATE TABLE schema.t`** where `schema` doesn't exist → **Msg 2760** (target schema for the create must already exist).
   Distinct from FROM / INSERT / UPDATE / DELETE / MERGE / DROP / TRUNCATE access which use 208 / 3701 / 4701 respectively.
 - **`AUTHORIZATION owner`** and the embedded `<schema_element>` list (CREATE TABLE / VIEW / GRANT nested inside CREATE SCHEMA) aren't modeled — `AUTHORIZATION` raises `NotSupportedException`; trailing statement-starting tokens (CREATE / SELECT / INSERT / etc.) parse as their own statements in the same batch (deviates from real SQL Server's strict greedy-consume but reaches the same end state for the common idiom).
-- **No "first in batch" enforcement** — real SQL Server raises Msg 111 if CREATE SCHEMA isn't the first statement, tied to its greedy schema_element grammar.
-  The simulator's dispatch already treats each statement as independent, so CREATE SCHEMA in any position works.
+- **"First in batch" is enforced** — `CREATE SCHEMA` after any dispatched statement raises **Msg 111 state 14** (`'CREATE SCHEMA' must be the first statement in a query batch.`), matching real; with no `GO`, a batch is one `CommandText`.
 - **`sys` and `INFORMATION_SCHEMA` host catalog views** (sys.schemas / sys.tables / sys.objects / sys.columns / INFORMATION_SCHEMA.TABLES / .COLUMNS / .SCHEMATA — see [`catalog-views.md`](catalog-views.md)).
   Adding a user table via `CREATE TABLE sys.foo (…)` raises `NotSupportedException` ("Cannot CREATE TABLE in the built-in 'sys' schema"); same rejection for `INFORMATION_SCHEMA`.
   Both `Schema` entries exist in `Database.Schemas` to carry their conventional ids and to be reachable from `sys.schemas`, but their `HeapTables` dicts stay empty — catalog views live in a separate `Simulation.CatalogViews` registry.
@@ -54,17 +53,52 @@ Routes through `Simulation.Drop.cs` alongside DROP TABLE / VIEW / FUNCTION / PRO
 
 ## Synonyms (`CREATE SYNONYM` / `DROP SYNONYM`)
 
-`CREATE SYNONYM [schema.]name FOR base_object` (`Simulation.Synonym.cs`) stores a name indirection in the schema's `Synonyms` dict (a lightweight `Synonym` = name + the base `MultiPartName` as written).
+`CREATE SYNONYM [schema.]name FOR base_object` (`Simulation.Synonym.cs`) stores a name indirection in the schema's `Synonyms` dict (a `Synonym` = a `SchemaObject` carrying the base `MultiPartName` as written).
 `SYNONYM` isn't a reserved keyword — the CREATE / DROP dispatchers match it as an identifier (`Name … Equals("SYNONYM")`), like `CREATE SERVER ROLE`.
+The base object is **not** resolved at creation: real binds it lazily, so a synonym over a missing — or cross-database, or not-yet-created — base creates successfully and fails at first use.
 
-Resolution: `BatchContext.TryResolveTable` / `TryResolveView` redirect a FROM-source reference to a synonym onto its base — a synonym-to-table base resolves through `TryResolveTable` (recursing so a schema-qualified base routes), a synonym-to-view base through `TryResolveView`.
-So `SELECT * FROM syn` (and column projection / WHERE through it) reads `syn FOR t` names; probe-confirmed against SQL Server 2025.
+### Resolution
 
-- **Name collision** (existing table / view / … or another synonym) → **Msg 2714** (`ThereIsAlreadyAnObject`).
+`BatchContext.TryRedirectThroughSynonym` is the shared redirect step behind `TryResolveTable` / `TryResolveView` / `TryResolveFunction`; each recurses on the base name so a schema-qualified (or 3-part cross-database) base routes.
+`ExpandSynonym` rewrites a name to its base ahead of resolution at the two EXEC entry points, and `RejectCrossDatabaseMutation` expands before testing the db segment so a write through a synonym is gated on the base's database, not the synonym's.
+Reference sites that ship, all probe-confirmed against real: FROM-source table / view, INSERT / UPDATE / DELETE / MERGE targets, `EXEC syn` (procedure base), `SELECT dbo.syn(1)` (scalar-function base), `FROM dbo.syn(1)` (TVF base), and cross-database bases for reads.
+A cross-database *write* through a synonym raises the standard `NotSupportedException` from `RejectCrossDatabaseMutation` (real allows it) — the same gap 3-part-name writes carry.
+
+- **Missing base at first use** → **Msg 5313** ("Synonym '<n>' refers to an invalid object."), the name rendered as written at the use site.
+  State 1 when the base names nothing, State 224 when it names an object the reference can't use (a procedure or sequence in a FROM clause).
+  Raised from `BatchContext.UnresolvableObjectName`, which the FROM and DML sites throw in place of the plain Msg 208.
+  The EXEC path is the exception: it expands the synonym first, so a missing base is **Msg 2812** naming the *base* (real's wording — the synonym name never appears).
+- **Synonym chain** (a base that is itself a synonym) → **Msg 470** at first use, not at creation: `The synonym "<outer>" referenced synonym "<inner>". Synonym chaining is not allowed.`
+- **`NEXT VALUE FOR syn`** where the base is a sequence → **Msg 11726** ("Object '<n>' is not a sequence object.").
+  Real refuses the indirection here even though `CREATE SYNONYM … FOR <sequence>` succeeds; the simulator matches.
+
+### Catalog surface
+
+Synonyms enroll in `Schema.SchemaObjects()`, so they take an `ObjectId` / `CreateDate` / `ModifyDate` and project everywhere that walk feeds: `sys.objects` / `sys.all_objects` / `sysobjects` (type `SN`, type_desc `SYNONYM`, `parent_object_id` 0), `OBJECT_NAME` / `OBJECT_SCHEMA_NAME`, `GRANT`'s securable resolution, and `DROP SCHEMA`'s non-empty check.
+`sys.synonyms` projects the 13-column real shape (`BuiltInResources.CoreObjects.cs`), with `principal_id` NULL, the three `is_*` flags 0, and `base_object_name` the bracket-quoted base **as written** — `[t]` / `[dbo].[t]` / `[otherdb].[dbo].[t]` for the 1-, 2-, and 3-part forms.
+
+- **`OBJECT_ID('syn')`** returns the synonym's own id and never follows the base: the `'SN'` filter matches, every other filter (`'U'`, `'P'`, …) is NULL — probe-confirmed.
+- **`OBJECTPROPERTYEX(id, 'BaseType')`** reports the *base object's* type code (`'U '` / `'P '` / `'FN'`), NULL when the base doesn't resolve.
+  `OBJECTPROPERTY(id, 'IsSynonym')` is NULL on real (not a property name) and stays NULL here; `IsTable` / `IsView` report 0.
+
+### Name collisions and DROP
+
+- **Either direction collides** → **Msg 2714** (`ThereIsAlreadyAnObject`): a `CREATE SYNONYM` over any existing object, and a `CREATE TABLE` / `CREATE VIEW` / `CREATE PROCEDURE` / `CREATE SEQUENCE` / `SELECT … INTO` over an existing synonym.
+  Both directions run through `Schema.HasNameInSharedNamespace`.
+  (Real varies the State per statement — 8 for CREATE SYNONYM / SEQUENCE, 6 for CREATE TABLE / SELECT INTO, 3 for CREATE VIEW / PROCEDURE — and qualifies the name in some of them; the simulator's single factory reports State 6 with the leaf name.)
+- **DROP of the wrong kind** → **Msg 3705** (`CannotUseDropWithObjectKind`): `DROP TABLE syn` says "because 'syn' is a synonym. Use DROP SYNONYM.", `DROP SYNONYM t` says "is a table. Use DROP TABLE."
+  The check is kind-general (probe-confirmed wording per kind: table / view / procedure / function / table valued function / sequence / trigger / synonym), so `DROP TABLE` over a view or sequence raises it too.
+  `IF EXISTS` doesn't suppress it — the object exists, it's just the wrong kind.
 - **DROP SYNONYM [IF EXISTS] name** removes the entry; a missing target without `IF EXISTS` → **Msg 3701 State 5** (`CannotDropSynonymDoesNotExist`, "Cannot drop the synonym '<n>', because it does not exist or you do not have permission.").
 
-**Scope:** FROM-source table / view resolution + the DDL ship.
-Deferred (documented on `Synonym`): catalog projection (`sys.synonyms` / `sys.objects`), `OBJECT_ID('syn')`, synonym targets for EXEC / scalar-function / sequence references, cross-database bases, and the reverse name collision (creating a table over an existing synonym name doesn't raise 2714 — synonyms aren't in `SchemaObjects()`).
+A synonym is a grantable securable: `GRANT SELECT ON syn` and `GRANT EXECUTE ON syn` both land (real accepts either family, since the base's kind isn't consulted at grant time), and the grant records against the synonym's own `object_id`.
+
+### Divergences
+
+- **A grant on the synonym isn't honored at use.** The DML / FROM permission gate checks the resolved *base* object, so a principal holding `SELECT` on the synonym but not on the base gets Msg 229 where real reads through.
+  Closing it means carrying resolution provenance out of the redirect (`TryResolveTable` returns the base table with no record of the synonym it came through).
+- `base_object_name` expands an omitted middle segment: `FOR tempdb..t` stores `[tempdb].[dbo].[t]` where real keeps `[tempdb]..[t]`, because `MultiPartName` compresses empty segments at parse.
+- Msg 2714's State / name qualification per statement kind, as above.
 
 ## ALTER SCHEMA TRANSFER
 `ALTER SCHEMA <dest> TRANSFER [(OBJECT|TYPE)::] <source>.<obj>` moves a single object from one schema to another.
@@ -72,7 +106,8 @@ Routes through `Simulation.Alter.cs`'s `TryParseAlterSchemaTransfer`.
 The `Object` and `Type` class prefixes parse via two adjacent `:` operators (the tokenizer accepts `:` as a single-char operator, so the `::` separator decomposes into two tokens for the prefix grammar).
 Default class is `OBJECT` (the bare form with no prefix).
 
-- **OBJECT class** walks the shared object-name namespace dicts on the source `Schema`: `HeapTables` → `Views` → `Functions` → `Procedures` → `Sequences`, first-hit wins.
+- **OBJECT class** walks the shared object-name namespace dicts on the source `Schema`: `HeapTables` → `Views` → `Functions` → `Procedures` → `Sequences` → `Synonyms`, first-hit wins.
+  A transferred synonym keeps its stored base name verbatim (probe-confirmed: `base_object_name` still reads `[dbo].[t]` after the move).
   Triggers fail-fast with **Msg 15347** (`"Cannot transfer an object that is owned by a parent object."`) — triggers belong to their parent's schema and follow the parent automatically.
   Found-object collision check uses `Schema.HasNameInSharedNamespace` against the destination; collision → **Msg 15530** (`"The object with name \"<n>\" already exists."`).
   On success, the object's `SchemaId` updates to the destination's id, its `Schema` reference reseats (every concrete `SchemaObject` derivative except `HeapTable` carries a per-instance `Schema` field), and any attached DML triggers (matching `Trigger.Parent` to the moved table / view) co-migrate into the destination's `Triggers` dict via `ReseatAttachedTriggers`.

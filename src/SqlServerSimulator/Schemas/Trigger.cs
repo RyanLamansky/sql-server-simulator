@@ -96,8 +96,12 @@ internal sealed class Trigger(
     /// parent at runtime walks the schema's <see cref="Schema.Triggers"/>
     /// dict and fires every trigger whose <see cref="Parent"/> matches
     /// and whose <see cref="Actions"/> include the current DML kind.
+    /// Mutable so <c>ALTER VIEW</c> — which swaps in a fresh
+    /// <see cref="View"/> instance under the same object identity — can carry
+    /// the parent's triggers across to the replacement, as real SQL Server
+    /// does. Every other site treats it as effectively immutable.
     /// </summary>
-    public readonly SchemaObject Parent = parent;
+    public SchemaObject Parent = parent;
 
     /// <summary>
     /// The set of DML actions this trigger fires on. A single trigger

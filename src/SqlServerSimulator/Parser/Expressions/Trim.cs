@@ -77,15 +77,23 @@ internal sealed class Trim : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = source.Run(runtime);
+        // Argument numbering follows the written order, so the bare `TRIM(x)`
+        // form makes the source argument 1 while `TRIM(chars FROM x)` makes
+        // chars argument 1 and the source argument 2 (probe-confirmed
+        // 2026-07-31, together with the capitalized `Trim` function word real
+        // echoes where the rest of the string family is lowercase).
+        var sourceIndex = this.trimChars is null ? 1 : 2;
+        StringScalars.RejectLegacyLob(value, "Trim", sourceIndex);
         if (value.IsNull)
             return SqlValue.Null(value.Type);
         if (!SqlType.IsStringCategory(value.Type))
-            throw SimulatedSqlException.InvalidArgumentDataType(value.Type.SqlServerName, argumentIndex: 1, "Trim");
+            throw SimulatedSqlException.InvalidArgumentDataType(value.Type.SqlServerName, sourceIndex, "Trim");
 
         char[] chars;
         if (this.trimChars is not null)
         {
             var charsValue = this.trimChars.Run(runtime);
+            StringScalars.RejectLegacyLob(charsValue, "Trim", argumentIndex: 1);
             if (charsValue.IsNull)
                 return SqlValue.Null(value.Type);
             chars = charsValue.AsString.ToCharArray();

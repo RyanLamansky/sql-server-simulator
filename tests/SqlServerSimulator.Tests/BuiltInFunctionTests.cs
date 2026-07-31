@@ -244,9 +244,94 @@ public sealed class BuiltInFunctionTests
     [DataRow("select replace('abc', cast('a' as ntext), 'b')", "ntext", 2, "replace")]
     [DataRow("select replace('abc', 'a', cast('b' as ntext))", "ntext", 3, "replace")]
     [DataRow("select charindex(cast('a' as ntext), 'abc')", "ntext", 1, "charindex")]
+    [DataRow("select len(cast(0x01 as image))", "image", 1, "len")]
+    [DataRow("select ltrim('  a  ', cast('x' as ntext))", "ntext", 2, "ltrim")]
+    [DataRow("select rtrim('  a  ', cast('x' as text))", "text", 2, "rtrim")]
+    [DataRow("select ascii(cast('abc' as text))", "text", 1, "ascii")]
+    [DataRow("select unicode(cast('abc' as ntext))", "ntext", 1, "unicode")]
+    [DataRow("select soundex(cast('abc' as text))", "text", 1, "soundex")]
+    [DataRow("select difference(cast('abc' as ntext), 'abd')", "ntext", 1, "difference")]
+    [DataRow("select difference('abd', cast(0x01 as image))", "image", 2, "difference")]
+    [DataRow("select translate(cast('abc' as ntext), 'a', 'b')", "ntext", 1, "translate")]
+    [DataRow("select translate('abc', cast('a' as ntext), 'b')", "ntext", 2, "translate")]
+    [DataRow("select translate('abc', 'a', cast('b' as ntext))", "ntext", 3, "translate")]
+    [DataRow("select patindex(cast('%a%' as ntext), 'abc')", "ntext", 1, "patindex")]
+    [DataRow("select patindex('%a%', cast(0x01 as image))", "image", 2, "patindex")]
+    [DataRow("select string_escape(cast('abc' as ntext), 'json')", "ntext", 1, "string_escape")]
     public void LegacyLobArgument_IsRejected(string sql, string typeName, int argument, string function)
         => new Simulation().AssertSqlError(
             sql, 8116, $"Argument data type {typeName} is invalid for argument {argument} of {function} function.");
+
+    /// <summary>
+    /// TRIM numbers its arguments in written order, so the source is argument 1
+    /// in the bare form and argument 2 once a <c>chars FROM</c> prefix takes
+    /// the first slot — and the function word real echoes is capitalized where
+    /// the rest of the family is lowercase (probe-confirmed 2026-07-31).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select trim(cast('abc' as ntext))", "ntext", 1)]
+    [DataRow("select trim(cast('a' as ntext) from 'abc')", "ntext", 1)]
+    [DataRow("select trim('a' from cast('abc' as text))", "text", 2)]
+    public void LegacyLobArgument_TrimReportsWrittenPosition(string sql, string typeName, int argument)
+        => new Simulation().AssertSqlError(
+            sql, 8116, $"Argument data type {typeName} is invalid for argument {argument} of Trim function.");
+
+    /// <summary>
+    /// STRING_AGG rejects a legacy LOB in either the aggregated value or the
+    /// separator, naming the same lowercase function word as the scalars.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select string_agg(nt, ',') from lob", "ntext", 1)]
+    [DataRow("select string_agg('a', nt) from lob", "ntext", 2)]
+    public void LegacyLobArgument_StringAggIsRejected(string sql, string typeName, int argument)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table lob (nt ntext null); insert lob values (N'abc')");
+        simulation.AssertSqlError(
+            sql, 8116, $"Argument data type {typeName} is invalid for argument {argument} of string_agg function.");
+    }
+
+    /// <summary>
+    /// The rejection is a binding rule, so it fires on a NULL-valued legacy LOB
+    /// column too — the value never gets far enough to propagate NULL.
+    /// </summary>
+    [TestMethod]
+    public void LegacyLobArgument_NullValuedColumn_StillRejected()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table lob (nt ntext null); insert lob values (null)");
+        simulation.AssertSqlError(
+            "select len(nt) from lob", 8116, "Argument data type ntext is invalid for argument 1 of len function.");
+    }
+
+    /// <summary>
+    /// DIFFERENCE is the family's odd member: a <c>text</c> argument implicitly
+    /// converts to varchar and evaluates, where its own SOUNDEX refuses one.
+    /// </summary>
+    [TestMethod]
+    public void Difference_AnsiTextArgument_IsAccepted()
+        => AreEqual(3, new Simulation().ExecuteScalar("select difference(cast('abc' as text), 'abd')"));
+
+    /// <summary>
+    /// QUOTENAME quotes the <c>nvarchar</c> rendering of whatever it is given,
+    /// so <c>text</c> / <c>ntext</c> and the ordinary non-string families all
+    /// quote; only <c>image</c> — which has no implicit conversion to
+    /// <c>nvarchar</c> — clashes, with Msg 206 rather than the family's
+    /// Msg 8116 (probe-confirmed 2026-07-31).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select quotename(cast('abc' as ntext))", "[abc]")]
+    [DataRow("select quotename(cast('abc' as text))", "[abc]")]
+    [DataRow("select quotename(123)", "[123]")]
+    [DataRow("select quotename(cast('2024-01-15' as date))", "[2024-01-15]")]
+    public void QuoteName_NonNVarcharArgument_Quotes(string sql, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(sql));
+
+    /// <inheritdoc cref="QuoteName_NonNVarcharArgument_Quotes"/>
+    [TestMethod]
+    public void QuoteName_ImageArgument_RaisesMsg206()
+        => new Simulation().AssertSqlError(
+            "select quotename(cast(0x01 as image))", 206, "Operand type clash: image is incompatible with nvarchar");
 
     /// <summary>
     /// The exceptions are arguments that are read rather than transformed —

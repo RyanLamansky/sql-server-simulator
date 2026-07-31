@@ -310,7 +310,14 @@ partial class Simulation
                 if (!batch.IsSkipping)
                 {
                     var offsetValue = offsetExpr.Run(new RuntimeContext(NoColumnResolver, batch));
-                    offset = offsetValue.IsNull ? 0 : offsetValue.CoerceTo(SqlType.Int32).AsInt32;
+                    offset = offsetValue.IsNull ? 0 : offsetValue.CoerceTo(SqlType.BigInt).AsInt64;
+
+                    // An offset *literal* outside int range is a grammar-level
+                    // failure (Msg 1080, class 15) where the same value through
+                    // a variable is accepted and simply positions past the end
+                    // — probe-confirmed 2026-07-31.
+                    if (offsetExpr is Value && offset is < int.MinValue or > int.MaxValue)
+                        throw SimulatedSqlException.IntegerValueOutOfRange(offset.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 }
             }
         }

@@ -49,7 +49,10 @@ internal sealed class NextValueFor : Expression
             // from "name resolves but to a non-sequence object" (Msg 11726). Test the
             // latter first via the generic table resolver — if it finds a regular
             // object, Msg 11726 wins; otherwise Msg 208 from InvalidObjectName.
-            if (context.Batch.TryResolveTable(sequenceName, out _))
+            // A synonym is a non-sequence object here even when its base IS a
+            // sequence: probe-confirmed that real refuses NEXT VALUE FOR through
+            // a synonym with the same Msg 11726.
+            if (context.Batch.TryResolveSynonym(sequenceName, out _) || context.Batch.TryResolveTable(sequenceName, out _))
                 throw SimulatedSqlException.ObjectIsNotASequence(sequenceName.ToString());
             throw SimulatedSqlException.InvalidObjectName(sequenceName);
         }

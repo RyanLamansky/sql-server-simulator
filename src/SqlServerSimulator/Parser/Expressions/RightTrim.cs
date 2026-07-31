@@ -27,10 +27,11 @@ internal sealed class RightTrim : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var raw = source.Run(runtime);
+        StringScalars.RejectLegacyLob(raw, "rtrim");
         if (raw.IsNull)
             return SqlValue.Null(StringScalars.ResolveResultType(raw.Type, runtime.Batch));
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "rtrim");
-        var chars = StringScalars.ResolveTrimCharacters(this.trimChars, runtime);
+        var chars = StringScalars.ResolveTrimCharacters(this.trimChars, runtime, "rtrim");
         if (chars is null)
             return SqlValue.Null(value.Type);
         // An empty explicit set removes nothing (.NET's TrimEnd would treat an

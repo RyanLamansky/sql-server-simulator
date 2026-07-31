@@ -31,7 +31,7 @@ internal sealed class SchemaName : Expression
         var idValue = this.idArg.Run(runtime);
         if (idValue.IsNull)
             return SqlValue.Null(SqlType.SystemName);
-        var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
+        var id = ScalarArguments.CoerceToInt(idValue);
         foreach (var schema in runtime.Batch.CurrentDatabase.Schemas.Values)
         {
             if (schema.SchemaId == id)

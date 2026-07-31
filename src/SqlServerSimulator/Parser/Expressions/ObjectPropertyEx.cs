@@ -58,7 +58,7 @@ internal sealed class ObjectPropertyEx : Expression
         var propValue = this.propertyArg.Run(runtime);
         if (idValue.IsNull || propValue.IsNull)
             return SqlValue.Null(SqlType.SqlVariant);
-        var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
+        var id = ScalarArguments.CoerceToInt(idValue);
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
 
         var obj = ObjectProperty.FindObject(runtime.Batch.CurrentDatabase, id);
@@ -68,11 +68,12 @@ internal sealed class ObjectPropertyEx : Expression
             ? SqlValue.Null(SqlType.SqlVariant)
             : ObjectProperty.EvaluateProperty(obj, prop) is int booleanResult
                 ? SqlValue.FromVariant(SqlValue.FromInt32(booleanResult))
-                : EvaluateExtendedProperty(obj, prop, runtime.Batch.CurrentDatabase);
+                : EvaluateExtendedProperty(obj, prop, runtime.Batch);
     }
 
-    private static SqlValue EvaluateExtendedProperty(SchemaObject obj, string property, Database database)
+    private static SqlValue EvaluateExtendedProperty(SchemaObject obj, string property, BatchContext batch)
     {
+        var database = batch.CurrentDatabase;
         Span<char> upper = stackalloc char[property.Length];
         var len = property.AsSpan().ToUpperInvariant(upper);
 
@@ -83,7 +84,7 @@ internal sealed class ObjectPropertyEx : Expression
                 // BaseType's inner type is char(2) in the database collation
                 // (probe-confirmed) — the 2-char object-type code with its
                 // trailing-space padding.
-                "BASETYPE" => SqlValue.FromVariant(SqlValue.FromChar(CharSqlType.Get(2, database.Collation, Coercibility.Implicit), BaseTypeFor(obj))),
+                "BASETYPE" => BaseTypeVariant(obj, batch, database),
                 "SCHEMAID" => IntVariant(ObjectProperty.FindOwningSchema(database, obj)?.SchemaId),
                 _ => SqlValue.Null(SqlType.SqlVariant),
             },
@@ -195,6 +196,24 @@ internal sealed class ObjectPropertyEx : Expression
                 return true;
         }
         return HasPrimaryKey(table);
+    }
+
+    /// <summary>
+    /// <c>BaseType</c> as a <c>char(2)</c> sql_variant. A synonym reports the
+    /// type of the object it points at rather than <c>'SN'</c> — probe-confirmed
+    /// <c>'U '</c> for a table base, <c>'P '</c> for a procedure, <c>'FN'</c>
+    /// for a scalar function — and NULL when the base doesn't resolve.
+    /// </summary>
+    private static SqlValue BaseTypeVariant(SchemaObject obj, BatchContext batch, Database database)
+    {
+        var reported = obj;
+        if (obj is Synonym synonym)
+        {
+            if (!batch.TryResolveSynonymBase(synonym, out var target))
+                return SqlValue.Null(SqlType.SqlVariant);
+            reported = target;
+        }
+        return SqlValue.FromVariant(SqlValue.FromChar(CharSqlType.Get(2, database.Collation, Coercibility.Implicit), BaseTypeFor(reported)));
     }
 
     private static string BaseTypeFor(SchemaObject obj) => obj switch

@@ -21,7 +21,7 @@ internal static class BitOperandHelpers
     /// 8 / 16 / 32 / 64 for tinyint / smallint / int / bigint. Used for
     /// per-type range-checking of bit indices in <c>GET_BIT</c> / <c>SET_BIT</c>
     /// (probe-confirmed against SQL Server 2025: <c>GET_BIT(cast(8 as int), 32)</c>
-    /// raises Msg 8120, "Parameter 2 in function 'get_bit' is out of range 0 to 31.").
+    /// raises Msg 9838, "Parameter 2 in function 'get_bit' is out of range 0 to 31.").
     /// </summary>
     public static int IntegerBitWidth(SqlType type)
     {
@@ -31,6 +31,36 @@ internal static class BitOperandHelpers
             : type == SqlType.BigInt ? 64
             : -1;
     }
+
+    /// <summary>
+    /// Reads a position / shift-distance / bit-value argument as a
+    /// <c>bigint</c>. Real never narrows one to <c>int</c>: the argument has
+    /// to be an integer type already (anything else — decimal, float, money,
+    /// string, binary — is Msg 8116 naming the type), and the range check
+    /// that follows runs against the widened value, so a position past
+    /// <c>int</c> range is an ordinary out-of-range failure rather than a
+    /// conversion overflow (probe-confirmed 2026-07-31).
+    /// </summary>
+    /// <remarks>
+    /// A NULL argument reports the same "data type NULL" Msg 8116 the first
+    /// operand does. Real distinguishes the bare NULL keyword (this error)
+    /// from a NULL-valued typed argument (result NULL); the simulator
+    /// resolves both to the same placeholder-typed value, so the family
+    /// answers uniformly the way its first operand always has.
+    /// </remarks>
+    /// <param name="value">The evaluated argument.</param>
+    /// <param name="functionName">Lowercase function name for the error wording.</param>
+    /// <param name="argumentIndex">1-based argument position for the error wording.</param>
+    /// <param name="allowBit">
+    /// <c>bit</c> is accepted only at <c>SET_BIT</c>'s third argument; every
+    /// other position rejects it alongside the non-integer types, which is
+    /// real's own split.
+    /// </param>
+    public static long IntegerArgument(SqlValue value, string functionName, int argumentIndex, bool allowBit) =>
+        value.IsNull ? throw ArgInvalidForBitFunc(functionName, "NULL", argumentIndex)
+            : !SqlType.IsIntegerCategory(value.Type) || (value.Type == SqlType.Bit && !allowBit)
+                ? throw ArgInvalidForBitFunc(functionName, value.Type.SqlServerName, argumentIndex)
+                : value.CoerceTo(SqlType.BigInt).AsInt64;
 }
 
 /// <summary>
@@ -99,9 +129,9 @@ internal sealed class BitCount : Expression
 /// <summary>
 /// SQL <c>GET_BIT(num, position)</c>: returns the bit at the given
 /// 0-based position (LSB = 0) as <c>bit</c>. Position must be in range
-/// <c>[0, bit-width-1]</c> for integer types (probe-confirmed Msg 8120
-/// for out-of-range against SQL Server 2025, 2026-05-22). NULL operand
-/// raises Msg 8116.
+/// <c>[0, bit-width-1]</c> for integer types (probe-confirmed Msg 9838
+/// state 1 for out-of-range against SQL Server 2025, 2026-07-31). NULL or
+/// non-integer operand raises Msg 8116.
 /// </summary>
 internal sealed class GetBit : Expression
 {
@@ -126,11 +156,11 @@ internal sealed class GetBit : Expression
         var width = BitOperandHelpers.IntegerBitWidth(v.Type);
         if (width < 0)
             throw BitOperandHelpers.ArgInvalidForBitFunc("get_bit", v.Type.ToString()!, 1);
-        var pos = this.positionArg.Run(runtime).CoerceTo(SqlType.Int32).AsInt32;
+        var pos = BitOperandHelpers.IntegerArgument(this.positionArg.Run(runtime), "get_bit", 2, allowBit: false);
         if (pos < 0 || pos >= width)
-            throw SimulatedSqlException.BitFunctionPositionOutOfRange("get_bit", 2, 0, width - 1);
+            throw SimulatedSqlException.BitFunctionPositionOutOfRange("get_bit", width - 1, state: 1);
         var bits = BitCount.ToUnsignedBits(v);
-        return SqlValue.FromBoolean(((bits >> pos) & 1UL) == 1UL);
+        return SqlValue.FromBoolean(((bits >> (int)pos) & 1UL) == 1UL);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Bit;
@@ -142,8 +172,9 @@ internal sealed class GetBit : Expression
 /// SQL <c>SET_BIT(num, position [, value])</c>: sets the bit at the given
 /// 0-based position to the optional value argument (default 1). Returns
 /// the same integer type as the first argument. Out-of-range position
-/// raises Msg 8120; NULL operand raises Msg 8116; value other than 0 or
-/// 1 raises Msg 8120 (probe-confirmed against SQL Server 2025).
+/// raises Msg 9838 state 2; NULL or non-integer operand raises Msg 8116;
+/// value other than 0 or 1 raises Msg 9839 (probe-confirmed against
+/// SQL Server 2025, 2026-07-31).
 /// </summary>
 internal sealed class SetBit : Expression
 {
@@ -171,14 +202,14 @@ internal sealed class SetBit : Expression
         var width = BitOperandHelpers.IntegerBitWidth(v.Type);
         if (width < 0)
             throw BitOperandHelpers.ArgInvalidForBitFunc("set_bit", v.Type.ToString()!, 1);
-        var pos = this.positionArg.Run(runtime).CoerceTo(SqlType.Int32).AsInt32;
+        var pos = BitOperandHelpers.IntegerArgument(this.positionArg.Run(runtime), "set_bit", 2, allowBit: false);
         if (pos < 0 || pos >= width)
-            throw SimulatedSqlException.BitFunctionPositionOutOfRange("set_bit", 2, 0, width - 1);
-        var setTo = this.valueArg is null ? 1 : this.valueArg.Run(runtime).CoerceTo(SqlType.Int32).AsInt32;
+            throw SimulatedSqlException.BitFunctionPositionOutOfRange("set_bit", width - 1, state: 2);
+        var setTo = this.valueArg is null ? 1L : BitOperandHelpers.IntegerArgument(this.valueArg.Run(runtime), "set_bit", 3, allowBit: true);
         if (setTo is not (0 or 1))
-            throw SimulatedSqlException.BitFunctionPositionOutOfRange("set_bit", 3, 0, 1);
+            throw SimulatedSqlException.BitFunctionValueNotZeroOrOne();
         var bits = BitCount.ToUnsignedBits(v);
-        bits = setTo == 1 ? bits | (1UL << pos) : bits & ~(1UL << pos);
+        bits = setTo == 1 ? bits | (1UL << (int)pos) : bits & ~(1UL << (int)pos);
         return UnsignedBitsToTyped(bits, v.Type);
     }
 
@@ -203,6 +234,11 @@ internal sealed class SetBit : Expression
 /// returns <c>0</c>. <c>RIGHT_SHIFT</c> uses logical (unsigned) shift
 /// semantics — probe-confirmed: <c>RIGHT_SHIFT(cast(-16 as int), 2)</c>
 /// returns <c>1073741820</c>, not <c>-4</c>.
+/// A negative distance shifts the opposite way instead of zeroing —
+/// probe-confirmed 2026-07-31: <c>LEFT_SHIFT(cast(255 as int), -4)</c>
+/// returns <c>15</c> and <c>RIGHT_SHIFT(cast(255 as int), -4)</c> returns
+/// <c>4080</c> — and neither direction has a range check, so a distance
+/// past <c>int</c> range simply zeroes rather than failing to convert.
 /// </summary>
 internal sealed class BitShift : Expression
 {
@@ -248,12 +284,22 @@ internal sealed class BitShift : Expression
         var width = BitOperandHelpers.IntegerBitWidth(v.Type);
         if (width < 0)
             throw BitOperandHelpers.ArgInvalidForBitFunc(this.functionName, v.Type.ToString()!, 1);
-        var shift = this.shiftArg.Run(runtime).CoerceTo(SqlType.Int32).AsInt32;
+        var shift = BitOperandHelpers.IntegerArgument(this.shiftArg.Run(runtime), this.functionName, 2, allowBit: false);
         var mask = width == 64 ? ulong.MaxValue : (1UL << width) - 1;
         var bits = BitCount.ToUnsignedBits(v) & mask;
-        var result = shift < 0 || shift >= width ? 0UL
-            : this.isLeftShift ? (bits << shift) & mask
-            : bits >> shift;
+
+        // A negative distance shifts the other way rather than zeroing the
+        // result — probe-confirmed LEFT_SHIFT(255, -4) = 15 and
+        // RIGHT_SHIFT(255, -4) = 4080 — and any magnitude at or past the
+        // operand's bit width zeroes it whichever way it points, which is
+        // also how a distance beyond int range lands (that comparison runs
+        // first, so the negation below can't overflow).
+        var beyondWidth = shift <= -width || shift >= width;
+        var towardHighBits = this.isLeftShift ^ (shift < 0);
+        var distance = beyondWidth ? width : (int)(shift < 0 ? -shift : shift);
+        var result = beyondWidth ? 0UL
+            : towardHighBits ? (bits << distance) & mask
+            : bits >> distance;
         return SetBit.UnsignedBitsToTyped(result, v.Type);
     }
 

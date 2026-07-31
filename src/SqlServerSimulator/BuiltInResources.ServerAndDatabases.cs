@@ -763,9 +763,11 @@ internal static partial class BuiltInResources
     /// against SQL Server 2025). <c>configuration_id</c> and <c>name</c> are
     /// stable across instances; <c>value</c> mirrors <c>value_in_use</c> on a
     /// fresh server. The four sql_variant columns wrap an <c>int</c> inner for
-    /// every option.
+    /// every option. These are the defaults an option reports until
+    /// <c>sp_configure</c> writes it — see <c>Simulation.ServerConfiguration</c>
+    /// for the per-simulation overrides layered on top.
     /// </summary>
-    private static readonly (int Id, string Name, int Value, int Minimum, int Maximum, int ValueInUse, string Description, bool IsDynamic, bool IsAdvanced)[] ConfigurationData =
+    internal static readonly (int Id, string Name, int Value, int Minimum, int Maximum, int ValueInUse, string Description, bool IsDynamic, bool IsAdvanced)[] ConfigurationData =
     [
         (101, "recovery interval (min)", 0, 0, 32767, 0, "Maximum recovery interval in minutes", true, true),
         (102, "allow updates", 0, 0, 1, 0, "Allow updates to system tables", true, false),
@@ -885,13 +887,8 @@ internal static partial class BuiltInResources
     private static readonly SqlValue[][] ConfigurationsRows = BuildConfigurationsRows();
 
     /// <summary>
-    /// <c>sys.configurations</c> for one batch. Every row is fixed except
-    /// <c>clr enabled</c>, which reports the simulation's
-    /// <see cref="Simulation.EnableClr"/> opt-in, and <c>clr strict security</c>,
-    /// which drops to 0 once CLR is enabled — the simulator gates assembly
-    /// registration on the host opt-in rather than on assembly signing, so
-    /// continuing to report real's default of 1 would describe an enforcement it
-    /// does not perform.
+    /// <c>sys.configurations</c> for one batch: the stock defaults with the
+    /// simulation's <c>sp_configure</c> writes layered on top.
     /// </summary>
     /// <remarks>
     /// mssql-django's <c>enable_clr()</c> reads <c>clr enabled</c> here and only
@@ -900,23 +897,54 @@ internal static partial class BuiltInResources
     /// </remarks>
     private static SqlValue[][] ConfigurationRowsFor(Parser.BatchContext batch)
     {
-        if (!batch.Connection.Simulation.EnableClr)
+        var simulation = batch.Connection.Simulation;
+        if (!simulation.EnableClr && simulation.ServerConfiguration.IsEmpty)
             return ConfigurationsRows;
 
         var rows = (SqlValue[][])ConfigurationsRows.Clone();
         for (var i = 0; i < rows.Length; i++)
         {
-            if (ConfigurationData[i].Name is not ("clr enabled" or "clr strict security"))
+            var (configured, inUse) = EffectiveConfigurationValues(simulation, i);
+            if (configured == ConfigurationData[i].Value && inUse == ConfigurationData[i].ValueInUse)
                 continue;
 
             var row = (SqlValue[])rows[i].Clone();
-            var enabled = SqlValue.FromVariant(SqlValue.FromInt32(ConfigurationData[i].Name == "clr enabled" ? 1 : 0));
-            row[2] = enabled;
-            row[5] = enabled;
+            row[2] = SqlValue.FromVariant(SqlValue.FromInt32(configured));
+            row[5] = SqlValue.FromVariant(SqlValue.FromInt32(inUse));
             rows[i] = row;
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// The <c>config_value</c> / <c>run_value</c> pair one configuration option
+    /// currently reports: whatever <c>sp_configure</c> staged and
+    /// <c>RECONFIGURE</c> installed, else the stock default.
+    /// <para>
+    /// The two CLR rows are the exception, and report the simulation's
+    /// <see cref="Simulation.EnableClr"/> opt-in whatever <c>sp_configure</c>
+    /// wrote: <c>clr enabled</c> mirrors the opt-in and <c>clr strict
+    /// security</c> drops to 0 once CLR is on, because the simulator gates
+    /// assembly registration on the host opt-in rather than on assembly
+    /// signing — reporting real's default of 1 would describe an enforcement it
+    /// does not perform.
+    /// </para>
+    /// </summary>
+    internal static (int Configured, int InUse) EffectiveConfigurationValues(Simulation simulation, int index)
+    {
+        var (id, name, value, _, _, valueInUse, _, _, _) = ConfigurationData[index];
+        if (name is "clr enabled" or "clr strict security")
+        {
+            var clr = !simulation.EnableClr ? value
+                : name == "clr enabled" ? 1
+                : 0;
+            return (clr, clr);
+        }
+
+        return simulation.ServerConfiguration.TryGetValue(id, out var setting)
+            ? setting
+            : (value, valueInUse);
     }
 
     private static SqlValue[][] BuildConfigurationsRows()
@@ -1079,7 +1107,7 @@ internal static partial class BuiltInResources
                 trueBit,
                 falseBit,
                 falseBit,
-                falseBit,
+                SqlValue.FromBoolean(db.RecursiveTriggers),
                 falseBit,
                 trueBit,
                 falseBit,

@@ -278,13 +278,14 @@ internal static partial class BuiltInResources
         ], (batch, database) =>
             EnumerateObjects(batch, database, charTwo, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped));
 
-        // sys.synonyms: schema-scoped synonym catalog. CREATE SYNONYM isn't
-        // modeled (the parser rejects it at Msg 102), so the view is always
-        // empty — but SSMS's "Edit Top 200 Rows" commit probes whether the
-        // edit target is a synonym via a three-part `[db].sys.synonyms` read,
-        // which must resolve and return zero rows rather than Msg 208. Column
+        // sys.synonyms: schema-scoped synonym catalog, one row per CREATE
+        // SYNONYM. SSMS's "Edit Top 200 Rows" commit probes whether the edit
+        // target is a synonym via a three-part `[db].sys.synonyms` read, so the
+        // view must resolve through that form as well as the plain one. Column
         // shape probe-confirmed against SQL Server 2025 (name sysname,
-        // base_object_name nvarchar(1035), type char(2), type_desc nvarchar(60)).
+        // base_object_name nvarchar(1035), type char(2), type_desc nvarchar(60));
+        // a sample row confirms principal_id NULL, parent_object_id 0, and the
+        // three is_* flags 0.
         Sys("synonyms",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -300,7 +301,7 @@ internal static partial class BuiltInResources
             new("is_published", SqlType.Bit, null, false),
             new("is_schema_published", SqlType.Bit, null, false),
             new("base_object_name", SqlType.NVarchar, 1035, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], (_, database) => EnumerateSynonyms(database, charTwo, zeroParent));
 
         // sys.columns: load-bearing subset of real SQL Server's column set.
         // Probe-confirmed (2026-05-11): max_length is byte-length (4 for int,
@@ -780,6 +781,43 @@ internal static partial class BuiltInResources
             HierarchyIdSqlType => (892, 0, 0),
             _ => throw new NotSupportedException($"No sys.columns metadata for {t}."),
         };
+    }
+
+    /// <summary>
+    /// Projects <c>sys.synonyms</c> over every schema's <c>Synonyms</c> dict in
+    /// ObjectId order. <c>base_object_name</c> carries the bracket-quoted base
+    /// name as written at CREATE time; the base is never resolved here, so a
+    /// synonym over a missing object still lists (matching real, where the row
+    /// exists and the failure waits for first use).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSynonyms(Database database, SqlType charTwo, SqlValue zeroParent)
+    {
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
+        var notPublished = SqlValue.FromBoolean(false);
+        var typeCode = SqlValue.FromChar(charTwo, "SN");
+        var typeDesc = SqlValue.FromNVarchar("SYNONYM");
+        foreach (var schema in database.Schemas.Values)
+        {
+            var schemaId = SqlValue.FromInt32(schema.SchemaId);
+            foreach (var synonym in schema.Synonyms.Values.OrderBy(s => s.ObjectId))
+            {
+                yield return [
+                    SqlValue.FromSystemName(synonym.Name),
+                    SqlValue.FromInt32(synonym.ObjectId),
+                    nullPrincipal,
+                    schemaId,
+                    zeroParent,
+                    typeCode,
+                    typeDesc,
+                    SqlValue.FromDateTime(synonym.CreateDate),
+                    SqlValue.FromDateTime(synonym.ModifyDate),
+                    notMsShipped,
+                    notPublished,
+                    notPublished,
+                    SqlValue.FromNVarchar(synonym.BaseObjectName),
+                ];
+            }
+        }
     }
 
     private static IEnumerable<SqlValue[]> EnumerateObjects(

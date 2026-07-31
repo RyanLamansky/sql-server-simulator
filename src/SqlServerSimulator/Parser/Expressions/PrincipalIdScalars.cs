@@ -124,7 +124,7 @@ internal sealed class Permissions : Expression
         var idValue = this.objectIdArg.Run(runtime);
         if (idValue.IsNull)
             return SqlValue.Null(SqlType.Int32);
-        var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
+        var id = ScalarArguments.CoerceToInt(idValue);
 
         if (this.columnArg is null)
         {

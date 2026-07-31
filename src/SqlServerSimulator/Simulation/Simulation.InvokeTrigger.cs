@@ -13,9 +13,9 @@ partial class Simulation
     /// <paramref name="insertedRows"/> / <paramref name="deletedRows"/>.
     /// Called by INSERT / UPDATE / DELETE / MERGE post-write. A trigger
     /// body throwing propagates up — the calling DML's undo log walks
-    /// back, rolling the write itself. Direct same-trigger recursion is
-    /// suppressed via <see cref="SimulatedDbConnection.FiringTriggerIds"/>
-    /// (matches SQL Server's default <c>RECURSIVE_TRIGGERS OFF</c>).
+    /// back, rolling the write itself. Which of the matching triggers actually
+    /// fire depends on what's already running — see <see cref="CanFireTrigger"/>
+    /// for the <c>RECURSIVE_TRIGGERS</c> / <c>nested triggers</c> rules.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -64,6 +64,8 @@ partial class Simulation
                 if ((trigger.Actions & action) == 0)
                     continue;
                 if (trigger.IsDisabled)
+                    continue;
+                if (!CanFireTrigger(outerBatch, trigger))
                     continue;
                 matching.Add(trigger);
             }
@@ -188,6 +190,7 @@ partial class Simulation
                 if (trigger.Timing != TriggerTiming.InsteadOf) continue;
                 if ((trigger.Actions & action) == 0) continue;
                 if (trigger.IsDisabled) continue;
+                if (!CanFireTrigger(outerBatch, trigger)) continue;
                 matched = trigger;
                 break;
             }
@@ -241,17 +244,11 @@ partial class Simulation
         {
             foreach (var trigger in triggers)
             {
-                // Direct-recursion guard. Trigger T currently firing → skip
-                // re-fires of T (the body's DML may still fire other triggers
-                // — only same-trigger recursion is blocked).
-                if (!connection.FiringTriggerIds.Add(trigger.ObjectId))
-                    continue;
-
+                // Whether this trigger fires at all was settled by the caller's
+                // CanFireTrigger filter; nothing between there and here changes
+                // the stack, since each body pops its own frame on exit.
                 if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
-                {
-                    _ = connection.FiringTriggerIds.Remove(trigger.ObjectId);
                     throw SimulatedSqlException.MaximumNestingLevelExceeded();
-                }
 
                 connection.LastStatementRowCount = affectedRowCount;
 
@@ -263,6 +260,7 @@ partial class Simulation
                 {
                     connection.NestingLevel++;
                     connection.TriggerNestLevel++;
+                    connection.FiringTriggers.Add((trigger.ObjectId, trigger.Timing == TriggerTiming.After));
                     connection.TriggerBodyErrorRaised = false;
                     // Module WITH EXECUTE AS: run the body as the impersonated
                     // principal (OWNER / SELF → dbo, CALLER → no-op, named user →
@@ -306,13 +304,13 @@ partial class Simulation
                 {
                     connection.NestingLevel--;
                     connection.TriggerNestLevel--;
+                    connection.FiringTriggers.RemoveAt(connection.FiringTriggers.Count - 1);
                     // Local temp tables the trigger body created are dropped at
                     // trigger exit (probe-confirmed Msg 208 afterward — module-
                     // scoped lifetime, same as procs / dynamic SQL).
                     innerBatch?.DropScopedTempTables();
                     connection.Security.RevertTo(savedImpersonationDepth);
                     connection.TriggerBodyErrorRaised = savedBodyErrorRaised;
-                    _ = connection.FiringTriggerIds.Remove(trigger.ObjectId);
                 }
             }
         }
@@ -371,15 +369,13 @@ partial class Simulation
 
     private static bool HasTrigger(BatchContext batch, SchemaObject parent, TriggerActions action, TriggerTiming timing)
     {
-        // In-flight triggers are excluded — for AFTER, this matters only
-        // when a body re-enters itself (the recursion guard would skip
-        // anyway, so the result-set effect is the same). For INSTEAD OF
-        // the distinction is load-bearing: a body that issues DML against
-        // its own target must reach the heap, because the trigger
-        // (suppressed by the recursion guard) can't run a second time.
-        // Probe-confirmed: real SQL Server's INSTEAD OF body's nested
-        // INSERT writes the heap directly.
-        var firingIds = batch.Connection.FiringTriggerIds;
+        // Triggers the nesting rules suppress are excluded — for AFTER, so the
+        // DML site skips the per-row snapshot capture it would only feed to a
+        // trigger that isn't going to run. For INSTEAD OF the exclusion is
+        // load-bearing: a body that issues DML against its own target must
+        // reach the heap, because the trigger can't run a second time.
+        // Probe-confirmed: real SQL Server's INSTEAD OF body's nested INSERT
+        // writes the heap directly.
         foreach (var schema in batch.CurrentDatabase.Schemas.Values)
         {
             foreach (var trigger in schema.Triggers.Values)
@@ -388,11 +384,62 @@ partial class Simulation
                 if (trigger.Timing != timing) continue;
                 if ((trigger.Actions & action) == 0) continue;
                 if (trigger.IsDisabled) continue;
-                if (firingIds.Contains(trigger.ObjectId)) continue;
+                if (!CanFireTrigger(batch, trigger)) continue;
                 return true;
             }
         }
         return false;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="trigger"/> fires given what's already running on
+    /// the connection — the two rules below, both probed against SQL Server 2025.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <strong>Direct recursion.</strong> With the database's
+    /// <c>RECURSIVE_TRIGGERS</c> off (the default), a trigger whose body's DML
+    /// would re-fire that same trigger is skipped and the DML reaches the heap.
+    /// The test is the <em>innermost</em> firing trigger, not the whole stack:
+    /// real re-fires a trigger sitting further up (T1's trigger writes T2, whose
+    /// trigger writes T1, whose trigger runs again), and a stored procedure
+    /// between the body and the DML doesn't launder the recursion either.
+    /// Turning <c>RECURSIVE_TRIGGERS</c> on lifts the rule for AFTER triggers
+    /// only — an INSTEAD OF trigger never re-fires itself whatever the setting,
+    /// since real processes its body's DML against its own target as if the
+    /// table had no INSTEAD OF trigger.
+    /// </para>
+    /// <para>
+    /// <strong>Nested triggers.</strong> With the <c>nested triggers</c> server
+    /// option off, an AFTER trigger doesn't fire while any AFTER trigger is
+    /// running up the stack — only the first AFTER level runs. INSTEAD OF
+    /// triggers are exempt and nest normally, and an AFTER trigger underneath
+    /// nothing but INSTEAD OF frames still fires.
+    /// </para>
+    /// </remarks>
+    private static bool CanFireTrigger(BatchContext batch, Trigger trigger)
+    {
+        var stack = batch.Connection.FiringTriggers;
+        if (stack.Count == 0)
+            return true;
+
+        if (trigger.Timing == TriggerTiming.After)
+        {
+            if (!batch.Connection.Simulation.NestedTriggersEnabled)
+            {
+                foreach (var (_, isAfter) in stack)
+                {
+                    if (isAfter)
+                        return false;
+                }
+                return true;
+            }
+
+            if (batch.CurrentDatabase.RecursiveTriggers)
+                return true;
+        }
+
+        return stack[^1].ObjectId != trigger.ObjectId;
     }
 
     /// <summary>

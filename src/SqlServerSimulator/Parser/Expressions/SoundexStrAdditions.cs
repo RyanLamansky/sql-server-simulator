@@ -28,6 +28,7 @@ internal sealed class Soundex : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var v = this.input.Run(runtime);
+        StringScalars.RejectLegacyLob(v, "soundex");
         return v.IsNull
             ? SqlValue.Null(SqlType.Varchar)
             : SqlValue.FromVarchar(Compute(v.CoerceTo(SqlType.NVarchar).AsString));
@@ -115,6 +116,12 @@ internal sealed class Difference : Expression
     {
         var l = this.left.Run(runtime);
         var r = this.right.Run(runtime);
+        // DIFFERENCE is the family's odd member: a `text` argument implicitly
+        // converts to varchar and evaluates, while `ntext` / `image` raise
+        // Msg 8116 — where its own SOUNDEX refuses all three (probe-confirmed
+        // 2026-07-31).
+        StringScalars.RejectLegacyLob(l, "difference", argumentIndex: 1, allowAnsiText: true);
+        StringScalars.RejectLegacyLob(r, "difference", argumentIndex: 2, allowAnsiText: true);
         if (l.IsNull || r.IsNull)
             return SqlValue.Null(SqlType.Int32);
         var sl = Soundex.Compute(l.CoerceTo(SqlType.NVarchar).AsString);

@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -470,9 +471,9 @@ partial class Simulation
             _ when col.Type == SqlType.Date => (null, 6, 0, null),
             _ when col.Type == SqlType.SmallDateTime => (null, 16, 0, null),
             _ when col.Type == SqlType.DateTime => (null, 16, 3, null),
-            DateTime2SqlType dt2 => (dt2.precision == 0 ? 19 : 20 + dt2.precision, 16, dt2.precision, null),
-            TimeSqlType tm => (tm.precision == 0 ? 8 : 9 + tm.precision, 12, tm.precision, null),
-            DateTimeOffsetSqlType dto => (dto.precision == 0 ? 26 : 27 + dto.precision, 20, dto.precision, null),
+            DateTime2SqlType dt2 => (ScaledTemporalPrecision(19, dt2.precision), 16, dt2.precision, null),
+            TimeSqlType tm => (ScaledTemporalPrecision(8, tm.precision), 12, tm.precision, null),
+            DateTimeOffsetSqlType dto => (ScaledTemporalPrecision(26, dto.precision), 20, dto.precision, null),
             _ when col.Type == SqlType.UniqueIdentifier => (null, 16, null, null),
             _ when col.Type == SqlType.RowVersion => (null, 8, null, 8),
             _ when col.Type == SqlType.Text => (null, 2147483647, null, 2147483647),
@@ -489,6 +490,15 @@ partial class Simulation
             SqlVariantSqlType => (null, 8000, null, null),
             _ => throw new NotSupportedException($"sp_columns_100 does not model {col.Type} columns."),
         };
+
+    /// <summary>
+    /// The rendered width of a fractional-second temporal type — the ODBC
+    /// display precision <c>sp_columns_100</c> and <c>sp_help</c> both report.
+    /// A zero scale renders no fractional part, so it stays at the base width;
+    /// any other scale adds its digits plus the decimal point.
+    /// </summary>
+    internal static int ScaledTemporalPrecision(int baseWidth, int scale) =>
+        scale == 0 ? baseWidth : baseWidth + scale + 1;
 
     // SS_DATA_TYPE: the legacy tabular-storage token (old syscolumns.type).
     // Integer / exact-numeric / approximate / money / datetime types switch to
@@ -966,7 +976,7 @@ partial class Simulation
         arg.IsDefault || arg.Value.IsNull ? null : arg.Value.CoerceTo(SqlType.NVarchar).AsString;
 
     private static int CatalogOdbcVer(ProcArgument arg) =>
-        arg.IsDefault || arg.Value.IsNull ? 2 : arg.Value.CoerceTo(SqlType.Int32).AsInt32;
+        arg.IsDefault || arg.Value.IsNull ? 2 : ScalarArguments.CoerceProcedureParameter(arg.Value, SqlType.Int32);
 
     // Parses @table_type's quoted comma-list ("'TABLE','VIEW'") into an
     // upper-case set; null / empty means "all types".

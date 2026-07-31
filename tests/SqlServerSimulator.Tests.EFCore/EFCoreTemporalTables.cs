@@ -85,6 +85,10 @@ public class EFCoreTemporalTables
         _ = context.Customers.Add(new Customer { Id = 1, Name = "alice", Credit = 100m });
         _ = context.SaveChanges();
 
+        // Keep the INSERT's statement time off the UPDATE's: a history row
+        // whose period start equals its end has zero duration, which every
+        // FOR SYSTEM_TIME form hides.
+        System.Threading.Thread.Sleep(50);
         var alice = context.Customers.Single(c => c.Id == 1);
         alice.Credit = 200m;
         _ = context.SaveChanges();
@@ -140,10 +144,50 @@ public class EFCoreTemporalTables
         _ = context.Customers.Add(new Customer { Id = 1, Name = "alice", Credit = 100m });
         _ = context.SaveChanges();
 
+        // Separate the INSERT's statement time from the DELETE's: a history
+        // row whose period start equals its end has zero duration, and every
+        // FOR SYSTEM_TIME form hides those.
+        System.Threading.Thread.Sleep(50);
         _ = context.Customers.Remove(context.Customers.Single());
         _ = context.SaveChanges();
 
         Assert.AreEqual(0, context.Customers.Count());
         Assert.AreEqual(1, context.Customers.TemporalAll().Count());
+    }
+
+    /// <summary>
+    /// The three range forms over one row with two versions: the original
+    /// runs [insert, update), the current one [update, max). Their shared
+    /// boundary is where the forms differ — BETWEEN takes the version
+    /// starting there, FROM … TO doesn't, and CONTAINED IN takes only the
+    /// version that ends there.
+    /// </summary>
+    [TestMethod]
+    public void TemporalRangeForms_DifferAtTheVersionBoundary()
+    {
+        using var context = new CustomerContext(CreateSimulation());
+        _ = context.Customers.Add(new Customer { Id = 1, Name = "alice", Credit = 100m });
+        _ = context.SaveChanges();
+
+        // Read the boundaries back from the period columns rather than the
+        // host clock — the same reason TemporalAsOf's test does, plus the
+        // range endpoints have to be exact for the boundary claims to mean
+        // anything.
+        var insertTime = context.Customers.Where(c => c.Id == 1).Select(c => EF.Property<DateTime>(c, "PeriodStart")).Single();
+        System.Threading.Thread.Sleep(50);
+
+        var alice = context.Customers.Single(c => c.Id == 1);
+        alice.Credit = 999m;
+        _ = context.SaveChanges();
+        var updateTime = context.Customers.Where(c => c.Id == 1).Select(c => EF.Property<DateTime>(c, "PeriodStart")).Single();
+
+        static decimal[] Credits(IQueryable<Customer> query)
+            => [.. query.OrderBy(c => EF.Property<DateTime>(c, "PeriodStart")).Select(c => c.Credit)];
+
+        CollectionAssert.AreEqual(new[] { 100m, 999m }, Credits(context.Customers.TemporalBetween(insertTime, updateTime)));
+        CollectionAssert.AreEqual(new[] { 100m }, Credits(context.Customers.TemporalFromTo(insertTime, updateTime)));
+        CollectionAssert.AreEqual(new[] { 100m }, Credits(context.Customers.TemporalContainedIn(insertTime, updateTime)));
+        // A range reaching max datetime2 contains the current version too.
+        CollectionAssert.AreEqual(new[] { 100m, 999m }, Credits(context.Customers.TemporalContainedIn(insertTime, DateTime.MaxValue)));
     }
 }

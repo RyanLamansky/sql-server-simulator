@@ -31,6 +31,10 @@ partial class Simulation
                 // Same shape-sharing pattern as ALTER PROCEDURE — body /
                 // actions replace in place, ObjectId is preserved.
                 return TryParseCreateTrigger(context, isAlter: true, createOrAlter: false);
+            case ReservedKeyword { Keyword: Keyword.View }:
+                return TryParseCreateView(context, isAlter: true, createOrAlter: false);
+            case ReservedKeyword { Keyword: Keyword.Function }:
+                return TryParseCreateFunction(context, isAlter: true, createOrAlter: false);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Sequence }:
                 return TryParseAlterSequence(context);
             case ReservedKeyword { Keyword: Keyword.Schema }:
@@ -72,9 +76,10 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Dispatches <c>ALTER DATABASE name SET &lt;option&gt; …</c>. The three
-    /// historically-shipped options (COMPATIBILITY_LEVEL, ALLOW_SNAPSHOT_ISOLATION,
-    /// READ_COMMITTED_SNAPSHOT) carry semantic effect and route to dedicated
+    /// Dispatches <c>ALTER DATABASE name SET &lt;option&gt; …</c>. The four
+    /// load-bearing options (COMPATIBILITY_LEVEL, ALLOW_SNAPSHOT_ISOLATION,
+    /// READ_COMMITTED_SNAPSHOT, RECURSIVE_TRIGGERS) carry semantic effect and
+    /// route to dedicated
     /// helpers; the remaining accept-list (RECOVERY, ANSI_NULLS, QUERY_STORE,
     /// TARGET_RECOVERY_TIME, ACCELERATED_DATABASE_RECOVERY, …) is parse-and-
     /// discard — see <see cref="RecognizedDatabaseOptions"/> for the closed
@@ -89,8 +94,9 @@ partial class Simulation
         return context.Token switch
         {
             UnquotedString { ContextualKeyword: ContextualKeyword.Compatibility_Level } => TryParseAlterDatabaseSetCompatibilityLevel(context),
-            UnquotedString { ContextualKeyword: ContextualKeyword.Allow_Snapshot_Isolation } => TryParseAlterDatabaseSetSnapshotFlag(context, isRcsi: false),
-            UnquotedString { ContextualKeyword: ContextualKeyword.Read_Committed_Snapshot } => TryParseAlterDatabaseSetSnapshotFlag(context, isRcsi: true),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Allow_Snapshot_Isolation } => TryParseAlterDatabaseSetBooleanOption(context, DatabaseBooleanOption.AllowSnapshotIsolation),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Read_Committed_Snapshot } => TryParseAlterDatabaseSetBooleanOption(context, DatabaseBooleanOption.ReadCommittedSnapshot),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Recursive_Triggers } => TryParseAlterDatabaseSetBooleanOption(context, DatabaseBooleanOption.RecursiveTriggers),
             UnquotedString unquoted when RecognizedDatabaseOptions.TryGetValue(unquoted.Value, out var kind) => ConsumeDatabaseOptionTail(context, kind),
             _ => false,
         };
@@ -114,8 +120,16 @@ partial class Simulation
         return true;
     }
 
+    /// <summary>The per-database flags whose SET form is a bare <c>ON</c> / <c>OFF</c>.</summary>
+    private enum DatabaseBooleanOption
+    {
+        AllowSnapshotIsolation,
+        ReadCommittedSnapshot,
+        RecursiveTriggers,
+    }
+
     /// <summary>
-    /// Parses <c>ALTER DATABASE name SET (ALLOW_SNAPSHOT_ISOLATION | READ_COMMITTED_SNAPSHOT) { ON | OFF }</c>.
+    /// Parses <c>ALTER DATABASE name SET (ALLOW_SNAPSHOT_ISOLATION | READ_COMMITTED_SNAPSHOT | RECURSIVE_TRIGGERS) { ON | OFF }</c>.
     /// The probed real-server gates ALLOW_SNAPSHOT_ISOLATION ON behind a
     /// brief stabilization wait and READ_COMMITTED_SNAPSHOT ON behind a
     /// single-connection requirement; the simulator skips both — the flip
@@ -124,17 +138,20 @@ partial class Simulation
     /// state changes (Msg 5083); the simulator falls through and raises
     /// <see cref="NotSupportedException"/> on the unexpected trailer.
     /// </summary>
-    private static bool TryParseAlterDatabaseSetSnapshotFlag(ParserContext context, bool isRcsi)
+    private static bool TryParseAlterDatabaseSetBooleanOption(ParserContext context, DatabaseBooleanOption option)
     {
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: var on } || on is not (Keyword.On or Keyword.Off))
             return false;
         if (context.Batch.IsSkipping)
             return true;
         var value = on == Keyword.On;
-        if (isRcsi)
-            context.CurrentDatabase.ReadCommittedSnapshot = value;
-        else
-            context.CurrentDatabase.AllowSnapshotIsolation = value;
+        var database = context.CurrentDatabase;
+        switch (option)
+        {
+            case DatabaseBooleanOption.AllowSnapshotIsolation: database.AllowSnapshotIsolation = value; break;
+            case DatabaseBooleanOption.ReadCommittedSnapshot: database.ReadCommittedSnapshot = value; break;
+            default: database.RecursiveTriggers = value; break;
+        }
         return true;
     }
 
@@ -717,7 +734,7 @@ partial class Simulation
     /// <summary>
     /// Moves an object between schemas. Walks the source schema's shared-
     /// namespace dicts (heap tables / views / functions / procedures /
-    /// sequences) — first hit by leaf name wins. Triggers explicitly raise
+    /// sequences / synonyms) — first hit by leaf name wins. Triggers explicitly raise
     /// Msg 15347 since they're owned by their parent (the trigger's schema
     /// follows its parent's schema automatically). After the move,
     /// HeapTable / View transfers reseat any attached triggers — they belong
@@ -790,6 +807,21 @@ partial class Simulation
             destSchema.Sequences[leafName] = seq;
             seq.Schema = destSchema;
             seq.SchemaId = destSchema.SchemaId;
+            return;
+        }
+        // A synonym moves as a plain name indirection: its stored base name is
+        // untouched by the transfer (probe-confirmed — base_object_name still
+        // reads [dbo].[t] after the synonym lands in another schema).
+        if (sourceSchema.Synonyms.TryGetValue(leafName, out var synonym))
+        {
+            if (sameSchema) return;
+            if (destSchema.HasNameInSharedNamespace(leafName))
+                throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
+            batch.AcquireStatementLock(synonym.SchemaLock, LockMode.SchemaModification);
+            _ = sourceSchema.Synonyms.TryRemove(leafName, out _);
+            destSchema.Synonyms[leafName] = synonym;
+            synonym.Schema = destSchema;
+            synonym.SchemaId = destSchema.SchemaId;
             return;
         }
 

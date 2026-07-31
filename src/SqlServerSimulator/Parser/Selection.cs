@@ -2068,7 +2068,7 @@ internal sealed partial class Selection
                         _ = ParseOptionalTableHints(context);
                         return FromSource.DeferredPlaceholder(placeholderAlias ?? objectName.Leaf);
                     }
-                    throw SimulatedSqlException.InvalidObjectName(objectName);
+                    throw context.Batch.UnresolvableObjectName(objectName);
                 }
 
                 // A disabled clustered index makes the table unreachable on real,
@@ -2080,11 +2080,9 @@ internal sealed partial class Selection
                 for (var ci = 0; ci < heapColumnNames.Length; ci++)
                     heapColumnNames[ci] = heapTable.Columns[ci].Name;
 
-                // Optional FOR SYSTEM_TIME (ALL | AS OF expr) between the
-                // table name and any alias. Only legal on a system-versioned
-                // parent; rejected on non-temporal tables (probe-confirmed
-                // Msg 13510 wording — surfaced via a SyntaxErrorNear here
-                // since the simulator doesn't carry the exact message).
+                // Optional FOR SYSTEM_TIME clause between the table name and
+                // any alias. Only legal on a system-versioned parent; a
+                // non-temporal target is Msg 13544.
                 var temporalRowSource = ParseOptionalForSystemTime(context, heapTable);
 
                 // FOR SYSTEM_TIME leaves the cursor at the post-clause lookahead
@@ -3304,6 +3302,11 @@ internal sealed partial class Selection
             : null)
         {
             ProjectionExpressions = [.. expressions],
+            // An empty scope, not an unknown one: as the first branch of a
+            // set-op chain this projects output aliases and nothing else, so a
+            // trailing ORDER BY naming anything but one of them is Msg 207 on
+            // real (`select 2 as x union all select 1 order by y`).
+            BranchFromSources = [],
             ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions),
             ColumnReportsNumeric = ColumnReportsNumericOf(expressions, schema),
             // A FROM-less projection has no sources, so column nullability is
@@ -3376,20 +3379,20 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Detects the optional <c>FOR SYSTEM_TIME ALL | AS OF expr</c> clause
-    /// between a table name and any alias in a FROM source. Returns the
-    /// composed row enumerator (parent rows + history rows, optionally
-    /// time-filtered) when present, or null when the clause isn't there.
+    /// Detects the optional <c>FOR SYSTEM_TIME</c> clause between a table
+    /// name and any alias in a FROM source. Returns the composed row
+    /// enumerator (parent rows + history rows, time-filtered per form) when
+    /// present, or null when the clause isn't there.
     /// </summary>
     /// <remarks>
-    /// Only <c>ALL</c> and <c>AS OF</c> ship; <c>FROM … TO …</c>,
-    /// <c>BETWEEN … AND …</c>, and <c>CONTAINED IN (…, …)</c> raise
-    /// <see cref="NotSupportedException"/> until an application emission
-    /// requires them. Non-temporal target raises Msg 13544 here
-    /// (probe-confirmed wording, qualified-name form approximated — real
-    /// SQL Server pads temp-table names with their internal suffix).
+    /// All five forms parse: <c>ALL</c>, <c>AS OF t</c>,
+    /// <c>BETWEEN t1 AND t2</c>, <c>FROM t1 TO t2</c>, and
+    /// <c>CONTAINED IN (t1, t2)</c>; anything else is Msg 102. Non-temporal
+    /// target raises Msg 13544 here (probe-confirmed wording, qualified-name
+    /// form approximated — real SQL Server pads temp-table names with their
+    /// internal suffix).
     /// </remarks>
-    private static IEnumerable<byte[]>? ParseOptionalForSystemTime(ParserContext context, HeapTable heapTable)
+    private static TemporalRowSource? ParseOptionalForSystemTime(ParserContext context, HeapTable heapTable)
     {
         // ConsumeOptionalAlias's contract: caller leaves cursor on the last
         // table-name segment. To peek for FOR SYSTEM_TIME without breaking
@@ -3416,22 +3419,93 @@ internal sealed partial class Selection
         context.MoveNextRequired();
         switch (context.Token)
         {
-            // ALL: union of current + history rows, no time filter.
+            // ALL: union of current + history rows, with only the
+            // zero-duration filter every form applies.
             case ReservedKeyword { Keyword: Keyword.All }:
                 context.MoveNextOptional();
-                return heapTable.Rows.Concat(historyTable.Rows);
-            // AS OF expr: parent + history rows where start <= expr < end.
+                return new TemporalRowSource(heapTable, historyTable, pc, TemporalQueryKind.All, null, null, context.Batch);
+            // AS OF t: rows where start <= t < end.
             case ReservedKeyword { Keyword: Keyword.As }:
                 context.MoveNextRequired();
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Of })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                    throw TemporalSyntaxError(context);
                 context.MoveNextRequired();
-                var timeExpr = Expression.Parse(context);
-                return new TemporalAsOfRowSource(heapTable, historyTable, pc, timeExpr, context.Batch);
+                return new TemporalRowSource(heapTable, historyTable, pc, TemporalQueryKind.AsOf, ParseTemporalTimeArgument(context), null, context.Batch);
+            // BETWEEN t1 AND t2: rows active at any point in [t1, t2].
+            case ReservedKeyword { Keyword: Keyword.Between }:
+                context.MoveNextRequired();
+                var betweenLower = ParseTemporalTimeArgument(context);
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.And })
+                    throw TemporalSyntaxError(context);
+                context.MoveNextRequired();
+                return new TemporalRowSource(heapTable, historyTable, pc, TemporalQueryKind.Between, betweenLower, ParseTemporalTimeArgument(context), context.Batch);
+            // FROM t1 TO t2: same, with the upper bound exclusive.
+            case ReservedKeyword { Keyword: Keyword.From }:
+                context.MoveNextRequired();
+                var fromLower = ParseTemporalTimeArgument(context);
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.To })
+                    throw TemporalSyntaxError(context);
+                context.MoveNextRequired();
+                return new TemporalRowSource(heapTable, historyTable, pc, TemporalQueryKind.FromTo, fromLower, ParseTemporalTimeArgument(context), context.Batch);
+            // CONTAINED IN (t1, t2): rows whose whole validity period sits
+            // inside the range. The parenthesized two-argument form is the
+            // only spelling real accepts (bare arguments are Msg 102).
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Contained }:
+                context.MoveNextRequired();
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.In })
+                    throw TemporalSyntaxError(context);
+                context.MoveNextRequired();
+                if (context.Token is not Operator { Character: '(' })
+                    throw TemporalSyntaxError(context);
+                context.MoveNextRequired();
+                var containedLower = ParseTemporalTimeArgument(context);
+                if (context.Token is not Operator { Character: ',' })
+                    throw TemporalSyntaxError(context);
+                context.MoveNextRequired();
+                var containedUpper = ParseTemporalTimeArgument(context);
+                if (context.Token is not Operator { Character: ')' })
+                    throw TemporalSyntaxError(context);
+                context.MoveNextOptional();
+                return new TemporalRowSource(heapTable, historyTable, pc, TemporalQueryKind.ContainedIn, containedLower, containedUpper, context.Batch);
             default:
-                throw new NotSupportedException("Only FOR SYSTEM_TIME ALL and FOR SYSTEM_TIME AS OF <expr> are modeled. BETWEEN / FROM … TO / CONTAINED IN are deferred.");
+                throw TemporalSyntaxError(context);
         }
     }
+
+    /// <summary>
+    /// Parses one <c>FOR SYSTEM_TIME</c> time argument. Real SQL Server's
+    /// grammar admits only a literal or a variable reference in these
+    /// positions — a function call, a parenthesized subquery, or a column
+    /// reference is Msg 102 (probe-confirmed against SQL Server 2025:
+    /// <c>AS OF SYSUTCDATETIME()</c> and <c>BETWEEN p.ValidFrom AND …</c>
+    /// both fail at parse). Leaves the cursor on the token after the
+    /// argument, which is where each form's separator (<c>AND</c> /
+    /// <c>TO</c> / <c>,</c> / <c>)</c>) or the post-clause lookahead sits.
+    /// </summary>
+    private static Expression ParseTemporalTimeArgument(ParserContext context)
+    {
+        Expression argument = context.Token switch
+        {
+            Numeric number => new Value(number.Value, number.IntegerLiteralDigitCount),
+            Literal literal => new Value(literal.Value),
+            AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
+            ReservedKeyword { Keyword: Keyword.Null } => new Value(),
+            _ => throw TemporalSyntaxError(context),
+        };
+        context.MoveNextOptional();
+        return argument;
+    }
+
+    /// <summary>
+    /// The rejection a malformed <c>FOR SYSTEM_TIME</c> clause raises: real
+    /// SQL Server splits by what the offending token is — a reserved keyword
+    /// gives Msg 156 (<c>BETWEEN 't' TO 't'</c> → "near the keyword 'TO'"),
+    /// anything else Msg 102 (<c>FOR SYSTEM_TIME GARBAGE</c>).
+    /// </summary>
+    private static SimulatedSqlException TemporalSyntaxError(ParserContext context)
+        => context.Token is ReservedKeyword reserved
+            ? SimulatedSqlException.SyntaxErrorNearKeyword(reserved)
+            : SimulatedSqlException.SyntaxErrorNear(context);
 
     /// <summary>
     /// Builds the <c>database.schema.table</c> qualified name a Msg 13544 /
@@ -3452,46 +3526,120 @@ internal sealed partial class Selection
 }
 
 /// <summary>
-/// Lazy row source for <c>FOR SYSTEM_TIME AS OF expr</c>: yields rows from
-/// the parent and the history sibling whose period brackets the evaluated
-/// time point (start &lt;= t &lt; end). The time expression is evaluated
-/// once on iteration start (no per-row re-evaluation), matching the
-/// "constant per query" contract real SQL Server applies to the AS OF
-/// time expression.
+/// Which <c>FOR SYSTEM_TIME</c> form a <see cref="TemporalRowSource"/>
+/// filters by. Each carries the row-version predicate real SQL Server
+/// applies over the union of the parent and history rows.
 /// </summary>
-internal sealed class TemporalAsOfRowSource(HeapTable parent, HeapTable history, (int StartOrdinal, int EndOrdinal) period, Expression timeExpr, BatchContext batch) : IEnumerable<byte[]>
+internal enum TemporalQueryKind
+{
+    /// <summary>Every row version, no time bound.</summary>
+    All,
+    /// <summary>The version current at one instant: start &lt;= t &lt; end.</summary>
+    AsOf,
+    /// <summary>Active anywhere in [t1, t2]: start &lt;= t2 and end &gt; t1.</summary>
+    Between,
+    /// <summary>Active anywhere in [t1, t2): start &lt; t2 and end &gt; t1.</summary>
+    FromTo,
+    /// <summary>Whole validity period inside [t1, t2]: start &gt;= t1 and end &lt;= t2.</summary>
+    ContainedIn,
+}
+
+/// <summary>
+/// Lazy row source for a <c>FOR SYSTEM_TIME</c> clause: yields the rows of
+/// the parent and its history sibling that satisfy the form's period
+/// predicate. Bound expressions are evaluated once on iteration start (no
+/// per-row re-evaluation), matching the "constant per query" contract real
+/// SQL Server applies to the time arguments.
+/// </summary>
+/// <remarks>
+/// Every form — <c>ALL</c> included — drops rows whose validity period has
+/// zero duration (<c>ROW START = ROW END</c>), which is what real SQL Server
+/// does: a row updated more than once inside one transaction leaves such a
+/// history row behind, and it is physically stored (a direct
+/// <c>SELECT</c> against the history table returns it) but invisible to
+/// every <c>FOR SYSTEM_TIME</c> form. Probe-confirmed against SQL Server
+/// 2025.
+/// </remarks>
+internal sealed class TemporalRowSource(
+    HeapTable parent,
+    HeapTable history,
+    (int StartOrdinal, int EndOrdinal) period,
+    TemporalQueryKind kind,
+    Expression? lowerBound,
+    Expression? upperBound,
+    BatchContext batch) : IEnumerable<byte[]>
 {
     public IEnumerator<byte[]> GetEnumerator()
     {
-        // Evaluate the time expression once at iteration start. The
-        // resolver throws on any column reference — AS OF's expression
-        // is a parse-time / batch-state constant in real SQL Server.
-        var raw = timeExpr.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch));
-        // EF Core 10 emits AS OF '<iso-literal>' as a Varchar / NVarchar
-        // literal; coerce to datetime2 so the period filter compares ticks.
-        var timePoint = raw.CoerceTo(SqlType.GetDateTime2(7)).AsDateTime2;
+        // Evaluate the bounds once at iteration start. A NULL bound makes
+        // every comparison unknown, so the whole source is empty (real
+        // returns no rows rather than raising).
+        var lower = TemporalRowSource.EvaluateBound(lowerBound, batch);
+        var upper = TemporalRowSource.EvaluateBound(upperBound, batch);
+        if ((lowerBound is not null && lower is null) || (upperBound is not null && upper is null))
+            yield break;
+
         var startStored = parent.StorageOrdinals[period.StartOrdinal];
         var endStored = parent.StorageOrdinals[period.EndOrdinal];
+        var lowerTime = lower ?? default;
+        var upperTime = upper ?? default;
 
         foreach (var bytes in parent.Heap.EnumerateRows())
         {
-            if (TemporalAsOfRowSource.RowMatches(parent.StoredColumns, bytes, parent.Heap, startStored, endStored, timePoint))
+            if (this.RowMatches(parent.StoredColumns, bytes, parent.Heap, startStored, endStored, lowerTime, upperTime))
                 yield return bytes;
         }
         foreach (var bytes in history.Heap.EnumerateRows())
         {
-            if (TemporalAsOfRowSource.RowMatches(history.StoredColumns, bytes, history.Heap, startStored, endStored, timePoint))
+            if (this.RowMatches(history.StoredColumns, bytes, history.Heap, startStored, endStored, lowerTime, upperTime))
                 yield return bytes;
         }
     }
 
     IEnumerator IEnumerable.GetEnumerator() => this.GetEnumerator();
 
-    private static bool RowMatches(HeapColumn[] storedColumns, byte[] bytes, Heap lobStore, int startStored, int endStored, DateTime timePoint)
+    /// <summary>
+    /// Evaluates one bound to a <c>datetime2(7)</c> point, or null when the
+    /// expression is absent or evaluates to NULL. The argument's type is
+    /// gated the way real gates it — as a comparison against the period
+    /// columns: strings and the date/time family (except <c>time</c>)
+    /// convert, <c>time</c> and binary raise Msg 402, everything else
+    /// (integer, decimal, money, float, bit, uniqueidentifier) raises
+    /// Msg 206.
+    /// </summary>
+    private static DateTime? EvaluateBound(Expression? expression, BatchContext batch)
+    {
+        if (expression is null)
+            return null;
+        // The restricted argument grammar admits no column reference, so
+        // the resolver is a guard rather than a reachable path.
+        var raw = expression.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch));
+        if (raw.IsNull)
+            return null;
+        var target = SqlType.GetDateTime2(7);
+        if (raw.Type is TimeSqlType or BinarySqlType or VarbinarySqlType)
+            throw SimulatedSqlException.IncompatibleDataTypesInOperator(target, raw.Type, "greater than");
+        if (raw.Type.Category is not (SqlTypeCategory.String or SqlTypeCategory.DateTime))
+            throw SimulatedSqlException.OperandTypeClash(target, raw.Type);
+        // EF Core 10 emits the bounds as Varchar / NVarchar literals;
+        // coercing to datetime2 lets the period filter compare ticks.
+        return raw.CoerceTo(target).AsDateTime2;
+    }
+
+    private bool RowMatches(HeapColumn[] storedColumns, byte[] bytes, Heap lobStore, int startStored, int endStored, DateTime lower, DateTime upper)
     {
         var rowStart = RowDecoder.DecodeColumn(storedColumns, bytes, startStored, lobStore).AsDateTime2;
         var rowEnd = RowDecoder.DecodeColumn(storedColumns, bytes, endStored, lobStore).AsDateTime2;
-        return rowStart <= timePoint && timePoint < rowEnd;
+        // Zero-duration versions are invisible to every form, so the
+        // period predicate only sees rows that were current for a while.
+        return rowStart < rowEnd && kind switch
+        {
+            TemporalQueryKind.All => true,
+            TemporalQueryKind.AsOf => rowStart <= lower && lower < rowEnd,
+            TemporalQueryKind.Between => rowStart <= upper && rowEnd > lower,
+            TemporalQueryKind.FromTo => rowStart < upper && rowEnd > lower,
+            _ => rowStart >= lower && rowEnd <= upper,
+        };
     }
 }
 

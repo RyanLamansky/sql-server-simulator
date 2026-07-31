@@ -28,10 +28,11 @@ internal sealed class LeftTrim : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var raw = source.Run(runtime);
+        StringScalars.RejectLegacyLob(raw, "ltrim");
         if (raw.IsNull)
             return SqlValue.Null(StringScalars.ResolveResultType(raw.Type, runtime.Batch));
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "ltrim");
-        var chars = StringScalars.ResolveTrimCharacters(this.trimChars, runtime);
+        var chars = StringScalars.ResolveTrimCharacters(this.trimChars, runtime, "ltrim");
         if (chars is null)
             return SqlValue.Null(value.Type);
         // An empty explicit set removes nothing (.NET's TrimStart would treat

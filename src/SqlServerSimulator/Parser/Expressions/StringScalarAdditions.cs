@@ -31,6 +31,7 @@ internal sealed class StringEscape : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var v = this.textArg.Run(runtime);
+        StringScalars.RejectLegacyLob(v, "string_escape");
         if (v.IsNull)
             return SqlValue.Null(SqlType.NVarcharMax);
         // Mode is validated for shape; only 'json' is documented. The
@@ -96,6 +97,9 @@ internal sealed class Translate : Expression
         var input = this.inputArg.Run(runtime);
         var chars = this.charsArg.Run(runtime);
         var translations = this.translationsArg.Run(runtime);
+        StringScalars.RejectLegacyLob(input, "translate", argumentIndex: 1);
+        StringScalars.RejectLegacyLob(chars, "translate", argumentIndex: 2);
+        StringScalars.RejectLegacyLob(translations, "translate", argumentIndex: 3);
         var resultType = ResolveResultType(input.Type);
         if (input.IsNull || chars.IsNull || translations.IsNull)
             return SqlValue.Null(resultType);
@@ -118,9 +122,9 @@ internal sealed class Translate : Expression
 
     /// <summary>
     /// TRANSLATE returns a value of the same length family as its input. A
-    /// MAX-form input (<c>varchar(max)</c> / <c>nvarchar(max)</c> or a
-    /// <c>text</c> / <c>ntext</c> LOB) carries unbounded length through to the
-    /// result, so it must project as <see cref="SqlType.NVarcharMax"/> to
+    /// MAX-form input (<c>varchar(max)</c> / <c>nvarchar(max)</c>) carries
+    /// unbounded length through to the result, so it must project as
+    /// <see cref="SqlType.NVarcharMax"/> to
     /// stream over the wire as PLP; a bounded input keeps the existing
     /// length-0 <c>nvarchar</c> shape (the simulator coerces every input to
     /// nvarchar before processing — a minor pre-existing family divergence

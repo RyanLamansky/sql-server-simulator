@@ -88,6 +88,9 @@ partial class Simulation
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
         AssertConstraintNameUnique(context, explicitName);
+        // A CHECK may not read a non-persisted computed column — Msg 1764,
+        // raised whether or not WITH NOCHECK skipped the data validation.
+        RejectCheckOverNonPersistedComputedColumn(context.Batch.CurrentDatabase.Collation, table.Name, table.Columns, predicate);
         var name = explicitName ?? AutoCheckName(table.Name, null, table.CheckConstraints.Count);
         var constraint = new CheckConstraint(name, predicate, null, context.CurrentDatabase.AllocateObjectId())
         {

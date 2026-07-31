@@ -157,6 +157,7 @@ internal sealed partial class Selection
                     if (aggregate.Kind == AggregateKind.StringAgg && state.Aggregators[i] is Aggregators.StringAggAggregator stringAgg)
                     {
                         var separatorValue = aggregate.Separator!.Run(rowRuntime);
+                        Expressions.StringScalars.RejectLegacyLob(separatorValue, "string_agg", argumentIndex: 2);
                         stringAgg.SetSeparator(separatorValue.IsNull ? string.Empty : separatorValue.AsString);
 
                         if (aggregate.OrderBy is { } orderBy)

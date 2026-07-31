@@ -343,7 +343,7 @@ internal sealed class SpatialMethodCall : Expression
     /// </summary>
     private int Index(RuntimeContext runtime, bool isGeography, IndexKind kind)
     {
-        var index = this.arguments.Length == 0 ? 0 : this.arguments[0].Run(runtime).CoerceTo(SqlType.Int32).AsInt32;
+        var index = this.arguments.Length == 0 ? 0 : ScalarArguments.CoerceToInt(this.arguments[0].Run(runtime));
         return index >= 1 ? index : throw kind switch
         {
             IndexKind.Point => SimulatedSqlException.SpatialPointIndexTooSmall(isGeography, index),

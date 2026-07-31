@@ -24,6 +24,7 @@ internal sealed class UnicodeCodepoint(ParserContext context) : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var v = source.Run(runtime);
+        StringScalars.RejectLegacyLob(v, "unicode");
         if (v.IsNull)
             return SqlValue.Null(SqlType.Int32);
         var s = SqlType.IsStringCategory(v.Type) ? v.AsString : v.CoerceTo(SqlType.Varchar).AsString;

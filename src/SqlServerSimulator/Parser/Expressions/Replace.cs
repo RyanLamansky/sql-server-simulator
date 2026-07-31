@@ -31,6 +31,9 @@ internal sealed class Replace : Expression
         var rawInput = input.Run(runtime);
         var rawOld = oldValue.Run(runtime);
         var rawNew = newValue.Run(runtime);
+        StringScalars.RejectLegacyLob(rawInput, "replace", argumentIndex: 1);
+        StringScalars.RejectLegacyLob(rawOld, "replace", argumentIndex: 2);
+        StringScalars.RejectLegacyLob(rawNew, "replace", argumentIndex: 3);
         if (rawInput.IsNull || rawOld.IsNull || rawNew.IsNull)
             return SqlValue.Null(StringScalars.ContainerResultType(rawInput.Type, runtime.Batch));
         var i = StringScalars.CoerceToVarchar(rawInput, runtime.Batch, "replace", argumentIndex: 1);

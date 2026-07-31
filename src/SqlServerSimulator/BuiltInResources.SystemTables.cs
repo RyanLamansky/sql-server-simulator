@@ -43,6 +43,24 @@ internal static partial class BuiltInResources
         ["sysname", 231, 1, 256, 256, 0, 0, 0, 0, 4, 0, 872468488, 18, true, false, 39, null, 128, null, "SQL_Latin1_General_CP1_CI_AS"],
     ];
 
+    /// <summary>
+    /// The <c>type_name(user_type_id)</c> lookup over <see cref="SystypesRowData"/>
+    /// — column 3 is the id, column 0 the name. Lives beside the row data so
+    /// the column layout is known in one place; returns null for an id no
+    /// system type carries (a user-defined type, which callers resolve
+    /// against the database's own type dictionaries).
+    /// </summary>
+    internal static string? SystemTypeName(int userTypeId)
+    {
+        foreach (var row in SystypesRowData)
+        {
+            if (Convert.ToInt32(row[3]!, CultureInfo.InvariantCulture) == userTypeId)
+                return (string)row[0]!;
+        }
+
+        return null;
+    }
+
     public static readonly Lazy<Dictionary<string, HeapTable>> SystemHeapTables = new(BuildSystemHeapTables);
 
     private static Dictionary<string, HeapTable> BuildSystemHeapTables()

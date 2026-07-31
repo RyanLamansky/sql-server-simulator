@@ -6,6 +6,7 @@ Sibling deep-dives: [`foreign-keys.md`](foreign-keys.md) (the FK family in full)
   Inline column-level CHECK may only reference its owning column — peer refs raise **Msg 8141** at CREATE TABLE (probe-confirmed).
   The walker is structural (`Expression.VisitColumnReferences` + `BooleanExpression.VisitOperandExpressions`); coverage spans the common containers (`Reference`, `Parenthesized`, `TwoSidedExpression`, `Cast`, `Length`) — peer refs in rarer ones (`DATEPART`, `SUBSTRING`, nested `CASE`) escape the CREATE check and surface at INSERT.
   Table-level CHECK has no peer restriction.
+  A predicate over a computed column has its own persistence rules — [below](#computed-columns-in-a-check-constraint).
 - `PRIMARY KEY` / `UNIQUE` / secondary `CREATE INDEX`: no B-tree; reads, `UPDATE`/`DELETE`/`MERGE` target scans, **and key-uniqueness enforcement itself** go through the **incrementally-maintained** per-`Heap` seek acceleration (equality / IN / leading-column range / equality-prefix+range continuation / ORDER BY elimination / keyset).
   Seek shapes, mutation/MERGE seeking, journal mechanics, decline rules, residual-WHERE invariant in [`indexes.md`](indexes.md); the enforcement seek's own decline rules are [below](#key-uniqueness-enforcement-seeks-rather-than-scans).
   Violations: PK/UNIQUE *constraints* raise Msg 2627; unique *indexes* raise Msg 2601.
@@ -13,6 +14,30 @@ Sibling deep-dives: [`foreign-keys.md`](foreign-keys.md) (the FK family in full)
 - `FOREIGN KEY`: inline / table-level / named forms; all four referential actions on `ON DELETE`/`ON UPDATE`; enforced at INSERT/UPDATE/DELETE/MERGE; full `sys.foreign_keys` / `sys.foreign_key_columns`.
   Enforcement **seeks the shared `HeapSeekCache`** (live-byte verified, no residual WHERE).
   Referential-action, cascade-cycle, PK/UNIQUE-target, NULL-skip rules + Msg numbers in [`foreign-keys.md`](foreign-keys.md).
+
+## Computed columns in a CHECK constraint
+
+A **PERSISTED** computed column carries a CHECK in every form: the inline column tail (`cc AS a + 1 PERSISTED [CONSTRAINT n] CHECK (cc > 0)`), the table-level list, `ALTER TABLE … ADD CONSTRAINT … CHECK`, and the inline tail of an `ALTER TABLE … ADD` of the computed column itself.
+Enforcement reads the stored value like any other column, so an INSERT out of range raises Msg 547 and so does an UPDATE of the underlying column that drives the expression out of range without ever naming the computed column.
+An unnamed inline CHECK auto-names as the column-level shape `CK__<table>__<column>__<hex>`, the same as a regular column's.
+
+A computed column takes several inline constraints in any order — `PERSISTED PRIMARY KEY CHECK (cc > 0)`, the reverse, and the doubly-named `CONSTRAINT ck CHECK (…) CONSTRAINT uq UNIQUE` all parse — so `ParseComputedColumnInlineConstraint` loops rather than reading one constraint.
+A PRIMARY KEY naming the computed column promotes it to NOT NULL, inline and table-level alike, exactly as it does a regular column: the promotion happens where the computed `HeapColumn` is materialized, since `ParseColumnList`'s promotion loop walks the column list while that slot is still an unresolved placeholder.
+
+A **non-persisted** computed column is rejected, with the message depending on how the predicate reaches it (probe-confirmed split, the same shape the FK family has):
+
+| Form | Error |
+|------|-------|
+| CHECK inline on the non-persisted column itself | **Msg 8183** — `Only UNIQUE or PRIMARY KEY constraints can be created on computed columns, while CHECK, FOREIGN KEY, and NOT NULL constraints require that computed columns be persisted.` (real rejects at parse, before the constraint reaches resolution) |
+| Table-level list, `ALTER TABLE … ADD CONSTRAINT`, or an inline CHECK on a *persisted* column reaching a non-persisted computed peer | **Msg 1764** — `Computed Column '<col>' in table '<table>' is invalid for use in 'CHECK CONSTRAINT' because it is not persisted.` (note real's capitalized "Computed Column") |
+
+Msg 1764 **beats Msg 8141**: an inline CHECK reaching a non-persisted computed peer reports the persistence failure, not the peer-reference one, so `RejectChecksOverNonPersistedComputedColumns` runs ahead of the peer-reference walk at every site.
+The peer-reference gate still wins when the peer is persisted or regular.
+`WITH NOCHECK` doesn't excuse Msg 1764 — real rejects the declaration itself, and the option only skips the existing-row scan.
+As with the FK family's Msg 1764, real's trailing informational **Msg 1750** (`Could not create constraint or index. See previous errors.`) is collapsed away.
+
+Both gates reach `DECLARE @t TABLE` and `CREATE TYPE … AS TABLE` through the shared column parser, naming the variable (`'@t'`) or the type in the Msg 1764 text.
+The Msg 1764 walk shares `Expression.VisitColumnReferences` with the Msg 8141 gate and so inherits its container-coverage limits (see the bullet above): a reference buried in a rarer container escapes the declaration-time check.
 
 ## `IGNORE_DUP_KEY`
 

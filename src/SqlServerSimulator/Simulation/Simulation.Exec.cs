@@ -132,11 +132,16 @@ partial class Simulation
             "sp_addlinkedserver" => InvokeSpAddLinkedServer(batch),
             "sp_addlinkedsrvlogin" or "sp_droplinkedsrvlogin" or "sp_serveroption" => InvokeSpLinkedServerNoOp(batch),
             "sp_columns_100" => InvokeSpColumns100(batch),
+            "sp_configure" => InvokeSpConfigure(batch),
             "sp_datatype_info_100" => InvokeSpDatatypeInfo100(batch),
             "sp_dropextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Drop),
             "sp_dropserver" => InvokeSpDropServer(batch),
             "sp_executesql" => ParseSpExecuteSql(batch, returnCodeVar),
             "sp_getapplock" => InvokeSpGetAppLock(batch, returnCodeVar),
+            "sp_help" => InvokeSpHelp(batch),
+            "sp_helpconstraint" => InvokeSpHelpConstraint(batch),
+            "sp_helpindex" => InvokeSpHelpIndex(batch),
+            "sp_helptext" => InvokeSpHelpText(batch),
             "sp_pkeys" => InvokeSpPkeys(batch),
             "sp_releaseapplock" => InvokeSpReleaseAppLock(batch, returnCodeVar),
             "sp_rename" => InvokeSpRename(batch),
@@ -166,6 +171,10 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
+        // A synonym target expands to its base before resolution, so a synonym
+        // over a missing procedure reports Msg 2812 naming the base — real's
+        // wording (the synonym name never appears in that message).
+        procName = batch.ExpandSynonym(procName);
         if (!batch.TryResolveProcedure(procName, out var procedure))
             throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.ToString());
 

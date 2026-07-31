@@ -439,13 +439,10 @@ public sealed class SetOperationTests
 
     /// <summary>
     /// A name matching neither an output alias nor a projected source column
-    /// is still Msg 207.
+    /// is still Msg 207 — provided it binds nowhere in the first branch's FROM
+    /// scope either. A name that *does* bind there is Msg 104 instead
+    /// (<see cref="SetOperation_TopLevelOrderBy_UnprojectedColumn_RaisesMsg104"/>).
     /// </summary>
-    /// <remarks>
-    /// Needs more than one result row: the sort — and with it the ORDER BY name
-    /// resolution — is skipped when there is nothing to order, so the error is
-    /// raised at execution rather than at bind time the way real does.
-    /// </remarks>
     [TestMethod]
     public void SetOperation_TopLevelOrderBy_UnknownName_RaisesMsg207()
     {
@@ -457,6 +454,152 @@ public sealed class SetOperationTests
         _ = sim.AssertSqlError(
             "select id as Col1 from n where num <= 1 union select id as Col1 from n where num >= 2 order by [nosuchcol]",
             207);
+    }
+
+    /// <summary>
+    /// Two tables sharing <c>id</c> / <c>name</c>, each with a column the other
+    /// lacks (<c>extra</c> on the left, <c>other</c> on the right), so a
+    /// top-level ORDER BY can name a column that exists only in the branch that
+    /// isn't in scope. Empty on purpose: real binds a set-op ORDER BY at
+    /// compile time, so every rejection below must fire without a row.
+    /// </summary>
+    private static Simulation SeededSetOpOrderByTables()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table so_a (id int, name varchar(20), extra int);
+            create table so_b (id int, name varchar(20), other int)
+            """);
+        return sim;
+    }
+
+    /// <summary>
+    /// A top-level ORDER BY over a set operation may name only a projected
+    /// column. A term that binds in the first branch's FROM scope but isn't
+    /// projected — including any expression over one, since the combined stream
+    /// carries no column to evaluate it against — is Msg 104.
+    /// </summary>
+    [TestMethod]
+    // Unprojected column of the first branch, unqualified and qualified.
+    [DataRow("select id from so_a union select id from so_b order by name")]
+    [DataRow("select id from so_a a union select id from so_b b order by a.name")]
+    // Column only the first branch has: in scope, so not Msg 207.
+    [DataRow("select id from so_a union select id from so_b order by extra")]
+    // Expressions, over a projected column and an unprojected one alike.
+    [DataRow("select id from so_a union select id from so_b order by id + 1")]
+    [DataRow("select id from so_a union select id from so_b order by name + 'x'")]
+    [DataRow("select id from so_a union select id from so_b order by len(name)")]
+    [DataRow("select id from so_a union select id from so_b order by (select 1)")]
+    // A joined table and a derived table are both in the first branch's scope.
+    [DataRow("select a.id from so_a a join so_b b2 on a.id = b2.id union select id from so_b order by b2.other")]
+    [DataRow("select id from (select id, name from so_a) q union select id from so_b order by name")]
+    // Every set operator, not just UNION.
+    [DataRow("select id from so_a except select id from so_b order by name")]
+    [DataRow("select id from so_a intersect select id from so_b order by name")]
+    public void SetOperation_TopLevelOrderBy_UnprojectedColumn_RaisesMsg104(string sql)
+        => AreEqual(
+            "ORDER BY items must appear in the select list if the statement contains a UNION, INTERSECT or EXCEPT operator.",
+            SeededSetOpOrderByTables().AssertSqlError(sql, 104).Message);
+
+    /// <summary>
+    /// The Msg 104 / Msg 207 split: real binds the ORDER BY term against the
+    /// first branch's FROM scope and reports that failure ahead of Msg 104, so
+    /// a name nothing in scope carries stays Msg 207. Only the *leftmost*
+    /// branch is in scope — a column of a later branch alone binds nowhere.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select id from so_a union select id from so_b order by nosuchcol", "nosuchcol")]
+    [DataRow("select id from so_a a union select id from so_b b order by a.nosuch", "nosuch")]
+    [DataRow("select id from so_a union select id from so_b order by other", "other")]
+    [DataRow("select id from so_a union select id from so_b union select other from so_b order by other", "other")]
+    [DataRow("select id from so_a union select id from so_b order by nosuch + 1", "nosuch")]
+    // An output alias is in scope for a bare term only, so an expression over
+    // one binds against the sources and misses there.
+    [DataRow("select id + 1 as zz from so_a union select id from so_b order by zz + 1", "zz")]
+    public void SetOperation_TopLevelOrderBy_UnboundName_RaisesMsg207(string sql, string name)
+        => AreEqual(
+            $"Invalid column name '{name}'.",
+            SeededSetOpOrderByTables().AssertSqlError(sql, 207).Message);
+
+    /// <summary>
+    /// A qualifier no FROM source in the first branch answers to is Msg 4104,
+    /// not Msg 207 — including the second branch's own alias, and an output
+    /// alias used as though it were a source.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select id from so_a a union select id from so_b b order by b.id", "b.id")]
+    [DataRow("select id from so_a a union select id from so_b b order by x.id", "x.id")]
+    [DataRow("select id as zz from so_a union select id from so_b order by zz.id", "zz.id")]
+    public void SetOperation_TopLevelOrderBy_UnknownQualifier_RaisesMsg4104(string sql, string name)
+        => AreEqual(
+            $"The multi-part identifier \"{name}\" could not be bound.",
+            SeededSetOpOrderByTables().AssertSqlError(sql, 4104).Message);
+
+    /// <summary>
+    /// An ordinal outside the projection's column count is Msg 108, the same as
+    /// on a single SELECT — the top-level sort used to index the projected row
+    /// unchecked and surface an <see cref="ArgumentOutOfRangeException"/>.
+    /// </summary>
+    [TestMethod]
+    [DataRow(0)]
+    [DataRow(5)]
+    public void SetOperation_TopLevelOrderBy_OrdinalOutOfRange_RaisesMsg108(int ordinal)
+        => AreEqual(
+            $"The ORDER BY position number {ordinal} is out of range of the number of items in the select list.",
+            SeededSetOpOrderByTables()
+                .AssertSqlError($"select id from so_a union select id from so_b order by {ordinal}", 108).Message);
+
+    /// <summary>
+    /// A qualified term names the source column, never an output alias, so it
+    /// sorts by whichever output column projects that source — here the second,
+    /// while the unqualified spelling of the same leaf takes the alias on the
+    /// first. Both orderings are probe-confirmed against real.
+    /// </summary>
+    [TestMethod]
+    [DataRow("c.id", "1,2,3")]
+    [DataRow("id", "3,2,1")]
+    public void SetOperation_TopLevelOrderBy_QualifiedTermTakesSourceOverAlias(string term, string expected)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table so_c (id int, extra int);
+            insert so_c values (1, 30), (2, 20), (3, 10)
+            """);
+
+        using var reader = sim.ExecuteReader(
+            $"select c.extra as id, c.id as other from so_c c union select 99, 99 order by {term}");
+        var values = new List<string>();
+        while (reader.Read())
+            values.Add($"{reader.GetValue(1)}");
+        AreEqual($"{expected},99", string.Join(",", values));
+    }
+
+    /// <summary>
+    /// A FROM-less branch contributes an empty scope, not an unknown one: its
+    /// output aliases are the only legal ORDER BY terms and anything else is
+    /// Msg 207 (real's binding failure), never Msg 104.
+    /// </summary>
+    [TestMethod]
+    public void SetOperation_TopLevelOrderBy_FromLessBranch_UnknownNameRaisesMsg207()
+        => AreEqual("Invalid column name 'y'.",
+            new Simulation().AssertSqlError("select 2 as x union all select 1 order by y", 207).Message);
+
+    /// <summary>
+    /// The set-op rule is confined to set-op statements: a single SELECT still
+    /// orders by a non-projected source column, and still reports an unbindable
+    /// one as Msg 207 rather than Msg 104.
+    /// </summary>
+    [TestMethod]
+    public void SingleSelect_OrderByUnprojectedColumn_StaysLegal()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table so_a (id int, name varchar(20), extra int);
+            insert so_a values (2, 'b', 20), (1, 'a', 10)
+            """);
+
+        AreEqual(1, sim.ExecuteScalar("select id from so_a order by name"));
+        _ = sim.AssertSqlError("select id from so_a order by nosuchcol", 207);
     }
 
     /// <summary>

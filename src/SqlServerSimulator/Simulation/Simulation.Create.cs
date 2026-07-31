@@ -23,9 +23,9 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Schema }:
                 return TryParseCreateSchema(context);
             case ReservedKeyword { Keyword: Keyword.Function }:
-                return TryParseCreateFunction(context);
+                return TryParseCreateFunction(context, isAlter: false, createOrAlter: false);
             case ReservedKeyword { Keyword: Keyword.View }:
-                return TryParseCreateView(context);
+                return TryParseCreateView(context, isAlter: false, createOrAlter: false);
             case ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc }:
                 return Simulation.TryParseCreateProcedure(context, isAlter: false, createOrAlter: false);
             case ReservedKeyword { Keyword: Keyword.Trigger }:
@@ -57,13 +57,16 @@ partial class Simulation
             case Name assemblyWord when assemblyWord.Value.Equals("ASSEMBLY", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateAssembly(context);
             case ReservedKeyword { Keyword: Keyword.Or }:
-                // CREATE OR ALTER {PROCEDURE|TRIGGER} — modern upsert syntax.
+                // CREATE OR ALTER {PROCEDURE|TRIGGER|VIEW|FUNCTION} — modern
+                // upsert syntax.
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Alter })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 return context.GetNextRequired() switch
                 {
+                    ReservedKeyword { Keyword: Keyword.Function } => Simulation.TryParseCreateFunction(context, isAlter: false, createOrAlter: true),
                     ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc } => Simulation.TryParseCreateProcedure(context, isAlter: false, createOrAlter: true),
                     ReservedKeyword { Keyword: Keyword.Trigger } => Simulation.TryParseCreateTrigger(context, isAlter: false, createOrAlter: true),
+                    ReservedKeyword { Keyword: Keyword.View } => Simulation.TryParseCreateView(context, isAlter: false, createOrAlter: true),
                     _ => throw SimulatedSqlException.SyntaxErrorNear(context),
                 };
             case ReservedKeyword { Keyword: Keyword.Table }:
@@ -158,7 +161,7 @@ partial class Simulation
                 pending.Name,
                 resolvedType,
                 maxLength: computedMaxLength,
-                nullable: pending.Nullable,
+                nullable: pending.Nullable && !IsPendingPrimaryKeyOrdinal(pendingKeys, pending.Index),
                 computedExpression: pending.Expression,
                 isPersisted: pending.Persisted,
                 computedDefinition: pending.Definition);
@@ -177,6 +180,11 @@ partial class Simulation
         }
         if (fixedWidthSum > Heap.MaxRowSize)
             throw SimulatedSqlException.RowSizeExceedsMaximum(tableName.Leaf, fixedWidthSum, Heap.MaxRowSize);
+
+        // A CHECK predicate — inline or table-level — may not read a
+        // non-persisted computed column (Msg 1764). Runs ahead of the Msg 8141
+        // walk below, matching real's probed precedence.
+        RejectChecksOverNonPersistedComputedColumns(context.Batch.CurrentDatabase.Collation, tableName.Leaf, heapColumns, pendingChecks);
 
         // Real SQL Server's Msg 8141 (probed against SQL Server 2025) rejects
         // an inline column-level CHECK that references any column other than
@@ -708,16 +716,7 @@ partial class Simulation
             pendingComputed.Add((computedIndex, columnName.Value, computed, persisted, computedNullable, computedDefinition));
             heapColumns.Add(null);
             explicitNull.Add(false);
-            // Inline PRIMARY KEY / UNIQUE after a computed column's
-            // PERSISTED [NOT NULL] suffix — probe-confirmed: `c AS expr
-            // PERSISTED NOT NULL PRIMARY KEY` is legal at CREATE TABLE.
-            // ResolveKeyConstraints applies the persisted/nullability gate
-            // after computed-column materialization.
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique })
-            {
-                var (inlineKind, inlineClustered, inlineIgnoreDupKey) = ParseInlineKeyKindAndModifiers(context);
-                pendingKeys.Add((inlineKind, null, [computedIndex], inlineClustered, inlineIgnoreDupKey, []));
-            }
+            ParseComputedColumnInlineConstraint(context, columnName.Value, computedIndex, persisted, pendingKeys, pendingChecks, pendingForeignKeys);
             return;
         }
 
@@ -918,7 +917,7 @@ partial class Simulation
                             var namedCheck = ParseInlineCheckPredicate(context);
                             pendingChecks.Add((namedConstraint.Value, namedCheck.Predicate, columnName.Value, namedCheck.Definition));
                             continue;
-                        case ReservedKeyword { Keyword: Keyword.References }:
+                        case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References }:
                             inlineFkName = namedConstraint.Value;
                             continue;
                         case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
@@ -951,9 +950,10 @@ partial class Simulation
                     var inlineCheck = ParseInlineCheckPredicate(context);
                     pendingChecks.Add((null, inlineCheck.Predicate, columnName.Value, inlineCheck.Definition));
                     continue;
-                case ReservedKeyword { Keyword: Keyword.References } referencesKw when isTableVariable || isTableType:
+                case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References } referencesKw when isTableVariable || isTableType:
                     throw isTableType ? SimulatedSqlException.SyntaxErrorNearKeyword(referencesKw) : SimulatedSqlException.SyntaxErrorNear(context);
-                case ReservedKeyword { Keyword: Keyword.References }:
+                case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References }:
+                    ConsumeOptionalForeignKeyNoisePhrase(context);
                     ParseInlineForeignKeyTail(context, columnName.Value, heapColumns.Count, inlineFkName: inlineFkName, pendingForeignKeys);
                     inlineFkName = null;
                     continue;
@@ -1158,6 +1158,84 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Parses the optional inline constraints a computed column carries after
+    /// its <c>PERSISTED [NOT NULL]</c> suffix: <c>[CONSTRAINT name] {PRIMARY KEY
+    /// | UNIQUE | CHECK (…) | [FOREIGN KEY] REFERENCES …}</c>, repeated in any
+    /// order (real accepts <c>PERSISTED PRIMARY KEY CHECK (cc &gt; 0)</c> and the
+    /// named pair <c>CONSTRAINT ck CHECK (…) CONSTRAINT uq UNIQUE</c>).
+    /// PRIMARY KEY / UNIQUE defer their persistence gate to
+    /// <c>ResolveKeyConstraints</c> (which runs after the placeholder slot is
+    /// filled); CHECK and FOREIGN KEY on a non-persisted column raise Msg 8183
+    /// here, which is where real raises it for the inline form — the
+    /// table-level and ALTER TABLE forms reach resolution and raise Msg 1764
+    /// instead (probe-confirmed split).
+    /// </summary>
+    private static void ParseComputedColumnInlineConstraint(
+        ParserContext context,
+        string columnName,
+        int computedIndex,
+        bool persisted,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
+        List<PendingForeignKey>? pendingForeignKeys)
+    {
+        while (true)
+        {
+            string? constraintName = null;
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint })
+            {
+                if (context.GetNextRequired() is not Name namedConstraint)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                constraintName = namedConstraint.Value;
+                context.MoveNextRequired();
+            }
+
+            switch (context.Token)
+            {
+                case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
+                    var (inlineKind, inlineClustered, inlineIgnoreDupKey) = ParseInlineKeyKindAndModifiers(context);
+                    pendingKeys.Add((inlineKind, constraintName, [computedIndex], inlineClustered, inlineIgnoreDupKey, []));
+                    continue;
+                case ReservedKeyword { Keyword: Keyword.Check }:
+                    if (!persisted)
+                        throw SimulatedSqlException.ComputedColumnConstraintRequiresPersisted();
+                    var inlineCheck = ParseInlineCheckPredicate(context);
+                    pendingChecks.Add((constraintName, inlineCheck.Predicate, columnName, inlineCheck.Definition));
+                    continue;
+                case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References }:
+                    if (!persisted)
+                        throw SimulatedSqlException.ComputedColumnConstraintRequiresPersisted();
+                    ConsumeOptionalForeignKeyNoisePhrase(context);
+                    ParseInlineForeignKeyTail(context, columnName, computedIndex, constraintName, pendingForeignKeys);
+                    continue;
+                default:
+                    // No further constraint — the cursor is on the column
+                    // list's comma or closing paren (or past the end of an
+                    // ALTER TABLE ADD). A consumed CONSTRAINT name with
+                    // nothing to name is a syntax error.
+                    if (constraintName is not null)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Consumes the optional <c>FOREIGN KEY</c> noise phrase an inline
+    /// column-level foreign key may carry ahead of <c>REFERENCES</c>, leaving
+    /// the cursor on <c>REFERENCES</c> either way.
+    /// </summary>
+    private static void ConsumeOptionalForeignKeyNoisePhrase(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Foreign })
+            return;
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Key })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.References })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
     /// Parses the <c>IDENTITY [(seed, increment)]</c> property after a column's
     /// data type. Enters with <see cref="ParserContext.Token"/> on the
     /// <c>IDENTITY</c> keyword and leaves it on the next non-identity token
@@ -1282,6 +1360,72 @@ partial class Simulation
             : !collation.Equals(declaredEnd, heapColumns[generatedEndOrdinal]!.Name)
                 ? throw SimulatedSqlException.TemporalPeriodEndNotMatching()
                 : (generatedStartOrdinal, generatedEndOrdinal);
+    }
+
+    /// <summary>
+    /// True when <paramref name="ordinal"/> participates in a pending PRIMARY
+    /// KEY. A computed column's <see cref="HeapColumn"/> is built after
+    /// <see cref="ParseColumnList"/>'s PK-promotion loop has walked the column
+    /// list, so its slot was still an unresolved placeholder there and the
+    /// promotion has to happen where the column is materialized instead. Real
+    /// promotes a computed PK column to NOT NULL exactly as it does a regular
+    /// one, from the inline and the table-level form alike (probe-confirmed).
+    /// </summary>
+    internal static bool IsPendingPrimaryKeyOrdinal(
+        IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
+        int ordinal)
+    {
+        foreach (var pending in pendingKeys)
+        {
+            if (pending.Kind != KeyConstraintKind.PrimaryKey)
+                continue;
+            foreach (var keyOrdinal in pending.FullOrdinals)
+            {
+                if (keyOrdinal == ordinal)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Rejects any CHECK predicate that reads a non-persisted computed column
+    /// — Msg 1764, which real raises for the table-level <c>CREATE TABLE</c> /
+    /// <c>DECLARE @t TABLE</c> / <c>CREATE TYPE … AS TABLE</c> forms, for
+    /// <c>ALTER TABLE … ADD CONSTRAINT … CHECK</c> (with or without
+    /// <c>WITH NOCHECK</c>), and for an inline CHECK that reaches a
+    /// non-persisted computed peer. A CHECK inline on the non-persisted column
+    /// itself never arrives here: the parser raises Msg 8183 first.
+    /// Probe-confirmed to beat Msg 8141, so callers run this walk ahead of the
+    /// peer-reference gate. Reference enumeration shares
+    /// <see cref="Expression.VisitColumnReferences"/> with that gate and so
+    /// inherits its container-coverage limits.
+    /// </summary>
+    internal static void RejectChecksOverNonPersistedComputedColumns(
+        Collation collation,
+        string tableName,
+        IReadOnlyList<HeapColumn?> columns,
+        IReadOnlyList<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks)
+    {
+        foreach (var pending in pendingChecks)
+            RejectCheckOverNonPersistedComputedColumn(collation, tableName, columns, pending.Predicate);
+    }
+
+    internal static void RejectCheckOverNonPersistedComputedColumn(
+        Collation collation,
+        string tableName,
+        IReadOnlyList<HeapColumn?> columns,
+        BooleanExpression predicate)
+    {
+        predicate.VisitOperandExpressions(op =>
+            op.VisitColumnReferences(name =>
+            {
+                foreach (var column in columns)
+                {
+                    if (column is { Computed: not null, IsPersisted: false } && collation.Equals(column.Name, name.Leaf))
+                        throw SimulatedSqlException.CheckConstraintOnNonPersistedComputedColumn(column.Name, tableName);
+                }
+            }));
     }
 
     internal static CheckConstraint[] ResolveCheckConstraints(
@@ -1438,7 +1582,7 @@ partial class Simulation
                 pendingChecks.Add((constraintName, tableCheck.Predicate, null, tableCheck.Definition));
                 return;
             case ReservedKeyword { Keyword: Keyword.Foreign }:
-                ParseTableLevelForeignKey(context, constraintName, heapColumns, pendingForeignKeys);
+                ParseTableLevelForeignKey(context, constraintName, heapColumns, pendingComputed, pendingForeignKeys);
                 return;
             case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
                 break;
@@ -1458,33 +1602,11 @@ partial class Simulation
         {
             if (context.GetNextRequired() is not Name keyColumn)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            var found = -1;
-            for (var i = 0; i < heapColumns.Count; i++)
-            {
-                if (heapColumns[i] is { } existing && context.Batch.CurrentDatabase.Collation.Equals(existing.Name, keyColumn.Value))
-                {
-                    found = i;
-                    break;
-                }
-                if (heapColumns[i] is null)
-                {
-                    foreach (var pending in pendingComputed)
-                    {
-                        if (pending.Index == i && context.Batch.CurrentDatabase.Collation.Equals(pending.Name, keyColumn.Value))
-                        {
-                            // Computed columns participate as key columns when
-                            // PERSISTED — validated in ResolveKeyConstraints
-                            // after computed-column materialization fills the
-                            // null slot. Record the ordinal; the persistence
-                            // gate fires later.
-                            found = i;
-                            break;
-                        }
-                    }
-                    if (found >= 0)
-                        break;
-                }
-            }
+            // Computed columns participate as key columns when PERSISTED —
+            // validated in ResolveKeyConstraints after computed-column
+            // materialization fills the null placeholder slot. Record the
+            // ordinal; the persistence gate fires later.
+            var found = FindDeclaredColumnOrdinal(context, heapColumns, pendingComputed, keyColumn.Value, out _);
             if (found < 0)
                 throw SimulatedSqlException.InvalidColumnName(keyColumn.Value);
             ordinals.Add(found);
@@ -1644,16 +1766,64 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Resolves a table-level constraint's column reference against the
+    /// in-flight CREATE TABLE column list. A computed column holds a
+    /// <see langword="null"/> placeholder in <paramref name="heapColumns"/>
+    /// until the second pass materializes it, so its name comes from
+    /// <paramref name="pendingComputed"/> instead. Returns the full ordinal, or
+    /// -1 when the name matches no declared column; <paramref name="declaredName"/>
+    /// carries the column's own spelling (the reference may differ by case).
+    /// </summary>
+    private static int FindDeclaredColumnOrdinal(
+        ParserContext context,
+        List<HeapColumn?> heapColumns,
+        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
+        string columnName,
+        out string declaredName)
+    {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        for (var i = 0; i < heapColumns.Count; i++)
+        {
+            if (heapColumns[i] is { } existing)
+            {
+                if (collation.Equals(existing.Name, columnName))
+                {
+                    declaredName = existing.Name;
+                    return i;
+                }
+
+                continue;
+            }
+
+            foreach (var pending in pendingComputed)
+            {
+                if (pending.Index == i && collation.Equals(pending.Name, columnName))
+                {
+                    declaredName = pending.Name;
+                    return i;
+                }
+            }
+        }
+
+        declaredName = columnName;
+        return -1;
+    }
+
+    /// <summary>
     /// Parses the table-level FOREIGN KEY shape after the optional
     /// <c>CONSTRAINT name</c> has been consumed and the cursor is on
     /// <c>FOREIGN</c>: <c>FOREIGN KEY (cols) REFERENCES other (cols) [ON DELETE
     /// action] [ON UPDATE action]</c>. Child columns resolve into full
-    /// ordinals via the in-flight <paramref name="heapColumns"/> list.
+    /// ordinals via the in-flight <paramref name="heapColumns"/> list, computed
+    /// ones through their <paramref name="pendingComputed"/> placeholder slot;
+    /// the PERSISTED gate (Msg 1764) fires later, in <c>ResolveForeignKeys</c>,
+    /// once those slots are filled.
     /// </summary>
     private static void ParseTableLevelForeignKey(
         ParserContext context,
         string? constraintName,
         List<HeapColumn?> heapColumns,
+        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<PendingForeignKey>? pendingForeignKeys)
     {
         if (pendingForeignKeys is null)
@@ -1668,18 +1838,10 @@ partial class Simulation
         {
             if (context.GetNextRequired() is not Name childCol)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            var found = -1;
-            for (var i = 0; i < heapColumns.Count; i++)
-            {
-                if (heapColumns[i] is { } existing && context.Batch.CurrentDatabase.Collation.Equals(existing.Name, childCol.Value))
-                {
-                    found = i;
-                    break;
-                }
-            }
+            var found = FindDeclaredColumnOrdinal(context, heapColumns, pendingComputed, childCol.Value, out var declaredName);
             if (found < 0)
                 throw SimulatedSqlException.InvalidColumnName(childCol.Value);
-            childColumnNames.Add(heapColumns[found]!.Name);
+            childColumnNames.Add(declaredName);
             childOrdinals.Add(found);
             context.MoveNextRequired();
         } while (context.Token is Operator { Character: ',' });
@@ -1967,6 +2129,26 @@ partial class Simulation
             }
 
             var fkName = pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf));
+
+            // A computed referencing column has to be PERSISTED (Msg 1764), and
+            // then constrains the referential actions to the ones that never
+            // write it: ON DELETE removes the whole row so NO ACTION and CASCADE
+            // both work (Msg 1765 for SET NULL / SET DEFAULT), while every ON
+            // UPDATE action but NO ACTION would have to write it (Msg 1715).
+            // Probed precedence: Msg 1776 beats 1764, 1764 beats 1765, 1765
+            // beats 1715.
+            foreach (var childOrdinal in pf.ChildFullOrdinals)
+            {
+                var childColumn = childTable.Columns[childOrdinal];
+                if (childColumn.Computed is null)
+                    continue;
+                if (!childColumn.IsPersisted)
+                    throw SimulatedSqlException.ForeignKeyOnNonPersistedComputedColumn(childColumn.Name, childTable.Name);
+                if (pf.DeleteAction is ReferentialAction.SetNull or ReferentialAction.SetDefault)
+                    throw SimulatedSqlException.ForeignKeyComputedColumnDeleteAction(fkName, childColumn.Name);
+                if (pf.UpdateAction != ReferentialAction.NoAction)
+                    throw SimulatedSqlException.ForeignKeyComputedColumnUpdateAction(fkName, childColumn.Name);
+            }
 
             // SET DEFAULT needs something to set: a NOT NULL referencing column
             // with no DEFAULT leaves the action no value, which real rejects at

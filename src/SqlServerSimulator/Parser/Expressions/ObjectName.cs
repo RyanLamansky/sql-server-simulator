@@ -41,7 +41,7 @@ internal sealed class ObjectName : Expression
         var idValue = this.idArg.Run(runtime);
         if (idValue.IsNull)
             return SqlValue.Null(SqlType.SystemName);
-        var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
+        var id = ScalarArguments.CoerceToInt(idValue);
 
         Database? targetDb;
         if (this.dbIdArg is null)
@@ -53,7 +53,7 @@ internal sealed class ObjectName : Expression
             var dbIdValue = this.dbIdArg.Run(runtime);
             if (dbIdValue.IsNull)
                 return SqlValue.Null(SqlType.SystemName);
-            var dbIdInt = dbIdValue.CoerceTo(SqlType.Int32).AsInt32;
+            var dbIdInt = ScalarArguments.CoerceToInt(dbIdValue);
             targetDb = LookupDatabaseById(runtime.Batch.Connection.Simulation, dbIdInt);
             if (targetDb is null)
                 return SqlValue.Null(SqlType.SystemName);

@@ -109,9 +109,13 @@ internal sealed class VarbinaryToHex : Expression
             var lengthValue = this.length!.Run(runtime);
             if (fullLengthValue.IsNull || startValue.IsNull || lengthValue.IsNull)
                 return SqlValue.Null(SqlType.NVarcharMax);
-            prefix = fullLengthValue.CoerceTo(SqlType.Int32).AsInt32 != 0;
-            startOffset = startValue.CoerceTo(SqlType.Int32).AsInt32;
-            requestedLength = lengthValue.CoerceTo(SqlType.Int32).AsInt32;
+            // The flag parameter is declared bit, so any non-zero magnitude
+            // reads as set rather than overflowing; the offset and length are
+            // int, and one past int range reports the narrowing (Msg 8115) —
+            // probe-confirmed 2026-07-31 against the real function.
+            prefix = fullLengthValue.CoerceTo(SqlType.Bit).AsBoolean;
+            startOffset = ScalarArguments.CoerceToInt(startValue);
+            requestedLength = ScalarArguments.CoerceToInt(lengthValue);
         }
 
         if (startOffset < 1 || startOffset > bytes.Length)

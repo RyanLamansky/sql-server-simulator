@@ -16,6 +16,7 @@ internal sealed class Upper(ParserContext context) : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var raw = source.Run(runtime);
+        StringScalars.RejectLegacyLob(raw, "upper");
         if (raw.IsNull)
             return SqlValue.Null(StringScalars.ResolveResultType(raw.Type, runtime.Batch));
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "upper");

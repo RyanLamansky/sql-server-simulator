@@ -69,7 +69,7 @@ internal sealed class ColumnProperty : Expression
         var propValue = this.propertyArg.Run(runtime);
         if (idValue.IsNull || columnValue.IsNull || propValue.IsNull)
             return SqlValue.Null(SqlType.Int32);
-        var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
+        var id = ScalarArguments.CoerceToInt(idValue);
         var columnName = columnValue.CoerceTo(SqlType.NVarchar).AsString;
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
 

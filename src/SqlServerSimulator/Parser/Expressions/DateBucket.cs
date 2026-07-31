@@ -54,7 +54,7 @@ internal sealed class DateBucket : Expression
         var width = this.bucketWidth.Run(runtime);
         if (width.IsNull)
             return SqlValue.Null(dateValue.Type);
-        var widthInt = width.CoerceTo(SqlType.Int32).AsInt32;
+        var widthInt = ScalarArguments.CoerceToInt(width);
         if (widthInt < 1)
             throw SimulatedSqlException.DateAddOverflow("int");
         var originValue = this.origin?.Run(runtime) ?? DefaultOriginFor(dateValue.Type);

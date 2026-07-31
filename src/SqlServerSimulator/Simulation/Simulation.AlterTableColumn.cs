@@ -96,6 +96,17 @@ partial class Simulation
         if (pendingComputed.Count > 0)
             ResolveComputedColumnsForAddColumn(context.Batch, context.Batch.CurrentDatabase.Collation, table, heapColumns, pendingComputed);
 
+        // An added column's inline CHECK may not read a non-persisted computed
+        // column — Msg 1764, over the pre-existing columns as well as the ones
+        // this statement adds.
+        if (pendingChecks.Count > 0)
+        {
+            var visibleColumns = new List<HeapColumn?>(table.Columns.Length + heapColumns.Count);
+            visibleColumns.AddRange(table.Columns);
+            visibleColumns.AddRange(heapColumns);
+            RejectChecksOverNonPersistedComputedColumns(context.Batch.CurrentDatabase.Collation, table.Name, visibleColumns, pendingChecks);
+        }
+
         var existingCount = table.Columns.Length;
         var newColumns = new HeapColumn[heapColumns.Count];
         for (var i = 0; i < heapColumns.Count; i++)
@@ -1045,18 +1056,17 @@ partial class Simulation
                         }
                         catch (OverflowException)
                         {
-                            // Msg 220's wording embeds the source's plain
-                            // value (e.g. `500` for int → tinyint overflow).
-                            // Overflow on a non-integer narrowing (decimal
-                            // precision change) routes through Msg 8115.
-                            if (!SqlType.IsIntegerCategory(decoded.Type))
-                                throw SimulatedSqlException.ArithmeticOverflowToNumeric();
-                            // Widen the source value to BigInt so AsInt64
-                            // works regardless of which integer subtype the
-                            // value carried — int→bigint widening can't
-                            // overflow.
-                            var formatted = decoded.CoerceTo(SqlType.BigInt).AsInt64.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                            throw SimulatedSqlException.ArithmeticOverflowForDataType(newCol.Type.SqlServerName, formatted);
+                            // Same source-type-keyed error family as CAST and
+                            // column assignment (probe-confirmed for ALTER
+                            // COLUMN too, 2026-07-31): int-family sources give
+                            // the value-bearing Msg 220, float/real Msg 232,
+                            // a bigint source the generic Msg 8115 naming the
+                            // target, and a non-integer narrowing (decimal
+                            // precision change) Msg 8115's numeric wording.
+                            throw SimulatedSqlException.TryConversionOverflow(decoded, newCol.Type)
+                                ?? (SqlType.IsIntegerCategory(decoded.Type)
+                                    ? SimulatedSqlException.ArithmeticOverflow(newCol.Type.ToString()!)
+                                    : SimulatedSqlException.ArithmeticOverflowToNumeric());
                         }
                         // Bounded-length validation for narrowing varchar /
                         // nvarchar / varbinary. The CoerceTo path itself is

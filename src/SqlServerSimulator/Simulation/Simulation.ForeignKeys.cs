@@ -249,10 +249,12 @@ partial class Simulation
     // matching every row against every parent key.
     //
     // The scan is defensive rather than live: only a non-persisted computed
-    // column lacks a storage slot, and real rejects one in a FOREIGN KEY with
-    // Msg 1764 (a PERSISTED computed column is allowed and does have a slot),
-    // so no valid schema reaches it. Kept because the seek path's precondition
-    // is a property of the storage layout rather than of the constraint.
+    // column lacks a storage slot, and one in a FOREIGN KEY is rejected at
+    // declaration the way real rejects it — Msg 1764 from the table-level and
+    // ALTER forms, Msg 8183 from the inline one (a PERSISTED computed column is
+    // allowed and does have a slot) — so no valid schema reaches it. Kept
+    // because the seek path's precondition is a property of the storage layout
+    // rather than of the constraint.
     private static IEnumerable<(int PageIndex, int SlotIndex, SqlValue[] ChildFull, int ParentIndex)> MatchChildRowsToParents(
         ForeignKey fk, IReadOnlyList<SqlValue[]> parentKeyRows)
     {

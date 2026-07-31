@@ -94,7 +94,7 @@ internal sealed class DatePartsBuilder : Expression
             }
             if (precisionConstant.IsNull || precisionConstant.Type.Category != SqlTypeCategory.Integer)
                 throw SimulatedSqlException.ScaleArgumentNotValid(TargetTypeName(kind));
-            var p = precisionConstant.CoerceTo(SqlType.Int32).AsInt32;
+            var p = ScalarArguments.CoerceToInt(precisionConstant);
             if (p is < 0 or > 7)
                 throw SimulatedSqlException.InvalidScale(p, line: 1);
             this.parsedPrecision = p;
@@ -145,7 +145,7 @@ internal sealed class DatePartsBuilder : Expression
         {
             if (i == precisionSlot)
                 continue;
-            ints[i] = values[i].CoerceTo(SqlType.Int32).AsInt32;
+            ints[i] = ScalarArguments.CoerceToInt(values[i]);
         }
 
         return this.kind switch

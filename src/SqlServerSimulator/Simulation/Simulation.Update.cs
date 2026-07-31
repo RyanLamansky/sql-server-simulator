@@ -198,7 +198,7 @@ partial class Simulation
 
         var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
             ? SimulatedSqlException.MustDeclareTableVariable(leadingIdent.Leaf)
-            : SimulatedSqlException.InvalidObjectName(leadingIdent));
+            : context.Batch.UnresolvableObjectName(leadingIdent));
         return table.IsTableValuedParameter
             ? throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf)
             : ExecuteUpdateAgainstTable(context, table, rawAssignments, output, top, leadingView);

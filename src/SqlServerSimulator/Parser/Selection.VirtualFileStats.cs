@@ -115,6 +115,6 @@ partial class Selection
     private static int? EvalNullableInt(Expression expr, RuntimeContext runtime)
     {
         var value = expr.Run(runtime);
-        return value.IsNull ? null : value.CoerceTo(SqlType.Int32).AsInt32;
+        return value.IsNull ? null : ScalarArguments.CoerceToInt(value);
     }
 }

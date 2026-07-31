@@ -29,8 +29,8 @@ internal sealed class ColName : Expression
         var colIdValue = this.colIdArg.Run(runtime);
         if (tableIdValue.IsNull || colIdValue.IsNull)
             return SqlValue.Null(SqlType.SystemName);
-        var tableId = tableIdValue.CoerceTo(SqlType.Int32).AsInt32;
-        var colId = colIdValue.CoerceTo(SqlType.Int32).AsInt32;
+        var tableId = ScalarArguments.CoerceToInt(tableIdValue);
+        var colId = ScalarArguments.CoerceToInt(colIdValue);
         foreach (var schema in runtime.Batch.CurrentDatabase.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)

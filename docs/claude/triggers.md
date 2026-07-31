@@ -46,10 +46,7 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) ship at the parse
 - **`UPDATE(col)` / `COLUMNS_UPDATED()`** — see [Change-detection intrinsics](#change-detection-intrinsics).
 - **AFTER triggers fire on a zero-row DML** — an UPDATE / DELETE matching nothing, an `INSERT … SELECT` producing nothing, and a MERGE with no source rows all still run the body, with empty `INSERTED` / `DELETED` and `@@ROWCOUNT` 0 (probe-confirmed for all four shapes).
   `UPDATE(col)` still reports the SET-clause columns there, because the reading is a property of the statement rather than of the rows.
-- **Direct-recursion suppression** — matches real SQL Server's default `RECURSIVE_TRIGGERS OFF`.
-  The connection's `FiringTriggerIds` set tracks in-flight trigger ObjectIds; the dispatcher skips fires whose ObjectId is already in flight.
-  Trigger T can still cause trigger U to fire via cross-table DML; only same-trigger recursion is blocked.
-  **For INSTEAD OF**, the presence-check (`HasInsteadOfTrigger`) also excludes in-flight triggers, so a body's nested DML against its own target reaches the heap (probe-confirmed) — without this filter, the nested INSERT would skip both the trigger fire *and* the heap write, becoming a no-op.
+- **Nesting and recursion gating** — `RECURSIVE_TRIGGERS` (per database) and the `nested triggers` server option decide whether a trigger fires while other triggers are running; see [Nesting and recursion options](#nesting-and-recursion-options).
 - **MERGE routing through INSTEAD OF** — each WHEN branch's action is dispatched independently.
   A MERGE against a target with INSTEAD OF INSERT routes the `WHEN NOT MATCHED THEN INSERT` branch through the trigger (no heap write, no identity allocation, no constraint check); a mixed MERGE with INSTEAD OF INSERT + no INSTEAD OF UPDATE routes the INSERT branch through the trigger and the UPDATE branch through the heap normally.
   Per-action key validation excludes pending operations that bypass the heap.
@@ -64,12 +61,55 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) ship at the parse
 - **Dispatch**: [`Simulation.InvokeTrigger.cs`](../../src/SqlServerSimulator/Simulation/Simulation.InvokeTrigger.cs) — `FireTriggers` walks every schema's `Triggers` dict, materializes the pseudo-tables once per fire, allocates a child `BatchContext`, runs the body via `DispatchStatementsUntil`.
   `TryFireInsteadOfTrigger` is the single-trigger INSTEAD OF dispatch; returns `true` if a trigger fired.
   `HasAfterTrigger` / `HasInsteadOfTrigger` are the fast-path predicates DML sites call first to avoid per-row snapshot capture when no trigger is attached.
-  Both predicates exclude in-flight triggers via `Connection.FiringTriggerIds`.
+  Both predicates route through `CanFireTrigger`, so a trigger the nesting rules suppress reads as absent.
   `MaterializePseudoTable` takes a `HeapColumn[]` directly so the same machinery works for table parents (parent's `Columns`) and view parents (view's `OutputColumns`).
 - **DML hooks**: `Simulation.Insert.cs` (INSERT + INSERT … SELECT + INSERT … OUTPUT) detects INSTEAD OF on either the destination view or the destination table and either routes through `ProcessInsteadOfInsertOnView` (for view targets — view INSERT may include non-updatable views) or threads an `insteadOfActive` flag through `ProcessHeapInsert` (for table targets, which skips identity allocation, constraint enforcement, and heap write).
   `Simulation.Update.cs` and `Simulation.Delete.cs` thread the per-target INSTEAD OF detection through their `CommitUpdate` / `CommitDelete` helpers; for view targets with INSTEAD OF, INSERTED / DELETED are projected through `View.BaseColumnOrdinals` via a `ProjectThroughView` helper.
   `Simulation.Merge.cs` detects per-action INSTEAD OF at the top of `CommitMerge` and routes each pending list (inserts, updates, deletes) independently through trigger-fire or heap-write paths.
-- **Connection state**: [`SimulatedDbConnection.FiringTriggerIds`](../../src/SqlServerSimulator/SimulatedDbConnection.cs) (recursion guard) + `TriggerNestLevel` (surfaced by `TRIGGER_NESTLEVEL()`).
+- **Connection state**: [`SimulatedDbConnection.FiringTriggers`](../../src/SqlServerSimulator/SimulatedDbConnection.cs) (the in-flight trigger stack the gating reads) + `TriggerNestLevel` (surfaced by `TRIGGER_NESTLEVEL()`).
+- **Gating**: `Simulation.CanFireTrigger` — the one predicate behind both nesting rules, called from `FireTriggers`' match loop, `TryFireInsteadOfTrigger`'s, and `HasTrigger`.
+
+## Nesting and recursion options
+
+Two knobs decide whether a trigger fires while other triggers are already running on the connection.
+Both are read at fire time by `Simulation.CanFireTrigger`, the single predicate `FireTriggers`, `TryFireInsteadOfTrigger` and `HasTrigger` all filter through, against the connection's `FiringTriggers` stack (one frame per in-flight trigger, carrying its ObjectId and whether it's an AFTER trigger).
+Everything below is probe-confirmed against SQL Server 2025.
+
+### `RECURSIVE_TRIGGERS` — a trigger re-firing itself
+
+`ALTER DATABASE <db> SET RECURSIVE_TRIGGERS { ON | OFF }`, per database, default OFF, surfaced as `sys.databases.is_recursive_triggers_on` and stored on `Database.RecursiveTriggers`.
+
+Off, an AFTER trigger whose body's DML would re-fire that same trigger is skipped and the DML reaches the heap.
+On, the re-fire happens, bounded only by the 32-level nesting cap — an unbounded self-insert runs 32 bodies and then raises **Msg 217** (`Maximum stored procedure, function, trigger, or view nesting level exceeded (limit 32).`), rolling the whole statement back.
+
+Three rules the option's name doesn't convey:
+
+- The test is the **innermost** firing trigger, not the whole stack.
+  Indirect recursion fires either way: T1's trigger writes T2, whose trigger writes T1, whose trigger runs again — with its outer frame still on the stack.
+  This is why `FiringTriggers` is a stack rather than a set of in-flight ids.
+- A **stored procedure between the body and the DML doesn't launder the recursion** — the innermost *trigger* frame is still the trigger's own, so the re-fire stays suppressed.
+- **INSTEAD OF triggers never self-recurse**, whatever the setting: real processes an INSTEAD OF body's DML against its own target as if the table had no INSTEAD OF trigger.
+  The `HasInsteadOfTrigger` presence-check excluding the innermost frame is what makes the nested INSERT reach the heap — without the filter it would skip both the trigger fire *and* the heap write, becoming a no-op.
+
+### `nested triggers` — an AFTER trigger under another AFTER trigger
+
+The server option (`sp_configure 'nested triggers', 0` + `RECONFIGURE`; `sys.configurations` id 115), default 1, server-scoped on `Simulation.ServerConfiguration` and read through `Simulation.NestedTriggersEnabled`.
+`sys.databases.is_nested_triggers_on` stays NULL — real reports it only for contained databases.
+
+Off, **an AFTER trigger doesn't fire while any AFTER trigger is running anywhere up the stack**: only the first AFTER level runs.
+The cascading write still lands; it just doesn't fire the next trigger.
+Consequences worth stating separately, each probed:
+
+- **INSTEAD OF triggers are exempt** and nest normally — an INSTEAD OF chain runs to full depth even with the option off.
+- The AFTER rule reads the **whole stack, not the frame above**: an AFTER trigger's body still reaches an INSTEAD OF trigger, but the AFTER trigger one level below *that* stays suppressed.
+  Conversely an AFTER trigger under nothing but INSTEAD OF frames does fire.
+- **Sibling triggers on one table all fire** — they're all first-level, not nested.
+- It **also disables direct recursion**, whatever `RECURSIVE_TRIGGERS` says, because a trigger re-firing itself is an AFTER trigger under an AFTER trigger.
+  The server option wins.
+
+The staged / installed split matters here: a `sp_configure` write alone changes nothing, because the dispatcher reads the *installed* value (`value_in_use`) that only `RECONFIGURE` moves.
+The sibling option `server trigger recursion` (id 116) round-trips through the catalog like any other but carries no behavior, since server-scope DDL triggers don't fire.
+See [`catalog-views.md`](catalog-views.md) for the `sp_configure` surface itself.
 
 ## `OUTPUT` on a triggered target — Msg 334
 
@@ -211,9 +251,6 @@ Event types parse as bare identifiers and store verbatim in `DdlTrigger.EventTyp
   INSTEAD OF UPDATE / DELETE on a join / aggregate / DISTINCT view raises `NotSupportedException` — implementing it requires executing the view's selection to enumerate would-be-affected rows, which loses heap-row identity and bypasses the existing visibility-filter machinery.
   Deferred.
 - **Logon / server triggers** — only DML triggers (DATABASE-scope and OBJECT-scope) ship.
-- **`RECURSIVE_TRIGGERS ON`** — direct recursion is unconditionally suppressed.
-  The database option to allow it isn't surfaced.
-- **`is_nested_triggers_on = OFF`** — cross-table cascading triggers always fire (depth-limited only by `MaxNestingLevel`).
 - **`@@NESTLEVEL` independence** — the simulator collapses UDF / procedure / trigger depth into a single counter (`SimulatedDbConnection.NestingLevel`).
   `TRIGGER_NESTLEVEL()` reads its own dedicated `TriggerNestLevel` counter, so it's accurate, but `@@NESTLEVEL` (not modeled at all) wouldn't have the right value if added.
 

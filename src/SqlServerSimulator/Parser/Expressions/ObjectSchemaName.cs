@@ -37,7 +37,7 @@ internal sealed class ObjectSchemaName : Expression
         var idValue = this.idArg.Run(runtime);
         if (idValue.IsNull)
             return SqlValue.Null(SqlType.SystemName);
-        var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
+        var id = ScalarArguments.CoerceToInt(idValue);
         // A restricted principal gets NULL for an id it can't view metadata for
         // (probe-confirmed), matching sys.objects hiding.
         var restrict = PermissionEnforcement.MetadataVisibilityApplies(runtime.Batch);

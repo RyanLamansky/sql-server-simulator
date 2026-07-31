@@ -562,8 +562,11 @@ partial class Simulation
     /// <summary>Raises Msg 4606 when a DML permission targets a proc / scalar-function, or EXECUTE targets a table / view / TVF / sequence.</summary>
     private static void ValidatePermissionAgainstObjectKind(string permName, string objectTypeCode)
     {
-        var kindIsExecutable = objectTypeCode is "P " or "FN" or "PC" or "FS" or "FT";
-        var kindIsTabular = objectTypeCode is "U " or "V " or "IF" or "TF";
+        // A synonym takes either family: real accepts GRANT SELECT and GRANT
+        // EXECUTE on the same synonym (probe-confirmed), since the base object's
+        // kind isn't consulted at grant time.
+        var kindIsExecutable = objectTypeCode is "P " or "FN" or "PC" or "FS" or "FT" or "SN";
+        var kindIsTabular = objectTypeCode is "U " or "V " or "IF" or "TF" or "SN";
         var isDml = permName.Equals("SELECT", StringComparison.OrdinalIgnoreCase)
             || permName.Equals("INSERT", StringComparison.OrdinalIgnoreCase)
             || permName.Equals("UPDATE", StringComparison.OrdinalIgnoreCase)

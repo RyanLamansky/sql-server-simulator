@@ -36,6 +36,13 @@ internal sealed class QuoteName : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var nameValue = this.name.Run(runtime);
+        // QUOTENAME quotes its argument as nvarchar, so `image` — the one type
+        // with no implicit conversion to it — clashes rather than raising the
+        // Msg 8116 the rest of the string family gives a legacy LOB
+        // (probe-confirmed 2026-07-31: `text` / `ntext` / `varbinary` all
+        // quote, only `image` clashes).
+        if (nameValue.Type is ImageSqlType)
+            throw SimulatedSqlException.OperandTypeClash(nameValue.Type, SqlType.NVarchar);
         // The result carries the input argument's collation and coercibility
         // (real SQL Server propagates the operand's collation through string
         // functions). Pinning to the neutral SqlType.NVarchar instead would
@@ -69,7 +76,12 @@ internal sealed class QuoteName : Expression
                 return SqlValue.Null(resultType);
         }
 
-        var nameString = nameValue.AsString;
+        // A non-string argument quotes its implicit nvarchar rendering, so
+        // `QUOTENAME(123)` is `[123]` and a varbinary quotes the characters its
+        // bytes spell (probe-confirmed 2026-07-31).
+        var nameString = SqlType.IsStringCategory(nameValue.Type)
+            ? nameValue.AsString
+            : nameValue.CoerceTo(SqlType.NVarchar).AsString;
         if (nameString.Length > MaxInputLength)
             return SqlValue.Null(resultType);
 

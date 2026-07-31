@@ -49,7 +49,7 @@ internal sealed class EOMonth : Expression
             // Probe-confirmed quirk: NULL month offset is silently treated as
             // zero (no shift), unlike start_date's NULL which propagates.
             if (!offsetValue.IsNull)
-                offset = offsetValue.CoerceTo(SqlType.Int32).AsInt32;
+                offset = ScalarArguments.CoerceToInt(offsetValue);
         }
 
         var shifted = asDate.AddMonths(offset);

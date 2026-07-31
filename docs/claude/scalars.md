@@ -212,6 +212,7 @@ The rules below describe the *runtime* value; the width bounds it.
   Leading and trailing `%` characters are consumed by the anchoring decision and don't translate to `.*` in the regex body — that's what makes `PATINDEX('%abc%', 'xabcx')` return 2 (position of `abc`) rather than 1 (position of the empty `.*` prefix).
   Subject NULL raises Msg 8116 (asymmetric with NULL pattern, which silently returns NULL).
   Subject non-string raises Msg 8116; pattern non-string implicitly coerces to the subject's string family.
+  The subject takes a `text` / `ntext` document but not an `image`, and the pattern refuses all three — see *Legacy LOB arguments* below.
   Result type is `int` for bounded subjects and `bigint` for `varchar(MAX)` / `nvarchar(MAX)` / legacy LOB family.
   No `ESCAPE` clause (Msg 156 at parse, falls out of the general grammar).
 - **`STUFF(input, start, length, replacement)`** uses 1-based `start` ∈ `[1, len(input)]`; out-of-range start, `start > len(input)`, `start == len(input) + 1`, and negative `length` all silently return NULL.
@@ -222,6 +223,7 @@ The rules below describe the *runtime* value; the width bounds it.
 - **`QUOTENAME(name [, delim])`** returns `nvarchar(258)` **carrying the input argument's collation and coercibility** (like the `UPPER`/`LTRIM` family — the result is not pinned to the neutral `SqlType.NVarchar`).
   This matters when the database collation differs from `Collation.Baseline`: a plain literal carries the database collation while a sysname catalog column carries the baseline at Implicit rank, so `'text' + QUOTENAME(sys-catalog sysname)` (SMO's Object-Explorer Urn) resolves via the Implicit collation instead of raising the Msg 468 two-coercible-defaults conflict a Baseline/coercible-default result would trigger.
   Supported delimiter chars: `[`/`]`, `(`/`)`, `<`/`>`, `{`/`}`, `"`, `'`, `` ` ``. The pair is selected by either side (probe-verified: `QUOTENAME('a)b', '(')` doubles `)` inside the body). Multi-char delimiter argument picks the first char. NULL input, NULL delimiter, unsupported delimiter character, and input > 128 chars all return NULL.
+  A non-string argument quotes its implicit `nvarchar` rendering (`QUOTENAME(123)` → `[123]`, a date → `[2024-01-15]`, a `varbinary` → the characters its bytes spell), so `image` — the one type with no implicit conversion to `nvarchar` — is the only rejection, and it raises **Msg 206** rather than Msg 8116.
 - **`REPLICATE(input, count)`** preserves the input's string type.
   Result truncates to 8000 bytes for non-MAX `varchar`/`nvarchar`; `varchar(MAX)` / `nvarchar(MAX)` / legacy LOB input bypass the cap.
   MAX detection runs at `Run` time off the runtime input value's type: a MAX-declared column or CAST target decodes to a max-form (length -1) / LOB string type that survives `StringScalars.CoerceToVarchar`, so `Replicate.IsMaxForm` reads it directly — no parse-time resolver needed, which is what lets a FROM-source `varchar(MAX)` column bypass the cap (probe-confirmed: `DATALENGTH(REPLICATE(vmaxcol, 200))` = 20000, and the `nvarchar(MAX)` sibling = 40000, while bounded `varchar(20)` / `nvarchar(20)` columns and plain literals stay capped at 8000 — MAX-ness is a property of the declared type, per Microsoft's docs).
@@ -236,22 +238,80 @@ The rules below describe the *runtime* value; the width bounds it.
   Culture defaults to en-US; invalid culture name silently falls back to en-US.
   .NET `FormatException` (e.g. `decimal.ToString("D5")`) → NULL; unrecognized custom-format tokens that .NET passes through (e.g. `int.ToString("qq qq")`) are echoed verbatim.
 
-## Integer arguments outside `int` range
+## Integer arguments outside the parameter's range
 
-A length / position / count / index / code-point argument beyond `int` range raises **Msg 8115** (`Arithmetic overflow error converting expression to data type int.`) rather than leaking .NET's narrowing exception, via `StringScalars.CoerceLengthArgument`.
-Probe-confirmed 2026-07-31 for SUBSTRING, CHARINDEX, STUFF, REPLICATE, SPACE, CHOOSE, CHAR, NCHAR, PARSENAME and STR alongside the LEFT / RIGHT pair that first needed it.
+An integer argument — a length, position, count, index, code point, object / database / index id, month offset, SRID — is narrowed to the type its parameter is declared as, and one that doesn't fit raises SQL Server's own conversion error rather than leaking .NET's narrowing exception.
+`ScalarArguments.CoerceToInt` / `CoerceToSmallInt` is the single narrowing seam (`StringScalars.CoerceLengthArgument` delegates to it), and it routes an overflow through `SimulatedSqlException.TryConversionOverflow` — the same chooser CAST, column assignment and ALTER COLUMN use, so the **source** type picks the error family and the **target** picks the state:
 
-Other integer-argument sites — bit manipulation, the catalog-id scalars, CONVERT's style argument — still narrow with a raw `checked` cast; the same treatment applies when one is next touched.
+| Argument's source type | Error |
+| --- | --- |
+| `bigint` / `numeric` | **Msg 8115** state 2, `Arithmetic overflow error converting expression to data type <target>.` |
+| `int` narrowing to a `smallint` parameter | **Msg 220** state 1, `Arithmetic overflow error for data type smallint, value = 40000.` |
+| `float` / `real` | **Msg 232**, `Arithmetic overflow error for type <target>, value = …` (state 3 for int, 2 for smallint) |
+| `money` (int target) | **Msg 237**, `There is insufficient result space to convert a money value to int.` |
+| `varchar` holding an out-of-range number | **Msg 248**, `The conversion of the varchar value '3000000000' overflowed an int column.` |
+
+Nearly every parameter is declared `int`.
+The `smallint` exceptions are `FILEGROUP_NAME`'s filegroup id, `INDEXKEY_PROPERTY`'s key ordinal (its object and index ids stay int), and the minute offset `SWITCHOFFSET` / `TODATETIMEOFFSET` take — each names `smallint` in its overflow.
+
+Probe-confirmed 2026-07-31 across: the string scalars (SUBSTRING, CHARINDEX, STUFF, REPLICATE, SPACE, CHOOSE, CHAR, NCHAR, PARSENAME, STR, LEFT, RIGHT); the catalog-id scalars (COL_NAME, COLUMNPROPERTY, OBJECT_NAME, OBJECT_SCHEMA_NAME, OBJECT_DEFINITION, OBJECTPROPERTY, OBJECTPROPERTYEX, SCHEMA_NAME, DB_NAME, TYPE_NAME, FILE_NAME, FILEGROUP_NAME, USER_NAME, INDEX_COL, INDEXPROPERTY, INDEXKEY_PROPERTY, STATS_DATE, `fn_virtualfilestats`); the date scalars (EOMONTH, DATE_BUCKET, the `*FROMPARTS` family, SWITCHOFFSET, TODATETIMEOFFSET); CONVERT's style argument; the spatial index / SRID arguments (`STPointN`, `geometry::Point`, `SET @g.STSrid`); and `fn_varbintohexsubstring`'s offset and length.
+
+Three sites answer differently, each probe-confirmed:
+
+- **The bit-manipulation family never narrows at all** — see [Bit manipulation](#bit-manipulation-argument-rules) below.
+- **A system procedure's parameter** reports **Msg 8114** state 5 naming both families (`Error converting data type bigint to int.`) rather than the arithmetic-overflow family, via `ScalarArguments.CoerceProcedureParameter`.
+  Confirmed for `sp_getapplock`'s `@LockTimeout` (int), `sp_columns_100`'s `@ODBCVer` (int), and `sp_datatype_info_100`'s `@data_type` (int) / `@ODBCVer` (**tinyint**, which its message names).
+- **A cursor `FETCH ABSOLUTE` / `RELATIVE` offset *literal*** past int range is a grammar-level failure, **Msg 1080** class 15 (`The integer value 3000000000 is out of range.`); the same value through a *variable* is accepted and simply positions past the end.
+
+### Divergences
+
+- **`3000000000` types as `bigint`, not `numeric`.**
+  Real types an integer literal beyond int range as `numeric(10, 0)`, the simulator as `bigint`.
+  Where a function type-rejects `numeric` but accepts `bigint` (the bit family, COLUMNPROPERTY / INDEXPROPERTY / INDEXKEY_PROPERTY's first argument, CONVERT's style), the two therefore answer with different errors for the bare literal and agree once the argument is an explicit `CAST(… AS bigint)`.
+- **Argument evaluation order.**
+  Real converts every argument before running the function body; the simulator converts each where it is used, so `INDEX_COL` / `INDEXKEY_PROPERTY` / `STATS_DATE` resolve the named object first and return NULL for a missing one where real reports the later argument's overflow.
+- **Non-integer arguments outside the bit family aren't type-rejected** — real answers Msg 8116 for a `float` / `numeric` / `bit` / `varbinary` style or id argument where the simulator converts it; tracked in the over-permissive register of [`backlog.md`](backlog.md).
+
+## Bit manipulation argument rules
+
+`GET_BIT` / `SET_BIT` / `LEFT_SHIFT` / `RIGHT_SHIFT` take their position / distance / value argument as a **`bigint`** and never narrow it, so an out-of-`int`-range argument is an ordinary out-of-range outcome rather than a conversion overflow (probe-confirmed 2026-07-31):
+
+- The argument must already be an integer type; decimal, float, money, string, binary and NULL all raise **Msg 8116** naming the type, argument index and function (`Argument data type decimal is invalid for argument 2 of get_bit function.`).
+  `bit` is rejected everywhere except `SET_BIT`'s third argument, which alone admits it.
+- A position outside `[0, bit-width - 1]` raises **Msg 9838** — `Parameter 2 in function 'get_bit' is out of range 0 to 31.` — at state **1** for `get_bit` and state **2** for `set_bit`.
+  The width follows the *first* operand's type (0 to 7 for `tinyint`, 0 to 63 for `bigint`).
+- `SET_BIT`'s third argument must be exactly 0 or 1; anything else, at any magnitude, raises **Msg 9839** (`Parameter 3 in function 'set_bit' must be 0 or 1.`).
+- The shifts have **no range check**: a negative distance shifts the opposite way (`LEFT_SHIFT(255, -4)` = 15, `RIGHT_SHIFT(255, -4)` = 4080, and the `<<` / `>>` operators match), and any magnitude at or past the operand's bit width — including one beyond `int` range — zeroes the result whichever way it points.
+
+Divergence: real distinguishes the bare `NULL` keyword (Msg 8116) from a NULL-valued *typed* argument (result NULL).
+The simulator resolves both to the same placeholder-typed value, so every NULL argument takes the Msg 8116 path its first operand always has.
 
 ## Legacy LOB arguments
 
-No string function accepts `text` or `ntext` as the operand it **transforms**: real raises **Msg 8116** naming the function and argument position, and so does the simulator (probe-confirmed 2026-07-31 across LEN / LEFT / RIGHT / UPPER / LOWER / LTRIM / REVERSE / REPLACE / STUFF).
-REPLACE rejects one in all three of its arguments.
+No string function accepts `text`, `ntext` or `image` as the operand it **transforms**: real raises **Msg 8116** naming the type, the 1-based argument position and the function, and so does the simulator.
+Probe-confirmed 2026-07-31 across LEN / LEFT / RIGHT / UPPER / LOWER / LTRIM / RTRIM / TRIM / REVERSE / REPLACE / STUFF / REPLICATE / CHARINDEX / PATINDEX / ASCII / UNICODE / SOUNDEX / DIFFERENCE / TRANSLATE / STRING_ESCAPE / STRING_AGG / FORMAT.
+Every argument position of a multi-argument member is covered — REPLACE and TRANSLATE reject one in all three of theirs, STUFF in its 1st and 4th, LTRIM / RTRIM in the 2nd (the character set), STRING_AGG in both.
 
-An argument that is **read** rather than transformed accepts a LOB, which is how a legacy `text` column is meant to be consumed — CHARINDEX's haystack and SUBSTRING's source both take one.
-`StringScalars.CoerceToVarchar`'s `allowLegacyLob` flag marks those.
+Three members deviate, each probe-confirmed:
 
-The types are column-only besides: a local variable declared `text` / `ntext` / `image` raises **Msg 2739** (`The text, ntext, and image data types are invalid for local variables.`), which is why no string function ever sees one through a variable.
+- **TRIM** numbers its arguments in written order, so the source is argument 1 in the bare `TRIM(x)` form and argument 2 once a `chars FROM` prefix claims the first slot.
+  Its function word is also the only capitalized one real emits — `of Trim function.` beside `of len function.`.
+- **DIFFERENCE** takes a `text` argument: it converts implicitly to `varchar` and evaluates, while `ntext` and `image` raise.
+  Its own SOUNDEX refuses all three.
+- **QUOTENAME** quotes the `nvarchar` rendering of whatever it is given, so `text` / `ntext` and every non-string family quote normally; only `image`, which has no implicit conversion to `nvarchar`, fails — and with **Msg 206** (`Operand type clash: image is incompatible with nvarchar`) rather than the family's Msg 8116.
+
+An argument that is **read** rather than transformed accepts a LOB, which is how a legacy `text` column is meant to be consumed — CHARINDEX's haystack, PATINDEX's subject and SUBSTRING's source all take one, as do CONCAT / CONCAT_WS / COALESCE / ISNULL and DATALENGTH.
+`StringScalars.CoerceToVarchar`'s `allowLegacyLob` flag marks the coercing sites; `StringScalars.RejectLegacyLob` is the standalone gate for the members that read their argument directly.
+
+The types are column-only besides: a local variable declared `text` / `ntext` / `image` raises **Msg 2739** (`The text, ntext, and image data types are invalid for local variables.`), so a string function only ever sees one through a column or a CAST.
+
+### Divergences
+
+- **The gate runs per row, not at compile time.**
+  Real binds the rule while compiling, so `SELECT LEN(nt) FROM t WHERE 1 = 0` fails on an empty rowset; the simulator raises when the first row reaches the expression, so a query that returns no rows passes silently.
+  The gate does sit ahead of each function's NULL short-circuit, so a NULL-valued LOB column still raises — only a row-less result escapes.
+- **`CHARINDEX(<needle>, <image>)`** reports Msg 8116 for argument 2 where real reports Msg 206 (`image is incompatible with varchar`); real accepts the pair when the needle is binary too, which needs the unbuilt binary CHARINDEX.
+- **`SUBSTRING(<image>)` / `SUBSTRING(<varbinary>)`** raise Msg 8116 where real returns the binary slice — binary SUBSTRING isn't built.
 
 ## EF.Functions-driven type-check / random scalars: `ISNUMERIC` / `ISDATE` / `RAND`
 - **`ISNUMERIC(expression)`** returns `int` (1 / 0); NULL → 0 (not NULL).
@@ -279,6 +339,7 @@ The types are column-only besides: a local variable declared `text` / `ntext` / 
   NULL → NULL.
 - **`DIFFERENCE(s1, s2)`** — counts matching positions (0–4) between the two strings' SOUNDEX codes.
   Result `int`; NULL on either side → NULL.
+  Unlike SOUNDEX it accepts a `text` argument (implicitly converted to `varchar`) while refusing `ntext` / `image` — see *Legacy LOB arguments* above.
 - **`STR(float [, length [, decimals]])`** — right-aligned fixed-width numeric-to-string.
   Defaults: length 10, decimals 0 (rounds half-away-from-zero, doesn't truncate).
   Overflow (formatted value exceeds `length`) returns a string of `*` characters of length `length`.

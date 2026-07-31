@@ -51,20 +51,18 @@ partial class Simulation
     /// <para>
     /// <strong>OR ALTER</strong>: the modern <c>CREATE OR ALTER PROCEDURE</c>
     /// syntax does an upsert — creates when missing, replaces when present
-    /// (preserving the <see cref="SchemaObject.ObjectId"/>). Pure
+    /// (preserving the <see cref="SchemaObject.ObjectId"/> and
+    /// <see cref="SchemaObject.CreateDate"/>, advancing
+    /// <see cref="SchemaObject.ModifyDate"/>). Pure
     /// <c>CREATE PROCEDURE</c> on an existing name raises Msg 2714; pure
-    /// <c>ALTER PROCEDURE</c> on a missing name raises Msg 208.
+    /// <c>ALTER PROCEDURE</c> on a missing name raises Msg 208, and on a name
+    /// another object kind holds, Msg 2010.
     /// </para>
     /// <para>
-    /// <strong>Fidelity gaps</strong>: real SQL Server enforces Msg 111 (the
-    /// "CREATE/ALTER PROCEDURE must be the first statement in a query batch"
-    /// rule). The simulator doesn't (same stance as scalar UDFs / views —
-    /// no <c>GO</c> support means batch boundaries are CommandText
-    /// boundaries, so the rule has no enforcement target). <c>WITH
-    /// RECOMPILE</c> / <c>EXECUTE AS</c> / <c>ENCRYPTION</c> / <c>FOR
-    /// REPLICATION</c> parse and are silently ignored — they affect query-
-    /// planner / security / replication behavior the simulator doesn't
-    /// model.
+    /// <strong>Fidelity gaps</strong>: <c>WITH RECOMPILE</c> / <c>EXECUTE
+    /// AS</c> / <c>ENCRYPTION</c> / <c>FOR REPLICATION</c> parse and are
+    /// silently ignored — they affect query-planner / security / replication
+    /// behavior the simulator doesn't model.
     /// </para>
     /// </remarks>
     private static bool TryParseCreateProcedure(ParserContext context, bool isAlter, bool createOrAlter)
@@ -77,8 +75,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var procName = BatchContext.ParseObjectName(context);
-        if (!context.Batch.TryResolveSchema(procName, out var schema))
-            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(procName.ImmediateQualifier ?? Database.DefaultSchemaName);
+        var schema = ResolveModuleSchema(context, procName, isAlter);
 
         context.MoveNextRequired();
 
@@ -155,40 +152,34 @@ partial class Simulation
         if (!isAlter && !createOrAlter)
             PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE PROCEDURE", procName.Leaf, schema);
 
-        var existed = schema.Procedures.TryGetValue(procName.Leaf, out var existing);
-
         // CREATE-only (no OR ALTER) collides with any existing object of the
         // same name (procs share the namespace with tables / views /
-        // functions). ALTER requires the proc to exist.
-        if (!isAlter && !createOrAlter && schema.HasNameInSharedNamespace(procName.Leaf))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(procName.Leaf);
-        if (isAlter && !existed)
-            throw SimulatedSqlException.InvalidObjectName(procName);
-        // ALTER (and the ALTER-leg of CREATE OR ALTER on an existing proc)
-        // acquires Sch-M on the existing instance's SchemaLock before
-        // replacement so concurrent EXEC (which holds Sch-S via
-        // TryResolveProcedure) blocks our mutation until it finishes.
-        if (existed)
-            context.Batch.AcquireStatementLock(existing!.SchemaLock, LockMode.SchemaModification);
-
-        // ALTER preserves the existing object_id (probe-confirmed). CREATE
-        // and CREATE OR ALTER (on a missing name) allocate a fresh id.
-        var objectId = existed ? existing!.ObjectId : context.CurrentDatabase.AllocateObjectId();
+        // functions); either ALTER leg over a name another kind holds is Msg
+        // 2010, and bare ALTER on a free name is Msg 208. The helper also
+        // takes Sch-M on the instance being replaced, so a concurrent EXEC
+        // (holding Sch-S via TryResolveProcedure) blocks the swap.
+        var replaced = (Procedure?)ResolveModuleAlterTarget(
+            context, schema, procName, isAlter, createOrAlter,
+            schema.Procedures.TryGetValue(procName.Leaf, out var existing) ? existing : null);
 
         // Newlines before the body start, so per-call body errors report a
         // line relative to the whole CREATE statement (probe-confirmed).
         var procedure = new Procedure(
             schema,
             procName.Leaf,
-            objectId,
+            // ALTER preserves the existing object_id (probe-confirmed). CREATE
+            // and CREATE OR ALTER (on a missing name) allocate a fresh id.
+            replaced?.ObjectId ?? context.CurrentDatabase.AllocateObjectId(),
             [.. parameters],
             bodyText,
-            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow,
+            createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow,
             bodyLineOffset: CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart))
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
         };
+        if (replaced is not null)
+            procedure.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Procedures[procName.Leaf] = procedure;
         return true;
     }

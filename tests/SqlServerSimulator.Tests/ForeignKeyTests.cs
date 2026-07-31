@@ -632,4 +632,192 @@ public sealed class ForeignKeyTests
         _ = sim.ExecuteNonQuery("create table p (x int not null constraint pk_p primary key)");
         _ = sim.ExecuteNonQuery(sql);
     }
+
+    /// <summary>
+    /// A PERSISTED computed column is a legal referencing column in all three
+    /// declaration forms (probe-confirmed): the inline column tail with the
+    /// optional <c>FOREIGN KEY</c> noise phrase, the table-level list, and
+    /// <c>ALTER TABLE … ADD CONSTRAINT</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table c (id int not null primary key, base int not null, cc as base + 1 persisted foreign key references p(id))")]
+    [DataRow("create table c (id int not null primary key, base int not null, cc as base + 1 persisted references p(id))")]
+    [DataRow("create table c (id int not null primary key, base int not null, cc as base + 1 persisted, constraint fk_c foreign key (cc) references p(id))")]
+    public void ComputedPersisted_ReferencingColumn_EnforcesOnInsert(string createChild)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table p (id int not null primary key); {createChild}; insert p values (2)");
+        AreEqual(2, sim.ExecuteScalar("insert c (id, base) values (1, 1); select cc from c"));
+        var ex = sim.AssertSqlError("insert c (id, base) values (2, 99)", 547);
+        Assert.Contains("FOREIGN KEY constraint", ex.Message);
+        Assert.Contains("column 'id'", ex.Message);
+    }
+
+    [TestMethod]
+    public void ComputedPersisted_ReferencingColumn_AlterTableAddConstraint_Enforces()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (id int not null primary key);
+            create table c (id int not null primary key, base int not null, cc as base + 1 persisted);
+            insert p values (2);
+            alter table c add constraint fk_c foreign key (cc) references p(id)
+            """);
+        AreEqual(1, sim.ExecuteScalar("insert c (id, base) values (1, 1); select count(*) from c"));
+        _ = sim.AssertSqlError("insert c (id, base) values (2, 99)", 547);
+    }
+
+    /// <summary>
+    /// The computed value is re-checked when the columns it reads change: an
+    /// UPDATE that recomputes the FK column to an orphan value raises Msg 547
+    /// even though the UPDATE never names the FK column.
+    /// </summary>
+    [TestMethod]
+    public void ComputedPersisted_ReferencingColumn_UpdateOfUnderlyingColumn_Revalidates()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (id int not null primary key);
+            create table c (id int not null primary key, base int not null, cc as base + 1 persisted references p(id));
+            insert p values (2), (7);
+            insert c (id, base) values (1, 1)
+            """);
+        var ex = sim.AssertSqlError("update c set base = 90", 547);
+        Assert.Contains("UPDATE statement conflicted", ex.Message);
+        AreEqual(7, sim.ExecuteScalar("update c set base = 6; select cc from c"));
+    }
+
+    /// <summary>
+    /// Parent-side enforcement reaches the computed child column too: a
+    /// NO ACTION parent DELETE raises Msg 547 naming the computed column, and
+    /// ON DELETE CASCADE removes the whole child row (the one delete action a
+    /// computed referencing column allows, since it never writes the column).
+    /// </summary>
+    [TestMethod]
+    public void ComputedPersisted_ReferencingColumn_ParentDelete_NoActionRaisesAndCascadeRemoves()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (id int not null primary key);
+            create table c (id int not null primary key, base int not null, cc as base + 1 persisted references p(id));
+            insert p values (5);
+            insert c (id, base) values (1, 4)
+            """);
+        var ex = sim.AssertSqlError("delete p where id = 5", 547);
+        Assert.Contains("REFERENCE constraint", ex.Message);
+        Assert.Contains("column 'cc'", ex.Message);
+
+        var cascade = new Simulation();
+        _ = cascade.ExecuteNonQuery("""
+            create table p (id int not null primary key);
+            create table c (id int not null primary key, base int not null, cc as base + 1 persisted,
+                            constraint fk_c foreign key (cc) references p(id) on delete cascade);
+            insert p values (5);
+            insert c (id, base) values (1, 4);
+            delete p where id = 5
+            """);
+        AreEqual(0, cascade.ExecuteScalar("select count(*) from c"));
+    }
+
+    /// <summary>
+    /// A non-persisted computed referencing column is rejected — <b>Msg 1764</b>
+    /// from the table-level and ALTER forms, which reach constraint resolution,
+    /// and <b>Msg 8183</b> from the inline column form, which real rejects at
+    /// parse before resolution (probe-confirmed split).
+    /// </summary>
+    [TestMethod]
+    public void ComputedNonPersisted_ReferencingColumn_TableLevel_Raises1764()
+    {
+        var ex = new Simulation().AssertSqlError("""
+            create table p (id int not null primary key);
+            create table c (id int not null primary key, base int not null, cc as base + 1,
+                            constraint fk_c foreign key (cc) references p(id))
+            """, 1764);
+        AreEqual("Computed Column 'cc' in table 'c' is invalid for use in 'FOREIGN KEY CONSTRAINT' because it is not persisted.", ex.Message);
+    }
+
+    [TestMethod]
+    public void ComputedNonPersisted_ReferencingColumn_AlterTableAddConstraint_Raises1764()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (id int not null primary key);
+            create table c (id int not null primary key, base int not null, cc as base + 1)
+            """);
+        var ex = sim.AssertSqlError("alter table c add constraint fk_c foreign key (cc) references p(id)", 1764);
+        AreEqual("Computed Column 'cc' in table 'c' is invalid for use in 'FOREIGN KEY CONSTRAINT' because it is not persisted.", ex.Message);
+    }
+
+    [TestMethod]
+    [DataRow("create table c (id int not null primary key, base int not null, cc as base + 1 foreign key references p(id))")]
+    [DataRow("create table c (id int not null primary key, base int not null, cc as base + 1 constraint fk_c references p(id))")]
+    public void ComputedNonPersisted_ReferencingColumn_Inline_Raises8183(string createChild)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table p (id int not null primary key)");
+        var ex = sim.AssertSqlError(createChild, 8183);
+        AreEqual(
+            "Only UNIQUE or PRIMARY KEY constraints can be created on computed columns, while CHECK, FOREIGN KEY, and NOT NULL constraints require that computed columns be persisted.",
+            ex.Message);
+    }
+
+    /// <summary>
+    /// Referential actions that would have to <em>write</em> the computed
+    /// referencing column are rejected at declaration: <b>Msg 1765</b> for
+    /// ON DELETE SET NULL / SET DEFAULT, <b>Msg 1715</b> for every ON UPDATE
+    /// action but NO ACTION. Probed precedence puts 1765 ahead of 1715.
+    /// </summary>
+    [TestMethod]
+    [DataRow("on delete set null", 1765, "Only NO ACTION and CASCADE referential delete actions are allowed for referencing computed column 'cc'.")]
+    [DataRow("on delete set default", 1765, "Only NO ACTION and CASCADE referential delete actions are allowed for referencing computed column 'cc'.")]
+    [DataRow("on delete set null on update cascade", 1765, "Only NO ACTION and CASCADE referential delete actions are allowed for referencing computed column 'cc'.")]
+    [DataRow("on update cascade", 1715, "Only NO ACTION referential update action is allowed for referencing computed column 'cc'.")]
+    [DataRow("on update set null", 1715, "Only NO ACTION referential update action is allowed for referencing computed column 'cc'.")]
+    public void ComputedPersisted_ReferencingColumn_WritingReferentialAction_Rejected(string actions, int expectedNumber, string expectedTail)
+    {
+        var ex = new Simulation().AssertSqlError($"""
+            create table p (id int not null primary key);
+            create table c (id int not null primary key, base int null, cc as base + 1 persisted,
+                            constraint fk_c foreign key (cc) references p(id) {actions})
+            """, expectedNumber);
+        AreEqual($"Foreign key 'fk_c' creation failed. {expectedTail}", ex.Message);
+    }
+
+    /// <summary>
+    /// The referenced (parent) side accepts a PERSISTED computed column when it
+    /// carries the PK / UNIQUE the FK needs, and enforces against its stored
+    /// value — probe-confirmed, including the Msg 547 naming the computed
+    /// column. Real rejects a <em>non-persisted</em> computed referenced column
+    /// with Msg 1784, which the simulator never reaches: UNIQUE on a
+    /// non-persisted computed column is itself unbuilt, so the parent key can't
+    /// exist in the first place.
+    /// </summary>
+    [TestMethod]
+    public void ComputedPersisted_ReferencedColumn_EnforcesAgainstStoredValue()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (id int not null primary key, b int not null, pc as b * 2 persisted unique);
+            create table c (id int not null primary key, r int null, constraint fk_c foreign key (r) references p(pc));
+            insert p (id, b) values (1, 21)
+            """);
+        AreEqual(1, sim.ExecuteScalar("insert c values (1, 42); select count(*) from c"));
+        var ex = sim.AssertSqlError("insert c values (2, 43)", 547);
+        Assert.Contains("column 'pc'", ex.Message);
+    }
+
+    /// <summary>
+    /// The <c>FOREIGN KEY</c> noise phrase an inline column-level FK may carry
+    /// ahead of <c>REFERENCES</c> is accepted on an ordinary column too, named
+    /// or not.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table c (id int not null primary key, r int foreign key references p(id))")]
+    [DataRow("create table c (id int not null primary key, r int constraint fk_c foreign key references p(id))")]
+    public void InlineForeignKeyNoisePhrase_OnOrdinaryColumn_Accepted(string createChild)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table p (id int not null primary key); {createChild}");
+        _ = sim.AssertSqlError("insert c values (1, 99)", 547);
+    }
 }

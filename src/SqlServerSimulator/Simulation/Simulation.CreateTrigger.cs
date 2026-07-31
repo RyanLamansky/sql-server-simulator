@@ -242,6 +242,8 @@ partial class Simulation
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
         };
+        if (existed)
+            trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         triggerSchema.Triggers[triggerName.Leaf] = trigger;
         return true;
     }

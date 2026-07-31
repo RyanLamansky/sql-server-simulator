@@ -33,7 +33,7 @@ internal sealed class ObjectProperty : Expression
         var propValue = this.propertyArg.Run(runtime);
         if (idValue.IsNull || propValue.IsNull)
             return SqlValue.Null(SqlType.Int32);
-        var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
+        var id = ScalarArguments.CoerceToInt(idValue);
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
         var obj = FindObject(runtime.Batch.CurrentDatabase, id);
         return obj is null ? SqlValue.Null(SqlType.Int32)
@@ -58,6 +58,8 @@ internal sealed class ObjectProperty : Expression
                 if (tr.ObjectId == id) return tr;
             foreach (var s in schema.Sequences.Values)
                 if (s.ObjectId == id) return s;
+            foreach (var sn in schema.Synonyms.Values)
+                if (sn.ObjectId == id) return sn;
         }
         return null;
     }
@@ -77,7 +79,8 @@ internal sealed class ObjectProperty : Expression
                 || schema.Procedures.Values.Contains(obj)
                 || schema.Functions.Values.Contains(obj)
                 || schema.Triggers.Values.Contains(obj)
-                || schema.Sequences.Values.Contains(obj))
+                || schema.Sequences.Values.Contains(obj)
+                || schema.Synonyms.Values.Contains(obj))
             {
                 return schema;
             }

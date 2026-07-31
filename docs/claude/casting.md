@@ -20,6 +20,18 @@ Per-source-category rule applied after `SqlValue.CoerceTo`:
 
 **CAST/CONVERT context defaults missing length to 30** for `varchar`/`nvarchar`/`varbinary` (column-context default is 1).
 
+## Numeric narrowing overflow: the source-type-keyed error family
+
+A numeric value overflowing an integer conversion target picks its error by **source type**, identically across CAST/CONVERT, INSERT/UPDATE column assignment, `SET @v`, and ALTER COLUMN (probe-confirmed 2026-07-31; chooser = `SimulatedSqlException.TryConversionOverflow`, called from `Cast`'s runtime catch, `CoerceForInsert`, the ALTER COLUMN per-row coercion, and the float/money paths inside `SqlValue.CoerceTo`):
+
+- `tinyint`/`smallint`/`int` source → **Msg 220** `Arithmetic overflow error for data type <t>, value = <v>.` (state: tinyint 2, smallint 1).
+- `bigint` or `decimal`/`numeric` source → generic **Msg 8115**.
+- `float`/`real` source → **Msg 232** `Arithmetic overflow error for type <t>, value = <v>.` with six fractional digits (`F6`), state target-keyed tinyint 1 / smallint 2 / int 3; a `bigint` target stays Msg 8115.
+- `money` source splinters per target: tinyint → Msg 232 state 11; smallint → **Msg 220 state 7 with the value in money's ×10000 tick representation** (70000 reports `value = 700000000`); int → **Msg 237** `There is insufficient result space to convert a money value to int.`; `smallmoney` takes none of these and stays Msg 8115.
+- String source → Msg 244 (`INT1`/`INT2`, state 1/2 target-keyed) for tinyint/smallint, Msg 248 for int, Msg 8115 for bigint — see the string→integer section.
+
+TRY_CAST/TRY_CONVERT swallow all of these (232 and 237 are in the swallow set).
+
 ## `float`/`real` → `decimal`/`numeric`
 
 A permitted conversion (implicit and explicit), **not** the Msg 529 explicit-conversion rejection — `CoerceToDecimal` converts through .NET `decimal` (rounding half-away-from-zero to the target scale; `real` converts from its own 4-byte value, keeping the ~7-significant-digit representation real does).

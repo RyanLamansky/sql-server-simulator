@@ -36,7 +36,7 @@ internal sealed partial class Selection
     /// reference. An alias wrapper is unwrapped first, so <c>c.name AS Col5</c>
     /// reports <c>c.name</c>.
     /// </summary>
-    internal static MultiPartName?[]? ProjectionSourceReferences(List<Expression> projections)
+    internal static MultiPartName?[]? ProjectionSourceReferences(IReadOnlyList<Expression> projections)
     {
         MultiPartName?[]? sources = null;
         for (var i = 0; i < projections.Count; i++)
@@ -118,56 +118,83 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// The projected column an <em>unqualified</em> top-level ORDER BY term
+    /// names by its output alias, or -1. A qualified term never matches here:
+    /// real binds <c>alias.col</c> to the source column, so
+    /// <c>SELECT c.extra AS id, c.id AS other … UNION … ORDER BY c.id</c> sorts
+    /// by <c>other</c> even though an output alias <c>id</c> exists
+    /// (probe-confirmed).
+    /// </summary>
+    private static int OutputNameOrdinalOf(MultiPartName name, string[] columnNames)
+    {
+        if (name.ImmediateQualifier is null)
+        {
+            for (var j = 0; j < columnNames.Length; j++)
+            {
+                if (BuiltInToken.Equals(columnNames[j], name.Leaf))
+                    return j;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// The projected column whose own *source* reference a top-level ORDER BY
+    /// term names, or -1. <c>SELECT num AS Col2 … UNION … ORDER BY num</c>
+    /// sorts by Col2 on real (probe-confirmed) — the spelling an ORM is left
+    /// with when it aliases every output positionally.
+    /// </summary>
+    private static int ProjectionSourceOrdinalOf(MultiPartName name, MultiPartName?[]? projectionSources)
+    {
+        if (projectionSources is not null)
+        {
+            for (var j = 0; j < projectionSources.Length; j++)
+            {
+                if (projectionSources[j] is { } source && SourceReferenceMatches(source, name))
+                    return j;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
     /// Computes ORDER BY keys for the top-level (post-set-op) sort directly off
     /// an encoded <c>byte[]</c> row, decoding only the columns an ORDER BY item
     /// references rather than the whole tuple. References resolve against the
-    /// inner plan's projected column names / ordinals only — there are no source
-    /// columns to fall back to (an unresolved name is Msg 207 — real reserves
-    /// Msg 104 for a name that *is* a source column but isn't projected, which
-    /// needs the inner plan's full source column set to tell apart), matching the
-    /// <see cref="ComputeOrderKeys"/> path this mirrors. <paramref name="columns"/>
-    /// is the schema's cached <see cref="HeapColumn"/>[] so each per-column decode
-    /// hits the RowLayout geometry cache.
+    /// inner plan's projected columns / ordinals only — there are no source
+    /// columns in the combined stream to fall back to, which is why
+    /// <see cref="ValidateSetOpOrderByTerms"/> has already rejected every term
+    /// that isn't one of them (Msg 104 / 207 / 4104 / 108 at parse, the way
+    /// real binds it). <paramref name="columns"/> is the schema's cached
+    /// <see cref="HeapColumn"/>[] so each per-column decode hits the RowLayout
+    /// geometry cache.
     /// </summary>
     private static SqlValue[] ComputeTopLevelOrderKeys(
         List<OrderBySpec> orderBy,
         string[] columnNames,
         HeapColumn[] columns,
-        string?[]? sourceColumnNames,
+        MultiPartName?[]? projectionSources,
         byte[] rowBytes,
         BatchContext batch)
     {
-        // Only a *bare* reference may resolve through the source-column
-        // fallback below. Real accepts `… UNION … ORDER BY num` (num behind a
-        // projected column) but rejects any expression over such a name —
-        // `ORDER BY CASE WHEN num IS NULL …` is Msg 104 — so letting the
-        // fallback fire inside an expression would accept what real refuses.
+        // Only a *bare* reference may resolve through the projection-source
+        // fallback: real accepts `… UNION … ORDER BY num` (num behind a
+        // projected column) but rejects any expression over such a name.
+        // The parse-time validation enforces that for a validated plan; the
+        // gate also holds the line for the shapes it declines to judge (a
+        // branch whose FROM sources weren't captured, or a skip-mode
+        // placeholder source).
         var termIsBareReference = false;
         SqlValue ResolveByOutputName(MultiPartName name)
         {
-            for (var j = 0; j < columnNames.Length; j++)
-            {
-                if (BuiltInToken.Equals(columnNames[j], name.Leaf))
-                    return RowDecoder.DecodeColumn(columns, rowBytes, j);
-            }
-
-            // A top-level ORDER BY over a set operation may also name the
-            // *source* column behind a projected one, not just its output
-            // alias: `SELECT num AS Col2 … UNION … ORDER BY num` sorts by
-            // Col2 on real (probe-confirmed), which is what ORMs emit when
-            // they alias every output positionally. Checked after the output
-            // names so an alias that shadows a different source column still
-            // wins.
-            if (termIsBareReference && sourceColumnNames is not null)
-            {
-                for (var j = 0; j < sourceColumnNames.Length; j++)
-                {
-                    if (sourceColumnNames[j] is { } source && BuiltInToken.Equals(source, name.Leaf))
-                        return RowDecoder.DecodeColumn(columns, rowBytes, j);
-                }
-            }
-
-            throw SimulatedSqlException.InvalidColumnName(name);
+            var ordinal = OutputNameOrdinalOf(name, columnNames);
+            if (ordinal < 0 && termIsBareReference)
+                ordinal = ProjectionSourceOrdinalOf(name, projectionSources);
+            return ordinal >= 0
+                ? RowDecoder.DecodeColumn(columns, rowBytes, ordinal)
+                : throw SimulatedSqlException.InvalidColumnName(name);
         }
 
         var keys = new SqlValue[orderBy.Count];

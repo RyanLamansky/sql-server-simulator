@@ -94,7 +94,7 @@ internal sealed class DbName : Expression
         var v = this.idArg.Run(runtime);
         if (v.IsNull)
             return SqlValue.Null(SqlType.SystemName);
-        var requested = v.CoerceTo(SqlType.Int32).AsInt32;
+        var requested = ScalarArguments.CoerceToInt(v);
         foreach (var (db, id) in DbId.DatabasesWithIds(runtime.Batch.Connection.Simulation))
         {
             if (id == requested)
@@ -230,7 +230,7 @@ internal sealed class FileNameLookup : Expression
         if (value.IsNull)
             return SqlValue.Null(SqlType.SystemName);
         var database = runtime.Batch.CurrentDatabase;
-        return value.CoerceTo(SqlType.Int32).AsInt32 switch
+        return ScalarArguments.CoerceToInt(value) switch
         {
             1 => SqlValue.FromString(SqlType.SystemName, database.Name + "_Data"),
             2 => SqlValue.FromString(SqlType.SystemName, database.Name + "_Log"),
@@ -302,7 +302,11 @@ internal sealed class FilegroupName : Expression
         var value = this.idArg.Run(runtime);
         if (value.IsNull)
             return SqlValue.Null(SqlType.SystemName);
-        var requested = value.CoerceTo(SqlType.Int32).AsInt32;
+        // The parameter is declared smallint, so an id past smallint range
+        // reports the narrowing to *that* type — Msg 8115 "converting
+        // expression to data type smallint" for a bigint id, and the
+        // value-bearing Msg 220 for an int one (probe-confirmed 2026-07-31).
+        var requested = ScalarArguments.CoerceToSmallInt(value);
         foreach (var (name, id) in runtime.Batch.CurrentDatabase.Filegroups)
         {
             if (id == requested)

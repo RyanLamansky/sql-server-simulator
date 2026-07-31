@@ -79,14 +79,7 @@ internal sealed class ConvertExpression : Expression
             // any other narrowing-to-int.
             if (styleValue.Type.Category is SqlTypeCategory.String or SqlTypeCategory.UniqueIdentifier or SqlTypeCategory.DateTime)
                 throw SimulatedSqlException.InvalidArgumentDataType(styleValue.Type.SqlServerName, 3, this.tryMode ? "try_convert" : "convert");
-            try
-            {
-                styleCode = styleValue.CoerceTo(SqlType.Int32).AsInt32;
-            }
-            catch (OverflowException)
-            {
-                throw SimulatedSqlException.ArithmeticOverflow(SqlType.Int32.SqlServerName);
-            }
+            styleCode = ScalarArguments.CoerceToInt(styleValue);
         }
 
         var sourceValue = this.source.Run(runtime);

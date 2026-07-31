@@ -49,6 +49,9 @@ internal sealed class PatIndex : Expression
         var isBig = IsBigResult(s.Type);
         SqlType resultType = isBig ? SqlType.BigInt : SqlType.Int32;
         var p = this.pattern.Run(runtime);
+        // The subject takes a text / ntext document (it is searched, not
+        // transformed); the pattern refuses every legacy LOB.
+        StringScalars.RejectLegacyLob(p, "patindex", argumentIndex: 1);
         if (p.IsNull)
             return SqlValue.Null(resultType);
 

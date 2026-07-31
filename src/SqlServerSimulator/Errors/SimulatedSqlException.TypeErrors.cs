@@ -1,3 +1,4 @@
+using System.Globalization;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -281,25 +282,98 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 232: a numeric result overflowed the target
     /// integer type — fired by <c>POWER</c> when the float-internal result
-    /// can't be coerced back to the input's integer type. Distinct from
-    /// Msg 8115 (generic arithmetic overflow) by message wording: this one
-    /// embeds the source numeric value, while 8115 embeds only the target
-    /// type. The simulator formats <paramref name="formattedValue"/> as
-    /// SQL Server does — six fractional digits via <c>F6</c>.
+    /// can't be coerced back to the input's integer type, and by float /
+    /// real / money conversion overflows via
+    /// <see cref="TryConversionOverflow"/>. Distinct from Msg 8115 (generic
+    /// arithmetic overflow) by message wording: this one embeds the source
+    /// numeric value, while 8115 embeds only the target type. The simulator
+    /// formats <paramref name="formattedValue"/> as SQL Server does — six
+    /// fractional digits via <c>F6</c>. The state is target-keyed for the
+    /// conversion path (tinyint 1, smallint 2, int 3, money source 11);
+    /// the default 3 is <c>POWER</c>'s int-result state.
     /// </summary>
-    internal static SimulatedSqlException ArithmeticOverflowForType(string typeName, string formattedValue) =>
-        new($"Arithmetic overflow error for type {typeName}, value = {formattedValue}.", 232, 16, 3);
+    internal static SimulatedSqlException ArithmeticOverflowForType(string typeName, string formattedValue, byte state = 3) =>
+        new($"Arithmetic overflow error for type {typeName}, value = {formattedValue}.", 232, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 220: integer-family narrowing overflow during
-    /// ALTER COLUMN per-row coercion (e.g. <c>int</c> → <c>tinyint</c> on a
-    /// value &gt; 255). Probe-confirmed verbatim wording: <c>"Arithmetic
-    /// overflow error for data type tinyint, value = 500."</c>; embeds the
-    /// target type's SqlServer name (lowercase) and the offending value's
-    /// invariant-culture string form.
+    /// column assignment, CAST, or ALTER COLUMN per-row coercion (e.g.
+    /// <c>int</c> → <c>tinyint</c> on a value &gt; 255). Probe-confirmed
+    /// verbatim wording: <c>"Arithmetic overflow error for data type tinyint,
+    /// value = 500."</c>; embeds the target type's SqlServer name (lowercase)
+    /// and the offending value's invariant-culture string form. The state is
+    /// target-keyed: tinyint 2, smallint 1, and 7 for a money source
+    /// reporting its ×10000 tick value.
     /// </summary>
-    internal static SimulatedSqlException ArithmeticOverflowForDataType(string targetTypeName, string formattedValue) =>
-        new($"Arithmetic overflow error for data type {targetTypeName}, value = {formattedValue}.", 220, 16, 2);
+    internal static SimulatedSqlException ArithmeticOverflowForDataType(string targetTypeName, string formattedValue, byte state = 2) =>
+        new($"Arithmetic overflow error for data type {targetTypeName}, value = {formattedValue}.", 220, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 237: a <c>money</c> source overflowed an
+    /// <c>int</c> conversion target. The money-to-integer overflow surface is
+    /// splintered per target — see <see cref="TryConversionOverflow"/> —
+    /// and this is the int cell. Same text as Msg 234's string-target
+    /// variant, different error number (probe-confirmed 2026-07-31).
+    /// </summary>
+    internal static SimulatedSqlException InsufficientResultSpaceForMoneyToInt() =>
+        new("There is insufficient result space to convert a money value to int.", 237, 16, 1);
+
+    /// <summary>
+    /// Chooses the SQL Server error for a numeric source value that overflowed
+    /// a narrower conversion target, or <see langword="null"/> when no special
+    /// case applies and the caller's own generic Msg 8115 stands. The source
+    /// type picks the error family and the target picks the state —
+    /// probe-confirmed against SQL Server 2025 (2026-07-31), identical across
+    /// CAST/CONVERT, INSERT/UPDATE column assignment, <c>SET @v</c>, and
+    /// ALTER COLUMN:
+    /// <list type="bullet">
+    /// <item><c>tinyint</c> / <c>smallint</c> / <c>int</c> source → the
+    /// value-bearing Msg 220 (tinyint state 2, smallint state 1); a
+    /// <c>bigint</c> source stays Msg 8115.</item>
+    /// <item><c>float</c> / <c>real</c> source → the value-bearing Msg 232
+    /// with six fractional digits (state 1/2/3 for tinyint/smallint/int); a
+    /// <c>bigint</c> target stays Msg 8115.</item>
+    /// <item><c>money</c> source → Msg 232 state 11 for tinyint, Msg 220
+    /// state 7 for smallint with the value in money's ×10000 tick
+    /// representation, Msg 237 for int; <c>smallmoney</c> takes none of
+    /// these and stays Msg 8115.</item>
+    /// </list>
+    /// </summary>
+    internal static SimulatedSqlException? TryConversionOverflow(SqlValue source, SqlType targetType)
+    {
+        if (targetType is TinyIntSqlType or SmallIntSqlType
+            && SqlType.IsIntegerCategory(source.Type) && source.Type != SqlType.BigInt)
+        {
+            return ArithmeticOverflowForDataType(
+                targetType.SqlServerName,
+                source.CoerceTo(SqlType.BigInt).AsInt64.ToString(CultureInfo.InvariantCulture),
+                state: targetType is TinyIntSqlType ? (byte)2 : (byte)1);
+        }
+
+        if (source.Type == SqlType.Float || source.Type == SqlType.Real)
+        {
+            var state = targetType is TinyIntSqlType ? (byte)1
+                : targetType is SmallIntSqlType ? (byte)2
+                : targetType == SqlType.Int32 ? (byte)3
+                : (byte)0;
+            return state == 0 ? null : ArithmeticOverflowForType(
+                targetType.SqlServerName,
+                source.CoerceTo(SqlType.Float).AsDouble.ToString("F6", CultureInfo.InvariantCulture),
+                state);
+        }
+
+        if (source.Type == SqlType.Money)
+        {
+            if (targetType is TinyIntSqlType)
+                return ArithmeticOverflowForType("tinyint", source.AsMoney.ToString("F6", CultureInfo.InvariantCulture), state: 11);
+            if (targetType is SmallIntSqlType)
+                return ArithmeticOverflowForDataType("smallint", (source.AsMoney * 10000m).ToString("F0", CultureInfo.InvariantCulture), state: 7);
+            if (targetType == SqlType.Int32)
+                return InsufficientResultSpaceForMoneyToInt();
+        }
+
+        return null;
+    }
 
     /// <summary>
     /// Mimics SQL Server error 8170: a non-NULL <c>uniqueidentifier</c> was
@@ -395,10 +469,11 @@ partial class SimulatedSqlException
     /// (<c>INT2</c>). Distinct from the int-overflow variant
     /// (<see cref="OverflowConvertingToInt"/>, Msg 248) and the generic
     /// arithmetic-overflow (<see cref="ArithmeticOverflow"/>, Msg 8115)
-    /// used for <c>bigint</c> overflows.
+    /// used for <c>bigint</c> overflows. The state is target-keyed:
+    /// <c>INT1</c> 1, <c>INT2</c> 2 (probe-confirmed 2026-07-31).
     /// </summary>
-    internal static SimulatedSqlException OverflowConvertingNarrowInt(SqlType sourceType, string sourceValue, string targetTypeAlias) =>
-        new($"The conversion of the {sourceType.SqlServerName} value '{sourceValue}' overflowed an {targetTypeAlias} column. Use a larger integer column.", 244, 16, 1);
+    internal static SimulatedSqlException OverflowConvertingNarrowInt(SqlType sourceType, string sourceValue, string targetTypeAlias, byte state) =>
+        new($"The conversion of the {sourceType.SqlServerName} value '{sourceValue}' overflowed an {targetTypeAlias} column. Use a larger integer column.", 244, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 248: the int-target counterpart of Msg 244.
@@ -564,12 +639,25 @@ partial class SimulatedSqlException
         new($"Argument data type {typeName} is invalid for argument {argumentIndex} of {functionName} function.", 8116, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 8120 — the bit-manipulation family raises
-    /// this when a position / value argument falls outside its allowed
-    /// range (e.g. <c>GET_BIT(int, 32)</c> exceeds the int bit-width).
+    /// Mimics SQL Server's Msg 9838 — <c>GET_BIT</c> / <c>SET_BIT</c> raise
+    /// this when the position argument falls outside the first operand's bit
+    /// width (<c>GET_BIT(int, 32)</c> exceeds int's 0-to-31 range). The check
+    /// runs against the argument widened to <c>bigint</c>, so a position past
+    /// <c>int</c> range lands here rather than in a conversion overflow.
+    /// State is function-keyed: 1 for <c>get_bit</c>, 2 for <c>set_bit</c>
+    /// (probe-confirmed 2026-07-31).
     /// </summary>
-    internal static SimulatedSqlException BitFunctionPositionOutOfRange(string functionName, int argumentIndex, int min, int max) =>
-        new($"Parameter {argumentIndex} in function '{functionName}' is out of range {min} to {max}.", 8120, 16, 1);
+    internal static SimulatedSqlException BitFunctionPositionOutOfRange(string functionName, int maxPosition, byte state) =>
+        new($"Parameter 2 in function '{functionName}' is out of range 0 to {maxPosition}.", 9838, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 9839 — <c>SET_BIT</c>'s third argument carries
+    /// the bit to write and must be exactly 0 or 1; any other value, at any
+    /// magnitude, reports this rather than a range or conversion error
+    /// (probe-confirmed 2026-07-31).
+    /// </summary>
+    internal static SimulatedSqlException BitFunctionValueNotZeroOrOne() =>
+        new("Parameter 3 in function 'set_bit' must be 0 or 1.", 9839, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 9819 — <c>TRANSLATE(input, chars, translations)</c>

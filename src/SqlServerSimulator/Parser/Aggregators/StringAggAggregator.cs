@@ -55,6 +55,7 @@ internal sealed class StringAggAggregator : Aggregator
 
     public override void Add(SqlValue value)
     {
+        StringScalars.RejectLegacyLob(value, "string_agg");
         if (value.IsNull)
             return;
 
@@ -73,6 +74,7 @@ internal sealed class StringAggAggregator : Aggregator
     /// </summary>
     public void AddOrdered(SqlValue value, SqlValue[] orderKeys)
     {
+        StringScalars.RejectLegacyLob(value, "string_agg");
         if (value.IsNull)
             return;
         this.orderedBuffer!.Add(new OrderedRow(value.AsString, this.lastSeparator, orderKeys));

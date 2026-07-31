@@ -983,8 +983,8 @@ internal readonly partial struct SqlValue
     /// but kept for symmetry).
     /// </summary>
     private static SimulatedSqlException OverflowOnConvert(SqlType sourceType, string sourceValue, SqlType target) =>
-        target == SqlType.TinyInt ? SimulatedSqlException.OverflowConvertingNarrowInt(sourceType, sourceValue, "INT1")
-        : target == SqlType.SmallInt ? SimulatedSqlException.OverflowConvertingNarrowInt(sourceType, sourceValue, "INT2")
+        target == SqlType.TinyInt ? SimulatedSqlException.OverflowConvertingNarrowInt(sourceType, sourceValue, "INT1", state: 1)
+        : target == SqlType.SmallInt ? SimulatedSqlException.OverflowConvertingNarrowInt(sourceType, sourceValue, "INT2", state: 2)
         : target == SqlType.Int32 ? SimulatedSqlException.OverflowConvertingToInt(sourceType, sourceValue)
         : SimulatedSqlException.ArithmeticOverflow(target.ToString()!);
 
@@ -1041,7 +1041,10 @@ internal readonly partial struct SqlValue
         }
         catch (OverflowException)
         {
-            throw SimulatedSqlException.ArithmeticOverflow(target.ToString()!);
+            // money picks a different error per target (Msg 232 / 220 / 237
+            // for tinyint / smallint / int); smallmoney stays Msg 8115.
+            throw SimulatedSqlException.TryConversionOverflow(this, target)
+                ?? SimulatedSqlException.ArithmeticOverflow(target.ToString()!);
         }
     }
 
@@ -1160,7 +1163,10 @@ internal readonly partial struct SqlValue
         }
         catch (OverflowException)
         {
-            throw SimulatedSqlException.ArithmeticOverflow(target.ToString()!);
+            // float/real report the value-bearing Msg 232 for tinyint /
+            // smallint / int targets; a bigint target stays Msg 8115.
+            throw SimulatedSqlException.TryConversionOverflow(this, target)
+                ?? SimulatedSqlException.ArithmeticOverflow(target.ToString()!);
         }
     }
 

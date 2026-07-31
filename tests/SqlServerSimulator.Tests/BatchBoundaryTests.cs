@@ -1,3 +1,5 @@
+using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+
 namespace SqlServerSimulator;
 
 /// <summary>
@@ -37,6 +39,20 @@ public class BatchBoundaryTests
     }
 
     [TestMethod]
+    [DataRow("create view v as select 1 as x", "alter view v as select 2 as x", "ALTER VIEW")]
+    [DataRow("create function fn() returns int as begin return 1 end",
+        "alter function fn() returns int as begin return 2 end", "ALTER FUNCTION")]
+    public void AlterModuleMustBeFirstStatement_RaisesMsg111(string create, string alter, string expectedLabel)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(create);
+        simulation.AssertSqlError(
+            $"declare @x int = 1; {alter}",
+            111,
+            $"'{expectedLabel}' must be the first statement in a query batch.");
+    }
+
+    [TestMethod]
     public void AlterTriggerMustBeFirstStatement_RaisesMsg111()
     {
         var simulation = new Simulation();
@@ -49,12 +65,59 @@ public class BatchBoundaryTests
             "'ALTER TRIGGER' must be the first statement in a query batch.");
     }
 
+    /// <summary>
+    /// The state byte identifies the offending statement kind. Probe-confirmed
+    /// 2026-07-31 — real also carries 12 for CREATE RULE and 13 for CREATE
+    /// DEFAULT, neither of which the simulator parses.
+    /// </summary>
     [TestMethod]
-    public void CreateOrAlterProcedure_UsesProcedureLabel()
-        => new Simulation().AssertSqlError(
-            "declare @x int = 1; create or alter procedure p as select 2",
-            111,
-            "'CREATE/ALTER PROCEDURE' must be the first statement in a query batch.");
+    [DataRow("create table t (id int); create proc p as select 1", (byte)1)]
+    [DataRow("create table t (id int); create function fn() returns int as begin return 1 end", (byte)4)]
+    [DataRow("create table t (id int); create trigger tr on t after insert as select 1", (byte)6)]
+    [DataRow("create table t (id int); create view v as select 1 as x", (byte)9)]
+    [DataRow("create schema audit; create schema staging", (byte)14)]
+    public void Msg111_CarriesPerKindState(string sql, byte expectedState)
+        => AreEqual(expectedState, new Simulation().AssertSqlError(sql, 111).State);
+
+    /// <inheritdoc cref="Msg111_CarriesPerKindState"/>
+    [TestMethod]
+    public void Msg111_AlterTrigger_CarriesState7()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (id int)",
+            "create trigger tr on t after insert as select 1");
+        AreEqual((byte)7, simulation.AssertSqlError(
+            "declare @x int = 1; alter trigger tr on t after insert as select 2", 111).State);
+    }
+
+    /// <inheritdoc cref="Msg111_CarriesPerKindState"/>
+    [TestMethod]
+    [DataRow("create function fn() returns int as begin return 1 end",
+        "alter function fn() returns int as begin return 2 end", (byte)5)]
+    [DataRow("create view v as select 1 as x", "alter view v as select 2 as x", (byte)10)]
+    public void Msg111_AlterModule_CarriesPerKindState(string create, string alter, byte expectedState)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(create);
+        AreEqual(expectedState, simulation.AssertSqlError($"declare @x int = 1; {alter}", 111).State);
+    }
+
+    /// <summary>
+    /// <c>CREATE OR ALTER</c> reports under the plain <c>CREATE</c> label and
+    /// state, never the ALTER one — real names the statement by the verb it
+    /// started with (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create or alter procedure p as select 2", "CREATE/ALTER PROCEDURE", (byte)1)]
+    [DataRow("create or alter function fn() returns int as begin return 2 end", "CREATE FUNCTION", (byte)4)]
+    [DataRow("create or alter view v as select 2 as x", "CREATE VIEW", (byte)9)]
+    public void CreateOrAlter_UsesCreateLabelAndState(string statement, string expectedLabel, byte expectedState)
+    {
+        var exception = new Simulation().AssertSqlError($"declare @x int = 1; {statement}", 111);
+        AreEqual($"'{expectedLabel}' must be the first statement in a query batch.", exception.Message);
+        AreEqual(expectedState, exception.State);
+    }
 
     [TestMethod]
     public void LeadingSemicolons_DontCountAsFirstStatement()

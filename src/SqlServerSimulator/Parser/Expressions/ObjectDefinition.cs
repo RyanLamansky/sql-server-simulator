@@ -35,7 +35,7 @@ internal sealed class ObjectDefinition : Expression
         var idValue = this.idArg.Run(runtime);
         if (idValue.IsNull)
             return SqlValue.Null(SqlType.NVarcharMax);
-        var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
+        var id = ScalarArguments.CoerceToInt(idValue);
 
         var database = runtime.Batch.CurrentDatabase;
         foreach (var schema in database.Schemas.Values)

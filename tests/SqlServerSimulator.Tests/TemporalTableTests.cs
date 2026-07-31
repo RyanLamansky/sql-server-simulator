@@ -97,6 +97,39 @@ public sealed class TemporalTableTests
             13587,
             "Period column 'Vf' in a system-versioned temporal table cannot be nullable.");
 
+    /// <summary>
+    /// One row with a hand-built version timeline: <c>a1</c> over
+    /// [2020, 2021), <c>a2</c> over [2021, 2022), plus the engine-timed
+    /// current version <c>a3</c> whose period runs from the INSERT's
+    /// statement time to max datetime2. Writing the two history rows
+    /// directly — versioning off, insert, versioning back on, the shape
+    /// SqlPackage emits — pins the boundaries to literals, so the range
+    /// tests assert against exact endpoints instead of racing the clock.
+    /// </summary>
+    private static Simulation VersionedCustomer()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            CreateTemporalCustomers,
+            "insert Customers (Id, Name) values (1, 'a3')",
+            "alter table Customers set (system_versioning = off)",
+            """
+            insert CustomersHistory (Id, Name, Vf, Vt) values
+                (1, 'a1', '2020-01-01', '2021-01-01'),
+                (1, 'a2', '2021-01-01', '2022-01-01')
+            """,
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory))");
+        return simulation;
+    }
+
+    /// <summary>
+    /// Runs a <c>FOR SYSTEM_TIME</c> clause over <see cref="VersionedCustomer"/>
+    /// and returns the matched versions' names, comma-separated in name
+    /// order (null when nothing matches).
+    /// </summary>
+    private static object? Versions(Simulation simulation, string forSystemTime)
+        => simulation.ExecuteScalar($"select string_agg(Name, ',') within group (order by Name) from Customers for system_time {forSystemTime}");
+
     [TestMethod]
     public void ForSystemTimeAll_UnionsCurrentAndHistory()
     {
@@ -104,9 +137,163 @@ public sealed class TemporalTableTests
         simulation.ExecuteBatches(
             CreateTemporalCustomers,
             "insert Customers (Id, Name) values (1, 'a'), (2, 'b')",
+            // Separate the INSERT's statement time from the UPDATE's so the
+            // history row it writes has a non-zero duration: versions that
+            // start and end on the same tick are invisible to every
+            // FOR SYSTEM_TIME form, and DateTime.UtcNow advances in ~15.6ms
+            // steps on Windows.
+            "waitfor delay '00:00:00.050'",
             "update Customers set Name = 'A' where Id = 1");
         AreEqual(3, simulation.ExecuteScalar("select count(*) from Customers for system_time all"));
     }
+
+    [TestMethod]
+    public void ForSystemTimeBetween_IsInclusiveOfBothEndpoints()
+    {
+        var simulation = VersionedCustomer();
+        // A point range on the boundary two versions share takes the one
+        // starting there (start <= t2) and not the one ending there
+        // (end > t1 fails).
+        AreEqual("a2", Versions(simulation, "between '2021-01-01' and '2021-01-01'"));
+        AreEqual("a1,a2", Versions(simulation, "between '2020-01-01' and '2021-01-01'"));
+        // The current version starts after 2022, so a range ending there
+        // leaves it out; one reaching max datetime2 takes it.
+        AreEqual("a1,a2", Versions(simulation, "between '2020-01-01' and '2022-01-01'"));
+        AreEqual("a1,a2,a3", Versions(simulation, "between '2020-01-01' and '9999-12-31 23:59:59.9999999'"));
+    }
+
+    [TestMethod]
+    public void ForSystemTimeFromTo_ExcludesTheUpperEndpoint()
+    {
+        var simulation = VersionedCustomer();
+        // Same lower-bound rule as BETWEEN, but a version starting exactly
+        // at the upper endpoint is out — so the shared-boundary point range
+        // matches nothing at all.
+        AreEqual("a1", Versions(simulation, "from '2020-01-01' to '2021-01-01'"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from Customers for system_time from '2021-01-01' to '2021-01-01'"));
+        AreEqual("a1,a2", Versions(simulation, "from '2020-01-01' to '2022-01-01'"));
+    }
+
+    [TestMethod]
+    public void ForSystemTimeContainedIn_RequiresTheWholePeriodInsideTheRange()
+    {
+        var simulation = VersionedCustomer();
+        // Both endpoints are inclusive against the version's own endpoints:
+        // [2020, 2021) fits exactly inside (2020, 2021).
+        AreEqual("a1", Versions(simulation, "contained in ('2020-01-01', '2021-01-01')"));
+        AreEqual("a1,a2", Versions(simulation, "contained in ('2020-01-01', '2022-01-01')"));
+        // One tick inside a version's own start drops that version.
+        AreEqual("a2", Versions(simulation, "contained in ('2020-01-01 00:00:00.0000001', '2022-01-01')"));
+        // The current version's period ends at max datetime2, so only a
+        // range reaching that far contains it.
+        AreEqual("a1,a2,a3", Versions(simulation, "contained in ('2020-01-01', '9999-12-31 23:59:59.9999999')"));
+    }
+
+    [TestMethod]
+    public void ForSystemTimeRanges_AcceptVariableArguments()
+    {
+        var simulation = VersionedCustomer();
+        AreEqual("a1,a2", simulation.ExecuteScalar("""
+            declare @from datetime2(7) = '2020-01-01', @to datetime2(7) = '2022-01-01';
+            select string_agg(Name, ',') within group (order by Name)
+            from Customers for system_time between @from and @to
+            """));
+    }
+
+    [TestMethod]
+    public void ForSystemTimeRanges_MisorderedEndpoints_ReturnNoRows()
+    {
+        var simulation = VersionedCustomer();
+        // Real doesn't reject t2 < t1 — the predicate simply can't hold.
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from Customers for system_time between '2022-01-01' and '2020-01-01'"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from Customers for system_time from '2022-01-01' to '2020-01-01'"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from Customers for system_time contained in ('2022-01-01', '2020-01-01')"));
+    }
+
+    [TestMethod]
+    public void ForSystemTimeRanges_NullArgument_ReturnsNoRows()
+        => AreEqual(0, VersionedCustomer().ExecuteScalar("select count(*) from Customers for system_time between null and null"));
+
+    [TestMethod]
+    public void ForSystemTime_ZeroDurationVersion_IsInvisibleToEveryForm()
+    {
+        // A row updated twice inside one transaction leaves a history row
+        // whose period start equals its end. Real stores it — a direct
+        // SELECT against the history table returns it — but hides it from
+        // every FOR SYSTEM_TIME form.
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            CreateTemporalCustomers,
+            "insert Customers (Id, Name) values (1, 'current')",
+            "alter table Customers set (system_versioning = off)",
+            "insert CustomersHistory (Id, Name, Vf, Vt) values (9, 'zero', '2020-01-01', '2020-01-01')",
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory))");
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from CustomersHistory where Id = 9"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from Customers for system_time all where Id = 9"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from Customers for system_time as of '2020-01-01' where Id = 9"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from Customers for system_time between '2000-01-01' and '2030-01-01' where Id = 9"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from Customers for system_time from '2000-01-01' to '2030-01-01' where Id = 9"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from Customers for system_time contained in ('2000-01-01', '2030-01-01') where Id = 9"));
+    }
+
+    [TestMethod]
+    public void ForSystemTimeRange_NumericArgument_RaisesMsg206()
+        => new Simulation().AssertSqlError(
+            $"{CreateTemporalCustomers}; select * from Customers for system_time between 42 and 99",
+            206,
+            "Operand type clash: datetime2 is incompatible with int");
+
+    [TestMethod]
+    public void ForSystemTimeRange_TimeArgument_RaisesMsg402()
+        => new Simulation().AssertSqlError(
+            $"{CreateTemporalCustomers}; declare @t time = '10:00'; select * from Customers for system_time from @t to '2030-01-01'",
+            402,
+            "The data types datetime2 and time are incompatible in the greater than operator.");
+
+    [TestMethod]
+    public void ForSystemTimeRange_UnparseableStringArgument_RaisesMsg241()
+        => new Simulation().AssertSqlError(
+            $"{CreateTemporalCustomers}; select * from Customers for system_time contained in ('nonsense', '2030-01-01')",
+            241,
+            "Conversion failed when converting date and/or time from character string.");
+
+    [TestMethod]
+    public void ForSystemTime_FunctionArgument_RaisesMsg102()
+        => new Simulation().AssertSqlError(
+            $"{CreateTemporalCustomers}; select * from Customers for system_time as of sysutcdatetime()",
+            102,
+            "Incorrect syntax near 'sysutcdatetime'.");
+
+    [TestMethod]
+    public void ForSystemTime_UnknownForm_RaisesMsg102()
+        => new Simulation().AssertSqlError(
+            $"{CreateTemporalCustomers}; select * from Customers for system_time garbage",
+            102,
+            "Incorrect syntax near 'garbage'.");
+
+    [TestMethod]
+    public void ForSystemTimeContainedIn_WithoutParentheses_RaisesMsg102()
+        // Number only: the message names the offending literal, and the
+        // simulator renders a string literal with the quotes it was written
+        // with where real strips them — a token-rendering difference that
+        // predates this clause and is not what the test is about.
+        => _ = new Simulation().AssertSqlError(
+            $"{CreateTemporalCustomers}; select * from Customers for system_time contained in '2020-01-01', '2022-01-01'",
+            102);
+
+    [TestMethod]
+    public void ForSystemTimeBetween_WithToSeparator_RaisesMsg156()
+        => new Simulation().AssertSqlError(
+            $"{CreateTemporalCustomers}; select * from Customers for system_time between '2020-01-01' to '2022-01-01'",
+            156,
+            "Incorrect syntax near the keyword 'to'.");
+
+    [TestMethod]
+    public void ForSystemTimeRange_NonTemporal_RaisesMsg13544()
+        => new Simulation().AssertSqlError(
+            "create table dbo.NotTemp (id int); select * from dbo.NotTemp for system_time contained in ('2020-01-01', '2022-01-01')",
+            13544,
+            "Temporal FOR SYSTEM_TIME clause can only be used with system-versioned tables. 'simulated.dbo.NotTemp' is not a system-versioned table.");
 
     [TestMethod]
     public void ForSystemTimeAsOf_ReturnsPriorState()

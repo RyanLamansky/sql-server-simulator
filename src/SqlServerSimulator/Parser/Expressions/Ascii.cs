@@ -25,6 +25,7 @@ internal sealed class Ascii(ParserContext context) : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var v = source.Run(runtime);
+        StringScalars.RejectLegacyLob(v, "ascii");
         if (v.IsNull)
             return SqlValue.Null(SqlType.Int32);
         var isString = SqlType.IsStringCategory(v.Type);

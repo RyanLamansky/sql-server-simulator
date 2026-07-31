@@ -51,14 +51,20 @@ partial class Simulation
         var destTable = new HeapTable(leaf, destColumns, batch.CurrentDatabase.AllocateObjectId());
         var isLocalTemp = BatchContext.IsLocalTempName(leaf);
         var isGlobalTemp = !isLocalTemp && BatchContext.IsGlobalTempName(leaf);
+        Schema? schema = null;
         var destination = isLocalTemp
             ? batch.Connection.TempTables
             : isGlobalTemp
                 ? batch.Connection.Simulation.GlobalTempTables
-                : batch.TryResolveSchema(targetName, out var schema) ? schema.HeapTables
+                : batch.TryResolveSchema(targetName, out schema) ? schema.HeapTables
                     : throw SimulatedSqlException.InvalidObjectName(targetName);
         if (isGlobalTemp)
             destTable.OwnerConnection = batch.Connection;
+        // SELECT INTO creates a table, so it collides with every name in the
+        // shared object namespace — a synonym, view or procedure of that name
+        // raises Msg 2714 just as another table would (probe-confirmed).
+        if (schema is not null && schema.HasNameInSharedNamespace(leaf))
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
         if (!destination.TryAdd(leaf, destTable))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
         // A local temp created via SELECT INTO inside a module body is dropped

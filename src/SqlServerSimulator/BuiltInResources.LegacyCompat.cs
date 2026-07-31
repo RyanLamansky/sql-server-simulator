@@ -44,6 +44,10 @@ internal static partial class BuiltInResources
         "sp_set_session_context",
         "sp_getapplock",
         "sp_releaseapplock",
+        // sp_configure: reads / stages server-configuration options, installed
+        // by RECONFIGURE. 'nested triggers' is the one option with behavior
+        // wired — see docs/claude/triggers.md.
+        "sp_configure",
         // sp_rename: object / column / index rename — schema-migration tools
         // (Alembic's rename_table / alter_column, SSMS) emit it. Mutates
         // catalog state and surfaces the sev-10 "Caution" info message.
@@ -80,6 +84,15 @@ internal static partial class BuiltInResources
         "sp_pkeys",
         "sp_statistics_100",
         "sp_stored_procedures",
+        // The sp_help family — the formatted-metadata procs interactive
+        // sessions and SSMS's scripting fall back on. sp_help delegates to
+        // sp_helpindex / sp_helpconstraint for its per-table detail sets;
+        // sp_helptext reads the same stored module definition sys.sql_modules
+        // and OBJECT_DEFINITION project. See docs/claude/catalog-views.md.
+        "sp_help",
+        "sp_helpconstraint",
+        "sp_helpindex",
+        "sp_helptext",
     ];
 
     /// <summary>
@@ -154,11 +167,40 @@ internal static partial class BuiltInResources
             new("comment", SqlType.NVarchar, 255, true),
             new("status", SqlType.SmallInt, null, true),
         ];
-        var rows = BuildSysconfiguresRows();
-        var view = new CatalogView("sysconfigures", columns, (_, _) => rows);
+        // The stock rows are built here rather than in a static field because
+        // they read ConfigurationData, which lives in a sibling partial whose
+        // static initializers may not have run yet.
+        var stockRows = BuildSysconfiguresRows();
+        var view = new CatalogView("sysconfigures", columns, (batch, _) => SysconfiguresRowsFor(batch.Connection.Simulation, stockRows));
         views["sysconfigures"] = view;
         views["sys.sysconfigures"] = view;
         views["dbo.sysconfigures"] = view;
+    }
+
+    /// <summary>
+    /// The stock <c>sysconfigures</c> rows, with the simulation's
+    /// <c>sp_configure</c> writes layered over the <c>value</c> column so the
+    /// legacy projection agrees with <c>sys.configurations</c>. The narrower
+    /// legacy shape carries only the staged value, not the installed one.
+    /// </summary>
+    private static SqlValue[][] SysconfiguresRowsFor(Simulation simulation, SqlValue[][] stockRows)
+    {
+        if (simulation.ServerConfiguration.IsEmpty && !simulation.EnableClr)
+            return stockRows;
+
+        var rows = (SqlValue[][])stockRows.Clone();
+        for (var i = 0; i < rows.Length; i++)
+        {
+            var (configured, _) = EffectiveConfigurationValues(simulation, i);
+            if (configured == ConfigurationData[i].Value)
+                continue;
+
+            var row = (SqlValue[])rows[i].Clone();
+            row[0] = SqlValue.FromInt32(configured);
+            rows[i] = row;
+        }
+
+        return rows;
     }
 
     private static SqlValue[][] BuildSysconfiguresRows()

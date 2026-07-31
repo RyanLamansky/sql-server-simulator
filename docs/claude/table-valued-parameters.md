@@ -170,7 +170,10 @@ The common idiom `IF type_id('dbo.MyType') IS NOT NULL DROP TYPE dbo.MyType` wor
 ## Fidelity gaps remaining
 
 - **CREATE-time body validation** — Msg 10700 against a TVP parameter surfaces at first EXEC, not at CREATE PROC (gap with all stored-proc bodies).
-  Real SQL Server validates body references at CREATE time.
+  Real SQL Server binds the whole body at CREATE and refuses to create the procedure: probe-confirmed 2026-07-31 that `CREATE PROCEDURE p @t dbo.tt READONLY AS INSERT @t VALUES (1)` raises Msg 10700 (level 16, state 1, `Procedure p`, line 1) with `OBJECT_ID('p')` still NULL afterwards.
+  The *parameter-list* rule is checked at CREATE and matches for procedures: a table-type parameter without `READONLY` raises **Msg 352** (level 15, state 1) and the procedure isn't created.
+  Missing-object references stay deferred on real too — a body over a nonexistent table creates fine.
+- **Table-type parameters outside `CREATE PROCEDURE`** — real accepts one in a scalar `CREATE FUNCTION` parameter list and in an `sp_executesql` parameter declaration, raising the same Msg 352 when `READONLY` is missing; the simulator's parameter-type parsers there don't consult `Schema.TableTypes`, so both report **Msg 243** (`Type <name> is not a defined system type.`).
 - **Inline non-unique `INDEX` clause** — Msg 102 in v1; real SQL Server accepts it.
   Adding it via the shared parser would close the gap for both `DECLARE @t TABLE` and `CREATE TYPE`.
 - **`IEnumerable<SqlDataRecord>`** as a TVP value source isn't accepted (SqlClient dependency / reflection path).

@@ -26,11 +26,13 @@ Probed against SQL Server 2025.
 - **`OBJECT_ID(name, 'FN')`** routes to function resolution; the `'IF'` / `'TF'` filters resolve inline / multi-statement TVFs respectively; no-filter form tries function then table.
   Other codes (V / P / ...) route to the matching object kind.
 - **DROP FUNCTION [IF EXISTS] schema.name[, ...]**: same shape as DROP TABLE; missing target → **Msg 3701** with "function" wording variant.
+- **`ALTER FUNCTION` / `CREATE OR ALTER FUNCTION`** replace the definition in place across all three function kinds — see [Replacing a module](#replacing-a-module--alter--create-or-alter).
+- **Msg 111 batch-first rule** is enforced: `CREATE FUNCTION` must open its batch, and since there is no `GO`, a batch is one `CommandText` — so `IF OBJECT_ID(…) IS NOT NULL DROP FUNCTION …; CREATE FUNCTION …` raises where two commands succeed (`ExecuteBatches` in the tests is the split).
+  Real's state byte identifies the kind: 4 for CREATE FUNCTION, 5 for ALTER FUNCTION, 6 / 7 for CREATE / ALTER TRIGGER, 9 / 10 for CREATE / ALTER VIEW, 12 for CREATE RULE, 13 for CREATE DEFAULT, 14 for CREATE SCHEMA, and 1 for the merged `'CREATE/ALTER PROCEDURE'` label (probe-confirmed 2026-07-31; the simulator carries the ones it parses).
 
 **Fidelity gaps**:
 - **No CREATE-time body validation** (Msg 455 missing-RETURN, Msg 443 side-effects, Msg 444 result-set SELECT in body).
   Deferred to runtime — fall-through body returns typed NULL, side-effecting statements surface their own errors.
-- **No Msg 111 batch-first enforcement** — `IF OBJECT_ID(…) IS NOT NULL DROP FUNCTION …; CREATE FUNCTION …` works here, real SQL Server requires separate batches (no `GO` support).
 - **`WITH SCHEMABINDING` / `ENCRYPTION` / `EXECUTE AS`** → `NotSupportedException`.
 - **`@@ROWCOUNT` inside a UDF body** isn't isolated — body statements overwrite the caller's `LastStatementRowCount`.
   Real SQL Server preserves it across the call.
@@ -66,7 +68,6 @@ Probed against SQL Server 2025.
   Apps reading TVF rows through raw SQL aren't affected.
 - **No SCHEMABINDING enforcement** — DROP TABLE on a TVF-referenced table succeeds (real SQL Server raises Msg 3729); the TVF later fails at call time when re-parsing.
 - **No CREATE-time body validation for forward refs** — self-recursive inline TVFs fail at CREATE with Msg 208 (real SQL Server also rejects, different error path).
-- **No Msg 111 batch-first enforcement** (same as scalar UDFs).
 
 ## Multi-statement table-valued functions
 `CREATE FUNCTION schema.name(@p type [= default], ...) RETURNS @r TABLE (column-list) [WITH SCHEMABINDING | ENCRYPTION] AS BEGIN ... END`, called from a FROM clause exactly like an inline TVF.
@@ -131,11 +132,12 @@ Probed against SQL Server 2025.
   - `INFORMATION_SCHEMA.TABLES` includes views with `TABLE_TYPE='VIEW'`.
   - `OBJECT_ID(name, 'V')` resolves views only; no-filter form falls through both functions and views before tables.
 - **DROP VIEW [IF EXISTS] schema.name[, ...]**: same shape as DROP TABLE / DROP FUNCTION; missing target → **Msg 3701** with `view` wording variant.
+- **`ALTER VIEW` / `CREATE OR ALTER VIEW`** replace the body in place, keeping the object id, grants and `INSTEAD OF` triggers but dropping any indexes — see [Replacing a module](#replacing-a-module--alter--create-or-alter).
 - **EF Core integration**: `ToView()` mapping works end-to-end.
   Keyless entities (`HasNoKey().ToView("name")`) project rows from CREATE VIEW-produced views; the simulator's per-call body re-parse handles correlated LINQ-emitted WHERE clauses against the view's projection.
 
 **Fidelity gaps**:
-- **No SCHEMABINDING enforcement** — DROP TABLE on a view-referenced table succeeds (real SQL Server raises Msg 3729); the view later fails at call time when re-parsing against the missing name.
+- **No SCHEMABINDING enforcement** — DROP TABLE on a view-referenced table succeeds, as does `ALTER VIEW` / `ALTER FUNCTION` on a module a schema-bound view references (real SQL Server raises Msg 3729 for all of them); the dependent module later fails at call time when re-parsing against the changed or missing name.
 - **`VIEW_DEFINITION` always surfaces body text** even for WITH ENCRYPTION views (real SQL Server returns NULL for ENCRYPTION views).
 - **`is_nullable` always True** in `sys.columns` for view output — same gap as inline TVFs.
 
@@ -207,11 +209,11 @@ Probed against SQL Server 2025.
   Separately, the handlers also capture the *full* original statement text into `SchemaObject.DefinitionText` (verb normalized to `CREATE`) for `OBJECT_DEFINITION` / `sys.sql_modules` / `INFORMATION_SCHEMA.ROUTINES.ROUTINE_DEFINITION` — see [`catalog-views.md`](catalog-views.md).
 - **Parens around parameter list optional**: `CREATE PROC p (@x int)` and `CREATE PROC p @x int` are equivalent.
 - **WITH options** (`RECOMPILE`, `ENCRYPTION`, `EXECUTE AS CALLER|SELF|OWNER|'name'`, `FOR REPLICATION`) parse-and-ignore — the simulator doesn't model query-planner / security / replication semantics.
-- **`CREATE OR ALTER`** is an upsert: creates when missing, replaces when present (preserving `Procedure.ObjectId`).
+- **`CREATE OR ALTER`** is an upsert: creates when missing, replaces when present — see [Replacing a module](#replacing-a-module--alter--create-or-alter) for what the replacement preserves.
 - **Bare `CREATE PROC` on existing name** raises **Msg 2714** (same factory as duplicate CREATE TABLE).
-- **Bare `ALTER PROC` on missing name** raises **Msg 208** (NOT Msg 3701 — distinct from DROP).
+- **Bare `ALTER PROC` on missing name** raises **Msg 208** (NOT Msg 3701 — distinct from DROP); on a name another object kind holds, **Msg 2010**.
 - **`DROP PROCEDURE [IF EXISTS] schema.name[, name...]`**: comma-list form; missing target → **Msg 3701** with `"Cannot drop the procedure 'X', …"` wording variant (`CannotDropProcedureDoesNotExist` factory).
-- **No Msg 111 batch-first enforcement** — real SQL Server requires CREATE/ALTER PROCEDURE to be the first statement in a query batch; the simulator (no `GO` support) doesn't enforce, matching the UDF / view stance.
+- **Msg 111 batch-first rule** is enforced under the merged `'CREATE/ALTER PROCEDURE'` label, state 1 (same stance as UDFs / views / triggers / schemas).
 
 **EXEC statement grammar** (`Simulation.Exec.cs`):
 - **`EXEC [@rc =] target [args]`** where `target` is a procedure name (or `( <string-expr> )` for dynamic SQL).
@@ -276,8 +278,7 @@ Each `DbParameter` binds to a proc parameter by name (the `@` prefix is stripped
 - **`sys.parameters.has_default_value`** is hardcoded `False` (matches probed real SQL Server behavior: the column reflects CLR-side DEFAULT_VALUE metadata, not the `= value` parameter default — even `@x int = 5` shows `has_default_value=False`).
 - **`sys.numbered_procedures`** (3-col: `object_id` / `procedure_number` / `definition`) is always empty — numbered stored procedures are a removed legacy feature.
   SMO's StoredProcedure scripting `LEFT JOIN`s it; modeling it also cleared the sweep's proc-Script transport crash (the unresolved name was hitting the skip-mode deferred-name-resolution wire death, not a distinct fault).
-- **`sys.procedures.modify_date`** mirrors `create_date` (real SQL Server bumps `modify_date` on each ALTER; the simulator preserves the original create_date through ALTER but doesn't track separate modify timestamps).
-- **No Msg 111 batch-first enforcement** (same gap as scalar UDFs / views).
+- **`sys.procedures.modify_date`** tracks the last ALTER: an unaltered module reports `create_date`, and every `ALTER` / `CREATE OR ALTER` leg advances `modify_date` while `create_date` holds (probe-confirmed).
 - **EXEC argument value-grammar limited to literals + `@var` + `DEFAULT`** — matches real SQL Server (Msg 102 on arithmetic), but the *type* of the literal is taken from the source token, not coerced through any inference like real SQL Server's procedure-call binding.
 - **`@@ROWCOUNT` inside a proc body** isn't isolated from the caller — same gap documented for UDF bodies.
 - **`OUTPUT` parameter timing**: the simulator's `SimulatedDbDataReader` populates output `DbParameter.Value` after the reader closes (via the synthesized `WriteBackOutputParameters` path), matching real SqlClient's general behavior; pre-close access reads the pre-EXEC value.
@@ -285,6 +286,42 @@ Each `DbParameter` binds to a proc parameter by name (the `@` prefix is stripped
   Parses fall through to syntax error.
 - `INSERT … EXEC` **ships** — the INSERT parser takes `EXEC` as a third row source alongside VALUES / SELECT, appending every result set the proc or dynamic batch yields.
   See [`dml.md`](dml.md#insert--exec).
+
+## Replacing a module — `ALTER` / `CREATE OR ALTER`
+
+`ALTER {VIEW | FUNCTION | PROCEDURE | TRIGGER}` and `CREATE OR ALTER {VIEW | FUNCTION | PROCEDURE | TRIGGER}` all reuse the matching `CREATE` parser — the grammar is identical, and only the existence-check direction and the preserved identity differ.
+`Simulation.Alter.cs` routes the ALTER verb; the `CREATE OR ALTER` arm lives in `Simulation.Create.cs`.
+The shared rules live in `ResolveModuleAlterTarget` / `ResolveModuleSchema` (`Simulation.ModuleDefinition.cs`), so a new module kind gets them by calling one helper.
+Probed against SQL Server 2025 (2026-07-31).
+
+**What the replacement preserves**:
+- `SchemaObject.ObjectId` and `SchemaObject.CreateDate`.
+- Every permission granted on the module — object-scope permission rows key off `object_id`, so preserving the id preserves the grants with no extra work.
+- A view's `INSTEAD OF` triggers, which reseat onto the replacement instance (the trigger-to-parent match is by reference, so `Trigger.Parent` is repointed explicitly).
+
+**What it resets**:
+- `SchemaObject.ModifyDate` advances to the statement's frozen `UtcNow`.
+- A view's indexes and its schema-binding: `ALTER VIEW` on an indexed view drops the indexes along with the `WITH SCHEMABINDING` that allowed them, and the base tables stop re-validating the view's unique keys (`DetachIndexedViewDependencies` unwires `HeapTable.DependentIndexedViews`, which `DROP VIEW` also calls).
+
+**Errors**:
+- **Bare `ALTER` on a name nothing holds** → **Msg 208** state 6, including when the *schema* qualifier doesn't exist (`ALTER VIEW nosuch.v` reports `Invalid object name 'nosuch.v'`, not the Msg 2760 either `CREATE` form reports).
+- **Either ALTER leg over a name another object kind holds** → **Msg 2010** (`"Cannot perform alter on 'X' because it is an incompatible object type."`), where the name echoes what the statement wrote — an unqualified reference stays unqualified, brackets are stripped.
+  That covers `ALTER VIEW` over a table, `ALTER FUNCTION` over a procedure, `ALTER PROCEDURE` over a table, and `CREATE OR ALTER` landing on any of them.
+- **A function's kind is fixed at creation.**
+  An `ALTER FUNCTION` body that writes a different kind (scalar ↔ inline TVF ↔ multi-statement TVF) is the same **Msg 2010**, and the stored function is left untouched.
+  A T-SQL body over a CLR routine (or an `AS EXTERNAL NAME` body over a T-SQL one) takes the same branch by construction — the type codes differ, so the narrowing finds nothing of the declared kind.
+- **Bare `CREATE` on an existing name** stays **Msg 2714**.
+- **Msg 111 batch-first** applies with the ALTER label and its own state: `ALTER FUNCTION` 5, `ALTER TRIGGER` 7, `ALTER VIEW` 10.
+  `CREATE OR ALTER` reports under the plain `CREATE` label and state, never the ALTER one — real names the statement by the verb it started with.
+  `PROCEDURE` merges both verbs into the one `'CREATE/ALTER PROCEDURE'` label at state 1.
+
+**Not modeled yet**:
+- **Msg 3729** — real refuses to `ALTER` a view or function that a schema-bound module references (`"Cannot ALTER 'dbo.f' because it is being referenced by object 'v'."`).
+  The simulator tracks no schema-binding dependency graph at all (the same absence that lets `DROP TABLE` remove a schema-bound view's base), so the ALTER succeeds and the dependent module fails at its next call.
+- **Msg 166** — real rejects a database-qualified name on these statements (`'CREATE/ALTER VIEW' does not allow specifying the database name as a prefix to the object name.`); the simulator resolves the 3-part name instead.
+- **The permission gate on the ALTER legs**: only a plain `CREATE` runs `PermissionEnforcement.CheckCreateModule`.
+  Replacing an existing module is ungated, matching the procedure parser's pre-existing stance.
+- **`ALTER TRIGGER` over an incompatible kind** still reports Msg 208 rather than Msg 2010 — the trigger parser resolves its target alongside the `ON parent` clause and hasn't been moved onto the shared helper.
 
 ## Dynamic SQL (`EXEC (@sql)` / `sp_executesql`)
 Two re-tokenizing paths in `Simulation.ExecDynamicSql.cs`.

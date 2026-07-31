@@ -331,14 +331,30 @@ public sealed class KeyConstraintTests
     }
 
     [TestMethod]
-    public void PrimaryKey_OnPersistedNullableComputed_RaisesMsg8111()
+    public void PrimaryKey_OnPersistedComputed_PromotesToNotNull()
     {
-        // PERSISTED without an explicit NOT NULL keeps the simulator's
-        // computed-column nullability defaulted to true; the existing PK
-        // nullable check catches it.
-        _ = new Simulation().AssertSqlError(
-            "create table t (a int null, c as a + 1 persisted, primary key (c))", 8111);
+        // Probe-confirmed: a PERSISTED computed column named by a PRIMARY KEY
+        // is promoted to NOT NULL exactly as a regular column is, even when
+        // the expression's source column is nullable — so no Msg 8111, and a
+        // row whose expression evaluates to NULL fails with Msg 515 instead.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int null, c as a + 1 persisted, primary key (c));
+            insert t (a) values (1)
+            """);
+        Assert.AreEqual("NO", sim.ExecuteScalar(
+            "select is_nullable from information_schema.columns where table_name = 't' and column_name = 'c'"));
+        var ex = sim.AssertSqlError("insert t (a) values (null)", 515);
+        Assert.Contains("column 'c'", ex.Message);
     }
+
+    [TestMethod]
+    public void PrimaryKey_OnPersistedComputed_Inline_PromotesToNotNull()
+        => Assert.AreEqual(2, new Simulation().ExecuteScalar("""
+            create table t (a int null, c as a + 1 persisted primary key);
+            insert t (a) values (1), (2);
+            select count(*) from t
+            """));
 
     [TestMethod]
     public void PrimaryKey_OnPersistedNotNullComputed_TableLevel_Succeeds()

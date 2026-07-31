@@ -549,7 +549,7 @@ partial class Simulation
         var assigned = rhs.Run(new RuntimeContext(NoColumnResolver, context.Batch));
         if (assigned.IsNull)
             throw SimulatedSqlException.SpatialSridCannotBeNull(spatial.IsGeography);
-        var srid = SpatialGeometry.ValidateSrid(assigned.CoerceTo(SqlType.Int32).AsInt32, spatial.IsGeography);
+        var srid = SpatialGeometry.ValidateSrid(ScalarArguments.CoerceToInt(assigned), spatial.IsGeography);
         if (!slot.Value.IsNull)
             slot.Value = SqlValue.FromSpatial(slot.Value.AsSpatial.WithSrid(srid), spatial.IsGeography);
         return true;

@@ -1,3 +1,5 @@
+using SqlServerSimulator.Parser;
+
 namespace SqlServerSimulator;
 
 partial class SimulatedSqlException
@@ -24,6 +26,20 @@ partial class SimulatedSqlException
         new($"Valid values of the database compatibility level are 100, 110, 120, 130, 140, 150, 160 or 170.", 15048, 16, 1);
 
     internal static SimulatedSqlException ThereIsAlreadyAnObject(string name) => new($"There is already an object named '{name}' in the database.", 2714, 16, 6);
+
+    /// <summary>
+    /// Mimics SQL Server error 2010: an <c>ALTER</c> (or the ALTER leg of a
+    /// <c>CREATE OR ALTER</c>) names an existing object whose kind differs
+    /// from the statement's own verb — <c>ALTER VIEW</c> over a table,
+    /// <c>ALTER FUNCTION</c> over a procedure, or an <c>ALTER FUNCTION</c>
+    /// that would change the function's own kind (scalar ↔ inline TVF ↔
+    /// multi-statement TVF). Probe-confirmed against SQL Server 2025
+    /// (2026-07-31): Class 16 State 1, and the name echoes what the statement
+    /// wrote (an unqualified reference stays unqualified; brackets are
+    /// stripped).
+    /// </summary>
+    internal static SimulatedSqlException CannotAlterIncompatibleObjectType(MultiPartName name) =>
+        new($"Cannot perform alter on '{name}' because it is an incompatible object type.", 2010, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 7202: an <c>OPENQUERY</c> (or four-part name)
@@ -180,6 +196,49 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotDropSynonymDoesNotExist(string name) =>
         new($"Cannot drop the synonym '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
+
+    /// <summary>
+    /// Mimics SQL Server error 3705: a <c>DROP</c> statement named an object of
+    /// the wrong kind — <c>DROP TABLE</c> over a synonym, or <c>DROP SYNONYM</c>
+    /// over a table / view / procedure / function / sequence / trigger. The
+    /// message names the statement that was issued, the object's actual kind,
+    /// and the <c>DROP</c> form that would work. Probe-confirmed verbatim
+    /// against SQL Server 2025 for every kind above; the object name appears
+    /// exactly as written in the statement.
+    /// </summary>
+    /// <param name="attemptedDropKind">The object kind the statement named (<c>TABLE</c> / <c>SYNONYM</c>).</param>
+    /// <param name="name">The target name as written.</param>
+    /// <param name="actualKind">Lower-case noun for what the object really is ("synonym", "table valued function", …).</param>
+    /// <param name="correctDropKind">The kind word of the <c>DROP</c> form that would succeed.</param>
+    internal static SimulatedSqlException CannotUseDropWithObjectKind(string attemptedDropKind, string name, string actualKind, string correctDropKind) =>
+        new($"Cannot use DROP {attemptedDropKind} with '{name}' because '{name}' is a {actualKind}. Use DROP {correctDropKind}.", 3705, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5313: a reference resolved to a synonym whose
+    /// base object doesn't exist. Synonym base names bind lazily — <c>CREATE
+    /// SYNONYM</c> succeeds over a missing (or cross-database missing) base and
+    /// the failure surfaces at first use. Probe-confirmed verbatim against SQL
+    /// Server 2025, with the synonym name rendered as written at the use site
+    /// (unqualified stays unqualified).
+    /// </summary>
+    /// <param name="name">The synonym name as written at the use site.</param>
+    /// <param name="state">
+    /// State 1 when the base name resolves to nothing at all; State 224 when it
+    /// resolves to an object of a kind the reference can't use (a procedure or
+    /// sequence named in a FROM clause) — both probe-confirmed.
+    /// </param>
+    internal static SimulatedSqlException SynonymRefersToInvalidObject(string name, byte state) =>
+        new($"Synonym '{name}' refers to an invalid object.", 5313, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 470: a synonym's base object is itself a
+    /// synonym. Real SQL Server accepts the <c>CREATE SYNONYM</c> and rejects
+    /// the chain at first use; the message double-quotes both names, the
+    /// referencing one as written at the use site and the referenced one as
+    /// stored. Probe-confirmed verbatim against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException SynonymChainingNotAllowed(string referencing, string referenced) =>
+        new($"The synonym \"{referencing}\" referenced synonym \"{referenced}\". Synonym chaining is not allowed.", 470, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 3701 with the <c>function</c> wording variant:
@@ -488,6 +547,31 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException InsteadOfTriggerCannotBeOrdered(string triggerName) =>
         new($"INSTEAD OF trigger '{triggerName}' cannot be associated with an order.", 15133, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15123: <c>sp_configure</c> named an option that
+    /// isn't in the configuration catalog — or one that is, but is advanced
+    /// while <c>show advanced options</c> is installed as 0. Real folds both
+    /// cases into the one message (probe-confirmed verbatim).
+    /// </summary>
+    internal static SimulatedSqlException ConfigurationOptionDoesNotExist(string name) =>
+        new($"The configuration option '{name}' does not exist, or it may be an advanced option.", 15123, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15124: the name <c>sp_configure</c> was given is
+    /// a prefix of more than one option. Real also returns the matching names as
+    /// a <c>duplicate_options</c> result set; the simulator raises only.
+    /// </summary>
+    internal static SimulatedSqlException ConfigurationOptionNotUnique(string name) =>
+        new($"The configuration option '{name}' is not unique.", 15124, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15129: the value <c>sp_configure</c> was given
+    /// falls outside the option's minimum / maximum. The value is single-quoted
+    /// even though it's numeric (probe-confirmed verbatim).
+    /// </summary>
+    internal static SimulatedSqlException InvalidConfigurationValue(int value, string name) =>
+        new($"'{value}' is not a valid value for configuration option '{name}'.", 15129, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 15015: <c>sp_dropserver</c> referenced a
@@ -1021,6 +1105,59 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ForeignKeyNoMatchingKey(string referencedTable, string foreignKeyName) =>
         new($"There are no primary or candidate keys in the referenced table '{referencedTable}' that match the referencing column list in the foreign key '{foreignKeyName}'.", 1776, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1764: a FOREIGN KEY's referencing column is a
+    /// computed column that isn't PERSISTED. Raised by the table-level
+    /// <c>CREATE TABLE</c> and <c>ALTER TABLE ADD CONSTRAINT</c> forms; the
+    /// inline column form raises Msg 8183 at parse instead, before the
+    /// constraint reaches resolution (probe-confirmed split). Msg 1776 wins
+    /// when both apply. Real pairs this with a trailing informational Msg 1750,
+    /// which the simulator collapses away as it does for Msg 1776.
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyOnNonPersistedComputedColumn(string columnName, string tableName) =>
+        NonPersistedComputedColumnInConstraint(columnName, tableName, "FOREIGN KEY CONSTRAINT");
+
+    /// <summary>
+    /// Mimics SQL Server error 1764 for a CHECK constraint whose predicate
+    /// references a computed column that isn't PERSISTED. Raised by the
+    /// table-level <c>CREATE TABLE</c> / <c>DECLARE @t TABLE</c> /
+    /// <c>CREATE TYPE … AS TABLE</c> forms, by <c>ALTER TABLE … ADD
+    /// CONSTRAINT … CHECK</c> (<c>WITH NOCHECK</c> included), and by an
+    /// inline CHECK on a persisted computed column that reaches a
+    /// non-persisted computed peer. A CHECK inline on the non-persisted
+    /// column itself raises Msg 8183 at parse instead. Probe-confirmed to
+    /// beat Msg 8141, so this walk runs ahead of the peer-reference gate.
+    /// </summary>
+    internal static SimulatedSqlException CheckConstraintOnNonPersistedComputedColumn(string columnName, string tableName) =>
+        NonPersistedComputedColumnInConstraint(columnName, tableName, "CHECK CONSTRAINT");
+
+    /// <summary>
+    /// Shared Msg 1764 body. Real names the offending constraint family in the
+    /// quoted slot (<c>FOREIGN KEY CONSTRAINT</c> / <c>CHECK CONSTRAINT</c>)
+    /// and capitalizes "Computed Column" — its wording, not a typo.
+    /// </summary>
+    private static SimulatedSqlException NonPersistedComputedColumnInConstraint(string columnName, string tableName, string constraintKind) =>
+        new($"Computed Column '{columnName}' in table '{tableName}' is invalid for use in '{constraintKind}' because it is not persisted.", 1764, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1765: a FOREIGN KEY whose referencing column is
+    /// computed declared <c>ON DELETE SET NULL</c> or <c>ON DELETE SET
+    /// DEFAULT</c> — neither can write a computed column, so only NO ACTION and
+    /// CASCADE (which removes the whole row) are allowed. Checked ahead of the
+    /// ON UPDATE gate (Msg 1715), matching real's probed precedence.
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyComputedColumnDeleteAction(string foreignKeyName, string columnName) =>
+        new($"Foreign key '{foreignKeyName}' creation failed. Only NO ACTION and CASCADE referential delete actions are allowed for referencing computed column '{columnName}'.", 1765, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1715: a FOREIGN KEY whose referencing column is
+    /// computed declared any ON UPDATE action other than NO ACTION. Every one
+    /// of the others would have to write the computed column (CASCADE included,
+    /// unlike the ON DELETE case), so NO ACTION is the only legal update action.
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyComputedColumnUpdateAction(string foreignKeyName, string columnName) =>
+        new($"Foreign key '{foreignKeyName}' creation failed. Only NO ACTION referential update action is allowed for referencing computed column '{columnName}'.", 1715, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 3726: <c>DROP TABLE</c> targeted a table that

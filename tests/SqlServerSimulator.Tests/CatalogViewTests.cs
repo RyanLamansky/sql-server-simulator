@@ -651,7 +651,8 @@ public sealed class CatalogViewTests
             select count(*) from #r
             """));
 
-    // === sys.synonyms: schema-scoped, always empty (CREATE SYNONYM unmodeled) ===
+    // === sys.synonyms: schema-scoped, one row per CREATE SYNONYM ===
+    // Row-level projection (values, base_object_name shapes) lives in SynonymTests.
 
     [TestMethod]
     public void SysSynonyms_Projects13Columns_ZeroRows()

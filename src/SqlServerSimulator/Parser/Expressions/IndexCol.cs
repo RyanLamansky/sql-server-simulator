@@ -52,11 +52,11 @@ internal sealed class IndexCol : Expression
             return SqlValue.Null(SqlType.SystemName);
         }
 
-        var indexId = indexIdValue.CoerceTo(SqlType.Int32).AsInt32;
+        var indexId = ScalarArguments.CoerceToInt(indexIdValue);
         if (IndexLookup.ResolveByIndexId(table, indexId) is not { } resolved)
             return SqlValue.Null(SqlType.SystemName);
 
-        var keyId = keyIdValue.CoerceTo(SqlType.Int32).AsInt32;
+        var keyId = ScalarArguments.CoerceToInt(keyIdValue);
         if (IndexLookup.GetKeyColumn(resolved.Constraint, resolved.Index, keyId) is not { } keyCol)
             return SqlValue.Null(SqlType.SystemName);
 

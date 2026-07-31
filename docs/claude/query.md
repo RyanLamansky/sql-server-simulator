@@ -23,12 +23,7 @@
   A branch may be **parenthesized**, and the parentheses may wrap a whole nested chain rather than a single SELECT — `SELECT … UNION (SELECT … UNION SELECT …)` and `… EXCEPT (… INTERSECT …)` are what an ORM emits when it combines an already-combined queryset (`ParseSetOpBranch`).
   Without it the opening paren read as a scalar subquery, so the branch looked like a one-column select list and the chain failed the equal-expression-count check.
   **Not accepted yet**: a parenthesized *leading* branch at statement start (`(SELECT …) UNION SELECT …`) still raises Msg 102 — that needs the statement dispatcher to route a leading `(` into the SELECT parser, not just the branch position.
-  Top-level ORDER BY references the first branch's columns, and resolves a term three ways (probe-confirmed, in this order): an **output alias**, the **source column name behind a projected column** (`SELECT num AS Col2 … UNION … ORDER BY num` sorts by Col2 — what ORMs emit when they alias every output positionally), or an **ordinal**.
-  The alias is checked first, so an alias shadowing a different source column keeps its binding.
-  Two divergences remain here.
-  Only a **bare** reference (or ordinal) resolves through that fallback: real accepts `… UNION … ORDER BY num` but rejects any *expression* over such a name — `ORDER BY CASE WHEN num IS NULL …` is Msg 104 and an expression over an output alias is Msg 207 — so letting the fallback fire inside an expression would accept what real refuses.
-  A term naming a real column that isn't projected raises Msg 207 where real raises **Msg 104** (`"ORDER BY items must appear in the select list if the statement contains a UNION, INTERSECT or EXCEPT operator."`) — telling the two apart needs the branch's FROM sources at ORDER BY resolution, which that seam doesn't carry.
-  And resolution is execution-time: the sort is skipped when there is at most one result row, so an unresolvable term goes unreported for such a query where real rejects it at bind time.
+  Top-level ORDER BY binds against the first branch — see [Top-level ORDER BY over a set operation](#top-level-order-by-over-a-set-operation).
 - `SELECT *`: bare and qualified `<source>.*`.
   Multi-source `*` keeps duplicate names.
   Unbound `<qualifier>.*` → Msg 4104.
@@ -123,6 +118,30 @@ Matching on the leaf alone silently sorted by the wrong column whenever a join b
 `DISTINCT` keeps its own rule: the term must appear in the select list, and a miss is Msg 145 rather than a source fallback.
 The term may name the **source column behind a projected one** rather than its output alias (`SELECT DISTINCT c.name AS Col5 … ORDER BY c.name`), which is the only spelling left when an ORM aliases every output positionally.
 Under DISTINCT the qualified form follows the same source-reference rule as the non-DISTINCT path: it must name a source column that is itself projected, and a miss is Msg 145 rather than a leaf match against the output aliases (tightened 2026-07-31 — `SELECT DISTINCT val AS id … ORDER BY t.id` is an error, while `ORDER BY c.nm` over `SELECT DISTINCT nm AS Col5` is legal).
+
+### Top-level ORDER BY over a set operation
+
+The ORDER BY after a UNION / INTERSECT / EXCEPT chain is a different resolver (`ApplyTopLevelOrderBy`) with a stricter rule, because the combined stream carries only the projected columns — there is no source row left to reach into.
+Real binds it at **compile time**, against the **leftmost branch's FROM scope**; the simulator does the same, in `ValidateSetOpOrderByTerms`, off the `BranchFromSources` / `ProjectionExpressions` the combined plan inherits from that branch.
+Compile-time is load-bearing rather than incidental: resolution used to be per-row, so a query yielding at most one row skipped the sort and reported nothing at all.
+
+A term is legal only as an **in-range ordinal** or a **bare reference to a projected column**, spelled either as its **output alias** (unqualified terms only) or as the **source column behind it** (`SELECT num AS Col2 … UNION … ORDER BY num` sorts by Col2 — what ORMs emit when they alias every output positionally).
+The alias is checked first, so an alias shadowing a different source column keeps its binding; and a **qualified** term skips the alias scan entirely, exactly as on the single-SELECT path — `SELECT c.extra AS id, c.id AS other … UNION … ORDER BY c.id` sorts by `other`, while `ORDER BY id` sorts by the alias (both probe-confirmed).
+
+Everything else is an error, and *which* error is the whole distinction (real emits the binding failure first and Msg 104 second, so the simulator's first-error contract makes them mutually exclusive):
+
+| Term | Result |
+| --- | --- |
+| Column in the first branch's scope but not projected (`ORDER BY name`, `ORDER BY a.name`, a joined or derived table's column) | **Msg 104** `ORDER BY items must appear in the select list if the statement contains a UNION, INTERSECT or EXCEPT operator.` |
+| Any expression over a bound name (`ORDER BY id + 1`, `LEN(name)`, `(SELECT 1)`, `c COLLATE …`) | **Msg 104** |
+| Name nothing in scope carries — including a column only a *later* branch has (`ORDER BY other`), and an output alias used inside an expression (`ORDER BY zz + 1`) | **Msg 207** `Invalid column name '…'.` |
+| Qualifier no FROM source answers to — the second branch's alias, an output alias, an unknown one (`ORDER BY b.id`) | **Msg 4104** `The multi-part identifier "…" could not be bound.` |
+| Ordinal below 1 or past the column count | **Msg 108** |
+
+A FROM-less branch contributes an **empty** scope, not an unknown one: `SELECT 2 AS X UNION ALL SELECT 1 ORDER BY X` is legal and `ORDER BY Y` is Msg 207.
+A skip-mode placeholder source suppresses the whole pass — real defers such a statement's binding, so no name in scope can be a compile error there.
+
+**Divergence**: a *constant* term (`ORDER BY 'x'`) lands on Msg 104; real reserves **Msg 408** for it, which the simulator models on neither this path nor the single-SELECT one.
 
 ## Result drain / ORDER BY representation
 The FROM-bearing SELECT projection paths — streaming, buffered (ORDER BY / DISTINCT), windowed, and aggregate — all yield already-projected `SqlValue[]` rows, so `SimulatedSqlResultSet` serves the reader and TDS cursors directly with no encode-then-re-decode round-trip (see the `SimulatedSqlResultSet` doc + [`data-reader.md`](data-reader.md)).

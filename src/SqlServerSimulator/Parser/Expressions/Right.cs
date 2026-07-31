@@ -24,6 +24,7 @@ internal sealed class Right : Expression
     {
         var rawSource = source.Run(runtime);
         var n = count.Run(runtime);
+        StringScalars.RejectLegacyLob(rawSource, "right");
         if (rawSource.IsNull || n.IsNull)
             return SqlValue.Null(ResolveResultType(rawSource.Type, runtime.Batch));
         var s = StringScalars.CoerceToVarchar(rawSource, runtime.Batch, "right");

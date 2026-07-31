@@ -1646,8 +1646,8 @@ internal sealed class BatchContext
         // the base table (recursing so a schema-qualified base routes too).
         // A synonym whose base is a view returns false here and is picked up
         // by the caller's TryResolveView, which applies the same redirect.
-        if (schema.Synonyms.TryGetValue(name.Leaf, out var tableSynonym))
-            return this.TryResolveTable(tableSynonym.BaseObject, out table);
+        if (this.TryRedirectThroughSynonym(schema, name, out var tableBase))
+            return this.TryResolveTable(tableBase, out table);
 
         // Bare 1-part also falls through to system tables when the default
         // schema doesn't hold the table — same shared-instance reasoning,
@@ -1689,6 +1689,10 @@ internal sealed class BatchContext
     /// </summary>
     public void RejectCrossDatabaseMutation(MultiPartName name)
     {
+        // A synonym is a name indirection, so the mutation's real target is its
+        // base — `INSERT syn` where `syn FOR otherdb.dbo.t` writes across the
+        // database boundary just as the spelled-out 3-part name would.
+        name = this.ExpandSynonym(name);
         if (name.Count == 3 && !this.CurrentDatabase.Collation.Equals(name[0], this.CurrentDatabase.Name))
         {
             throw new NotSupportedException(
@@ -1738,11 +1742,20 @@ internal sealed class BatchContext
     public bool TryResolveFunction(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out UserDefinedFunction? function)
     {
         function = null;
-        if (name.Count < 2
-            || !this.TryResolveSchema(name, out var schema)
-            || !schema.Functions.TryGetValue(name.Leaf, out function))
-        {
+        if (name.Count < 2 || !this.TryResolveSchema(name, out var schema))
             return false;
+        if (!schema.Functions.TryGetValue(name.Leaf, out function))
+        {
+            // Synonym redirect: `SELECT dbo.syn(1)` where `syn FOR f` calls the
+            // base scalar function, and `FROM dbo.syn(1)` the base TVF
+            // (probe-confirmed both work on real). A base written unqualified
+            // needs the default schema attached, since a 1-part name never
+            // reaches function resolution at a call site (Msg 195).
+            if (!this.TryRedirectThroughSynonym(schema, name, out var functionBase))
+                return false;
+            if (functionBase.Count == 1)
+                functionBase = new MultiPartName(Database.DefaultSchemaName).WithAddedPart(functionBase.Leaf);
+            return this.TryResolveFunction(functionBase, out function);
         }
         this.AcquireStatementLock(function.SchemaLock, LockMode.SchemaStability);
         return true;
@@ -1765,8 +1778,8 @@ internal sealed class BatchContext
         {
             // Synonym redirect for a synonym whose base is a view (see
             // TryResolveTable for the table-base case).
-            return schema.Synonyms.TryGetValue(name.Leaf, out var viewSynonym)
-                && this.TryResolveView(viewSynonym.BaseObject, out view);
+            return this.TryRedirectThroughSynonym(schema, name, out var viewBase)
+                && this.TryResolveView(viewBase, out view);
         }
         this.AcquireStatementLock(view.SchemaLock, LockMode.SchemaStability);
         _ = this.DependencySink?.Views.Add(view);
@@ -1868,6 +1881,94 @@ internal sealed class BatchContext
         }
         this.AcquireStatementLock(sequence.SchemaLock, LockMode.SchemaStability);
         return true;
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="name"/> to a <see cref="Synonym"/> — the
+    /// synonym object itself, without following it to its base. Accepts 1-part
+    /// names with the usual <see cref="Database.DefaultSchemaName"/> fallback.
+    /// Used by <c>OBJECT_ID</c> (which reports a synonym's own id and never
+    /// follows it — probe-confirmed <c>OBJECT_ID('syn', 'U')</c> is NULL) and
+    /// by the DROP / error paths that need to know a name is a synonym.
+    /// </summary>
+    public bool TryResolveSynonym(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Synonym? synonym)
+    {
+        synonym = null;
+        if (!this.TryResolveSchema(name, out var schema) || !schema.Synonyms.TryGetValue(name.Leaf, out synonym))
+            return false;
+        this.AcquireStatementLock(synonym.SchemaLock, LockMode.SchemaStability);
+        return true;
+    }
+
+    /// <summary>
+    /// Resolves the object a <paramref name="synonym"/> points at, by direct
+    /// dictionary lookup rather than through the kind-specific resolvers (so
+    /// no second redirect is applied). Returns false when the base name has no
+    /// object behind it — the deferred-resolution case real reports as
+    /// Msg 5313 at first use.
+    /// </summary>
+    public bool TryResolveSynonymBase(Synonym synonym, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out SchemaObject? baseObject)
+    {
+        baseObject = null;
+        if (!this.TryResolveSchema(synonym.BaseObject, out var schema))
+            return false;
+        var collation = schema.Database.Collation;
+        foreach (var candidate in schema.SchemaObjects())
+        {
+            if (collation.Equals(candidate.Name, synonym.BaseObject.Leaf))
+            {
+                baseObject = candidate;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Rewrites <paramref name="name"/> to the base object it names when it is
+    /// a synonym, leaving any other name untouched. The EXEC path expands
+    /// before resolving so a synonym over a missing procedure reports Msg 2812
+    /// naming the base, matching real.
+    /// </summary>
+    public MultiPartName ExpandSynonym(MultiPartName name) =>
+        this.TryResolveSchema(name, out var schema) && this.TryRedirectThroughSynonym(schema, name, out var baseName)
+            ? baseName
+            : name;
+
+    /// <summary>
+    /// The error a reference to <paramref name="name"/> raises when nothing
+    /// resolved: Msg 208 for an unknown name, or Msg 5313 when the name is a
+    /// synonym (whose base binds lazily, so the failure belongs to the base,
+    /// not the synonym). Real distinguishes the two 5313 states — 1 when the
+    /// base names nothing, 224 when it names an object the reference can't use
+    /// (a procedure or sequence in a FROM clause).
+    /// </summary>
+    public SimulatedSqlException UnresolvableObjectName(MultiPartName name) =>
+        this.TryResolveSynonym(name, out var synonym)
+            ? SimulatedSqlException.SynonymRefersToInvalidObject(name.ToString(), this.TryResolveSynonymBase(synonym, out _) ? (byte)224 : (byte)1)
+            : SimulatedSqlException.InvalidObjectName(name);
+
+    /// <summary>
+    /// The shared synonym-redirect step behind <see cref="TryResolveTable"/> /
+    /// <see cref="TryResolveView"/> / <see cref="TryResolveFunction"/>: hands
+    /// back the base name when <paramref name="name"/>'s leaf is a synonym in
+    /// <paramref name="schema"/>. A base that is itself a synonym raises
+    /// Msg 470 — real accepts the <c>CREATE SYNONYM</c> that builds the chain
+    /// and rejects it at first use, so the check belongs here rather than at
+    /// creation.
+    /// </summary>
+    private bool TryRedirectThroughSynonym(Schema schema, MultiPartName name, out MultiPartName baseName)
+    {
+        if (!schema.Synonyms.TryGetValue(name.Leaf, out var synonym))
+        {
+            baseName = default;
+            return false;
+        }
+        this.AcquireStatementLock(synonym.SchemaLock, LockMode.SchemaStability);
+        baseName = synonym.BaseObject;
+        return this.TryResolveSchema(baseName, out var baseSchema) && baseSchema.Synonyms.ContainsKey(baseName.Leaf)
+            ? throw SimulatedSqlException.SynonymChainingNotAllowed(name.ToString(), baseName.ToString())
+            : true;
     }
 
     /// <summary>

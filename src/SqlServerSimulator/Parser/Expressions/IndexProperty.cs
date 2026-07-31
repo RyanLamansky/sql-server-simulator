@@ -58,7 +58,7 @@ internal sealed class IndexProperty : Expression
         var propValue = this.propertyArg.Run(runtime);
         if (idValue.IsNull || indexValue.IsNull || propValue.IsNull)
             return SqlValue.Null(SqlType.Int32);
-        var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
+        var id = ScalarArguments.CoerceToInt(idValue);
         var indexName = indexValue.CoerceTo(SqlType.NVarchar).AsString;
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
 

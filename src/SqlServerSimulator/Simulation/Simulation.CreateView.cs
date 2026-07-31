@@ -8,9 +8,11 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Parses <c>CREATE VIEW schema.name [(col_list)] [WITH SCHEMABINDING |
-    /// ENCRYPTION | VIEW_METADATA] AS &lt;SELECT&gt; [WITH CHECK OPTION]</c>
-    /// and stores a <see cref="View"/> in the target
+    /// Parses <c>CREATE [OR ALTER] VIEW schema.name [(col_list)] [WITH
+    /// SCHEMABINDING | ENCRYPTION | VIEW_METADATA] AS &lt;SELECT&gt; [WITH
+    /// CHECK OPTION]</c> — and, via <paramref name="isAlter"/>, the
+    /// identically-shaped <c>ALTER VIEW</c> — storing a <see cref="View"/> in
+    /// the target
     /// <see cref="Schema.Views"/> dict. The body source is captured by
     /// running <see cref="Selection.Parse"/> once at CREATE time to derive
     /// the output column schema and to measure the body span — the cursor
@@ -45,20 +47,34 @@ partial class Simulation
     /// <item>Self-recursion → Msg 208 from the body's parse against the
     /// not-yet-registered view name. Matches real SQL Server's rejection
     /// (different error path; same end state).</item>
+    /// <item><c>ALTER VIEW</c> / <c>CREATE OR ALTER VIEW</c> over a name held
+    /// by another object kind → <strong>Msg 2010</strong>; bare <c>ALTER
+    /// VIEW</c> on a name nothing holds → <strong>Msg 208</strong>.</item>
     /// </list>
+    /// <para>
+    /// <strong>What the replacement preserves</strong> (probe-confirmed):
+    /// the <see cref="SchemaObject.ObjectId"/> and
+    /// <see cref="SchemaObject.CreateDate"/>, every permission granted on the
+    /// view (the permission store keys object-scope rows by object_id), and
+    /// the view's <c>INSTEAD OF</c> triggers, which reseat onto the new
+    /// instance. <see cref="SchemaObject.ModifyDate"/> advances. Indexes are
+    /// <em>not</em> preserved: an ALTER of an indexed view drops its indexes
+    /// along with the schema-binding that allowed them.
+    /// </para>
     /// </remarks>
-    private static bool TryParseCreateView(ParserContext context)
+    private static bool TryParseCreateView(ParserContext context, bool isAlter, bool createOrAlter)
     {
+        // CREATE OR ALTER reports under the plain CREATE label (probe-confirmed
+        // — real names the statement by the verb it started with).
         if (context.Batch.BlockDepth > 0 || context.Batch.HasDispatchedStatement)
-            throw SimulatedSqlException.MustBeFirstStatementInBatch("CREATE VIEW");
+            throw SimulatedSqlException.MustBeFirstStatementInBatch(isAlter ? "ALTER VIEW" : "CREATE VIEW");
 
         context.MoveNextRequired();
         if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var viewName = BatchContext.ParseObjectName(context);
-        if (!context.Batch.TryResolveSchema(viewName, out var schema))
-            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(viewName.ImmediateQualifier ?? Database.DefaultSchemaName);
+        var schema = ResolveModuleSchema(context, viewName, isAlter);
 
         context.MoveNextRequired();
 
@@ -142,39 +158,83 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        // DDL gate: db-scope CREATE VIEW + ALTER on the target schema (Msg 262
-        // state 18 with the view as Procedure attribution, else Msg 2760).
-        PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE VIEW", viewName.Leaf, schema);
+        // DDL gate on a plain create: db-scope CREATE VIEW + ALTER on the
+        // target schema (Msg 262 state 18 with the view as Procedure
+        // attribution, else Msg 2760). Replacing an existing view isn't gated
+        // here (outside the probed scope), matching the procedure parser.
+        if (!isAlter && !createOrAlter)
+            PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE VIEW", viewName.Leaf, schema);
 
-        // Reject collisions across the shared object-name namespace.
-        if (schema.HasNameInSharedNamespace(viewName.Leaf))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(viewName.Leaf);
+        // Cross-kind collisions (Msg 2714 on create, Msg 2010 on either ALTER
+        // leg) and the ALTER-on-missing Msg 208 all live in the shared helper.
+        var replaced = (View?)ResolveModuleAlterTarget(
+            context, schema, viewName, isAlter, createOrAlter,
+            schema.Views.TryGetValue(viewName.Leaf, out var existingView) ? existingView : null);
 
         var outputColumns = ComputeViewOutputColumns(context.CurrentDatabase.Collation, bodySelection, renameList, viewName.Leaf);
 
         var (baseTable, baseColumnOrdinals, rejectionReason, visibilityCheck, checkOptionCheck) =
             AnalyzeViewUpdatability(context.CurrentDatabase.Collation, bodySelection, withCheckOption);
 
-        var objectId = context.CurrentDatabase.AllocateObjectId();
         var view = new View(
             schema,
             viewName.Leaf,
-            objectId,
+            replaced?.ObjectId ?? context.CurrentDatabase.AllocateObjectId(),
             outputColumns,
             bodyText,
             withCheckOption,
             isSchemaBound,
-            createDate: context.Batch.CurrentStatement.UtcNow,
+            createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow,
             baseTable: baseTable,
             baseColumnOrdinals: baseColumnOrdinals,
             rejectionReason: rejectionReason,
             visibilityCheck: visibilityCheck,
             checkOptionCheck: checkOptionCheck)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter: false, createOrAlter: false),
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
         };
+        if (replaced is not null)
+        {
+            view.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+            DetachIndexedViewDependencies(replaced);
+            ReseatTriggerParents(context.CurrentDatabase, replaced, view);
+        }
         schema.Views[viewName.Leaf] = view;
         return true;
+    }
+
+    /// <summary>
+    /// Unwires a replaced (or dropped) view from every base table's
+    /// <see cref="HeapTable.DependentIndexedViews"/> list. Without this the
+    /// stale instance keeps driving unique-index re-validation on base-table
+    /// DML — enforcing indexes that no longer exist, over a body that no
+    /// longer describes the view. No-op for an ordinary unindexed view, which
+    /// never registered a dependency.
+    /// </summary>
+    private static void DetachIndexedViewDependencies(View view)
+    {
+        foreach (var table in view.ReferencedBaseTables)
+            _ = table.DependentIndexedViews.Remove(view);
+        view.ReferencedBaseTables = [];
+    }
+
+    /// <summary>
+    /// Points every trigger attached to <paramref name="replaced"/> at
+    /// <paramref name="replacement"/>. A view's <c>INSTEAD OF</c> triggers
+    /// survive <c>ALTER VIEW</c> on real SQL Server (probe-confirmed), and the
+    /// trigger-firing paths match a trigger to its parent by reference, so the
+    /// swap has to carry them across.
+    /// </summary>
+    private static void ReseatTriggerParents(Database database, SchemaObject replaced, SchemaObject replacement)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var trigger in schema.Triggers.Values)
+            {
+                if (ReferenceEquals(trigger.Parent, replaced))
+                    trigger.Parent = replacement;
+            }
+        }
     }
 
     /// <summary>

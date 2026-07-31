@@ -259,19 +259,12 @@ internal sealed class Cast : Expression
         }
         catch (OverflowException)
         {
-            // A tinyint/smallint/int source overflowing tinyint or smallint
-            // reports Msg 220 with the source value embedded — real's %ld slot
-            // holds it (probe-confirmed against SQL Server 2025, 2026-07-22).
-            // A bigint source (value could exceed the 32-bit slot) and every
-            // other narrowing keep the generic Msg 8115.
-            if (targetType is TinyIntSqlType or SmallIntSqlType
-                && SqlType.IsIntegerCategory(sourceType) && sourceType != SqlType.BigInt)
-            {
-                var formatted = value.CoerceTo(SqlType.BigInt).AsInt64.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                throw SimulatedSqlException.ArithmeticOverflowForDataType(targetType.SqlServerName, formatted);
-            }
-
-            throw SimulatedSqlException.ArithmeticOverflow(targetType.ToString()!);
+            // The error is source-type-keyed — int-family sources report the
+            // value-bearing Msg 220, float/real Msg 232, money its own
+            // per-target splinter — with the generic Msg 8115 for everything
+            // the chooser declines (bigint / decimal / smallmoney sources).
+            throw SimulatedSqlException.TryConversionOverflow(value, targetType)
+                ?? SimulatedSqlException.ArithmeticOverflow(targetType.ToString()!);
         }
 
         return EnforceTargetMaxLength(coerced, targetType, targetMaxLength, sourceType, budgetCollation);
@@ -382,6 +375,8 @@ internal sealed class Cast : Expression
     /// </summary>
     internal static bool IsConversionFailure(int number) => number is
         220    // ArithmeticOverflowForDataType (integer → tinyint/smallint)
+        or 232 // ArithmeticOverflowForType (float/real/money → integer)
+        or 237 // InsufficientResultSpaceForMoneyToInt
         or 241 // ConversionFailedDateTimeFromString
         or 242 // ConversionToDateTimeOutOfRange
         or 244 // OverflowConvertingNarrowInt (INT1/INT2)

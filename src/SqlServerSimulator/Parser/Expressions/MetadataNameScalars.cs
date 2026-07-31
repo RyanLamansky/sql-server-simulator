@@ -27,7 +27,7 @@ internal sealed class TypeName : Expression
         var v = this.idArg.Run(runtime);
         if (v.IsNull)
             return SqlValue.Null(SqlType.SystemName);
-        var id = v.CoerceTo(SqlType.Int32).AsInt32;
+        var id = ScalarArguments.CoerceToInt(v);
         if (id == 0)
             return SqlValue.FromString(SqlType.SystemName, "void type");
         // System types resolve through the same row data the sys.types

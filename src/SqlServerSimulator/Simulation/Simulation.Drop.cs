@@ -438,6 +438,7 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropViewDoesNotExist(name.ToString());
         }
+        DetachIndexedViewDependencies(droppedView);
         CascadeDropTriggers(context.CurrentDatabase, droppedView);
     }
 
@@ -482,13 +483,20 @@ partial class Simulation
         // the schema is looked up through CurrentDatabase.Schemas; a missing
         // schema or db-mismatched 3-part name surfaces the standard Msg 3701
         // below.
+        Schema? schema = null;
         var destination = isLocalTempTable
             ? context.Batch.Connection.TempTables
             : isGlobalTempTable
                 ? context.Batch.Connection.Simulation.GlobalTempTables
-                : context.Batch.TryResolveSchema(name, out var schema) ? schema.HeapTables : null;
+                : context.Batch.TryResolveSchema(name, out schema) ? schema.HeapTables : null;
         if (destination is null || !destination.TryGetValue(name.Leaf, out var removedTable))
         {
+            // A name belonging to another object kind — a synonym above all,
+            // since `DROP TABLE syn` reads as dropping what the synonym points
+            // at — raises Msg 3705 naming that kind, and IF EXISTS doesn't
+            // suppress it (the object does exist).
+            if (schema is not null)
+                RejectDropOfOtherKind(schema, name, "TABLE");
             if (ifExists)
                 return;
             throw SimulatedSqlException.CannotDropTableDoesNotExist(name.ToString());

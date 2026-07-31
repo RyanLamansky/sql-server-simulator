@@ -28,6 +28,7 @@ internal sealed class CharIndex : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var n = needle.Run(runtime);
+        StringScalars.RejectLegacyLob(n, "charindex");
         // CHARINDEX's haystack (arg 2) implicit-coerces to varchar per real
         // (probe-confirmed 2026-05-22: CHARINDEX('2', 12345) = 2). Needle
         // (arg 1) stays strict — real rejects non-string with Msg 8116.

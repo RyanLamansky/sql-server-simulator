@@ -49,7 +49,7 @@ internal sealed class UserName : Expression
         var idValue = this.idArg.Run(runtime);
         if (idValue.IsNull)
             return SqlValue.Null(SqlType.SystemName);
-        var id = idValue.CoerceTo(SqlType.Int32).AsInt32;
+        var id = ScalarArguments.CoerceToInt(idValue);
         foreach (var principal in runtime.Batch.CurrentDatabase.Principals.Values)
         {
             if (principal.PrincipalId == id)

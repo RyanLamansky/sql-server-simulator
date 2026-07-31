@@ -52,15 +52,18 @@ internal sealed class IndexKeyProperty : Expression
         if (objectIdValue.IsNull || indexIdValue.IsNull || keyIdValue.IsNull || propValue.IsNull)
             return SqlValue.Null(SqlType.Int32);
 
-        var objectId = objectIdValue.CoerceTo(SqlType.Int32).AsInt32;
+        var objectId = ScalarArguments.CoerceToInt(objectIdValue);
         if (ObjectProperty.FindObject(runtime.Batch.CurrentDatabase, objectId) is not HeapTable table)
             return SqlValue.Null(SqlType.Int32);
 
-        var indexId = indexIdValue.CoerceTo(SqlType.Int32).AsInt32;
+        var indexId = ScalarArguments.CoerceToInt(indexIdValue);
         if (IndexLookup.ResolveByIndexId(table, indexId) is not { } resolved)
             return SqlValue.Null(SqlType.Int32);
 
-        var keyId = keyIdValue.CoerceTo(SqlType.Int32).AsInt32;
+        // Only the key ordinal is declared smallint here; the object and
+        // index ids are int (probe-confirmed 2026-07-31 by the target type
+        // each overflow names).
+        var keyId = ScalarArguments.CoerceToSmallInt(keyIdValue);
         if (IndexLookup.GetKeyColumn(resolved.Constraint, resolved.Index, keyId) is not { } keyCol)
             return SqlValue.Null(SqlType.Int32);
 

@@ -1001,6 +1001,9 @@ public sealed partial class Simulation
             yield break;
         }
 
+        // Synonym targets expand to their base name here for the same reason
+        // the EXEC-statement path does — see ParseExec.
+        procName = batch.ExpandSynonym(procName);
         if (!batch.TryResolveProcedure(procName, out var procedure))
             throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.ToString());
 
@@ -1853,6 +1856,12 @@ public sealed partial class Simulation
                     yield return o;
                 break;
 
+            case ReservedKeyword { Keyword: Keyword.Reconfigure }:
+                ParseReconfigureStatement(batch);
+                if (!batch.IsSkipping)
+                    connection.LastStatementRowCount = 0;
+                break;
+
             case ReservedKeyword { Keyword: Keyword.Revert }:
                 RevertStatement(batch);
                 if (!batch.IsSkipping)
@@ -2078,7 +2087,7 @@ public sealed partial class Simulation
                 or Keyword.Return or Keyword.Print or Keyword.RaisError or Keyword.WaitFor
                 or Keyword.Truncate or Keyword.Use or Keyword.Grant or Keyword.Revoke or Keyword.Deny
                 or Keyword.Open or Keyword.Fetch or Keyword.Close or Keyword.Deallocate
-                or Keyword.Exec or Keyword.Execute or Keyword.Revert
+                or Keyword.Exec or Keyword.Execute or Keyword.Reconfigure or Keyword.Revert
         }
         // THROW is a contextual keyword in SQL Server's grammar — added with
         // the TRY/CATCH companion feature in 2012, not in the reserved list.

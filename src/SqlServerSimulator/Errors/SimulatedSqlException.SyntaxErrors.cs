@@ -164,9 +164,24 @@ partial class SimulatedSqlException
     /// kind against SQL Server 2025 (2026-05-13): PROCEDURE merges CREATE
     /// and ALTER into one label; VIEW / FUNCTION / TRIGGER / SCHEMA each
     /// use their separate <c>CREATE</c> / <c>ALTER</c> labels.
+    /// <para>The state byte identifies the offending statement kind — real
+    /// carries a distinct one per kind (probe-confirmed 2026-07-31, including
+    /// the labels the simulator has no parser for: <c>CREATE RULE</c> 12 and
+    /// <c>CREATE DEFAULT</c> 13). <c>CREATE OR ALTER</c> reports under the
+    /// plain <c>CREATE</c> label and state, not the ALTER one.</para>
     /// </summary>
     internal static SimulatedSqlException MustBeFirstStatementInBatch(string statementKind) =>
-        new($"'{statementKind}' must be the first statement in a query batch.", 111, 15, 1);
+        new($"'{statementKind}' must be the first statement in a query batch.", 111, 15, statementKind switch
+        {
+            "ALTER FUNCTION" => 5,
+            "ALTER TRIGGER" => 7,
+            "ALTER VIEW" => 10,
+            "CREATE FUNCTION" => 4,
+            "CREATE SCHEMA" => 14,
+            "CREATE TRIGGER" => 6,
+            "CREATE VIEW" => 9,
+            _ => 1,
+        });
 
     /// <summary>
     /// Mimics SQL Server error 189: a built-in function received the wrong
