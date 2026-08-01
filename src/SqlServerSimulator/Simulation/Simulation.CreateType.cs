@@ -152,6 +152,7 @@ partial class Simulation
             pendingKeys: [.. pendingKeys],
             pendingChecks: [.. pendingChecks]);
         schema.TableTypes[typeName.Leaf] = tableType;
+        RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");
         return true;
     }
 
@@ -271,6 +272,7 @@ partial class Simulation
             isNullable: isNullable,
             userTypeId: context.CurrentDatabase.AllocateUserTypeId(),
             createDate: context.Batch.CurrentStatement.UtcNow);
+        RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");
         return true;
     }
 }

@@ -20,6 +20,81 @@ internal readonly struct ReferencedSecurable(int objectId, int schemaId, string 
 }
 
 /// <summary>
+/// One column-grantable object a statement touches — a base table or a view —
+/// together with the 1-based column ordinals it reads or assigns. Query reads
+/// are recorded at parse time on <see cref="Parser.Selection.ReadColumnsByObject"/>
+/// (keyed by <see cref="Schemas.SchemaObject.ObjectId"/>); the UPDATE / DELETE
+/// paths, which don't ride a <see cref="Parser.Selection"/> plan, build one
+/// inline per check. An empty <see cref="Ordinals"/> set on a query read means
+/// the object was touched without naming a column (<c>COUNT(*)</c> /
+/// <c>SELECT 1</c>), which real checks as requiring the permission on
+/// <em>every</em> column.
+/// </summary>
+/// <remarks>
+/// A reference that arrived through a synonym never gets one of these: a
+/// synonym is an entity-level securable that takes no column list at all
+/// (Msg 1020), so such a reference is checked object-grain against the synonym.
+/// </remarks>
+internal sealed class ColumnReadTarget(Schemas.SchemaObject securable, Storage.HeapColumn[] columns)
+{
+    public readonly Schemas.SchemaObject Securable = securable;
+
+    /// <summary>The securable's columns in ordinal order — a table's columns or a view's projection columns.</summary>
+    public readonly Storage.HeapColumn[] Columns = columns;
+
+    /// <summary>The 1-based ordinals touched so far (<c>sys.columns.column_id</c>).</summary>
+    public readonly HashSet<int> Ordinals = [];
+
+    public ColumnReadTarget(Storage.HeapTable table)
+        : this(table, table.Columns)
+    {
+    }
+
+    public ColumnReadTarget(Schemas.View view)
+        : this(view, view.OutputColumns)
+    {
+    }
+
+    /// <summary>
+    /// Resolves a column reference's leaf name to its ordinal and records it. An
+    /// unresolved name — a correlated or aliased reference this target doesn't
+    /// own — is ignored, so recording never alters query semantics.
+    /// </summary>
+    public void Add(MultiPartName name) => this.Add(name.Leaf);
+
+    public void Add(string columnName)
+    {
+        for (var i = 0; i < this.Columns.Length; i++)
+        {
+            if (BuiltInToken.Equals(this.Columns[i].Name, columnName))
+            {
+                _ = this.Ordinals.Add(i + 1);
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The ordinals a check must visit, ascending — the recorded set, or every
+    /// column when nothing was named (the <c>COUNT(*)</c> shape).
+    /// </summary>
+    public int[] OrdinalsToCheck()
+    {
+        if (this.Ordinals.Count == 0)
+        {
+            var all = new int[this.Columns.Length];
+            for (var i = 0; i < all.Length; i++)
+                all[i] = i + 1;
+            return all;
+        }
+        var ordinals = new int[this.Ordinals.Count];
+        this.Ordinals.CopyTo(ordinals);
+        Array.Sort(ordinals);
+        return ordinals;
+    }
+}
+
+/// <summary>
 /// Execution-time permission enforcement — the thin layer between the
 /// statement dispatch / row sources and <see cref="PermissionChecker"/>. Every
 /// entry point short-circuits before any allocation when the effective
@@ -50,13 +125,15 @@ internal static class PermissionEnforcement
 
     /// <summary>
     /// Checks the read permission on every securable a <see cref="Parser.Selection"/>
-    /// recorded; throws on the first denial. A base-table SELECT read whose
-    /// column ordinals were tracked (<paramref name="readColumns"/>) is checked
-    /// column-by-column (Msg 230 naming the first inaccessible column, or Msg 229
-    /// when the principal has no access to the object at all); views / TVFs /
-    /// scalar-UDF EXECUTE stay object-grain (Msg 229).
+    /// recorded; throws on the first denial. A SELECT read whose column ordinals
+    /// were tracked (<paramref name="readColumns"/> — base tables and views alike)
+    /// is checked column-by-column (Msg 230 naming the first inaccessible column,
+    /// or Msg 229 when the principal has no access to the object at all); TVFs,
+    /// scalar-UDF EXECUTE, and any reference that arrived through a synonym stay
+    /// object-grain (Msg 229), the last because the synonym's own id never keys
+    /// the column map.
     /// </summary>
-    internal static void CheckReadSources(BatchContext batch, List<ReferencedSecurable>? securables, Dictionary<int, (Storage.HeapTable Table, HashSet<int> Columns)>? readColumns = null)
+    internal static void CheckReadSources(BatchContext batch, List<ReferencedSecurable>? securables, Dictionary<int, ColumnReadTarget>? readColumns = null)
     {
         if (securables is null || securables.Count == 0 || !Applies(batch))
             return;
@@ -65,10 +142,10 @@ internal static class PermissionEnforcement
         foreach (var s in securables)
         {
             var permission = Permission.Resolve(s.Permission);
-            // Column-grain path: a base-table SELECT read with tracked columns.
-            if (permission == Permission.Select && readColumns is not null && readColumns.TryGetValue(s.ObjectId, out var entry))
+            // Column-grain path: a SELECT read with tracked columns.
+            if (permission == Permission.Select && readColumns is not null && readColumns.TryGetValue(s.ObjectId, out var target))
             {
-                CheckColumnReads(database, principalId, Permission.Select, s.ObjectName, s.SchemaName, entry.Table, entry.Columns);
+                CheckColumnGrants(database, principalId, Permission.Select, target);
                 continue;
             }
             if (!PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassObject, s.ObjectId, s.SchemaId))
@@ -81,76 +158,41 @@ internal static class PermissionEnforcement
     }
 
     /// <summary>
-    /// Column-level enforcement of <paramref name="permission"/> (SELECT for
-    /// reads, UPDATE for writes) on a base table. When the principal has no
-    /// positive grant reaching the object at all, the object-level check has
-    /// already failed → Msg 229; otherwise each column is checked in ascending
-    /// ordinal order and the first inaccessible one raises Msg 230. An empty
-    /// <paramref name="columns"/> set means the table was touched without naming
-    /// a column (COUNT(*) / SELECT 1), which real checks as every column.
+    /// Column-level enforcement over an ordinal set gathered inline (the UPDATE /
+    /// DELETE write and read-implies-SELECT paths, which don't ride a
+    /// <see cref="Parser.Selection"/> plan). No-op for dbo / module bodies, and
+    /// no-op when nothing was named — unlike a query read, a DML statement that
+    /// resolved no column of the target genuinely touches none of them.
     /// </summary>
-    private static void CheckColumnReads(Database database, int principalId, Permission permission, string objectName, string schemaName, Storage.HeapTable table, HashSet<int> columns)
+    internal static void CheckColumns(BatchContext batch, Permission permission, ColumnReadTarget target)
+    {
+        if (target.Ordinals.Count == 0 || !Applies(batch))
+            return;
+        CheckColumnGrants(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId, permission, target);
+    }
+
+    /// <summary>
+    /// Column-level enforcement of <paramref name="permission"/> (SELECT for
+    /// reads, UPDATE for writes). When the principal has no positive grant
+    /// reaching the object at all, the object-level check has already failed →
+    /// Msg 229; otherwise each column is checked in ascending ordinal order and
+    /// the first inaccessible one raises Msg 230.
+    /// </summary>
+    private static void CheckColumnGrants(Database database, int principalId, Permission permission, ColumnReadTarget target)
     {
         // Object-level Msg 229 when the object is inaccessible at object grain
         // (no grant, or an object / schema / db DENY overriding the grant) AND
         // the principal holds no column-level grant on it — otherwise the object
         // is partially accessible and an inaccessible column raises Msg 230.
-        var objectAccessible = PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassObject, table.ObjectId, table.SchemaId);
-        if (!objectAccessible && !PermissionChecker.HasColumnLevelGrant(database, principalId, permission, table.ObjectId))
-            throw SimulatedSqlException.PermissionDenied(permission.CanonicalName, objectName, database.Name, schemaName);
-        var ordinals = columns.Count == 0 ? AllColumnOrdinals(table) : SortedOrdinals(columns);
-        foreach (var ordinal in ordinals)
+        var securable = target.Securable;
+        var schemaName = SchemaNameFor(database, securable.SchemaId);
+        var objectAccessible = PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassObject, securable.ObjectId, securable.SchemaId);
+        if (!objectAccessible && !PermissionChecker.HasColumnLevelGrant(database, principalId, permission, securable.ObjectId))
+            throw SimulatedSqlException.PermissionDenied(permission.CanonicalName, securable.Name, database.Name, schemaName);
+        foreach (var ordinal in target.OrdinalsToCheck())
         {
-            if (!PermissionChecker.IsColumnGranted(database, principalId, permission, table.ObjectId, table.SchemaId, ordinal))
-                throw SimulatedSqlException.ColumnPermissionDenied(permission.CanonicalName, table.Columns[ordinal - 1].Name, objectName, database.Name, schemaName);
-        }
-    }
-
-    private static IEnumerable<int> AllColumnOrdinals(Storage.HeapTable table)
-    {
-        for (var i = 1; i <= table.Columns.Length; i++)
-            yield return i;
-    }
-
-    private static int[] SortedOrdinals(HashSet<int> columns)
-    {
-        var ordinals = new int[columns.Count];
-        columns.CopyTo(ordinals);
-        Array.Sort(ordinals);
-        return ordinals;
-    }
-
-    /// <summary>
-    /// Column-level enforcement over an explicit ordinal set on a base table (the
-    /// UPDATE / DELETE write and read-implies-SELECT paths, which don't ride a
-    /// <see cref="Parser.Selection"/> plan). No-op for dbo / module bodies; the
-    /// same Msg 229 vs 230 boundary as the query read path.
-    /// </summary>
-    internal static void CheckTableColumns(BatchContext batch, Permission permission, Storage.HeapTable table, HashSet<int> columns)
-    {
-        if (columns.Count == 0 || !Applies(batch))
-            return;
-        var database = batch.CurrentDatabase;
-        var principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
-        CheckColumnReads(database, principalId, permission, table.Name, SchemaNameFor(database, table.SchemaId), table, columns);
-    }
-
-    /// <summary>
-    /// Resolves a column reference's leaf name to its 1-based ordinal on
-    /// <paramref name="table"/> and adds it to <paramref name="set"/>; an
-    /// unresolved name (a correlated / aliased reference the single-table path
-    /// doesn't own) is ignored. The UPDATE / DELETE column-grain paths use this
-    /// to gather the read (WHERE / SET-RHS) and assigned (SET-target) ordinals.
-    /// </summary>
-    internal static void AddColumnOrdinal(Storage.HeapTable table, MultiPartName name, HashSet<int> set)
-    {
-        for (var i = 0; i < table.Columns.Length; i++)
-        {
-            if (BuiltInToken.Equals(table.Columns[i].Name, name.Leaf))
-            {
-                _ = set.Add(i + 1);
-                return;
-            }
+            if (!PermissionChecker.IsColumnGranted(database, principalId, permission, securable.ObjectId, securable.SchemaId, ordinal))
+                throw SimulatedSqlException.ColumnPermissionDenied(permission.CanonicalName, target.Columns[ordinal - 1].Name, securable.Name, database.Name, schemaName);
         }
     }
 
@@ -186,21 +228,39 @@ internal static class PermissionEnforcement
             throw SimulatedSqlException.PermissionDenied(permission.ToUpperInvariant(), objectName, database.Name, schemaName, procedure);
     }
 
-    /// <summary>Checks a permission on a heap table (deriving its schema name); no-op when checks don't apply.</summary>
-    internal static void CheckTable(BatchContext batch, string permission, Storage.HeapTable table)
+    /// <summary>Checks a permission on a resolved securable — a table, view, synonym or module; no-op when checks don't apply.</summary>
+    internal static void CheckSchemaObject(BatchContext batch, string permission, Schemas.SchemaObject securable, string procedure = "")
     {
         if (!Applies(batch))
             return;
-        CheckObject(batch, permission, table.ObjectId, table.SchemaId, table.Name, SchemaNameFor(batch.CurrentDatabase, table.SchemaId));
+        CheckObject(batch, permission, securable.ObjectId, securable.SchemaId, securable.Name, SchemaNameFor(batch.CurrentDatabase, securable.SchemaId), procedure);
     }
 
-    /// <summary>Checks a permission on a view; no-op when checks don't apply.</summary>
-    internal static void CheckView(BatchContext batch, string permission, Schemas.View view)
+    /// <summary>
+    /// Checks a permission on the securable a reference written as
+    /// <paramref name="writtenName"/> reached (see <see cref="SecurableFor"/>);
+    /// no-op when checks don't apply.
+    /// </summary>
+    internal static void CheckReference(BatchContext batch, string permission, MultiPartName writtenName, Schemas.SchemaObject resolved, string procedure = "")
     {
         if (!Applies(batch))
             return;
-        CheckObject(batch, permission, view.ObjectId, view.SchemaId, view.Name, view.Schema.Name);
+        CheckSchemaObject(batch, permission, SecurableFor(batch, writtenName, resolved), procedure);
     }
+
+    /// <summary>
+    /// The securable a reference written as <paramref name="writtenName"/> is
+    /// checked against: the <see cref="Schemas.Synonym"/> itself when the name
+    /// is one, otherwise <paramref name="resolved"/>.
+    /// </summary>
+    /// <remarks>
+    /// A synonym is its own securable and real never walks the check through to
+    /// the base object — a grant on the base alone does not admit a reference
+    /// through the synonym (the denial even names the synonym), and a DENY on the
+    /// base does not block one. Probe-confirmed against SQL Server 2025.
+    /// </remarks>
+    internal static Schemas.SchemaObject SecurableFor(BatchContext batch, MultiPartName writtenName, Schemas.SchemaObject resolved) =>
+        batch.TryResolveSynonym(writtenName, out var synonym) ? synonym : resolved;
 
     private static string SchemaNameFor(Database database, int schemaId)
     {

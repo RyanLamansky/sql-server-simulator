@@ -20,7 +20,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// tooling + EF Core query: <c>Collation</c>, <c>Status</c>, <c>UserAccess</c>,
 /// <c>IsAutoClose</c>, <c>IsAutoShrink</c>, <c>Recovery</c>,
 /// <c>SnapshotIsolationState</c>, <c>IsReadCommittedSnapshotOn</c>,
-/// <c>ComparisonStyle</c>, <c>LCID</c>, <c>SQLSortOrder</c>, <c>Version</c>.
+/// <c>IsRecursiveTriggersEnabled</c>, <c>ComparisonStyle</c>, <c>LCID</c>,
+/// <c>SQLSortOrder</c>, <c>Version</c>.
 /// Properties not on the list return NULL (forward-compatible with future
 /// tooling that may query newer property names). <see cref="Produce"/>
 /// resolves a property to its inner value; a NULL result (a null-valued
@@ -78,6 +79,7 @@ internal sealed class DatabasePropertyEx : Expression
             "ISAUTOCLOSE" => SqlValue.FromInt32(0),
             "ISAUTOSHRINK" => SqlValue.FromInt32(0),
             "ISREADCOMMITTEDSNAPSHOTON" => SqlValue.FromInt32(db.ReadCommittedSnapshot ? 1 : 0),
+            "ISRECURSIVETRIGGERSENABLED" => SqlValue.FromInt32(db.RecursiveTriggers ? 1 : 0),
             // DBCC CHECKDB isn't modeled, so the last-good-checkdb time is a
             // NULL sql_variant. SMO's CAST(ISNULL(..., 0) AS datetime) resolves
             // to 1900-01-01: ISNULL over the NULL variant fixes to sql_variant

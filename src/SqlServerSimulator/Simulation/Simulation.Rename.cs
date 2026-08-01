@@ -1,5 +1,6 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -67,14 +68,17 @@ partial class Simulation
         if (objType is null)
         {
             RenameTable(batch, objName, newName);
+            RecordRenameEvent(batch, objName, "TABLE");
         }
         else if (BuiltInToken.Equals(objType, "COLUMN"))
         {
             RenameColumn(batch, objName, newName);
+            RecordRenameEvent(batch, objName, "COLUMN");
         }
         else if (BuiltInToken.Equals(objType, "INDEX"))
         {
             RenameIndex(batch, objName, newName);
+            RecordRenameEvent(batch, objName, "INDEX");
         }
         else
         {
@@ -84,6 +88,19 @@ partial class Simulation
 
         batch.AppendInfoError(@class: 10, state: 1, number: 15477, message: RenameCautionMessage);
         yield break;
+    }
+
+    /// <summary>
+    /// Raises the <c>RENAME</c> DDL event for a completed <c>sp_rename</c>.
+    /// Real reports the <em>old</em> name as <c>ObjectName</c> (probe-confirmed)
+    /// alongside a <c>NewObjectName</c> element the simulator doesn't emit.
+    /// </summary>
+    private static void RecordRenameEvent(BatchContext batch, string objName, string objectType)
+    {
+        var dot = objName.LastIndexOf('.');
+        var schemaName = dot < 0 ? Database.DefaultSchemaName : objName[..dot].Trim('[', ']');
+        var leaf = objName[(dot + 1)..].Trim('[', ']');
+        RecordDdlEvent(batch.Parser, "RENAME", schemaName, leaf, objectType);
     }
 
     private static (string? ObjName, string? NewName, string? ObjType) ParseSpRenameArgs(List<ProcArgument> arguments)
@@ -132,6 +149,11 @@ partial class Simulation
         if (schema.HasNameInSharedNamespace(newName))
             throw SimulatedSqlException.RenameDuplicateName(newName, "object");
 
+        // A schema-bound module's reference is by name, so real refuses to
+        // rename out from under one — Msg 15336, echoing @objname as passed.
+        if (SchemaBinding.FindReferencingModule(database, table) is not null)
+            throw SimulatedSqlException.RenameParticipatesInEnforcedDependencies(objName);
+
         batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
         _ = schema.HeapTables.TryRemove(table.Name, out _);
         table.Name = newName;
@@ -165,6 +187,12 @@ partial class Simulation
             if (collation.Equals(column.Name, newName))
                 throw SimulatedSqlException.RenameDuplicateName(newName, "COLUMN");
         }
+
+        // Column-granular schema binding: renaming a column no schema-bound
+        // module reads is allowed, renaming one that is read is Msg 15336
+        // (both probe-confirmed).
+        if (SchemaBinding.ColumnReferencingModuleNames(batch.CurrentDatabase, table, columnName).Count > 0)
+            throw SimulatedSqlException.RenameParticipatesInEnforcedDependencies(objName);
 
         // Storage is by ordinal, so the name change needs no row re-encode — but
         // the schema-version bump invalidates any cached plan that resolved the

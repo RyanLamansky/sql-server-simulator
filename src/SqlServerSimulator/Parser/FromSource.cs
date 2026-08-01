@@ -41,7 +41,8 @@ internal sealed class FromSource(
     bool materializeOnce = false,
     bool isPlaceholder = false,
     CatalogView? backingCatalogView = null,
-    Database? backingCatalogDatabase = null)
+    Database? backingCatalogDatabase = null,
+    Synonym? viaSynonym = null)
 {
     public readonly string? Qualifier = qualifier;
     public readonly string[] ColumnNames = columnNames;
@@ -69,6 +70,15 @@ internal sealed class FromSource(
     /// mutually exclusive: at most one is non-null.
     /// </summary>
     public readonly View? BackingView = backingView;
+
+    /// <summary>
+    /// The <see cref="Schemas.Synonym"/> this source was written as, when the
+    /// FROM clause reached <see cref="BackingTable"/> / <see cref="BackingView"/>
+    /// through one; null for a direct reference. Permission enforcement checks
+    /// the synonym rather than the object behind it, and skips column-grain
+    /// tracking for the source (a synonym takes no column grants at all).
+    /// </summary>
+    public readonly Synonym? ViaSynonym = viaSynonym;
 
     /// <summary>
     /// When non-null, this source is the right side of a <c>CROSS APPLY</c>
@@ -182,7 +192,7 @@ internal sealed class FromSource(
         new(this.Qualifier, this.ColumnNames, this.Columns, this.StoredSchema,
             this.StorageOrdinals, this.LobStore, rows,
             lateralPlan: null, backingTable: this.BackingTable, backingView: this.BackingView,
-            heapPlan: this.HeapPlan, materializeOnce: false);
+            heapPlan: this.HeapPlan, materializeOnce: false, viaSynonym: this.ViaSynonym);
 }
 
 /// <summary>

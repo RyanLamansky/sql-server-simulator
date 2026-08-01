@@ -576,7 +576,9 @@ internal abstract class Expression
                 context.MoveNextRequired();
             }
         }
-        return new Value();
+        // Not a written literal: the placeholder stands for a call, so a dead
+        // branch's `ORDER BY dbo.missing()` mustn't read as a constant term.
+        return Value.UntypedNullPlaceholder();
     }
 
     /// <summary>
@@ -892,6 +894,27 @@ internal abstract class Expression
     /// direction is to under-claim.
     /// </summary>
     internal virtual bool IsRowIndependent => false;
+
+    /// <summary>
+    /// True when this expression is built purely from written literals —
+    /// a literal, a parenthesization or unary minus over one, arithmetic /
+    /// concatenation / <c>CAST</c> / <c>CONVERT</c> / <c>COALESCE</c> over
+    /// literal operands. Narrower than <see cref="IsRowIndependent"/>, which
+    /// also admits variables and parameters. Consumed by the ORDER BY parser's
+    /// Msg 408 gate: real rejects a term whose value it folds at compile time,
+    /// while a variable, a subquery, a UDF call and any function reading server
+    /// or session state all sort fine (probe-confirmed — <c>@v + 1</c>,
+    /// <c>(SELECT 1)</c>, <c>GETDATE()</c>, <c>@@SPID</c>, <c>ISNULL(NULL, 1)</c>
+    /// are all accepted, <c>'x'</c> / <c>1 + 0</c> / <c>CAST(1 AS int)</c> /
+    /// <c>COALESCE(NULL, 1)</c> are not).
+    /// The default is a conservative <see langword="false"/>: a node that
+    /// doesn't opt in is assumed non-constant, so the gate under-rejects rather
+    /// than refusing a term real accepts. Real additionally folds deterministic
+    /// scalar calls over literals (<c>ABS(-1)</c>, <c>LEN('abc')</c>) and
+    /// <c>CASE</c> / <c>IIF</c> over literal arms; those stay accepted here (see
+    /// docs/claude/query.md).
+    /// </summary>
+    internal virtual bool IsWrittenConstant => false;
 
     /// <summary>
     /// Maximum shared nesting budget (see <see cref="ParserContext.NestingDepth"/>)
@@ -1210,6 +1233,7 @@ internal abstract class Expression
                 "COUNT_BIG" => AggregateExpression.Parse(context, AggregateKind.CountBig),
                 "CUME_DIST" => WindowExpression.ParseCumeDist(context),
                 "DATETRUNC" => new DateTrunc(context),
+                "EVENTDATA" => new EventDataFunction(context),
                 "FILE_IDEX" => new FileId(context, extended: true),
                 "FILE_NAME" => new FileNameLookup(context),
                 "HASHBYTES" => new HashBytes(context),

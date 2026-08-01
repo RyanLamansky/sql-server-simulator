@@ -177,7 +177,7 @@ partial class Simulation
         if (context.Token is not (null or Operator { Character: ';' }))
             throw SimulatedSqlException.MergeMustBeTerminated();
         if (!context.Batch.IsSkipping)
-            CheckMergePermissions(context.Batch, destinationTable, sourceView, whenClauses);
+            CheckMergePermissions(context.Batch, destinationName, (SchemaObject?)sourceView ?? destinationTable, whenClauses);
         return ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output);
     }
 
@@ -187,15 +187,12 @@ partial class Simulation
     /// UPDATE / DELETE). Denials surface as Msg 229. The source read is not
     /// separately checked — a documented gap.
     /// </summary>
-    private static void CheckMergePermissions(BatchContext batch, HeapTable destinationTable, View? sourceView, IReadOnlyList<WhenClause> whenClauses)
+    private static void CheckMergePermissions(BatchContext batch, MultiPartName destinationName, SchemaObject destination, IReadOnlyList<WhenClause> whenClauses)
     {
-        void Check(string permission)
-        {
-            if (sourceView is not null)
-                PermissionEnforcement.CheckView(batch, permission, sourceView);
-            else
-                PermissionEnforcement.CheckTable(batch, permission, destinationTable);
-        }
+        if (!PermissionEnforcement.Applies(batch))
+            return;
+        var target = PermissionEnforcement.SecurableFor(batch, destinationName, destination);
+        void Check(string permission) => PermissionEnforcement.CheckSchemaObject(batch, permission, target);
 
         Check("SELECT");
         var insert = false;
@@ -248,12 +245,17 @@ partial class Simulation
     }
 
     /// <summary>
-    /// <c>USING (VALUES …) AS alias [(cols)]</c> or
-    /// <c>USING (SELECT … / WITH … SELECT …) AS alias [(cols)]</c>. The
-    /// alias is required here (matches real SQL Server). Cursor on entry:
-    /// the opening <c>(</c>. Cursor on exit: the next un-consumed token
-    /// (typically <c>ON</c>).
+    /// <c>USING (VALUES …) AS alias [(cols)]</c> or <c>USING (SELECT …) AS
+    /// alias [(cols)]</c>. The alias is required here (matches real SQL
+    /// Server). Cursor on entry: the opening <c>(</c>. Cursor on exit: the
+    /// next un-consumed token (typically <c>ON</c>).
     /// </summary>
+    /// <remarks>
+    /// A CTE prefix inside the parens is real's <strong>Msg 156</strong>: the
+    /// source is a table source, and no parenthesized query position accepts a
+    /// WITH. The prefix belongs ahead of the MERGE itself
+    /// (<c>WITH c AS (…) MERGE … USING c</c>), which ships.
+    /// </remarks>
     private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema) ParseParenthesizedMergeSource(ParserContext context)
     {
         context.MoveNextRequired();
@@ -285,6 +287,8 @@ partial class Simulation
         }
         else
         {
+            if (context.Token is ReservedKeyword { Keyword: Keyword.With } withKeyword)
+                throw SimulatedSqlException.SyntaxErrorNearKeyword(withKeyword);
             var selection = Selection.Parse(context, depth: 1);
             sourceSchema = selection.Schema;
             selectionColumnNames = selection.ColumnNames;

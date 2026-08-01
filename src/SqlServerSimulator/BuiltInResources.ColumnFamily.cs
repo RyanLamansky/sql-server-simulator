@@ -31,7 +31,7 @@ internal static partial class BuiltInResources
         ], (batch, database) =>
             database.Schemas.Values
                 .SelectMany(s => s.HeapTables.Values)
-                .Where(t => t.PeriodColumns is not null && !t.IsHistoryTable)
+                .Where(t => t.PeriodColumns is not null && !t.IsHistoryTable && !t.PeriodInheritedFromBase)
                 .OrderBy(t => t.ObjectId)
                 .Select(t => new SqlValue[]
                 {
@@ -463,7 +463,7 @@ internal static partial class BuiltInResources
             obj.DefinitionText is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(obj.DefinitionText),
             on,  // uses_ansi_nulls
             on,  // uses_quoted_identifier
-            obj is View { IsSchemaBound: true } ? on : off, // is_schema_bound
+            obj is View { IsSchemaBound: true } or UserDefinedFunction { IsSchemaBound: true } ? on : off, // is_schema_bound
             off, // uses_database_collation
             off, // is_recompiled
             obj is ScalarFunction { ReturnsNullOnNullInput: true } ? on : off, // null_on_null_input

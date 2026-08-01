@@ -37,7 +37,7 @@ internal sealed class ObjectProperty : Expression
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
         var obj = FindObject(runtime.Batch.CurrentDatabase, id);
         return obj is null ? SqlValue.Null(SqlType.Int32)
-            : EvaluateProperty(obj, prop) is int result
+            : EvaluateProperty(runtime.Batch.CurrentDatabase, obj, prop) is int result
                 ? SqlValue.FromInt32(result)
                 : SqlValue.Null(SqlType.Int32);
     }
@@ -93,8 +93,10 @@ internal sealed class ObjectProperty : Expression
     /// Returns <c>1</c> / <c>0</c> for the recognized properties, <c>null</c>
     /// for unknown names. Property-name comparison is case-insensitive via
     /// the SSS003-friendly <see cref="ReadOnlySpan{T}"/> overload.
+    /// <paramref name="database"/> carries the schema dictionaries
+    /// <c>IsDeterministic</c>'s transitive module walk resolves through.
     /// </summary>
-    internal static int? EvaluateProperty(SchemaObject obj, string property)
+    internal static int? EvaluateProperty(Database database, SchemaObject obj, string property)
     {
         // Boolean Is-X checks based on concrete type. Returns 1 if true,
         // 0 if false, NULL for unknown property names (matching real
@@ -126,7 +128,7 @@ internal sealed class ObjectProperty : Expression
             },
             13 => upper switch
             {
-                "ISSCHEMABOUND" => obj is View { IsSchemaBound: true } ? 1 : 0,
+                "ISSCHEMABOUND" => ModuleDeterminism.EvaluateSchemaBound(obj),
                 // 0 for every resolvable object — probe-confirmed even for
                 // catalog views (real's legacy system-table sense never
                 // applies to modeled objects). DacFx's default-constraint
@@ -138,7 +140,7 @@ internal sealed class ObjectProperty : Expression
             },
             15 => upper switch
             {
-                "ISDETERMINISTIC" => obj is ScalarFunction ? 1 : 0,
+                "ISDETERMINISTIC" => ModuleDeterminism.Evaluate(database, obj),
                 "ISTABLEFUNCTION" => obj is InlineTableValuedFunction or MultiStatementTableValuedFunction ? 1 : 0,
                 _ => null,
             },

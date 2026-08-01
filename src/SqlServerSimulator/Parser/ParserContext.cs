@@ -304,18 +304,18 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public List<ReferencedSecurable>? SecurableSink;
 
     /// <summary>
-    /// Accumulates, per base-table <c>object_id</c>, the set of 1-based column
+    /// Accumulates, per table / view <c>object_id</c>, the set of 1-based column
     /// ordinals a query reads (select list / WHERE / JOIN ON / GROUP BY /
     /// HAVING / ORDER BY), so the outermost <see cref="Selection.Parse"/> can
     /// attach them to <see cref="Selection.ReadColumnsByObject"/> for the
     /// execution-time column-level SELECT check. Principal-independent, so it
     /// rides the cached plan; created alongside <see cref="SecurableSink"/> and
     /// null outside a top-level query expression (module bodies never leak into
-    /// a caller's map). An empty column set means the table is read without
+    /// a caller's map). An empty column set means the object is read without
     /// naming a specific column (<c>COUNT(*)</c> / <c>SELECT 1</c>), which real
     /// SQL Server checks as requiring SELECT on <em>every</em> column.
     /// </summary>
-    public Dictionary<int, (Storage.HeapTable Table, HashSet<int> Columns)>? ReadColumnSink;
+    public Dictionary<int, ColumnReadTarget>? ReadColumnSink;
 
     public Simulation Simulation => Command.simulation;
 

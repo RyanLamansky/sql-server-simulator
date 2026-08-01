@@ -63,6 +63,18 @@ public sealed partial class SimulatedSqlException
         new("Sub-entity lists (such as column or security expressions) cannot be specified for entity-level permissions.", 1020, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 1020 for a column list on a <em>synonym</em>
+    /// securable. Same wording as <see cref="GrantSubEntityListNotAllowed"/> but
+    /// severity 16 state 3, because real raises it after the securable resolves
+    /// (so it is a catchable runtime error, and it beats the Msg 4615
+    /// unknown-column check) rather than as the compile-time class-15 rejection
+    /// an entity-level <em>permission</em> gets. Probe-confirmed against
+    /// SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException GrantSubEntityListNotAllowedOnSynonym() =>
+        new("Sub-entity lists (such as column or security expressions) cannot be specified for entity-level permissions.", 1020, 16, 3);
+
+    /// <summary>
     /// Mimics SQL Server error 262: <c>CREATE TABLE</c> attempted by a principal
     /// lacking <c>db_ddladmin</c> / <c>db_owner</c> membership (or an explicit
     /// CREATE TABLE grant). Severity 14, state 1, probe-confirmed wording.

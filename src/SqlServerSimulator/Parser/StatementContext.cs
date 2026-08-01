@@ -47,8 +47,19 @@ internal sealed class StatementContext
     /// <c>CURRENT_TIMESTAMP</c>) and UTC-returning variants share this
     /// single UTC instant, and <c>SYSDATETIMEOFFSET</c> reports a
     /// <c>+00:00</c> offset.
+    /// <para>
+    /// Seeded at construction rather than left at <see cref="DateTime"/>'s
+    /// default: a body batch that never reaches the dispatch loop (a view or
+    /// inline-TVF body, which is parsed and executed directly) would otherwise
+    /// serve <c>0001-01-01</c> to every current-time call — a value outside
+    /// legacy <c>datetime</c>'s range, so <c>GETDATE()</c> raised Msg 242
+    /// instead of returning a time. Such bodies overwrite this with the
+    /// referencing statement's own freeze via
+    /// <see cref="BatchContext.AdoptStatementFreezeFrom"/>; the seed is the
+    /// floor for any batch that inherits nothing.
+    /// </para>
     /// </summary>
-    public DateTime UtcNow;
+    public DateTime UtcNow = DateTime.UtcNow;
 
     /// <summary>
     /// 1-based line within the batch where this statement started (taken
@@ -94,6 +105,28 @@ internal sealed class StatementContext
     /// start of each statement iteration by the dispatch loop.
     /// </summary>
     public bool SuppressErrorReset;
+
+    /// <summary>
+    /// DDL events this statement raised, appended by the statement's own
+    /// processor once its work succeeded and drained by the dispatch loop,
+    /// which fires the matching database-scope DDL triggers. Null until a DDL
+    /// statement records something; reset at the top of each statement
+    /// iteration alongside <see cref="UtcNow"/>. Statement-scoped because the
+    /// events belong to one statement's completion and the text span
+    /// <see cref="StartIndex"/> anchors is that statement's.
+    /// </summary>
+    public List<DdlEventInfo>? PendingDdlEvents;
+
+    /// <summary>
+    /// Object id of a database-scope DDL trigger this statement <em>created</em>,
+    /// excluded from its own statement's fire set: real doesn't run a brand-new
+    /// trigger for the <c>CREATE TRIGGER</c> that made it, though a sibling
+    /// trigger does see the <c>CREATE_TRIGGER</c> event (probe-confirmed).
+    /// An <c>ALTER</c> leaves this null, because the trigger already existed —
+    /// which is why real does run the replaced body for its own
+    /// <c>ALTER_TRIGGER</c>.
+    /// </summary>
+    public int? DdlTriggerCreatedThisStatement;
 
     /// <summary>
     /// Whether this statement's leading keyword makes it row-returning — a

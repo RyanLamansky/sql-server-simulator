@@ -506,6 +506,27 @@ partial class SimulatedSqlException
         new($"The ORDER BY position number {position} is out of range of the number of items in the select list.", 108, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 408: an <c>ORDER BY</c> term folds to a constant
+    /// (<c>'x'</c>, <c>1 + 0</c>, <c>CAST(1 AS int)</c>, <c>NULL</c>).
+    /// <paramref name="position"/> is the term's 1-based index in the ORDER BY
+    /// list. A signed integer literal is the ordinal form and lands on Msg 108
+    /// instead; a variable, a subquery, a UDF call and any server- or
+    /// session-state function all sort fine (probe-confirmed).
+    /// </summary>
+    internal static SimulatedSqlException ConstantExpressionInOrderBy(int position) =>
+        new($"A constant expression was encountered in the ORDER BY list, position {position}.", 408, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1008: an <c>ORDER BY</c> term is a bare variable,
+    /// which real reads as a variable column position rather than a sort
+    /// expression. A variable inside a larger expression (<c>@v + 1</c>) is
+    /// accepted (probe-confirmed). <paramref name="position"/> is the term's
+    /// 1-based index in the ORDER BY list.
+    /// </summary>
+    internal static SimulatedSqlException VariableInOrderByPosition(int position) =>
+        new($"The SELECT item identified by the ORDER BY number {position} contains a variable as part of the expression identifying a column position. Variables are only allowed when ordering by an expression referencing a column name.", 1008, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 4108 — a windowed (OVER) function appeared
     /// somewhere other than the SELECT projection or ORDER BY: WHERE, HAVING,
     /// GROUP BY, ON, etc.
@@ -810,4 +831,54 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException StringAggResultExceededLimit() =>
         new("STRING_AGG aggregation result exceeded the limit of 8000 bytes. Use LOB types to avoid result truncation.", 9829, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11535: the executed module sent more result
+    /// sets than its <c>WITH RESULT SETS</c> clause declared — including the
+    /// <c>RESULT SETS NONE</c> form, which declares zero and so reports
+    /// <c>"specified 0 result set(s)"</c>. Wording and State 1 probe-confirmed
+    /// against SQL Server 2025; the sets that did match are streamed to the
+    /// client before this fires.
+    /// </summary>
+    internal static SimulatedSqlException ResultSetsTooManySent(int declaredCount) =>
+        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified {declaredCount} result set(s), and the statement tried to send more result sets than this.", 11535, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11536: the executed module sent fewer result
+    /// sets than its <c>WITH RESULT SETS</c> clause declared. Unlike the other
+    /// result-set-contract errors this one is attributed to the <c>EXECUTE</c>
+    /// statement itself rather than the module's producing statement
+    /// (probe-confirmed: <c>ERROR_PROCEDURE()</c> reads NULL).
+    /// </summary>
+    internal static SimulatedSqlException ResultSetsTooFewSent(int declaredCount, int sentCount) =>
+        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified {declaredCount} result set(s), but the statement only sent {sentCount} result set(s) at run time.", 11536, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11537: a result set's column count doesn't
+    /// match the count its <c>WITH RESULT SETS</c> definition declared. Note
+    /// the wording asymmetry real uses — <c>"result set number N"</c> here
+    /// versus <c>"result set #N"</c> in Msg 11538 / 11553.
+    /// </summary>
+    internal static SimulatedSqlException ResultSetsColumnCountMismatch(int declaredCount, int setNumber, int sentCount) =>
+        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified {declaredCount} column(s) for result set number {setNumber}, but the statement sent {sentCount} column(s) at run time.", 11537, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11538: a <c>WITH RESULT SETS</c> column
+    /// declared a type the run-time column can't reach by implicit
+    /// conversion. Both type names render bare (no length / precision
+    /// decoration) — probe-confirmed: a <c>decimal(5,2)</c> declaration
+    /// reports <c>'decimal'</c> and a <c>time(3)</c> run-time column reports
+    /// <c>'time'</c>.
+    /// </summary>
+    internal static SimulatedSqlException ResultSetsNoConversion(string declaredTypeName, int columnNumber, int setNumber, string runtimeTypeName) =>
+        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified type '{declaredTypeName}' for column #{columnNumber} in result set #{setNumber}, and the corresponding type sent at run time was '{runtimeTypeName}'; there is no conversion between the two types.", 11538, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11553: a <c>WITH RESULT SETS</c> column
+    /// declared <c>NOT NULL</c> received a NULL at run time. Raised per row as
+    /// the result set streams, so rows preceding the offending one reach the
+    /// client.
+    /// </summary>
+    internal static SimulatedSqlException ResultSetsNullInNonNullableColumn(int columnNumber, int setNumber) =>
+        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified a non-nullable type for column #{columnNumber} in result set #{setNumber}, and the corresponding value sent at run time was null.", 11553, 16, 1);
 }

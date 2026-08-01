@@ -15,6 +15,23 @@ Sibling deep-dives: [`foreign-keys.md`](foreign-keys.md) (the FK family in full)
   Enforcement **seeks the shared `HeapSeekCache`** (live-byte verified, no residual WHERE).
   Referential-action, cascade-cycle, PK/UNIQUE-target, NULL-skip rules + Msg numbers in [`foreign-keys.md`](foreign-keys.md).
 
+## One inline constraint of each kind per column (Msg 8148 / 8151)
+
+A single column definition admits at most one inline constraint of each kind.
+A second raises **Msg 8148** `More than one column <kind> constraint specified for column 'b', table 't'.` — `CHECK`, `DEFAULT`, `UNIQUE` and `PRIMARY KEY` each echoing their own keyword, whether the pair is named, unnamed, or one of each.
+An inline `PRIMARY KEY` beside an inline `UNIQUE` is **Msg 8151** (`Both a PRIMARY KEY and UNIQUE constraint have been defined for column 'b', table 't'. Only one is allowed.`) in either order instead.
+Both fire wherever a column definition is parsed: CREATE TABLE, `DECLARE @t TABLE` (the message names `@t`), `CREATE TYPE … AS TABLE`, `ALTER TABLE … ADD <column>`, and the inline tail of a **persisted computed column**.
+
+The restriction is on the column *definition* only — a table-level `CHECK` over a column that already carries an inline one is legal, as is a later `ALTER TABLE … ADD CHECK`, and a `DEFAULT` pairs with a `CHECK` freely.
+All probe-confirmed against SQL Server 2025.
+
+**Divergence**: the message names the table by the leaf the parser carries, where real echoes the name as written (`table 'dbo.t'` for a schema-qualified CREATE) — shared with the sibling column-definition errors (Msg 8141 / 8147).
+
+## Constraint naming metadata
+
+`sys.check_constraints.is_system_named` is 1 for every server-generated name and 0 for a `CONSTRAINT name` one, on both declaration paths — CREATE TABLE (inline column tail and table-level list) and `ALTER TABLE … ADD` — matching real (probe-confirmed against SQL Server 2025, which reports the same split for `sys.default_constraints` and `sys.key_constraints`).
+The auto-name shapes themselves are in [`alter-table.md`](alter-table.md); they are deterministic but don't byte-match real's object-id-derived hex.
+
 ## Computed columns in a CHECK constraint
 
 A **PERSISTED** computed column carries a CHECK in every form: the inline column tail (`cc AS a + 1 PERSISTED [CONSTRAINT n] CHECK (cc > 0)`), the table-level list, `ALTER TABLE … ADD CONSTRAINT … CHECK`, and the inline tail of an `ALTER TABLE … ADD` of the computed column itself.

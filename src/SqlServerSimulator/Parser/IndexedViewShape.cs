@@ -14,6 +14,13 @@ namespace SqlServerSimulator.Parser;
 /// </summary>
 internal sealed class IndexedViewShape
 {
+    /// <summary>
+    /// The first CTE the body declares → Msg 10137, which embeds it. Declared
+    /// order, not reference order: real names the first one even when the
+    /// body's SELECT reads only a later one, and even when nothing reads it.
+    /// </summary>
+    public string? CteName;
+
     /// <summary>`SELECT DISTINCT` anywhere in the body → Msg 10100.</summary>
     public bool HasDistinct;
 

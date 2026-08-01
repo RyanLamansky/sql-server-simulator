@@ -30,14 +30,50 @@ internal sealed class Value : Expression
     /// </summary>
     internal readonly bool IsUntypedNull;
 
+    /// <summary>
+    /// True when the constant was written as a literal in the SQL text, as
+    /// opposed to standing in for a constant-valued <c>@@</c> keyword or a
+    /// parser-synthesized placeholder. ORDER BY's Msg 408 gate reads this:
+    /// real rejects a literal term but sorts happily by <c>@@VERSION</c> /
+    /// <c>@@MAX_PRECISION</c> (probe-confirmed), because a niladic function is
+    /// evaluated per statement rather than folded.
+    /// </summary>
+    internal readonly bool IsLiteral;
+
     /// <summary>Bare <c>NULL</c> literal — typed as <see cref="SqlType.Int32"/>; SQL Server has no truly untyped NULL, so we pick a default type that yields to any typed sibling in promotion.</summary>
     public Value()
     {
         this.Constant = SqlValue.Null(SqlType.Int32);
         this.IsUntypedNull = true;
+        this.IsLiteral = true;
     }
 
-    public Value(SqlValue value) => this.Constant = value;
+    public Value(SqlValue value)
+    {
+        this.Constant = value;
+        this.IsLiteral = true;
+    }
+
+    /// <summary>
+    /// Constant that isn't a written literal — the <c>@@OPTIONS</c> bitmask.
+    /// Kept out of <see cref="IsLiteral"/> so it doesn't read as a constant
+    /// ORDER BY term.
+    /// </summary>
+    internal static Value NonLiteral(SqlValue value) => new(value, untypedNull: false);
+
+    /// <summary>
+    /// Untyped-NULL placeholder standing in for an expression the parser
+    /// discarded (a skip-mode deferred function call). Promotes like the bare
+    /// <c>NULL</c> keyword but isn't a written literal, so a dead branch's
+    /// <c>ORDER BY dbo.missing()</c> doesn't read as a constant term.
+    /// </summary>
+    internal static Value UntypedNullPlaceholder() => new(SqlValue.Null(SqlType.Int32), untypedNull: true);
+
+    private Value(SqlValue value, bool untypedNull)
+    {
+        this.Constant = value;
+        this.IsUntypedNull = untypedNull;
+    }
 
     /// <summary>
     /// Integer-literal ctor carrying the token's significant-digit count for
@@ -47,6 +83,7 @@ internal sealed class Value : Expression
     {
         this.Constant = value;
         this.IntegerLiteralDigitCount = integerLiteralDigitCount;
+        this.IsLiteral = true;
     }
 
     public Value(DoubleAtPrefixedString doubleAtPrefixedString)
@@ -130,7 +167,7 @@ internal sealed class Value : Expression
     /// option and the plan cache keys on it.
     /// </summary>
     public static Value FromAtAtOptions(ParserContext context) =>
-        new(SqlValue.FromInt32(context.QuotedIdentifiers ? 5432 : 5432 & ~256));
+        NonLiteral(SqlValue.FromInt32(context.QuotedIdentifiers ? 5432 : 5432 & ~256));
 
     public override SqlValue Run(RuntimeContext runtime) => this.Constant;
 
@@ -139,6 +176,8 @@ internal sealed class Value : Expression
     internal override string DebugDisplay() => this.Constant.DebugDisplay();
 
     internal override bool IsRowIndependent => true;
+
+    internal override bool IsWrittenConstant => this.IsLiteral;
 
     internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => this.Constant.IsNull;
 

@@ -42,6 +42,27 @@ partial class SimulatedSqlException
         new($"Cannot perform alter on '{name}' because it is an incompatible object type.", 2010, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 166: a <c>CREATE</c> / <c>ALTER</c> /
+    /// <c>CREATE OR ALTER</c> of a programmable module carries a
+    /// database-name prefix. <paramref name="moduleKind"/> is the bare kind
+    /// keyword (<c>VIEW</c> / <c>FUNCTION</c> / <c>PROCEDURE</c> /
+    /// <c>TRIGGER</c>) — real always names the statement in the combined
+    /// <c>'CREATE/ALTER X'</c> form regardless of which verb was written, and
+    /// rejects a prefix naming the current database as readily as any other
+    /// (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ModuleNameMayNotBeDatabaseQualified(string moduleKind) =>
+        new($"'CREATE/ALTER {moduleKind}' does not allow specifying the database name as a prefix to the object name.", 166, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 117: an object name carries more prefixes than
+    /// the statement allows — a four-part (server-qualified) name where at
+    /// most <c>database.schema</c> is legal.
+    /// </summary>
+    internal static SimulatedSqlException TooManyNamePrefixes(MultiPartName name, int maximum) =>
+        new($"The object name '{name}' contains more than the maximum number of prefixes. The maximum is {maximum}.", 117, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 7202: an <c>OPENQUERY</c> (or four-part name)
     /// references a linked-server name that isn't registered in
     /// <c>sys.servers</c>. Wording probe-confirmed against SQL Server 2025;
@@ -305,6 +326,16 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException InsteadOfTriggerAlreadyExists(string triggerName, string parentKind, string parentName, string actionName) =>
         new($"Cannot create trigger '{triggerName}' on {parentKind} '{parentName}' because an INSTEAD OF {actionName} trigger already exists on this object.", 2111, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2110: an <c>ALTER TRIGGER</c> (or the ALTER leg
+    /// of a <c>CREATE OR ALTER</c>) names an existing trigger but an
+    /// <c>ON</c> target other than the one it is attached to. Both names echo
+    /// what the statement wrote. Probe-confirmed against SQL Server 2025:
+    /// Class 15, State 1.
+    /// </summary>
+    internal static SimulatedSqlException CannotAlterTriggerOnDifferentObject(MultiPartName triggerName, MultiPartName parentName) =>
+        new($"Cannot alter trigger '{triggerName}' on '{parentName}' because this trigger does not belong to this object. Specify the correct trigger name or the correct target object name.", 2110, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server error 334: a DML statement whose <c>OUTPUT</c> clause
@@ -732,6 +763,28 @@ partial class SimulatedSqlException
         new($"Could not create IDENTITY attribute on nullable column '{columnName}', table '{tableName}'.", 8147, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 8148: one column definition carries two inline
+    /// constraints of the same kind — <c>b int CHECK (b &gt; 0) CHECK (b &lt; 10)</c>,
+    /// two <c>DEFAULT</c>s, two <c>UNIQUE</c>s or two <c>PRIMARY KEY</c>s
+    /// (probe-confirmed against SQL Server 2025 for each, including a named
+    /// and an unnamed pair and a persisted computed column). Only the *column*
+    /// form is restricted: a second table-level CHECK over the same column, or
+    /// a later <c>ALTER TABLE … ADD CHECK</c>, is legal.
+    /// <paramref name="constraintKind"/> is the keyword real echoes
+    /// (<c>CHECK</c> / <c>DEFAULT</c> / <c>UNIQUE</c> / <c>PRIMARY KEY</c>).
+    /// </summary>
+    internal static SimulatedSqlException MultipleColumnConstraints(string constraintKind, string columnName, string tableName) =>
+        new($"More than one column {constraintKind} constraint specified for column '{columnName}', table '{tableName}'.", 8148, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8151: one column definition carries both an
+    /// inline <c>PRIMARY KEY</c> and an inline <c>UNIQUE</c> (either order).
+    /// The same-kind pair is Msg 8148 instead.
+    /// </summary>
+    internal static SimulatedSqlException BothPrimaryKeyAndUniqueOnColumn(string columnName, string tableName) =>
+        new($"Both a PRIMARY KEY and UNIQUE constraint have been defined for column '{columnName}', table '{tableName}'. Only one is allowed.", 8151, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2749: the identity column's data type isn't in
     /// the supported list (int/bigint/smallint/tinyint/decimal-or-numeric with
     /// scale 0). The message text is the literal SQL Server wording.
@@ -909,6 +962,71 @@ partial class SimulatedSqlException
         new($"Cannot drop schema '{schemaName}' because it is being referenced by object '{objectName}'.", 3729, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 3729: a <c>DROP</c> targeted an object that a
+    /// <c>WITH SCHEMABINDING</c> module references. <paramref name="statement"/>
+    /// is the verb pair real echoes (<c>DROP TABLE</c> / <c>DROP VIEW</c> /
+    /// <c>DROP FUNCTION</c>), the target is schema-qualified, and the blocking
+    /// module surfaces as its bare leaf. Probe-confirmed verbatim against SQL
+    /// Server 2025 — state 1, distinct from the ALTER form's state 3.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropReferencedBySchemaBoundObject(
+        string statement, string qualifiedName, string referencingName) =>
+        new($"Cannot {statement} '{qualifiedName}' because it is being referenced by object '{referencingName}'.", 3729, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 3729: an <c>ALTER</c> (or <c>CREATE OR
+    /// ALTER</c>) of a view or function that a <c>WITH SCHEMABINDING</c>
+    /// module references. Real omits the object kind here — the message reads
+    /// <c>Cannot ALTER 'dbo.f'</c> — carries state 3, and attributes the error
+    /// to the altered module as its Procedure. Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException CannotAlterReferencedBySchemaBoundObject(
+        string qualifiedName, string moduleLeafName, string referencingName) =>
+        new($"Cannot ALTER '{qualifiedName}' because it is being referenced by object '{referencingName}'.",
+            new SimulatedError(@class: 16, lineNumber: 0,
+                message: $"Cannot ALTER '{qualifiedName}' because it is being referenced by object '{referencingName}'.",
+                number: 3729, procedure: moduleLeafName, server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 3));
+
+    /// <summary>
+    /// Mimics SQL Server error 15336: <c>sp_rename</c> targeted an object or
+    /// column a <c>WITH SCHEMABINDING</c> module references. Real echoes the
+    /// <c>@objname</c> as passed — <c>'dbo.t'</c> for the object form,
+    /// <c>'dbo.t.c'</c> for the column form. Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException RenameParticipatesInEnforcedDependencies(string objName) =>
+        new($"Object '{objName}' cannot be renamed because the object participates in enforced dependencies.", 15336, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15348: <c>ALTER SCHEMA … TRANSFER</c> targeted
+    /// an object a <c>WITH SCHEMABINDING</c> module references. The message
+    /// names nothing — probe-confirmed verbatim, including real's unspaced
+    /// "schemabound". Transferring the schema-bound module itself is allowed.
+    /// </summary>
+    internal static SimulatedSqlException CannotTransferSchemaBoundObject() =>
+        new("Cannot transfer a schemabound object.", 15348, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4512: a <c>WITH SCHEMABINDING</c> body named a
+    /// FROM-clause source with something other than a two-part name.
+    /// <paramref name="moduleKind"/> is the word real echoes (<c>view</c> /
+    /// <c>function</c>). Probe-confirmed verbatim against both a one-part
+    /// (<c>FROM t</c>) and a three-part (<c>FROM master.dbo.t</c>) name.
+    /// </summary>
+    internal static SimulatedSqlException CannotSchemaBindInvalidName(
+        string moduleKind, string qualifiedModuleName, string referencedName) =>
+        new($"Cannot schema bind {moduleKind} '{qualifiedModuleName}' because name '{referencedName}' is invalid for schema binding. Names must be in two-part format and an object cannot reference itself.", 4512, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 4513: a <c>WITH SCHEMABINDING</c> body
+    /// referenced a view or function that isn't itself schema bound — the rule
+    /// that makes the dependency graph closed under schema binding.
+    /// Probe-confirmed verbatim; state 2.
+    /// </summary>
+    internal static SimulatedSqlException CannotSchemaBindNotSchemaBound(
+        string moduleKind, string qualifiedModuleName, string referencedName) =>
+        new($"Cannot schema bind {moduleKind} '{qualifiedModuleName}'. '{referencedName}' is not schema bound.", 4513, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 15530: <c>ALTER SCHEMA dest TRANSFER source.obj</c>
     /// rejected because <paramref name="objectLeafName"/> is already present
     /// in the destination schema. The canonical wording surfaces only the
@@ -1033,33 +1151,143 @@ partial class SimulatedSqlException
         new($"SYSTEM_VERSIONING is not turned ON for table '{qualifiedTableName}'.", 13591, 16, 1);
 
     /// <summary>
-    /// <c>ALTER TABLE … SET (SYSTEM_VERSIONING = ON …)</c> targeted a base
-    /// table that doesn't have a <c>PERIOD FOR SYSTEM_TIME</c> declaration.
-    /// SQL Server reports a related Msg 13558 family; the simulator surfaces
-    /// the requirement as a single canonical wording until verbatim
-    /// probe-matching lands.
-    /// </summary>
-    internal static SimulatedSqlException SystemVersioningOnRequiresPeriod(string qualifiedTableName) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because table '{qualifiedTableName}' does not have a PERIOD FOR SYSTEM_TIME declaration.", 13558, 16, 1);
-
-    /// <summary>
-    /// <c>ALTER TABLE … SET (SYSTEM_VERSIONING = ON …)</c> targeted a base
-    /// table that's already system-versioned. SQL Server's matching error is
-    /// in the 13530+ range; the simulator's wording carries the same intent
-    /// until verbatim probe-matching lands.
+    /// Mimics SQL Server error 13596: <c>ALTER TABLE … SET (SYSTEM_VERSIONING
+    /// = ON)</c> — with no <c>HISTORY_TABLE</c> option — targeted a base table
+    /// that's already system-versioned. Naming the *current* history table
+    /// instead is accepted (it's how a retention period is changed in place);
+    /// naming a different one raises
+    /// <see cref="TemporalHistoryTableNameNotCorrect"/> /
+    /// <see cref="TemporalTableAlreadyHasHistoryTable"/>. Probe-confirmed
+    /// wording against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException SystemVersioningAlreadyOn(string qualifiedTableName) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because table '{qualifiedTableName}' already has SYSTEM_VERSIONING turned ON.", 13530, 16, 1);
+        new($"SYSTEM_VERSIONING is already turned ON for table '{qualifiedTableName}'.", 13596, 16, 1);
 
     /// <summary>
-    /// <c>ALTER TABLE … SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = name))</c>
-    /// named a history table that's already serving as another base table's
-    /// history sibling (<c>IsHistoryTable=true</c>) or is itself a
-    /// system-versioned base. SQL Server's matching error is in the 13533
-    /// family; canonical simulator wording until verbatim probe-matching.
+    /// Mimics SQL Server error 13595: <c>ALTER TABLE … SET (SYSTEM_VERSIONING
+    /// = ON (HISTORY_TABLE = name))</c> on an already-versioned base named an
+    /// existing table other than the base's current history sibling.
+    /// Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException TemporalHistoryTableNameNotCorrect(string qualifiedHistoryName, string qualifiedTableName) =>
+        new($"Temporal history table name '{qualifiedHistoryName}' is not correct for current table '{qualifiedTableName}'.", 13595, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13757: same shape as
+    /// <see cref="TemporalHistoryTableNameNotCorrect"/>, but the named history
+    /// table doesn't resolve at all — real checks the existing link before it
+    /// resolves the name, so an unresolvable name on an already-versioned base
+    /// reports the link rather than Msg 4902. Probe-confirmed wording against
+    /// SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException TemporalTableAlreadyHasHistoryTable(string qualifiedTableName) =>
+        new($"Temporal table '{qualifiedTableName}' already has history table defined. Consider dropping system_versioning first if you want to use different history table.", 13757, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13514: the named history table is already
+    /// serving as another base table's history sibling
+    /// (<c>IsHistoryTable=true</c>) or is itself a system-versioned base.
+    /// Probe-confirmed wording against SQL Server 2025 — identical from the
+    /// <c>CREATE TABLE</c> and <c>ALTER TABLE</c> paths.
     /// </summary>
     internal static SimulatedSqlException HistoryTableAlreadyInUse(string qualifiedTableName) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedTableName}' is already in use as a temporal table sibling.", 13533, 16, 1);
+        new($"History table '{qualifiedTableName}' is already in use.", 13514, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13515: the candidate history table carries a
+    /// PRIMARY KEY / UNIQUE constraint or a unique index of its own. Real
+    /// checks this before the foreign-key, constraint and IDENTITY rejections
+    /// and before any column-shape comparison. Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException HistoryTableHasUniqueKeys(string qualifiedHistoryName) =>
+        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedHistoryName}' has custom unique keys defined. Consider dropping all unique keys and trying again.", 13515, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13516: the candidate history table declares
+    /// FOREIGN KEY constraints. Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException HistoryTableHasForeignKeys(string qualifiedHistoryName) =>
+        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedHistoryName}' has foreign keys defined. Consider dropping all foreign keys and trying again.", 13516, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13517: the candidate history table declares
+    /// CHECK constraints. DEFAULT constraints are *not* covered — real accepts
+    /// a history table carrying them (probe-confirmed). Probe-confirmed
+    /// wording.
+    /// </summary>
+    internal static SimulatedSqlException HistoryTableHasConstraints(string qualifiedHistoryName) =>
+        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedHistoryName}' has table or column constraints defined. Consider dropping all table and column constraints and trying again.", 13517, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13518: the candidate history table has an
+    /// IDENTITY column. Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException HistoryTableHasIdentityColumn(string qualifiedHistoryName) =>
+        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedHistoryName}' has IDENTITY column specification. Consider dropping all IDENTITY column specifications and trying again.", 13518, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13523: base and candidate history table have
+    /// different column counts. Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException HistoryTableColumnCountMismatch(string qualifiedTableName, int baseColumnCount, string qualifiedHistoryName, int historyColumnCount) =>
+        new($"Setting SYSTEM_VERSIONING to ON failed because table '{qualifiedTableName}' has {baseColumnCount} columns and table '{qualifiedHistoryName}' has {historyColumnCount} columns.", 13523, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13524: the columns at the same 1-based ordinal
+    /// have different names. Real walks the ordinals in order and reports the
+    /// first column that differs in name, type, collation or nullability — so
+    /// a name mismatch at a later ordinal loses to a type mismatch at an
+    /// earlier one. Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException HistoryTableColumnNameMismatch(string historyColumnName, int ordinal, string qualifiedHistoryName, string baseColumnName, string qualifiedTableName) =>
+        new($"Setting SYSTEM_VERSIONING to ON failed because column '{historyColumnName}' at ordinal {ordinal} in history table '{qualifiedHistoryName}' has a different name than the column '{baseColumnName}' at the same ordinal in table '{qualifiedTableName}'.", 13524, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13525: matching columns have different declared
+    /// types, rendered in their full declaration form (<c>nvarchar(60)</c>,
+    /// <c>datetime2(3)</c>). Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException HistoryTableColumnTypeMismatch(string columnName, string historyType, string qualifiedHistoryName, string baseType, string qualifiedTableName) =>
+        new($"Setting SYSTEM_VERSIONING to ON failed because column '{columnName}' has data type {historyType} in history table '{qualifiedHistoryName}' which is different from corresponding column type {baseType} in table '{qualifiedTableName}'.", 13525, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13526: matching columns resolve to different
+    /// collations. Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException HistoryTableColumnCollationMismatch(string columnName, string qualifiedTableName, string qualifiedHistoryName) =>
+        new($"Setting SYSTEM_VERSIONING to ON failed because column '{columnName}' does not have the same collation in tables '{qualifiedTableName}' and '{qualifiedHistoryName}'.", 13526, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13531: matching columns differ in nullability,
+    /// in either direction. Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException HistoryTableColumnNullabilityMismatch(string columnName, string qualifiedTableName, string qualifiedHistoryName) =>
+        new($"Setting SYSTEM_VERSIONING to ON failed because column '{columnName}' does not have the same nullability attribute in tables '{qualifiedTableName}' and '{qualifiedHistoryName}'.", 13531, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13574: the candidate history table declares a
+    /// <c>PERIOD FOR SYSTEM_TIME</c> of its own — checked ahead of every other
+    /// history-table rejection. Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException HistoryTableContainsPeriod(string qualifiedHistoryName) =>
+        new($"Setting SYSTEM_VERSIONING to ON failed because temporal history table '{qualifiedHistoryName}' contains SYSTEM_TIME period.", 13574, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13743: <c>HISTORY_RETENTION_PERIOD</c> was given
+    /// a count of zero or less. Probe-confirmed wording, which renders the
+    /// offending number without quotes.
+    /// </summary>
+    internal static SimulatedSqlException InvalidHistoryRetentionPeriod(string value) =>
+        new($"{value} is not a valid value for system versioning history retention period.", 13743, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13744: <c>HISTORY_RETENTION_PERIOD</c> named a
+    /// unit outside DAY(S) / WEEK(S) / MONTH(S) / YEAR(S). Severity 15 (not
+    /// 16 like the rest of the family) and the unit is echoed as written —
+    /// both probe-confirmed.
+    /// </summary>
+    internal static SimulatedSqlException InvalidHistoryRetentionUnit(string unit) =>
+        new($"'{unit}' is not a valid history retention period unit for system versioning.", 13744, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server error 4902: <c>ALTER TABLE</c> named a target that
@@ -1421,6 +1649,10 @@ partial class SimulatedSqlException
         new($"Cannot create index on view '{qualifiedViewName}'. The function '{functionName}' yields nondeterministic results. Use a deterministic system function, or modify the user-defined function to return deterministic results.", 1949, 16, 1);
 
     /// <inheritdoc cref="IndexedViewHasDistinct"/>
+    internal static SimulatedSqlException IndexedViewReferencesCte(string qualifiedViewName, string cteName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it references common table expression \"{cteName}\". Views referencing common table expressions cannot be indexed. Consider not indexing the view, or removing the common table expression from the view definition.", 10137, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewHasDistinct"/>
     internal static SimulatedSqlException IndexedViewHasSelfJoin(string qualifiedViewName, string qualifiedTableName) =>
         new($"Cannot create index on view \"{qualifiedViewName}\". The view contains a self join on \"{qualifiedTableName}\".", 1947, 16, 1);
 
@@ -1683,13 +1915,14 @@ partial class SimulatedSqlException
         new($"Period column '{columnName}' in a system-versioned temporal table cannot be altered.", 13599, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 13510: <c>CREATE TABLE ... WITH (SYSTEM_VERSIONING = ON)</c>
-    /// was issued without an accompanying <c>PERIOD FOR SYSTEM_TIME</c> declaration
-    /// (and with no <c>LEDGER=ON</c> option). Probe-confirmed wording against SQL
-    /// Server 2025.
+    /// Mimics SQL Server error 13510: <c>SYSTEM_VERSIONING = ON</c> was
+    /// requested on a table without a <c>PERIOD FOR SYSTEM_TIME</c> declaration
+    /// (and with no <c>LEDGER=ON</c> option). Probe-confirmed wording against
+    /// SQL Server 2025, including the state split — <c>CREATE TABLE … WITH</c>
+    /// reports state 2, <c>ALTER TABLE … SET</c> state 1.
     /// </summary>
-    internal static SimulatedSqlException SystemVersioningRequiresPeriod() =>
-        new($"Cannot set SYSTEM_VERSIONING to ON when SYSTEM_TIME period is not defined and the LEDGER=ON option is not specified.", 13510, 16, 2);
+    internal static SimulatedSqlException SystemVersioningRequiresPeriod(byte state = 2) =>
+        new($"Cannot set SYSTEM_VERSIONING to ON when SYSTEM_TIME period is not defined and the LEDGER=ON option is not specified.", 13510, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 12002: <c>CREATE SPATIAL INDEX</c> referenced a

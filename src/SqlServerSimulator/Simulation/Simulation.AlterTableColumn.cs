@@ -1,5 +1,6 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -435,7 +436,7 @@ partial class Simulation
         foreach (var ordinal in toDropOrdinals)
         {
             var col = table.Columns[ordinal];
-            var blockers = CollectColumnDependencies(context.Batch.CurrentDatabase.Collation, table, ordinal, col);
+            var blockers = CollectColumnDependencies(context.Batch.CurrentDatabase, table, ordinal, col);
             if (blockers.Count > 0)
                 throw SimulatedSqlException.DropColumnHasDependenciesMixed(col.Name, blockers);
         }
@@ -527,10 +528,12 @@ partial class Simulation
     /// factory consumes to render the probed message shape. Walker order:
     /// PK / UQ → outgoing FK → incoming FK (parent-side references to
     /// this column) → CHECK (inline by name, table-level by predicate
-    /// walk) → DEFAULT → index.
+    /// walk) → DEFAULT → schema-bound module → index (probe-confirmed that
+    /// a schema-bound view precedes an index on the same column).
     /// </summary>
-    private static List<(string Name, bool IsIndex)> CollectColumnDependencies(Collation collation, HeapTable table, int ordinal, HeapColumn col)
+    private static List<(string Name, bool IsIndex)> CollectColumnDependencies(Database database, HeapTable table, int ordinal, HeapColumn col)
     {
+        var collation = database.Collation;
         var blockers = new List<(string, bool)>();
         var storageOrdinal = table.StorageOrdinals[ordinal];
 
@@ -582,6 +585,8 @@ partial class Simulation
         }
         if (col.DefaultConstraint is { } df)
             blockers.Add((df.Name, false));
+        foreach (var module in SchemaBinding.ColumnReferencingModuleNames(database, table, col.Name))
+            blockers.Add((module, false));
         foreach (var ix in table.Indexes)
         {
             if (storageOrdinal < 0)
@@ -819,7 +824,7 @@ partial class Simulation
         // SqlType-subclass change (varchar(50)→varchar(100) widening passes
         // under an index, varchar→nvarchar doesn't).
         var isSubclassChange = existingCol.Type.GetType() != newType.GetType();
-        var blockers = CollectAlterColumnBlockers(context.Batch.CurrentDatabase.Collation, table, ordinal, existingCol, isSubclassChange);
+        var blockers = CollectAlterColumnBlockers(context.Batch.CurrentDatabase, table, ordinal, existingCol, isSubclassChange);
         if (blockers.Count > 0)
             throw SimulatedSqlException.AlterColumnHasDependencies(columnName, blockers);
 
@@ -875,10 +880,14 @@ partial class Simulation
     /// <paramref name="includeIndexes"/> selects whether indexes block (true
     /// when the alteration changes the column's <see cref="SqlType"/>
     /// subclass — probe-confirmed that pure length widening within the same
-    /// SqlType family passes under an index).
+    /// SqlType family passes under an index). A schema-bound module
+    /// referencing the column blocks unconditionally too: probe-confirmed that
+    /// a widening real waves past an index still fails under a schema-bound
+    /// view.
     /// </summary>
-    private static List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind)> CollectAlterColumnBlockers(Collation collation, HeapTable table, int ordinal, HeapColumn col, bool includeIndexes)
+    private static List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind)> CollectAlterColumnBlockers(Database database, HeapTable table, int ordinal, HeapColumn col, bool includeIndexes)
     {
+        var collation = database.Collation;
         var blockers = new List<(string, SimulatedSqlException.AlterColumnBlockerKind)>();
         var storageOrdinal = table.StorageOrdinals[ordinal];
 
@@ -925,6 +934,9 @@ partial class Simulation
             if (c.Computed is { } expr && ComputedReferencesColumn(collation, expr, col.Name))
                 blockers.Add((c.Name, SimulatedSqlException.AlterColumnBlockerKind.Column));
         }
+
+        foreach (var module in SchemaBinding.ColumnReferencingModuleNames(database, table, col.Name))
+            blockers.Add((module, SimulatedSqlException.AlterColumnBlockerKind.Object));
 
         if (includeIndexes)
         {

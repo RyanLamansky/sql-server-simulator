@@ -152,6 +152,9 @@ Probe-confirmed semantics (SQL Server 2025):
 - **Uncoercible values** surface the shared per-row coercion error (the simulator's Msg 245 conversion path — real SQL Server raises Msg 8114 for a dynamic value; the simulator's INSERT coercion path is Msg 245 for both INSERT…SELECT and INSERT…EXEC, a divergence).
 - **Nested INSERT…EXEC** (the executed proc / dynamic batch itself contains an `INSERT … EXEC`) raises **Msg 8164 St 1** "An INSERT EXEC statement cannot be nested." Guarded by `SimulatedDbConnection.InsertExecActive`, set while the outer drain runs and checked at the inner INSERT…EXEC entry.
 - **OUTPUT clause combined with INSERT…EXEC** raises **Msg 483 St 2** "The OUTPUT clause cannot be used in an INSERT...EXEC statement." — a structural check that fires regardless of skip state, before the source dispatch.
+- **`WITH RESULT SETS` on the EXEC source** raises **Msg 102** — real refuses the clause here, and reports the token one late (`'SETS'`, not `'WITH'`), which the simulator mirrors by consuming both words before raising.
+  `WITH RECOMPILE` stays accepted.
+  The clause elsewhere is in [`programmable.md`](programmable.md#execute--with-result-sets).
 
 Skip-mode (un-taken IF branch) parses the EXEC clause for cursor advance but `ParseExec` self-suppresses the invocation, so the drain sees no result sets and no rows land.
 
@@ -190,6 +193,7 @@ Probe-confirmed schema-inference rules:
 
 - `(VALUES …)` — parenthesized literal tuples; alias is required.
 - `(SELECT …)` or a set-op chain — parenthesized query; alias is required.
+  A CTE prefix inside the parens is **Msg 156** (`Incorrect syntax near the keyword 'with'.`), matching real — the prefix belongs ahead of the MERGE (`WITH c AS (…) MERGE … USING c`), which ships.
 - bare-table / view / `#temp` / `@tablevar` / `schema.table` reference — alias is optional and defaults to the source's leaf name.
   Optional `WITH (hint [, …])` table hints sit alias-then-hint (same placement as FROM source); the trailing column-rename `(c1, c2)` list isn't legal here and parses as a hint clause (probe-confirmed Msg 321 on the first column name).
 
@@ -258,8 +262,6 @@ EF Core's `ExecuteUpdate` / `ExecuteDelete` for batched single-statement DML emi
 
 - `WHEN NOT MATCHED BY SOURCE` with `THEN INSERT` — Msg 10711 (parsing rejects).
 - MERGE into a view (real SQL Server allows updatable views as MERGE targets) — only base tables and table variables ship.
-- Source as a CTE-prefixed SELECT (`USING (WITH cte AS … SELECT …)`) — Selection.Parse doesn't reach CTEs from a subquery slot.
-  Wrap the CTE inside a non-CTE SELECT instead.
 - `OUTPUT … INTO @t` with `$action` — the existing `OUTPUT INTO @t` path uses `MutationOutputProjection`, which doesn't carry the `$action` slot.
   INTO-less OUTPUT works fully.
 - Multi-statement WHEN-clause bodies (real SQL Server only allows the one DML action per WHEN — same restriction here).

@@ -398,15 +398,23 @@ public sealed class WindowAggregateTests
     }
 
     /// <summary>
-    /// Windows over the multi-stream grouping shapes aren't built — one window
-    /// would have to span every grouping set's group stream as a single row set.
+    /// Over the multi-stream grouping shapes the window spans every grouping
+    /// set's groups as a single row set — <c>ROLLUP(region)</c> emits two
+    /// region rows plus the grand total, so <c>count(*) over()</c> reads 3.
+    /// The semantics matrix lives in <c>GroupingSetTests</c>.
     /// </summary>
     [TestMethod]
     [DataRow("select region, sum(amount), count(*) over() from sales group by rollup(region)")]
     [DataRow("select region, sum(amount), count(*) over() from sales group by cube(region)")]
-    public void WindowWithMultipleGroupingSetsNotSupported(string sql)
+    public void WindowWithMultipleGroupingSets_CountsEverySetsGroups(string sql)
     {
         using var connection = SeededSales();
-        _ = Throws<NotSupportedException>(() => _ = connection.CreateCommand(sql).ExecuteScalar());
+        using var reader = connection.CreateCommand(sql).ExecuteReader();
+        var counts = new List<int>();
+        while (reader.Read())
+            counts.Add(Convert.ToInt32(reader.GetValue(2)));
+        HasCount(3, counts);
+        foreach (var count in counts)
+            AreEqual(3, count);
     }
 }

@@ -208,12 +208,13 @@ partial class Simulation
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var dummyFrame = new UdfFrame(SqlType.Int32);
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
+        innerBatch.AdoptStatementFreezeFrom(outerBatch);
         connection.NestingLevel++;
         try
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
-            var bodySelection = Selection.Parse(parser, depth: 0);
+            var bodySelection = ParseBodyQuery(parser);
             var resultSet = bodySelection.Execute(innerBatch, outerResolver: null);
             var rows = new List<byte[]>();
             foreach (var rowBytes in resultSet.RowBytes)
@@ -222,6 +223,13 @@ partial class Simulation
         }
         finally
         {
+            // The child batch executes a Selection directly rather than
+            // through the dispatch loop, so nothing else runs the loop's
+            // statement-end lock release: without this the Sch-S the body
+            // took on each base table outlives the statement (and the
+            // connection), and the next connection's Sch-M on that table
+            // waits forever.
+            innerBatch.ReleaseStatementSchemaLocks();
             connection.NestingLevel--;
         }
     }
@@ -261,6 +269,7 @@ partial class Simulation
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var dummyFrame = new UdfFrame(SqlType.Int32);
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
+        innerBatch.AdoptStatementFreezeFrom(outerBatch);
         var nestedViews = new HashSet<View>();
         innerBatch.DependencySink = (tables, nestedViews);
         connection.NestingLevel++;
@@ -268,10 +277,11 @@ partial class Simulation
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
-            _ = Selection.Parse(parser, depth: 0);
+            _ = ParseBodyQuery(parser);
         }
         finally
         {
+            innerBatch.ReleaseStatementSchemaLocks();
             connection.NestingLevel--;
         }
         foreach (var nested in nestedViews)
@@ -295,6 +305,11 @@ partial class Simulation
         // Real database-qualifies the view in every message of this family.
         var qualified = $"{context.Batch.CurrentDatabase.Name}.{view.Schema.Name}.{view.Name}";
 
+        // The one gate whose precedence is probe-confirmed: a CTE-bearing body
+        // reports Msg 10137 ahead of the DISTINCT, subquery and
+        // nondeterministic-function rejections it also violates.
+        if (shape.CteName is { } cteName)
+            throw SimulatedSqlException.IndexedViewReferencesCte(qualified, cteName);
         if (shape.NondeterministicFunction is { } nondeterministic)
             throw SimulatedSqlException.IndexedViewIsNondeterministic(qualified, nondeterministic);
         if (shape.SelfJoinedTable is { } selfJoined)
@@ -377,12 +392,20 @@ partial class Simulation
         {
             SuppressDiagnosticsResolution = true,
         };
+        innerBatch.AdoptStatementFreezeFrom(outerBatch);
 
         var shape = new IndexedViewShape();
         var parser = innerBatch.Parser;
         parser.IndexedViewShapeCollector = shape;
-        parser.MoveNextRequired();
-        _ = Selection.Parse(parser, depth: 0);
+        try
+        {
+            parser.MoveNextRequired();
+            _ = ParseBodyQuery(parser);
+        }
+        finally
+        {
+            innerBatch.ReleaseStatementSchemaLocks();
+        }
         shape.HasSubquery = parser.SubqueriesParsed > 0;
         return shape;
     }

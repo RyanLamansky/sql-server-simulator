@@ -46,6 +46,9 @@ partial class Simulation
             PermissionChecker.ClassDatabase, majorId: 0, minorId: 0,
             granteePrincipalId: id, grantorPrincipalId: Database.DboPrincipalId,
             permission: Permission.Connect, state: PermissionState.Grant));
+        // Real emits no SchemaName for a principal event; ObjectType names the
+        // user kind (the simulator models only the SQL flavor).
+        RecordDdlEvent(context, "CREATE_USER", null, name, "SQL USER");
         return true;
     }
 
@@ -137,6 +140,7 @@ partial class Simulation
         var id = context.CurrentDatabase.AllocatePrincipalId();
         context.CurrentDatabase.Principals[name] = new DatabasePrincipal(
             id, name, "R", "DATABASE_ROLE", isFixedRole: false, context.Batch.CurrentStatement.UtcNow);
+        RecordDdlEvent(context, "CREATE_ROLE", null, name, "ROLE");
         return true;
     }
 
@@ -188,6 +192,7 @@ partial class Simulation
             {
                 _ = context.CurrentDatabase.RoleMembers.Remove((role.PrincipalId, member.PrincipalId));
             }
+            RecordDdlEvent(context, "ALTER_ROLE", null, roleName, "ROLE");
             return true;
         }
 
@@ -234,6 +239,7 @@ partial class Simulation
         // Cascade: drop role memberships that reference the removed principal.
         _ = context.CurrentDatabase.RoleMembers.RemoveAll(rm =>
             rm.RoleId == removed.PrincipalId || rm.MemberId == removed.PrincipalId);
+        RecordDdlEvent(context, isRole ? "DROP_ROLE" : "DROP_USER", null, name, isRole ? "ROLE" : "SQL USER");
         return true;
     }
 

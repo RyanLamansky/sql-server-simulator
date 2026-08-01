@@ -227,6 +227,7 @@ partial class Simulation
         if (blocker is not null)
             throw SimulatedSqlException.CannotDropSchemaBecauseNotEmpty(schemaName, blocker);
         _ = context.CurrentDatabase.Schemas.TryRemove(schemaName, out _);
+        RecordDdlEvent(context, "DROP_SCHEMA", schemaName, schemaName, "SCHEMA");
     }
 
     /// <summary>
@@ -301,6 +302,7 @@ partial class Simulation
             context.Batch.AcquireStatementLock(existingDdl.SchemaLock, LockMode.SchemaModification);
             if (!context.CurrentDatabase.DdlTriggers.TryRemove(name.Leaf, out _) && !ifExists)
                 throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
+            RecordDdlEvent(context, "DROP_TRIGGER", EventSchemaName(name), name.Leaf, "TRIGGER");
             return;
         }
 
@@ -314,6 +316,10 @@ partial class Simulation
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
         if (!schema.Triggers.TryRemove(name.Leaf, out _) && !ifExists)
             throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
+        RecordDdlEvent(
+            context, "DROP_TRIGGER", schema.Name, name.Leaf, "TRIGGER",
+            existing.Parent.Name,
+            existing.Parent is View ? "VIEW" : "TABLE");
     }
 
     /// <summary>
@@ -335,6 +341,7 @@ partial class Simulation
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
         if (!schema.Sequences.TryRemove(name.Leaf, out _) && !ifExists)
             throw SimulatedSqlException.CannotDropSequenceDoesNotExist(name.ToString());
+        RecordDdlEvent(context, "DROP_SEQUENCE", schema.Name, name.Leaf, "SEQUENCE");
     }
 
     /// <summary>
@@ -365,6 +372,7 @@ partial class Simulation
         if (schema is not null && schema.AliasTypes.TryGetValue(name.Leaf, out _))
         {
             _ = schema.AliasTypes.TryRemove(name.Leaf, out _);
+            RecordDdlEvent(context, "DROP_TYPE", schema.Name, name.Leaf, "TYPE");
             return;
         }
         if (schema is null || !schema.TableTypes.TryGetValue(name.Leaf, out var tableType))
@@ -390,6 +398,7 @@ partial class Simulation
             }
         }
         _ = schema.TableTypes.TryRemove(name.Leaf, out _);
+        RecordDdlEvent(context, "DROP_TYPE", schema.Name, name.Leaf, "TYPE");
     }
 
     /// <summary>
@@ -413,6 +422,7 @@ partial class Simulation
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
         if (!schema.Procedures.TryRemove(name.Leaf, out _) && !ifExists)
             throw SimulatedSqlException.CannotDropProcedureDoesNotExist(name.ToString());
+        RecordDdlEvent(context, "DROP_PROCEDURE", schema.Name, name.Leaf, "PROCEDURE");
     }
 
     /// <summary>
@@ -432,6 +442,7 @@ partial class Simulation
             throw SimulatedSqlException.CannotDropViewDoesNotExist(name.ToString());
         }
         context.Batch.AcquireStatementLock(droppedView.SchemaLock, LockMode.SchemaModification);
+        RejectDropOfSchemaBoundReferent(context.CurrentDatabase, droppedView, "DROP VIEW", schema.Name);
         if (!schema.Views.TryRemove(name.Leaf, out _))
         {
             if (ifExists)
@@ -440,6 +451,7 @@ partial class Simulation
         }
         DetachIndexedViewDependencies(droppedView);
         CascadeDropTriggers(context.CurrentDatabase, droppedView);
+        RecordDdlEvent(context, "DROP_VIEW", schema.Name, name.Leaf, "VIEW");
     }
 
     /// <summary>
@@ -462,8 +474,10 @@ partial class Simulation
             throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
         }
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
+        RejectDropOfSchemaBoundReferent(context.CurrentDatabase, existing, "DROP FUNCTION", schema.Name);
         if (!schema.Functions.TryRemove(name.Leaf, out _) && !ifExists)
             throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
+        RecordDdlEvent(context, "DROP_FUNCTION", schema.Name, name.Leaf, "FUNCTION");
     }
 
     private static void DropOneTable(ParserContext context, MultiPartName name, bool ifExists)
@@ -526,6 +540,12 @@ partial class Simulation
         // bare table name, not the qualified one (probe-confirmed).
         if (removedTable.IncomingForeignKeys.Count > 0)
             throw SimulatedSqlException.CannotDropTableReferencedByForeignKey(removedTable.Name);
+        // Schema-binding protection, which real applies after the FK gate
+        // (probe-confirmed: a table that is both an FK parent and a
+        // schema-bound view's base reports Msg 3726). Temp tables are exempt —
+        // a schema-bound body can't name one.
+        if (!isTempTable && schema is not null)
+            RejectDropOfSchemaBoundReferent(context.CurrentDatabase, removedTable, "DROP TABLE", schema.Name);
         if (!destination.TryRemove(name.Leaf, out _))
         {
             if (ifExists)
@@ -548,6 +568,7 @@ partial class Simulation
             foreach (var fk in removedTable.OutgoingForeignKeys)
                 _ = fk.ReferencedTable.IncomingForeignKeys.RemoveAll(other => ReferenceEquals(other, fk));
             CascadeDropTriggers(context.CurrentDatabase, removedTable);
+            RecordDdlEvent(context, "DROP_TABLE", schema?.Name ?? Database.DefaultSchemaName, name.Leaf, "TABLE");
         }
     }
 
@@ -662,6 +683,7 @@ partial class Simulation
             if (context.Batch.CurrentDatabase.Collation.Equals(table.Indexes[i].Name, indexName))
             {
                 table.Indexes.RemoveAt(i);
+                RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
                 return;
             }
         }
@@ -669,6 +691,22 @@ partial class Simulation
         if (ifExists)
             return;
         throw SimulatedSqlException.CannotDropIndexDoesNotExist(qualifiedTableName, indexName, state: 7);
+    }
+
+    /// <summary>
+    /// Raises <strong>Msg 3729</strong> when a <c>WITH SCHEMABINDING</c>
+    /// module references the object being dropped. <paramref name="statement"/>
+    /// is the verb pair real echoes; the target is rendered
+    /// <c>schema.leaf</c> and the blocker as its bare leaf.
+    /// </summary>
+    private static void RejectDropOfSchemaBoundReferent(
+        Database database, SchemaObject target, string statement, string schemaName)
+    {
+        if (SchemaBinding.FindReferencingModule(database, target) is { } referencing)
+        {
+            throw SimulatedSqlException.CannotDropReferencedBySchemaBoundObject(
+                statement, $"{schemaName}.{target.Name}", referencing.Name);
+        }
     }
 
     /// <summary>

@@ -62,9 +62,9 @@ internal sealed class UpdatePredicate : BooleanExpression
 
         // Outside a trigger body the construct has nothing to report on.
         // Real's wording names the IF form even when it appears elsewhere.
-        return context.Batch.TriggerFrame is not { } frame
+        return context.Batch.TriggerFrame?.Trigger is not { } trigger
             ? throw SimulatedSqlException.UpdateOnlyWithinCreateTrigger()
-            : new UpdatePredicate(ResolveColumnId(frame.Trigger, columnName), columnName);
+            : new UpdatePredicate(ResolveColumnId(trigger, columnName), columnName);
     }
 
     /// <summary>

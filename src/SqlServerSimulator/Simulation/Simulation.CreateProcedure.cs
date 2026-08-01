@@ -75,6 +75,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var procName = BatchContext.ParseObjectName(context);
+        RejectQualifiedModuleName(procName, "PROCEDURE");
         var schema = ResolveModuleSchema(context, procName, isAlter);
 
         context.MoveNextRequired();
@@ -181,6 +182,7 @@ partial class Simulation
         if (replaced is not null)
             procedure.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Procedures[procName.Leaf] = procedure;
+        RecordDdlEvent(context, replaced is null ? "CREATE_PROCEDURE" : "ALTER_PROCEDURE", schema.Name, procName.Leaf, "PROCEDURE");
         return true;
     }
 

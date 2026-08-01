@@ -333,4 +333,107 @@ public sealed class AlterModuleTests
             2010,
             "Cannot perform alter on 'dbo.t' because it is an incompatible object type.");
     }
+
+    // --- ALTER TRIGGER's share of the same rules ---
+
+    /// <summary>
+    /// The Msg 2010 gate covers ALTER TRIGGER too: a name held by a table, a
+    /// view or a procedure is an incompatible target, on both ALTER legs.
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter trigger dbo.t on dbo.t after insert as select 1", "dbo.t")]
+    [DataRow("alter trigger t on dbo.t after insert as select 1", "t")]
+    [DataRow("alter trigger dbo.v on dbo.t after insert as select 1", "dbo.v")]
+    [DataRow("alter trigger dbo.p on dbo.t after insert as select 1", "dbo.p")]
+    [DataRow("create or alter trigger dbo.p on dbo.t after insert as select 1", "dbo.p")]
+    public void AlterTrigger_OverIncompatibleObject_RaisesMsg2010(string commandText, string writtenName)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (a int)",
+            "create view dbo.v as select 1 as c",
+            "create procedure dbo.p as select 1");
+        sim.AssertSqlError(
+            commandText,
+            2010,
+            $"Cannot perform alter on '{writtenName}' because it is an incompatible object type.");
+    }
+
+    /// <summary>A name nothing holds stays Msg 208 on a bare ALTER TRIGGER.</summary>
+    [TestMethod]
+    public void AlterTrigger_MissingTrigger_RaisesMsg208()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.t (a int)");
+        sim.AssertSqlError(
+            "alter trigger dbo.nosuch on dbo.t after insert as select 1",
+            208,
+            "Invalid object name 'dbo.nosuch'.");
+    }
+
+    /// <summary>
+    /// Msg 2110: the trigger exists but hangs off another parent. Both names
+    /// echo what the statement wrote, and the ALTER leaves the trigger where it
+    /// was rather than re-homing it.
+    /// </summary>
+    [TestMethod]
+    public void AlterTrigger_DifferentParent_RaisesMsg2110()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.ta (a int)",
+            "create table dbo.tb (b int)",
+            "create trigger dbo.tr on dbo.ta after insert as select 1");
+        sim.AssertSqlError(
+            "alter trigger dbo.tr on dbo.tb after insert as select 1",
+            2110,
+            "Cannot alter trigger 'dbo.tr' on 'dbo.tb' because this trigger does not belong to this object. Specify the correct trigger name or the correct target object name.");
+        _ = sim.AssertSqlError("create or alter trigger tr on tb after insert as select 1", 2110);
+        AreEqual("ta", sim.ExecuteScalar("select object_name(parent_id) from sys.triggers where name = 'tr'"));
+    }
+
+    /// <summary>A missing ON target still reports first (Msg 8197), ahead of the name-kind check.</summary>
+    [TestMethod]
+    public void AlterTrigger_MissingParent_ReportsBeforeKindCheck()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table dbo.t (a int)", "create procedure dbo.p as select 1");
+        _ = sim.AssertSqlError("alter trigger dbo.p on dbo.nosuch after insert as select 1", 8197);
+    }
+
+    // --- Database-qualified module names (Msg 166) ---
+
+    /// <summary>
+    /// Msg 166: no module CREATE / ALTER / CREATE OR ALTER accepts a database
+    /// prefix, and real names the statement in the combined
+    /// <c>'CREATE/ALTER X'</c> form whichever verb was written. A prefix naming
+    /// the current database is rejected the same as any other.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create view simulated.dbo.v as select 1 as c", "VIEW")]
+    [DataRow("alter view simulated.dbo.v as select 1 as c", "VIEW")]
+    [DataRow("create or alter view master.dbo.v as select 1 as c", "VIEW")]
+    [DataRow("create function simulated.dbo.f() returns int as begin return 1 end", "FUNCTION")]
+    [DataRow("alter function other.dbo.f() returns int as begin return 1 end", "FUNCTION")]
+    [DataRow("create procedure simulated.dbo.p as select 1", "PROCEDURE")]
+    [DataRow("create or alter procedure master.dbo.p as select 1", "PROCEDURE")]
+    [DataRow("create trigger simulated.dbo.tr on dbo.t after insert as select 1", "TRIGGER")]
+    [DataRow("alter trigger simulated.dbo.tr on dbo.t after insert as select 1", "TRIGGER")]
+    public void ModuleName_DatabaseQualified_RaisesMsg166(string commandText, string moduleKind)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.t (a int)");
+        sim.AssertSqlError(
+            commandText,
+            166,
+            $"'CREATE/ALTER {moduleKind}' does not allow specifying the database name as a prefix to the object name.");
+    }
+
+    /// <summary>A server prefix is Msg 117 rather than Msg 166.</summary>
+    [TestMethod]
+    public void ModuleName_ServerQualified_RaisesMsg117()
+        => new Simulation().AssertSqlError(
+            "create view srv.simulated.dbo.v as select 1 as c",
+            117,
+            "The object name 'srv.simulated.dbo.v' contains more than the maximum number of prefixes. The maximum is 2.");
 }

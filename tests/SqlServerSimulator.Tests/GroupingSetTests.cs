@@ -6,8 +6,9 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Tests for the GROUP BY extension grammar — <c>ROLLUP</c>, <c>CUBE</c>,
 /// <c>GROUPING SETS</c> — plus the <c>GROUPING()</c> / <c>GROUPING_ID()</c>
-/// scalars that distinguish subtotal/total-row NULLs from data NULLs.
-/// Probe-confirmed against SQL Server 2025 (2026-05-13).
+/// scalars that distinguish subtotal/total-row NULLs from data NULLs, and the
+/// window functions that span every set's groups as one row set.
+/// Probe-confirmed against SQL Server 2025 (2026-05-13, windows 2026-07-31).
 /// </summary>
 [TestClass]
 public sealed class GroupingSetTests
@@ -368,5 +369,230 @@ public sealed class GroupingSetTests
         // set — must still fold rows per region.
         using var conn = SeededSales();
         AreEqual(2, conn.CreateCommand("select count(*) from (select region from sales group by (region)) g").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Rollup_Window_SpansEveryGroupingSet()
+    {
+        // Probe-confirmed 2026-07-31: a window in a ROLLUP-grouped SELECT runs
+        // over the *complete* grouped result, subtotal and grand-total rows
+        // included — `sum(sum(amount)) over ()` totals 325 + 500 + 825 = 1650
+        // and `count(*) over ()` counts all three output rows.
+        using var conn = SeededSales();
+        using var reader = conn.CreateCommand("""
+            select region, sum(amount) s, sum(sum(amount)) over () w, count(*) over () c
+            from sales group by rollup(region) order by region
+            """).ExecuteReader();
+        var rows = new List<(int Total, int Window, int Count)>();
+        while (reader.Read())
+            rows.Add((reader.GetInt32(1), reader.GetInt32(2), reader.GetInt32(3)));
+        Assert.HasCount(3, rows);
+        AreEqual(825 + 325 + 500, rows.Sum(r => r.Total));
+        foreach (var (_, window, count) in rows)
+        {
+            AreEqual(1650, window);
+            AreEqual(3, count);
+        }
+    }
+
+    [TestMethod]
+    public void Rollup_PartitionByGroupedColumn_FoldsSubtotalNullsWithDataNulls()
+    {
+        // Probe-confirmed 2026-07-31: a subtotal row's grouped-away key reads
+        // as NULL and PARTITION BY can't tell it from a data NULL, so the
+        // east/NULL leaf (25), both region subtotals (325, 500) and the grand
+        // total (825) share one 4-row partition summing 1675.
+        using var conn = SeededSales();
+        using var reader = conn.CreateCommand("""
+            select product,
+                   sum(sum(amount)) over (partition by product) wp,
+                   count(*) over (partition by product) cp
+            from sales group by rollup(region, product)
+            """).ExecuteReader();
+        var rows = new List<(string? Product, int Window, int Count)>();
+        while (reader.Read())
+            rows.Add((reader.IsDBNull(0) ? null : reader.GetString(0), reader.GetInt32(1), reader.GetInt32(2)));
+        Assert.HasCount(8, rows);
+        foreach (var (product, window, count) in rows)
+        {
+            AreEqual(product switch { null => 1675, "gadget" => 350, _ => 450 }, window);
+            AreEqual(product is null ? 4 : 2, count);
+        }
+    }
+
+    [TestMethod]
+    public void Rollup_PartitionByGroupingFlag_SeparatesSubtotalsFromDataNulls()
+    {
+        // GROUPING() is legal inside a window's PARTITION BY and is the only
+        // way to keep subtotal rows out of the data-NULL partition: adding it
+        // splits the 1675 partition above into the east/NULL leaf (25) and the
+        // three grouped-away rows (325 + 500 + 825 = 1650).
+        using var conn = SeededSales();
+        using var reader = conn.CreateCommand("""
+            select product, grouping(product) gp,
+                   sum(sum(amount)) over (partition by product, grouping(product)) w
+            from sales group by rollup(region, product)
+            """).ExecuteReader();
+        var rows = new List<(string? Product, byte Grouping, int Window)>();
+        while (reader.Read())
+            rows.Add((reader.IsDBNull(0) ? null : reader.GetString(0), reader.GetByte(1), reader.GetInt32(2)));
+        Assert.HasCount(8, rows);
+        foreach (var (product, grouping, window) in rows)
+        {
+            AreEqual(
+                grouping == 1 ? 1650 : product switch { null => 25, "gadget" => 350, _ => 450 },
+                window);
+        }
+    }
+
+    [TestMethod]
+    public void Cube_RankTiesAcrossGroupingSetBoundaries()
+    {
+        // Ranking treats the concatenated stream as one row set: the east/NULL
+        // leaf (25) and the CUBE's all-region NULL-product subtotal (also 25)
+        // come from different grouping sets yet tie — ROW_NUMBER hands out 10
+        // and 11 while RANK gives both 10 (probe-confirmed 2026-07-31).
+        using var conn = SeededSales();
+        using var reader = conn.CreateCommand("""
+            select sum(amount) s,
+                   row_number() over (order by sum(amount) desc) rn,
+                   rank() over (order by sum(amount) desc) rk
+            from sales group by cube(region, product) order by rn
+            """).ExecuteReader();
+        var rows = new List<(int Total, long RowNumber, long Rank)>();
+        while (reader.Read())
+            rows.Add((reader.GetInt32(0), reader.GetInt64(1), reader.GetInt64(2)));
+        Assert.HasCount(11, rows);
+        AreEqual((825, 1L, 1L), rows[0]);
+        AreEqual((25, 10L, 10L), rows[9]);
+        AreEqual((25, 11L, 10L), rows[10]);
+    }
+
+    [TestMethod]
+    public void GroupingSets_LagReadsThePreviousGroupAcrossSets()
+    {
+        // LAG steps through the concatenated stream, so a row's predecessor
+        // can belong to a different grouping set.
+        using var conn = SeededSales();
+        using var reader = conn.CreateCommand("""
+            select sum(amount) s, lag(sum(amount)) over (order by sum(amount)) prev
+            from sales group by grouping sets ((region), (product), ()) order by s
+            """).ExecuteReader();
+        var rows = new List<(int Total, int? Previous)>();
+        while (reader.Read())
+            rows.Add((reader.GetInt32(0), reader.IsDBNull(1) ? null : reader.GetInt32(1)));
+        Assert.HasCount(6, rows);
+        AreEqual((25, null), rows[0]);
+        AreEqual((325, 25), rows[1]);
+        AreEqual((350, 325), rows[2]);
+        AreEqual((450, 350), rows[3]);
+        AreEqual((500, 450), rows[4]);
+        AreEqual((825, 500), rows[5]);
+    }
+
+    [TestMethod]
+    public void Rollup_Window_SeesPostHavingGroupsOnly()
+    {
+        // HAVING runs before the window pass, and it filters across every
+        // grouping set: east's 325 subtotal drops, leaving west (500) and the
+        // grand total (825) — so the window counts 2 and totals 1325.
+        using var conn = SeededSales();
+        using var reader = conn.CreateCommand("""
+            select sum(amount) s, count(*) over () c, sum(sum(amount)) over () w
+            from sales group by rollup(region) having sum(amount) > 400 order by s
+            """).ExecuteReader();
+        var rows = new List<(int Total, int Count, int Window)>();
+        while (reader.Read())
+            rows.Add((reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2)));
+        Assert.HasCount(2, rows);
+        AreEqual((500, 2, 1325), rows[0]);
+        AreEqual((825, 2, 1325), rows[1]);
+    }
+
+    [TestMethod]
+    public void Rollup_Window_FrameRunsOverTheConcatenatedStream()
+    {
+        // A running total over the ROLLUP result accumulates the grand-total
+        // row alongside the leaves: region sorts NULLs first, so the frame
+        // reads 825, then 1150, then 1650.
+        using var conn = SeededSales();
+        using var reader = conn.CreateCommand("""
+            select sum(sum(amount)) over (order by region rows unbounded preceding) rt
+            from sales group by rollup(region) order by region
+            """).ExecuteReader();
+        var running = new List<int>();
+        while (reader.Read())
+            running.Add(reader.GetInt32(0));
+        Assert.HasCount(3, running);
+        AreEqual(825, running[0]);
+        AreEqual(1150, running[1]);
+        AreEqual(1650, running[2]);
+    }
+
+    [TestMethod]
+    [DataRow("select top 2 sum(amount) s, count(*) over () c from sales group by rollup(region) order by s desc")]
+    [DataRow("select sum(amount) s, count(*) over () c from sales group by rollup(region) order by s desc offset 0 rows fetch next 2 rows only")]
+    public void Rollup_RowLimitingAppliesAfterTheWindow(string sql)
+    {
+        // TOP / OFFSET-FETCH trim the already-windowed stream, so the count
+        // stays 3 even though only two rows come back.
+        using var conn = SeededSales();
+        using var reader = conn.CreateCommand(sql).ExecuteReader();
+        var rows = new List<(int Total, int Count)>();
+        while (reader.Read())
+            rows.Add((reader.GetInt32(0), reader.GetInt32(1)));
+        Assert.HasCount(2, rows);
+        AreEqual((825, 3), rows[0]);
+        AreEqual((500, 3), rows[1]);
+    }
+
+    [TestMethod]
+    public void Cube_DistinctDedupesAfterTheWindow()
+    {
+        // DISTINCT collapses the windowed projection, not the group stream:
+        // the two grouped-away-vs-not partitions each total 825.
+        using var conn = SeededSales();
+        using var reader = conn.CreateCommand("""
+            select distinct grouping(region) gr, sum(sum(amount)) over (partition by grouping(region)) w
+            from sales group by cube(region) order by gr
+            """).ExecuteReader();
+        var rows = new List<(byte Grouping, int Window)>();
+        while (reader.Read())
+            rows.Add((reader.GetByte(0), reader.GetInt32(1)));
+        Assert.HasCount(2, rows);
+        AreEqual(((byte)0, 825), rows[0]);
+        AreEqual(((byte)1, 825), rows[1]);
+    }
+
+    [TestMethod]
+    public void GroupingSets_WindowInOrderBy()
+    {
+        // A window is legal in the grouped query's ORDER BY, spanning every
+        // set the same way a select-list window does.
+        using var conn = SeededSales();
+        using var reader = conn.CreateCommand("""
+            select sum(amount) s from sales group by grouping sets ((region), (product), ())
+            order by row_number() over (order by sum(amount) desc)
+            """).ExecuteReader();
+        var totals = new List<int>();
+        while (reader.Read())
+            totals.Add(reader.GetInt32(0));
+        CollectionAssert.AreEqual(new List<int> { 825, 500, 450, 350, 325, 25 }, totals);
+    }
+
+    [TestMethod]
+    // A bare column in a window operand / PARTITION BY carries the same
+    // containment obligation as the select list (Msg 8120), a second nesting
+    // level under OVER stays Msg 130, and a window in HAVING stays Msg 4108 —
+    // identical to the plain-GROUP-BY path.
+    [DataRow("select region, sum(amount), sum(amount) over () from sales group by rollup(region)", 8120)]
+    [DataRow("select region, sum(amount), sum(sum(amount)) over (partition by product) from sales group by rollup(region)", 8120)]
+    [DataRow("select region, sum(sum(sum(amount))) over () from sales group by cube(region)", 130)]
+    [DataRow("select region, sum(amount) from sales group by rollup(region) having sum(sum(amount)) over () > 1", 4108)]
+    public void WindowOverGroupingSets_BindingRejections(string sql, int errorNumber)
+    {
+        using var conn = SeededSales();
+        var ex = Throws<DbException>(() => _ = conn.CreateCommand(sql).ExecuteScalar());
+        AreEqual(errorNumber.ToString(), ex.Data["HelpLink.EvtID"]);
     }
 }

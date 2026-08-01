@@ -80,6 +80,7 @@ EF emits these from `DateTime.UtcNow`/`Now`/`DateTimeOffset.UtcNow` and `HasDefa
 
 **Per-statement freeze**: two `SYSDATETIME()` calls in one SELECT return identical values; an UPDATE that stamps every row writes the same value; successive SELECTs in one batch DO advance.
 Captured once per statement-loop iteration into `BatchContext.CurrentStatement.UtcNow`.
+A view or inline-TVF body is inlined into the referencing statement and adopts *its* freeze — which batch a module body reads from is the seam described in [`programmable.md`](programmable.md#body-batches-and-the-per-statement-freeze).
 
 **UTC == Local** (Azure SQL Database default): no local-time conversion; all six functions return the same UTC instant (rounded per type — datetime variants quantize to 1/300s tick).
 `SYSDATETIMEOFFSET` reports `+00:00`.

@@ -154,6 +154,7 @@ partial class Simulation
         MultiPartName functionName,
         List<UdfParameter> parameters,
         SqlType returnType,
+        bool isSchemaBound,
         bool isAlter,
         bool createOrAlter)
     {
@@ -213,7 +214,10 @@ partial class Simulation
             className,
             methodName,
             method,
-            replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow);
+            replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow)
+        {
+            IsSchemaBound = isSchemaBound,
+        };
         if (replaced is not null)
             clrFunction.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Functions[functionName.Leaf] = clrFunction;

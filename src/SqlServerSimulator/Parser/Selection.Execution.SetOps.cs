@@ -316,9 +316,9 @@ internal sealed partial class Selection
     /// A term's subquery binds in its own scope, which its own parse already
     /// did — <see cref="Expression.VisitColumnReferences"/> not descending into
     /// one is what keeps this walk out of it.
-    /// A constant term (<c>ORDER BY 'x'</c>) lands on Msg 104 here; real
-    /// reserves Msg 408 for it, which the simulator doesn't model on either the
-    /// set-op or the single-SELECT path.
+    /// A constant term (<c>ORDER BY 'x'</c>) never reaches this walk — the
+    /// ORDER BY parser rejects it with Msg 408 for both the set-op and the
+    /// single-SELECT path.
     /// </remarks>
     private static void ValidateSetOpOrderByTerms(
         List<OrderBySpec> orderBy,

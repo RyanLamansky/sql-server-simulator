@@ -1002,7 +1002,9 @@ public sealed partial class Simulation
         }
 
         // Synonym targets expand to their base name here for the same reason
-        // the EXEC-statement path does — see ParseExec.
+        // the EXEC-statement path does — see ParseExec, including carrying the
+        // synonym through as the EXECUTE check's securable.
+        var rpcSynonym = batch.TryResolveSynonym(procName, out var resolvedSynonym) ? resolvedSynonym : null;
         procName = batch.ExpandSynonym(procName);
         if (!batch.TryResolveProcedure(procName, out var procedure))
             throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.ToString());
@@ -1088,7 +1090,7 @@ public sealed partial class Simulation
             batch.Variables[returnCodeVarName] = new VariableSlot(SqlType.Int32, declaredMaxLength: null, SqlValue.FromInt32(0), returnValueWriteback);
         }
 
-        foreach (var outcome in InvokeProcedure(batch, procedure, arguments, returnCodeVarName))
+        foreach (var outcome in InvokeProcedure(batch, procedure, arguments, returnCodeVarName, rpcSynonym))
             yield return outcome;
 
         // Output param writeback: the per-argument OutputSlot.Value was
@@ -1305,6 +1307,8 @@ public sealed partial class Simulation
         batch.CurrentStatement.StartIndex = batch.Parser.Token?.StartIndex ?? 0;
         batch.CurrentStatement.SuppressErrorReset = false;
         batch.CurrentStatement.ReportedIgnoredDuplicate = false;
+        batch.CurrentStatement.PendingDdlEvents = null;
+        batch.CurrentStatement.DdlTriggerCreatedThisStatement = null;
         // Classify the statement as row-returning from its leading token so a
         // failure under continue-on-error surfaces the way real SQL Server
         // frames it: a SELECT (bare / CTE-prefixed / parenthesized) or VALUES
@@ -1358,6 +1362,11 @@ public sealed partial class Simulation
             try
             {
                 outcomes = [.. DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart)];
+                // Database-scope DDL triggers fire after the statement's own
+                // work completed but inside its error handling, so a body-side
+                // error surfaces as the statement's (and reaches an enclosing
+                // TRY / CATCH, and trips the Msg 3616 swallowed-error rule).
+                FireDdlTriggers(batch);
             }
             catch (SimulatedSqlException ex)
             {
@@ -1536,12 +1545,20 @@ public sealed partial class Simulation
         // statement's cap even when the session value changes before the
         // (lazily-read) result is drained — notably a proc body's SET
         // TEXTSIZE, which reverts at proc exit while its result sets keep it.
-        if (connection.TextSize >= 0)
+        // Stamped in the same walk: the producing statement's line and
+        // enclosing procedure, which a downstream projection (EXEC … WITH
+        // RESULT SETS) attributes its errors to. Already-stamped results pass
+        // through untouched so the innermost producing frame wins.
+        foreach (var o in outcomes!)
         {
-            foreach (var o in outcomes!)
+            if (o is not SimulatedQueryResult query)
+                continue;
+            if (connection.TextSize >= 0)
+                query.ClientTextSize = connection.TextSize;
+            if (query.OriginLine == 0)
             {
-                if (o is SimulatedQueryResult query)
-                    query.ClientTextSize = connection.TextSize;
+                query.OriginLine = batch.CurrentStatement.StartLine + batch.LineOffset;
+                query.OriginProcedure = batch.ErrorProcedureName;
             }
         }
 

@@ -356,6 +356,113 @@ public class OrderByTests
         AreEqual("10,20,30", string.Join(",", Column(sim, "select val as x from ob t order by t.val")));
     }
 
+    /// <summary>
+    /// Msg 408: a term real folds to a constant at compile time is rejected,
+    /// on a single SELECT and on a set-op chain alike, and the position is the
+    /// term's 1-based index in the ORDER BY list.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select v from t order by 'x'", 1)]
+    [DataRow("select v from t order by 1.5", 1)]
+    [DataRow("select v from t order by 1e0", 1)]
+    [DataRow("select v from t order by 1 + 0", 1)]
+    [DataRow("select v from t order by 2 - 1", 1)]
+    [DataRow("select v from t order by 'a' + 'b'", 1)]
+    [DataRow("select v from t order by cast(1 as int)", 1)]
+    [DataRow("select v from t order by convert(varchar(5), 1)", 1)]
+    [DataRow("select v from t order by coalesce(null, 1)", 1)]
+    [DataRow("select v from t order by null", 1)]
+    [DataRow("select v from t order by 0x01", 1)]
+    [DataRow("select v from t order by (1 + 1)", 1)]
+    [DataRow("select v from t order by ('x')", 1)]
+    [DataRow("select v from t order by -1.5", 1)]
+    [DataRow("select top 1 v from t order by 'x'", 1)]
+    [DataRow("select v from t order by 'x' offset 0 rows", 1)]
+    [DataRow("select v from t order by v, 'x'", 2)]
+    [DataRow("select v from t union all select v from t order by 'x'", 1)]
+    [DataRow("select v from t union all select v from t order by 1, 'x'", 2)]
+    public void OrderBy_ConstantTerm_RaisesMsg408(string commandText, int position)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (v int); insert t values (3),(1),(2)");
+        sim.AssertSqlError(
+            commandText,
+            408,
+            $"A constant expression was encountered in the ORDER BY list, position {position}.");
+    }
+
+    /// <summary>
+    /// The Msg 408 gate is syntactic: a term that reaches a variable, a
+    /// subquery, a UDF, or any server- / session-state function sorts, because
+    /// real evaluates rather than folds it. A select-list alias naming a
+    /// constant projection is likewise fine — only the written ORDER BY term is
+    /// inspected.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select v from t order by getdate()")]
+    [DataRow("select v from t order by newid()")]
+    [DataRow("select v from t order by rand()")]
+    [DataRow("select v from t order by (select 1)")]
+    [DataRow("select v from t order by @@spid")]
+    [DataRow("select v from t order by @@version")]
+    [DataRow("select v from t order by db_name()")]
+    [DataRow("select v from t order by isnull(null, 1)")]
+    [DataRow("select v from t order by cast(getdate() as date)")]
+    [DataRow("select v from t order by case when v = 1 then 1 else 2 end")]
+    [DataRow("declare @p int = 1; select v from t order by @p + 1")]
+    [DataRow("select 5 as x from t order by x")]
+    public void OrderBy_NonConstantTerm_Sorts(string commandText)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (v int); insert t values (3),(1),(2)");
+        Assert.HasCount(3, Column(sim, commandText));
+    }
+
+    /// <summary>
+    /// The ordinal form is a <em>signed</em> integer literal, parentheses
+    /// included: <c>(1)</c> and <c>+1</c> name the first column, while
+    /// <c>-1</c> and <c>-(1)</c> are position -1 (Msg 108). An arithmetic
+    /// expression folding to the same number is a constant instead (Msg 408,
+    /// covered above).
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_SignedIntegerLiteral_IsTheOrdinalForm()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (v int); insert t values (3),(1),(2)");
+        AreEqual("1,2,3", string.Join(",", Column(sim, "select v from t order by (1)")));
+        AreEqual("1,2,3", string.Join(",", Column(sim, "select v from t order by +1")));
+        AreEqual("3,2,1", string.Join(",", Column(sim, "select v from t order by (1) desc")));
+        sim.AssertSqlError("select v from t order by -1", 108, "The ORDER BY position number -1 is out of range of the number of items in the select list.");
+        sim.AssertSqlError("select v from t order by -(1)", 108, "The ORDER BY position number -1 is out of range of the number of items in the select list.");
+        sim.AssertSqlError("select v from t order by (2)", 108, "The ORDER BY position number 2 is out of range of the number of items in the select list.");
+    }
+
+    /// <summary>
+    /// Msg 1008: real reads a variable term as a variable column position
+    /// rather than a sort expression, whenever the variable is reachable
+    /// through pure conversions — bare, parenthesized, or CAST. A variable
+    /// inside arithmetic sorts per row instead.
+    /// </summary>
+    [TestMethod]
+    public void OrderBy_VariableColumnPositionTerm_RaisesMsg1008()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (v int); insert t values (3),(1),(2)");
+        sim.AssertSqlError(
+            "declare @p int = 1; select v from t order by @p",
+            1008,
+            "The SELECT item identified by the ORDER BY number 1 contains a variable as part of the expression identifying a column position. Variables are only allowed when ordering by an expression referencing a column name.");
+        _ = sim.AssertSqlError("declare @p int = 1; select v from t order by (@p)", 1008);
+        _ = sim.AssertSqlError("declare @p int = 1; select v from t order by ((@p))", 1008);
+        _ = sim.AssertSqlError("declare @p int = 1; select v from t order by cast(@p as int)", 1008);
+        _ = sim.AssertSqlError("declare @p int = 1; select v from t union all select v from t order by @p", 1008);
+        Assert.Contains("ORDER BY number 2", sim.AssertSqlError("declare @p int = 1; select v from t order by v, @p desc", 1008).Message);
+        // A variable inside arithmetic is a sort expression.
+        Assert.HasCount(3, Column(sim, "declare @p int = 1; select v from t order by -@p"));
+        Assert.HasCount(3, Column(sim, "declare @p int = 1; select v from t order by (@p) + 0"));
+    }
+
     private static List<string> Column(Simulation simulation, string commandText)
     {
         using var reader = simulation.ExecuteReader(commandText);

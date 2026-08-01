@@ -96,7 +96,7 @@ partial class Simulation
             : context.Batch.UnresolvableObjectName(leadingIdent));
         return table.IsTableValuedParameter
             ? throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf)
-            : ExecuteDeleteAgainstTable(context, table, output, top, leadingView);
+            : ExecuteDeleteAgainstTable(context, leadingIdent, table, output, top, leadingView);
     }
 
     /// <summary>
@@ -105,6 +105,7 @@ partial class Simulation
     /// </summary>
     private static SimulatedStatementOutcome ExecuteDeleteAgainstTable(
         ParserContext context,
+        MultiPartName targetName,
         HeapTable table,
         OutputProjection? output,
         Selection.DmlTopLimit? top,
@@ -121,30 +122,27 @@ partial class Simulation
                 where = BooleanExpression.Parse(context);
         }
 
-        if (!context.Batch.IsSkipping)
+        if (!context.Batch.IsSkipping && PermissionEnforcement.Applies(context.Batch))
         {
             // DELETE reads the target when it has a WHERE clause — real then
             // also requires SELECT, checked first so the SELECT denial surfaces
             // when both SELECT and DELETE are missing (probe M1d). A bare DELETE
             // with no WHERE reads nothing and needs only DELETE (M1e). DELETE
             // itself is not column-grantable, so it stays object-grain; only the
-            // read-implies-SELECT is column-grain on a base table.
-            if (sourceView is not null)
+            // read-implies-SELECT is column-grain — on a base table or a view,
+            // but not through a synonym, which takes no column grants at all.
+            var securable = PermissionEnforcement.SecurableFor(context.Batch, targetName, (SchemaObject?)sourceView ?? table);
+            if (where is not null && securable is not Synonym)
             {
-                if (where is not null)
-                    PermissionEnforcement.CheckView(context.Batch, "SELECT", sourceView);
-                PermissionEnforcement.CheckView(context.Batch, "DELETE", sourceView);
+                var read = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
+                where.VisitOperandExpressions(op => op.VisitColumnReferences(read.Add));
+                PermissionEnforcement.CheckColumns(context.Batch, Permission.Select, read);
             }
-            else
+            else if (where is not null)
             {
-                if (where is not null && PermissionEnforcement.Applies(context.Batch))
-                {
-                    var readColumns = new HashSet<int>();
-                    where.VisitOperandExpressions(op => op.VisitColumnReferences(n => PermissionEnforcement.AddColumnOrdinal(table, n, readColumns)));
-                    PermissionEnforcement.CheckTableColumns(context.Batch, Permission.Select, table, readColumns);
-                }
-                PermissionEnforcement.CheckTable(context.Batch, "DELETE", table);
+                PermissionEnforcement.CheckSchemaObject(context.Batch, "SELECT", securable);
             }
+            PermissionEnforcement.CheckSchemaObject(context.Batch, "DELETE", securable);
         }
 
         var storedColumns = table.StoredColumns;
@@ -264,7 +262,7 @@ partial class Simulation
             // real requires SELECT on each, checked before the DELETE write
             // permission (probe M2).
             CheckJoinedReadSources(context.Batch, sources, targetIndex);
-            PermissionEnforcement.CheckTable(context.Batch, "DELETE", table);
+            PermissionEnforcement.CheckSchemaObject(context.Batch, "DELETE", (SchemaObject?)sources[targetIndex].ViaSynonym ?? table);
         }
 
         // Alias-form DELETE: table-IX wasn't pre-acquired (target identified

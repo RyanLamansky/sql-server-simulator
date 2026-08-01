@@ -54,4 +54,65 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException HelpColumnIsNotComputed(string columnName) =>
         new($"Column '{columnName}' is not a computed column.", 15646, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 15010 — <c>sp_helpdb</c>'s "no such database"
+    /// error. A NULL <paramref name="databaseName"/> renders as the empty
+    /// string, matching <c>raiserror</c>'s NULL substitution.
+    /// </summary>
+    internal static SimulatedSqlException HelpDatabaseDoesNotExist(string databaseName) =>
+        new($"The database '{databaseName}' does not exist. Supply a valid database name. To see available databases, use sys.databases.", 15010, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 15007 — <c>sp_who</c> / <c>sp_who2</c>'s
+    /// <c>@loginame</c> argument naming no known login.
+    /// </summary>
+    internal static SimulatedSqlException HelpLoginIsNotValid(string loginName) =>
+        new($"'{loginName}' is not a valid login or you do not have permission.", 15007, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 15198 — <c>sp_helpuser</c>'s <c>@name_in_db</c>
+    /// argument matching neither a database user nor a database role.
+    /// </summary>
+    internal static SimulatedSqlException HelpNameIsNotAUserOrRole(string name) =>
+        new($"The name supplied ({name}) is not a user, role, or aliased login.", 15198, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 15305 — <c>sp_helptrigger</c>'s
+    /// <c>@triggertype</c> argument outside <c>insert</c> / <c>update</c> /
+    /// <c>delete</c>. The message carries no substitution.
+    /// </summary>
+    internal static SimulatedSqlException HelpTriggerTypeIsNotValid() =>
+        new("The @TriggerType parameter value must be 'insert', 'update', or 'delete'.", 15305, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 15234 — <c>sp_spaceused</c> against an object
+    /// kind that occupies no storage (anything but a table, a view or a
+    /// queue). The message carries no substitution.
+    /// </summary>
+    internal static SimulatedSqlException SpaceUsedObjectHasNoSpace() =>
+        new("Objects of this type have no space allocated.", 15234, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 15143 — <c>sp_spaceused</c>'s
+    /// <c>@updateusage</c> argument outside <c>true</c> / <c>false</c>.
+    /// </summary>
+    internal static SimulatedSqlException SpaceUsedUpdateUsageIsNotValid(string value) =>
+        new($"'{value}' is not a valid option for the @updateusage parameter. Enter either 'true' or 'false'.", 15143, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 14822 — <c>sp_spaceused</c>'s <c>@mode</c>
+    /// argument outside <c>ALL</c> / <c>LOCAL_ONLY</c> / <c>REMOTE_ONLY</c>.
+    /// The doubled space before <c>'ALL'</c> is the catalog row's own.
+    /// </summary>
+    internal static SimulatedSqlException SpaceUsedModeIsNotValid(string value) =>
+        new($"'{value}' is not a valid option for the @mode parameter. Enter  'ALL', 'LOCAL_ONLY' or 'REMOTE_ONLY'.", 14822, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 14821 — <c>sp_spaceused @mode = 'REMOTE_ONLY'</c>
+    /// against a database with no stretch (remote) part. State 1 is the
+    /// database form's; the object form raises the same message with state 2.
+    /// </summary>
+    internal static SimulatedSqlException SpaceUsedRemoteOnlyHasNoRemotePart(byte state) =>
+        new("Cannot execute in REMOTE_ONLY mode since remote part does not exist or is invalid for this operation.", 14821, 16, state);
 }

@@ -91,7 +91,14 @@ Synonyms enroll in `Schema.SchemaObjects()`, so they take an `ObjectId` / `Creat
   `IF EXISTS` doesn't suppress it — the object exists, it's just the wrong kind.
 - **DROP SYNONYM [IF EXISTS] name** removes the entry; a missing target without `IF EXISTS` → **Msg 3701 State 5** (`CannotDropSynonymDoesNotExist`, "Cannot drop the synonym '<n>', because it does not exist or you do not have permission.").
 
-A synonym is a grantable securable: `GRANT SELECT ON syn` and `GRANT EXECUTE ON syn` both land (real accepts either family, since the base's kind isn't consulted at grant time), and the grant records against the synonym's own `object_id`.
+### Permissions
+
+A synonym is a grantable securable in its own right: `GRANT SELECT ON syn` and `GRANT EXECUTE ON syn` both land (real accepts either family, since the base's kind isn't consulted at grant time), and the grant records against the synonym's own `object_id`.
+
+**It is also the securable that gets checked.**
+A reference written through a synonym is enforced against the synonym and never walks through to the base — a grant on the base alone does not admit it (the Msg 229 names the synonym), and a DENY on the base does not block it.
+The redirect carries that provenance: `FromSource.ViaSynonym` for query sources, the written `MultiPartName` for DML / EXEC targets, both funnelling through `PermissionEnforcement.SecurableFor`.
+A synonym takes no column list at all (Msg 1020), so every check through one is object-grain → [`permissions.md`](permissions.md#reference-provenance-synonyms).
 
 ### Divergences
 
@@ -116,6 +123,9 @@ Default class is `OBJECT` (the bare form with no prefix).
 - **Missing destination schema** → **Msg 15151** alter-schema variant (`"Cannot alter the schema '<n>', …"`).
 - **Missing source object** → **Msg 15151** find-object variant (`"Cannot find the object '<leaf>', …"`); the qualifier doesn't echo into the message (probe-confirmed).
 - **Same-schema transfer** (source schema = destination schema) is a silent no-op — probe-confirmed against real SQL Server.
+- **An object a `WITH SCHEMABINDING` module references** → **Msg 15348** (`"Cannot transfer a schemabound object."` — real's unspaced "schemabound", matched verbatim).
+  Only the referenced side is pinned: transferring the schema-bound module itself succeeds (probe-confirmed).
+  See [`programmable.md`](programmable.md#schema-binding-with-schemabinding).
 - **SchemaId mutability**: `SchemaObject.SchemaId` is a settable `int` (not `readonly`) so the TRANSFER path can reseat objects.
   Every derived type with a separate `Schema` field (`View`, `Procedure`, `UserDefinedFunction`, `Sequence`, `TableType`, `Trigger`) likewise dropped `readonly`.
   Apps that read `SchemaId` between transfers see the updated value.

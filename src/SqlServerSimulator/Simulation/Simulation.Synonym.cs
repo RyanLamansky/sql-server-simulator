@@ -36,9 +36,11 @@ partial class Simulation
 
         var leaf = synonymName.Leaf;
         var synonym = new Synonym(schema, leaf, context.CurrentDatabase.AllocateObjectId(), context.Batch.CurrentStatement.UtcNow, baseObject);
-        return schema.HasNameInSharedNamespace(leaf) || !schema.Synonyms.TryAdd(leaf, synonym)
-            ? throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf)
-            : true;
+        if (schema.HasNameInSharedNamespace(leaf) || !schema.Synonyms.TryAdd(leaf, synonym))
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
+        // Real reports the base object as TargetObjectName with no type.
+        RecordDdlEvent(context, "CREATE_SYNONYM", schema.Name, leaf, "SYNONYM", baseObject.Leaf);
+        return true;
     }
 
     /// <summary>
@@ -70,9 +72,10 @@ partial class Simulation
         if (!context.Batch.TryResolveSchema(synonymName, out var schema))
             return ifExists ? true : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(leaf);
         RejectDropOfOtherKind(schema, synonymName, "SYNONYM");
-        return schema.Synonyms.TryRemove(leaf, out _) || ifExists
-            ? true
-            : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(leaf);
+        if (!schema.Synonyms.TryRemove(leaf, out var dropped))
+            return ifExists ? true : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(leaf);
+        RecordDdlEvent(context, "DROP_SYNONYM", schema.Name, leaf, "SYNONYM", dropped.BaseObject.Leaf);
+        return true;
     }
 
     /// <summary>

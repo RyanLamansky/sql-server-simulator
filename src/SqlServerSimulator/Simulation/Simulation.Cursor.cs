@@ -113,7 +113,7 @@ partial class Simulation
         }
 
         context.MoveNextRequired(); // consume FOR
-        var selection = Selection.Parse(context, 0);
+        var selection = ParseBodyQuery(context);
 
         // Trailing SQL-92 updatability clause: FOR READ ONLY | FOR UPDATE [OF cols].
         List<string>? forUpdateColumns = null;

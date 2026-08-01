@@ -22,6 +22,8 @@ internal abstract class TwoSidedExpression : Expression
     // operand's flag here is harmless — the non-decimal result is filtered out.
     internal override bool ResultReportsNumeric => this.left.ResultReportsNumeric || this.right.ResultReportsNumeric;
 
+    internal override bool IsWrittenConstant => this.left.IsWrittenConstant && this.right.IsWrittenConstant;
+
     /// <summary>
     /// Builds the <see cref="TwoSidedExpression"/> that corresponds to a
     /// compound-assignment operator's arithmetic step. Used by the SET and

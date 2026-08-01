@@ -74,6 +74,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var viewName = BatchContext.ParseObjectName(context);
+        RejectQualifiedModuleName(viewName, "VIEW");
         var schema = ResolveModuleSchema(context, viewName, isAlter);
 
         context.MoveNextRequired();
@@ -122,7 +123,7 @@ partial class Simulation
         var commandText = context.Command.CommandText;
         var bodyStart = context.Token?.StartIndex
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
-        var bodySelection = Selection.Parse(context, depth: 0);
+        var bodySelection = ParseBodyQuery(context);
         var bodyEnd = context.Token?.StartIndex ?? commandText.Length;
         var bodyText = commandText[bodyStart..bodyEnd];
 
@@ -171,6 +172,9 @@ partial class Simulation
             context, schema, viewName, isAlter, createOrAlter,
             schema.Views.TryGetValue(viewName.Leaf, out var existingView) ? existingView : null);
 
+        if (isSchemaBound)
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "view", $"{schema.Name}.{viewName.Leaf}", bodyText);
+
         var outputColumns = ComputeViewOutputColumns(context.CurrentDatabase.Collation, bodySelection, renameList, viewName.Leaf);
 
         var (baseTable, baseColumnOrdinals, rejectionReason, visibilityCheck, checkOptionCheck) =
@@ -200,6 +204,7 @@ partial class Simulation
             ReseatTriggerParents(context.CurrentDatabase, replaced, view);
         }
         schema.Views[viewName.Leaf] = view;
+        RecordDdlEvent(context, replaced is null ? "CREATE_VIEW" : "ALTER_VIEW", schema.Name, viewName.Leaf, "VIEW");
         return true;
     }
 

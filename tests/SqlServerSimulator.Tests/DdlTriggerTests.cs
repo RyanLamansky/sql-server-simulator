@@ -3,11 +3,11 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Behavioral tests for database-scope DDL triggers
-/// (<c>CREATE TRIGGER … ON DATABASE FOR &lt;event_type_group&gt; AS &lt;body&gt;</c>).
-/// The simulator stores DDL triggers for catalog-view round-trip but does
-/// not fire them; these tests verify the storage + catalog visibility +
-/// drop / disable paths.
+/// Storage and catalog-view tests for database-scope DDL triggers
+/// (<c>CREATE TRIGGER … ON DATABASE FOR &lt;event_type_group&gt; AS &lt;body&gt;</c>) —
+/// the create / drop paths and the <c>sys.triggers</c> /
+/// <c>sys.trigger_events</c> / <c>sys.trigger_event_types</c> projection.
+/// Firing behavior lives in <see cref="DdlTriggerFiringTests"/>.
 /// </summary>
 [TestClass]
 public sealed class DdlTriggerTests

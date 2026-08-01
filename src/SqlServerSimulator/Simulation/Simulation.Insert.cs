@@ -45,7 +45,7 @@ partial class Simulation
         if (destinationTable.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);
         if (!context.Batch.IsSkipping)
-            PermissionEnforcement.CheckObject(context.Batch, "INSERT", destinationTable.ObjectId, destinationTable.SchemaId, destinationTable.Name, destinationName.ImmediateQualifier ?? Database.DefaultSchemaName);
+            PermissionEnforcement.CheckReference(context.Batch, "INSERT", destinationName, destinationTable);
         // Phase 1b: acquire table-IX on the INSERT target (escalates to
         // table-X via TABLOCK*); row-X is taken per inserted row in
         // ProcessHeapInsert.
@@ -69,7 +69,7 @@ partial class Simulation
     private static SimulatedStatementOutcome ProcessViewInsert(View destinationView, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName)
     {
         if (!context.Batch.IsSkipping)
-            PermissionEnforcement.CheckObject(context.Batch, "INSERT", destinationView.ObjectId, destinationView.SchemaId, destinationView.Name, destinationView.Schema.Name);
+            PermissionEnforcement.CheckReference(context.Batch, "INSERT", destinationName, destinationView);
         return ProcessViewInsertCore(destinationView, context, top, destinationName);
     }
 
@@ -796,7 +796,7 @@ partial class Simulation
         connection.InsertExecActive = true;
         try
         {
-            foreach (var outcome in connection.Simulation.ParseExec(batch))
+            foreach (var outcome in connection.Simulation.ParseExec(batch, insertExecSource: true))
             {
                 if (outcome is not SimulatedSqlResultSet resultSet)
                     continue;

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
@@ -111,9 +112,9 @@ partial class Simulation
         // gate below.
         context.MoveNextOptional();
         SkipOptionalFilegroupClause(context);
-        MultiPartName? historyTableName = null;
+        SystemVersioningOptions? systemVersioning = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-            historyTableName = ParseSystemVersioningOption(context);
+            systemVersioning = ParseSystemVersioningOption(context);
 
         // Pass 2: resolve computed columns now that every column's name has
         // been seen. The resolver throws Msg 1759 for any reference to another
@@ -271,20 +272,36 @@ partial class Simulation
         var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks, context.CurrentDatabase);
         var resolvedPeriod = ResolvePeriodColumns(context.Batch.CurrentDatabase.Collation, heapColumns!, pendingPeriod);
 
-        // History-table pre-validation when SYSTEM_VERSIONING = ON: must have
-        // PeriodColumns on the parent, and the history table name's
-        // destination dict must accept it (schema lookup + collision check
-        // upfront so a history failure doesn't leave an orphan parent).
+        // History-table pre-validation when SYSTEM_VERSIONING = ON: the parent
+        // must have PeriodColumns, and the history table's schema must
+        // resolve. A named history table that already exists is adopted (real
+        // links it after the shape validation below); one that doesn't is
+        // built from the parent's shape, as is the auto-named form — whose
+        // name derives from the parent's object id and so waits until the
+        // parent is constructed.
         Schema? historySchema = null;
         ConcurrentDictionary<string, HeapTable>? historyDestination = null;
-        if (historyTableName is { } hn)
+        HeapTable? existingHistory = null;
+        if (systemVersioning is { } options)
         {
             if (resolvedPeriod is null)
                 throw SimulatedSqlException.SystemVersioningRequiresPeriod();
-            if (!context.Batch.TryResolveSchema(hn, out historySchema))
-                throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(hn.Count >= 2 ? hn.ImmediateQualifier! : Database.DefaultSchemaName);
-            if (historySchema.HasNameInSharedNamespace(hn.Leaf))
-                throw SimulatedSqlException.ThereIsAlreadyAnObject(hn.Leaf);
+            if (options.HistoryTable is { } hn)
+            {
+                if (!context.Batch.TryResolveSchema(hn, out historySchema))
+                    throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(hn.Count >= 2 ? hn.ImmediateQualifier! : Database.DefaultSchemaName);
+                if (historySchema.HeapTables.TryGetValue(hn.Leaf, out existingHistory))
+                    RejectUnusableHistoryTable(context, existingHistory);
+                else if (historySchema.HasNameInSharedNamespace(hn.Leaf))
+                    throw SimulatedSqlException.ThereIsAlreadyAnObject(hn.Leaf);
+            }
+            else
+            {
+                // The auto-generated name lands in the base table's own
+                // schema, which a temp table doesn't have — and real rejects
+                // system-versioning a temp table outright.
+                historySchema = schema ?? throw new NotSupportedException("SYSTEM_VERSIONING on a temp table isn't modeled.");
+            }
             historyDestination = historySchema.HeapTables;
         }
 
@@ -307,18 +324,41 @@ partial class Simulation
         if (isLocalTempTable)
             context.Batch.RegisterScopedTempTable(heapTable.Name);
 
-        if (historyTableName is { } historyName && historyDestination is not null && historySchema is not null)
+        if (systemVersioning is { } versioning && historyDestination is not null && historySchema is not null)
         {
-            var historyTable = BuildHistoryTable(heapTable, historyName.Leaf, historySchema.SchemaId, context);
-            if (!historyDestination.TryAdd(historyTable.Name, historyTable))
+            HeapTable historyTable;
+            if (existingHistory is not null)
             {
-                // Roll back parent insertion if history-add raced — shouldn't
-                // happen given the pre-validation above, but keep both
-                // commits consistent if it does.
-                _ = destination.TryRemove(heapTable.Name, out _);
-                throw SimulatedSqlException.ThereIsAlreadyAnObject(historyTable.Name);
+                // Real validates an already-existing history table's shape
+                // against the base and links it; only a freshly built sibling
+                // matches by construction.
+                try
+                {
+                    ValidateHistoryTableShape(context, heapTable, existingHistory);
+                }
+                catch
+                {
+                    _ = destination.TryRemove(heapTable.Name, out _);
+                    throw;
+                }
+                historyTable = existingHistory;
+                historyTable.IsHistoryTable = true;
+            }
+            else
+            {
+                historyTable = BuildHistoryTable(heapTable, versioning.HistoryTable?.Leaf ?? AutoHistoryTableName(historySchema, heapTable.ObjectId), historySchema.SchemaId, context);
+                if (!historyDestination.TryAdd(historyTable.Name, historyTable))
+                {
+                    // Roll back parent insertion if history-add raced — shouldn't
+                    // happen given the pre-validation above, but keep both
+                    // commits consistent if it does.
+                    _ = destination.TryRemove(heapTable.Name, out _);
+                    throw SimulatedSqlException.ThereIsAlreadyAnObject(historyTable.Name);
+                }
             }
             heapTable.SystemVersioning = historyTable;
+            heapTable.HistoryRetentionPeriod = versioning.RetentionPeriod;
+            heapTable.HistoryRetentionUnit = versioning.RetentionUnit;
         }
 
         // FK resolution runs after the table is in its dict so a
@@ -343,7 +383,14 @@ partial class Simulation
             // on success per-FK).
             _ = destination.TryRemove(heapTable.Name, out _);
             if (heapTable.SystemVersioning is { } versionedHistory)
-                _ = historyDestination!.TryRemove(versionedHistory.Name, out _);
+            {
+                // An adopted history table predates this statement, so the
+                // rollback returns it to plain status instead of dropping it.
+                if (existingHistory is null)
+                    _ = historyDestination!.TryRemove(versionedHistory.Name, out _);
+                else
+                    versionedHistory.IsHistoryTable = false;
+            }
             throw;
         }
 
@@ -353,16 +400,19 @@ partial class Simulation
         // isn't logged — a known asymmetry documented as a quirk.
         if (isTempTable && context.Connection.CurrentTransaction is { } tx)
             tx.UndoLog.RecordTempTableCreation(destination, heapTable.Name);
+        // Real raises no DDL event for a temp table (tempdb owns it), only for
+        // a permanent one in the current database.
+        if (!isTempTable)
+            RecordDdlEvent(context, "CREATE_TABLE", schema?.Name ?? Database.DefaultSchemaName, heapTable.Name, "TABLE");
         return true;
     }
 
     /// <summary>
-    /// Parses the trailing <c>WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = X))</c>
-    /// option after a CREATE TABLE column list. Cursor on entry: the <c>WITH</c>
-    /// keyword. Cursor on exit: the option's closing <c>)</c>. The history
-    /// table name is required (auto-generated history naming isn't modeled).
+    /// Parses the trailing <c>WITH (SYSTEM_VERSIONING = ON […])</c> option
+    /// after a CREATE TABLE column list. Cursor on entry: the <c>WITH</c>
+    /// keyword. Cursor on exit: the option's closing <c>)</c>.
     /// </summary>
-    private static MultiPartName ParseSystemVersioningOption(ParserContext context)
+    private static SystemVersioningOptions ParseSystemVersioningOption(ParserContext context)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -372,23 +422,222 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
             throw new NotSupportedException("SYSTEM_VERSIONING must be set to ON in CREATE TABLE.");
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw new NotSupportedException("SYSTEM_VERSIONING = ON without an explicit (HISTORY_TABLE = …) clause isn't modeled — auto-generated history-table naming is deferred.");
-        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.History_Table })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not Operator { Character: '=' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
-        var historyName = BatchContext.ParseObjectName(context);
+        var options = ParseSystemVersioningOnOptions(context);
         ExpectCloseParen(context);
-        ExpectCloseParen(context);
-        return historyName;
+        return options;
+    }
+
+    /// <summary>
+    /// Parses the option list a <c>SYSTEM_VERSIONING = ON</c> clause may carry
+    /// — <c>HISTORY_TABLE</c>, <c>HISTORY_RETENTION_PERIOD</c> and
+    /// <c>DATA_CONSISTENCY_CHECK</c>, comma-separated in any order, each
+    /// optional, and the whole parenthesized list optional too (bare
+    /// <c>= ON</c> auto-names the history table). Shared by the CREATE TABLE
+    /// and ALTER TABLE paths. Cursor on entry: the <c>ON</c> keyword. Cursor
+    /// on exit: the last token of the clause — the list's closing <c>)</c>, or
+    /// <c>ON</c> itself when no list follows — so the caller reads the
+    /// enclosing <c>)</c> next.
+    /// </summary>
+    /// <remarks>
+    /// <c>DATA_CONSISTENCY_CHECK = ON|OFF</c> parses-and-discards: the
+    /// simulator doesn't enforce the temporal-data-consistency rules that the
+    /// option toggles (caller-trusted history rows in the loader path).
+    /// </remarks>
+    private static SystemVersioningOptions ParseSystemVersioningOnOptions(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        if (context.GetNextOptional() is not Operator { Character: '(' })
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return SystemVersioningOptions.Bare;
+        }
+
+        MultiPartName? historyTable = null;
+        var retentionPeriod = -1;
+        var retentionUnit = HistoryRetentionUnit.Infinite;
+        while (true)
+        {
+            switch (context.GetNextRequired())
+            {
+                case UnquotedString { ContextualKeyword: ContextualKeyword.History_Table }:
+                    if (context.GetNextRequired() is not Operator { Character: '=' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    context.MoveNextRequired();
+                    historyTable = BatchContext.ParseObjectName(context);
+                    break;
+                case UnquotedString { ContextualKeyword: ContextualKeyword.History_Retention_Period }:
+                    if (context.GetNextRequired() is not Operator { Character: '=' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    (retentionPeriod, retentionUnit) = ParseHistoryRetentionPeriod(context);
+                    break;
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Data_Consistency_Check }:
+                    if (context.GetNextRequired() is not Operator { Character: '=' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    break;
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            if (context.GetNextRequired() is not Operator { Character: ',' })
+                break;
+        }
+        return context.Token is Operator { Character: ')' }
+            ? new SystemVersioningOptions(historyTable, retentionPeriod, retentionUnit)
+            : throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
+    /// Parses one <c>HISTORY_RETENTION_PERIOD</c> value — <c>&lt;count&gt;
+    /// DAY[S] | WEEK[S] | MONTH[S] | YEAR[S]</c> or <c>INFINITE</c>. Cursor on
+    /// entry: the <c>=</c>. Cursor on exit: the last token of the value.
+    /// Probe-confirmed rejections: a count of zero or less is Msg 13743
+    /// (which echoes the number unquoted), an unrecognized unit is Msg 13744
+    /// at severity 15, and a count with no unit at all is Msg 102.
+    /// </summary>
+    private static (int Period, HistoryRetentionUnit Unit) ParseHistoryRetentionPeriod(ParserContext context)
+    {
+        var negated = false;
+        if (context.GetNextRequired() is Operator { Character: '-' })
+        {
+            negated = true;
+            context.MoveNextRequired();
+        }
+        if (context.Token is not Numeric { IntegerLiteralDigitCount: > 0 } count)
+        {
+            return context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Infinite } && !negated
+                ? (-1, HistoryRetentionUnit.Infinite)
+                : throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        var period = count.Value.CoerceTo(SqlType.BigInt).AsInt64 * (negated ? -1 : 1);
+        if (context.GetNextRequired() is not UnquotedString unitToken)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        Span<char> unitBuffer = stackalloc char[unitToken.Span.Length];
+        _ = unitToken.Span.ToUpperInvariant(unitBuffer);
+        var unit = unitBuffer switch
+        {
+            "DAY" or "DAYS" => HistoryRetentionUnit.Day,
+            "WEEK" or "WEEKS" => HistoryRetentionUnit.Week,
+            "MONTH" or "MONTHS" => HistoryRetentionUnit.Month,
+            "YEAR" or "YEARS" => HistoryRetentionUnit.Year,
+            _ => throw SimulatedSqlException.InvalidHistoryRetentionUnit(unitToken.Span.ToString()),
+        };
+        // Real validates the count only after the unit parses.
+        return period is > 0 and <= int.MaxValue
+            ? ((int)period, unit)
+            : throw SimulatedSqlException.InvalidHistoryRetentionPeriod(period.ToString(CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// The name real SQL Server generates for an auto-named history table:
+    /// <c>MSSQL_TemporalHistoryFor_&lt;base object id&gt;</c> in the base
+    /// table's own schema (probe-confirmed, including that a base in a
+    /// non-<c>dbo</c> schema keeps its sibling alongside it). Real
+    /// disambiguates a collision — reachable by re-enabling versioning on a
+    /// base whose previous sibling is still around — with a random 8-hex
+    /// suffix; the simulator's suffix is a deterministic 32-bit FNV-1a of the
+    /// colliding name plus the attempt number, matching the shape but not the
+    /// value.
+    /// </summary>
+    private static string AutoHistoryTableName(Schema schema, int baseObjectId)
+    {
+        var baseName = $"MSSQL_TemporalHistoryFor_{baseObjectId.ToString(CultureInfo.InvariantCulture)}";
+        var candidate = baseName;
+        for (var attempt = 0; schema.HasNameInSharedNamespace(candidate); attempt++)
+        {
+            var h = Fnv1a32.Initial;
+            h.MixTableSeed(baseName);
+            h.Mix((byte)attempt);
+            candidate = $"{baseName}_{h.Value:X8}";
+        }
+        return candidate;
+    }
+
+    /// <summary>
+    /// Rejects a candidate history table that's already spoken for — serving
+    /// as another base's sibling, or a system-versioned base itself (Msg
+    /// 13514). Checked before the column-shape comparison and identically
+    /// from the CREATE TABLE and ALTER TABLE paths.
+    /// </summary>
+    private static void RejectUnusableHistoryTable(ParserContext context, HeapTable candidate)
+    {
+        if (candidate.IsHistoryTable || candidate.SystemVersioning is not null)
+            throw SimulatedSqlException.HistoryTableAlreadyInUse(QualifyTableName(candidate, context.CurrentDatabase));
+    }
+
+    /// <summary>
+    /// Validates that an existing table can serve as <paramref name="baseTable"/>'s
+    /// history sibling, in real SQL Server's probe-confirmed check order: its
+    /// own SYSTEM_TIME period (Msg 13574), then unique keys (13515), foreign
+    /// keys (13516), CHECK constraints (13517) and IDENTITY columns (13518),
+    /// then the column count (13523), then an ordinal walk comparing name
+    /// (13524), declared type (13525), collation (13526) and nullability
+    /// (13531) — reporting the first column that differs on any of the four
+    /// rather than the first difference of each kind.
+    /// </summary>
+    /// <remarks>
+    /// DEFAULT constraints and non-unique indexes on the history table are
+    /// accepted (probe-confirmed), as is a history table in a different schema
+    /// from the base.
+    /// </remarks>
+    private static void ValidateHistoryTableShape(ParserContext context, HeapTable baseTable, HeapTable history)
+    {
+        var qualifiedBase = QualifyTableName(baseTable, context.CurrentDatabase);
+        var qualifiedHistory = QualifyTableName(history, context.CurrentDatabase);
+        if (history.PeriodColumns is not null && !history.PeriodInheritedFromBase)
+            throw SimulatedSqlException.HistoryTableContainsPeriod(qualifiedHistory);
+        if (history.KeyConstraints.Count > 0 || history.Indexes.Any(i => i.IsUnique))
+            throw SimulatedSqlException.HistoryTableHasUniqueKeys(qualifiedHistory);
+        if (history.OutgoingForeignKeys.Count > 0)
+            throw SimulatedSqlException.HistoryTableHasForeignKeys(qualifiedHistory);
+        if (history.CheckConstraints.Count > 0)
+            throw SimulatedSqlException.HistoryTableHasConstraints(qualifiedHistory);
+        if (history.Columns.Any(c => c.Identity is not null))
+            throw SimulatedSqlException.HistoryTableHasIdentityColumn(qualifiedHistory);
+        if (baseTable.Columns.Length != history.Columns.Length)
+            throw SimulatedSqlException.HistoryTableColumnCountMismatch(qualifiedBase, baseTable.Columns.Length, qualifiedHistory, history.Columns.Length);
+
+        var collation = context.CurrentDatabase.Collation;
+        var databaseCollationName = context.CurrentDatabase.CollationName;
+        for (var i = 0; i < baseTable.Columns.Length; i++)
+        {
+            var baseColumn = baseTable.Columns[i];
+            var historyColumn = history.Columns[i];
+            if (!collation.Equals(baseColumn.Name, historyColumn.Name))
+                throw SimulatedSqlException.HistoryTableColumnNameMismatch(historyColumn.Name, i + 1, qualifiedHistory, baseColumn.Name, qualifiedBase);
+            var baseType = baseColumn.Type.ToString()!;
+            var historyType = historyColumn.Type.ToString()!;
+            if (!string.Equals(baseType, historyType, StringComparison.OrdinalIgnoreCase))
+                throw SimulatedSqlException.HistoryTableColumnTypeMismatch(baseColumn.Name, historyType, qualifiedHistory, baseType, qualifiedBase);
+            if (!string.Equals(baseColumn.Collation ?? databaseCollationName, historyColumn.Collation ?? databaseCollationName, StringComparison.OrdinalIgnoreCase))
+                throw SimulatedSqlException.HistoryTableColumnCollationMismatch(baseColumn.Name, qualifiedBase, qualifiedHistory);
+            if (baseColumn.Nullable != historyColumn.Nullable)
+                throw SimulatedSqlException.HistoryTableColumnNullabilityMismatch(baseColumn.Name, qualifiedBase, qualifiedHistory);
+        }
     }
 
     private static void ExpectCloseParen(ParserContext context)
     {
         if (context.GetNextRequired() is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
+    /// The parsed content of a <c>SYSTEM_VERSIONING = ON […]</c> clause.
+    /// <see cref="HistoryTable"/> is null for the auto-named form; the
+    /// retention pair defaults to the INFINITE (-1 / -1) every system-versioned
+    /// table starts at.
+    /// </summary>
+    private readonly struct SystemVersioningOptions(MultiPartName? historyTable, int retentionPeriod, HistoryRetentionUnit retentionUnit)
+    {
+        public readonly MultiPartName? HistoryTable = historyTable;
+
+        public readonly int RetentionPeriod = retentionPeriod;
+
+        public readonly HistoryRetentionUnit RetentionUnit = retentionUnit;
+
+        /// <summary>The auto-named, INFINITE-retention form: bare <c>= ON</c>.</summary>
+        public static SystemVersioningOptions Bare => new(null, -1, HistoryRetentionUnit.Infinite);
     }
 
     /// <summary>
@@ -504,6 +753,7 @@ partial class Simulation
                 isPersisted: pc.IsPersisted,
                 generatedAs: GeneratedAlwaysAsRow.None,
                 isHidden: pc.IsHidden,
+                collation: pc.Collation,
                 computedDefinition: pc.ComputedDefinition);
         }
         return new HeapTable(
@@ -515,6 +765,7 @@ partial class Simulation
             periodColumns: parent.PeriodColumns)
         {
             IsHistoryTable = true,
+            PeriodInheritedFromBase = true,
         };
     }
 
@@ -716,7 +967,7 @@ partial class Simulation
             pendingComputed.Add((computedIndex, columnName.Value, computed, persisted, computedNullable, computedDefinition));
             heapColumns.Add(null);
             explicitNull.Add(false);
-            ParseComputedColumnInlineConstraint(context, columnName.Value, computedIndex, persisted, pendingKeys, pendingChecks, pendingForeignKeys);
+            ParseComputedColumnInlineConstraint(context, tableName, columnName.Value, computedIndex, persisted, pendingKeys, pendingChecks, pendingForeignKeys);
             return;
         }
 
@@ -795,6 +1046,9 @@ partial class Simulation
         string? inlineKeyName = null;
         string? inlineFkName = null;
         string? inlineDefaultName = null;
+        // One column definition admits at most one inline CHECK (Msg 8148);
+        // a table-level CHECK over the same column is unrestricted.
+        var inlineCheckSeen = false;
         while (true)
         {
             switch (context.Token)
@@ -900,6 +1154,8 @@ partial class Simulation
                     finally { context.InDefaultClause = false; }
                     defaultDefinition = $"({context.SourceTextFrom(defaultStart)})";
                     continue;
+                case ReservedKeyword { Keyword: Keyword.Default }:
+                    throw SimulatedSqlException.MultipleColumnConstraints("DEFAULT", columnName.Value, tableName);
                 case ReservedKeyword { Keyword: Keyword.Constraint } inlineConstraintKw when inlineKeyKind is null && inlineFkName is null:
                     if (isTableType)
                         throw SimulatedSqlException.SyntaxErrorNearKeyword(inlineConstraintKw);
@@ -914,8 +1170,11 @@ partial class Simulation
                             inlineDefaultName = namedConstraint.Value;
                             continue;
                         case ReservedKeyword { Keyword: Keyword.Check }:
+                            if (inlineCheckSeen)
+                                throw SimulatedSqlException.MultipleColumnConstraints("CHECK", columnName.Value, tableName);
                             var namedCheck = ParseInlineCheckPredicate(context);
                             pendingChecks.Add((namedConstraint.Value, namedCheck.Predicate, columnName.Value, namedCheck.Definition));
+                            inlineCheckSeen = true;
                             continue;
                         case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References }:
                             inlineFkName = namedConstraint.Value;
@@ -946,9 +1205,20 @@ partial class Simulation
                     if (context.Token is ReservedKeyword { Keyword: Keyword.Asc or Keyword.Desc } directionKw)
                         throw SimulatedSqlException.SyntaxErrorNearKeyword(directionKw);
                     continue;
+                // A second key clause on the same column: same kind twice is
+                // Msg 8148, one of each is Msg 8151 (both probe-confirmed).
+                case ReservedKeyword { Keyword: Keyword.Primary } when inlineKeyKind == KeyConstraintKind.PrimaryKey:
+                    throw SimulatedSqlException.MultipleColumnConstraints("PRIMARY KEY", columnName.Value, tableName);
+                case ReservedKeyword { Keyword: Keyword.Unique } when inlineKeyKind == KeyConstraintKind.Unique:
+                    throw SimulatedSqlException.MultipleColumnConstraints("UNIQUE", columnName.Value, tableName);
+                case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
+                    throw SimulatedSqlException.BothPrimaryKeyAndUniqueOnColumn(columnName.Value, tableName);
                 case ReservedKeyword { Keyword: Keyword.Check }:
+                    if (inlineCheckSeen)
+                        throw SimulatedSqlException.MultipleColumnConstraints("CHECK", columnName.Value, tableName);
                     var inlineCheck = ParseInlineCheckPredicate(context);
                     pendingChecks.Add((null, inlineCheck.Predicate, columnName.Value, inlineCheck.Definition));
+                    inlineCheckSeen = true;
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References } referencesKw when isTableVariable || isTableType:
                     throw isTableType ? SimulatedSqlException.SyntaxErrorNearKeyword(referencesKw) : SimulatedSqlException.SyntaxErrorNear(context);
@@ -1172,6 +1442,7 @@ partial class Simulation
     /// </summary>
     private static void ParseComputedColumnInlineConstraint(
         ParserContext context,
+        string tableName,
         string columnName,
         int computedIndex,
         bool persisted,
@@ -1179,6 +1450,7 @@ partial class Simulation
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         List<PendingForeignKey>? pendingForeignKeys)
     {
+        var checkSeen = false;
         while (true)
         {
             string? constraintName = null;
@@ -1199,8 +1471,11 @@ partial class Simulation
                 case ReservedKeyword { Keyword: Keyword.Check }:
                     if (!persisted)
                         throw SimulatedSqlException.ComputedColumnConstraintRequiresPersisted();
+                    if (checkSeen)
+                        throw SimulatedSqlException.MultipleColumnConstraints("CHECK", columnName, tableName);
                     var inlineCheck = ParseInlineCheckPredicate(context);
                     pendingChecks.Add((constraintName, inlineCheck.Predicate, columnName, inlineCheck.Definition));
+                    checkSeen = true;
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References }:
                     if (!persisted)
@@ -1444,6 +1719,7 @@ partial class Simulation
             resolved[c] = new CheckConstraint(name, pending.Predicate, pending.InlineColumn, database.AllocateObjectId())
             {
                 Definition = pending.Definition,
+                IsSystemNamed = pending.Name is null,
             };
         }
         return resolved;

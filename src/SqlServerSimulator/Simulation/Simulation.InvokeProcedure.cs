@@ -37,7 +37,8 @@ partial class Simulation
         BatchContext outerBatch,
         Procedure procedure,
         IReadOnlyList<ProcArgument> arguments,
-        string? returnCodeVariableName)
+        string? returnCodeVariableName,
+        Synonym? viaSynonym = null)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
@@ -47,8 +48,19 @@ partial class Simulation
         // principal; the error's Procedure attribution names the proc (probe-
         // confirmed). Ownership chaining suppresses the check when the caller
         // is itself a module body (EnforcesPermissions is false there).
-        PermissionEnforcement.CheckObject(outerBatch, "EXECUTE", procedure.ObjectId, procedure.SchemaId,
-            procedure.Name, procedure.Schema.Name, procedure: $"{procedure.Schema.Name}.{procedure.Name}");
+        // A call written through a synonym is checked against the synonym
+        // instead — an EXECUTE grant on the base proc does not admit it, and the
+        // denial names the synonym and carries no Procedure attribution, since
+        // the module was never entered (probe-confirmed).
+        if (viaSynonym is not null)
+        {
+            PermissionEnforcement.CheckSchemaObject(outerBatch, "EXECUTE", viaSynonym);
+        }
+        else
+        {
+            PermissionEnforcement.CheckObject(outerBatch, "EXECUTE", procedure.ObjectId, procedure.SchemaId,
+                procedure.Name, procedure.Schema.Name, procedure: $"{procedure.Schema.Name}.{procedure.Name}");
+        }
 
         // Bind arguments to parameters. Positional args fill from the left;
         // named args do per-name lookup. Track which parameters are bound

@@ -94,4 +94,6 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
     internal override bool ContainsVariableReference => left.ContainsVariableReference || right.ContainsVariableReference;
 
     internal override bool IsRowIndependent => left.IsRowIndependent && right.IsRowIndependent;
+
+    internal override bool IsWrittenConstant => left.IsWrittenConstant && right.IsWrittenConstant;
 }

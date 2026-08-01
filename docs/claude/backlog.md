@@ -35,8 +35,6 @@ A standing survey of areas with no build behind them, one line each pointing at 
 Presence here is status, not a priority claim — the ordering caveat at the top of this file applies.
 The subsections that follow carry the areas with work in flight.
 
-- **Windows over multi-stream grouping** — a window combined with `ROLLUP` / `CUBE` / `GROUPING SETS` raises `NotSupportedException`; one window would have to span every grouping set's group stream as a single row set, where the executor loops per set.
-  Windows over a plain GROUP BY ship → [`query.md`](query.md#windows-over-a-grouped-query).
 - **Full-text query pipeline** — the tokenizer / stemmer / inverted-index build behind `CONTAINS` / `FREETEXT`, which raise `NotSupportedException`; the catalog + index DDL, the BACPAC round-trip, and the property scalars ship → [`full-text.md`](full-text.md#known-gaps).
 - **Spatial evaluation** — the value model, the **planar** measures and the **round-earth length / point-to-point distance** all ship; the last is measured along the *great elliptic arc*, which is the curve real uses and not the geodesic (see [`spatial.md`](spatial.md#round-earth-measures-the-great-elliptic-arc) for the derivation and the ~6e-9 residual against real). What remains:
   **ellipsoidal polygon area** for `geography`'s `STArea` — the companion problem to the arc integral, wanting spherical excess plus an ellipsoidal correction;
@@ -45,16 +43,15 @@ The subsections that follow carry the areas with work in flight.
   and the **constructive operations** (`STUnion` / `STBuffer` / …), which want polygon clipping.
   Also open: `STCentroid` / `STPointOnSurface` / `EnvelopeAngle` / `EnvelopeCenter`, a spatial *column*'s property form (`Location.Lat` reads as a two-part column name — the method form works), curved shapes and FULLGLOBE, GML, SRID transformation, `sys.spatial_reference_systems` seed rows, `ALTER SPATIAL INDEX`, and query-planner use of the spatial index → [`spatial.md`](spatial.md#not-modeled-yet).
 - **XML mutation and XQuery beyond the path subset** — `.modify()` XML-DML plus its `UPDATE … SET` integration, FLWOR / comparison / boolean / arithmetic operators, value predicates, constructors, XSD validation against `xml(collection)` bindings, `ALTER XML SCHEMA COLLECTION ADD` → [`xml.md`](xml.md#known-gaps).
-- **DDL trigger firing** — `CREATE TRIGGER … ON DATABASE` parses, stores, and projects into `sys.triggers` / `sys.trigger_events` / `sys.trigger_event_types`, but no DDL event dispatches to it, so no body ever runs → [`triggers.md`](triggers.md).
-- **`EXEC … WITH RESULT SETS`** — the result-set-override option falls through to a syntax error; the `INSERT … EXEC` it is usually paired with ships → [`programmable.md`](programmable.md), [`dml.md`](dml.md#insert--exec).
 - **Multi-source cursors** — a cursor over a JOIN / derived table / view is forced STATIC where real is DYNAMIC, costing mid-loop change visibility, `@@CURSOR_ROWS = -1`, and positioned DML; it needs per-source row identity carried through the join driver plus live re-execution → [`cursors.md`](cursors.md).
-- **Temporal retention and history wiring** — `HISTORY_RETENTION_PERIOD` pruning, auto-named history tables, and base-vs-history column-shape validation at `SET (SYSTEM_VERSIONING = ON)`; all five `FOR SYSTEM_TIME` query forms ship → [`temporal-tables.md`](temporal-tables.md#not-modeled).
-- **Synonym permission provenance** — `GRANT SELECT ON syn` is accepted and recorded but not honored at use: the DML / FROM gate checks the resolved base object, so a principal granted on the synonym alone gets Msg 229 where real reads through.
-  Needs the redirect to carry which synonym a reference arrived by.
-  Cross-database *writes* through a synonym are the same `RejectCrossDatabaseMutation` gap a spelled-out 3-part name hits.
-  The rest of the synonym surface (catalog projection, `OBJECT_ID`, EXEC / function targets, deferred base resolution, both collision directions, schema transfer) ships → [`schemas.md`](schemas.md#synonyms-create-synonym--drop-synonym).
+- **Temporal history-table indexing** — real gives every history table a clustered index on `(period end, period start)` and requires one before it accepts a finite `HISTORY_RETENTION_PERIOD` (Msg 13765); the simulator's history sibling is a plain heap, so it accepts retention unconditionally and can't raise that.
+  Retention filtering, auto-named history tables, and the base-vs-history shape validation all ship → [`temporal-tables.md`](temporal-tables.md#divergences).
+- **Cross-database writes through a synonym** — the same `RejectCrossDatabaseMutation` gap a spelled-out 3-part name hits.
+  The rest of the synonym surface, permission provenance included, ships → [`schemas.md`](schemas.md#synonyms-create-synonym--drop-synonym).
 - **Key-range locks** — the one unbuilt piece of the locking model; HOLDLOCK widens to table-S in their place → [`locking.md`](locking.md).
-- **Column grants on views aren't honored** — `GRANT SELECT (col) ON <view>` is accepted and then denies the *granted* column too (Msg 229 at object level), where real allows it; column-level SELECT / UPDATE / REFERENCES on **tables** ship → [`permissions.md`](permissions.md#known-gaps).
+- **`sys.sql_expression_dependencies` / `sys.dm_sql_referencing_entities` / `sys.dm_sql_referenced_entities`** — neither the catalog view nor the two DMVs resolve, so a tool asking "what depends on this" gets Msg 208.
+  The [schema-binding gate](programmable.md#schema-binding-with-schemabinding) now derives a reference set from a module body, but only for schema-bound modules and only name-approximately at column granularity, where these surfaces want dependency rows for **every** module (real records them for plain views and procedures too, resolving late-bound names when it can) down to `referenced_minor_id` per column — probed shape: one row per (referencing module, referenced object) plus one per referenced column, carrying `is_schema_bound_reference` / `referenced_class_desc` / `is_caller_dependent` / `is_ambiguous`.
+  Building it means capturing column bindings at parse time, which the per-row name-keyed resolver doesn't do today; that capture is the real cost and would also sharpen the schema-binding gate's column granularity.
 - **`GRANT … ON SERVER` / `ON LOGIN::` securables and application roles** — server-scope permission *names* and server roles ship → [`permissions.md`](permissions.md#known-gaps).
 - **Multi-statement plan caching** — the cache keys single-SELECT batches, so every SaveChanges INSERT-then-`SELECT SCOPE_IDENTITY()` round trip re-parses → [`plan-cache.md`](plan-cache.md).
   **Measured 2026-07-30 before building, and the headroom is smaller than this entry used to imply.** Against a 200-row table, one process per case, 20k warm + best of 5×20k: a cache **hit** costs 14.4 µs/op, the same SELECT forced to always miss costs 26.8, and `SET NOCOUNT ON; SELECT` — never cached — costs 20.1.
@@ -107,8 +104,7 @@ Getting there took eleven roots, and the pattern worth keeping is that failures 
 The set-op ORDER BY binding this exposed (Msg 104 for a term that binds in the first branch's FROM scope but isn't projected, Msg 207 / 4104 for one that binds nowhere) ships — see [`query.md`](query.md#top-level-order-by-over-a-set-operation).
 The DISTINCT counterpart (qualified term leaf-matched against the output names) is fixed.
 
-One residual there: real rejects a **constant** ORDER BY term with **Msg 408** ("A constant expression was encountered in the ORDER BY list, position N"), on a single SELECT and a set-op chain alike.
-The simulator sorts by the constant on a single SELECT and reports the set-op case as Msg 104.
+The constant-term rejection that exposed (**Msg 408**, plus **Msg 1008** for a bare variable term) ships — see [`query.md`](query.md#constant-terms-msg-408-and-bare-variables-msg-1008).
 
 **Over-permissive validation — the simulator *accepts* what real *rejects*.** This is the more dangerous divergence direction (an app query works on the simulator and breaks on real), and it is invisible to a sim-only failure list: surface it with the *reverse* delta `comm -13 <sim fails> <real fails>`, where real-only failures mean the simulator over-passes. **Whole-suite audits should always run the reverse delta — a green "matches real" claim requires both directions.**
 
@@ -153,8 +149,8 @@ Blocked on a larger unmodeled parent feature (shipping a function here implies t
   Probed: real *parses* `OPENROWSET('MSDASQL', …)` then errors on disabled ad-hoc access (**Msg 7222**) and `OPENROWSET(BULK 'file', SINGLE_CLOB)` on the missing file (**Msg 4860**); the simulator doesn't parse the FROM-source form at all (Msg 102). Ad-hoc / external data access is a feature, not a syntax tweak — the parse-then-runtime-error shape depends on the whole external-data model.
 
 - **System stored procedures** (`sp_*` family) — formatted-metadata / management procs invoked via `EXEC sp_name`.
-  Shipped so far: the `sp_help` family (`sp_help` / `sp_helptext` / `sp_helpindex` / `sp_helpconstraint`), the ODBC/JDBC catalog set (`sp_tables` / `sp_columns_100` / `sp_pkeys` / `sp_statistics_100` / `sp_stored_procedures` / `sp_datatype_info_100`) and `sp_rename` — see [`catalog-views.md`](catalog-views.md).
-  Still unregistered → **Msg 2812** ("Could not find stored procedure '…'."): `sp_helpdb`, `sp_helpuser`, `sp_helprotect`, `sp_spaceused`, `sp_who` / `sp_who2`, `sp_depends`, `sp_helptrigger`, `sp_helpstats`, `sp_MSforeachtable`, the `sp_add*` / `sp_configure` management family.
+  Shipped so far: the `sp_help` family (`sp_help` / `sp_helptext` / `sp_helpindex` / `sp_helpconstraint` / `sp_helpdb` / `sp_helptrigger` / `sp_helpuser`), the ODBC/JDBC catalog set (`sp_tables` / `sp_columns_100` / `sp_pkeys` / `sp_statistics_100` / `sp_stored_procedures` / `sp_datatype_info_100`), `sp_spaceused`, `sp_who` / `sp_who2`, `sp_MSforeachtable`, `sp_rename` and `sp_configure` — see [`catalog-views.md`](catalog-views.md).
+  Still unregistered → **Msg 2812** ("Could not find stored procedure '…'."): `sp_helprotect`, `sp_depends` (wants the dependency graph), `sp_helpstats`, `sp_helpfile` as a proc of its own (only `sp_helpdb`'s appended set reaches it), `sp_MSforeachdb` / `sp_MSforeach_worker`, the `sp_add*` management family.
   A broad surface — each proc is its own result-shape contract over the catalog views.
   Ships piecemeal by popularity, not as a bundle.
 
@@ -179,8 +175,9 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **Non-Framework CLR assemblies load** — real resolves every `AssemblyRef` against a fixed .NET Framework catalog and raises **Msg 6503** otherwise (probe-confirmed for .NET 10 and for .NET Standard 2.0); the simulator runs on .NET so all of them bind, which is also what lets the tests emit a fixture assembly without a Framework toolchain.
   → [`clr-assemblies.md`](clr-assemblies.md#divergences).
 - **`REGEXP_LIKE` isn't reserved at compatibility level 170** — detail under the Django shakedown above; closing it belongs with the native predicate.
-- **A constant `ORDER BY` term is accepted** — real raises **Msg 408** (`A constant expression was encountered in the ORDER BY list, position 1.`) for `ORDER BY 'x'` on a single SELECT and on a set-op chain alike; a single SELECT sorts by the constant here, and the set-op path reports Msg 104 instead.
-  → [`query.md`](query.md#top-level-order-by-over-a-set-operation).
+- **A constant `ORDER BY` term inside `OVER` / `WITHIN GROUP` is accepted** — real raises **Msg 5309** (`Windowed functions, aggregates and NEXT VALUE FOR functions do not support constants as ORDER BY clause expressions.`) for `OVER (ORDER BY 'x')` and `WITHIN GROUP (ORDER BY 'x')`; the statement-level ORDER BY's Msg 408 gate ships and the same `Expression.IsWrittenConstant` predicate would drive this one.
+  Two folded shapes escape the statement-level gate as well: a deterministic scalar call over literals (`ABS(-1)`, `LEN('abc')`) and `CASE` / `IIF` over literal arms, both of which real folds to a constant and rejects.
+  → [`query.md`](query.md#constant-terms-msg-408-and-bare-variables-msg-1008).
 - **Module bodies aren't bound at CREATE** — real compiles the body at `CREATE PROCEDURE` / `FUNCTION` and raises whatever the binder finds (probe-confirmed: **Msg 10700** for a body that writes its own READONLY TVP, **Msg 207** for an invalid column, **Msg 8116** for a legacy LOB in a string scalar — and the module is not created), deferring only *missing-object* resolution.
   The simulator re-tokenizes the body at first EXEC, so all of those surface there instead.
   The two module-level rules that are checked at CREATE both ship: **Msg 352** for a TVP parameter declared without `READONLY`, and **Msg 111** for a CREATE that isn't first in its batch (per-kind state bytes included).
@@ -191,29 +188,17 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **Non-integer id / style arguments aren't type-rejected** — real answers **Msg 8116** naming the type (`Argument data type numeric is invalid for argument 1 of columnproperty function.`) for a `numeric` / `float` / `money` / `bit` / `varbinary` argument at `COLUMNPROPERTY` / `INDEXPROPERTY` / `INDEXKEY_PROPERTY`'s first argument and at `CONVERT`'s style; the simulator converts it and reports only the conversion outcome.
   The **bit-manipulation family does gate its arguments** this way, and every out-of-range argument now raises a real error rather than leaking .NET's — see [`scalars.md`](scalars.md#integer-arguments-outside-the-parameters-range).
   Closing the rest is worth pairing with the literal-typing divergence beside it (real types `3000000000` as `numeric(10, 0)`, the simulator as `bigint`), since the gate only changes the answer for a bare literal once that matches.
-- **A second inline CHECK on one column is accepted** — real raises **Msg 8148** (`More than one column CHECK constraint specified for column 'b', table 't'.`) for `b int CHECK (b > 0) CHECK (b < 10)`, and for the same doubling on a persisted computed column; the simulator queues both predicates and enforces them.
-  Surfaced beside the computed-column CHECK rules — see [`constraints.md`](constraints.md#computed-columns-in-a-check-constraint).
-- **A schema-bound dependency doesn't block `ALTER`** — real raises **Msg 3729** (`Cannot ALTER 'dbo.f' because it is being referenced by object 'v'.`) when a schema-bound module references the target of an `ALTER VIEW` / `ALTER FUNCTION`; the simulator has no dependency graph, so the ALTER lands and the dependent module fails at its next call.
-  Same absence that lets `DROP TABLE` remove a schema-bound view's base, so one dependency graph closes both.
-  → [`programmable.md`](programmable.md#replacing-a-module--alter--create-or-alter).
-- **A database-qualified module name is resolved rather than rejected** — real answers **Msg 166** (`'CREATE/ALTER VIEW' does not allow specifying the database name as a prefix to the object name.`) for a 3-part name on `CREATE` / `ALTER` of a view, function, procedure or trigger; the simulator routes the name through normal resolution.
-  → [`programmable.md`](programmable.md#replacing-a-module--alter--create-or-alter).
-
 Tracked elsewhere: the recursive-CTE construct restrictions (Msg 460 / 461 / 462 / 467) now ship — see [`ctes.md`](ctes.md#recursive-member-restrictions).
 
 ## Fidelity gaps in shipped behavior
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
-- **`sys.check_constraints.is_system_named` reads 0 for a CREATE TABLE auto-name** — the name itself has the right `CK__<table>__<col>__<hex>` shape, but `ResolveCheckConstraints` never sets the flag, so real's 1 for a constraint the server named reads as 0.
-  `ALTER TABLE … ADD CHECK` sets it correctly, which localizes the fix to the one resolver.
-  See [`constraints.md`](constraints.md).
-- **Msg 102 renders a string literal with its own quotes** — `Incorrect syntax near ''2020-01-01''.` where real says `near '2020-01-01'.`, because the token stringifies to its source text and the message wraps that in quotes of its own.
-  Probed 2026-07-31 in two unrelated positions (`group by 'a' 'b'`, a bare `FOR SYSTEM_TIME CONTAINED IN` argument list), so the rule looks general: real names the literal's *value*.
-  The fix is a token-rendering one — `Literal`'s string form — with the open question of what real prints for the `N'…'` and `0x…` spellings, neither of which was probed.
 - **Per-object creation-time `QUOTED_IDENTIFIER` capture not modeled** — real SQL Server stamps procedures / views / triggers / tables with the QI setting in effect at CREATE (`sys.sql_modules.uses_quoted_identifier`, `OBJECTPROPERTY(id, 'IsQuotedIdentOn')`) and executes bodies under the captured setting; the simulator re-parses bodies under the executing session's current setting.
   See [`grammar.md`](grammar.md).
   Rare legacy-pattern impact.
+- **`GROUP BY '<literal>'` binds before the trailing token parses** — the simulator raises Msg 164 on the constant grouping term where real parses the whole clause first and reports Msg 102 at the stray token after it (`group by 'a' 'b'`).
+  An ordering divergence between binding and parsing, surfaced while probing the Msg 102 token-rendering fix; the `group by c 'b'` shape agrees on both sides.
 - **Skip-mode deferred name resolution — DML target tables not placeholder-continued** — the skip-mode parse-continuation fix substitutes placeholder metadata for a missing *FROM-clause table* or *schema-qualified function* so an un-taken branch parses to completion and is discarded whole (killing the orphaned-`ELSE` cascade — see [`control-flow.md`](control-flow.md)).
   Re-probed 2026-07-29: the **spurious Msg 208 is gone** — `IF 1=0 INSERT INTO missing SELECT * FROM other; SELECT 'after'` now returns `after`, as do the UPDATE and DELETE forms, so a dead branch with a missing DML target no longer breaks the following statement.
   What still reproduces is the **orphaned `ELSE`**: the bare (non-`BEGIN`/`END`) form `IF 1=0 INSERT INTO missing … ELSE SELECT 'else-ran'` raises **Msg 102** near `else` where real runs the ELSE, and a missing **MERGE** target raises Msg 102 near `;`.
@@ -230,9 +215,8 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 - **Result-set `fNullable` inference — remaining long tail** — the projection nullability that drives the COLMETADATA `fNullable` flag (see `Expression.ResultIsNullable`) covers the structural cases: direct refs, literals, ISNULL, CASE, and (added in the go-mssqldb pass) CONCAT / CONCAT_WS (always NOT NULL), IIF (both-arm rule), and VALUES row-constructor columns (OR over rows).
   Still over-claiming nullable vs real: (1) **per-function** signatures — `CEILING` / `FLOOR` / `ROUND` / `SIGN` / `GETDATE` project NOT NULL on real while `ABS` / `POWER` / `SQUARE` / `NEWID` / `RAND` stay nullable, an idiosyncratic per-builtin table with no clean rule; (2) **`@@`-variable** nullability (`@@ROWCOUNT` / `@@SPID` are NOT NULL on real); (3) **string `+` concatenation** of two non-null operands (real projects NOT NULL, but the resolver has no `BatchContext` to distinguish string-vs-arithmetic `+` — `1+1` stays nullable on real, so it can't blanket-propagate); (4) **constant-fold** cases where real eliminates a null arm — `NULLIF(1,2)`, no-ELSE `CASE WHEN <constant> …`, all-constant `COALESCE(NULL,5)` (realistic `COALESCE(agg,0)` already matches: nullable on both).
   All are metadata-only over-claims (nullable is the safe direction); low demand, no clean rule.
-- **`OBJECTPROPERTY(id, 'IsDeterministic')` doesn't analyze the body** — every scalar function reports 1, so a non-deterministic one (a `GETDATE()`-bearing UDF) over-reports; real evaluates determinism per module.
-  `IsSchemaBound` likewise reports 0 for a schema-bound *function* (the flag is tracked on views only).
-  See [`catalog-views.md`](catalog-views.md).
+- **`OBJECTPROPERTY(id, 'IsDeterministic')` and the `CAST` / `CONVERT` style rule** — the module walk ships (schema-binding precondition, nondeterministic-built-in table, transitive module references — see [`catalog-views.md`](catalog-views.md#isdeterministic)), but it classifies conversions between a date/time type and a character string as deterministic where real keys off the style argument.
+  Closing it needs the conversion's source and target types, which the token-level body scan doesn't carry; the probed style table is recorded in `catalog-views.md` for whoever picks it up.
 - **Runtime-error streaming shape** — a per-row runtime error (`SELECT 10/0`, arithmetic overflow) is emitted by real *after* COLMETADATA, so a streaming client surfaces it while draining rows; the simulator raises it at execute-time before any COLMETADATA, so the client sees it from the initial execute call.
   Message / number / class match; only the wire position differs.
   Deferred — deep change to statement execution ordering, low practical impact.
@@ -260,6 +244,8 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   See [`collations.md`](collations.md#locale-comparer-sort-parity-gap).
 - **Workload-harness divergence reporting quirks** (`.vs/workload/Program.cs`, local-only) — the parity report's example line rebuilds parameters from the op seed and can mismatch the actual divergent instance, and divergent instances aren't re-run single-threaded to classify transient-vs-stable.
   Both made the shared-plan-state hunt slower than it needed to be (the fixed bug class itself — instance-bound aggregate/window results, baked TOP/OFFSET counts, frozen RAND, unstamped replay clock — is documented in [`plan-cache.md`](plan-cache.md)'s shared-plan contract section).
+
+- **Msg 3729 echoes a normalized name for an unqualified DROP** — `drop table sbt` reports `'dbo.sbt'` where real echoes `'sbt'` as written; the schema-binding gate renders the resolved two-part name rather than the statement's spelling.
 
 ## Live-but-untested surfaces
 

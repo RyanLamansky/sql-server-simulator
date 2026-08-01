@@ -99,6 +99,10 @@ internal static class ModelXmlReader
         // assignment, and the connection is disposed at the end of the
         // method so the override doesn't leak.
         connection.CurrentDatabase = database;
+        // A bacpac can carry a database-scope DDL trigger of its own; letting
+        // the loader's synthesized DDL fire it would run an audit body against
+        // half-built schema. Real's import path suppresses them the same way.
+        connection.SuppressDdlTriggers = true;
         var bracketedDb = BracketName(database.Name);
 
         // Pre-build a set of view qualified-names so the index emitter can

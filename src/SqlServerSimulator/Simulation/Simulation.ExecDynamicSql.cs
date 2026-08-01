@@ -23,7 +23,7 @@ partial class Simulation
     /// the token after the closing <c>)</c>. Skip-mode evaluates the
     /// expression (cursor advance) but suppresses the dispatch.
     /// </remarks>
-    private IEnumerable<SimulatedStatementOutcome> ParseExecDynamicSql(BatchContext batch, string? returnCodeVar)
+    private IEnumerable<SimulatedStatementOutcome> ParseExecDynamicSql(BatchContext batch, string? returnCodeVar, bool insertExecSource = false)
     {
         var context = batch.Parser;
         if (context.Token is not Operator { Character: '(' })
@@ -34,6 +34,7 @@ partial class Simulation
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
+        var resultSets = ParseExecuteOptions(batch, insertExecSource);
 
         if (batch.IsSkipping)
             yield break;
@@ -49,7 +50,8 @@ partial class Simulation
             yield break; // dynamic SQL of NULL → no-op (matches real SQL Server's lenient handling)
 
         var sqlText = sqlValue.CoerceTo(VarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;
-        foreach (var outcome in ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null))
+        var dynamicBatch = ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null);
+        foreach (var outcome in resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets))
             yield return outcome;
 
         // EXEC (@sql) doesn't expose a return code in the standard sense
@@ -84,7 +86,7 @@ partial class Simulation
     /// at exit. Probe-confirmed against SQL Server 2025.
     /// </para>
     /// </remarks>
-    private IEnumerable<SimulatedStatementOutcome> ParseSpExecuteSql(BatchContext batch, string? returnCodeVar)
+    private IEnumerable<SimulatedStatementOutcome> ParseSpExecuteSql(BatchContext batch, string? returnCodeVar, bool insertExecSource = false)
     {
         var context = batch.Parser;
 
@@ -129,6 +131,8 @@ partial class Simulation
             argumentValues.Add((argName, argValue, argOutputSlot));
             hasMoreArgs = context.Token is Operator { Character: ',' };
         }
+
+        var resultSets = ParseExecuteOptions(batch, insertExecSource);
 
         if (batch.IsSkipping)
             yield break;
@@ -186,7 +190,8 @@ partial class Simulation
             }
         }
 
-        foreach (var outcome in ExecuteDynamicBatch(batch, sqlText, preDeclared))
+        var dynamicBatch = ExecuteDynamicBatch(batch, sqlText, preDeclared);
+        foreach (var outcome in resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets))
             yield return outcome;
 
         // Writeback: sp_executesql's OUTPUT params copy the dynamic batch's

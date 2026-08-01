@@ -207,6 +207,25 @@ public sealed class IndexedViewTests
         AreEqual(1, sim.ExecuteScalar("select count(*) from sys.stats_columns where object_id = object_id('dbo.v') and stats_id = 1"));
     }
 
+    /// <summary>
+    /// The three body re-parses <c>CREATE INDEX</c> runs over a view — the
+    /// qualifying-battery shape scan, the duplicate-key materialization, and
+    /// the base-table dependency collection — each execute outside the
+    /// dispatch loop, so each has to release its own statement schema locks.
+    /// A leak there leaves a Sch-S on the base table that outlives the
+    /// connection, and the next connection's Sch-M waits forever; the
+    /// separate-connection <c>ALTER TABLE</c> here is the regression guard
+    /// (<c>ADD COLUMN</c> is deliberately un-gated by schema binding, so the
+    /// statement's only obstacle would be the stale lock).
+    /// </summary>
+    [TestMethod]
+    public void CreateViewIndex_ReleasesBaseTableSchemaLocks()
+    {
+        var sim = SeedIndexedView();
+        _ = sim.ExecuteNonQuery("alter table dbo.b add extra int null");
+        AreEqual(4, sim.ExecuteScalar("select count(*) from sys.columns where object_id = object_id('dbo.b')"));
+    }
+
     // --- NOEXPAND ---
 
     [TestMethod]
@@ -259,6 +278,8 @@ public sealed class IndexedViewTests
         "Cannot create index on view 'simulated.dbo.v'. The function 'getdate' yields nondeterministic results. Use a deterministic system function, or modify the user-defined function to return deterministic results.")]
     [DataRow("select t1.id, t2.a from dbo.t t1 join dbo.t t2 on t2.id = t1.id", "id", 1947,
         "Cannot create index on view \"simulated.dbo.v\". The view contains a self join on \"simulated.dbo.t\".")]
+    [DataRow("with c as (select id, a from dbo.t) select id, a from c", "id", 10137,
+        "Cannot create index on view \"simulated.dbo.v\" because it references common table expression \"c\". Views referencing common table expressions cannot be indexed. Consider not indexing the view, or removing the common table expression from the view definition.")]
     public void NonQualifyingShape_RejectedAtCreateIndex(string body, string keyColumn, int errorNumber, string message)
     {
         var sim = BatteryTables();
@@ -285,6 +306,27 @@ public sealed class IndexedViewTests
             "Cannot create the clustered index \"ix_sum\" on view \"simulated.dbo.v\" because the view references an unknown value (SUM aggregate of nullable expression). Consider referencing only non-nullable values in SUM. ISNULL() may be useful for this.",
             ex.Message);
         AreEqual(0, ex.State);
+    }
+
+    /// <summary>
+    /// Msg 10137 names the <em>first declared</em> CTE, not the one the body's
+    /// SELECT reads — and a CTE nothing reads still names itself. It is also
+    /// the one gate whose precedence is probe-confirmed: a CTE-bearing body
+    /// reports 10137 ahead of the DISTINCT rejection it also violates.
+    /// </summary>
+    [TestMethod]
+    [DataRow("with c1 as (select id, a from dbo.t), c2 as (select id, a from c1) select id, a from c2", "c1")]
+    [DataRow("with unread as (select 1 as x) select id, a from dbo.t", "unread")]
+    [DataRow("with c as (select distinct id, a from dbo.t) select id, a from c", "c")]
+    public void CteBearingView_Raises10137_NamingTheFirstDeclaredCte(string body, string cteName)
+    {
+        var sim = BatteryTables();
+        _ = sim.ExecuteNonQuery($"create view dbo.v with schemabinding as {body}");
+
+        var ex = sim.AssertSqlError("create unique clustered index ix on dbo.v(id)", 10137);
+        AreEqual(
+            $"Cannot create index on view \"simulated.dbo.v\" because it references common table expression \"{cteName}\". Views referencing common table expressions cannot be indexed. Consider not indexing the view, or removing the common table expression from the view definition.",
+            ex.Message);
     }
 
     /// <summary>

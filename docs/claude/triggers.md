@@ -5,11 +5,12 @@ Body source is captured between `AS` and end-of-batch; re-tokenized per fire ins
 AFTER (and its `FOR` synonym) attaches to heap tables only; INSTEAD OF attaches to heap tables and views.
 Probed against SQL Server 2025.
 
-Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) ship at the parse-and-store fidelity tier — see the DDL triggers section below.
+Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) fire on the DDL the simulator models — see the [DDL triggers](#ddl-triggers--create-trigger--on-database) section below.
 
 ## What's modeled
 
-- **CREATE / ALTER / CREATE OR ALTER TRIGGER** — same upsert pattern as procedures (ObjectId preserved across ALTER).
+- **CREATE / ALTER / CREATE OR ALTER TRIGGER** — same upsert pattern as procedures (ObjectId preserved across ALTER), and the same replacement gates: **Msg 2010** when the name holds another object kind, **Msg 2110** when it holds a trigger on a different parent, **Msg 208** when it holds nothing (bare ALTER), **Msg 2714** on a plain CREATE over a taken name, and **Msg 166** for a database-qualified trigger name — see [`programmable.md`](programmable.md#replacing-a-module--alter--create-or-alter).
+  A missing `ON` target reports its Msg 8197 ahead of all of them.
 - **DROP TRIGGER [IF EXISTS] name [, ...]** — comma-list form supported via the shared DROP parser.
 - **DISABLE / ENABLE TRIGGER { name | ALL } ON parent** — toggles `Trigger.IsDisabled`.
   Disabled triggers stay in the schema and surface in `sys.triggers.is_disabled` but don't fire.
@@ -108,7 +109,7 @@ Consequences worth stating separately, each probed:
   The server option wins.
 
 The staged / installed split matters here: a `sp_configure` write alone changes nothing, because the dispatcher reads the *installed* value (`value_in_use`) that only `RECONFIGURE` moves.
-The sibling option `server trigger recursion` (id 116) round-trips through the catalog like any other but carries no behavior, since server-scope DDL triggers don't fire.
+The sibling option `server trigger recursion` (id 116) round-trips through the catalog like any other but carries no behavior, since server-scope triggers aren't modeled at all.
 See [`catalog-views.md`](catalog-views.md) for the `sp_configure` surface itself.
 
 ## `OUTPUT` on a triggered target — Msg 334
@@ -133,7 +134,7 @@ This is the rule behind EF Core's `HasTrigger` annotation: declaring a trigger m
 
 `sp_settriggerorder @triggername, @order, @stmttype [, @namespace]` pins a trigger to the front or back of the AFTER triggers a given action runs on its table.
 Named and positional argument forms both bind, `@order` / `@stmttype` are case-insensitive, and the name may be bare or schema-qualified.
-`@namespace` (DATABASE / SERVER scope, for DDL triggers) is accepted and ignored — those don't fire yet.
+`@namespace` (DATABASE / SERVER scope, for DDL triggers) is accepted and ignored — DDL-trigger ordering isn't modeled, and a DDL trigger's name doesn't resolve here.
 
 Only the two ends are ordered: `First` runs first, `Last` runs last, and everything between keeps the dictionary's arbitrary order, which real leaves unspecified as well.
 Ordering is **per action** and independent — pinning a multi-action trigger first for INSERT leaves its UPDATE position alone — and `@order = 'None'` clears both slots for that action.
@@ -219,7 +220,7 @@ That's the same deferred module-body validation every other trigger-body name re
 
 ## DDL triggers — `CREATE TRIGGER … ON DATABASE`
 
-Parse-and-store-but-no-fire surface for database-scope DDL triggers.
+Database-scope DDL triggers fire on the DDL the simulator models, with `EVENTDATA()` describing the statement.
 AW's `[ddlDatabaseTriggerLog]` (`FOR DDL_DATABASE_LEVEL_EVENTS`) loads end-to-end and surfaces in `sys.triggers` with the probe-confirmed shape: `parent_class=0`, `parent_class_desc='DATABASE'`, `parent_id=0`, `type_desc='SQL_TRIGGER'`, `is_ms_shipped=0`, `is_instead_of_trigger=0`.
 The full `CREATE TRIGGER` text lands in `sys.sql_modules.definition` via `SchemaObject.DefinitionText`; `is_ms_shipped`'s absence was one gate (Msg 207 aborted the whole DDL-trigger populator).
 
@@ -229,28 +230,82 @@ The simulator expands them: a trigger created `FOR DDL_DATABASE_LEVEL_EVENTS` su
 The closure is computed from a hard-coded copy of SQL Server's static `sys.trigger_event_types` catalog (`src/SqlServerSimulator/TriggerEventTypes.cs`, 312 rows: `type` / `type_name` / `parent_type`), also surfaced as the `sys.trigger_event_types` catalog view.
 Individual-event names (`FOR CREATE_TABLE`) emit a single row with a NULL group.
 
-**Storage**: `DdlTrigger` class (`src/SqlServerSimulator/DdlTrigger.cs`) carries name + object_id + event-type list + body source + `is_disabled` flag.
+**Storage**: `DdlTrigger` class (`src/SqlServerSimulator/Schemas/DdlTrigger.cs`) carries name + object_id + event-type list + body source + body line offset + `is_disabled` flag, plus the `Covers` predicate that expands the declared events to their leaf closure once.
 `Database.DdlTriggers` is the per-database `ConcurrentDictionary<string, DdlTrigger>` (case-insensitive keys); not per-schema because DDL triggers belong to the database itself.
 The class extends `SchemaObject` for the object-id + create-date pattern but doesn't participate in any schema's shared namespace except for name collision detection at CREATE time (probe-confirmed: a DDL trigger named `foo` collides with a same-named DML trigger / table / view / proc in the same schema).
 
 **Parser**: `Simulation.CreateTrigger.cs::TryParseCreateTrigger` — after `ON`, if the next token is `DATABASE`, dispatch to `ParseDdlTriggerBody` which handles `[WITH options] {FOR|AFTER} <event_type_list> AS <body>`.
-Event types parse as bare identifiers and store verbatim in `DdlTrigger.EventTypes`.
+Event types parse as bare identifiers and store verbatim in `DdlTrigger.EventTypes`; matching at fire time is case-insensitive.
 `DROP TRIGGER name ON DATABASE` lives in `Simulation.Drop.cs::DropOneTrigger`, which peeks the next tokens via `SaveCheckpoint` / `RestoreCheckpoint` to decide between the DML-trigger and DDL-trigger paths.
+`{ DISABLE | ENABLE } TRIGGER { name | ALL } ON DATABASE` routes through the same `TryParseEnableOrDisableTrigger` the DML form uses, branching on the `DATABASE` keyword after `ON`; a disabled DDL trigger stays in `sys.triggers` with `is_disabled = 1` and doesn't fire.
 
 **Catalog**: `sys.triggers` enumerator in `BuiltInResources.cs::EnumerateSysTriggers` yields rows for `Database.DdlTriggers` after the per-schema DML trigger loop, with the `parent_class=0` shape above.
 `sys.trigger_events` (`BuiltInResources.ConstraintsAndTriggers.cs::EnumerateSysTriggerEvents`) yields the expanded leaf-event rows for each DDL trigger after the DML-trigger loop; `sys.trigger_event_types` is a server-scoped view over `TriggerEventTypes.All`.
 
-**Deferred**:
-- Trigger firing — the simulator doesn't dispatch DDL events to any trigger loop.
-  Accepted as a documented behavior gap; AW's trigger body is an audit-log writer, not a load-bearing dependency.
-- `DISABLE` / `ENABLE TRIGGER … ON DATABASE` — the per-schema disable/enable path doesn't extend to the per-database dict.
+### Firing
+
+`Simulation.RecordDdlEvent` is called by each modeled DDL processor once its own work succeeded, appending a `DdlEventInfo` to `StatementContext.PendingDdlEvents`; `Simulation.FireDdlTriggers` drains that from the dispatch loop right after `DispatchOneStatementCore` returns.
+Recording after success and firing after the statement is what gives the probe-confirmed shape: **a failed DDL raises no event**, an un-taken `IF` branch raises none, and the body already sees the finished change (`OBJECT_ID` of the new table resolves inside a `CREATE_TABLE` body).
+The fire sits inside the dispatcher's own `try`, so a body error becomes the statement's error — reaching an enclosing `TRY` / `CATCH`, tripping Msg 3616 for a swallowed one, and carrying the trigger's unqualified name as `ERROR_PROCEDURE`.
+A body `SELECT` becomes the firing statement's result set through the same `PendingTriggerResultSets` buffer DML bodies use.
+
+Matching is on the **expanded leaf event set**, so `FOR DDL_TABLE_EVENTS` fires on exactly the `CREATE_TABLE` / `ALTER_TABLE` / `DROP_TABLE` rows it projects into `sys.trigger_events`.
+One statement can raise several events — `DROP TABLE a, b` raises one `DROP_TABLE` per name, each carrying the whole statement as `CommandText` (probe-confirmed) — and `SELECT … INTO` raises `CREATE_TABLE` while a `#temp` destination raises nothing.
+
+Events raised, by object kind: **table** (CREATE / ALTER / DROP, plus `SELECT … INTO`), **view**, **procedure**, **function**, **trigger** (both the DML and the DDL flavor), **index** (CREATE / ALTER / DROP), **schema** (CREATE / DROP, and `ALTER SCHEMA … TRANSFER` → `ALTER_SCHEMA`), **sequence**, **synonym** (CREATE / DROP — T-SQL has no `ALTER SYNONYM`), **type**, **user**, **role** (CREATE / ALTER / DROP), and `sp_rename` → **RENAME**.
+
+**A brand-new DDL trigger doesn't fire for its own `CREATE TRIGGER`**, though a sibling trigger does see that `CREATE_TRIGGER` event — and an `ALTER TRIGGER` *does* run the replaced body for its own `ALTER_TRIGGER`, because the trigger already existed (both probe-confirmed).
+`StatementContext.DdlTriggerCreatedThisStatement` carries the one excluded object id.
+
+**Nesting.** DDL triggers nest: a `CREATE_VIEW` trigger runs at `TRIGGER_NESTLEVEL()` 2 for a view a `CREATE_TABLE` body created.
+A trigger doesn't re-fire itself for DDL its own body issues — `Simulation.CanFireDdlTrigger` is the innermost-frame test, matching real's default (`RECURSIVE_TRIGGERS` off).
+The 32-level nesting cap applies (Msg 217), and DDL frames push `IsAfter = false` so they don't count toward the AFTER-DML `nested triggers` rule.
+
+**Atomic scope.** The bodies run inside one `RunMutation` scope, so everything they wrote rolls back together when a later body throws — the same firing-statement-atomic unit DML triggers get.
+
+`Simulation.ImportBacpac` suppresses firing wholesale via `SimulatedDbConnection.SuppressDdlTriggers`: a bacpac can carry a DDL trigger of its own, and running an audit body against half-built schema would fail the load (real's import path disables DDL triggers for the same reason).
+
+### `EVENTDATA()`
+
+A no-arg built-in returning the `<EVENT_INSTANCE>` document as `xml`, or **NULL** outside a database-scope DDL trigger body — including inside a DML trigger (probe-confirmed).
+The document is built once per fire and carried on the body's `TriggerFrame`, so every call within one body returns the same instance, `PostTime` included.
+
+```
+<EVENT_INSTANCE><EventType>CREATE_TABLE</EventType><PostTime>2026-07-31T22:39:11.550</PostTime><SPID>53</SPID>
+<ServerName>…</ServerName><LoginName>sa</LoginName><UserName>dbo</UserName><DatabaseName>ddlprobe</DatabaseName>
+<SchemaName>dbo</SchemaName><ObjectName>t1</ObjectName><ObjectType>TABLE</ObjectType>
+<TSQLCommand><SetOptions ANSI_NULLS="ON" ANSI_NULL_DEFAULT="ON" ANSI_PADDING="ON" QUOTED_IDENTIFIER="ON" ENCRYPTED="FALSE"/>
+<CommandText>CREATE TABLE t1 (a int)</CommandText></TSQLCommand></EVENT_INSTANCE>
+```
+
+Element order is real's.
+`SchemaName` is **omitted entirely** for `CREATE_USER` / `CREATE_ROLE` and their siblings, matching real; `TargetObjectName` / `TargetObjectType` follow `ObjectType` for the index and trigger events (naming the parent table or view), and a synonym event carries `TargetObjectName` alone.
+`ObjectType` uses real's spellings — `TABLE`, `VIEW`, `INDEX`, `SCHEMA`, `TRIGGER`, `SEQUENCE`, `SYNONYM`, `TYPE`, `ROLE`, `SQL USER`.
+`ServerName` is `SIMULATED`, matching `@@SERVERNAME`; `LoginName` / `UserName` read the session's effective principal, so `EXECUTE AS` shows through.
+`QUOTED_IDENTIFIER` reflects the session setting; the other `SetOptions` attributes are fixed.
+
+`CommandText` is the statement's own source span, trailing whitespace trimmed.
+For a statement whose body runs to end of batch (`CREATE VIEW` / `PROCEDURE` / `TRIGGER`) real keeps the batch's trailing newline and the simulator trims it — a cosmetic divergence.
+
+### Not modeled yet
+
+- **Per-event extra elements**: `AlterTableActionList` (which columns / constraints an `ALTER TABLE` touched), a principal's `SID` / `DefaultSchema` / `DefaultLanguage`, a schema's `OwnerName`, `sp_rename`'s `NewObjectName`, and the empty `TargetServerName` / `TargetDatabaseName` / `TargetSchemaName` trio real puts ahead of a synonym's `TargetObjectName`.
+  The common header plus `TSQLCommand` is what an audit body reads.
+- **`ALTER SCHEMA … TRANSFER`'s `ObjectType`** reports `OBJECT` / `TYPE` — the transfer's own name class — where real reports the moved object's actual kind (`SYNONYM`, `TABLE`, …).
+- **`GRANT` / `DENY` / `REVOKE`** → `GRANT_DATABASE` / `DENY_DATABASE` / `REVOKE_DATABASE`, whose document carries a distinct `Grantor` / `Permissions` / `Grantees` / `GrantOption` block.
+- **A body `ROLLBACK` vetoing the DDL** — real undoes the DDL and raises **Msg 3609** (`The transaction ended in the trigger. The batch has been aborted.`), leaving `@@TRANCOUNT` 0 and skipping the rest of the batch.
+  The simulator's DDL isn't undoable (schema changes don't enter the undo log — the same asymmetry `CREATE TABLE` has under `ROLLBACK TRAN`), so a body error rolls back what the bodies wrote but leaves the DDL in place.
+  `@@TRANCOUNT` in a body reads 0 under auto-commit where real reads 1, for the same reason.
+- **`sp_settriggerorder` for DDL triggers** — `@namespace` is accepted and ignored, and the name resolves against DML triggers only.
+  Firing order across several DDL triggers is by `object_id` (creation order), which is what real ran them in unpinned.
+- **Server-scope triggers** (`ON ALL SERVER`, `sys.server_triggers`, `parent_class = 100`) — neither stored nor fired; only `ON DATABASE` scope exists.
 
 ## Not modeled
 
 - **INSTEAD OF UPDATE / DELETE on non-updatable views** — INSTEAD OF INSERT on any view ships; INSTEAD OF UPDATE / DELETE on an updatable (single-base, no DISTINCT / JOIN / aggregate) view ships.
   INSTEAD OF UPDATE / DELETE on a join / aggregate / DISTINCT view raises `NotSupportedException` — implementing it requires executing the view's selection to enumerate would-be-affected rows, which loses heap-row identity and bypasses the existing visibility-filter machinery.
   Deferred.
-- **Logon / server triggers** — only DML triggers (DATABASE-scope and OBJECT-scope) ship.
+- **Logon / server triggers** (`ON ALL SERVER`) — only DML triggers and database-scope DDL triggers ship.
 - **`@@NESTLEVEL` independence** — the simulator collapses UDF / procedure / trigger depth into a single counter (`SimulatedDbConnection.NestingLevel`).
   `TRIGGER_NESTLEVEL()` reads its own dedicated `TriggerNestLevel` counter, so it's accurate, but `@@NESTLEVEL` (not modeled at all) wouldn't have the right value if added.
 

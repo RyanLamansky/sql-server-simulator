@@ -56,6 +56,27 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     /// </summary>
     public int ClientTextSize = -1;
 
+    /// <summary>
+    /// 1-based line of the statement that produced this result, already
+    /// adjusted by its batch's <c>LineOffset</c>; <c>0</c> = unstamped.
+    /// Written once by the dispatch loop at statement materialization, so the
+    /// innermost frame — a procedure body, a dynamic-SQL batch — wins as the
+    /// result propagates outward. Paired with <see cref="OriginProcedure"/>,
+    /// it lets a consumer that fails while projecting an already-produced
+    /// result attribute the error to where the rows came from rather than to
+    /// itself; <c>EXEC … WITH RESULT SETS</c> is the consumer that needs it
+    /// (real reports the module's own SELECT for Msg 11535 / 11537 / 11538 /
+    /// 11553, not the EXECUTE statement).
+    /// </summary>
+    public int OriginLine;
+
+    /// <summary>
+    /// Schema-qualified name of the procedure / trigger whose body produced
+    /// this result, or empty for a top-level or dynamic-SQL batch. Stamped
+    /// alongside <see cref="OriginLine"/>.
+    /// </summary>
+    public string OriginProcedure = "";
+
     /// <summary>Creates a fresh cursor that iterates this result's rows.</summary>
     public abstract RowCursor CreateCursor();
 

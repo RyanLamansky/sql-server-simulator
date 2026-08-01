@@ -22,7 +22,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// Shipped properties (all probe-confirmed against SQL Server 2025):
 /// <list type="bullet">
 /// <item><description>All <c>Is*</c> booleans from <see cref="ObjectProperty"/>
-/// (delegates to the shared <see cref="ObjectProperty.EvaluateProperty"/> helper).</description></item>
+/// (delegates to the shared <c>ObjectProperty.EvaluateProperty</c> helper).</description></item>
 /// <item><description><c>BaseType</c> — <c>'U '</c> for user table, <c>'V '</c>
 /// for view, <c>'P '</c> for procedure, <c>'FN'</c> / <c>'IF'</c> / <c>'TF'</c>
 /// for function variants, <c>'TR'</c> for trigger, <c>'SO'</c> for sequence.</description></item>
@@ -66,7 +66,7 @@ internal sealed class ObjectPropertyEx : Expression
         // carries them as an int inner base type inside the sql_variant.
         return obj is null
             ? SqlValue.Null(SqlType.SqlVariant)
-            : ObjectProperty.EvaluateProperty(obj, prop) is int booleanResult
+            : ObjectProperty.EvaluateProperty(runtime.Batch.CurrentDatabase, obj, prop) is int booleanResult
                 ? SqlValue.FromVariant(SqlValue.FromInt32(booleanResult))
                 : EvaluateExtendedProperty(obj, prop, runtime.Batch);
     }

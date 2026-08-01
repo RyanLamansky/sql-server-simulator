@@ -201,7 +201,7 @@ partial class Simulation
             : context.Batch.UnresolvableObjectName(leadingIdent));
         return table.IsTableValuedParameter
             ? throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf)
-            : ExecuteUpdateAgainstTable(context, table, rawAssignments, output, top, leadingView);
+            : ExecuteUpdateAgainstTable(context, leadingIdent, table, rawAssignments, output, top, leadingView);
     }
 
     /// <summary>
@@ -211,6 +211,7 @@ partial class Simulation
     /// </summary>
     private static SimulatedStatementOutcome ExecuteUpdateAgainstTable(
         ParserContext context,
+        MultiPartName targetName,
         HeapTable table,
         List<(string ColumnName, Expression Expr)> rawAssignments,
         OutputProjection? output,
@@ -230,7 +231,7 @@ partial class Simulation
                 where = BooleanExpression.Parse(context);
         }
 
-        if (!context.Batch.IsSkipping)
+        if (!context.Batch.IsSkipping && PermissionEnforcement.Applies(context.Batch))
         {
             // UPDATE reads the target when it has a WHERE clause or a SET
             // expression that references a target column — real then also
@@ -238,30 +239,33 @@ partial class Simulation
             // UPDATE are missing the SELECT denial surfaces (probe M1). A
             // constant-SET UPDATE with no WHERE reads nothing and needs only
             // UPDATE (M1b).
-            if (sourceView is not null)
+            if (PermissionEnforcement.SecurableFor(context.Batch, targetName, (SchemaObject?)sourceView ?? table) is Synonym synonym)
             {
-                // Views stay object-grain (column-level grants on views aren't
-                // modeled).
+                // A synonym takes no column grants at all, so a reference
+                // through one is checked object-grain against the synonym.
                 if (where is not null || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch))
-                    PermissionEnforcement.CheckView(context.Batch, "SELECT", sourceView);
-                PermissionEnforcement.CheckView(context.Batch, "UPDATE", sourceView);
+                    PermissionEnforcement.CheckSchemaObject(context.Batch, "SELECT", synonym);
+                PermissionEnforcement.CheckSchemaObject(context.Batch, "UPDATE", synonym);
             }
-            else if (PermissionEnforcement.Applies(context.Batch))
+            else
             {
-                // Column-grain: the WHERE + SET-RHS columns require SELECT
-                // (checked first, per probe M1 ordering), each SET-target column
-                // requires UPDATE — first inaccessible column → Msg 230 (or Msg
-                // 229 when the object is wholly inaccessible for that permission).
-                var readColumns = new HashSet<int>();
-                where?.VisitOperandExpressions(op => op.VisitColumnReferences(n => PermissionEnforcement.AddColumnOrdinal(table, n, readColumns)));
+                // Column-grain on a base table and a view alike: the WHERE +
+                // SET-RHS columns require SELECT (checked first, per probe M1
+                // ordering), each SET-target column requires UPDATE — first
+                // inaccessible column → Msg 230 (or Msg 229 when the object is
+                // wholly inaccessible for that permission). Through a view the
+                // ordinals are the view's own, matching what
+                // `GRANT UPDATE (col) ON <view>` stored.
+                var read = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
+                where?.VisitOperandExpressions(op => op.VisitColumnReferences(read.Add));
                 foreach (var (_, expr) in rawAssignments)
-                    expr.VisitColumnReferences(n => PermissionEnforcement.AddColumnOrdinal(table, n, readColumns));
-                PermissionEnforcement.CheckTableColumns(context.Batch, Permission.Select, table, readColumns);
+                    expr.VisitColumnReferences(read.Add);
+                PermissionEnforcement.CheckColumns(context.Batch, Permission.Select, read);
 
-                var assignedColumns = new HashSet<int>();
+                var assigned = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
                 foreach (var (columnName, _) in rawAssignments)
-                    PermissionEnforcement.AddColumnOrdinal(table, new MultiPartName(columnName), assignedColumns);
-                PermissionEnforcement.CheckTableColumns(context.Batch, Permission.Update, table, assignedColumns);
+                    assigned.Add(columnName);
+                PermissionEnforcement.CheckColumns(context.Batch, Permission.Update, assigned);
             }
         }
 
@@ -456,7 +460,7 @@ partial class Simulation
             // permission (probe M2). Additional-source reads inside a WHERE
             // subquery route through the standard Selection read-source sink.
             CheckJoinedReadSources(context.Batch, sources, targetIndex);
-            PermissionEnforcement.CheckTable(context.Batch, "UPDATE", table);
+            PermissionEnforcement.CheckSchemaObject(context.Batch, "UPDATE", (SchemaObject?)sources[targetIndex].ViaSynonym ?? table);
         }
 
         // Alias-form UPDATE: table-IX wasn't pre-acquired because the target
@@ -930,11 +934,24 @@ partial class Simulation
         // target nor source SELECT granted denies the source).
         for (var i = 0; i < sources.Length; i++)
         {
-            if (i != targetIndex && sources[i].BackingTable is { } backing)
-                PermissionEnforcement.CheckTable(batch, "SELECT", backing);
+            if (i != targetIndex)
+                CheckSourceSelect(batch, sources[i]);
         }
-        if (sources[targetIndex].BackingTable is { } target)
-            PermissionEnforcement.CheckTable(batch, "SELECT", target);
+        CheckSourceSelect(batch, sources[targetIndex]);
+    }
+
+    /// <summary>
+    /// SELECT-checks one joined FROM source against the securable it was written
+    /// as — the synonym when the reference arrived through one, otherwise the
+    /// backing table. Sources with neither (derived tables, views) are skipped;
+    /// their inner reads route through the standard read-source sink.
+    /// </summary>
+    private static void CheckSourceSelect(BatchContext batch, FromSource source)
+    {
+        if (source.ViaSynonym is { } synonym)
+            PermissionEnforcement.CheckSchemaObject(batch, "SELECT", synonym);
+        else if (source.BackingTable is { } backing)
+            PermissionEnforcement.CheckSchemaObject(batch, "SELECT", backing);
     }
 
     /// <summary>

@@ -320,4 +320,92 @@ public sealed class CheckConstraintTests
             alter table t add constraint ck check (b >= a);
             select definition from sys.check_constraints where name = 'ck'
             """));
+
+    /// <summary>
+    /// Msg 8148: one column definition admits at most one inline constraint of
+    /// each kind — named or not, on a plain or a persisted computed column, at
+    /// CREATE TABLE / DECLARE @t TABLE / CREATE TYPE AS TABLE / ALTER TABLE ADD
+    /// alike (probe-confirmed against SQL Server 2025, including the DEFAULT /
+    /// UNIQUE / PRIMARY KEY wordings).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (b int check (b > 0) check (b < 10))", "CHECK", "b", "t")]
+    [DataRow("create table t (b int constraint ck1 check (b > 0) check (b < 10))", "CHECK", "b", "t")]
+    [DataRow("create table t (b int constraint ck1 check (b > 0) constraint ck2 check (b < 10))", "CHECK", "b", "t")]
+    [DataRow("create table t (b int check (b > 0) check (b < 10) check (b <> 5))", "CHECK", "b", "t")]
+    [DataRow("create table t (a int, cc as a + 1 persisted check (cc > 0) check (cc < 10))", "CHECK", "cc", "t")]
+    [DataRow("create table t (b int default 1 default 2)", "DEFAULT", "b", "t")]
+    [DataRow("create table t (b int unique unique)", "UNIQUE", "b", "t")]
+    [DataRow("create table t (b int primary key primary key)", "PRIMARY KEY", "b", "t")]
+    [DataRow("declare @t table (b int check (b > 0) check (b < 10))", "CHECK", "b", "@t")]
+    [DataRow("create type tt as table (b int check (b > 0) check (b < 10))", "CHECK", "b", "tt")]
+    public void ColumnConstraint_DeclaredTwiceInline_RaisesMsg8148(string commandText, string kind, string column, string table)
+        => new Simulation().AssertSqlError(
+            commandText,
+            8148,
+            $"More than one column {kind} constraint specified for column '{column}', table '{table}'.");
+
+    /// <summary>
+    /// The rule is per column *definition*: a table-level CHECK over a column
+    /// that already carries an inline one is legal, as is a later
+    /// <c>ALTER TABLE … ADD CHECK</c>, and DEFAULT pairs with CHECK freely.
+    /// </summary>
+    [TestMethod]
+    public void ColumnConstraint_TableLevelAndAlterAdds_StayLegal()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (b int default 1 check (b > 0), check (b < 10));
+            alter table t add check (b <> 5)
+            """);
+        Assert.AreEqual(3, sim.ExecuteScalar("select count(*) from sys.check_constraints where parent_object_id = object_id('t')"));
+    }
+
+    /// <summary>
+    /// The mixed inline key pair gets real's own Msg 8151 rather than Msg 8148
+    /// (probe-confirmed, either order).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (b int primary key unique)")]
+    [DataRow("create table t (b int unique primary key)")]
+    public void ColumnConstraint_InlinePrimaryKeyAndUnique_RaisesMsg8151(string commandText)
+        => new Simulation().AssertSqlError(
+            commandText,
+            8151,
+            "Both a PRIMARY KEY and UNIQUE constraint have been defined for column 'b', table 't'. Only one is allowed.");
+
+    /// <summary>
+    /// The Msg 8148 gate also covers a column added by ALTER TABLE, where the
+    /// message names the target table.
+    /// </summary>
+    [TestMethod]
+    public void ColumnConstraint_AlterTableAddColumn_TwoInlineChecks_RaisesMsg8148()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int)");
+        sim.AssertSqlError(
+            "alter table t add b int check (b > 0) check (b < 10)",
+            8148,
+            "More than one column CHECK constraint specified for column 'b', table 't'.");
+    }
+
+    /// <summary>
+    /// <c>sys.check_constraints.is_system_named</c> is 1 for every
+    /// server-generated name and 0 for a <c>CONSTRAINT name</c> one, at
+    /// CREATE TABLE (inline and table-level) as much as at ALTER TABLE
+    /// (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CheckConstraint_IsSystemNamed_TracksWhoNamedIt()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int check (a > 0), b int constraint ck_b check (b > 0), c int, check (c > 0));
+            alter table t add check (a < 100);
+            alter table t add constraint ck_alter check (b < 100)
+            """);
+        Assert.AreEqual(3, sim.ExecuteScalar("select count(*) from sys.check_constraints where is_system_named = 1"));
+        Assert.AreEqual(2, sim.ExecuteScalar("select count(*) from sys.check_constraints where is_system_named = 0"));
+        Assert.AreEqual(0, sim.ExecuteScalar("select count(*) from sys.check_constraints where is_system_named = 1 and name in ('ck_b', 'ck_alter')"));
+    }
 }

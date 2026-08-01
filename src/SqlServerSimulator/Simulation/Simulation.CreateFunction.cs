@@ -45,7 +45,8 @@ partial class Simulation
     /// <para>
     /// <strong>Fidelity gaps</strong>: real SQL Server schema-binds inline
     /// TVFs and rejects DROP TABLE of any table the body references; the
-    /// simulator parses <c>WITH SCHEMABINDING</c> but doesn't track the
+    /// simulator records <c>WITH SCHEMABINDING</c> on
+    /// <see cref="UserDefinedFunction.IsSchemaBound"/> but doesn't track the
     /// dependency, so a DROP of a referenced table succeeds and the TVF
     /// later fails at call time when re-resolving. Nullability of TVF output
     /// columns is conservatively reported as nullable in <c>sys.columns</c>
@@ -78,6 +79,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var functionName = BatchContext.ParseObjectName(context);
+        RejectQualifiedModuleName(functionName, "FUNCTION");
         var schema = ResolveModuleSchema(context, functionName, isAlter);
 
         if (context.GetNextRequired() is not Operator { Character: '(' })
@@ -165,10 +167,10 @@ partial class Simulation
             out var keyConstraints,
             out var checkConstraints);
 
-        // Optional WITH-clause (SCHEMABINDING / ENCRYPTION — parse-and-ignore,
-        // matching the inline TVF tail).
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-            ParseInlineTvfOptions(context);
+        // Optional WITH-clause (SCHEMABINDING is captured for
+        // sys.sql_modules / OBJECTPROPERTY; ENCRYPTION parse-and-discards).
+        var isSchemaBound = context.Token is ReservedKeyword { Keyword: Keyword.With }
+            && ParseInlineTvfOptions(context);
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -231,6 +233,9 @@ partial class Simulation
 
         var replaced = ResolveFunctionAlterTarget<MultiStatementTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
 
+        if (isSchemaBound)
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText);
+
         var function = new MultiStatementTableValuedFunction(
             schema,
             functionName.Leaf,
@@ -244,10 +249,12 @@ partial class Simulation
             createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow)
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
+            IsSchemaBound = isSchemaBound,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Functions[functionName.Leaf] = function;
+        RecordDdlEvent(context, replaced is null ? "CREATE_FUNCTION" : "ALTER_FUNCTION", schema.Name, functionName.Leaf, "FUNCTION");
         return true;
     }
 
@@ -264,9 +271,11 @@ partial class Simulation
 
         // Optional WITH option [, option …] clause. RETURNS NULL ON NULL INPUT
         // is the only option that affects runtime semantics (NULL-propagation
-        // skips the body); SCHEMABINDING / ENCRYPTION / EXECUTE AS parse-and-
-        // discard. Multiple options separate by commas.
+        // skips the body); SCHEMABINDING records on the function for the
+        // catalog surfaces without being enforced, and ENCRYPTION parse-and-
+        // discards. Multiple options separate by commas.
         var returnsNullOnNullInput = false;
+        var isSchemaBound = false;
         string? executeAsClause = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
@@ -288,6 +297,9 @@ partial class Simulation
                         context.MoveNextRequired();
                         break;
                     case UnquotedString { ContextualKeyword: ContextualKeyword.SchemaBinding }:
+                        isSchemaBound = true;
+                        context.MoveNextRequired();
+                        break;
                     case UnquotedString { ContextualKeyword: ContextualKeyword.Encryption }:
                         context.MoveNextRequired();
                         break;
@@ -324,7 +336,7 @@ partial class Simulation
         // registered CLR assembly rather than in T-SQL.
         context.MoveNextRequired();
         if (context.Token is ReservedKeyword { Keyword: Keyword.External })
-            return ParseClrScalarTail(context, schema, functionName, parameters, returnType, isAlter, createOrAlter);
+            return ParseClrScalarTail(context, schema, functionName, parameters, returnType, isSchemaBound, isAlter, createOrAlter);
 
         // BEGIN/END required for scalar UDF bodies. Capture span between
         // outer BEGIN (exclusive) and matching END (exclusive) using token-
@@ -387,6 +399,9 @@ partial class Simulation
 
         var replaced = ResolveFunctionAlterTarget<ScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
 
+        if (isSchemaBound)
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText);
+
         var function = new ScalarFunction(
             schema,
             functionName.Leaf,
@@ -399,10 +414,12 @@ partial class Simulation
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
+            IsSchemaBound = isSchemaBound,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Functions[functionName.Leaf] = function;
+        RecordDdlEvent(context, replaced is null ? "CREATE_FUNCTION" : "ALTER_FUNCTION", schema.Name, functionName.Leaf, "FUNCTION");
         return true;
     }
 
@@ -421,12 +438,10 @@ partial class Simulation
     {
         context.MoveNextRequired(); // step past TABLE
 
-        // Optional WITH-clause: SCHEMABINDING / ENCRYPTION (parse-and-ignore).
-        // RETURNS NULL ON NULL INPUT here → Msg 487.
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-        {
-            ParseInlineTvfOptions(context);
-        }
+        // Optional WITH-clause: SCHEMABINDING is captured, ENCRYPTION
+        // parse-and-discards. RETURNS NULL ON NULL INPUT here → Msg 487.
+        var isSchemaBound = context.Token is ReservedKeyword { Keyword: Keyword.With }
+            && ParseInlineTvfOptions(context);
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -469,6 +484,9 @@ partial class Simulation
 
         var replaced = ResolveFunctionAlterTarget<InlineTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
 
+        if (isSchemaBound)
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText);
+
         var outputColumns = InferInlineTvfOutputColumns(context, [.. parameters], bodyText, functionName.Leaf);
 
         var function = new InlineTableValuedFunction(
@@ -481,29 +499,34 @@ partial class Simulation
             createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow)
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
+            IsSchemaBound = isSchemaBound,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Functions[functionName.Leaf] = function;
+        RecordDdlEvent(context, replaced is null ? "CREATE_FUNCTION" : "ALTER_FUNCTION", schema.Name, functionName.Leaf, "FUNCTION");
         return true;
     }
 
     /// <summary>
     /// Consumes a <c>WITH option [, option ...]</c> clause on an inline TVF.
     /// Cursor on entry: the <c>WITH</c> keyword. Cursor on exit: the first
-    /// token after the option list (expected to be <c>AS</c>).
+    /// token after the option list (expected to be <c>AS</c>). Returns true
+    /// when <c>SCHEMABINDING</c> was among the options.
     /// </summary>
-    private static void ParseInlineTvfOptions(ParserContext context)
+    private static bool ParseInlineTvfOptions(ParserContext context)
     {
+        var isSchemaBound = false;
         context.MoveNextRequired();
         while (true)
         {
             switch (context.Token)
             {
                 case UnquotedString { ContextualKeyword: ContextualKeyword.SchemaBinding }:
+                    isSchemaBound = true;
+                    context.MoveNextRequired();
+                    break;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Encryption }:
-                    // Parse-and-ignore. Fidelity gap on SCHEMABINDING
-                    // documented in CLAUDE.md.
                     context.MoveNextRequired();
                     break;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Returns }:
@@ -516,6 +539,7 @@ partial class Simulation
                 break;
             context.MoveNextRequired();
         }
+        return isSchemaBound;
     }
 
     /// <summary>
@@ -527,20 +551,26 @@ partial class Simulation
     /// the closing <c>)</c> (when <paramref name="openedParen"/>) or the
     /// statement boundary.
     /// </summary>
+    /// <remarks>
+    /// The paren-less form ends at a statement keyword only at the body's own
+    /// nesting level: a <c>SELECT</c> inside a derived table, a subquery, or a
+    /// CTE definition belongs to the body and must not truncate the captured
+    /// span. A body opening with <c>WITH</c> additionally spends one
+    /// depth-0 statement keyword on the query the CTE prefix scopes to.
+    /// </remarks>
     private static int CaptureInlineTvfBody(ParserContext context, bool openedParen)
     {
-        // The first token is always the body's leading SELECT — consume
-        // unconditionally so the statement-boundary check doesn't bail
-        // immediately on the SELECT keyword itself. After that, scan until
-        // the matching `)` (paren-form) or the next statement-starting
-        // keyword (paren-less form).
+        // The first token is always the body's own start — the leading SELECT,
+        // or the WITH of a CTE prefix. Consume it unconditionally so the
+        // statement-boundary check doesn't bail on the token that opens the
+        // body. After that, scan until the matching `)` (paren-form) or the
+        // next statement-starting keyword (paren-less form).
+        var awaitingCtePrefixedQuery = context.Token is ReservedKeyword { Keyword: Keyword.With };
         var depth = openedParen ? 1 : 0;
         var lastBodyEnd = context.Token!.EndIndex;
         context.MoveNextOptional();
         while (context.Token is not null)
         {
-            if (!openedParen && IsStatementBoundary(context.Token))
-                break;
             switch (context.Token)
             {
                 case Operator { Character: '(' }:
@@ -550,6 +580,16 @@ partial class Simulation
                     if (openedParen && depth == 1)
                         return lastBodyEnd;
                     depth--;
+                    break;
+                default:
+                    if (openedParen || depth != 0 || !IsStatementBoundary(context.Token))
+                        break;
+                    // The query a CTE prefix scopes to is the one statement
+                    // keyword that continues the body instead of ending it; a
+                    // `;` ends it either way.
+                    if (!awaitingCtePrefixedQuery || context.Token is not ReservedKeyword)
+                        return lastBodyEnd;
+                    awaitingCtePrefixedQuery = false;
                     break;
             }
             lastBodyEnd = context.Token.EndIndex;
@@ -600,10 +640,14 @@ partial class Simulation
         // anything here.
         var dummyFrame = new UdfFrame(SqlType.Int32);
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame);
+        // Inspection runs the body's FROM-less projections, so the batch needs
+        // the CREATE statement's own current-time freeze to evaluate a
+        // GETDATE() / SYSDATETIME() column.
+        innerBatch.AdoptStatementFreezeFrom(outerContext.Batch);
         var parser = innerBatch.Parser;
         parser.MoveNextRequired();
 
-        var selection = Selection.Parse(parser, depth: 0);
+        var selection = ParseBodyQuery(parser);
 
         var columns = new HeapColumn[selection.Schema.Length];
         var seenNames = new HashSet<string>(outerContext.Batch.CurrentDatabase.Collation);

@@ -85,9 +85,9 @@ internal sealed class View(
     /// through <c>sys.sql_modules.is_schema_bound</c> and
     /// <c>OBJECTPROPERTY(id, 'IsSchemaBound')</c>, and required before a view
     /// can carry an index (a non-schema-bound view raises Msg 1939 at
-    /// CREATE INDEX). The simulator doesn't otherwise enforce schema-binding
-    /// (a referenced table can still be dropped — see
-    /// <c>Simulation.CreateView.cs</c>).
+    /// CREATE INDEX). Set, it also enrolls the body's references in the
+    /// dependency gate — dropping or altering anything the body names is
+    /// refused (see <see cref="SchemaBinding"/>).
     /// </summary>
     public readonly bool IsSchemaBound = isSchemaBound;
 

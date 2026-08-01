@@ -73,6 +73,31 @@ abstract class Token
     // This is used for various error messages even though tokens are not directly accessible to user code.
     public sealed override string ToString() => command.Substring(StartIndex, length);
 
+    /// <summary>
+    /// Longest source-spelled token real keeps in a message's <c>near '…'</c>
+    /// slot. Probe-confirmed against SQL Server 2025 (2026-07-31): a 200-digit
+    /// numeric literal is reported clipped to its first 128 characters.
+    /// </summary>
+    private protected const int MaxErrorTextLength = 128;
+
+    /// <summary>
+    /// This token's text as SQL Server renders it in a message's
+    /// <c>near '…'</c> slot, which is not always the way the token was
+    /// spelled: <see cref="Tokens.Literal"/> and
+    /// <see cref="Tokens.DelimitedIdentifier"/> override this because real
+    /// names the value they denote instead. Deliberately separate from
+    /// <see cref="ToString"/>, which stays source-exact for the parser's own
+    /// text matching (table-hint and query-hint name lookup read it).
+    /// </summary>
+    public virtual string ErrorText => Clip(Source);
+
+    /// <summary>
+    /// Materializes <paramref name="text"/> clipped to
+    /// <see cref="MaxErrorTextLength"/> characters.
+    /// </summary>
+    private protected static string Clip(ReadOnlySpan<char> text) =>
+        new(text[..Math.Min(text.Length, MaxErrorTextLength)]);
+
 #if DEBUG
     /// <summary>
     /// Identifies this token within the scope of the full command by wrapping it with '»' and '«';

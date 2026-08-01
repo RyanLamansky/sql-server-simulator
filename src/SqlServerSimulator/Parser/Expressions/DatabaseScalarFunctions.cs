@@ -139,14 +139,21 @@ internal sealed class HasDbAccess : Expression
         if (arg.IsNull)
             return SqlValue.Null(SqlType.Int32);
         var name = arg.CoerceTo(SqlType.NVarchar).AsString;
-        if (!runtime.Batch.Connection.Simulation.Databases.ContainsKey(name))
-            return SqlValue.Null(SqlType.Int32);
-        // model is the restricted template database — inaccessible even to a
-        // normal login (probe-confirmed). Every other hosted database (system
-        // or user) is accessible since the simulator has no per-login
-        // database-access model.
-        return SqlValue.FromInt32(BuiltInToken.Comparer.Equals(name, Simulation.ModelDatabaseName) ? 0 : 1);
+        return runtime.Batch.Connection.Simulation.Databases.TryGetValue(name, out var database)
+            ? SqlValue.FromInt32(IsAccessible(database) ? 1 : 0)
+            : SqlValue.Null(SqlType.Int32);
     }
+
+    /// <summary>
+    /// Whether <paramref name="database"/> is accessible to a normal login —
+    /// the answer <c>HAS_DBACCESS</c> gives, and the same gate
+    /// <c>sp_helpdb</c> applies before listing a database. <c>model</c> is the
+    /// restricted template and answers <see langword="false"/>
+    /// (probe-confirmed); every other hosted database is accessible, since the
+    /// simulator has no per-login database-access model.
+    /// </summary>
+    internal static bool IsAccessible(Database database) =>
+        !BuiltInToken.Comparer.Equals(database.Name, Simulation.ModelDatabaseName);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 

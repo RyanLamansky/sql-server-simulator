@@ -75,11 +75,13 @@ partial class Simulation
 
         // Built-ins: dbo lives in every database; sys / INFORMATION_SCHEMA are
         // server-owned. Real SQL Server raises Msg 2760 on each — replicated.
-        return IsReservedSchemaName(context.CurrentDatabase.Collation, schemaName)
-            ? throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schemaName)
-            : context.CurrentDatabase.Schemas.TryAdd(schemaName, new Schema(context.CurrentDatabase, schemaName, context.CurrentDatabase.AllocateSchemaId()))
-                ? true
-                : throw SimulatedSqlException.ThereIsAlreadyAnObject(schemaName);
+        if (IsReservedSchemaName(context.CurrentDatabase.Collation, schemaName))
+            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schemaName);
+        if (!context.CurrentDatabase.Schemas.TryAdd(schemaName, new Schema(context.CurrentDatabase, schemaName, context.CurrentDatabase.AllocateSchemaId())))
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(schemaName);
+        // Real reports the new schema as both SchemaName and ObjectName.
+        RecordDdlEvent(context, "CREATE_SCHEMA", schemaName, schemaName, "SCHEMA");
+        return true;
     }
 
     /// <summary>

@@ -247,71 +247,16 @@ partial class Simulation
                 // Whether this trigger fires at all was settled by the caller's
                 // CanFireTrigger filter; nothing between there and here changes
                 // the stack, since each body pops its own frame on exit.
-                if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
-                    throw SimulatedSqlException.MaximumNestingLevelExceeded();
-
-                connection.LastStatementRowCount = affectedRowCount;
-
-                var triggerFrame = new TriggerFrame(trigger, insertedPseudo, deletedPseudo, columnsUpdatedMask);
-                var savedImpersonationDepth = connection.Security.ImpersonationDepth;
-                var savedBodyErrorRaised = connection.TriggerBodyErrorRaised;
-                BatchContext? innerBatch = null;
-                try
-                {
-                    connection.NestingLevel++;
-                    connection.TriggerNestLevel++;
-                    connection.FiringTriggers.Add((trigger.ObjectId, trigger.Timing == TriggerTiming.After));
-                    connection.TriggerBodyErrorRaised = false;
-                    // Module WITH EXECUTE AS: run the body as the impersonated
-                    // principal (OWNER / SELF → dbo, CALLER → no-op, named user →
-                    // that principal); unwound in the finally below.
-                    PushModuleExecuteAsFrame(connection, trigger.ExecuteAsClause, connection.CurrentDatabase);
-                    if (!string.IsNullOrEmpty(trigger.BodyText))
-                    {
-                        using var bodyCommand = new SimulatedDbCommand(this, connection);
-#pragma warning disable CA2100 // trigger.BodyText is the simulator's own captured body span
-                        bodyCommand.CommandText = trigger.BodyText;
-#pragma warning restore CA2100
-                        innerBatch = new BatchContext(bodyCommand, triggerFrame)
-                        {
-                            // Trigger-body errors report a CREATE-relative line and
-                            // carry the trigger's UNQUALIFIED name (probe-confirmed:
-                            // ERROR_PROCEDURE / SqlError.Procedure = "tr", not
-                            // "dbo.tr" — the one asymmetry from stored procedures).
-                            LineOffset = trigger.BodyLineOffset,
-                            ErrorProcedureName = trigger.Name,
-                        };
-                        var parser = innerBatch.Parser;
-                        parser.MoveNextOptional();
-                        foreach (var bodyOutcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
-                        {
-                            // A body SELECT is the firing statement's result
-                            // set on real, so buffer it for the dispatcher to
-                            // yield once the statement completes. Rows-affected
-                            // outcomes stay discarded — the body's counts are
-                            // not the statement's.
-                            if (bodyOutcome is SimulatedQueryResult)
-                                (outerBatch.PendingTriggerResultSets ??= []).Add(bodyOutcome);
-                        }
-                        // Real aborts the batch when any error of severity >= 11
-                        // was raised while the body ran, even one the body's own
-                        // TRY / CATCH swallowed — the swallow doesn't save it.
-                        if (connection.TriggerBodyErrorRaised)
-                            throw SimulatedSqlException.ErrorRaisedDuringTriggerExecution();
-                    }
-                }
-                finally
-                {
-                    connection.NestingLevel--;
-                    connection.TriggerNestLevel--;
-                    connection.FiringTriggers.RemoveAt(connection.FiringTriggers.Count - 1);
-                    // Local temp tables the trigger body created are dropped at
-                    // trigger exit (probe-confirmed Msg 208 afterward — module-
-                    // scoped lifetime, same as procs / dynamic SQL).
-                    innerBatch?.DropScopedTempTables();
-                    connection.Security.RevertTo(savedImpersonationDepth);
-                    connection.TriggerBodyErrorRaised = savedBodyErrorRaised;
-                }
+                RunOneTriggerBody(
+                    outerBatch,
+                    new TriggerFrame(trigger, insertedPseudo, deletedPseudo, columnsUpdatedMask),
+                    trigger.BodyText,
+                    trigger.BodyLineOffset,
+                    trigger.Name,
+                    trigger.ExecuteAsClause,
+                    trigger.ObjectId,
+                    trigger.Timing == TriggerTiming.After,
+                    affectedRowCount);
             }
         }
         finally
@@ -321,6 +266,104 @@ partial class Simulation
         }
 
         connection.LastIdentity = outerScopeIdentity;
+    }
+
+    /// <summary>
+    /// Runs one trigger body in a child <see cref="BatchContext"/>: nesting-cap
+    /// check, frame push, <c>WITH EXECUTE AS</c> impersonation, body dispatch,
+    /// the Msg 3616 swallowed-error check, and the unwinding. Shared by the DML
+    /// fire loop (<see cref="RunTriggerBodies"/>) and the DDL one
+    /// (<c>FireDdlTriggers</c>), which differ only in the frame they hand it and
+    /// the atomic scope they publish around the whole set.
+    /// </summary>
+    /// <param name="outerBatch">The firing statement's batch, which buffers any result sets the body yields.</param>
+    /// <param name="frame">The pseudo-table / event-data frame the body resolves against.</param>
+    /// <param name="bodyText">Raw body source, re-tokenized in the child batch.</param>
+    /// <param name="bodyLineOffset">Newlines from the CREATE verb to the body, for error-line attribution.</param>
+    /// <param name="triggerName">The trigger's unqualified name, reported as <c>ERROR_PROCEDURE</c>.</param>
+    /// <param name="executeAsClause">Module <c>WITH EXECUTE AS</c> principal, or null.</param>
+    /// <param name="objectId">The trigger's object id, pushed on the in-flight stack.</param>
+    /// <param name="countsAsAfterFrame">
+    /// Whether the frame this body pushes counts as an AFTER-trigger frame for
+    /// the <c>nested triggers</c> rule — true only for AFTER DML triggers.
+    /// </param>
+    /// <param name="affectedRowCount">The firing statement's row count, which <c>@@ROWCOUNT</c> reads on body entry.</param>
+    private void RunOneTriggerBody(
+        BatchContext outerBatch,
+        TriggerFrame frame,
+        string bodyText,
+        int bodyLineOffset,
+        string triggerName,
+        string? executeAsClause,
+        int objectId,
+        bool countsAsAfterFrame,
+        int affectedRowCount)
+    {
+        var connection = outerBatch.Connection;
+        if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
+            throw SimulatedSqlException.MaximumNestingLevelExceeded();
+
+        connection.LastStatementRowCount = affectedRowCount;
+
+        var savedImpersonationDepth = connection.Security.ImpersonationDepth;
+        var savedBodyErrorRaised = connection.TriggerBodyErrorRaised;
+        BatchContext? innerBatch = null;
+        try
+        {
+            connection.NestingLevel++;
+            connection.TriggerNestLevel++;
+            connection.FiringTriggers.Add((objectId, countsAsAfterFrame));
+            connection.TriggerBodyErrorRaised = false;
+            // Module WITH EXECUTE AS: run the body as the impersonated
+            // principal (OWNER / SELF → dbo, CALLER → no-op, named user →
+            // that principal); unwound in the finally below.
+            PushModuleExecuteAsFrame(connection, executeAsClause, connection.CurrentDatabase);
+            if (!string.IsNullOrEmpty(bodyText))
+            {
+                using var bodyCommand = new SimulatedDbCommand(this, connection);
+#pragma warning disable CA2100 // bodyText is the simulator's own captured body span
+                bodyCommand.CommandText = bodyText;
+#pragma warning restore CA2100
+                innerBatch = new BatchContext(bodyCommand, frame)
+                {
+                    // Trigger-body errors report a CREATE-relative line and
+                    // carry the trigger's UNQUALIFIED name (probe-confirmed:
+                    // ERROR_PROCEDURE / SqlError.Procedure = "tr", not
+                    // "dbo.tr" — the one asymmetry from stored procedures).
+                    LineOffset = bodyLineOffset,
+                    ErrorProcedureName = triggerName,
+                };
+                var parser = innerBatch.Parser;
+                parser.MoveNextOptional();
+                foreach (var bodyOutcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
+                {
+                    // A body SELECT is the firing statement's result
+                    // set on real, so buffer it for the dispatcher to
+                    // yield once the statement completes. Rows-affected
+                    // outcomes stay discarded — the body's counts are
+                    // not the statement's.
+                    if (bodyOutcome is SimulatedQueryResult)
+                        (outerBatch.PendingTriggerResultSets ??= []).Add(bodyOutcome);
+                }
+                // Real aborts the batch when any error of severity >= 11
+                // was raised while the body ran, even one the body's own
+                // TRY / CATCH swallowed — the swallow doesn't save it.
+                if (connection.TriggerBodyErrorRaised)
+                    throw SimulatedSqlException.ErrorRaisedDuringTriggerExecution();
+            }
+        }
+        finally
+        {
+            connection.NestingLevel--;
+            connection.TriggerNestLevel--;
+            connection.FiringTriggers.RemoveAt(connection.FiringTriggers.Count - 1);
+            // Local temp tables the trigger body created are dropped at
+            // trigger exit (probe-confirmed Msg 208 afterward — module-
+            // scoped lifetime, same as procs / dynamic SQL).
+            innerBatch?.DropScopedTempTables();
+            connection.Security.RevertTo(savedImpersonationDepth);
+            connection.TriggerBodyErrorRaised = savedBodyErrorRaised;
+        }
     }
 
     /// <summary>

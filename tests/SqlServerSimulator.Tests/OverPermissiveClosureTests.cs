@@ -245,7 +245,9 @@ public sealed class OverPermissiveClosureTests
 
         var unqualified = sim.ExecuteScalar<int>("select object_id('f')");
         AreEqual(sim.ExecuteScalar<int>("select object_id('dbo.f')"), unqualified);
-        AreEqual(1, sim.ExecuteScalar<int>("select objectproperty(object_id('f'), 'IsDeterministic')"));
+        // 0 because `f` isn't schema-bound, which real makes a precondition
+        // for determinism — the point here is that the id resolved at all.
+        AreEqual(0, sim.ExecuteScalar<int>("select objectproperty(object_id('f'), 'IsDeterministic')"));
         // A genuinely absent name still yields NULL.
         AreEqual(DBNull.Value, sim.ExecuteScalar("select object_id('nosuchthing')"));
     }

@@ -457,6 +457,21 @@ internal sealed partial class Selection
             _ = aggregates.RemoveAll(rehomed.Contains);
     }
 
+    /// <summary>
+    /// The securable a FROM source's columns carry grants on — its backing table
+    /// or view. Null when the source has none (derived table, catalog view,
+    /// temp table), or when the source was reached through a synonym: a synonym
+    /// takes no column grants at all, so such a reference is checked
+    /// object-grain against the synonym itself.
+    /// </summary>
+    private static Schemas.SchemaObject? ColumnGrantableSecurable(FromSource source) =>
+        source.ViaSynonym is not null ? null
+            : source.BackingTable is { } table ? (table.Name.StartsWith('#') ? null : table)
+            : source.BackingView;
+
+    private static ColumnReadTarget NewReadTarget(FromSource source) =>
+        source.BackingTable is { } table ? new ColumnReadTarget(table) : new ColumnReadTarget(source.BackingView!);
+
     private static Selection BuildSqlProjection(
         BatchContext parseBatch,
         FromSource[] sources,
@@ -472,17 +487,9 @@ internal sealed partial class Selection
         Func<MultiPartName, SqlType>? outerTypeResolver,
         bool isAssignmentOnly,
         MultiPartName? intoTarget,
-        Dictionary<int, (Storage.HeapTable Table, HashSet<int> Columns)>? readColumnSink)
+        Dictionary<int, ColumnReadTarget>? readColumnSink)
     {
         RecordIndexedViewShape(parseBatch, sources, joins, fromClause, distinct, topExpression, aggregates);
-
-        // Windows combined with GROUP BY / aggregates run over the grouped
-        // rows (BuildAggregateProjectionRows drives the window engine). The
-        // multi-grouping-set shapes (ROLLUP / CUBE / GROUPING SETS) emit
-        // several group streams that a window would have to span as one, which
-        // the per-set loop doesn't model.
-        if (windows.Count > 0 && fromClause.GroupingSets.Count > 1)
-            throw new NotSupportedException("Combining window functions with ROLLUP / CUBE / GROUPING SETS in the same SELECT isn't modeled.");
 
         RehomeAggregatesOverOuterScope(parseBatch, sources, aggregates);
 
@@ -529,10 +536,10 @@ internal sealed partial class Selection
         SqlType ResolveColumnType(MultiPartName name) => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
 
         // Column-level read tracking (parse-time, principal-independent): record
-        // every base-table column this query reads into the shared sink so the
+        // every table / view column this query reads into the shared sink so the
         // execution-time column-level SELECT check (Msg 230 / 229) can run
-        // against the current principal. Pre-seed each base-table source with an
-        // empty ordinal set — a table read that names no column (COUNT(*) /
+        // against the current principal. Pre-seed each such source with an
+        // empty ordinal set — a read that names no column (COUNT(*) /
         // SELECT 1) then routes through the column path as "all columns". The
         // projection funnels through RecordingResolver (recording is free — the
         // schema resolution already visits these references); WHERE / JOIN ON /
@@ -568,11 +575,11 @@ internal sealed partial class Selection
                 if (qualifier is not null)
                     break;
             }
-            if (matches != 1 || sources[matchSource].BackingTable is not { } table || table.Name.StartsWith('#'))
+            if (matches != 1 || ColumnGrantableSecurable(sources[matchSource]) is not { } securable)
                 return;
-            if (!readColumnSink.TryGetValue(table.ObjectId, out var entry))
-                readColumnSink[table.ObjectId] = entry = (table, []);
-            _ = entry.Columns.Add(matchColumn + 1);
+            if (!readColumnSink.TryGetValue(securable.ObjectId, out var target))
+                readColumnSink[securable.ObjectId] = target = NewReadTarget(sources[matchSource]);
+            _ = target.Ordinals.Add(matchColumn + 1);
         }
         SqlType RecordingResolver(MultiPartName name)
         {
@@ -583,8 +590,8 @@ internal sealed partial class Selection
         {
             foreach (var source in sources)
             {
-                if (source.BackingTable is { } table && !table.Name.StartsWith('#'))
-                    _ = readColumnSink.TryAdd(table.ObjectId, (table, []));
+                if (ColumnGrantableSecurable(source) is { } securable)
+                    _ = readColumnSink.TryAdd(securable.ObjectId, NewReadTarget(source));
             }
         }
 

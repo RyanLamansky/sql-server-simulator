@@ -1015,7 +1015,7 @@ internal static partial class BuiltInResources
     /// row reports this constant (matching real SQL Server's non-null,
     /// datetime-typed column).
     /// </summary>
-    private static readonly DateTime SysDatabasesCreateDate = new(2025, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+    internal static readonly DateTime SysDatabasesCreateDate = new(2025, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
 
     /// <summary>
     /// Fixed <c>service_broker_guid</c> for every <c>sys.databases</c> row.
@@ -1395,7 +1395,7 @@ internal static partial class BuiltInResources
         var rowsDesc = SqlValue.FromNVarchar("ROWS");
         var logDesc = SqlValue.FromNVarchar("LOG");
         var unlimited = SqlValue.FromInt32(-1);
-        var growthKb = SqlValue.FromInt32(65536);
+        var growthKb = SqlValue.FromInt32(FileGrowthKilobytes);
 
         SqlValue[] BuildFile(short id, int fileId, byte type, SqlValue typeDesc, int dataSpaceId, string logicalName, string physicalName, int sizePages) =>
         [
@@ -1435,8 +1435,8 @@ internal static partial class BuiltInResources
 
         foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation))
         {
-            yield return BuildFile(id, 1, 0, rowsDesc, 1, db.Name + "_Data", "/var/opt/mssql/data/" + db.Name + ".mdf", ComputeDataFileSizePages(db));
-            yield return BuildFile(id, 2, 1, logDesc, 0, db.Name + "_Log", "/var/opt/mssql/data/" + db.Name + "_log.ldf", LogFileSizePages);
+            yield return BuildFile(id, 1, 0, rowsDesc, 1, db.Name + "_Data", DataFilePath(db.Name), ComputeDataFileSizePages(db));
+            yield return BuildFile(id, 2, 1, logDesc, 0, db.Name + "_Log", LogFilePath(db.Name), LogFileSizePages);
         }
     }
 
@@ -1462,7 +1462,7 @@ internal static partial class BuiltInResources
         var rowsDesc = SqlValue.FromNVarchar("ROWS");
         var logDesc = SqlValue.FromNVarchar("LOG");
         var unlimited = SqlValue.FromInt32(-1);
-        var growthKb = SqlValue.FromInt32(65536);
+        var growthKb = SqlValue.FromInt32(FileGrowthKilobytes);
         var nullLsn = SqlValue.Null(lsnNumeric);
 
         SqlValue[] BuildFile(int fileId, byte type, SqlValue typeDesc, int dataSpaceId, string logicalName, string physicalName, int sizePages) =>
@@ -1487,8 +1487,8 @@ internal static partial class BuiltInResources
             nullLsn,
         ];
 
-        yield return BuildFile(1, 0, rowsDesc, 1, database.Name + "_Data", "/var/opt/mssql/data/" + database.Name + ".mdf", ComputeDataFileSizePages(database));
-        yield return BuildFile(2, 1, logDesc, 0, database.Name + "_Log", "/var/opt/mssql/data/" + database.Name + "_log.ldf", LogFileSizePages);
+        yield return BuildFile(1, 0, rowsDesc, 1, database.Name + "_Data", DataFilePath(database.Name), ComputeDataFileSizePages(database));
+        yield return BuildFile(2, 1, logDesc, 0, database.Name + "_Log", LogFilePath(database.Name), LogFileSizePages);
     }
 
     /// <summary>

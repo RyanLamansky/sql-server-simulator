@@ -44,6 +44,18 @@ internal abstract class UserDefinedFunction(
     public string? ExecuteAsClause;
 
     /// <summary>
+    /// True when the function was declared <c>WITH SCHEMABINDING</c>.
+    /// Surfaced through <c>sys.sql_modules.is_schema_bound</c> and
+    /// <c>OBJECTPROPERTY(id, 'IsSchemaBound')</c>, and read by
+    /// <see cref="ModuleDeterminism"/> — schema-binding is the precondition
+    /// real SQL Server puts on <c>IsDeterministic</c>. Set, it also enrolls
+    /// the body's references in the dependency gate: dropping or altering
+    /// anything the body names is refused, and the body may only reference
+    /// schema-bound modules (see <see cref="SchemaBinding"/>).
+    /// </summary>
+    public bool IsSchemaBound;
+
+    /// <summary>
     /// Raw source text of the body. For scalars: the text between the outer
     /// <c>BEGIN</c> and <c>END</c> (exclusive of both). For inline TVFs: the
     /// SELECT-statement text between <c>AS RETURN [(</c> and the trailing

@@ -273,13 +273,10 @@ public sealed class TemporalTableTests
 
     [TestMethod]
     public void ForSystemTimeContainedIn_WithoutParentheses_RaisesMsg102()
-        // Number only: the message names the offending literal, and the
-        // simulator renders a string literal with the quotes it was written
-        // with where real strips them — a token-rendering difference that
-        // predates this clause and is not what the test is about.
-        => _ = new Simulation().AssertSqlError(
+        => new Simulation().AssertSqlError(
             $"{CreateTemporalCustomers}; select * from Customers for system_time contained in '2020-01-01', '2022-01-01'",
-            102);
+            102,
+            "Incorrect syntax near '2020-01-01'.");
 
     [TestMethod]
     public void ForSystemTimeBetween_WithToSeparator_RaisesMsg156()
@@ -547,24 +544,54 @@ public sealed class TemporalTableTests
     }
 
     [TestMethod]
-    public void AlterSystemVersioningOn_BaseWithoutPeriod_RaisesMsg13558()
+    public void AlterSystemVersioningOn_BaseWithoutPeriod_RaisesMsg13510()
         => new Simulation().AssertSqlError("""
             create table base (Id int);
             create table h (Id int);
             alter table base set (system_versioning = on (history_table = dbo.h))
             """,
-            13558,
-            "Setting SYSTEM_VERSIONING to ON failed because table 'simulated.dbo.base' does not have a PERIOD FOR SYSTEM_TIME declaration.");
+            13510,
+            "Cannot set SYSTEM_VERSIONING to ON when SYSTEM_TIME period is not defined and the LEDGER=ON option is not specified.");
 
     [TestMethod]
-    public void AlterSystemVersioningOn_AlreadyOn_RaisesMsg13530()
+    public void AlterSystemVersioningOn_AlreadyOnWithSameHistory_Succeeds()
+    {
+        // Re-issuing SET ON against the sibling the base already has is real's
+        // supported way to change the retention period in place.
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            CreateTemporalCustomers,
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 5 weeks))");
+        AreEqual((byte)2, simulation.ExecuteScalar("select temporal_type from sys.tables where name = 'Customers'"));
+        AreEqual("WEEK", simulation.ExecuteScalar("select history_retention_period_unit_desc from sys.tables where name = 'Customers'"));
+    }
+
+    [TestMethod]
+    public void AlterSystemVersioningOn_AlreadyOnWithoutHistoryTable_RaisesMsg13596()
         => new Simulation().AssertSqlError(
-            $"{CreateTemporalCustomers}; alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory))",
-            13530,
-            "Setting SYSTEM_VERSIONING to ON failed because table 'simulated.dbo.Customers' already has SYSTEM_VERSIONING turned ON.");
+            $"{CreateTemporalCustomers}; alter table Customers set (system_versioning = on)",
+            13596,
+            "SYSTEM_VERSIONING is already turned ON for table 'simulated.dbo.Customers'.");
 
     [TestMethod]
-    public void AlterSystemVersioningOn_HistoryAlreadyInUse_RaisesMsg13533()
+    public void AlterSystemVersioningOn_AlreadyOnWithDifferentHistory_RaisesMsg13595()
+        => new Simulation().AssertSqlError($"""
+            {CreateTemporalCustomers};
+            create table Other (Id int not null, Name nvarchar(30) not null, Vf datetime2 not null, Vt datetime2 not null);
+            alter table Customers set (system_versioning = on (history_table = dbo.Other))
+            """,
+            13595,
+            "Temporal history table name 'simulated.dbo.Other' is not correct for current table 'simulated.dbo.Customers'.");
+
+    [TestMethod]
+    public void AlterSystemVersioningOn_AlreadyOnWithUnresolvableHistory_RaisesMsg13757()
+        => new Simulation().AssertSqlError(
+            $"{CreateTemporalCustomers}; alter table Customers set (system_versioning = on (history_table = dbo.tNoSuch))",
+            13757,
+            "Temporal table 'simulated.dbo.Customers' already has history table defined. Consider dropping system_versioning first if you want to use different history table.");
+
+    [TestMethod]
+    public void AlterSystemVersioningOn_HistoryAlreadyInUse_RaisesMsg13514()
     {
         // First pair establishes h as one base's history; second base then
         // tries to link the same h — must fail.
@@ -581,19 +608,387 @@ public sealed class TemporalTableTests
             """);
         simulation.AssertSqlError(
             "alter table base2 set (system_versioning = on (history_table = dbo.h))",
-            13533,
-            "Setting SYSTEM_VERSIONING to ON failed because history table 'simulated.dbo.h' is already in use as a temporal table sibling.");
+            13514,
+            "History table 'simulated.dbo.h' is already in use.");
     }
 
     [TestMethod]
-    public void AlterSystemVersioningOn_MissingHistoryTable_RaisesMsg4902()
-        => new Simulation().AssertSqlError("""
+    public void AlterSystemVersioningOn_MissingHistoryTable_CreatesIt()
+    {
+        // Real doesn't reject a history-table name that doesn't resolve — it
+        // builds the table from the base's shape, same as the CREATE path.
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("""
             create table base (Id int not null primary key,
                                Vf datetime2 generated always as row start not null,
                                Vt datetime2 generated always as row end not null,
                                period for system_time (Vf, Vt));
-            alter table base set (system_versioning = on (history_table = dbo.tNoSuch))
+            alter table base set (system_versioning = on (history_table = dbo.BaseHistory))
+            """);
+        AreEqual((byte)1, simulation.ExecuteScalar("select temporal_type from sys.tables where name = 'BaseHistory'"));
+        AreEqual(3, simulation.ExecuteScalar("select count(*) from sys.columns where object_id = object_id('dbo.BaseHistory')"));
+    }
+
+    // -- Auto-named history tables --
+
+    private const string CreateAutoNamedCustomers = """
+        create table Customers (
+            Id int not null primary key,
+            Name nvarchar(30) not null,
+            Vf datetime2 generated always as row start not null,
+            Vt datetime2 generated always as row end not null,
+            period for system_time (Vf, Vt)
+        ) with (system_versioning = on)
+        """;
+
+    [TestMethod]
+    public void AutoNamedHistory_TakesTheBaseObjectIdAndSchema()
+    {
+        // MSSQL_TemporalHistoryFor_<base object_id>, in the base's own schema
+        // — probe-confirmed shape (the id itself is the simulator's, so the
+        // name matches real's structure, not its value).
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"create schema app; {CreateAutoNamedCustomers.Replace("table Customers", "table app.Customers", StringComparison.Ordinal)}");
+        AreEqual(1, simulation.ExecuteScalar("""
+            select count(*) from sys.tables t join sys.schemas s on s.schema_id = t.schema_id
+            where t.temporal_type = 1 and s.name = 'app'
+              and t.name = 'MSSQL_TemporalHistoryFor_' + cast((select object_id from sys.tables where name = 'Customers') as varchar(20))
+            """));
+    }
+
+    [TestMethod]
+    public void AutoNamedHistory_MaintainsVersionsLikeANamedOne()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            CreateAutoNamedCustomers,
+            "insert Customers (Id, Name) values (1, 'a')",
+            "waitfor delay '00:00:00.050'",
+            "update Customers set Name = 'A' where Id = 1");
+        AreEqual(2, simulation.ExecuteScalar("select count(*) from Customers for system_time all"));
+    }
+
+    [TestMethod]
+    public void AutoNamedHistory_CollidingName_TakesAHexSuffix()
+    {
+        // Turning versioning off leaves the old sibling behind under the
+        // generated name, so turning it back on has to disambiguate. Real
+        // appends a random 8-hex suffix; the simulator's is deterministic.
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            CreateAutoNamedCustomers,
+            "alter table Customers set (system_versioning = off)",
+            "alter table Customers set (system_versioning = on)");
+        var second = (string)simulation.ExecuteScalar("select name from sys.tables where temporal_type = 1")!;
+        var expectedPrefix = "MSSQL_TemporalHistoryFor_" + simulation.ExecuteScalar("select object_id from sys.tables where name = 'Customers'");
+        StartsWith(expectedPrefix + "_", second);
+        AreEqual(expectedPrefix.Length + 9, second.Length);
+    }
+
+    // -- HISTORY_RETENTION_PERIOD --
+
+    /// <summary>
+    /// The <see cref="VersionedCustomer"/> timeline with a retention period
+    /// applied: <c>a1</c> ends in 2021 and <c>a2</c> in 2022, both long past
+    /// any window measured from now, so a finite retention hides both while
+    /// the current <c>a3</c> stays.
+    /// </summary>
+    private static Simulation AgedVersionedCustomer(string retention)
+    {
+        var simulation = VersionedCustomer();
+        _ = simulation.ExecuteNonQuery($"alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = {retention}))");
+        return simulation;
+    }
+
+    [TestMethod]
+    public void HistoryRetention_DefaultsToInfinite()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(CreateTemporalCustomers);
+        AreEqual(-1, simulation.ExecuteScalar("select history_retention_period from sys.tables where name = 'Customers'"));
+        AreEqual(-1, simulation.ExecuteScalar("select history_retention_period_unit from sys.tables where name = 'Customers'"));
+        AreEqual("INFINITE", simulation.ExecuteScalar("select history_retention_period_unit_desc from sys.tables where name = 'Customers'"));
+        // History and non-temporal tables report NULL rather than any value.
+        AreEqual(0, simulation.ExecuteScalar("select count(history_retention_period) from sys.tables where name = 'CustomersHistory'"));
+    }
+
+    [TestMethod]
+    public void HistoryRetention_ProjectsUnitCodeAndDescription()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table Customers (
+                Id int not null primary key,
+                Vf datetime2 generated always as row start not null,
+                Vt datetime2 generated always as row end not null,
+                period for system_time (Vf, Vt)
+            ) with (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 3 months))
+            """);
+        AreEqual(3, simulation.ExecuteScalar("select history_retention_period from sys.tables where name = 'Customers'"));
+        AreEqual(5, simulation.ExecuteScalar("select history_retention_period_unit from sys.tables where name = 'Customers'"));
+        AreEqual("MONTH", simulation.ExecuteScalar("select history_retention_period_unit_desc from sys.tables where name = 'Customers'"));
+    }
+
+    [TestMethod]
+    public void HistoryRetention_AcceptsEveryUnitInBothNumberForms()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(CreateTemporalCustomers);
+        foreach (var (spelling, unit) in new[] { ("7 day", 3), ("7 days", 3), ("2 week", 4), ("2 weeks", 4), ("1 month", 5), ("1 months", 5), ("4 year", 6), ("4 years", 6) })
+        {
+            _ = simulation.ExecuteNonQuery($"alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = {spelling}))");
+            AreEqual(unit, simulation.ExecuteScalar("select history_retention_period_unit from sys.tables where name = 'Customers'"));
+        }
+        _ = simulation.ExecuteNonQuery("alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = infinite))");
+        AreEqual(-1, simulation.ExecuteScalar("select history_retention_period from sys.tables where name = 'Customers'"));
+    }
+
+    [TestMethod]
+    public void HistoryRetention_NonPositiveCount_RaisesMsg13743()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(CreateTemporalCustomers);
+        simulation.AssertSqlError(
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 0 days))",
+            13743,
+            "0 is not a valid value for system versioning history retention period.");
+        simulation.AssertSqlError(
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = -1 days))",
+            13743,
+            "-1 is not a valid value for system versioning history retention period.");
+    }
+
+    [TestMethod]
+    public void HistoryRetention_UnknownUnit_RaisesMsg13744()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(CreateTemporalCustomers);
+        var error = simulation.AssertSqlError(
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 3 hours))",
+            13744);
+        AreEqual("'hours' is not a valid history retention period unit for system versioning.", error.Message);
+        // Severity 15, unlike the rest of the temporal family's 16.
+        AreEqual((byte)15, error.Class);
+    }
+
+    [TestMethod]
+    public void HistoryRetention_MissingUnit_RaisesMsg102()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(CreateTemporalCustomers);
+        simulation.AssertSqlError(
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 3))",
+            102,
+            "Incorrect syntax near ')'.");
+    }
+
+    [TestMethod]
+    public void HistoryRetention_AgedVersions_AreInvisibleToEveryForm()
+    {
+        var simulation = AgedVersionedCustomer("10 days");
+        AreEqual("a3", Versions(simulation, "all"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from Customers for system_time as of '2020-06-01'"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from Customers for system_time between '2020-01-01' and '2022-01-01'"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from Customers for system_time from '2020-01-01' to '2022-01-01'"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from Customers for system_time contained in ('2020-01-01', '2022-01-01')"));
+    }
+
+    [TestMethod]
+    public void HistoryRetention_AgedVersions_StayInTheHistoryTable()
+    {
+        // Real prunes from a background task, so an aged row is filtered out
+        // of FOR SYSTEM_TIME immediately but still readable directly. The
+        // simulator has no background task, so its aged rows stay forever.
+        var simulation = AgedVersionedCustomer("10 days");
+        AreEqual(2, simulation.ExecuteScalar("select count(*) from CustomersHistory"));
+    }
+
+    [TestMethod]
+    public void HistoryRetention_WindowIsMeasuredFromTheStatementClock()
+    {
+        // A window reaching back to mid-2021 covers a2 (which stopped being
+        // current at 2022-01-01) but not a1 (2021-01-01) — so the cutoff is
+        // read off the clock, not treated as all-or-nothing.
+        var now = DateTime.UtcNow;
+        var monthsBackToMid2021 = ((now.Year - 2021) * 12) + now.Month - 7;
+        var simulation = AgedVersionedCustomer($"{monthsBackToMid2021} months");
+        AreEqual("a2,a3", Versions(simulation, "all"));
+    }
+
+    [TestMethod]
+    public void HistoryRetention_Infinite_RestoresAgedVersions()
+    {
+        var simulation = AgedVersionedCustomer("10 days");
+        _ = simulation.ExecuteNonQuery("alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = infinite))");
+        AreEqual("a1,a2,a3", Versions(simulation, "all"));
+    }
+
+    // -- Base / history column-shape validation at SET (SYSTEM_VERSIONING = ON) --
+
+    /// <summary>
+    /// Links <see cref="CreateUnversionedTemporalPair"/>'s base to a history
+    /// table declared by <paramref name="historyColumns"/> and returns the
+    /// rejection. Real's check order is probe-confirmed: the history table's
+    /// own period, then unique keys / foreign keys / constraints / IDENTITY,
+    /// then the column count, then an ordinal walk over name, type, collation
+    /// and nullability.
+    /// </summary>
+    private static void AssertHistoryShapeError(string historyColumns, int errorNumber, string expectedMessage)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"""
+            create table Customers (
+                Id int not null primary key,
+                Name nvarchar(30) not null,
+                Vf datetime2 generated always as row start not null,
+                Vt datetime2 generated always as row end not null,
+                period for system_time (Vf, Vt)
+            );
+            create table CustomersHistory ({historyColumns});
+            """);
+        simulation.AssertSqlError(
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory))",
+            errorNumber,
+            expectedMessage);
+    }
+
+    [TestMethod]
+    public void HistoryShape_ColumnCountMismatch_RaisesMsg13523()
+        => AssertHistoryShapeError(
+            "Id int not null, Name nvarchar(30) not null, Vf datetime2 not null, Vt datetime2 not null, Extra int null",
+            13523,
+            "Setting SYSTEM_VERSIONING to ON failed because table 'simulated.dbo.Customers' has 4 columns and table 'simulated.dbo.CustomersHistory' has 5 columns.");
+
+    [TestMethod]
+    public void HistoryShape_ColumnNameMismatch_RaisesMsg13524()
+        => AssertHistoryShapeError(
+            "Id int not null, Nom nvarchar(30) not null, Vf datetime2 not null, Vt datetime2 not null",
+            13524,
+            "Setting SYSTEM_VERSIONING to ON failed because column 'Nom' at ordinal 2 in history table 'simulated.dbo.CustomersHistory' has a different name than the column 'Name' at the same ordinal in table 'simulated.dbo.Customers'.");
+
+    [TestMethod]
+    public void HistoryShape_ColumnTypeMismatch_RaisesMsg13525()
+        => AssertHistoryShapeError(
+            "Id int not null, Name nvarchar(40) not null, Vf datetime2 not null, Vt datetime2 not null",
+            13525,
+            "Setting SYSTEM_VERSIONING to ON failed because column 'Name' has data type nvarchar(40) in history table 'simulated.dbo.CustomersHistory' which is different from corresponding column type nvarchar(30) in table 'simulated.dbo.Customers'.");
+
+    [TestMethod]
+    public void HistoryShape_PeriodColumnPrecisionMismatch_RaisesMsg13525()
+        => AssertHistoryShapeError(
+            "Id int not null, Name nvarchar(30) not null, Vf datetime2(3) not null, Vt datetime2(3) not null",
+            13525,
+            "Setting SYSTEM_VERSIONING to ON failed because column 'Vf' has data type datetime2(3) in history table 'simulated.dbo.CustomersHistory' which is different from corresponding column type datetime2(7) in table 'simulated.dbo.Customers'.");
+
+    [TestMethod]
+    public void HistoryShape_CollationMismatch_RaisesMsg13526()
+        => AssertHistoryShapeError(
+            "Id int not null, Name nvarchar(30) collate Latin1_General_BIN not null, Vf datetime2 not null, Vt datetime2 not null",
+            13526,
+            "Setting SYSTEM_VERSIONING to ON failed because column 'Name' does not have the same collation in tables 'simulated.dbo.Customers' and 'simulated.dbo.CustomersHistory'.");
+
+    [TestMethod]
+    public void HistoryShape_NullabilityMismatch_RaisesMsg13531()
+        => AssertHistoryShapeError(
+            "Id int not null, Name nvarchar(30) null, Vf datetime2 not null, Vt datetime2 not null",
+            13531,
+            "Setting SYSTEM_VERSIONING to ON failed because column 'Name' does not have the same nullability attribute in tables 'simulated.dbo.Customers' and 'simulated.dbo.CustomersHistory'.");
+
+    [TestMethod]
+    public void HistoryShape_UniqueKey_RaisesMsg13515()
+        => AssertHistoryShapeError(
+            "Id int not null primary key, Name nvarchar(30) not null, Vf datetime2 not null, Vt datetime2 not null",
+            13515,
+            "Setting SYSTEM_VERSIONING to ON failed because history table 'simulated.dbo.CustomersHistory' has custom unique keys defined. Consider dropping all unique keys and trying again.");
+
+    [TestMethod]
+    public void HistoryShape_ForeignKey_RaisesMsg13516()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table Customers (
+                Id int not null primary key,
+                Vf datetime2 generated always as row start not null,
+                Vt datetime2 generated always as row end not null,
+                period for system_time (Vf, Vt)
+            );
+            create table Ref (Id int not null primary key);
+            create table CustomersHistory (Id int not null references Ref(Id), Vf datetime2 not null, Vt datetime2 not null);
+            """);
+        simulation.AssertSqlError(
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory))",
+            13516,
+            "Setting SYSTEM_VERSIONING to ON failed because history table 'simulated.dbo.CustomersHistory' has foreign keys defined. Consider dropping all foreign keys and trying again.");
+    }
+
+    [TestMethod]
+    public void HistoryShape_CheckConstraint_RaisesMsg13517()
+        => AssertHistoryShapeError(
+            "Id int not null check (Id > 0), Name nvarchar(30) not null, Vf datetime2 not null, Vt datetime2 not null",
+            13517,
+            "Setting SYSTEM_VERSIONING to ON failed because history table 'simulated.dbo.CustomersHistory' has table or column constraints defined. Consider dropping all table and column constraints and trying again.");
+
+    [TestMethod]
+    public void HistoryShape_IdentityColumn_RaisesMsg13518()
+        => AssertHistoryShapeError(
+            "Id int identity(1,1) not null, Name nvarchar(30) not null, Vf datetime2 not null, Vt datetime2 not null",
+            13518,
+            "Setting SYSTEM_VERSIONING to ON failed because history table 'simulated.dbo.CustomersHistory' has IDENTITY column specification. Consider dropping all IDENTITY column specifications and trying again.");
+
+    [TestMethod]
+    public void HistoryShape_OwnPeriod_RaisesMsg13574()
+        => AssertHistoryShapeError("""
+            Id int not null, Name nvarchar(30) not null,
+            Vf datetime2 generated always as row start not null,
+            Vt datetime2 generated always as row end not null,
+            period for system_time (Vf, Vt)
             """,
-            4902,
-            "Cannot find the object \"dbo.tNoSuch\" because it does not exist or you do not have permissions.");
+            13574,
+            "Setting SYSTEM_VERSIONING to ON failed because temporal history table 'simulated.dbo.CustomersHistory' contains SYSTEM_TIME period.");
+
+    [TestMethod]
+    public void HistoryShape_DefaultConstraintAndNonUniqueIndex_AreAccepted()
+    {
+        // Probe-confirmed: real rejects unique keys, FKs and CHECK constraints
+        // on a history table but accepts DEFAULTs and non-unique indexes.
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("""
+            create table Customers (
+                Id int not null primary key,
+                Name nvarchar(30) not null,
+                Vf datetime2 generated always as row start not null,
+                Vt datetime2 generated always as row end not null,
+                period for system_time (Vf, Vt)
+            );
+            create table CustomersHistory (Id int not null default 0, Name nvarchar(30) not null, Vf datetime2 not null, Vt datetime2 not null);
+            create index ix_CustomersHistory on CustomersHistory (Vt, Vf);
+            """,
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory))");
+        AreEqual((byte)2, simulation.ExecuteScalar("select temporal_type from sys.tables where name = 'Customers'"));
+    }
+
+    [TestMethod]
+    public void HistoryShape_ExistingMatchingTable_LinksFromCreateTable()
+    {
+        // CREATE TABLE naming an existing history table adopts it after the
+        // same validation, rather than failing on the name collision.
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table CustomersHistory (Id int not null, Name nvarchar(30) not null, Vf datetime2 not null, Vt datetime2 not null)",
+            CreateTemporalCustomers.Replace("hidden ", "", StringComparison.Ordinal));
+        AreEqual((byte)1, simulation.ExecuteScalar("select temporal_type from sys.tables where name = 'CustomersHistory'"));
+        AreEqual((byte)2, simulation.ExecuteScalar("select temporal_type from sys.tables where name = 'Customers'"));
+    }
+
+    [TestMethod]
+    public void HistoryShape_ExistingMismatchedTable_RejectsCreateTableAndLeavesNoBase()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table CustomersHistory (Id int not null, Nom nvarchar(30) not null, Vf datetime2 not null, Vt datetime2 not null)");
+        simulation.AssertSqlError(
+            CreateTemporalCustomers.Replace("hidden ", "", StringComparison.Ordinal),
+            13524,
+            "Setting SYSTEM_VERSIONING to ON failed because column 'Nom' at ordinal 2 in history table 'simulated.dbo.CustomersHistory' has a different name than the column 'Name' at the same ordinal in table 'simulated.dbo.Customers'.");
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.tables where name = 'Customers'"));
+    }
 }

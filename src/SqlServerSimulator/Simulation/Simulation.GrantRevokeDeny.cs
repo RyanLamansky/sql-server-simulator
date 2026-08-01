@@ -265,6 +265,12 @@ partial class Simulation
                 throw SimulatedSqlException.CannotFindObject(objectSecurableName.Value.Leaf);
             securableObject = obj;
             permMajorId = obj.ObjectId;
+            // A synonym is entity-level: real accepts SELECT / UPDATE /
+            // REFERENCES on it but takes no column list, and reports that only
+            // once the securable has resolved — severity 16 state 3, ahead of
+            // the Msg 4615 unknown-column check.
+            if (obj is Synonym && permissions.Exists(p => p.Columns is not null))
+                throw SimulatedSqlException.GrantSubEntityListNotAllowedOnSynonym();
             foreach (var (permName, _) in permissions)
                 ValidatePermissionAgainstObjectKind(permName, obj.ObjectTypeCode);
         }

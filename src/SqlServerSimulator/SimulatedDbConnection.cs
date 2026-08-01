@@ -514,6 +514,15 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool TriggerBodyErrorRaised;
 
     /// <summary>
+    /// Suppresses database-scope DDL trigger firing for every statement on this
+    /// session. Set by the BACPAC loader, whose synthesized DDL rebuilds a
+    /// database that may already carry an audit trigger of its own — real's own
+    /// import path disables DDL triggers for the same reason, and firing an
+    /// imported trigger against half-built schema would fail the load.
+    /// </summary>
+    internal bool SuppressDdlTriggers;
+
+    /// <summary>
     /// Last identity value produced by an INSERT on this connection — the
     /// source for both <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c>. SQL
     /// Server scopes these per session/scope; the simulator collapses both

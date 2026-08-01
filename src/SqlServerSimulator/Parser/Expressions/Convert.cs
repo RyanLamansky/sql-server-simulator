@@ -143,4 +143,6 @@ internal sealed class ConvertExpression : Expression
     // Stability is governed by the value operand; the optional style is a
     // constant / variable and never row-varying.
     internal override Expression? PureConversionOperand => this.source;
+
+    internal override bool IsWrittenConstant => this.source.IsWrittenConstant;
 }

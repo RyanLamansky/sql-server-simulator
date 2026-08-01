@@ -19,6 +19,39 @@ partial class Simulation
     /// <c>DELETE</c> / <c>MERGE</c>) so the surrounding switch can resume
     /// dispatch.
     /// </remarks>
+    /// <summary>
+    /// Parses a stored body's query — an optional <c>WITH cte [, …]</c> prefix
+    /// followed by the <c>SELECT</c> it scopes to — at statement depth. The
+    /// seam every body-parse site shares: <c>CREATE</c> / <c>ALTER VIEW</c> and
+    /// each later re-parse of a view's stored text (invocation, indexed-view
+    /// materialization, shape analysis, base-table collection), the inline
+    /// TVF's <c>RETURN</c> body at both create and invoke, and
+    /// <c>DECLARE … CURSOR FOR</c>.
+    /// </summary>
+    /// <remarks>
+    /// A body is its own parse unit — the dispatch loop's WITH handling never
+    /// sees it, which is why a leading WITH has to be recognized here. The
+    /// bindings register on <paramref name="context"/> exactly as a top-level
+    /// prefix would, so the CTE resolves through the same FROM-source lookup;
+    /// bodies parsed in a child <see cref="BatchContext"/> get a fresh
+    /// <see cref="ParserContext"/> per parse, and the one body parsed on the
+    /// caller's own context (CREATE VIEW, which must start its batch) is
+    /// followed only by the trailing <c>WITH CHECK OPTION</c> scan before the
+    /// statement loop clears the slot.
+    /// <para>
+    /// Positions where a query may <em>not</em> carry a CTE prefix — a derived
+    /// table, a scalar subquery, the <c>RETURN (…)</c> expression of a scalar
+    /// UDF — keep calling <see cref="Selection.Parse"/> directly and so keep
+    /// rejecting the WITH, matching real.
+    /// </para>
+    /// </remarks>
+    internal static Selection ParseBodyQuery(ParserContext context)
+    {
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+            ParseCteBindings(context);
+        return Selection.Parse(context, depth: 0);
+    }
+
     private static void ParseCteBindings(ParserContext context)
     {
         var bindings = new Dictionary<string, CteBinding>(StringComparer.OrdinalIgnoreCase);
@@ -31,6 +64,13 @@ partial class Simulation
 
             if (bindings.ContainsKey(cteName.Value))
                 throw SimulatedSqlException.DuplicateCteName(cteName.Value);
+
+            // Msg 10137 names the first CTE a view body declares, whether or
+            // not the body's SELECT reaches it (probe-confirmed: a two-CTE
+            // body whose SELECT reads only the second still names the first,
+            // and an entirely unreferenced CTE names itself).
+            if (context.IndexedViewShapeCollector is { } shapeCollector)
+                shapeCollector.CteName ??= cteName.Value;
 
             string[]? renameList = null;
             context.MoveNextRequired();

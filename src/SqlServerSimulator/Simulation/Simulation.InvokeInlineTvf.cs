@@ -102,12 +102,15 @@ partial class Simulation
         // Body errors attribute to the outer invoking statement (probe-
         // confirmed: real reports the referencing SELECT's line, no procedure).
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
+        // Inlined into the referencing statement — same current-time freeze,
+        // so a per-row APPLY reads one constant value (matching real).
+        innerBatch.AdoptStatementFreezeFrom(outerBatch);
         connection.NestingLevel++;
         try
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
-            var bodySelection = Selection.Parse(parser, depth: 0);
+            var bodySelection = ParseBodyQuery(parser);
             var resultSet = bodySelection.Execute(innerBatch, outerResolver: null);
             foreach (var rowBytes in resultSet.RowBytes)
                 yield return rowBytes;

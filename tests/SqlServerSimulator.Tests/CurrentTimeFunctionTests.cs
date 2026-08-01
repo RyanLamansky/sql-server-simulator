@@ -190,6 +190,120 @@ public sealed class CurrentTimeFunctionTests
         AreEqual("datetime", DescribeFirstColumnTypeName("select Current_Timestamp"));
     }
 
+    // A view / inline-TVF body runs on its own child batch that never reaches
+    // the dispatch loop, so it inherits the referencing statement's freeze
+    // instead of being stamped. Before it did, current-time calls in such a
+    // body read an unstamped 0001-01-01 — outside legacy datetime's range, so
+    // bare GETDATE() raised Msg 242 (at first read for a view; at CREATE for an
+    // inline TVF, whose output-column inference parses the body).
+    [TestMethod]
+    public void View_ProjectingGetDate_ReturnsCurrentInstant()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create view v as select getdate() as d");
+        var before = DateTime.UtcNow;
+        using var reader = simulation.ExecuteReader("select d from v");
+        IsTrue(reader.Read());
+        AreEqual("datetime", reader.GetDataTypeName(0));
+        AssertRecent(before, reader.GetDateTime(0));
+    }
+
+    [TestMethod]
+    public void InlineTvf_ProjectingGetDate_ReturnsCurrentInstant()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create function dbo.m() returns table as return (select getdate() as d)");
+        var before = DateTime.UtcNow;
+        using var reader = simulation.ExecuteReader("select d from dbo.m()");
+        IsTrue(reader.Read());
+        AreEqual("datetime", reader.GetDataTypeName(0));
+        AssertRecent(before, reader.GetDateTime(0));
+    }
+
+    [TestMethod]
+    public void View_ProjectingCastGetDateToDateTime2_ReturnsCurrentInstant()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create view v as select cast(getdate() as datetime2) as d");
+        var before = DateTime.UtcNow;
+        using var reader = simulation.ExecuteReader("select d from v");
+        IsTrue(reader.Read());
+        AreEqual("datetime2", reader.GetDataTypeName(0));
+        AssertRecent(before, reader.GetDateTime(0));
+    }
+
+    // Projected types match real SQL Server's sys.columns for the same view
+    // (probe-confirmed: system_type_id 61 / 42 / 43 in that order).
+    [TestMethod]
+    public void View_ProjectingWholeCurrentTimeFamily_TypesAndInstantMatch()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("""
+            create view v as select getdate() as d, getutcdate() as u, current_timestamp as c,
+                sysdatetime() as s, sysutcdatetime() as su, sysdatetimeoffset() as o,
+                dateadd(day, 1, getdate()) as tomorrow
+            """);
+        var before = DateTime.UtcNow;
+        using var reader = simulation.ExecuteReader("select d, u, c, s, su, o, tomorrow from v");
+        IsTrue(reader.Read());
+        AreEqual("datetime", reader.GetDataTypeName(0));
+        AreEqual("datetime", reader.GetDataTypeName(1));
+        AreEqual("datetime", reader.GetDataTypeName(2));
+        AreEqual("datetime2", reader.GetDataTypeName(3));
+        AreEqual("datetime2", reader.GetDataTypeName(4));
+        AreEqual("datetimeoffset", reader.GetDataTypeName(5));
+        AreEqual("datetime", reader.GetDataTypeName(6));
+
+        var legacyExpected = RoundToLegacyTick(reader.GetDateTime(3));
+        AreEqual(legacyExpected.Ticks, reader.GetDateTime(0).Ticks);
+        AreEqual(legacyExpected.Ticks, reader.GetDateTime(1).Ticks);
+        AreEqual(legacyExpected.Ticks, reader.GetDateTime(2).Ticks);
+        AreEqual(reader.GetDateTime(3).Ticks, reader.GetDateTime(4).Ticks);
+        AreEqual(TimeSpan.Zero, reader.GetFieldValue<DateTimeOffset>(5).Offset);
+        AreEqual(legacyExpected.AddDays(1).Ticks, reader.GetDateTime(6).Ticks);
+        AssertRecent(before, reader.GetDateTime(3));
+    }
+
+    // Real inlines both into the referencing statement's plan, so their
+    // current-time calls read that statement's freeze (probe-confirmed: a view
+    // read once per row across a 300,000-row scan yields one constant value,
+    // equal to the referencing statement's own SYSDATETIME()).
+    [TestMethod]
+    public void View_CurrentTime_SharesReferencingStatementFreeze()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create view v as select sysdatetime() as d");
+        AreEqual(1, simulation.ExecuteScalar("select case when sysdatetime() = (select d from v) then 1 else 0 end"));
+    }
+
+    [TestMethod]
+    public void InlineTvf_CurrentTime_IsConstantAcrossPerRowApply()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (id int)",
+            "create function dbo.m() returns table as return (select sysdatetime() as d)",
+            "insert t values (1), (2), (3)");
+        AreEqual(1, simulation.ExecuteScalar("select count(distinct f.d) from t cross apply dbo.m() f"));
+        AreEqual(1, simulation.ExecuteScalar("select case when sysdatetime() = (select d from dbo.m()) then 1 else 0 end"));
+    }
+
+    // The freeze is the referencing statement's, not a value baked into the
+    // view at CREATE: a later statement reads a later instant.
+    [TestMethod]
+    public void View_CurrentTime_AdvancesAcrossStatements()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create view v as select sysdatetime() as d");
+        var first = simulation.ExecuteScalar<DateTime>("select d from v");
+        Thread.Sleep(2);
+        IsGreaterThan(first, simulation.ExecuteScalar<DateTime>("select d from v"));
+    }
+
+    private static void AssertRecent(DateTime before, DateTime actual)
+        => IsTrue(actual >= before.AddSeconds(-1) && actual <= DateTime.UtcNow.AddSeconds(1),
+            $"{actual:o} not within +/-1s of [{before:o}, {DateTime.UtcNow:o}]");
+
     private static string DescribeFirstColumnTypeName(string commandText)
     {
         using var reader = new Simulation().ExecuteReader(commandText);

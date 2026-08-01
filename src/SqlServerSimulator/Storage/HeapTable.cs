@@ -275,6 +275,49 @@ internal sealed class HeapTable : SchemaObject
     public bool IsHistoryTable;
 
     /// <summary>
+    /// True when <see cref="PeriodColumns"/> was copied from a base table
+    /// while building this table as its history sibling, rather than declared
+    /// by a <c>PERIOD FOR SYSTEM_TIME</c> clause of its own. The copy exists
+    /// only so the <c>FOR SYSTEM_TIME</c> row source can read the period
+    /// ordinals off either side; real SQL Server's history tables carry no
+    /// period at all, which is why a table with a *declared* period is
+    /// rejected as a history candidate (Msg 13574) while one holding a copy
+    /// can be re-linked after <c>SET (SYSTEM_VERSIONING = OFF)</c>.
+    /// </summary>
+    public bool PeriodInheritedFromBase;
+
+    /// <summary>
+    /// The <c>HISTORY_RETENTION_PERIOD</c> count declared on this table's
+    /// <c>SYSTEM_VERSIONING = ON</c> clause, paired with
+    /// <see cref="HistoryRetentionUnit"/>. -1 with
+    /// <see cref="Storage.HistoryRetentionUnit.Infinite"/> is the default
+    /// every system-versioned table starts at, and the pair projects through
+    /// <c>sys.tables.history_retention_period</c> /
+    /// <c>history_retention_period_unit</c> on the base table only (NULL on
+    /// history and non-temporal tables).
+    /// </summary>
+    public int HistoryRetentionPeriod = -1;
+
+    /// <inheritdoc cref="HistoryRetentionPeriod"/>
+    public HistoryRetentionUnit HistoryRetentionUnit = HistoryRetentionUnit.Infinite;
+
+    /// <summary>
+    /// The instant a history row must have stopped being current at or after
+    /// to remain visible to <c>FOR SYSTEM_TIME</c>, or null when retention is
+    /// INFINITE (every version stays visible). Real SQL Server applies the
+    /// window at query time and deletes the aged rows later from a background
+    /// task, so the cutoff is a read-side filter rather than a delete trigger.
+    /// </summary>
+    public DateTime? HistoryRetentionCutoff(DateTime asOf) => this.HistoryRetentionUnit switch
+    {
+        Storage.HistoryRetentionUnit.Day => asOf.AddDays(-this.HistoryRetentionPeriod),
+        Storage.HistoryRetentionUnit.Week => asOf.AddDays(-7L * this.HistoryRetentionPeriod),
+        Storage.HistoryRetentionUnit.Month => asOf.AddMonths(-this.HistoryRetentionPeriod),
+        Storage.HistoryRetentionUnit.Year => asOf.AddYears(-this.HistoryRetentionPeriod),
+        _ => null,
+    };
+
+    /// <summary>
     /// Non-null on global temp tables (<c>##foo</c>): the connection that ran
     /// the <c>CREATE TABLE</c>. Used by <see cref="SimulatedDbConnection.Dispose"/>
     /// to auto-drop the owner's <c>##</c> tables at session close — probe-

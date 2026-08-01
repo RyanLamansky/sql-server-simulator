@@ -119,19 +119,18 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException SyntaxErrorNearKeyword(string keyword) => new($"Incorrect syntax near the keyword '{keyword}'.", 156, 15, 1);
 
-    internal static SimulatedSqlException SyntaxErrorNear(ParserContext context) => new($"Incorrect syntax near '{context.Token}'.", 102, 15, 1);
-
-    internal static SimulatedSqlException SyntaxErrorNear(Token? token) => new($"Incorrect syntax near '{token}'.", 102, 15, 1);
-
-    internal static SimulatedSqlException SyntaxErrorNear(char c) => new($"Incorrect syntax near '{c}'.", 102, 15, 1);
+    internal static SimulatedSqlException SyntaxErrorNear(ParserContext context) => SyntaxErrorNear(context.Token);
 
     /// <summary>
-    /// Msg 102 naming a value the caller renders itself — for a string literal,
-    /// whose <c>Token.ToString()</c> carries the surrounding quotes that real's
-    /// message doesn't (real reports <c>near 'q'</c> for the literal
-    /// <c>'q'</c>, not <c>near ''q''</c>).
+    /// Mimics SQL Server error 102, naming the offending token. The name comes
+    /// from <c>Token.ErrorText</c> rather than the token's source text, because
+    /// real names a literal by the value it denotes: <c>'q'</c> is reported as
+    /// <c>near 'q'</c>, not <c>near ''q''</c>. A null token — end of input —
+    /// leaves the slot empty, matching real's <c>near ''.</c>
     /// </summary>
-    internal static SimulatedSqlException SyntaxErrorNearValue(string value) => new($"Incorrect syntax near '{value}'.", 102, 15, 1);
+    internal static SimulatedSqlException SyntaxErrorNear(Token? token) => new($"Incorrect syntax near '{token?.ErrorText}'.", 102, 15, 1);
+
+    internal static SimulatedSqlException SyntaxErrorNear(char c) => new($"Incorrect syntax near '{c}'.", 102, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server error 1038: a select-list column alias resolved to

@@ -114,18 +114,20 @@ internal sealed partial class Selection
     public List<ReferencedSecurable>? ReferencedSecurables;
 
     /// <summary>
-    /// Per base-table <c>object_id</c>, the 1-based column ordinals this query
+    /// Per table / view <c>object_id</c>, the 1-based column ordinals this query
     /// reads — the input to the execution-time column-level SELECT check
     /// (Msg 230 / 229). Recorded at parse time (principal-independent, rides the
     /// cached plan) from the resolved column references across the projection,
     /// WHERE, JOIN ON, GROUP BY, HAVING, and ORDER BY of every (sub)query.
-    /// A base table present with an <em>empty</em> ordinal set is read without
+    /// An object present with an <em>empty</em> ordinal set is read without
     /// naming a column (<c>COUNT(*)</c> / <c>SELECT 1</c> / <c>EXISTS</c>), which
-    /// real checks as requiring SELECT on every column. Null when the query
-    /// reads no base table (constant SELECT / all-system-table). Set once by the
-    /// outermost <see cref="ParseQueryExpression"/>.
+    /// real checks as requiring SELECT on every column. A source reached through
+    /// a synonym is absent (a synonym takes no column grants, so it is checked
+    /// object-grain). Null when the query reads no column-grantable object
+    /// (constant SELECT / all-system-table). Set once by the outermost
+    /// <see cref="ParseQueryExpression"/>.
     /// </summary>
-    public Dictionary<int, (Storage.HeapTable Table, HashSet<int> Columns)>? ReadColumnsByObject;
+    public Dictionary<int, ColumnReadTarget>? ReadColumnsByObject;
 
     /// <summary>
     /// Pre-computed destination schema (column names + types + nullability
@@ -953,11 +955,7 @@ internal sealed partial class Selection
             // column. Only a comma or a clause keyword may follow a complete,
             // aliased element (probe-confirmed).
             if (!elementExpected && StartsProjectionElement(context.Token))
-            {
-                throw context.Token is Literal { Value.Type.Category: SqlTypeCategory.String } offendingLiteral
-                    ? SimulatedSqlException.SyntaxErrorNearValue(offendingLiteral.Value.AsString)
-                    : SimulatedSqlException.SyntaxErrorNear(context);
-            }
+                throw SimulatedSqlException.SyntaxErrorNear(context);
 
             switch (context.Token)
             {
@@ -1571,8 +1569,11 @@ internal sealed partial class Selection
     /// <summary>
     /// Peeks whether the FROM source about to be parsed is a parenthesized
     /// join group — an opening <c>(</c> whose first interior token is not
-    /// <c>SELECT</c> (a derived table) or <c>VALUES</c> (a table-value
-    /// constructor). Entered with the cursor on the token preceding the source
+    /// <c>SELECT</c> (a derived table), <c>VALUES</c> (a table-value
+    /// constructor) or <c>WITH</c> (a CTE prefix, which no query in a
+    /// parenthesized position may carry — routing it to the derived-table
+    /// branch is what gets it real's Msg 156 instead of a join group's
+    /// Msg 102). Entered with the cursor on the token preceding the source
     /// (<c>FROM</c> / a JOIN keyword / a comma / the group's own <c>(</c> when
     /// this is an interior leftmost), matching the one-token lookahead
     /// <see cref="ParseSingleFromSource"/> consumes; the checkpoint is restored
@@ -1584,7 +1585,7 @@ internal sealed partial class Selection
         var opensParen = context.GetNextOptional() is Operator { Character: '(' };
         var interior = context.GetNextOptional();
         context.RestoreCheckpoint(checkpoint);
-        return opensParen && interior is not (null or ReservedKeyword { Keyword: Keyword.Select or Keyword.Values });
+        return opensParen && interior is not (null or ReservedKeyword { Keyword: Keyword.Select or Keyword.Values or Keyword.With });
     }
 
     /// <summary>
@@ -1766,15 +1767,25 @@ internal sealed partial class Selection
     /// </summary>
     /// <summary>
     /// Records a real table / view / TVF read on the active securable sink for
-    /// the execution-time SELECT permission check. Skips temp tables
-    /// (<c>#foo</c>) — those aren't permission-checked — and no-ops when no sink
-    /// is active (a module body, or a context that isn't tracking reads).
+    /// the execution-time SELECT permission check, and hands back the
+    /// <see cref="Schemas.Synonym"/> the reference was written as (null for a
+    /// direct one) so the caller can stamp it on the built
+    /// <see cref="FromSource"/>. A synonym is recorded as the securable in place
+    /// of the object behind it — real checks the synonym and never the base.
+    /// Skips temp tables (<c>#foo</c>) — those aren't permission-checked — and
+    /// records nothing when no sink is active (a module body, or a context that
+    /// isn't tracking reads); the synonym is resolved either way, since the
+    /// joined UPDATE / DELETE paths read it off the source without a sink.
     /// </summary>
-    private static void RecordSecurableRead(ParserContext context, Schemas.SchemaObject obj, MultiPartName name)
+    private static Schemas.Synonym? RecordSecurableRead(ParserContext context, Schemas.SchemaObject obj, MultiPartName name)
     {
-        if (context.SecurableSink is not { } sink || name.Leaf.StartsWith('#'))
-            return;
-        sink.Add(new ReferencedSecurable(obj.ObjectId, obj.SchemaId, obj.Name, name.ImmediateQualifier ?? Database.DefaultSchemaName));
+        var synonym = context.Batch.TryResolveSynonym(name, out var resolved) ? resolved : null;
+        if (context.SecurableSink is { } sink && !name.Leaf.StartsWith('#'))
+        {
+            var securable = (Schemas.SchemaObject?)synonym ?? obj;
+            sink.Add(new ReferencedSecurable(securable.ObjectId, securable.SchemaId, securable.Name, name.ImmediateQualifier ?? Database.DefaultSchemaName));
+        }
+        return synonym;
     }
 
     private static FromSource ParseSingleFromSource(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver) =>
@@ -1994,7 +2005,7 @@ internal sealed partial class Selection
                         viewColumnNames[ci] = resolvedView.OutputColumns[ci].Name;
                     var viewAlias = ConsumeOptionalAlias(context);
                     _ = ParseOptionalTableHints(context);
-                    RecordSecurableRead(context, resolvedView, objectName);
+                    var viewSynonym = RecordSecurableRead(context, resolvedView, objectName);
                     return new FromSource(
                         qualifier: viewAlias ?? resolvedView.Name,
                         columnNames: viewColumnNames,
@@ -2004,7 +2015,8 @@ internal sealed partial class Selection
                         lobStore: null,
                         rows: [],
                         lateralPlan: Selection.ForView(resolvedView),
-                        backingView: resolvedView);
+                        backingView: resolvedView,
+                        viaSynonym: viewSynonym);
                 }
 
                 // TVF call from FROM clause: `FROM schema.fn(args) [alias]`.
@@ -2029,7 +2041,7 @@ internal sealed partial class Selection
                         var outputColumns = function is InlineTableValuedFunction inline
                             ? inline.OutputColumns
                             : ((MultiStatementTableValuedFunction)function).OutputColumns;
-                        RecordSecurableRead(context, function, objectName);
+                        _ = RecordSecurableRead(context, function, objectName);
                         var lateralPlan = function is InlineTableValuedFunction inlineTvf
                             ? Selection.ForInlineTvf(inlineTvf, tvfArgs)
                             : Selection.ForMultiStatementTvf((MultiStatementTableValuedFunction)function, tvfArgs);
@@ -2106,7 +2118,7 @@ internal sealed partial class Selection
                 // materialize through a separate path that doesn't expose
                 // RIDs).
                 var heapPlan = context.Batch.AcquireDataLockIfApplicable(heapTable, heapHints, isWrite: false);
-                RecordSecurableRead(context, heapTable, objectName);
+                var heapSynonym = RecordSecurableRead(context, heapTable, objectName);
                 var heapQualifier = heapAlias ?? objectName.Leaf;
                 var heapRows = temporalRowSource
                     ?? (heapPlan.NoLockReader
@@ -2122,7 +2134,8 @@ internal sealed partial class Selection
                     lobStore: heapTable.Heap,
                     rows: heapRows,
                     backingTable: heapTable,
-                    heapPlan: temporalRowSource is null ? heapPlan : null);
+                    heapPlan: temporalRowSource is null ? heapPlan : null,
+                    viaSynonym: heapSynonym);
 
             // Table-variable source: <c>FROM @t [alias]</c>. Routes through
             // BatchContext.TableVariables instead of the regular schema dict;
@@ -2159,7 +2172,16 @@ internal sealed partial class Selection
                     return ParseValuesDerivedTable(context, context.OuterTypeResolver ?? outerTypeResolver);
 
                 if (afterOpenParen is not ReservedKeyword { Keyword: Keyword.Select })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                {
+                    // A CTE prefix inside a derived table is real's Msg 156
+                    // rather than the generic Msg 102 — a WITH may only
+                    // precede a statement, never a parenthesized query
+                    // (probe-confirmed; real follows it with Msg 319 and
+                    // Msg 102, of which the simulator raises the first).
+                    throw afterOpenParen is ReservedKeyword { Keyword: Keyword.With } withKeyword
+                        ? SimulatedSqlException.SyntaxErrorNearKeyword(withKeyword)
+                        : SimulatedSqlException.SyntaxErrorNear(context);
+                }
 
                 // Derived tables can correlate to outer scope (SQL Server
                 // allows any FROM derived table to reference outer columns,
@@ -2196,7 +2218,7 @@ internal sealed partial class Selection
                 // mandatory: real reports Msg 102 near the closing ')' when
                 // it's missing (probe-confirmed 2026-07-31).
                 var derivedQualifier = ConsumeOptionalAlias(context)
-                    ?? throw SimulatedSqlException.SyntaxErrorNearValue(")");
+                    ?? throw SimulatedSqlException.SyntaxErrorNear(')');
                 var derivedNames = ResolveDerivedTableColumnNames(context, derivedSelection.ColumnNames, derivedQualifier);
 
                 return new FromSource(
@@ -3146,10 +3168,10 @@ internal sealed partial class Selection
     /// <summary>
     /// Reads one or more ORDER BY items (comma separated). Each item is an
     /// <see cref="Expression"/> followed by an optional <c>ASC</c>/<c>DESC</c>
-    /// keyword (default ASC). A pure positive-integer literal is recorded as
-    /// an ordinal reference into the projection rather than a constant
-    /// expression; constant non-integer expressions silently sort by their
-    /// constant (SQL Server's Msg 408 rejection isn't modeled).
+    /// keyword (default ASC). A signed integer literal is recorded as an
+    /// ordinal reference into the projection (validated against the projection
+    /// count later, Msg 108); any other term built purely from literals is
+    /// rejected with Msg 408, and a bare variable with Msg 1008.
     /// </summary>
     private static void ParseOrderByItems(ParserContext context, List<OrderBySpec> orderBy)
     {
@@ -3170,24 +3192,61 @@ internal sealed partial class Selection
                     break;
             }
 
-            // A bare integer literal is the ordinal form (validated against the
-            // projection count later in BuildSqlProjection). Anything else —
-            // including a constant arithmetic expression like `1+0` — falls
-            // through to per-row evaluation; SQL Server's Msg 408 rejection of
-            // constant ORDER BY expressions isn't modeled.
-            if (expr is Value valExpr
-                && valExpr.Constant.Type == SqlType.Int32
-                && !valExpr.Constant.IsNull)
+            // Real's ordinal form is a *signed* integer literal, parentheses
+            // included: `(1)` orders by the first column and `-1` / `-(1)`
+            // report Msg 108 for position -1 (probe-confirmed), while a binary
+            // arithmetic expression that folds to the same number (`2 - 1`) is
+            // a constant instead.
+            if (IntegerOrdinalOf(expr) is { } ordinal)
             {
-                orderBy.Add(OrderBySpec.FromOrdinal(valExpr.Constant.AsInt32, descending));
+                orderBy.Add(OrderBySpec.FromOrdinal(ordinal, descending));
+                continue;
             }
-            else
-            {
-                orderBy.Add(OrderBySpec.FromExpression(expr, descending));
-            }
+
+            // Position is the 1-based index in the ORDER BY list, counted
+            // before the term is added.
+            if (expr.IsWrittenConstant)
+                throw SimulatedSqlException.ConstantExpressionInOrderBy(orderBy.Count + 1);
+
+            // A variable reachable through pure conversions only is real's
+            // "column position" shape, so it lands on its own error rather than
+            // Msg 408.
+            if (IsVariableColumnPosition(expr))
+                throw SimulatedSqlException.VariableInOrderByPosition(orderBy.Count + 1);
+
+            orderBy.Add(OrderBySpec.FromExpression(expr, descending));
         }
         while (context.Token is Operator { Character: ',' });
     }
+
+    /// <summary>
+    /// The ordinal an ORDER BY term names when it is an integer literal, or
+    /// null. Parentheses and unary minus are peeled — real's grammar takes a
+    /// signed integer constant here — so <c>(1)</c> is ordinal 1 and <c>-1</c>
+    /// is ordinal -1 (out of range, Msg 108).
+    /// </summary>
+    /// <summary>
+    /// Whether an ORDER BY term is a variable real reads as a column position
+    /// (Msg 1008): a <see cref="VariableReference"/> reachable through pure
+    /// conversions only — <c>@v</c>, <c>(@v)</c>, <c>((@v))</c>,
+    /// <c>CAST(@v AS int)</c>. A variable inside arithmetic sorts per row
+    /// instead (probe-confirmed: <c>@v + 1</c>, <c>-@v</c>, <c>(@v) + 0</c> all
+    /// order the rows).
+    /// </summary>
+    private static bool IsVariableColumnPosition(Expression expr)
+    {
+        while (expr.PureConversionOperand is { } operand)
+            expr = operand;
+        return expr is VariableReference;
+    }
+
+    private static int? IntegerOrdinalOf(Expression expr) => expr switch
+    {
+        Value { IsLiteral: true, Constant: { IsNull: false } constant } when constant.Type == SqlType.Int32 => constant.AsInt32,
+        Parenthesized parenthesized => IntegerOrdinalOf(parenthesized.Wrapped),
+        Negate negate => IntegerOrdinalOf(negate.Operand) is { } inner ? -inner : null,
+        _ => null,
+    };
 
     /// <summary>
     /// Builds the plan for a tableless SELECT (synthesized constant-row
@@ -3586,12 +3645,18 @@ internal sealed class TemporalRowSource(
 
         foreach (var bytes in parent.Heap.EnumerateRows())
         {
-            if (this.RowMatches(parent.StoredColumns, bytes, parent.Heap, startStored, endStored, lowerTime, upperTime))
+            if (this.RowMatches(parent.StoredColumns, bytes, parent.Heap, startStored, endStored, lowerTime, upperTime, DateTime.MinValue))
                 yield return bytes;
         }
+        // A finite HISTORY_RETENTION_PERIOD hides history rows whose validity
+        // ended before the window opens. Real applies the same cutoff at query
+        // time (its background cleanup task deletes them later), so an aged-out
+        // version disappears from every FOR SYSTEM_TIME form the moment the
+        // retention period is set.
+        var cutoff = parent.HistoryRetentionCutoff(batch.CurrentStatement.UtcNow) ?? DateTime.MinValue;
         foreach (var bytes in history.Heap.EnumerateRows())
         {
-            if (this.RowMatches(history.StoredColumns, bytes, history.Heap, startStored, endStored, lowerTime, upperTime))
+            if (this.RowMatches(history.StoredColumns, bytes, history.Heap, startStored, endStored, lowerTime, upperTime, cutoff))
                 yield return bytes;
         }
     }
@@ -3626,13 +3691,13 @@ internal sealed class TemporalRowSource(
         return raw.CoerceTo(target).AsDateTime2;
     }
 
-    private bool RowMatches(HeapColumn[] storedColumns, byte[] bytes, Heap lobStore, int startStored, int endStored, DateTime lower, DateTime upper)
+    private bool RowMatches(HeapColumn[] storedColumns, byte[] bytes, Heap lobStore, int startStored, int endStored, DateTime lower, DateTime upper, DateTime retentionCutoff)
     {
         var rowStart = RowDecoder.DecodeColumn(storedColumns, bytes, startStored, lobStore).AsDateTime2;
         var rowEnd = RowDecoder.DecodeColumn(storedColumns, bytes, endStored, lobStore).AsDateTime2;
         // Zero-duration versions are invisible to every form, so the
         // period predicate only sees rows that were current for a while.
-        return rowStart < rowEnd && kind switch
+        return rowStart < rowEnd && rowEnd >= retentionCutoff && kind switch
         {
             TemporalQueryKind.All => true,
             TemporalQueryKind.AsOf => rowStart <= lower && lower < rowEnd,

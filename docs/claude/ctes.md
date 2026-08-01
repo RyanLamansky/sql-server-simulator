@@ -41,3 +41,28 @@ Two related rejections fire earlier and differ from real in *which* error, not i
 `OPTION (MAXRECURSION N)` parses inside `Selection.ParseQueryExpression` after ORDER BY/OFFSET/FETCH and writes to every binding in scope.
 Other hints (`OPTIMIZE FOR`, `RECOMPILE`, etc.) → `NotSupportedException`.
 EF emits non-recursive CTEs in some shapes (TPC inheritance, certain Distinct/OrderBy/Skip patterns); recursive CTEs only via raw SQL.
+
+## Where a prefix may appear
+
+A **statement** may carry one, and so may a **stored body** — but a *parenthesized query* may not, on real or here.
+
+The statement side is the dispatch loop: it clears `ParserContext.CteBindings` per statement and repopulates from a leading WITH before the switch dispatches.
+That covers every module whose body is a statement sequence — stored procedures, triggers, multi-statement TVFs, scalar UDF bodies, dynamic SQL.
+
+A stored body is its own parse unit and never reaches that loop, so the prefix is recognized at the body-parse seam instead: `Simulation.ParseBodyQuery` (an optional WITH prefix + `Selection.Parse` at depth 0), shared by every site that parses a body's query.
+Those sites are `CREATE` / `ALTER VIEW` and each later re-parse of a view's stored text (invocation, indexed-view materialization, shape analysis, base-table collection), the inline TVF's `RETURN` body at both create and invoke, and `DECLARE … CURSOR FOR`.
+The view forms compose with everything else the header carries: the column-rename list, `WITH SCHEMABINDING`, a trailing `WITH CHECK OPTION`, `ALTER VIEW` / `CREATE OR ALTER VIEW`, and the body's own Msg 1033 ORDER BY rule.
+A recursive CTE works in a body the same as at statement level — the body re-parses per invocation, so each execution owns fresh bindings.
+
+Parenthesized query positions never route through that seam and so keep rejecting the WITH, which is what real does: a derived table, a scalar or `IN` subquery, a scalar UDF's `RETURN (…)` expression, and `MERGE … USING (…)` all answer **Msg 156** (`Incorrect syntax near the keyword 'with'.`).
+Real follows that with Msg 319 and Msg 102; the simulator raises the first.
+The FROM-clause leg takes one deliberate step to get there: a `(` whose first interior token is WITH is classified as a derived table rather than a parenthesized join group, so the rejection carries 156 instead of the join group's 102.
+
+Two body-side interactions live in their own features:
+
+- **Schema binding** excludes the names a body's own WITH prefix declares from the Msg 4512 two-part-name rule — a one-part CTE reference is the CTE even when the default schema holds a table of that name, whereas a real one-part table reference *inside* a CTE definition still trips it → [`programmable.md`](programmable.md#schema-binding-with-schemabinding).
+- **A CTE-bearing view can't be indexed**: `CREATE INDEX` on it is **Msg 10137**, naming the first CTE the body declares → [`indexes.md`](indexes.md).
+
+### Not modeled yet
+
+DML through a CTE-bodied view (`INSERT` / `UPDATE` / `DELETE` against `CREATE VIEW v AS WITH c AS (SELECT … FROM t) SELECT … FROM c`) reports Msg 4403, where real passes it through to the base table → [`programmable.md`](programmable.md#updatable-views-dml-through-views).

@@ -60,4 +60,5 @@ The static exception factories (`SimulatedSqlException.*Errors.cs`) can't reach 
 ## Divergences / residuals
 
 - **`THROW; re-raise inside a proc body`** preserves the original line but not a body-relative offset re-application; top-level re-raise is exact.
-- **DDL triggers** are parse-and-store-**no-fire** (see [`triggers.md`](triggers.md)), so no body-error attribution path exists for them; the body-line/name threading above covers DML triggers only.
+
+Database-scope DDL trigger bodies run through the same child-batch dispatch DML trigger bodies do, so the `LineOffset` / `ErrorProcedureName` threading above covers them too — a body-side `THROW` reports its CREATE-relative line and the trigger's unqualified name (see [`triggers.md`](triggers.md)).

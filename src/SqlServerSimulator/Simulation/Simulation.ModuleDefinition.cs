@@ -32,6 +32,13 @@ public sealed partial class Simulation
     /// ALTER. Sch-M is taken on the object being replaced so a concurrent
     /// reader holding Sch-S blocks the swap.
     /// </para>
+    /// <para>
+    /// Replacing a view or function a <c>WITH SCHEMABINDING</c> module
+    /// references is <strong>Msg 3729</strong> (state 3, the altered module
+    /// carried as Procedure attribution) — the same record that blocks the
+    /// referent's DROP, reached through the one choke point every module
+    /// parser's ALTER leg passes.
+    /// </para>
     /// </remarks>
     private static SchemaObject? ResolveModuleAlterTarget(
         ParserContext context,
@@ -46,13 +53,34 @@ public sealed partial class Simulation
             if (!isAlter && !createOrAlter)
                 throw SimulatedSqlException.ThereIsAlreadyAnObject(name.Leaf);
             context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
-            return existing;
+            return existing is View or UserDefinedFunction
+                && SchemaBinding.FindReferencingModule(context.CurrentDatabase, existing) is { } referencing
+                ? throw SimulatedSqlException.CannotAlterReferencedBySchemaBoundObject(
+                    $"{schema.Name}.{existing.Name}", existing.Name, referencing.Name)
+                : existing;
         }
         return schema.HasNameInSharedNamespace(name.Leaf)
             ? throw (isAlter || createOrAlter
                 ? SimulatedSqlException.CannotAlterIncompatibleObjectType(name)
                 : SimulatedSqlException.ThereIsAlreadyAnObject(name.Leaf))
             : isAlter ? throw SimulatedSqlException.InvalidObjectName(name) : null;
+    }
+
+    /// <summary>
+    /// Enforces the name shape a programmable module's <c>CREATE</c> /
+    /// <c>ALTER</c> / <c>CREATE OR ALTER</c> accepts: at most
+    /// <c>schema.object</c>. A database prefix is <strong>Msg 166</strong> even
+    /// when it names the current database, and a server prefix is
+    /// <strong>Msg 117</strong> (both probe-confirmed against SQL Server 2025,
+    /// for every verb and every module kind). <paramref name="moduleKind"/> is
+    /// the keyword real echoes inside <c>'CREATE/ALTER X'</c>.
+    /// </summary>
+    private static void RejectQualifiedModuleName(MultiPartName name, string moduleKind)
+    {
+        if (name.Count >= 4)
+            throw SimulatedSqlException.TooManyNamePrefixes(name, 2);
+        if (name.Count == 3)
+            throw SimulatedSqlException.ModuleNameMayNotBeDatabaseQualified(moduleKind);
     }
 
     /// <summary>

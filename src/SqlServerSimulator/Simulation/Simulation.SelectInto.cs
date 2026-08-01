@@ -105,6 +105,10 @@ partial class Simulation
             rowCount++;
         }
 
+        // SELECT … INTO creates a table, so real raises CREATE_TABLE for it
+        // (probe-confirmed) — but not for a temp destination.
+        if (!isLocalTemp && !isGlobalTemp)
+            RecordDdlEvent(batch.Parser, "CREATE_TABLE", schema?.Name ?? Database.DefaultSchemaName, leaf, "TABLE");
         return new SimulatedNonQuery(rowCount);
     }
 }

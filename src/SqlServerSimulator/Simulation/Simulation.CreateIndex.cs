@@ -157,6 +157,7 @@ partial class Simulation
                 if (ignoreDupKey)
                     throw SimulatedSqlException.IgnoreDupKeyOnViewIndex();
                 context.Batch.Connection.Simulation.CreateIndexOnView(context, view, indexName, isUnique, isClustered, keyColumns, includeColumnNames, filter, filterDefinition);
+                RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", view.Name, "VIEW");
                 return true;
             }
             throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
@@ -224,6 +225,7 @@ partial class Simulation
             ValidateExistingRowsForUniqueIndex(table, index, context.Batch, qualifiedTableName);
 
         table.Indexes.Add(index);
+        RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");
         return true;
     }
 

@@ -978,6 +978,11 @@ partial class Simulation
     private static int CatalogOdbcVer(ProcArgument arg) =>
         arg.IsDefault || arg.Value.IsNull ? 2 : ScalarArguments.CoerceProcedureParameter(arg.Value, SqlType.Int32);
 
+    // A bit-declared system-proc flag (sp_spaceused's @oneresultset /
+    // @include_total_xtp_storage): omitted / NULL is the declared default 0.
+    private static bool CatalogFlagArg(ProcArgument arg) =>
+        !arg.IsDefault && !arg.Value.IsNull && ScalarArguments.CoerceProcedureParameter(arg.Value, SqlType.Bit) != 0;
+
     // Parses @table_type's quoted comma-list ("'TABLE','VIEW'") into an
     // upper-case set; null / empty means "all types".
     private static HashSet<string>? ParseTableTypeList(string? tableType)

@@ -113,9 +113,31 @@ Probe-confirmed for `UPDATE` / `DELETE` / `INSERT` / `FROM` / `WHERE` / `ORDER`,
 **A value where only a separator belongs → Msg 102**, at that token.
 Each element takes at most one postfix alias, so the token after it must be a comma, a clause keyword, or the end: `SELECT 1 xyz 2` is an error at the `2`, not a second column.
 The loop re-enters the element switch after an alias arm, which is exactly where `elementExpected` is false, so the check costs nothing extra.
-A string literal is a legal alias, and the error names the *next* token without the literal's own quotes (`SELECT 'p' y 'q'` → `near 'q'`, via `SyntaxErrorNearValue`).
+A string literal is a legal alias, and the error names the *next* token (`SELECT 'p' y 'q'` → `near 'q'`) under the rendering rule below.
 
 Two end-of-input cases stay on Msg 102 and are distinguished by what preceded them: a bare `SELECT` reports near `'select'`, while a comma that promised an element the input never supplied reports near `','`.
+
+## How Msg 102 names the offending token
+
+The `near '…'` slot does not always echo the token as written, so `Token.ErrorText` — not `Token.ToString()` — feeds the Msg 102 factory.
+`ToString()` stays source-exact because the parser matches token text against it (table-hint and query-hint name lookup).
+Probe-confirmed against SQL Server 2025 (2026-07-31), each spelling placed in the same trailing-token position:
+
+| Spelling | Reported as | Rule |
+| --- | --- | --- |
+| `'b'` / `N'b'` / `"b"` | `b` | delimiters and the `N` prefix drop |
+| `'it''s'` | `it's` | the doubling that escaped a delimiter collapses |
+| `''` | *(empty)* | |
+| `[y]` / `[a]]b]` | `y` / `a]b` | delimited identifiers unwrap the same way |
+| `0xABC` | `0x0abc` | re-rendered from the parsed bytes: lowercase, odd digit count regains its leading zero |
+| `$00005` | `$00005` | a currency literal keeps its spelling, not the `money` value |
+| `12345` / `@v` | `12345` / `@v` | everything else is source text |
+
+A character body is named **as written, not as the collation stores it**: under a CP1252 database `'日本'` stores as `??` yet real still reports `near '日本'`, so the rendering reads the source rather than the parsed `SqlValue`.
+The binary spelling is the one exception that reads the value, which is why an odd-digit literal comes back padded.
+
+The slot also clips, at limits consistent with one shared 258-byte buffer: a character body at **129 UTF-16 code units** (counted after escapes collapse, and splitting a surrogate pair rather than rounding down to a whole character), a binary value at **258 bytes**, and any source-spelled token at **128 characters**.
+Real reaches that last clip through a 200-digit numeric literal — which the simulator's `decimal` backing can't represent — and precedes it with a Msg 103 for the over-long token that the simulator doesn't raise for non-identifiers.
 
 ## Divergences
 

@@ -137,6 +137,7 @@ partial class Simulation
                 if (collation.Equals(constraint.Name, indexName))
                 {
                     ApplyToConstraint(table, constraint, form, ignoreDupKey);
+                    RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
                 }
             }
@@ -146,6 +147,7 @@ partial class Simulation
                 if (collation.Equals(index.Name, indexName))
                 {
                     ApplyToIndex(context, table, index, form, ignoreDupKey);
+                    RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
                 }
             }
@@ -161,6 +163,7 @@ partial class Simulation
             ApplyToConstraint(table, constraint, form, ignoreDupKey);
         foreach (var index in table.Indexes)
             ApplyToIndex(context, table, index, form, ignoreDupKey);
+        RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), table.Name, "INDEX", table.Name, "TABLE");
         return true;
     }
 

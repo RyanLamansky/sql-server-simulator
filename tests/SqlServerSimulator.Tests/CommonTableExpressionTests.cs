@@ -4,9 +4,11 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Behavioral tests for the <c>WITH name [(col, …)] AS (SELECT …)</c>
-/// non-recursive CTE prefix that scopes to one following SELECT / INSERT
-/// / UPDATE / DELETE / MERGE statement. Recursive CTEs are not modeled.
+/// Behavioral tests for the <c>WITH name [(col, …)] AS (SELECT …)</c> CTE
+/// prefix — the recursive and non-recursive forms, the statements it scopes to
+/// (SELECT / INSERT / UPDATE / DELETE / MERGE), the stored bodies that may open
+/// with one (view, inline TVF, cursor declaration), and the parenthesized
+/// query positions that may not.
 /// </summary>
 [TestClass]
 public sealed class CommonTableExpressionTests
@@ -408,5 +410,190 @@ public sealed class CommonTableExpressionTests
         AreEqual(2, sim.ExecuteScalar("with c as (select distinct id from nr) select count(*) from c"));
         AreEqual(1, sim.ExecuteScalar("with c as (select top 1 id from nr) select count(*) from c"));
         AreEqual(2, sim.ExecuteScalar("with c as (select id from nr group by id) select count(*) from c"));
+    }
+
+    // ---- CTE prefix on a stored body ----
+    //
+    // A module body is its own parse unit — the statement dispatch loop's WITH
+    // handling never sees it — so every body-parse site recognizes the prefix
+    // itself. Probe-confirmed against SQL Server 2025 (2026-08-01): a view, an
+    // inline TVF and a cursor declaration each accept one; the parenthesized
+    // query positions below refuse it.
+
+    private static Simulation WithBodySource()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table dbo.b (id int not null, grp int not null);
+            insert dbo.b values (1, 10), (2, 10), (3, 20)
+            """);
+        return sim;
+    }
+
+    [TestMethod]
+    public void CteInViewBody_ProjectsRows()
+    {
+        var sim = WithBodySource();
+        sim.ExecuteBatches("create view dbo.v as with c as (select id, grp from dbo.b) select id, grp from c");
+        AreEqual(3, sim.ExecuteScalar("select count(*) from dbo.v"));
+        AreEqual(2, sim.ExecuteScalar("select count(*) from dbo.v where grp = 10"));
+    }
+
+    /// <summary>The view's own column-rename list applies over the CTE-fed projection.</summary>
+    [TestMethod]
+    public void CteInViewBody_WithColumnList_RenamesOutput()
+    {
+        var sim = WithBodySource();
+        sim.ExecuteBatches("create view dbo.v (a, g) as with c as (select id, grp from dbo.b) select id, grp from c");
+        AreEqual(6, sim.ExecuteScalar("select sum(a) from dbo.v"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from dbo.v where g = 20"));
+    }
+
+    [TestMethod]
+    public void CteInViewBody_MultipleBindings_CascadeInsideTheBody()
+    {
+        var sim = WithBodySource();
+        sim.ExecuteBatches("""
+            create view dbo.v as
+            with c1 as (select id, grp from dbo.b),
+                 c2 as (select id from c1 where grp = 10)
+            select id from c2
+            """);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from dbo.v"));
+    }
+
+    /// <summary>
+    /// The body re-parses per invocation, so each execution owns fresh
+    /// bindings — repeated and self-joined reads of a recursive-CTE view can't
+    /// cross-feed one another's iteration rowset.
+    /// </summary>
+    [TestMethod]
+    public void RecursiveCteInViewBody_Iterates()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create view dbo.v as with c as (select 1 as n union all select n + 1 from c where n < 5) select n from c");
+        AreEqual(5, sim.ExecuteScalar("select count(*) from dbo.v"));
+        AreEqual(15, sim.ExecuteScalar("select sum(n) from dbo.v"));
+        AreEqual(25, sim.ExecuteScalar("select count(*) from dbo.v a cross join dbo.v b"));
+    }
+
+    /// <summary>Both replacement legs re-parse the body, so both accept a prefix.</summary>
+    [TestMethod]
+    public void CteInViewBody_SurvivesAlterAndCreateOrAlter()
+    {
+        var sim = WithBodySource();
+        sim.ExecuteBatches(
+            "create view dbo.v as with c as (select id from dbo.b) select id from c",
+            "alter view dbo.v as with c as (select id from dbo.b where grp = 20) select id from c");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from dbo.v"));
+        sim.ExecuteBatches("create or alter view dbo.v as with c as (select id from dbo.b where id > 1) select id from c");
+        AreEqual(2, sim.ExecuteScalar("select count(*) from dbo.v"));
+    }
+
+    /// <summary>
+    /// The trailing <c>WITH CHECK OPTION</c> still parses after a CTE-prefixed
+    /// body — the body parse stops on the same post-body WITH either way.
+    /// </summary>
+    [TestMethod]
+    public void CteInViewBody_TrailingWithCheckOption_Parses()
+    {
+        var sim = WithBodySource();
+        sim.ExecuteBatches("create view dbo.v as with c as (select id, grp from dbo.b) select id, grp from c with check option");
+        AreEqual("CASCADE", sim.ExecuteScalar("select check_option from information_schema.views where table_name = 'v'"));
+    }
+
+    /// <summary>
+    /// Msg 1033 governs the view body's own ORDER BY exactly as it does an
+    /// unprefixed body: rejected bare, accepted with TOP.
+    /// </summary>
+    [TestMethod]
+    public void CteInViewBody_OrderByNeedsTop()
+    {
+        var sim = WithBodySource();
+        _ = sim.AssertSqlError("create view dbo.v as with c as (select id from dbo.b) select id from c order by id", 1033);
+        sim.ExecuteBatches("create view dbo.v as with c as (select id from dbo.b) select top 2 id from c order by id");
+        AreEqual(2, sim.ExecuteScalar("select count(*) from dbo.v"));
+    }
+
+    [TestMethod]
+    [DataRow("return (with c as (select id from dbo.b) select id from c)")]
+    [DataRow("return with c as (select id from dbo.b) select id from c")]
+    public void CteInInlineTvfBody_BothReturnForms(string body)
+    {
+        var sim = WithBodySource();
+        sim.ExecuteBatches($"create function dbo.f() returns table as {body}");
+        AreEqual(3, sim.ExecuteScalar("select count(*) from dbo.f()"));
+    }
+
+    /// <summary>
+    /// The paren-less <c>RETURN</c> form's body span ends at a statement
+    /// keyword only at the body's own nesting level — a SELECT inside a derived
+    /// table, a subquery or a CTE definition belongs to the body.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select id from (select id from dbo.b) d", 3)]
+    [DataRow("select id from dbo.b where grp in (select grp from dbo.b where grp = 10)", 2)]
+    public void ParenlessInlineTvfBody_KeepsNestedSelects(string body, int expectedRows)
+    {
+        var sim = WithBodySource();
+        sim.ExecuteBatches($"create function dbo.f() returns table as return {body}");
+        AreEqual(expectedRows, sim.ExecuteScalar("select count(*) from dbo.f()"));
+    }
+
+    /// <summary>A multi-statement TVF's body statements reach the dispatch loop, prefix included.</summary>
+    [TestMethod]
+    public void CteInMultiStatementTvfBody_Works()
+    {
+        var sim = WithBodySource();
+        sim.ExecuteBatches("""
+            create function dbo.f() returns @r table (id int) as
+            begin
+                with c as (select id from dbo.b where grp = 10) insert @r select id from c;
+                return
+            end
+            """);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from dbo.f()"));
+    }
+
+    [TestMethod]
+    public void CteInProcedureBody_Works()
+    {
+        var sim = WithBodySource();
+        sim.ExecuteBatches("create procedure dbo.p as with c as (select id from dbo.b) select count(*) from c");
+        AreEqual(3, sim.ExecuteScalar("exec dbo.p"));
+    }
+
+    [TestMethod]
+    public void CteInCursorDeclaration_Fetches()
+    {
+        var sim = WithBodySource();
+        AreEqual(20, sim.ExecuteScalar("""
+            declare @g int;
+            declare cur cursor for with c as (select grp from dbo.b where grp = 20) select grp from c;
+            open cur;
+            fetch next from cur into @g;
+            close cur;
+            deallocate cur;
+            select @g
+            """));
+    }
+
+    /// <summary>
+    /// Every parenthesized query position refuses a prefix — real answers
+    /// Msg 156 (followed by Msg 319 and Msg 102, of which the simulator raises
+    /// the first). The scalar UDF's <c>RETURN (…)</c> is an expression, so it
+    /// creates and fails at invocation.
+    /// </summary>
+    [TestMethod]
+    public void CtePrefix_InParenthesizedQueryPosition_Raises156()
+    {
+        var sim = WithBodySource();
+        var derived = sim.AssertSqlError("select * from (with c as (select id from dbo.b) select id from c) d", 156);
+        AreEqual("Incorrect syntax near the keyword 'with'.", derived.Message);
+        _ = sim.AssertSqlError("select (with c as (select max(id) m from dbo.b) select m from c)", 156);
+        _ = sim.AssertSqlError("select id from dbo.b where id in (with c as (select id from dbo.b) select id from c)", 156);
+
+        sim.ExecuteBatches("create function dbo.f() returns int as begin return (with c as (select id from dbo.b) select max(id) from c) end");
+        _ = sim.AssertSqlError("select dbo.f()", 156);
     }
 }

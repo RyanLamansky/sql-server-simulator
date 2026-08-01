@@ -119,6 +119,24 @@ Matching on the leaf alone silently sorted by the wrong column whenever a join b
 The term may name the **source column behind a projected one** rather than its output alias (`SELECT DISTINCT c.name AS Col5 … ORDER BY c.name`), which is the only spelling left when an ORM aliases every output positionally.
 Under DISTINCT the qualified form follows the same source-reference rule as the non-DISTINCT path: it must name a source column that is itself projected, and a miss is Msg 145 rather than a leaf match against the output aliases (tightened 2026-07-31 — `SELECT DISTINCT val AS id … ORDER BY t.id` is an error, while `ORDER BY c.nm` over `SELECT DISTINCT nm AS Col5` is legal).
 
+### Constant terms (Msg 408) and bare variables (Msg 1008)
+
+A term the server folds to a constant is rejected with **Msg 408** `A constant expression was encountered in the ORDER BY list, position N.` — position being the term's 1-based index in the list, and the rule applying to a single SELECT, a set-op chain, a `TOP` / `OFFSET` query and a `SELECT … INTO` alike.
+The gate is syntactic on the written term, not on what it resolves to: `SELECT 5 AS x FROM t ORDER BY x` sorts, because the term is an alias reference.
+
+The **ordinal form is a signed integer literal**, parentheses included — `(1)` and `+1` name the first column, `-1` and `-(1)` are position -1 (Msg 108) — while an arithmetic expression folding to the same number is a constant instead (`2 - 1` → Msg 408).
+
+Rejected (probe-confirmed): a literal of any type (`'x'`, `1.5`, `1e0`, `0x01`, `NULL`), arithmetic or concatenation over literals (`1 + 0`, `'a' + 'b'`), `CAST` / `CONVERT` of one, `COALESCE` over literals, and any of those in parentheses.
+Accepted: a variable inside an expression (`@v + 1`), a subquery (`(SELECT 1)`), a scalar UDF call, and every function reading server or session state (`GETDATE()`, `NEWID()`, `RAND()`, `DB_NAME()`, `@@SPID`, `@@VERSION`) — real evaluates rather than folds those.
+`ISNULL(NULL, 1)` is accepted where `COALESCE(NULL, 1)` is rejected, matching real's own split (COALESCE desugars to a CASE the folder reaches; ISNULL stays a runtime call).
+
+A **variable** term is real's variable-column-position shape and gets its own error, **Msg 1008** (`The SELECT item identified by the ORDER BY number N contains a variable …`), whenever the variable is reachable through pure conversions only — `@v`, `(@v)`, `((@v))`, `CAST(@v AS int)`.
+A variable inside arithmetic is a sort expression and orders the rows: `@v + 1`, `-@v` and `(@v) + 0` all sort (probe-confirmed).
+
+Detection is `Expression.IsWrittenConstant`, a conservative opt-in walk (default false) over the literal-bearing node types, so a shape it doesn't recognize sorts rather than raising.
+**Divergences**: real additionally folds deterministic scalar calls over literals (`ABS(-1)`, `LEN('abc')`) and `CASE` / `IIF` over literal arms, which sort here; and where real reports every ORDER BY error it finds, the simulator raises the first, so `ORDER BY nosuch, 'x'` is Msg 408 (position 2) rather than real's leading Msg 207.
+The window and ordered-aggregate clauses (`OVER (ORDER BY 'x')`, `WITHIN GROUP (ORDER BY 'x')`) have their own rejection on real — **Msg 5309** — which isn't modeled; those terms sort.
+
 ### Top-level ORDER BY over a set operation
 
 The ORDER BY after a UNION / INTERSECT / EXCEPT chain is a different resolver (`ApplyTopLevelOrderBy`) with a stricter rule, because the combined stream carries only the projected columns — there is no source row left to reach into.
@@ -141,7 +159,7 @@ Everything else is an error, and *which* error is the whole distinction (real em
 A FROM-less branch contributes an **empty** scope, not an unknown one: `SELECT 2 AS X UNION ALL SELECT 1 ORDER BY X` is legal and `ORDER BY Y` is Msg 207.
 A skip-mode placeholder source suppresses the whole pass — real defers such a statement's binding, so no name in scope can be a compile error there.
 
-**Divergence**: a *constant* term (`ORDER BY 'x'`) lands on Msg 104; real reserves **Msg 408** for it, which the simulator models on neither this path nor the single-SELECT one.
+A *constant* term never reaches this table — the ORDER BY parser rejects it up front with Msg 408 (below), on this path and the single-SELECT one alike.
 
 ## Result drain / ORDER BY representation
 The FROM-bearing SELECT projection paths — streaming, buffered (ORDER BY / DISTINCT), windowed, and aggregate — all yield already-projected `SqlValue[]` rows, so `SimulatedSqlResultSet` serves the reader and TDS cursors directly with no encode-then-re-decode round-trip (see the `SimulatedSqlResultSet` doc + [`data-reader.md`](data-reader.md)).
@@ -243,7 +261,7 @@ The aggregate executor (`Selection.Execution.Aggregate.cs`) **buffers** WHERE-fi
 The projection's column resolver returns typed NULL for columns that aren't in the current set but appear in another set's columns — that's the subtotal/total-row semantic.
 Without GROUP BY the executor synthesizes a single empty grouping set `[[]]` and runs one implicit group; same code path covers `GROUPING SETS(())` and the bare **`GROUP BY ()`** form (the empty grouping set = grand total over all rows, one aggregate row).
 `ParseGroupByItem` distinguishes `GROUP BY ()` (a `(` immediately followed by `)` → the empty fragment `[[]]`) from `GROUP BY (expr)` (a parenthesized grouping key) via a checkpoint peek.
-TOP / OFFSET / FETCH apply to the concatenated stream across all grouping sets.
+TOP / OFFSET / FETCH apply to the concatenated stream across all grouping sets, and so does any window in the query — see [Windows over ROLLUP / CUBE / GROUPING SETS](#windows-over-rollup--cube--grouping-sets).
 
 **GROUP BY a scalar expression** (e.g. `GROUP BY MONTH(d)`) projects and orders correctly: a column buried inside a grouping expression resolves against the group's first-seen **representative row** (`GroupState.Representative`) — within a non-empty group every grouping expression is constant, so any row yields the right value for a projection / HAVING / ORDER BY item that's functionally determined by the grouping (`SELECT MONTH(d) … GROUP BY MONTH(d)`, `MONTH(d) + 1`, etc.).
 The representative fallback fires only for non-empty grouping sets, preserving the ROLLUP/CUBE grand-total NULL.
@@ -332,7 +350,20 @@ Semantics probed against SQL Server 2025:
 Implementation: `ComputeWindowResults` (`Selection.Execution.Window.cs`) is the shared window engine — it addresses rows only by index through a `WindowRowContext` accessor, so it is agnostic to whether a "row" is a joined base tuple or a group.
 `BuildAggregateProjectionRows` materializes the post-HAVING groups, caches each group's aggregate results, and supplies an accessor that re-binds them per group — which is what lets a window operand's inner aggregate resolve to that group's value without any expression rewriting.
 
-**Not modeled yet**: windows combined with `ROLLUP` / `CUBE` / `GROUPING SETS` raise `NotSupportedException` — those emit several group streams that one window would have to span as a single row set, where the executor loops per set.
+#### Windows over ROLLUP / CUBE / GROUPING SETS
+
+`ROLLUP` / `CUBE` / `GROUPING SETS` emit one group stream per set, and a window spans the **concatenation** — the complete grouped result, subtotal and grand-total rows included.
+`SUM(SUM(amt)) OVER ()` under `GROUP BY ROLLUP(region)` therefore adds the grand-total row's own total to the per-region totals (325 + 500 + 825 = 1650 over the three-row result), and `COUNT(*) OVER ()` counts every output row across every set.
+Ranking treats it as one row set too, so two groups from *different* sets that carry the same ORDER BY value tie under `RANK` and take consecutive `ROW_NUMBER`s.
+
+- **A subtotal row's grouped-away key reads as NULL, and `PARTITION BY` can't tell it from a data NULL.**
+  Under `ROLLUP(region, product)` a `PARTITION BY product` partition for NULL holds the genuine NULL-product leaf row *and* every row where `product` was rolled away.
+- **`GROUPING()` / `GROUPING_ID()` are legal inside `PARTITION BY` / `ORDER BY`**, and adding one to the partition key is the way to keep subtotal rows out of the data-NULL partition — each group's window keys are evaluated with that group's own grouping set published.
+- HAVING still runs first (it filters across all sets), DISTINCT still dedupes the windowed projection afterwards, and TOP / OFFSET-FETCH still trim last.
+- The binding rules are unchanged from the single-set path: bare non-grouped column in an operand or `PARTITION BY` → **Msg 8120**, a second nesting level under `OVER` → **Msg 130**, a window in HAVING → **Msg 4108**.
+
+Implementation: the executor's per-set loop only *buffers* survivors — each tagged with the grouping set that produced it — and the single window pass runs after the loop over the concatenated buffer.
+The per-group resolution scaffolding (grouped-key resolver, ORDER BY resolver, runtimes) is hoisted above the set loop and reads a mutable `currentGroupingSet` slot, so the window pass can re-point it per row; `RuntimeAtGroup` restores both that slot and `BatchContext.GroupingSetExpressions` from the survivor, which is what makes `GROUPING()` in a window clause read the row's own set rather than whichever set ran last.
 
 - EF Core 10 reach: only `ROW_NUMBER` (via `Skip`/`Take`/`OrderBy + Take` per group) and aggregate-OVER (via grouped-projection patterns) are reached from LINQ.
   `EF.Functions` does NOT expose `Rank` / `DenseRank` / `CumeDist` / `PercentRank` / `Lag` / `Lead` / `NTile` / `FirstValue` / `LastValue` / `PercentileCont` / `PercentileDisc` — those are reachable only through raw SQL (`FromSqlInterpolated` / `SqlQuery`), so the simulator's expanded coverage helps applications that use raw SQL but doesn't intersect EF's LINQ→SQL translation surface.

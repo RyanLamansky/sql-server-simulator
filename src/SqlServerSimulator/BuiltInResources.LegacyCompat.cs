@@ -93,6 +93,22 @@ internal static partial class BuiltInResources
         "sp_helpconstraint",
         "sp_helpindex",
         "sp_helptext",
+        // sp_helpdb / sp_helpuser / sp_helptrigger: the same formatted-metadata
+        // family one scope out — the database list + its file allocation, the
+        // database's users and roles, and a table's or view's DML triggers.
+        "sp_helpdb",
+        "sp_helptrigger",
+        "sp_helpuser",
+        // sp_spaceused: the size report for one object or the whole database,
+        // computed from the same page counts sys.dm_db_partition_stats projects.
+        "sp_spaceused",
+        // sp_who / sp_who2: the session lists, projected over the live
+        // connection registry with the lock manager supplying the blocking spid.
+        "sp_who",
+        "sp_who2",
+        // sp_MSforeachtable: runs command templates once per user table with
+        // the table's bracketed name substituted for each '?'.
+        "sp_MSforeachtable",
     ];
 
     /// <summary>

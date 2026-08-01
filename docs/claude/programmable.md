@@ -1,5 +1,22 @@
 # Programmable objects — UDFs, TVFs, views
 
+## Body batches and the per-statement freeze
+
+Every module body runs on a child `BatchContext`, and the per-statement current-time freeze (`BatchContext.CurrentStatement.UtcNow`, read by `GETDATE` / `GETUTCDATE` / `CURRENT_TIMESTAMP` / `SYSDATETIME` / `SYSUTCDATETIME` / `SYSDATETIMEOFFSET` / `CURRENT_DATE`) lives on that frame — so *which* batch a body runs on decides which instant it reads.
+Two regimes, matching real:
+
+- **Bodies that dispatch statements of their own** — procedure, trigger, scalar-UDF, multi-statement-TVF bodies — go through the dispatch loop, which stamps a fresh `UtcNow` per body statement.
+  Probe-confirmed: a scalar-UDF body that spins for 1.2 seconds between two `SYSDATETIME()` calls reads two values 1.2 seconds apart.
+- **Bodies real inlines into the referencing statement's plan** — view and inline-TVF bodies — never reach the dispatch loop (they parse and execute a single `Selection` directly), so they adopt the referencing statement's freeze via `BatchContext.AdoptStatementFreezeFrom`.
+  Probe-confirmed: a view projecting `SYSDATETIME()`, read once per row across a 300,000-row scan, yields one constant value equal to the referencing statement's own `SYSDATETIME()`; an inline TVF applied per row does the same.
+  The same call sites cover the indexed-view helpers (body materialization for enforcement, dependency collection, shape analysis) and the CREATE-time inline-TVF output-column inference, all of which parse a body on a child batch.
+
+Adopting rather than re-stamping also keeps the value live: because the body re-parses per call, a baked projection value can't go stale, and a later statement reading the same view sees a later instant.
+
+**Why the seam is load-bearing**: an inlined body whose batch inherits nothing reads `default(DateTime)`, which makes `SYSDATETIME()` in a view return `0001-01-01` and `GETDATE()` — whose `datetime` range starts at 1753 — raise **Msg 242** (`"The conversion of a varchar data type to a datetime data type resulted in an out-of-range value."`) at first read for a view, at CREATE for an inline TVF.
+`StatementContext.UtcNow` is seeded at construction as the floor against that, so an un-inherited body batch still serves a live instant rather than year 1; the adoption on top of it is what makes the instant the *right* one.
+Regression coverage: `CurrentTimeFunctionTests`.
+
 ## Scalar user-defined functions
 `CREATE FUNCTION schema.name(@p type [= default], ...) RETURNS <type> [WITH RETURNS NULL ON NULL INPUT] AS BEGIN ... END`, called as `SELECT schema.fn(args)`.
 Body source captured between outer `BEGIN`/`END` (BEGIN TRAN/TRANSACTION/DISTRIBUTED skipped during nesting) and re-tokenized per call; parameters seed a child `BatchContext.Variables`, value-form RETURN lands in `BatchContext.UdfFrame.ReturnedValue`.
@@ -17,6 +34,8 @@ Probed against SQL Server 2025.
 - **DEFAULT keyword required for omission.**
   `fn()` raises Msg 313 even when every parameter has a declared default — the `DEFAULT` keyword is the only legal omission (re-evaluated per call in the child batch).
 - **WITH RETURNS NULL ON NULL INPUT**: any non-DEFAULT NULL arg short-circuits the body and returns typed NULL.
+- **WITH SCHEMABINDING** records on `UserDefinedFunction.IsSchemaBound`, surfacing through `sys.sql_modules.is_schema_bound` / `OBJECTPROPERTY(id,'IsSchemaBound')`, gating `OBJECTPROPERTY(id,'IsDeterministic')` (see [`catalog-views.md`](catalog-views.md#isdeterministic)), and enrolling the body's references in the dependency gate — [Schema binding](#schema-binding-with-schemabinding).
+  `ENCRYPTION` parse-and-discards.
 - **Recursion cap: 32.**
   Tracked by `SimulatedDbConnection.NestingLevel`; exceeding → **Msg 217**.
   Shared with future stored procs / triggers / views.
@@ -33,7 +52,6 @@ Probed against SQL Server 2025.
 **Fidelity gaps**:
 - **No CREATE-time body validation** (Msg 455 missing-RETURN, Msg 443 side-effects, Msg 444 result-set SELECT in body).
   Deferred to runtime — fall-through body returns typed NULL, side-effecting statements surface their own errors.
-- **`WITH SCHEMABINDING` / `ENCRYPTION` / `EXECUTE AS`** → `NotSupportedException`.
 - **`@@ROWCOUNT` inside a UDF body** isn't isolated — body statements overwrite the caller's `LastStatementRowCount`.
   Real SQL Server preserves it across the call.
 
@@ -44,10 +62,12 @@ Body re-parsed per call inside a child `BatchContext` with parameters seeded as 
 Same 32-level recursion cap (Msg 217) as scalar UDFs.
 Probed against SQL Server 2025.
 
-- **Body grammar**: exactly one SELECT.
+- **Body grammar**: exactly one SELECT, optionally carrying a `WITH cte AS (…)` prefix ([`ctes.md`](ctes.md#where-a-prefix-may-appear)).
   Parens optional.
   Multi-statement inside parens → Msg 102.
-- **WITH-clause options**: `SCHEMABINDING` / `ENCRYPTION` parse-and-ignore.
+  The body's stored span is measured by a token scan (`CaptureInlineTvfBody`) rather than by a parse, and the paren-less form's terminator — a statement keyword — counts only at the body's own nesting level, so a SELECT belonging to a derived table, a subquery or a CTE definition doesn't truncate the span.
+  A body opening with `WITH` also spends one depth-0 statement keyword on the query the prefix scopes to.
+- **WITH-clause options**: `SCHEMABINDING` records on `UserDefinedFunction.IsSchemaBound` (same surfaces and same dependency gate as scalar UDFs — [Schema binding](#schema-binding-with-schemabinding)); `ENCRYPTION` parse-and-discards.
   `RETURNS NULL ON NULL INPUT` → **Msg 487** (scalar-only).
 - **CREATE-time validation**: body parses once with parameters seeded as typed variables; `OutputColumns` derives from the resulting projection.
   Unnamed column → **Msg 4514** (distinct from SELECT INTO's Msg 1038).
@@ -66,7 +86,6 @@ Probed against SQL Server 2025.
 - **`is_nullable` always True** in `sys.columns` for TVF output.
   Real SQL Server propagates per-projection nullability via the same rules SELECT INTO uses (`Expression.ResultIsNullable`); wiring it through requires exposing projection expressions on `Selection` post-parse.
   Apps reading TVF rows through raw SQL aren't affected.
-- **No SCHEMABINDING enforcement** — DROP TABLE on a TVF-referenced table succeeds (real SQL Server raises Msg 3729); the TVF later fails at call time when re-parsing.
 - **No CREATE-time body validation for forward refs** — self-recursive inline TVFs fail at CREATE with Msg 208 (real SQL Server also rejects, different error path).
 
 ## Multi-statement table-valued functions
@@ -86,7 +105,7 @@ Probed against SQL Server 2025.
 - **RETURN handling**: bare `RETURN;` sets `BatchContext.ReturnSignaled` (the dispatch loop bails the same way procedure bodies do).
   Value-form `RETURN N` raises **Msg 178** at invoke time via the existing `ParseReturnStatement` check (both `UdfFrame` and `ProcFrame` are null).
   Real SQL Server enforces Msg 178 at CREATE time; the simulator defers — same convention scalar UDFs use for body validation.
-- **WITH-clause options**: `SCHEMABINDING` / `ENCRYPTION` parse-and-ignore (shared with inline TVF).
+- **WITH-clause options**: `SCHEMABINDING` records on `UserDefinedFunction.IsSchemaBound` and enrolls the body in the dependency gate ([Schema binding](#schema-binding-with-schemabinding)); `ENCRYPTION` parse-and-discards (shared with inline TVF).
 - **CROSS APPLY / OUTER APPLY**: works through the same `ParseSingleFromSource` branch as inline TVF — both function kinds dispatch through `Selection.ForInlineTvf` / `Selection.ForMultiStatementTvf` returning a `FromSource.LateralPlan`.
   Arguments evaluate against the outer row scope per call.
 - **Catalog surface**: `sys.objects` `type='TF'` / `type_desc='SQL_TABLE_VALUED_FUNCTION'` (distinct from inline TVF's `'IF'`).
@@ -102,7 +121,6 @@ Probed against SQL Server 2025.
   Real SQL Server's probe-observed behavior is more forgiving in some cases — for shared-key collisions it returns an empty result set rather than raising.
   Stricter behavior is defensible since apps that hit it are buggy.
 - **`is_nullable` always True** in `sys.columns` for return-table output (same gap as inline TVFs).
-- **No SCHEMABINDING enforcement** (same as inline TVFs).
 
 ## Views
 `CREATE VIEW schema.name [(col_list)] [WITH SCHEMABINDING | ENCRYPTION | VIEW_METADATA] AS <SELECT> [WITH CHECK OPTION]`, referenced from FROM as `FROM schema.view [alias]` (or unqualified `FROM view`).
@@ -111,14 +129,14 @@ Body re-parsed per call inside a child `BatchContext`, returned as `Selection.Fo
 Same 32-level recursion cap (Msg 217) as scalar UDFs / inline TVFs.
 Probed against SQL Server 2025.
 
-- **Body grammar**: a single SELECT (CTE-prefixed bodies via `WITH cte AS (...) SELECT ...` work — the body parse runs at depth 0).
+- **Body grammar**: a single SELECT, optionally carrying a `WITH cte AS (…)` prefix — recognized at the body-parse seam rather than by the statement dispatch loop, which a body never reaches → [`ctes.md`](ctes.md#where-a-prefix-may-appear).
   ORDER BY without TOP / OFFSET / FETCH → **Msg 1033** (same factory CTE bodies use).
 - **Column-rename list**: `CREATE VIEW v(a, b) AS SELECT ...` renames the projection.
   Count mismatch → **Msg 8158** (too few listed) / **Msg 8159** (too many) — shared factories with CTE rename lists.
 - **CREATE-time validation**: body parses once to derive `OutputColumns`.
   Unnamed projection → **Msg 4511** (distinct from inline TVF's Msg 4514 and SELECT INTO's Msg 1038 — different wording too: `"Create View or Function failed because no column name was specified for column N."`).
   Duplicate column name → **Msg 4506** (shared with inline TVFs).
-- **WITH-clause options**: `SCHEMABINDING` is captured on `View.IsSchemaBound` (it gates `CREATE INDEX` on the view and surfaces through `sys.sql_modules.is_schema_bound` / `OBJECTPROPERTY(id,'IsSchemaBound')`) but isn't otherwise enforced (a referenced table can still be dropped — see Fidelity gaps).
+- **WITH-clause options**: `SCHEMABINDING` is captured on `View.IsSchemaBound` (it gates `CREATE INDEX` on the view, surfaces through `sys.sql_modules.is_schema_bound` / `OBJECTPROPERTY(id,'IsSchemaBound')`, is the precondition `OBJECTPROPERTY(id,'IsDeterministic')` reads — see [`catalog-views.md`](catalog-views.md#isdeterministic) — and enrolls the body's references in the dependency gate, [Schema binding](#schema-binding-with-schemabinding)).
   `ENCRYPTION` / `VIEW_METADATA` parse-and-ignore.
   **`WITH CHECK OPTION`** (trailing the body) parses and records on `View.WithCheckOption`, enforced at DML time (Msg 550).
   A schema-bound view can carry a unique clustered index — an **indexed view** — see [`indexes.md`](indexes.md).
@@ -137,9 +155,51 @@ Probed against SQL Server 2025.
   Keyless entities (`HasNoKey().ToView("name")`) project rows from CREATE VIEW-produced views; the simulator's per-call body re-parse handles correlated LINQ-emitted WHERE clauses against the view's projection.
 
 **Fidelity gaps**:
-- **No SCHEMABINDING enforcement** — DROP TABLE on a view-referenced table succeeds, as does `ALTER VIEW` / `ALTER FUNCTION` on a module a schema-bound view references (real SQL Server raises Msg 3729 for all of them); the dependent module later fails at call time when re-parsing against the changed or missing name.
 - **`VIEW_DEFINITION` always surfaces body text** even for WITH ENCRYPTION views (real SQL Server returns NULL for ENCRYPTION views).
 - **`is_nullable` always True** in `sys.columns` for view output — same gap as inline TVFs.
+
+## Schema binding (`WITH SCHEMABINDING`)
+`WITH SCHEMABINDING` on a view, scalar function, inline TVF or multi-statement TVF pins everything the body names: the referenced objects can't be dropped, altered, renamed or moved while the module stands.
+`Schemas/SchemaBinding.cs` holds both halves — the reverse lookup the DDL gates consult, and the forward rules a schema-bound body's own references obey.
+Every message below was probe-confirmed verbatim against SQL Server 2025 (2026-08-01).
+
+**No stored dependency record.**
+The reference set is recomputed from the module body on every gate check rather than recorded at CREATE.
+A module's dependencies die with the module and travel with a replacement body for free that way, so there is no registry to invalidate on ALTER / DROP / `ALTER SCHEMA TRANSFER`.
+The sweep is gated on `View.IsSchemaBound` / `UserDefinedFunction.IsSchemaBound`, so a database with no schema-bound modules pays only a dictionary walk, and DDL is the only caller.
+The body walk re-tokenizes the stored source and lifts every dotted name chain out of the token stream — the same shape [`ModuleDeterminism`](catalog-views.md#isdeterministic) walks for its own question, kept separate because that one bails at the first nondeterministic built-in and needs neither column names nor FROM-clause positions.
+
+**What the gate blocks** (the referent is schema-qualified, the blocking module surfaces as its bare leaf; real names **one** blocker and picks the oldest, which the simulator matches by ordering candidates by object id):
+
+| Statement | Error |
+| --- | --- |
+| `DROP TABLE` / `DROP VIEW` / `DROP FUNCTION` of a referenced object | **Msg 3729** state 1 — `Cannot DROP TABLE 'dbo.t' because it is being referenced by object 'v'.` |
+| `ALTER` / `CREATE OR ALTER` of a referenced view or function | **Msg 3729** state 3 — `Cannot ALTER 'dbo.f' because it is being referenced by object 'v'.` (no object kind in the wording; the altered module is the error's Procedure attribution) |
+| `ALTER TABLE DROP COLUMN` / `ALTER COLUMN` of a referenced column | **Msg 5074** — the module joins the constraint / index blocker list as `The object 'v' is dependent on column 'a'.`, ordered after DEFAULT and before indexes; see [`alter-table.md`](alter-table.md) |
+| `sp_rename` of a referenced table or column | **Msg 15336** — `Object 'dbo.t' cannot be renamed because the object participates in enforced dependencies.` (echoes `@objname` as passed) |
+| `ALTER SCHEMA … TRANSFER` of a referenced object | **Msg 15348** — `Cannot transfer a schemabound object.` |
+
+Deliberately *not* blocked, each probe-confirmed: `ALTER TABLE … ADD` a new column; `TRUNCATE TABLE` on a referenced table; `ALTER SCHEMA … TRANSFER` of the schema-bound module itself; and every one of these against a **non**-schema-bound dependent, where real's late binding lets the DROP / ALTER through and the dependent breaks at its next call.
+`DROP TABLE` runs the FK gate first: a table that is both an FK parent and a schema-bound view's base reports **Msg 3726**, not 3729.
+
+**What a schema-bound body may reference.**
+Both checks run at CREATE / ALTER of the schema-bound module, off the same extraction:
+
+- A FROM-clause source named with anything other than a two-part name → **Msg 4512** state 3 (`Cannot schema bind view 'dbo.v' because name 't' is invalid for schema binding. Names must be in two-part format and an object cannot reference itself.`), for the one-part (`FROM t`) and three-part (`FROM other.dbo.t`) forms alike.
+- A referenced view or function that isn't itself schema bound → **Msg 4513** state 2 (`Cannot schema bind view 'dbo.v'. 'dbo.plain' is not schema bound.`) — the rule that keeps the dependency graph closed under schema binding.
+
+**Divergences**:
+- **Column dependency is name-based.** Real tracks the exact columns a body binds; column references here resolve per row through a name-keyed resolver, so there is no parse-time (table, ordinal) binding to consult.
+  A module counts as depending on column `C` of table `T` when it references `T` *and* its body mentions the identifier `C` anywhere.
+  That is exact for the single-table bodies schema binding is used for — a column the body never names stays droppable, matching real — and over-restrictive only when a body joins two referenced tables that share a column name and touches just one of them.
+- **The Msg 4512 one-part leg only fires for a name that resolves to an object** in the default schema.
+  A derived-table alias is indistinguishable from a table in a token stream, so requiring the name to resolve is what keeps a legal body (probe-confirmed legal on real, as is a built-in TVF like `FROM STRING_SPLIT(…)`) out of the message; an alias that happens to collide with a real table is reported.
+  A **CTE name is excluded outright**: the body's leading `WITH` prefix is walked for the names it declares, and a one-part reference to one of them is skipped even when the default schema holds a table of that name — real reads it as the CTE (probe-confirmed).
+  The exclusion covers only the declared names; a real one-part table reference *inside* a CTE definition still raises 4512.
+- **Msg 5074's blocker lines merge into one exception** rather than real's line-per-blocker Msg 5074 stream followed by a Msg 4922 — the pre-existing shape the constraint and index blockers already use.
+- **Real's blocker ordering isn't reproduced**: real interleaves by its own dependency-graph order (probed CHECK → view → PK on one column), where the simulator keeps its fixed walker order.
+  The view-before-index relationship *is* matched.
+- **`sys.sql_expression_dependencies` isn't projected.** Real records dependency rows for every module, schema-bound or not, down to `referenced_minor_id` per column; this extraction is schema-bound-only and name-approximate for columns, so a faithful projection is its own build — see [`backlog.md`](backlog.md).
 
 ## Updatable views (DML through views)
 INSERT / UPDATE / DELETE through a view route to the view's eventual base `HeapTable` with view-aware column-name translation, visibility filtering, and (optional) WITH CHECK OPTION enforcement.
@@ -196,6 +256,9 @@ The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row sele
 - **Multi-source UPDATE / DELETE** (alias-form `UPDATE alias SET ... FROM ...` where the alias resolves to a view) raises `NotSupportedException` — the alias-form FROM clause can't compose with the view's visibility predicate in the existing joined-update infrastructure.
 - **WHERE referencing a derived upstream column** (a chained view's WHERE that references an expression-projected column from the level below) marks the view as not-updatable with `ViewUpdatabilityRejection.UnsupportedShape` → Msg 4403 at DML.
   Real SQL Server's behavior on this specific niche shape isn't probe-confirmed; the simulator errs on the side of rejection.
+- **A CTE-bodied view is not updatable** — `INSERT` / `UPDATE` / `DELETE` through `CREATE VIEW v AS WITH c AS (SELECT … FROM t) SELECT … FROM c` reports Msg 4403 where real (probe-confirmed) passes all three through to the base table.
+  The analysis reads the body's FROM source, which is the CTE rather than a base table; seeing through the CTE's own plan is what's missing.
+  Reading such a view ships in full — see [`ctes.md`](ctes.md#where-a-prefix-may-appear).
 
 ## Stored procedures
 `CREATE [OR ALTER] PROCEDURE schema.name [(@p type [= default] [OUTPUT], ...)] [WITH options] AS body` lives in `Schema.Procedures`.
@@ -282,10 +345,59 @@ Each `DbParameter` binds to a proc parameter by name (the `@` prefix is stripped
 - **EXEC argument value-grammar limited to literals + `@var` + `DEFAULT`** — matches real SQL Server (Msg 102 on arithmetic), but the *type* of the literal is taken from the source token, not coerced through any inference like real SQL Server's procedure-call binding.
 - **`@@ROWCOUNT` inside a proc body** isn't isolated from the caller — same gap documented for UDF bodies.
 - **`OUTPUT` parameter timing**: the simulator's `SimulatedDbDataReader` populates output `DbParameter.Value` after the reader closes (via the synthesized `WriteBackOutputParameters` path), matching real SqlClient's general behavior; pre-close access reads the pre-EXEC value.
-- **No `WITH RESULT SETS`** (EXEC option to override result-set schema).
-  Parses fall through to syntax error.
 - `INSERT … EXEC` **ships** — the INSERT parser takes `EXEC` as a third row source alongside VALUES / SELECT, appending every result set the proc or dynamic batch yields.
   See [`dml.md`](dml.md#insert--exec).
+
+## `EXECUTE … WITH RESULT SETS`
+
+The `WITH` trailer on an `EXECUTE` statement, parsed by `Simulation.ResultSets.cs` and layered over the invoked module's outcomes as a projection.
+Probed against SQL Server 2025 (2026-07-31).
+
+**Grammar**: `WITH <option> [, …]`, where an option is `RECOMPILE` (accepted and discarded — the simulator has no plan-reuse decision to override) or one of the three `RESULT SETS` forms.
+Order is free (`WITH RECOMPILE, RESULT SETS …` and the reverse both parse), a second `RESULT SETS` is Msg 102, and a stray token after the clause is Msg 102 naming it.
+The `WITH` is claimed only when an execute option follows it, so a CTE behind an `EXEC` still dispatches as its own statement.
+
+**The three forms**:
+- `RESULT SETS UNDEFINED` — no-op; the module's own metadata stands.
+- `RESULT SETS NONE` — declares zero sets. A module that sends one raises **Msg 11535**; a pure-DML module satisfies it (row counts aren't result sets).
+- `RESULT SETS ( <definition> [, …] )` — one definition per set, each its own parenthesized `(column_name data_type [COLLATE …] [NULL | NOT NULL], …)` list.
+  The doubled parentheses are load-bearing: a single set still writes `((…))`, and a bare `(…)` fails at the first column name.
+  Omitted nullability means nullable.
+
+**Where it applies**: the procedure form, `EXEC (@sql)`, and `sp_executesql`, including the `@rc =` return-code and implicit-`EXEC` shapes.
+Not the system procedures (`sp_help`, `sp_tables`, …), whose arg parsers don't reach the option list.
+`INSERT … EXEC` **rejects** the clause with Msg 102 — real does too, and reports the token one late (`'SETS'`, not `'WITH'`), which the simulator mirrors.
+
+**The projection**: the declared names and types replace the module's, reaching the in-process reader's `GetName` / `GetDataTypeName` / `GetFieldType` and the wire's COLMETADATA (including the `NULL` / `NOT NULL` flag).
+Values convert through the CAST value path, so the `varchar` asterisk fallback, silent narrowing truncation and rounding behave as they do in a CAST.
+
+**The contract errors**:
+- **Msg 11535** — more sets sent than declared.
+- **Msg 11536** — fewer sets sent than declared.
+- **Msg 11537** — a set's column count doesn't match its definition (note real's wording asymmetry: `result set number N` here, `result set #N` in 11538 / 11553).
+- **Msg 11538** — the declared type isn't reachable from the run-time type by *implicit* conversion.
+  This is a narrower gate than CAST: `xml` → `varchar` and `varchar` → `varbinary` both have a legal explicit CAST and are still refused.
+  Both type names render bare, so a `decimal(5,2)` declaration reports `'decimal'`.
+  The gate is a family matrix (`IsImplicitlyConvertible` / `ConversionFamilyOf`), differentially checked cell-by-cell against real over a 25 × 25 type grid: 601 of 625 cells agree, and the 24 that don't are all `hierarchyid`-as-source, which never reach the gate because `CAST(<string> AS hierarchyid)` isn't in `SqlValue.CoerceTo` yet.
+- **Msg 11553** — a `NOT NULL` column received a NULL. Raised per row as the set streams, so preceding rows reach the client.
+- **Msg 8114** — a value-level conversion failure, with both type names *decorated* (`Error converting data type varchar(5) to numeric(5,2).`).
+  Real routes every conversion rule through this one number here, so the simulator remaps the CAST path's own failures (Msg 245 / 8115 / 8170 / …) onto it.
+
+**Error attribution**: Msg 11535 / 11537 / 11538 / 11553 and the Msg 8114 failure name the module's producing statement, not the `EXECUTE` — `ERROR_PROCEDURE()` reads the innermost producing procedure and `ERROR_LINE()` its statement's line.
+`SimulatedQueryResult.OriginLine` / `OriginProcedure`, stamped by the dispatch loop beside `ClientTextSize`, carry that; the innermost frame wins because an already-stamped result passes through untouched.
+Msg 11536 is the exception — it belongs to the `EXECUTE` statement itself and leaves `ERROR_PROCEDURE()` NULL.
+All of them are catchable by `TRY` / `CATCH`.
+
+**Not modeled yet**:
+- The `AS OBJECT <table>` / `AS TYPE <table_type>` / `AS FOR XML` result-set definition shorthands → `NotSupportedException`.
+- `WITH RESULT SETS` on a system procedure.
+- **`rowversion`** rides the binary family in the implicit-conversion matrix; real treats `timestamp` more narrowly than `varbinary` there (it declines `nvarchar` and `sql_variant`).
+- A pair the gate **allows** but `SqlValue.CoerceTo` hasn't built raises that path's own error rather than converting — `decimal` / `money` / `float` → `varbinary`, `money` ↔ `float`, `<string>` → `image` / `hierarchyid`, `varbinary` → `datetime`.
+  The same gaps show for a plain `CAST`, so they close there, not here.
+
+**Divergence**: a set-level violation (11535 / 11537 / 11538) fails the whole `EXECUTE`, so sets that preceded it don't reach the client — real streams the matched sets first and then raises.
+The dispatch loop materializes a statement's outcomes before yielding any of them, which is what hoists the error.
+Row-level violations inside an accepted set still stream (11553 and the Msg 8114 failure surface mid-drain, after the earlier rows).
 
 ## Replacing a module — `ALTER` / `CREATE OR ALTER`
 
@@ -305,8 +417,12 @@ Probed against SQL Server 2025 (2026-07-31).
 
 **Errors**:
 - **Bare `ALTER` on a name nothing holds** → **Msg 208** state 6, including when the *schema* qualifier doesn't exist (`ALTER VIEW nosuch.v` reports `Invalid object name 'nosuch.v'`, not the Msg 2760 either `CREATE` form reports).
+- **Replacing a view or function a schema-bound module references** → **Msg 3729** state 3, from the same choke point (`ResolveModuleAlterTarget`) — see [Schema binding](#schema-binding-with-schemabinding).
 - **Either ALTER leg over a name another object kind holds** → **Msg 2010** (`"Cannot perform alter on 'X' because it is an incompatible object type."`), where the name echoes what the statement wrote — an unqualified reference stays unqualified, brackets are stripped.
   That covers `ALTER VIEW` over a table, `ALTER FUNCTION` over a procedure, `ALTER PROCEDURE` over a table, and `CREATE OR ALTER` landing on any of them.
+- **`ALTER TRIGGER` takes the same Msg 2010 gate**, over a table, a view or a procedure name, on both ALTER legs.
+  Two trigger-specific errors sit around it, in real's own order: a missing `ON` target reports **Msg 8197** first (`"The object 'dbo.nosuch' does not exist or is invalid for this operation."`), ahead of any check on the trigger name; and a trigger that exists but hangs off a *different* parent is **Msg 2110** (`"Cannot alter trigger 'dbo.tr' on 'dbo.tb' because this trigger does not belong to this object. …"`, Class 15), with both names echoing what the statement wrote.
+  The ALTER is refused outright there — the trigger stays on its original parent rather than re-homing.
 - **A function's kind is fixed at creation.**
   An `ALTER FUNCTION` body that writes a different kind (scalar ↔ inline TVF ↔ multi-statement TVF) is the same **Msg 2010**, and the stored function is left untouched.
   A T-SQL body over a CLR routine (or an `AS EXTERNAL NAME` body over a T-SQL one) takes the same branch by construction — the type codes differ, so the narrowing finds nothing of the declared kind.
@@ -315,13 +431,14 @@ Probed against SQL Server 2025 (2026-07-31).
   `CREATE OR ALTER` reports under the plain `CREATE` label and state, never the ALTER one — real names the statement by the verb it started with.
   `PROCEDURE` merges both verbs into the one `'CREATE/ALTER PROCEDURE'` label at state 1.
 
+**A database-qualified name is rejected** on every one of these statements, `CREATE` / `ALTER` / `CREATE OR ALTER` alike: **Msg 166** `'CREATE/ALTER {VIEW | FUNCTION | PROCEDURE | TRIGGER}' does not allow specifying the database name as a prefix to the object name.`
+Real always names the statement in that combined `CREATE/ALTER` form whichever verb was written, and rejects a prefix naming the *current* database as readily as any other (probe-confirmed).
+A server prefix (four-part name) is **Msg 117** instead (`"contains more than the maximum number of prefixes. The maximum is 2."`).
+Both live in `RejectQualifiedModuleName` (`Simulation.ModuleDefinition.cs`), called by each module parser right after it reads its name.
+
 **Not modeled yet**:
-- **Msg 3729** — real refuses to `ALTER` a view or function that a schema-bound module references (`"Cannot ALTER 'dbo.f' because it is being referenced by object 'v'."`).
-  The simulator tracks no schema-binding dependency graph at all (the same absence that lets `DROP TABLE` remove a schema-bound view's base), so the ALTER succeeds and the dependent module fails at its next call.
-- **Msg 166** — real rejects a database-qualified name on these statements (`'CREATE/ALTER VIEW' does not allow specifying the database name as a prefix to the object name.`); the simulator resolves the 3-part name instead.
 - **The permission gate on the ALTER legs**: only a plain `CREATE` runs `PermissionEnforcement.CheckCreateModule`.
   Replacing an existing module is ungated, matching the procedure parser's pre-existing stance.
-- **`ALTER TRIGGER` over an incompatible kind** still reports Msg 208 rather than Msg 2010 — the trigger parser resolves its target alongside the `ON parent` clause and hasn't been moved onto the shared helper.
 
 ## Dynamic SQL (`EXEC (@sql)` / `sp_executesql`)
 Two re-tokenizing paths in `Simulation.ExecDynamicSql.cs`.

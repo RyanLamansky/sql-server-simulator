@@ -65,6 +65,21 @@ internal static partial class BuiltInResources
         var falseTableFlag = SqlValue.FromBoolean(false);
         var ledgerTypeNone = SqlValue.FromByte(0);
         var lockEscalationTable = SqlValue.FromString(nvarchar60Catalog, "TABLE");
+        // history_retention_period_unit_desc's five spellings, preallocated so
+        // the projection doesn't format one per row.
+        var retentionInfinite = SqlValue.FromString(nvarchar60Catalog, "INFINITE");
+        var retentionDay = SqlValue.FromString(nvarchar60Catalog, "DAY");
+        var retentionWeek = SqlValue.FromString(nvarchar60Catalog, "WEEK");
+        var retentionMonth = SqlValue.FromString(nvarchar60Catalog, "MONTH");
+        var retentionYear = SqlValue.FromString(nvarchar60Catalog, "YEAR");
+        SqlValue RetentionUnitDescription(HistoryRetentionUnit unit) => unit switch
+        {
+            HistoryRetentionUnit.Day => retentionDay,
+            HistoryRetentionUnit.Week => retentionWeek,
+            HistoryRetentionUnit.Month => retentionMonth,
+            HistoryRetentionUnit.Year => retentionYear,
+            _ => retentionInfinite,
+        };
         var durabilityDescSchemaAndData = SqlValue.FromString(nvarchar60Catalog, "SCHEMA_AND_DATA");
         Sys("tables",
         [
@@ -154,15 +169,17 @@ internal static partial class BuiltInResources
             // Remaining columns DacFx's SqlTable reverse-engineering reads.
             // text-in-row / large-value storage options, CDC, and Stretch
             // aren't modeled (constant 0 / false); the temporal history
-            // retention pair is -1/-1 (INFINITE) on a versioned table and
-            // NULL/NULL on history and non-temporal tables — all
-            // probe-confirmed against SQL Server 2025.
+            // retention triple carries the table's HISTORY_RETENTION_PERIOD on
+            // a versioned table — -1 / -1 / INFINITE until one is set — and is
+            // NULL on history and non-temporal tables (all probe-confirmed
+            // against SQL Server 2025).
             new("text_in_row_limit", SqlType.Int32, null, false),
             new("large_value_types_out_of_row", SqlType.Bit, null, false),
             new("is_tracked_by_cdc", SqlType.Bit, null, false),
             new("is_remote_data_archive_enabled", SqlType.Bit, null, false),
             new("history_retention_period", SqlType.Int32, null, true),
             new("history_retention_period_unit", SqlType.Int32, null, true),
+            new("history_retention_period_unit_desc", nvarchar60Catalog, 60, true),
         ], (batch, database) =>
             database.Schemas.Values
                 .SelectMany(s => s.HeapTables.Values)
@@ -214,8 +231,9 @@ internal static partial class BuiltInResources
                         falseTableFlag, // large_value_types_out_of_row
                         falseTableFlag, // is_tracked_by_cdc
                         falseTableFlag, // is_remote_data_archive_enabled
-                        t.SystemVersioning is not null ? SqlValue.FromInt32(-1) : SqlValue.Null(SqlType.Int32),
-                        t.SystemVersioning is not null ? SqlValue.FromInt32(-1) : SqlValue.Null(SqlType.Int32),
+                        t.SystemVersioning is not null ? SqlValue.FromInt32(t.HistoryRetentionPeriod) : SqlValue.Null(SqlType.Int32),
+                        t.SystemVersioning is not null ? SqlValue.FromInt32((int)t.HistoryRetentionUnit) : SqlValue.Null(SqlType.Int32),
+                        t.SystemVersioning is not null ? RetentionUnitDescription(t.HistoryRetentionUnit) : SqlValue.Null(nvarchar60Catalog),
                     };
                 }));
 

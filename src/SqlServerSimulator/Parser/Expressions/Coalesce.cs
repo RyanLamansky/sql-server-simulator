@@ -65,4 +65,20 @@ internal sealed class Coalesce : Expression
     }
 
     internal override string DebugDisplay() => $"COALESCE({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";
+
+    // Real desugars COALESCE to a CASE and folds an all-literal one, so
+    // `ORDER BY COALESCE(NULL, 1)` is Msg 408 while `ORDER BY ISNULL(NULL, 1)`
+    // (a runtime call) sorts — probe-confirmed.
+    internal override bool IsWrittenConstant
+    {
+        get
+        {
+            foreach (var argument in this.arguments)
+            {
+                if (!argument.IsWrittenConstant)
+                    return false;
+            }
+            return true;
+        }
+    }
 }

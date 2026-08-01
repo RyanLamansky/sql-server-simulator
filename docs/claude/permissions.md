@@ -90,7 +90,8 @@ DENY <perm_list> [ON <securable>] TO <principal_list> [AS <grantor>]
 - Grantee names accept either `Name` or `ReservedKeyword` raw text (so `public` works without special-casing).
 - The stored row's grantor is the granting session's **effective principal** (an impersonated grant records the impersonated grantor).
 - A **column list** after a permission name — `GRANT SELECT (a, b) ON t TO u`, `DENY SELECT (c) ON t TO u`, `GRANT UPDATE (b) ON t TO u`, `REFERENCES (col)` — stores **one row per column** at `minor_id` = the column's 1-based ordinal (`sys.columns.column_id`); an unknown column raises **Msg 4615** (`Invalid column name '<col>'.`).
-  The list may sit after the permission (`SELECT (a, b) ON t`) or after the object name (`SELECT ON t (a, b)`); the two placements can't combine (**Msg 1019**), and a list on a non-object scope raises **Msg 1020** — see [Column-level grants](#column-level-grants).
+  The list may sit after the permission (`SELECT (a, b) ON t`) or after the object name (`SELECT ON t (a, b)`); the two placements can't combine (**Msg 1019**), and a list on a non-object scope — or on a **synonym**, which is entity-level — raises **Msg 1020** — see [Column-level grants](#column-level-grants).
+  Tables and views both carry column ordinals (a view's are its projection's).
   A table-level (`minor_id 0`) GRANT / REVOKE of the same permission subsumes the grantee's column rows for it (probe-confirmed: a later `GRANT SELECT ON t` collapses the prior `GRANT SELECT (col)` rows); a column-level apply keys on its own `minor_id`.
   See [Column-level grants](#column-level-grants).
 - `WITH GRANT OPTION` stores a **single `W` row** (not `G`+`W`).
@@ -119,12 +120,13 @@ Existence leaks: SELECT on a missing object is plain Msg 208; Msg 229 fires only
 
 Wiring:
 - **SELECT** — each real table / view / TVF read (including nested subqueries and derived tables) is recorded on `Selection.ReferencedSecurables` at parse time (principal-independent, so it rides the cached plan) and checked at execution entry (and on plan-cache replay).
-  A base-table read additionally records its referenced column ordinals on `Selection.ReadColumnsByObject`, so the SELECT check is **column-grain** — see [Column-level grants](#column-level-grants).
+  A reference written through a synonym records the **synonym** as its securable — see [Reference provenance: synonyms](#reference-provenance-synonyms).
+  A table / view read additionally records its referenced column ordinals on `Selection.ReadColumnsByObject`, so the SELECT check is **column-grain** — see [Column-level grants](#column-level-grants).
   A scalar UDF invoked in a query records an EXECUTE securable the same way (checked once per statement, never per row).
 - **INSERT / UPDATE / DELETE / MERGE** — the target's write permission is checked (INSERT / UPDATE / DELETE; MERGE checks the union of its action kinds plus SELECT on the target); `INSERT … SELECT` also checks SELECT on the source's recorded reads.
   **UPDATE / DELETE read-implies-SELECT** (probe M1/M2): the target's SELECT is also required *when the statement reads it* — a WHERE clause, or a SET expression that references a target column (`SET v = v + 'x'`, detected via a static column-reference probe). A constant-SET UPDATE / bare DELETE with no WHERE reads nothing and needs only the write permission. The SELECT check runs *first*, so with neither SELECT nor the write granted the SELECT denial surfaces (real raises both records; the simulator raises the SELECT-first single error). A joined UPDATE / DELETE (`… FROM t JOIN u …`) SELECT-checks every backing-table source — the non-target sources first, then the target (matching real's ordering).
-  On a **single base table** (the no-FROM UPDATE / DELETE path) both the read-implies-SELECT and the UPDATE are **column-grain** (SELECT per WHERE / SET-RHS column, UPDATE per assigned column); the joined form and DML-through-view stay object-grain. See [Column-level grants](#column-level-grants).
-- **EXEC proc** / **scalar UDF invocation** — EXECUTE on the module at the call site (the Msg 229 for EXEC carries the proc's schema-qualified name as its Procedure attribution). The scalar-UDF check fires at the invocation seam (`PermissionEnforcement.CheckScalarFunctionExecute`, memoized once-per-statement) so SET / IF operand invocations are covered too.
+  On a **single target** (the no-FROM UPDATE / DELETE path) both the read-implies-SELECT and the UPDATE are **column-grain**, against a base table or a view alike (SELECT per WHERE / SET-RHS column, UPDATE per assigned column); the joined form, and any target reached through a synonym, stay object-grain. See [Column-level grants](#column-level-grants).
+- **EXEC proc** / **scalar UDF invocation** — EXECUTE on the module at the call site (the Msg 229 for EXEC carries the proc's schema-qualified name as its Procedure attribution; a call through a synonym checks the synonym and carries none). The scalar-UDF check fires at the invocation seam (`PermissionEnforcement.CheckScalarFunctionExecute`, memoized once-per-statement) so SET / IF operand invocations are covered too.
 - **TRUNCATE** — ALTER on the object → Msg 1088 (state 7).
 - **DDL gates** (all non-dbo only; `db_owner` / `db_ddladmin` pass everything):
   - **CREATE TABLE** — db-scope CREATE TABLE (else Msg 262 state 1) **and** ALTER on the target schema (else Msg 2760); temp tables exempt.
@@ -161,14 +163,43 @@ But when the object is inaccessible at object grain (no grant, or an object / sc
 `PermissionChecker.HasColumnLevelGrant` pairs with `IsGranted` to draw that line.
 
 **Read-column tracking (parse-time, principal-independent).**
-`Selection.ReadColumnsByObject` maps each base-table `object_id` → the set of column ordinals the query reads, accumulated in `BuildSqlProjection` from the resolved column references across the projection (through the schema-resolution walk), plus a structural walk of the WHERE / JOIN ON / GROUP BY / HAVING / ORDER BY / aggregate-operand expressions.
+`Selection.ReadColumnsByObject` maps each table / view `object_id` → a `ColumnReadTarget` (the securable, its columns, and the ordinals read), accumulated in `BuildSqlProjection` from the resolved column references across the projection (through the schema-resolution walk), plus a structural walk of the WHERE / JOIN ON / GROUP BY / HAVING / ORDER BY / aggregate-operand expressions.
 It rides the cached plan (recorded once, checked per execution against the current principal via `PermissionEnforcement.CheckReadSources`), and the `dbo` / module-body fast path pays nothing — the check short-circuits on `EffectiveIsDbo`, and the runtime row closure keeps the non-recording resolver, so recording adds nothing to execution.
-The UPDATE / DELETE single-table paths don't ride a `Selection` plan, so they gather their read / assigned ordinals inline (gated on `PermissionEnforcement.Applies`, so `dbo` skips the collection entirely) and call `PermissionEnforcement.CheckTableColumns`.
+The UPDATE / DELETE single-target paths don't ride a `Selection` plan, so they build a `ColumnReadTarget` inline (gated on `PermissionEnforcement.Applies`, so `dbo` skips the collection entirely) and call `PermissionEnforcement.CheckColumns`.
+
+**Views are column-grantable too.**
+A view carries its own column ordinals (`View.OutputColumns`, what `GRANT SELECT (col) ON <view>` stores as `minor_id`), and enforcement uses them rather than the base table's — so a view column computed from several base columns (`a + b AS both`) is one grantable unit and a denial names it.
+The base table is **never** consulted for a reference through the view (ownership chaining): a grant on the base does not admit the view read, and a DENY on the base does not block it.
+Both SELECT and the UPDATE pair (assigned columns need UPDATE, WHERE / SET-RHS columns need SELECT) are column-grain through a view; INSERT and DELETE through a view stay object-grain, matching real.
+All probe-confirmed against SQL Server 2025.
 
 **Coverage note.**
 Column collection uses the structural expression visitors, which don't recurse through every container (fixed-return scalar functions like `DATALENGTH(col)`, and columns buried in some non-arithmetic function args, are missed) — a residual gap that can under- or over-report a column in those uncommon shapes.
 Direct references, arithmetic / comparison, `CAST`, aggregates, and `SELECT *` are covered.
-Column grants on **views** are not modeled (views stay object-grain).
+
+### Reference provenance: synonyms
+
+A synonym is **its own securable**, and a reference written through one is checked against the synonym — never walked through to the base object.
+Probe-confirmed against SQL Server 2025, in both directions:
+
+| Held | Reference | Result |
+|---|---|---|
+| `GRANT SELECT ON syn` | `SELECT … FROM syn` | allowed |
+| `GRANT SELECT ON syn` | `SELECT … FROM base` | **Msg 229** naming `base` |
+| `GRANT SELECT ON base` | `SELECT … FROM syn` | **Msg 229** naming `syn` |
+| `GRANT` on base + `DENY` on syn | `FROM syn` denied, `FROM base` allowed | the DENY doesn't reach the base |
+| `GRANT` on syn + `DENY` on base | `FROM syn` allowed | the DENY doesn't reach the synonym |
+| `GRANT SELECT ON SCHEMA::s` | `FROM s.syn` | allowed — the ordinary scope walk, on the synonym's own schema |
+
+The same holds for `INSERT` / `UPDATE` / `DELETE` / `MERGE` through a table synonym and `EXEC` through a procedure synonym.
+The EXEC denial names the synonym and carries **no `Procedure` attribution** (the module was never entered), unlike a direct `EXEC dbo.p`, which attributes `dbo.p`.
+
+Because a synonym takes no column list at all, every check through one is **object-grain** — `GRANT SELECT (col) ON <synonym>` raises **Msg 1020** (severity 16, state 3), which is a *different* variant from the entity-level-permission rejection (class 15, state 1): real raises the synonym one after the securable resolves, so it is catchable and beats the Msg 4615 unknown-column check.
+
+The carrier is the *written* name.
+`PermissionEnforcement.SecurableFor(batch, writtenName, resolved)` returns the `Synonym` when the name is one and the resolved object otherwise; `CheckReference` is the check that wraps it, and `CheckSchemaObject` the already-resolved form.
+For query sources the provenance rides `FromSource.ViaSynonym`, stamped during FROM parsing — read both by the securable sink (which records the synonym in place of the object) and by the joined UPDATE / DELETE source checks.
+A source with `ViaSynonym` set is excluded from `Selection.ReadColumnsByObject` entirely, so the column-grain lookup misses and the object-grain path fires.
 
 ### Metadata visibility
 
@@ -303,6 +334,7 @@ Registered in `BuiltInResources.Security.cs` via the shared `EmptyCatalogRows`.
 | 229 | SELECT / INSERT / UPDATE / DELETE / EXECUTE denied (sev 14 state 5; Procedure attribution on EXEC; UPDATE/DELETE read-implies-SELECT; the object-level fallback when a column-grain check has no access at all). |
 | 230 | SELECT / UPDATE denied on a specific **column** (sev 14 state 1) — the column-level grant model's denial, naming the first inaccessible column. |
 | 4615 | GRANT / DENY / REVOKE column list naming a column the object lacks (`Invalid column name '<col>'.`). |
+| 1020 | Column list on an entity-level *permission* (class 15 state 1, compile-time) or on a **synonym** securable (sev 16 state 3, post-resolution). |
 | 262 | CREATE TABLE (state 1, no attribution) / CREATE VIEW / PROCEDURE / FUNCTION (state 18, object as Procedure attribution) db-scope-permission gate; database-scope DMV read without `VIEW DATABASE PERFORMANCE STATE` (state 1). |
 | 300 | Server-scope DMV read without `VIEW SERVER PERFORMANCE STATE` (sev 14 state 1). |
 | 2760 | CREATE TABLE / VIEW / PROCEDURE / FUNCTION with the db-scope permission but no ALTER on the target schema (double-quoted schema name). |
@@ -320,6 +352,10 @@ Every other permission is entity-level and takes no sub-entity list, so a column
 Probed across `INSERT` / `DELETE` / `EXECUTE` / `ALTER` / `CONTROL` / `TAKE OWNERSHIP` / `VIEW DEFINITION` / `VIEW CHANGE TRACKING` / `RECEIVE` — all rejected.
 Real reports it at **Class 15**, a compile-time rejection raised before the securable resolves: `TRY`/`CATCH` cannot intercept it, and it beats the Msg 4606 permission-vs-object-kind check, so `GRANT EXECUTE (col)` on a *table* is Msg 1020 rather than 4606.
 Both spellings are covered — the per-permission `GRANT EXECUTE (col) ON t` and the securable-placed `GRANT EXECUTE ON t (col)`.
+
+**And only on a column-bearing securable.**
+`SELECT` / `UPDATE` / `REFERENCES` accept a column list on a table or a view, but a **synonym** is entity-level regardless of the permission, so `GRANT SELECT (col) ON <synonym>` is Msg 1020 as well — at **severity 16 state 3**, since real raises this one only once the securable has resolved.
+That makes it catchable (unlike the class-15 variant) and puts it ahead of the Msg 4615 unknown-column check, so a bogus column name on a synonym still reports 1020.
 
 ## Principal scalars
 
@@ -351,7 +387,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 
 ## Known gaps
 
-- **Column-level grants** ship for SELECT / UPDATE / REFERENCES reads and writes — see [Column-level grants](#column-level-grants). Residual gaps: **column-level INSERT** grants (INSERT stays object-grain), column grants on **views**, and the structural-visitor coverage gap for columns buried in some non-arithmetic function containers.
+- **Column-level grants** ship for SELECT / UPDATE / REFERENCES reads and writes, on tables and views alike — see [Column-level grants](#column-level-grants). Residual gaps: **column-level INSERT** grants (INSERT stays object-grain) and the structural-visitor coverage gap for columns buried in some non-arithmetic function containers.
 - **`GRANT … ON SERVER` / `ON LOGIN::` securables**, **application roles** — not modeled. (Server-scope permission *names* — `CONNECT SQL` / `VIEW SERVER STATE` / … — and server roles are; see [Server roles + server-scope permissions](#server-roles--server-scope-permissions-simulationsimulationserverrolescs).)
 - **Server-permission enforcement beyond DMV state gating** — the `VIEW …STATE` permissions gate the modeled DMVs (see [DMV server-state gating](#dmv-server-state-gating)); other server-permission-gated actions (ALTER ANY LOGIN, CONTROL SERVER, …) are largely sysadmin-only already and aren't separately enforced.
 - **DDL statement permissions beyond the gated set** — CREATE TABLE / VIEW / PROCEDURE / FUNCTION / SEQUENCE / ROLE / USER / SCHEMA, ALTER TABLE, DROP TABLE, and DROP USER are gated; other CREATE / ALTER / DROP statements (indexes, triggers, types, sequences-alter, …) aren't. `ALTER` / `CREATE OR ALTER` of an existing module isn't gated (only pure CREATE is).

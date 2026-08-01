@@ -704,6 +704,40 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
+    /// The four page/row totals <c>sp_spaceused</c> reports, accumulated over
+    /// the same (table, index_id) identities <c>sys.dm_db_partition_stats</c>
+    /// projects and with real's own formulas: <c>ReservedPages</c> /
+    /// <c>UsedPages</c> sum every partition's reserved / used count,
+    /// <c>DataPages</c> sums only the <c>index_id &lt; 2</c> partitions'
+    /// in-row + LOB pages, and <c>RowCount</c> sums those partitions' row
+    /// counts. <paramref name="only"/> restricts the walk to one table (the
+    /// object form); null totals the whole database.
+    /// </summary>
+    internal static (long ReservedPages, long UsedPages, long DataPages, long RowCount) SpaceUsedTotals(
+        Database database, HeapTable? only)
+    {
+        long reserved = 0, used = 0, data = 0, rows = 0;
+        HeapTable? lastTable = null;
+        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database))
+        {
+            var isBase = !ReferenceEquals(table, lastTable);
+            lastTable = table;
+            if (only is not null && !ReferenceEquals(table, only))
+                continue;
+            long inRow = table.Heap.Pages.Count;
+            var lob = isBase ? table.Heap.LobPages.Count : 0;
+            reserved += inRow + lob;
+            used += inRow + lob;
+            if (indexId >= 2)
+                continue;
+            data += inRow + lob;
+            rows += table.Heap.RowCount;
+        }
+
+        return (reserved, used, data, rows);
+    }
+
+    /// <summary>
     /// Rows for <c>sys.partitions</c>: one per (object_id, index_id) that
     /// <see cref="EnumerateSysIndexes"/> reports, all with partition_number = 1
     /// (single, unpartitioned partition per index/heap). rows carries the
@@ -869,6 +903,21 @@ internal static partial class BuiltInResources
 
     /// <summary>Synthetic per-database log-file size, in 8 KB pages.</summary>
     internal const int LogFileSizePages = 128;
+
+    /// <summary>
+    /// Synthetic autogrowth increment, in KB — SQL Server's 64 MB default for
+    /// a database created without an explicit <c>FILEGROWTH</c>. Reported
+    /// verbatim by <c>sp_helpfile</c>'s <c>growth</c> cell and carried by
+    /// <c>sys.database_files</c> / <c>sys.master_files</c>' <c>growth</c>
+    /// column.
+    /// </summary>
+    internal const int FileGrowthKilobytes = 65536;
+
+    /// <summary>Synthetic physical path of a database's data file — shared by the file catalog views and <c>sp_helpfile</c>.</summary>
+    internal static string DataFilePath(string databaseName) => "/var/opt/mssql/data/" + databaseName + ".mdf";
+
+    /// <summary>Synthetic physical path of a database's log file — shared by the file catalog views and <c>sp_helpfile</c>.</summary>
+    internal static string LogFilePath(string databaseName) => "/var/opt/mssql/data/" + databaseName + "_log.ldf";
 
     /// <summary>Synthetic log-file <c>SpaceUsed</c> (pages) reported by FILEPROPERTY — a small fraction of <see cref="LogFileSizePages"/>.</summary>
     internal const int LogFileUsedPages = 24;

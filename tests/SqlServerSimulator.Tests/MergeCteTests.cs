@@ -7,9 +7,9 @@ namespace SqlServerSimulator;
 /// CTE-precedes-MERGE shape where the bare CTE name is the source. Real SQL
 /// Server (probe-confirmed 2026-05-19) accepts the bare-name form with or
 /// without an alias; rejects the related but invalid shape
-/// <c>MERGE … USING (WITH cte AS …)</c> at parse with Msg 156 (the CTE
-/// can't live inside the <c>USING (…)</c> parens — already enforced as
-/// Msg 102 by the simulator's grammar).
+/// <c>MERGE … USING (WITH cte AS …)</c> at parse with Msg 156 — the CTE
+/// can't live inside the <c>USING (…)</c> parens, which the simulator
+/// mirrors.
 /// </summary>
 [TestClass]
 public sealed class MergeCteTests
@@ -85,17 +85,18 @@ public sealed class MergeCteTests
     }
 
     [TestMethod]
-    public void CteInsideUsingParens_StillRejected()
+    public void CteInsideUsingParens_Raises156()
     {
-        // Phantom-feature shape — real SQL Server raises Msg 156 here, the
-        // simulator raises Msg 102. Same end state (rejected); shape
-        // documented as not supported on real SQL Server either.
-        _ = new Simulation().AssertSqlError("""
+        // The MERGE source is a table source, and no parenthesized query
+        // position accepts a CTE prefix — real answers Msg 156 (followed by
+        // Msg 319 and Msg 102, of which the simulator raises the first).
+        var ex = new Simulation().AssertSqlError("""
             create table tgt (id int primary key, v int);
             create table src (id int, v int);
             merge into tgt using (with c as (select id, v from src) select * from c) s on tgt.id = s.id
             when not matched then insert (id, v) values (s.id, s.v);
-            """, 102);
+            """, 156);
+        AreEqual("Incorrect syntax near the keyword 'with'.", ex.Message);
     }
 
     [TestMethod]

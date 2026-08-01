@@ -95,6 +95,26 @@ internal sealed class BatchContext
     public readonly StatementContext CurrentStatement = new();
 
     /// <summary>
+    /// Adopts <paramref name="outer"/>'s per-statement current-time freeze for
+    /// a body that runs as part of the referencing statement rather than as
+    /// statements of its own — a view body or an inline-TVF body, both of which
+    /// real SQL Server inlines into the referencing statement's plan.
+    /// Probe-confirmed against SQL Server 2025: a view whose projection is
+    /// <c>SYSDATETIME()</c>, read once per row across a 300,000-row scan,
+    /// yields one constant value equal to the referencing statement's own
+    /// <c>SYSDATETIME()</c> — and an inline TVF applied per row does the same.
+    /// <para>
+    /// Module bodies that <em>do</em> dispatch statements of their own
+    /// (procedure, trigger, scalar-UDF, multi-statement-TVF bodies) deliberately
+    /// don't call this: the dispatch loop re-stamps each body statement, which
+    /// is what real does — a UDF body that spins for 1.2 seconds between two
+    /// <c>SYSDATETIME()</c> calls reads two values 1.2 seconds apart.
+    /// </para>
+    /// </summary>
+    public void AdoptStatementFreezeFrom(BatchContext outer) =>
+        this.CurrentStatement.UtcNow = outer.CurrentStatement.UtcNow;
+
+    /// <summary>
     /// Per-execution results for the aggregate / window expressions of the
     /// SELECT currently projecting under this batch, keyed by expression
     /// instance (reference identity). The executor binds each group's / row's

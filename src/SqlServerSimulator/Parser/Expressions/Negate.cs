@@ -79,5 +79,7 @@ internal sealed class Negate(Expression operand) : Expression
 
     internal override bool IsRowIndependent => this.Operand.IsRowIndependent;
 
+    internal override bool IsWrittenConstant => this.Operand.IsWrittenConstant;
+
     internal override string DebugDisplay() => $"-{this.Operand.DebugDisplay()}";
 }

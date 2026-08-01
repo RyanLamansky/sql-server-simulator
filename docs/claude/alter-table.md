@@ -267,10 +267,12 @@ Probe-confirmed: dropping a column referenced by ANY of the following raises **M
 - Incoming `FOREIGN KEY` (parent side — another table's FK references this column)
 - `CHECK` constraint (inline `InlineColumn` match OR table-level predicate walked structurally for column refs by name)
 - `DEFAULT` constraint attached to the column
+- A `WITH SCHEMABINDING` view or function whose body names the column (see [`programmable.md`](programmable.md#schema-binding-with-schemabinding))
 - `INDEX` (`CREATE INDEX`-declared — either KEY column or INCLUDE column)
 
-Each blocker emits its line with the appropriate prefix: `The object 'X' is dependent on column 'col'.` for constraints, `The index 'X' is dependent on column 'col'.` for indexes.
+Each blocker emits its line with the appropriate prefix: `The object 'X' is dependent on column 'col'.` for constraints and schema-bound modules, `The index 'X' is dependent on column 'col'.` for indexes.
 Multiple blockers on one column emit one line each.
+The schema-bound module sits between DEFAULT and index in the walk, which reproduces real's probed view-before-index ordering.
 
 `IF EXISTS` suppresses Msg 4924 (column doesn't exist) but does NOT suppress Msg 5074 (dependencies block) — matches real SQL Server.
 
@@ -342,12 +344,13 @@ Widening within the same family (`varchar(50) → varchar(100)`, `int → bigint
 | Outgoing FOREIGN KEY using this column as a child column | Always | `The object 'X' is dependent…` |
 | Incoming FOREIGN KEY referencing this column as a parent column | Always | `The object 'X' is dependent…` |
 | Computed column that references this column in its expression | Always | `The column 'X' is dependent…` |
+| `WITH SCHEMABINDING` view or function whose body names this column | Always — probe-confirmed that a widening an index waves past still fails here | `The object 'X' is dependent…` |
 | Index whose key or include columns reference this column | Only when the `SqlType` subclass changes — length widening within the same family (`varchar(50) → varchar(100)`) passes | `The index 'X' is dependent…` |
 | CHECK constraint that references this column | Never (constraint survives the type change and continues to enforce against future inserts) | — |
 | DEFAULT constraint on this column | Never (default expression + constraint name survive the type change) | — |
 
 Multi-blocker enumeration follows the existing `DropColumnHasDependenciesMixed` pattern: one line per blocker, all surfaced in one Msg 5074 raise.
-Blocker order: PK / UQ → outgoing FK → incoming FK → computed-column refs → indexes (when applicable).
+Blocker order: PK / UQ → outgoing FK → incoming FK → computed-column refs → schema-bound modules → indexes (when applicable).
 
 ### Rejection paths (other than Msg 5074)
 

@@ -1,3 +1,5 @@
+using System.Collections.Frozen;
+
 namespace SqlServerSimulator.Schemas;
 
 /// <summary>
@@ -9,14 +11,9 @@ namespace SqlServerSimulator.Schemas;
 /// belong to any single schema.
 /// </summary>
 /// <remarks>
-/// The simulator <strong>does not</strong> fire DDL triggers. Statements
-/// that would invoke the trigger in real SQL Server (CREATE / ALTER / DROP
-/// against a database-scope event) execute normally and the trigger's body
-/// is never re-tokenized. The element exists to (a) accept the
-/// <c>CREATE TRIGGER … ON DATABASE</c> grammar that BACPAC SqlPackage emits
-/// from AdventureWorks's <c>[ddlDatabaseTriggerLog]</c>, and (b) populate
-/// the catalog views (<c>sys.triggers</c>, <c>sys.sql_modules</c>,
-/// <c>sys.trigger_events</c>) so model.xml round-trip works.
+/// The body fires after a matching DDL statement completes, inside that
+/// statement's atomic scope — see <c>Simulation.FireDdlTriggers</c> and
+/// <c>docs/claude/triggers.md</c>.
 /// </remarks>
 internal sealed class DdlTrigger(
     string name,
@@ -24,32 +21,77 @@ internal sealed class DdlTrigger(
     int schemaId,
     List<string> eventTypes,
     string bodyText,
-    DateTime createDate)
+    DateTime createDate,
+    int bodyLineOffset)
     : SchemaObject(name, objectId, schemaId, createDate)
 {
     public override string ObjectTypeCode => "TR";
     public override string ObjectTypeDescription => "SQL_TRIGGER";
 
     /// <summary>
-    /// The set of DDL event types this trigger would fire on. Stored as
-    /// raw uppercase identifier strings (<c>DDL_DATABASE_LEVEL_EVENTS</c>,
-    /// <c>CREATE_TABLE</c>, <c>DROP_PROCEDURE</c>, …) matching the AW
-    /// emit shape. The simulator never fires DDL triggers; this list
-    /// exists for <c>sys.trigger_events</c> round-trip.
+    /// The set of DDL event types this trigger fires on, as written:
+    /// event-group names (<c>DDL_DATABASE_LEVEL_EVENTS</c>) and individual
+    /// events (<c>CREATE_TABLE</c>, <c>DROP_PROCEDURE</c>) alike. Groups
+    /// expand to their leaf events for <c>sys.trigger_events</c> and for
+    /// <see cref="Covers"/>.
     /// </summary>
     public readonly List<string> EventTypes = eventTypes;
 
     /// <summary>
-    /// Raw source text of the body (everything after <c>AS</c>). Captured
-    /// for <c>sys.sql_modules.definition</c> only — never re-tokenized
-    /// because DDL events don't fire in the simulator.
+    /// Raw source text of the body (everything after <c>AS</c>),
+    /// re-tokenized per fire and stored for <c>sys.sql_modules.definition</c>.
     /// </summary>
     public readonly string BodyText = bodyText;
 
     /// <summary>
+    /// Newlines between the <c>CREATE TRIGGER</c> verb and the body's first
+    /// token, so a body error reports a line relative to the whole CREATE
+    /// statement the way real SQL Server does.
+    /// </summary>
+    public readonly int BodyLineOffset = bodyLineOffset;
+
+    /// <summary>
     /// True when the trigger is disabled via <c>DISABLE TRIGGER … ON
-    /// DATABASE</c>. Affects only the <c>sys.triggers.is_disabled</c>
-    /// surface; firing isn't modeled regardless.
+    /// DATABASE</c>. Disabled triggers stay in the catalog
+    /// (<c>sys.triggers.is_disabled</c>) but don't fire.
     /// </summary>
     public bool IsDisabled;
+
+    /// <summary>
+    /// The leaf event names <see cref="EventTypes"/> resolves to, groups
+    /// expanded through their transitive closure. Built once on first fire —
+    /// the declaration never changes after construction (ALTER replaces the
+    /// whole instance).
+    /// </summary>
+    private FrozenSet<string>? coveredEvents;
+
+    /// <summary>
+    /// Whether a raised event type dispatches to this trigger. Matching is on
+    /// the expanded leaf set, so a trigger declared <c>FOR DDL_TABLE_EVENTS</c>
+    /// fires on <c>CREATE_TABLE</c> / <c>ALTER_TABLE</c> / <c>DROP_TABLE</c>
+    /// (probe-confirmed — the same three rows it projects into
+    /// <c>sys.trigger_events</c>).
+    /// </summary>
+    public bool Covers(string eventTypeName) =>
+        (this.coveredEvents ??= BuildCoveredEvents(this.EventTypes)).Contains(eventTypeName);
+
+    private static FrozenSet<string> BuildCoveredEvents(List<string> declared)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var declaredName in declared)
+        {
+            if (!TriggerEventTypes.TryResolve(declaredName, out var entry))
+                continue;
+            if (TriggerEventTypes.IsGroup(entry))
+            {
+                foreach (var leaf in TriggerEventTypes.LeafClosure(entry.Type))
+                    _ = names.Add(leaf.TypeName);
+            }
+            else
+            {
+                _ = names.Add(entry.TypeName);
+            }
+        }
+        return names.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+    }
 }

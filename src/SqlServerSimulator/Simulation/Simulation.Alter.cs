@@ -610,9 +610,11 @@ partial class Simulation
                         continue;
                     }
                 default:
+                    RecordDdlEvent(context, "ALTER_SEQUENCE", sequence.Schema.Name, sequence.Name, "SEQUENCE");
                     return true;
             }
         }
+        RecordDdlEvent(context, "ALTER_SEQUENCE", sequence.Schema.Name, sequence.Name, "SEQUENCE");
         return true;
     }
 
@@ -705,6 +707,9 @@ partial class Simulation
             TransferTableType(sourceSchema, destSchema, sourceName.Leaf, context.Batch);
         else
             TransferObject(sourceSchema, destSchema, sourceName.Leaf, context.Batch);
+        // Real reports the transferred object, not the schema — SchemaName is
+        // the destination and ObjectName / ObjectType describe what moved.
+        RecordDdlEvent(context, "ALTER_SCHEMA", destSchemaName, sourceName.Leaf, classIsType ? "TYPE" : "OBJECT");
         return true;
     }
 
@@ -753,6 +758,7 @@ partial class Simulation
             if (sameSchema) return;
             if (destSchema.HasNameInSharedNamespace(leafName))
                 throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
+            RejectTransferOfSchemaBoundReferent(batch, heap);
             batch.AcquireStatementLock(heap.SchemaLock, LockMode.SchemaModification);
             _ = sourceSchema.HeapTables.TryRemove(leafName, out _);
             destSchema.HeapTables[leafName] = heap;
@@ -765,6 +771,7 @@ partial class Simulation
             if (sameSchema) return;
             if (destSchema.HasNameInSharedNamespace(leafName))
                 throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
+            RejectTransferOfSchemaBoundReferent(batch, view);
             batch.AcquireStatementLock(view.SchemaLock, LockMode.SchemaModification);
             _ = sourceSchema.Views.TryRemove(leafName, out _);
             destSchema.Views[leafName] = view;
@@ -778,6 +785,7 @@ partial class Simulation
             if (sameSchema) return;
             if (destSchema.HasNameInSharedNamespace(leafName))
                 throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
+            RejectTransferOfSchemaBoundReferent(batch, fn);
             batch.AcquireStatementLock(fn.SchemaLock, LockMode.SchemaModification);
             _ = sourceSchema.Functions.TryRemove(leafName, out _);
             destSchema.Functions[leafName] = fn;
@@ -826,6 +834,19 @@ partial class Simulation
         }
 
         throw SimulatedSqlException.CannotFindObject(leafName);
+    }
+
+    /// <summary>
+    /// Raises <strong>Msg 15348</strong> when a <c>WITH SCHEMABINDING</c>
+    /// module references the object being transferred — a schema-bound
+    /// reference is two-part, so moving the referent would break it. Real
+    /// gates only the referenced side: transferring the schema-bound module
+    /// itself succeeds (probe-confirmed).
+    /// </summary>
+    private static void RejectTransferOfSchemaBoundReferent(BatchContext batch, SchemaObject target)
+    {
+        if (SchemaBinding.FindReferencingModule(batch.CurrentDatabase, target) is not null)
+            throw SimulatedSqlException.CannotTransferSchemaBoundObject();
     }
 
     /// <summary>
@@ -907,6 +928,22 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
+        var handled = TryParseAlterTableAction(context, tableName, withCheckExplicit);
+        // Every accepted shape raises one ALTER_TABLE event (probe-confirmed:
+        // ADD COLUMN and ADD CONSTRAINT both report ALTER_TABLE, differing only
+        // in the AlterTableActionList detail the simulator doesn't emit).
+        if (handled)
+            RecordDdlEvent(context, "ALTER_TABLE", EventSchemaName(tableName), tableName.Leaf, "TABLE");
+        return handled;
+    }
+
+    /// <summary>
+    /// Routes the post-name body of <c>ALTER TABLE</c> to the sub-parser its
+    /// leading keyword names. Split from <see cref="TryParseAlterTable"/> so the
+    /// caller has one success point to raise the DDL event from.
+    /// </summary>
+    private static bool TryParseAlterTableAction(ParserContext context, MultiPartName tableName, bool? withCheckExplicit)
+    {
         switch (context.Token)
         {
             case ReservedKeyword { Keyword: Keyword.Set }:
@@ -941,18 +978,18 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses <c>ALTER TABLE … SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))</c>.
-    /// Cursor is on the <c>SET</c> keyword on entry. Probe-confirmed flow for
-    /// OFF: target table must resolve (Msg 4902 otherwise), must be
-    /// system-versioned (Msg 13591 otherwise); the parent's link to its
-    /// history sibling clears and the sibling's history-role flag flips.
-    /// Period / GENERATED-ALWAYS column metadata is preserved. For ON: base
-    /// must already have a PERIOD FOR SYSTEM_TIME declaration; the named
-    /// history table must resolve and not already be linked elsewhere; the
-    /// link is established and the sibling's history-role flag is set.
-    /// <c>DATA_CONSISTENCY_CHECK = ON|OFF</c> parses-and-discards (the
-    /// simulator doesn't enforce the temporal-data-consistency rules that
-    /// the option toggles).
+    /// Parses <c>ALTER TABLE … SET (SYSTEM_VERSIONING = OFF | ON [(&lt;options&gt;)])</c>,
+    /// where the options are the <c>HISTORY_TABLE</c> /
+    /// <c>HISTORY_RETENTION_PERIOD</c> / <c>DATA_CONSISTENCY_CHECK</c> list
+    /// shared with CREATE TABLE. Cursor is on the <c>SET</c> keyword on entry.
+    /// Probe-confirmed flow for OFF: target table must resolve (Msg 4902
+    /// otherwise), must be system-versioned (Msg 13591 otherwise); the
+    /// parent's link to its history sibling clears and the sibling's
+    /// history-role flag flips. Period / GENERATED-ALWAYS column metadata is
+    /// preserved. For ON: the base must have a PERIOD FOR SYSTEM_TIME
+    /// declaration (Msg 13510 otherwise); a named history table that exists is
+    /// shape-validated against the base and linked, one that doesn't is
+    /// created from the base's shape, and an omitted name auto-generates one.
     /// </summary>
     private static bool TryParseAlterTableSetSystemVersioning(ParserContext context, MultiPartName tableName)
     {
@@ -989,31 +1026,7 @@ partial class Simulation
         if (onOff is not ReservedKeyword { Keyword: Keyword.On })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.History_Table })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not Operator { Character: '=' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
-        var historyName = BatchContext.ParseObjectName(context);
-
-        // Optional `, DATA_CONSISTENCY_CHECK = ON|OFF` — simulator parses but
-        // doesn't enforce the temporal data-consistency rules the toggle gates.
-        context.MoveNextRequired();
-        if (context.Token is Operator { Character: ',' })
-        {
-            if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Data_Consistency_Check })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            if (context.GetNextRequired() is not Operator { Character: '=' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextRequired();
-        }
-
-        if (context.Token is not Operator { Character: ')' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var options = ParseSystemVersioningOnOptions(context);
         if (context.GetNextRequired() is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
@@ -1023,18 +1036,75 @@ partial class Simulation
         if (!context.Batch.TryResolveTable(tableName, out var baseTable))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
         if (baseTable.PeriodColumns is null)
-            throw SimulatedSqlException.SystemVersioningOnRequiresPeriod(QualifyTableName(baseTable, context.CurrentDatabase));
-        if (baseTable.SystemVersioning is not null)
-            throw SimulatedSqlException.SystemVersioningAlreadyOn(QualifyTableName(baseTable, context.CurrentDatabase));
+            throw SimulatedSqlException.SystemVersioningRequiresPeriod(state: 1);
 
-        if (!context.Batch.TryResolveTable(historyName, out var resolvedHistory))
-            throw SimulatedSqlException.CannotFindObjectForAlterTable(historyName.ToString());
-        if (resolvedHistory.IsHistoryTable || resolvedHistory.SystemVersioning is not null)
-            throw SimulatedSqlException.HistoryTableAlreadyInUse(QualifyTableName(resolvedHistory, context.CurrentDatabase));
+        // Re-issuing SET ON against the sibling the base already has is how a
+        // retention period is changed in place; every other re-issue is a
+        // rejection, and real reports the existing link before it resolves the
+        // name it was handed (probe-confirmed: an unresolvable name reports
+        // Msg 13757 rather than Msg 4902).
+        if (baseTable.SystemVersioning is { } currentHistory)
+        {
+            if (options.HistoryTable is not { } requested)
+                throw SimulatedSqlException.SystemVersioningAlreadyOn(QualifyTableName(baseTable, context.CurrentDatabase));
+            if (!context.Batch.TryResolveTable(requested, out var requestedHistory))
+                throw SimulatedSqlException.TemporalTableAlreadyHasHistoryTable(QualifyTableName(baseTable, context.CurrentDatabase));
+            if (!ReferenceEquals(requestedHistory, currentHistory))
+            {
+                throw SimulatedSqlException.TemporalHistoryTableNameNotCorrect(
+                    QualifyTableName(requestedHistory, context.CurrentDatabase),
+                    QualifyTableName(baseTable, context.CurrentDatabase));
+            }
+            baseTable.HistoryRetentionPeriod = options.RetentionPeriod;
+            baseTable.HistoryRetentionUnit = options.RetentionUnit;
+            return true;
+        }
+
+        HeapTable resolvedHistory;
+        if (options.HistoryTable is { } historyName && context.Batch.TryResolveTable(historyName, out var existingHistory))
+        {
+            RejectUnusableHistoryTable(context, existingHistory);
+            ValidateHistoryTableShape(context, baseTable, existingHistory);
+            resolvedHistory = existingHistory;
+        }
+        else
+        {
+            // A history table that doesn't exist yet is created from the
+            // base's shape, named as written or auto-named from the base's
+            // object id — probe-confirmed: real creates it rather than
+            // rejecting the ALTER.
+            var historySchema = HistoryDestinationSchema(context, baseTable, options.HistoryTable);
+            resolvedHistory = BuildHistoryTable(baseTable, options.HistoryTable?.Leaf ?? AutoHistoryTableName(historySchema, baseTable.ObjectId), historySchema.SchemaId, context);
+            if (!historySchema.HeapTables.TryAdd(resolvedHistory.Name, resolvedHistory))
+                throw SimulatedSqlException.ThereIsAlreadyAnObject(resolvedHistory.Name);
+        }
 
         baseTable.SystemVersioning = resolvedHistory;
+        baseTable.HistoryRetentionPeriod = options.RetentionPeriod;
+        baseTable.HistoryRetentionUnit = options.RetentionUnit;
         resolvedHistory.IsHistoryTable = true;
         return true;
+    }
+
+    /// <summary>
+    /// Resolves the schema a to-be-created history table lands in: the one the
+    /// name qualifies, or the base table's own for an unqualified or
+    /// auto-generated name.
+    /// </summary>
+    private static Schema HistoryDestinationSchema(ParserContext context, HeapTable baseTable, MultiPartName? historyName)
+    {
+        if (historyName is { } name && name.Count >= 2)
+        {
+            return context.Batch.TryResolveSchema(name, out var named)
+                ? named
+                : throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(name.ImmediateQualifier!);
+        }
+        foreach (var schema in context.CurrentDatabase.Schemas.Values)
+        {
+            if (schema.SchemaId == baseTable.SchemaId)
+                return schema;
+        }
+        throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(Database.DefaultSchemaName);
     }
 
     /// <summary>

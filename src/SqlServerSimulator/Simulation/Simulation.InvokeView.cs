@@ -41,12 +41,15 @@ partial class Simulation
         // Body errors attribute to the outer statement that referenced the view
         // (probe-confirmed: real reports the outer SELECT's line, no procedure).
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
+        // The body is part of the referencing statement, not a statement of its
+        // own, so its current-time calls read that statement's freeze.
+        innerBatch.AdoptStatementFreezeFrom(outerBatch);
         connection.NestingLevel++;
         try
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
-            var bodySelection = Selection.Parse(parser, depth: 0);
+            var bodySelection = ParseBodyQuery(parser);
             var resultSet = bodySelection.Execute(innerBatch, outerResolver: null);
             foreach (var rowBytes in resultSet.RowBytes)
                 yield return rowBytes;

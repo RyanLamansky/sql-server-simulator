@@ -41,6 +41,7 @@ partial class Simulation
         if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var triggerName = BatchContext.ParseObjectName(context);
+        RejectQualifiedModuleName(triggerName, "TRIGGER");
         if (!context.Batch.TryResolveSchema(triggerName, out var triggerSchema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(triggerName.ImmediateQualifier ?? Database.DefaultSchemaName);
 
@@ -49,7 +50,7 @@ partial class Simulation
         context.MoveNextRequired();
 
         // Branch on the parent-scope token: ON DATABASE → database-scope
-        // DDL trigger (parse-and-store-no-fire, see DdlTrigger.cs); a
+        // DDL trigger (see DdlTrigger.cs and Simulation.InvokeDdlTrigger.cs); a
         // Name → DML trigger attached to a heap-table or view parent.
         if (context.Token is ReservedKeyword { Keyword: Keyword.Database })
         {
@@ -218,8 +219,19 @@ partial class Simulation
         var existed = triggerSchema.Triggers.TryGetValue(triggerName.Leaf, out var existing);
         if (!isAlter && !createOrAlter && triggerSchema.HasNameInSharedNamespace(triggerName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf);
+        // Replacement rules, in real's own order (the parent-object resolution
+        // above already reported Msg 8197 for a target that doesn't exist, which
+        // real reports ahead of these — probe-confirmed): a name another object
+        // kind holds is Msg 2010, the same gate ALTER VIEW / FUNCTION /
+        // PROCEDURE take (see ResolveModuleAlterTarget); a trigger attached to a
+        // different parent is Msg 2110; and a name nothing holds is Msg 208 for
+        // a bare ALTER, or a plain create for CREATE OR ALTER.
+        if ((isAlter || createOrAlter) && !existed && triggerSchema.HasNameInSharedNamespace(triggerName.Leaf))
+            throw SimulatedSqlException.CannotAlterIncompatibleObjectType(triggerName);
         if (isAlter && !existed)
             throw SimulatedSqlException.InvalidObjectName(triggerName);
+        if (existed && (isAlter || createOrAlter) && !ReferenceEquals(existing!.Parent, parent))
+            throw SimulatedSqlException.CannotAlterTriggerOnDifferentObject(triggerName, parentName);
         // Sch-M on the existing trigger instance's SchemaLock before
         // replacement — same pattern as ALTER PROCEDURE.
         if (existed)
@@ -245,6 +257,14 @@ partial class Simulation
         if (existed)
             trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         triggerSchema.Triggers[triggerName.Leaf] = trigger;
+        RecordDdlEvent(
+            context,
+            existed ? "ALTER_TRIGGER" : "CREATE_TRIGGER",
+            triggerSchema.Name,
+            triggerName.Leaf,
+            "TRIGGER",
+            parent.Name,
+            parentKind == "view" ? "VIEW" : "TABLE");
         return true;
     }
 
@@ -294,6 +314,25 @@ partial class Simulation
         if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
+
+        // ON DATABASE toggles a database-scope DDL trigger instead of a DML
+        // one; the ALL form covers every DDL trigger in the database.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Database })
+        {
+            if (context.Batch.IsSkipping)
+                return true;
+            if (allTriggers)
+            {
+                foreach (var ddlTrigger in context.CurrentDatabase.DdlTriggers.Values)
+                    ddlTrigger.IsDisabled = disable;
+                return true;
+            }
+            if (!context.CurrentDatabase.DdlTriggers.TryGetValue(triggerName.Leaf, out var matchedDdlTrigger))
+                throw SimulatedSqlException.InvalidObjectName(triggerName);
+            matchedDdlTrigger.IsDisabled = disable;
+            return true;
+        }
+
         if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var parentName = BatchContext.ParseObjectName(context);
@@ -340,8 +379,11 @@ partial class Simulation
     /// <remarks>
     /// Event types parse as bare identifiers (e.g. <c>DDL_DATABASE_LEVEL_EVENTS</c>,
     /// <c>CREATE_TABLE</c>, <c>ALTER_PROCEDURE</c>). The simulator stores
-    /// the list verbatim for <c>sys.trigger_events</c> round-trip; no
-    /// validation against SQL Server's actual event-type catalog is done.
+    /// the list verbatim — the source casing survives into
+    /// <c>sys.trigger_events</c>, and both that projection and the fire-time
+    /// <see cref="DdlTrigger.Covers"/> match case-insensitively. A name
+    /// SQL Server's event-type catalog doesn't carry is accepted and never
+    /// matches anything.
     /// </remarks>
     private static bool ParseDdlTriggerBody(ParserContext context, MultiPartName triggerName, Schema triggerSchema, bool isAlter, bool createOrAlter)
     {
@@ -420,11 +462,22 @@ partial class Simulation
             triggerSchema.SchemaId,
             eventTypes,
             bodyText,
-            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow)
+            createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow,
+            bodyLineOffset: CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart))
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
         };
+        if (existed)
+            trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         context.CurrentDatabase.DdlTriggers[triggerName.Leaf] = trigger;
+        if (!existed)
+            context.Batch.CurrentStatement.DdlTriggerCreatedThisStatement = objectId;
+        RecordDdlEvent(
+            context,
+            existed ? "ALTER_TRIGGER" : "CREATE_TRIGGER",
+            triggerSchema.Name,
+            triggerName.Leaf,
+            "TRIGGER");
         return true;
     }
 }

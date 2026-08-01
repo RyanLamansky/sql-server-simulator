@@ -56,7 +56,7 @@ partial class Simulation
     /// unknown parameter names (Msg 201).
     /// </para>
     /// </remarks>
-    private IEnumerable<SimulatedStatementOutcome> ParseExec(BatchContext batch, bool implicitExec = false)
+    private IEnumerable<SimulatedStatementOutcome> ParseExec(BatchContext batch, bool implicitExec = false, bool insertExecSource = false)
     {
         var context = batch.Parser;
 
@@ -103,7 +103,7 @@ partial class Simulation
             // behavior).
             if (context.Token is Operator { Character: '(' })
             {
-                foreach (var outcome in ParseExecDynamicSql(batch, returnCodeVar))
+                foreach (var outcome in ParseExecDynamicSql(batch, returnCodeVar, insertExecSource))
                     yield return outcome;
                 yield break;
             }
@@ -136,22 +136,29 @@ partial class Simulation
             "sp_datatype_info_100" => InvokeSpDatatypeInfo100(batch),
             "sp_dropextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Drop),
             "sp_dropserver" => InvokeSpDropServer(batch),
-            "sp_executesql" => ParseSpExecuteSql(batch, returnCodeVar),
+            "sp_executesql" => ParseSpExecuteSql(batch, returnCodeVar, insertExecSource),
             "sp_getapplock" => InvokeSpGetAppLock(batch, returnCodeVar),
             "sp_help" => InvokeSpHelp(batch),
             "sp_helpconstraint" => InvokeSpHelpConstraint(batch),
+            "sp_helpdb" => InvokeSpHelpDb(batch),
             "sp_helpindex" => InvokeSpHelpIndex(batch),
             "sp_helptext" => InvokeSpHelpText(batch),
+            "sp_helptrigger" => InvokeSpHelpTrigger(batch),
+            "sp_helpuser" => InvokeSpHelpUser(batch),
+            "sp_MSforeachtable" => this.InvokeSpMsForEachTable(batch),
             "sp_pkeys" => InvokeSpPkeys(batch),
             "sp_releaseapplock" => InvokeSpReleaseAppLock(batch, returnCodeVar),
             "sp_rename" => InvokeSpRename(batch),
             "sp_settriggerorder" => InvokeSpSetTriggerOrder(batch),
             "sp_set_session_context" => InvokeSpSetSessionContext(batch),
+            "sp_spaceused" => InvokeSpSpaceUsed(batch),
             "sp_statistics_100" => InvokeSpStatistics100(batch),
             "sp_stored_procedures" => InvokeSpStoredProcedures(batch),
             "sp_tablecollations_100" => InvokeSpTableCollations(batch),
             "sp_tables" => InvokeSpTables(batch),
             "sp_updateextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Update),
+            "sp_who" => InvokeSpWho(batch),
+            "sp_who2" => InvokeSpWho2(batch),
             "xp_instance_regread" => InvokeXpInstanceRegread(batch),
             "xp_msver" => InvokeXpMsver(batch),
             "xp_qv" => InvokeXpQv(batch, returnCodeVar),
@@ -166,19 +173,24 @@ partial class Simulation
 
         // Args + invocation. Skip-mode runs the arg parser (cursor advance,
         // syntax errors still fire), but suppresses the invocation itself.
+        // The trailing WITH option list parses on the same terms.
         var arguments = ParseExecArguments(context, batch);
+        var resultSets = ParseExecuteOptions(batch, insertExecSource);
 
         if (batch.IsSkipping)
             yield break;
 
         // A synonym target expands to its base before resolution, so a synonym
         // over a missing procedure reports Msg 2812 naming the base — real's
-        // wording (the synonym name never appears in that message).
+        // wording (the synonym name never appears in that message). The synonym
+        // itself is carried through as the securable the EXECUTE check runs on.
+        var execSynonym = batch.TryResolveSynonym(procName, out var resolvedSynonym) ? resolvedSynonym : null;
         procName = batch.ExpandSynonym(procName);
         if (!batch.TryResolveProcedure(procName, out var procedure))
             throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.ToString());
 
-        foreach (var outcome in this.InvokeProcedure(batch, procedure, arguments, returnCodeVar))
+        var invocation = this.InvokeProcedure(batch, procedure, arguments, returnCodeVar, execSynonym);
+        foreach (var outcome in resultSets is null ? invocation : ApplyResultSetsContract(invocation, resultSets))
             yield return outcome;
     }
 
