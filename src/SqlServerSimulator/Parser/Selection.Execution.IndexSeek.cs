@@ -1250,7 +1250,7 @@ internal sealed partial class Selection
         foreach (var tuple in CartesianProduct(probesPerColumn))
         {
             var bucket = cache.Seek(table.Heap, source.StoredSchema, source.LobStore, prefix, commons, new SqlValueKey(tuple));
-            if (bucket.Count != 0)
+            if (bucket.Length != 0)
                 candidates.AddRange(bucket);
         }
 

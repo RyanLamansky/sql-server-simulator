@@ -732,7 +732,7 @@ partial class Simulation
     internal static bool IsLockableTable(HeapTable table) =>
         !table.IsTableVariable
         && !BatchContext.IsLocalTempName(table.Name)
-        && !Simulation.SystemHeapTables.ContainsValue(table);
+        && !Simulation.SystemHeapTables.Values.Contains(table);
 
     /// <summary>
     /// Whether a superseding UPDATE / DELETE may reclaim the old row's off-row

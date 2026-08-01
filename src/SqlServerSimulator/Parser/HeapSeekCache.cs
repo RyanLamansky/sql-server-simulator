@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
@@ -40,17 +41,20 @@ internal sealed class HeapSeekCache
     /// <summary>The seek cache attached to <paramref name="heap"/>, created on first use.</summary>
     public static HeapSeekCache For(Heap heap) => caches.GetValue(heap, static _ => new HeapSeekCache());
 
-    private static readonly List<(int Page, int Slot)> Empty = [];
-
     private readonly Dictionary<int, CacheEntry> byLeadOrdinal = [];
 
     // Build / replay / read are serialized: the per-Heap cache is shared
-    // across connections, so two readers can seek the same heap at once, and
-    // a returned bucket is copied out under this lock by the caller's
-    // AddRange before any concurrent mutation can patch it.
+    // across connections, so two readers can seek the same heap at once. What
+    // a read hands back outlives the lock — see Seek for why that's sound.
     private readonly Lock gate = new();
 
-    public List<(int Page, int Slot)> Seek(
+    // Returns a span over the entry's live bucket, not a copy — hence the
+    // read-only type, which the range / ordered seeks below deliberately don't
+    // share (theirs build a fresh list the caller owns and may reorder). The
+    // span also snapshots pointer and length together, so a concurrent Add
+    // that grows the bucket leaves the reader on the intact old array rather
+    // than racing a List's separate _items / _size reads.
+    public ReadOnlySpan<(int Page, int Slot)> Seek(
         Heap heap,
         HeapColumn[] schema,
         Heap? lobStore,
@@ -105,7 +109,7 @@ internal sealed class HeapSeekCache
         {
             var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons);
             var group = entry.EqualityCandidates(prefixKey);
-            if (group.Count <= RangeSliceMinGroupRids)
+            if (group.Length <= RangeSliceMinGroupRids)
             {
                 IndexSeekDiagnostics.Sink?.Add("PrefixRangeGroup");
                 return [.. group];
@@ -343,12 +347,12 @@ internal sealed class HeapSeekCache
         // Equality candidates for a probe of this entry's full arity (one hash
         // bucket) or a shorter leading prefix (one bucket of the lazily-built
         // narrow view for that arity) — both O(1) per probe.
-        public List<(int Page, int Slot)> EqualityCandidates(SqlValueKey probeKey)
+        public ReadOnlySpan<(int Page, int Slot)> EqualityCandidates(SqlValueKey probeKey)
         {
             var buckets = probeKey.ComponentCount == this.Ordinals.Length
                 ? this.Buckets
                 : this.EnsureNarrowView(probeKey.ComponentCount);
-            return buckets.TryGetValue(probeKey, out var bucket) ? bucket : Empty;
+            return buckets.TryGetValue(probeKey, out var bucket) ? CollectionsMarshal.AsSpan(bucket) : [];
         }
 
         private Dictionary<SqlValueKey, List<(int Page, int Slot)>> EnsureNarrowView(int arity)

@@ -496,7 +496,7 @@ public sealed partial class Simulation
     /// shared across all <see cref="Simulation"/> instances; the bytes are
     /// immutable.
     /// </summary>
-    internal static Dictionary<string, HeapTable> SystemHeapTables => BuiltInResources.SystemHeapTables.Value;
+    internal static FrozenDictionary<string, HeapTable> SystemHeapTables => BuiltInResources.SystemHeapTables.Value;
 
     /// <summary>
     /// Global temp tables (<c>##foo</c>) — instance-wide, visible to every
@@ -525,7 +525,7 @@ public sealed partial class Simulation
     /// <see cref="HeapTable"/> metadata on every read; rows aren't cached.
     /// Materialized once per process via <see cref="BuiltInResources"/>.
     /// </summary>
-    internal static Dictionary<string, CatalogView> CatalogViews => BuiltInResources.CatalogViews.Value;
+    internal static FrozenDictionary<string, CatalogView> CatalogViews => BuiltInResources.CatalogViews.Value;
 
     /// <summary>
     /// Random 12-byte tail (raw bytes [4..15] of the produced GUID) for

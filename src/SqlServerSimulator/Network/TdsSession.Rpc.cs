@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Data;
 using System.Globalization;
 using SqlServerSimulator.Storage;
@@ -272,7 +273,7 @@ internal sealed partial class TdsSession
     private static ushort WellKnownProcId(string procName) =>
         WellKnownProcIds.TryGetValue(procName, out var id) ? id : (ushort)0;
 
-    private static readonly Dictionary<string, ushort> WellKnownProcIds = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly FrozenDictionary<string, ushort> WellKnownProcIds = new Dictionary<string, ushort>(StringComparer.OrdinalIgnoreCase)
     {
         ["sp_executesql"] = Tds.ProcIdExecuteSql,
         ["sp_cursor"] = Tds.ProcIdCursor,
@@ -284,7 +285,7 @@ internal sealed partial class TdsSession
         ["sp_cursorfetch"] = Tds.ProcIdCursorFetch,
         ["sp_cursoroption"] = Tds.ProcIdCursorOption,
         ["sp_cursorclose"] = Tds.ProcIdCursorClose,
-    };
+    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// RETURNVALUE tokens for a request's output-direction parameters.

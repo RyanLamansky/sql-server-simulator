@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Schemas;
@@ -28,7 +29,7 @@ partial class Simulation
     // permission_name()'s uppercase canonical spelling (ALTER, CONTROL,
     // VIEW DEFINITION, …). Keyed case-insensitively because an off-catalog
     // permission stores the caller's own casing.
-    private static readonly Dictionary<string, string> HelpProtectLegacyActionNames = new(BuiltInToken.Comparer)
+    private static readonly FrozenDictionary<string, string> HelpProtectLegacyActionNames = new Dictionary<string, string>(BuiltInToken.Comparer)
     {
         ["BACKUP DATABASE"] = "Backup Database",
         ["BACKUP LOG"] = "Backup Transaction",
@@ -45,7 +46,7 @@ partial class Simulation
         ["REFERENCES"] = "References",
         ["SELECT"] = "Select",
         ["UPDATE"] = "Update",
-    };
+    }.ToFrozenDictionary(BuiltInToken.Comparer);
 
     /// <summary>
     /// Handles <c>EXEC sp_helprotect [@name] [, @username] [, @grantorname]

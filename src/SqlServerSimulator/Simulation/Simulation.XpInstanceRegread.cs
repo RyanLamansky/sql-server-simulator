@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Storage;
 
@@ -24,13 +25,13 @@ partial class Simulation
     /// default-directory value names are answered plausibly, everything else
     /// reads NULL (value not found).
     /// </summary>
-    private static readonly Dictionary<string, string> InstanceRegistryDefaults = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly FrozenDictionary<string, string> InstanceRegistryDefaults = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["SQLPath"] = "/var/opt/mssql",
         ["DefaultData"] = "/var/opt/mssql/data",
         ["DefaultLog"] = "/var/opt/mssql/data",
         ["BackupDirectory"] = "/var/opt/mssql/data",
-    };
+    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Handles <c>EXEC master.dbo.xp_instance_regread</c> (SSMS reads the

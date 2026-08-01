@@ -71,7 +71,7 @@ internal static class VersionStore
         IsVersioningEnabled(database)
         && !table.IsTableVariable
         && !BatchContext.IsLocalTempName(table.Name)
-        && !Simulation.SystemHeapTables.ContainsValue(table);
+        && !Simulation.SystemHeapTables.Values.Contains(table);
 
     /// <summary>
     /// Captures a pre-write snapshot for the row at

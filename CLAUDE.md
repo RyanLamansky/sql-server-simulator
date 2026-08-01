@@ -192,6 +192,9 @@ Field rosters live in the source XML docs; this captures only identity + load-be
 - **SSS007**: a `switch` **expression** over `Span<char>`/`ReadOnlySpan<char>` whose arm is a discard guard `_ when <governing>.SequenceEqual("literal")` should be the constant pattern `"literal"` — a span-of-char switch matches string constants directly since C# 11.
   Only the pure single-invocation guard whose receiver is the switch's governing expression is flagged (negated / `&&`-combined / different-span conditions are left alone).
   Enforcement companion to SSS003 (which creates the `stackalloc Span<char>` scrutinee); `ResolveBuiltIn` in `Parser/Expression.cs` is the reference shape.
+- **SSS008**: a `static readonly` field typed as a general-purpose collection from `System.Collections{,.Generic,.Immutable}` must be an array or a `Frozen` type — a static's contents are fixed for the process, so they should be laid out once for reading.
+  Throughput, not immutability, is the motive: arrays are permitted, `Immutable*` dictionary / set / list are flagged too (a per-lookup tree walk buys nothing here), `ImmutableArray<T>` is exempt.
+  `Lazy<T>` unwraps first; `Concurrent*` and `PriorityQueue` are exempt; anything genuinely mutated after init takes `#pragma warning disable SSS008` + rationale.
 - **MSTEST0049**: async tests must thread `TestContext.CancellationToken`.
   Pattern: `public TestContext TestContext { get; set; } = null!;`.
 - **MSTEST0037**: prefer `Assert.IsEmpty(values)` over `Assert.AreEqual(0, values.Count)`; typed asserts over generic.

@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
@@ -5,7 +6,7 @@ namespace SqlServerSimulator;
 
 internal static partial class BuiltInResources
 {
-    public static readonly Lazy<Dictionary<string, CatalogView>> CatalogViews = new(BuildCatalogViews);
+    public static readonly Lazy<FrozenDictionary<string, CatalogView>> CatalogViews = new(BuildCatalogViews);
 
     // Catalog-pinned types reused across catalog views — Latin1_General_CI_AS_KS_WS
     // at Implicit rank, matching what real SQL Server's catalog DDL pins
@@ -54,7 +55,7 @@ internal static partial class BuiltInResources
     /// <c>INFORMATION_SCHEMA.TABLES</c> / <c>.COLUMNS</c> / <c>.SCHEMATA</c>
     /// (the full ISO column shape).
     /// </summary>
-    private static Dictionary<string, CatalogView> BuildCatalogViews()
+    private static FrozenDictionary<string, CatalogView> BuildCatalogViews()
     {
         var views = new Dictionary<string, CatalogView>(BuiltInToken.Comparer);
         RegisterCoreObjects(views);
@@ -69,6 +70,6 @@ internal static partial class BuiltInResources
         RegisterLegacyCompat(views);
         ApplyMetadataVisibility(views);
         ApplyDmvGating(views);
-        return views;
+        return views.ToFrozenDictionary(BuiltInToken.Comparer);
     }
 }

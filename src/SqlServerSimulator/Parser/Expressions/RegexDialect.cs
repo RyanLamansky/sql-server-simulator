@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -973,7 +974,7 @@ internal static class RegexDialect
     /// compiles <c>\p{Greek}</c> and raises Msg 19300 for <c>\p{Foo}</c>, so the
     /// simulator has to tell the two apart.
     /// </summary>
-    private static readonly HashSet<string> Re2ScriptNames = new(StringComparer.Ordinal)
+    private static readonly FrozenSet<string> Re2ScriptNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "Adlam", "Ahom", "Anatolian_Hieroglyphs", "Arabic", "Armenian", "Avestan",
         "Balinese", "Bamum", "Bassa_Vah", "Batak", "Bengali", "Bhaiksuki", "Bopomofo",
@@ -1004,5 +1005,5 @@ internal static class RegexDialect
         "Telugu", "Thaana", "Thai", "Tibetan", "Tifinagh", "Tirhuta", "Toto",
         "Ugaritic", "Vai", "Vithkuqi", "Wancho", "Warang_Citi", "Yezidi", "Yi",
         "Zanabazar_Square",
-    };
+    }.ToFrozenSet(StringComparer.Ordinal);
 }

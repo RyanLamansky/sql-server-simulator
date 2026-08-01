@@ -1,4 +1,5 @@
 using SqlServerSimulator.Storage;
+using System.Collections.Frozen;
 using System.Globalization;
 
 namespace SqlServerSimulator;
@@ -61,9 +62,9 @@ internal static partial class BuiltInResources
         return null;
     }
 
-    public static readonly Lazy<Dictionary<string, HeapTable>> SystemHeapTables = new(BuildSystemHeapTables);
+    public static readonly Lazy<FrozenDictionary<string, HeapTable>> SystemHeapTables = new(BuildSystemHeapTables);
 
-    private static Dictionary<string, HeapTable> BuildSystemHeapTables()
+    private static FrozenDictionary<string, HeapTable> BuildSystemHeapTables()
     {
         HeapColumn[] systypesColumns =
         [
@@ -103,7 +104,8 @@ internal static partial class BuiltInResources
             _ = systypes.Heap.Insert(RowEncoder.EncodeRow(systypes.Schema, values));
         }
 
-        return new(BuiltInToken.Comparer) { [systypes.Name] = systypes };
+        return new Dictionary<string, HeapTable>(BuiltInToken.Comparer) { [systypes.Name] = systypes }
+            .ToFrozenDictionary(BuiltInToken.Comparer);
     }
 
     private static SqlValue ObjectToSqlValue(object? value, SqlType type) =>

@@ -770,7 +770,7 @@ internal sealed class BatchContext
     {
         if (table.IsTableVariable || IsLocalTempName(table.Name))
             return DataLockPlan.Bypass;
-        if (Simulation.SystemHeapTables.ContainsValue(table))
+        if (Simulation.SystemHeapTables.Values.Contains(table))
             return DataLockPlan.Bypass;
 
         var connection = this.Connection;
@@ -989,7 +989,7 @@ internal sealed class BatchContext
     {
         if (table.IsTableVariable || IsLocalTempName(table.Name))
             return null;
-        if (Simulation.SystemHeapTables.ContainsValue(table))
+        if (Simulation.SystemHeapTables.Values.Contains(table))
             return null;
 
         var connection = this.Connection;

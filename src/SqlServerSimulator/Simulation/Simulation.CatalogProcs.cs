@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Text.RegularExpressions;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
@@ -165,13 +166,13 @@ partial class Simulation
     // Lazy so the build defers past static-init time: the source
     // DatatypeInfo* raw tables live in a sibling partial whose field
     // initializers have no ordering guarantee relative to this file's.
-    private static readonly Lazy<Dictionary<string, object?[]>> SpDatatypeInfoByNameV2 =
+    private static readonly Lazy<FrozenDictionary<string, object?[]>> SpDatatypeInfoByNameV2 =
         new(() => BuildDatatypeInfoNameIndex(DatatypeInfoV2Raw!));
 
-    private static readonly Lazy<Dictionary<string, object?[]>> SpDatatypeInfoByNameV3 =
+    private static readonly Lazy<FrozenDictionary<string, object?[]>> SpDatatypeInfoByNameV3 =
         new(() => BuildDatatypeInfoNameIndex(DatatypeInfoV3Raw!));
 
-    private static Dictionary<string, object?[]> BuildDatatypeInfoNameIndex(object?[][] raw)
+    private static FrozenDictionary<string, object?[]> BuildDatatypeInfoNameIndex(object?[][] raw)
     {
         var index = new Dictionary<string, object?[]>(StringComparer.OrdinalIgnoreCase);
         foreach (var row in raw)
@@ -182,7 +183,7 @@ partial class Simulation
             _ = index.TryAdd(name, row);
         }
 
-        return index;
+        return index.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -342,7 +343,7 @@ partial class Simulation
 
     private static void AppendColumnRows(
         List<SqlValue[]> rows, SqlValue qualifier, SqlValue owner, string tableName,
-        HeapColumn[] columns, Dictionary<string, object?[]> byName, Regex? columnPattern)
+        HeapColumn[] columns, FrozenDictionary<string, object?[]> byName, Regex? columnPattern)
     {
         var tableNameValue = SqlValue.FromSystemName(tableName);
         for (var i = 0; i < columns.Length; i++)
@@ -356,7 +357,7 @@ partial class Simulation
 
     private static SqlValue[] BuildSpColumnsRow(
         SqlValue qualifier, SqlValue owner, SqlValue tableName,
-        HeapColumn col, int ordinal, Dictionary<string, object?[]> byName)
+        HeapColumn col, int ordinal, FrozenDictionary<string, object?[]> byName)
     {
         var baseName = SpColumnsTypeName(col.Type);
         var row = byName[baseName];
