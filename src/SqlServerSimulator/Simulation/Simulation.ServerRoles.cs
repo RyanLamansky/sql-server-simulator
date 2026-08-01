@@ -226,7 +226,22 @@ partial class Simulation
     /// when it <c>Covers</c> it (so <c>VIEW SERVER STATE</c> answers a <c>VIEW
     /// SERVER PERFORMANCE STATE</c> requirement).
     /// </summary>
-    internal bool HoldsServerPermission(string loginName, Permission permission)
+    internal bool HoldsServerPermission(string loginName, Permission permission) =>
+        this.HoldsServerPrincipalPermission(loginName, targetPrincipalId: 0, permission, blanketEquivalent: permission);
+
+    /// <summary>
+    /// The <c>ON LOGIN::</c> counterpart: whether <paramref name="loginName"/>
+    /// holds <paramref name="permission"/> against the server principal
+    /// <paramref name="targetPrincipalId"/>. A class-101 row on that exact
+    /// target satisfies it, and so does a class-100 row for
+    /// <paramref name="blanketEquivalent"/> — the server-wide permission that
+    /// covers every login (<c>IMPERSONATE</c> ← <c>IMPERSONATE ANY LOGIN</c>,
+    /// <c>VIEW DEFINITION</c> ← <c>VIEW ANY DEFINITION</c>, <c>ALTER</c> ←
+    /// <c>ALTER ANY LOGIN</c>). DENY over either class binds first, so a
+    /// <c>DENY IMPERSONATE ON LOGIN::x</c> beats a server-wide
+    /// <c>GRANT IMPERSONATE ANY LOGIN</c> (probe-confirmed).
+    /// </summary>
+    internal bool HoldsServerPrincipalPermission(string loginName, int targetPrincipalId, Permission permission, Permission blanketEquivalent)
     {
         if (this.IsLoginSysadmin(loginName))
             return true;
@@ -234,11 +249,11 @@ partial class Simulation
         var closure = this.BuildServerPrincipalClosure(loginName);
         lock (this.ServerPermissions)
         {
-            // DENY binds first.
+            // DENY binds first, over both classes.
             foreach (var row in this.ServerPermissions)
             {
                 if (row.State == PermissionState.Deny && closure.Contains(row.GranteeId)
-                    && row.Permission.Covers(permission, PermissionChecker.ClassServer))
+                    && Satisfies(row, targetPrincipalId, permission, blanketEquivalent))
                 {
                     return false;
                 }
@@ -247,7 +262,7 @@ partial class Simulation
             {
                 if (row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption
                     && closure.Contains(row.GranteeId)
-                    && row.Permission.Covers(permission, PermissionChecker.ClassServer))
+                    && Satisfies(row, targetPrincipalId, permission, blanketEquivalent))
                 {
                     return true;
                 }
@@ -255,6 +270,44 @@ partial class Simulation
         }
         return false;
     }
+
+    /// <summary>
+    /// Whether one stored row answers a (target, permission) request: a
+    /// class-101 row must name the same target and cover
+    /// <paramref name="permission"/>; a class-100 row must cover
+    /// <paramref name="blanketEquivalent"/>. A <c>targetPrincipalId</c> of 0
+    /// is the pure server-scope request, which only class-100 rows answer.
+    /// </summary>
+    private static bool Satisfies(ServerPermission row, int targetPrincipalId, Permission permission, Permission blanketEquivalent) =>
+        row.Class == PermissionChecker.ClassServerPrincipal
+            ? targetPrincipalId != 0 && row.MajorId == targetPrincipalId && row.Permission.Covers(permission, PermissionChecker.ClassObject)
+            : row.Permission.Covers(blanketEquivalent, PermissionChecker.ClassServer);
+
+    /// <summary>
+    /// Whether a <em>restricted</em> session's login may see the
+    /// <c>sys.server_principals</c> / <c>sys.sql_logins</c> row for
+    /// <paramref name="targetPrincipalId"/>. Real reveals a login row to a
+    /// principal that holds any permission on it (probe-confirmed: a bare login
+    /// sees only itself; <c>ALTER ON LOGIN::x</c> reveals x; <c>VIEW ANY
+    /// DEFINITION</c> reveals every row; a <c>DENY … ON LOGIN::x</c> re-hides x
+    /// even under a server-wide grant). <c>sa</c>, <c>public</c> and the fixed
+    /// server roles are always visible.
+    /// </summary>
+    internal bool CanViewServerPrincipal(string loginName, int targetPrincipalId)
+    {
+        if (targetPrincipalId <= FixedServerPrincipalIdMax)
+            return true;
+        if (this.TryResolveServerPrincipalId(loginName, out var selfId) && selfId == targetPrincipalId)
+            return true;
+        // A server role the login belongs to is visible through that membership.
+        return this.IsServerPrincipalInRole(selfId, targetPrincipalId)
+            || this.HoldsServerPrincipalPermission(loginName, targetPrincipalId, Permission.ViewDefinition, Permission.ViewAnyDefinition)
+            || this.HoldsServerPrincipalPermission(loginName, targetPrincipalId, Permission.Alter, Permission.AlterAnyLogin)
+            || this.HoldsServerPrincipalPermission(loginName, targetPrincipalId, Permission.Impersonate, Permission.ImpersonateAnyLogin);
+    }
+
+    /// <summary>Largest <c>principal_id</c> in the always-visible fixed block — <c>sa</c> (1), <c>public</c> (2) and the 18 fixed server roles (3–20).</summary>
+    internal const int FixedServerPrincipalIdMax = 20;
 
     /// <summary>
     /// Parses <c>CREATE SERVER ROLE name [AUTHORIZATION owner]</c>. Cursor on
@@ -395,12 +448,24 @@ partial class Simulation
     /// <c>master</c> (Msg 4621 elsewhere). Server-scope DENY replaces the prior
     /// GRANT row (unlike database scope, where G and D coexist — probe6 N4).
     /// </summary>
-    internal static void ApplyServerScopeGrant(ParserContext context, PermissionStatementKind kind, List<string> permissions, List<string> granteeNames)
+    internal static void ApplyServerScopeGrant(ParserContext context, PermissionStatementKind kind, List<string> permissions, List<string> granteeNames, string? loginSecurableName = null)
     {
         if (!BuiltInToken.Comparer.Equals(context.CurrentDatabase.Name, MasterDatabaseName))
             throw SimulatedSqlException.ServerPermissionsMasterOnly();
         var simulation = context.Batch.Connection.Simulation;
         var grantorId = context.Connection.Security.Effective.DatabasePrincipalId;
+
+        // ON LOGIN::x → class 101 against the named login's principal_id; the
+        // ON-less / ON SERVER:: form → class 100, major 0.
+        var permClass = PermissionChecker.ClassServer;
+        var majorId = 0;
+        if (loginSecurableName is not null)
+        {
+            if (!simulation.TryResolveServerPrincipalId(loginSecurableName, out majorId))
+                throw SimulatedSqlException.CannotFindLogin(loginSecurableName);
+            permClass = PermissionChecker.ClassServerPrincipal;
+        }
+
         var grantee = new List<int>(granteeNames.Count);
         foreach (var granteeName in granteeNames)
         {
@@ -414,19 +479,31 @@ partial class Simulation
             {
                 foreach (var permName in permissions)
                 {
-                    var canonical = permName.Trim();
-                    var code = ServerPermissionTypeCode(canonical);
-                    bool Same(ServerPermission p) => p.GranteeId == granteeId && BuiltInToken.Comparer.Equals(p.TypeCode, code);
+                    // Class-101 permissions (IMPERSONATE / ALTER / VIEW
+                    // DEFINITION / CONTROL) are the ordinary catalog names, so
+                    // their codes come from PermissionCatalog; the class-100
+                    // server-permission names have their own table. Either way
+                    // a catalog name projects its canonical uppercase spelling
+                    // regardless of the GRANT's casing, matching real; an
+                    // off-catalog name keeps its raw text.
+                    var resolved = Permission.Resolve(permName);
+                    var canonical = resolved == Permission.Other ? permName.Trim() : resolved.CanonicalName;
+                    var code = permClass == PermissionChecker.ClassServerPrincipal && resolved != Permission.Other
+                        ? resolved.CanonicalTypeCode
+                        : ServerPermissionTypeCode(canonical);
+                    bool Same(ServerPermission p) =>
+                        p.GranteeId == granteeId && p.Class == permClass && p.MajorId == majorId
+                        && BuiltInToken.Comparer.Equals(p.TypeCode.Trim(), code.Trim());
                     switch (kind)
                     {
                         case PermissionStatementKind.Grant:
                             _ = simulation.ServerPermissions.RemoveAll(p => Same(p) && p.State is PermissionState.Grant or PermissionState.GrantWithGrantOption or PermissionState.Deny);
-                            simulation.ServerPermissions.Add(new ServerPermission(granteeId, grantorId, canonical, code, PermissionState.Grant));
+                            simulation.ServerPermissions.Add(new ServerPermission(granteeId, grantorId, canonical, code, PermissionState.Grant, permClass, majorId));
                             break;
                         case PermissionStatementKind.Deny:
                             // Server-scope DENY replaces the prior G row (N4).
                             _ = simulation.ServerPermissions.RemoveAll(Same);
-                            simulation.ServerPermissions.Add(new ServerPermission(granteeId, grantorId, canonical, code, PermissionState.Deny));
+                            simulation.ServerPermissions.Add(new ServerPermission(granteeId, grantorId, canonical, code, PermissionState.Deny, permClass, majorId));
                             break;
                         default:
                             _ = simulation.ServerPermissions.RemoveAll(Same);
@@ -446,14 +523,25 @@ internal sealed class ServerRole(int principalId, string name, DateTime createDa
     public readonly DateTime CreateDate = createDate;
 }
 
-/// <summary>One server-scope permission grant / deny row (class 100).</summary>
-internal sealed class ServerPermission(int granteeId, int grantorId, string permissionName, string typeCode, PermissionState state)
+/// <summary>
+/// One server-scope permission grant / deny row: class 100 (<c>SERVER</c> — the
+/// ON-less / <c>ON SERVER::</c> form, <see cref="MajorId"/> 0) or class 101
+/// (<c>SERVER_PRINCIPAL</c> — the <c>ON LOGIN::</c> form, <see cref="MajorId"/>
+/// the target login's <c>principal_id</c>).
+/// </summary>
+internal sealed class ServerPermission(int granteeId, int grantorId, string permissionName, string typeCode, PermissionState state, byte @class = PermissionChecker.ClassServer, int majorId = 0)
 {
     public readonly int GranteeId = granteeId;
     public readonly int GrantorId = grantorId;
     public readonly string PermissionName = permissionName;
     public readonly string TypeCode = typeCode;
     public readonly PermissionState State = state;
+
+    /// <summary><c>sys.server_permissions.class</c>: 100 = SERVER, 101 = SERVER_PRINCIPAL.</summary>
+    public readonly byte Class = @class;
+
+    /// <summary><c>sys.server_permissions.major_id</c>: 0 at class 100, the target login's <c>principal_id</c> at class 101.</summary>
+    public readonly int MajorId = majorId;
 
     /// <summary>The resolved permission enum (<see cref="Permission.Other"/> for the long tail the state checker never matches), so <see cref="Simulation.HoldsServerPermission"/> compares by enum + covering graph rather than by name.</summary>
     public readonly Permission Permission = Permission.Resolve(permissionName);

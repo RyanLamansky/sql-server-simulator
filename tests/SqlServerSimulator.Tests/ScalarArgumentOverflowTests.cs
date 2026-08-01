@@ -153,24 +153,112 @@ public sealed class ScalarArgumentOverflowTests
             "Arithmetic overflow error converting expression to data type int.");
 
     /// <summary>
+    /// Four argument slots refuse a wrong type outright rather than converting
+    /// it — the object-id first argument of COLUMNPROPERTY / INDEXPROPERTY /
+    /// INDEXKEY_PROPERTY and CONVERT's style — reporting Msg 8116 naming the
+    /// offending family. A bare integer literal past int's range is
+    /// <c>numeric(digit_count, 0)</c>, so it lands here rather than on the
+    /// overflow surface a <c>bigint</c> CAST of the same value takes.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select columnproperty(3000000000, 'x', 'ColumnId')", "numeric", 1, "columnproperty")]
+    [DataRow("select indexproperty(3000000000, 'x', 'IndexDepth')", "numeric", 1, "indexproperty")]
+    [DataRow("select indexkey_property(3000000000, 1, 1, 'ColumnId')", "numeric", 1, "indexkey_property")]
+    [DataRow("select convert(varchar(30), getdate(), 3000000000)", "numeric", 3, "convert")]
+    public void GatedArgument_PastIntLiteral_RaisesMsg8116(string sql, string typeWord, int index, string functionName)
+        => new Simulation().AssertSqlError(
+            sql,
+            8116,
+            $"Argument data type {typeWord} is invalid for argument {index} of {functionName} function.");
+
+    /// <summary>
+    /// The gate admits only the four signed / unsigned integer families;
+    /// <c>bit</c>, the exact numerics, float / real, money, the string
+    /// families and the date families all raise, and a declared
+    /// <c>decimal</c> is spelled apart from a numeric-named literal.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(1 as float)", "float")]
+    [DataRow("cast(1 as real)", "real")]
+    [DataRow("cast(1 as decimal(5, 2))", "decimal")]
+    [DataRow("cast(1 as money)", "money")]
+    [DataRow("cast(1 as bit)", "bit")]
+    [DataRow("'1'", "varchar")]
+    [DataRow("cast('2020-01-01' as date)", "date")]
+    public void GatedArgument_WrongFamily_RaisesMsg8116NamingIt(string argument, string typeWord)
+        => new Simulation().AssertSqlError(
+            $"select columnproperty({argument}, 'x', 'ColumnId')",
+            8116,
+            $"Argument data type {typeWord} is invalid for argument 1 of columnproperty function.");
+
+    /// <summary>
+    /// The gate is a compile-time one on real, so it precedes the NULL
+    /// short-circuit: a typed NULL raises where a bare <c>NULL</c> (which
+    /// carries the placeholder <c>int</c> type) returns NULL.
+    /// </summary>
+    [TestMethod]
+    public void GatedArgument_TypedNull_RaisesMsg8116()
+    {
+        var simulation = new Simulation();
+        simulation.AssertSqlError(
+            "select columnproperty(cast(null as float), 'x', 'ColumnId')",
+            8116,
+            "Argument data type float is invalid for argument 1 of columnproperty function.");
+        simulation.AssertSqlError(
+            "select convert(varchar(30), getdate(), cast(null as varchar(5)))",
+            8116,
+            "Argument data type varchar is invalid for argument 3 of convert function.");
+        Assert.AreEqual(DBNull.Value, simulation.ExecuteScalar("select columnproperty(null, 'x', 'ColumnId')"));
+    }
+
+    /// <summary>
+    /// The gate passes the integer families through, so an in-family value
+    /// still reaches the ordinary conversion surface (or a plain NULL result).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(1 as bigint)")]
+    [DataRow("cast(1 as smallint)")]
+    [DataRow("cast(1 as tinyint)")]
+    [DataRow("1")]
+    public void GatedArgument_IntegerFamilies_PassThrough(string argument)
+        => Assert.AreEqual(DBNull.Value, new Simulation().ExecuteScalar($"select columnproperty({argument}, 'x', 'ColumnId')"));
+
+    /// <summary>
+    /// The sibling id scalars and the string scalars' position arguments carry
+    /// no such gate — they convert, so a past-int literal reaches Msg 8115.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select object_name(3000000000)")]
+    [DataRow("select col_name(3000000000, 1)")]
+    [DataRow("select objectproperty(3000000000, 'IsTable')")]
+    [DataRow("select type_name(3000000000)")]
+    [DataRow("select schema_name(3000000000)")]
+    [DataRow("select db_name(3000000000)")]
+    [DataRow("select substring('abcdef', 3000000000, 2)")]
+    public void UngatedArgument_PastIntLiteral_RaisesMsg8115(string sql)
+        => new Simulation().AssertSqlError(sql, 8115, "Arithmetic overflow error converting expression to data type int.");
+
+    /// <summary>
     /// A system procedure's parameter reports differently from a function
     /// argument: Msg 8114 naming both the source family and the parameter's
     /// declared type — int for sp_getapplock's timeout, tinyint for
-    /// sp_datatype_info_100's ODBC version.
+    /// sp_datatype_info_100's ODBC version. The source family is
+    /// <c>numeric</c> because an integer literal past int's range types
+    /// <c>numeric(digit_count, 0)</c>, never bigint.
     /// </summary>
     [TestMethod]
     public void ProcedureIntParameter_OutOfRange_RaisesMsg8114()
         => new Simulation().AssertSqlError(
             "declare @r int; exec @r = sp_getapplock @Resource = 'x', @LockMode = 'Exclusive', @LockTimeout = 3000000000",
             8114,
-            "Error converting data type bigint to int.");
+            "Error converting data type numeric to int.");
 
     [TestMethod]
     public void ProcedureTinyIntParameter_OutOfRange_RaisesMsg8114NamingTinyInt()
         => new Simulation().AssertSqlError(
             "exec sp_datatype_info_100 @ODBCVer = 3000000000",
             8114,
-            "Error converting data type bigint to tinyint.");
+            "Error converting data type numeric to tinyint.");
 
     /// <summary>
     /// A FETCH offset *literal* past int range is a grammar-level failure

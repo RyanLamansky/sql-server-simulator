@@ -45,6 +45,8 @@ partial class Simulation
                 return TryParseCreateLogin(context);
             case Name serverWord when serverWord.Value.Equals("SERVER", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateServerRole(context);
+            case Name appWord when appWord.Value.Equals("APPLICATION", StringComparison.OrdinalIgnoreCase):
+                return TryParseCreateApplicationRole(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return Simulation.TryParseCreateFullText(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:
@@ -158,6 +160,12 @@ partial class Simulation
                 VarbinarySqlType vb when vb.length > 0 => vb.length,
                 _ => null,
             };
+            // A PERSISTED computed column stores its expression's value, so
+            // real refuses to create one from a session that would read the
+            // expression's `"…"` the other way (Msg 1934, probe-confirmed —
+            // the non-persisted form is accepted).
+            if (pending.Persisted && !context.QuotedIdentifiers)
+                throw SimulatedSqlException.IncorrectSetOptions("CREATE TABLE", QuotedIdentifierOptionName);
             heapColumns[pending.Index] = new HeapColumn(
                 pending.Name,
                 resolvedType,
@@ -305,15 +313,23 @@ partial class Simulation
             historyDestination = historySchema.HeapTables;
         }
 
+        // A three-part CREATE TABLE lands in the named database, so the object
+        // id comes from that database's counter and the table carries it as
+        // its owner. Temp tables and table variables have no schema and so no
+        // owning database — they fall back to the session's.
+        var owningDatabase = schema?.Database;
         var heapTable = new HeapTable(
             tableName.Leaf,
             [.. heapColumns!],
-            context.CurrentDatabase.AllocateObjectId(),
+            (owningDatabase ?? context.CurrentDatabase).AllocateObjectId(),
             schemaId,
             context.Batch.CurrentStatement.UtcNow,
             keyConstraints,
             checkConstraints,
-            periodColumns: resolvedPeriod);
+            periodColumns: resolvedPeriod)
+        {
+            OwningDatabase = owningDatabase,
+        };
         if (isGlobalTempTable)
             heapTable.OwnerConnection = context.Batch.Connection;
         if (!destination.TryAdd(heapTable.Name, heapTable))
@@ -356,6 +372,7 @@ partial class Simulation
                     throw SimulatedSqlException.ThereIsAlreadyAnObject(historyTable.Name);
                 }
             }
+            historyTable.OwningDatabase = historySchema.Database;
             heapTable.SystemVersioning = historyTable;
             heapTable.HistoryRetentionPeriod = versioning.RetentionPeriod;
             heapTable.HistoryRetentionUnit = versioning.RetentionUnit;

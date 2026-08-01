@@ -98,6 +98,24 @@ public sealed class ReservedKeywordsTests
     /// </summary>
     private static readonly HashSet<string> DocumentedOmissions = ["WITHIN GROUP", "PRECISION"];
 
+    /// <summary>
+    /// Enum entries the canonical page doesn't list but real SQL Server does
+    /// enforce:
+    /// <list type="bullet">
+    /// <item><c>REGEXP_LIKE</c> — reserved at compatibility level 170, where
+    /// SQL Server 2025's native predicate ships. Probe-confirmed
+    /// (17.0.4065.4): at 170 <c>select 1 as REGEXP_LIKE</c>,
+    /// <c>create table REGEXP_LIKE (a int)</c> and the unbracketed
+    /// <c>dbo.REGEXP_LIKE(...)</c> CLR-UDF spelling all raise Msg 156, while a
+    /// database at 160 accepts every one of them. The documentation page
+    /// (last updated 2026-07-20, moniker <c>sql-server-ver17</c>) hasn't caught
+    /// up. <see cref="Tokens.UnquotedString.CheckReserved"/> gates the member on
+    /// the active level, so the enum entry doesn't reserve the word below
+    /// 170.</item>
+    /// </list>
+    /// </summary>
+    private static readonly HashSet<string> DocumentedAdditions = ["REGEXP_LIKE"];
+
     [TestMethod]
     public void Keyword_Enum_MatchesCanonicalReservedList()
     {
@@ -106,7 +124,7 @@ public sealed class ReservedKeywordsTests
             .Select(n => n.ToUpperInvariant())
             .ToHashSet();
 
-        var unexpectedExtras = enumNames.Except(CanonicalReservedKeywords).Order().ToList();
+        var unexpectedExtras = enumNames.Except(CanonicalReservedKeywords).Except(DocumentedAdditions).Order().ToList();
         var unexpectedOmissions = CanonicalReservedKeywords.Except(enumNames).Except(DocumentedOmissions).Order().ToList();
 
         IsEmpty(

@@ -26,7 +26,7 @@ internal sealed class Parenthesized(Expression wrapped) : Expression
 
     internal override bool IsRowIndependent => this.Wrapped.IsRowIndependent;
 
-    internal override bool IsWrittenConstant => this.Wrapped.IsWrittenConstant;
+    private protected override bool IsStructuralConstant => this.Wrapped.IsWrittenConstant;
 
     internal override bool ResultReportsNumeric => this.Wrapped.ResultReportsNumeric;
 }

@@ -47,6 +47,10 @@ public sealed class DecimalTypeNameTests
     [DataRow("abs(-1.1)")]
     [DataRow("-1.1")]                       // unary minus preserves it
     [DataRow("(10.0 + 1)")]                 // parentheses preserve it
+    [DataRow("3000000000")]                 // integer literal past int is numeric(10, 0)
+    [DataRow("-3000000000")]
+    [DataRow("99999999999999999999")]
+    [DataRow("3000000000 + 1")]
     public void NumericNamedSources_ReportNumeric(string expression) =>
         AreEqual("numeric", TypeName(expression));
 

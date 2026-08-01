@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Storage;
+using StoredIndex = SqlServerSimulator.Storage.Index;
 
 namespace SqlServerSimulator;
 
@@ -276,6 +277,97 @@ partial class Simulation
             if (index.IsDisabled && index.IsClustered)
                 throw SimulatedSqlException.QueryProcessorDisabledIndex(index.Name, table.Name);
         }
+    }
+
+    /// <summary>
+    /// The <c>QUOTED_IDENTIFIER</c> option name as Msg 1934 / 1935 spell it.
+    /// </summary>
+    internal const string QuotedIdentifierOptionName = "QUOTED_IDENTIFIER";
+
+    /// <summary>
+    /// Raises Msg 1934 when a write to <paramref name="table"/> runs under
+    /// <c>QUOTED_IDENTIFIER OFF</c> and the table carries one of the features
+    /// whose stored expressions real re-evaluates at write time — a
+    /// <c>PERSISTED</c> computed column, an enabled index over a computed
+    /// column, an enabled filtered index, an XML or spatial index, or an
+    /// indexed view built on it. Those expressions were parsed under the
+    /// creating session's setting, so real refuses to maintain them from a
+    /// session that would read <c>"…"</c> the other way.
+    /// <para>
+    /// Probe-confirmed boundaries (SQL Server 2025): reads are never gated —
+    /// <c>SELECT</c> from such a table succeeds; a non-persisted computed
+    /// column with no index over it doesn't gate; a <i>disabled</i> filtered
+    /// index doesn't gate; and dropping the computed column's index lifts the
+    /// gate again. The check reads the parse-position setting, so a module
+    /// body runs it against the module's captured
+    /// <see cref="Schemas.SchemaObject.UsesQuotedIdentifier"/>, not the
+    /// caller's.
+    /// </para>
+    /// <para>
+    /// Create-time body binding is exempt — real accepts
+    /// <c>CREATE PROCEDURE … AS INSERT …</c> under OFF and raises only when
+    /// the body runs. Ordinary skip mode is <b>not</b> exempt: a never-taken
+    /// <c>IF 1 = 0 INSERT …</c> still raises, real gating the batch rather
+    /// than the executed path (both probe-confirmed).
+    /// </para>
+    /// </summary>
+    /// <param name="table">The DML target.</param>
+    /// <param name="batch">Supplies the effective <c>QUOTED_IDENTIFIER</c>.</param>
+    /// <param name="verb">The statement name real echoes (<c>INSERT</c> / <c>UPDATE</c> / <c>DELETE</c> / <c>MERGE</c>).</param>
+    internal static void RejectIncorrectSetOptionsForWrite(HeapTable table, BatchContext batch, string verb)
+    {
+        if (batch.CreateTimeBinding || batch.Parser.QuotedIdentifiers || !RequiresQuotedIdentifierOn(table))
+            return;
+        throw SimulatedSqlException.IncorrectSetOptions(verb, QuotedIdentifierOptionName);
+    }
+
+    /// <summary>
+    /// Whether writing to <paramref name="table"/> re-evaluates an expression
+    /// captured under a creating session's SET options — the condition behind
+    /// <see cref="RejectIncorrectSetOptionsForWrite"/>.
+    /// </summary>
+    private static bool RequiresQuotedIdentifierOn(HeapTable table)
+    {
+        if (table.XmlIndexes.Count > 0 || table.SpatialIndexes.Count > 0 || table.DependentIndexedViews.Count > 0)
+            return true;
+
+        foreach (var column in table.Columns)
+        {
+            if (column is { Computed: not null, IsPersisted: true })
+                return true;
+        }
+
+        foreach (var index in table.Indexes)
+        {
+            if (index.IsDisabled)
+                continue;
+            if (index.Filter is not null || IndexCoversComputedColumn(table, index))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="index"/> keys or includes a computed column of
+    /// <paramref name="table"/>. An index over a computed column gates writes
+    /// even when the column itself isn't persisted (probe-confirmed): the
+    /// index stores the computed value, so maintaining it re-evaluates the
+    /// expression.
+    /// </summary>
+    private static bool IndexCoversComputedColumn(HeapTable table, StoredIndex index)
+    {
+        foreach (var key in index.KeyColumns)
+        {
+            if ((uint)key.ColumnOrdinal < (uint)table.Columns.Length && table.Columns[key.ColumnOrdinal].Computed is not null)
+                return true;
+        }
+
+        foreach (var ordinal in index.IncludedColumnOrdinals)
+        {
+            if ((uint)ordinal < (uint)table.Columns.Length && table.Columns[ordinal].Computed is not null)
+                return true;
+        }
+        return false;
     }
 
     /// <summary>

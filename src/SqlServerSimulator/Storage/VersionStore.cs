@@ -85,7 +85,7 @@ internal static class VersionStore
     /// </summary>
     internal static void CaptureWrite(BatchContext batch, HeapTable table, (int Page, int Slot) newRid, (int Page, int Slot)? oldRid, byte[]? oldPayload, VersionWriteKind kind)
     {
-        if (!WillCaptureVersions(batch.CurrentDatabase, table))
+        if (!WillCaptureVersions(batch.DatabaseFor(table), table))
             return;
 
         var tx = batch.Connection.CurrentTransaction;
@@ -159,9 +159,31 @@ internal static class VersionStore
     {
         if (entries.Count == 0)
             return;
-        var commitXid = database.AllocateTransactionCommitId();
+        // The commit-id counter is per-database, so a transaction that wrote
+        // through a three-part name stamps each side from its own sequence:
+        // the primary (the session's database, or whichever the first entry
+        // belongs to) covers the common single-database case with no
+        // allocation, and any further database gets one id of its own.
+        var primaryDatabase = entries[0].Table.OwningDatabase ?? database;
+        var primaryXid = primaryDatabase.AllocateTransactionCommitId();
+        Dictionary<Database, long>? otherDatabaseXids = null;
         foreach (var entry in entries)
         {
+            var owner = entry.Table.OwningDatabase ?? database;
+            long commitXid;
+            if (ReferenceEquals(owner, primaryDatabase))
+            {
+                commitXid = primaryXid;
+            }
+            else
+            {
+                otherDatabaseXids ??= [];
+                if (!otherDatabaseXids.TryGetValue(owner, out commitXid))
+                {
+                    commitXid = owner.AllocateTransactionCommitId();
+                    otherDatabaseXids[owner] = commitXid;
+                }
+            }
             var newChain = entry.Table.RowVersions.GetOrAdd(entry.NewRid, static _ => new RowVersionChain());
             switch (entry.Kind)
             {
@@ -388,7 +410,7 @@ internal static class VersionStore
         // Row was modified by another tx after my snapshot. Probe-confirmed
         // auto-rollback: the SI tx terminates with @@TRANCOUNT = 0.
         connection.CurrentTransaction?.Rollback();
-        throw SimulatedSqlException.SnapshotIsolationUpdateConflict($"{Database.DefaultSchemaName}.{table.Name}", batch.CurrentDatabase.Name);
+        throw SimulatedSqlException.SnapshotIsolationUpdateConflict($"{Database.DefaultSchemaName}.{table.Name}", batch.DatabaseFor(table).Name);
     }
 
     /// <summary>

@@ -255,6 +255,10 @@ partial class Simulation
 
         foreach (var pc in pendingComputed)
         {
+            // Same PERSISTED gate CREATE TABLE applies, under ALTER's own verb
+            // (probe-confirmed Msg 1934 "ALTER TABLE failed …").
+            if (pc.Persisted && !batch.Parser.QuotedIdentifiers)
+                throw SimulatedSqlException.IncorrectSetOptions("ALTER TABLE", QuotedIdentifierOptionName);
             var computedType = pc.Expression.GetSqlType(batch, ResolveReference);
             heapColumns[pc.Index] = new HeapColumn(pc.Name, computedType, maxLength: null, nullable: pc.Nullable, computedExpression: pc.Expression, isPersisted: pc.Persisted, computedDefinition: pc.Definition);
         }
@@ -340,7 +344,7 @@ partial class Simulation
                 newStoredValues[newStorageIndex] = c.Identity is { } identity
                     ? CoerceForIdentity(identity.GenerateNext(), c)
                     : c.Type == SqlType.RowVersion
-                        ? SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion())
+                        ? SqlValue.FromRowVersion(context.Batch.DatabaseFor(table).AllocateRowVersion())
                         : backfillValues[i] ?? SqlValue.Null(c.Type);
                 newStorageIndex++;
             }

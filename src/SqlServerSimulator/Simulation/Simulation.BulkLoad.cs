@@ -229,7 +229,7 @@ partial class Simulation
             for (var i = 0; i < table.Columns.Length; i++)
             {
                 if (table.Columns[i].Type == SqlType.RowVersion)
-                    rowValues[i] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
+                    rowValues[i] = SqlValue.FromRowVersion(context.Batch.DatabaseFor(table).AllocateRowVersion());
             }
 
             if (table.PeriodColumns is { } pc

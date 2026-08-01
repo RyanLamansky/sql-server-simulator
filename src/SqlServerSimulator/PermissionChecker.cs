@@ -373,6 +373,14 @@ internal static class PermissionChecker
     // …STATE server-scope edges resolve through Permission.Covering.
     internal const byte ClassServer = 100;
 
+    // The ON LOGIN:: securable (sys.server_permissions.class = 101,
+    // class_desc SERVER_PRINCIPAL), major_id = the target login's
+    // principal_id. Shares Simulation.ServerPermissions with class 100;
+    // Simulation.HoldsServerPrincipalPermission walks both, since a class-100
+    // blanket grant (IMPERSONATE ANY LOGIN, VIEW ANY DEFINITION) satisfies a
+    // per-login request while a class-101 DENY overrides it.
+    internal const byte ClassServerPrincipal = 101;
+
     /// <summary>Whether the effective principal holds <paramref name="permission"/> on the described securable. An off-catalog (<see cref="Permission.Other"/>) request is never satisfied.</summary>
     internal static bool IsGranted(Database database, int principalId, Permission permission, byte securableClass, int majorId, int schemaId)
     {

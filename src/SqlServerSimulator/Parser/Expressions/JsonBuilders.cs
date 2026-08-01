@@ -132,7 +132,12 @@ internal static class JsonValueRender
             : value.AsInt64.ToString(culture);
     }
 
-    private static void AppendJsonString(StringBuilder sb, string s)
+    /// <summary>
+    /// Appends <paramref name="s"/> as a quoted JSON string. Shared with the
+    /// <c>REGEXP_MATCHES</c> rowset member, whose <c>substring_matches</c>
+    /// column is JSON built the same way.
+    /// </summary>
+    public static void AppendJsonString(StringBuilder sb, string s)
     {
         // Minimal JSON-string escape: only the chars JSON syntax requires
         // (probe-confirmed against SQL Server 2025 — non-ASCII / `/` /

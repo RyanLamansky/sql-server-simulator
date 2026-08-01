@@ -286,6 +286,11 @@ partial class Simulation
         // XML-index reverse-engineering joins through this internal table + its
         // per-index statistics, so a primary allocates an object id for it here
         // (0 for secondaries — they resolve their primary's at enumeration).
+        // Msg 1934 echoes the statement as written, so the primary and
+        // secondary forms report different verbs (probe-confirmed).
+        if (!context.QuotedIdentifiers)
+            throw SimulatedSqlException.IncorrectSetOptions(isPrimary ? "CREATE PRIMARY XML INDEX" : "CREATE XML INDEX", QuotedIdentifierOptionName);
+
         var internalTableObjectId = isPrimary ? context.CurrentDatabase.AllocateObjectId() : 0;
         var index = new XmlIndex(
             indexName,

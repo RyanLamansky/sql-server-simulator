@@ -38,7 +38,11 @@ internal sealed class Length(ParserContext context) : Expression
         return SqlValue.FromInt32(length);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = StringScalars.BindArgument(source, batch, resolveColumnType, "len");
+        return SqlType.Int32;
+    }
 
     internal override string DebugDisplay() => $"LEN({source.DebugDisplay()})";
 

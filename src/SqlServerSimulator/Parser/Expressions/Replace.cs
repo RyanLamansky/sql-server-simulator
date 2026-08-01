@@ -53,7 +53,20 @@ internal sealed class Replace : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        StringScalars.ContainerResultType(input.GetSqlType(batch, resolveColumnType), batch);
+        StringScalars.ContainerResultType(BindArguments(batch, resolveColumnType), batch);
+
+    /// <summary>
+    /// Compile-time mirror of the three <c>RejectLegacyLob</c> calls in
+    /// <see cref="Run"/>, keeping the same argument numbering. Returns the
+    /// input's type, which is what the result width derives from.
+    /// </summary>
+    private SqlType BindArguments(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var inputType = StringScalars.BindArgument(input, batch, resolveColumnType, "replace");
+        _ = StringScalars.BindArgument(oldValue, batch, resolveColumnType, "replace", argumentIndex: 2);
+        _ = StringScalars.BindArgument(newValue, batch, resolveColumnType, "replace", argumentIndex: 3);
+        return inputType;
+    }
 
     internal override string DebugDisplay() => $"REPLACE({input.DebugDisplay()}, {oldValue.DebugDisplay()}, {newValue.DebugDisplay()})";
 }

@@ -54,11 +54,12 @@ internal enum CursorConcurrency
 /// <summary>
 /// A session-scoped T-SQL cursor (declared with <c>DECLARE … CURSOR FOR
 /// &lt;select&gt;</c>). Lives in <see cref="SimulatedDbConnection.Cursors"/>.
-/// Position is tracked by the base row's stable <c>(page, slot)</c> address,
-/// which <see cref="Heap.UpdateAt"/> preserves through value updates by
-/// rewriting in place (or installing a forwarding pointer) — so KEYSET
-/// membership tracking and positioned <c>WHERE CURRENT OF</c> DML work
-/// without requiring the base table to have a unique key.
+/// Position is tracked by the tuple of source rows' stable <c>(page, slot)</c>
+/// addresses — one per FROM slot, so a JOIN cursor reaches every participating
+/// row — which <see cref="Heap.UpdateAt"/> preserves through value updates by
+/// rewriting in place (or installing a forwarding pointer). KEYSET membership
+/// tracking and positioned <c>WHERE CURRENT OF</c> DML therefore work without
+/// requiring any base table to have a unique key.
 /// </summary>
 internal sealed class Cursor(
     string name,
@@ -66,7 +67,7 @@ internal sealed class Cursor(
     CursorSensitivity sensitivity,
     bool scrollable,
     bool readOnly,
-    HeapTable? baseTable,
+    HeapTable[] baseTables,
     CursorConcurrency concurrency = CursorConcurrency.Default,
     List<string>? forUpdateColumns = null)
 {
@@ -76,8 +77,11 @@ internal sealed class Cursor(
     public readonly bool Scrollable = scrollable;
     public readonly bool ReadOnly = readOnly;
 
-    /// <summary>The single base table, non-null for KEYSET / DYNAMIC / positioned DML.</summary>
-    public readonly HeapTable? BaseTable = baseTable;
+    /// <summary>The base table behind each FROM slot, in source order —
+    /// non-empty for KEYSET / DYNAMIC / positioned DML, empty for a STATIC
+    /// (non-updatable) cursor. A self-join repeats a table; positioned DML
+    /// binds to its first occurrence, as real SQL Server does.</summary>
+    public readonly HeapTable[] BaseTables = baseTables;
 
     /// <summary>The concurrency model — <see cref="CursorConcurrency.ScrollLocks"/>
     /// holds a cursor-scoped U lock on the fetched row, <see cref="CursorConcurrency.Optimistic"/>
@@ -107,22 +111,24 @@ internal sealed class Cursor(
     public bool IsOpen;
 
     /// <summary>
-    /// OPTIMISTIC snapshot of the currently-fetched row's full stored bytes,
-    /// captured at each FETCH. Positioned DML compares the live bytes at
-    /// <see cref="CurrentRid"/> against this; any difference (a value change, a
-    /// rowversion bump, or the row's disappearance) is an optimistic conflict.
-    /// A full-row byte compare subsumes both real detection bases — rowversion
-    /// column when present, column checksum otherwise. Null when the cursor
-    /// isn't OPTIMISTIC or isn't on a live row.
+    /// OPTIMISTIC snapshot of the currently-fetched row's full stored bytes —
+    /// one slot per FROM source, captured at each FETCH. Positioned DML
+    /// compares the live bytes at <see cref="CurrentRids"/> against this; any
+    /// difference (a value change, a rowversion bump, or the row's
+    /// disappearance) is an optimistic conflict. A full-row byte compare
+    /// subsumes both real detection bases — rowversion column when present,
+    /// column checksum otherwise. Null when the cursor isn't OPTIMISTIC or
+    /// isn't on a live row.
     /// </summary>
-    private byte[]? optimisticSnapshot;
+    private byte[]?[]? optimisticSnapshot;
 
     // SCROLL_LOCKS: cursor-scoped locks held directly (not through the
-    // statement / transaction release lists). The table-IX is held for the
-    // cursor's open lifetime; the row-U follows the current fetch position and
-    // is released when the cursor scrolls off the row, closes, or deallocates.
-    private LockResource? scrollTableLock;
-    private LockResource? scrollRowLock;
+    // statement / transaction release lists). A table-IX per participating
+    // base table is held for the cursor's open lifetime; the row-U locks
+    // follow the current fetch position (one per non-NULL-extended slot) and
+    // are released when the cursor scrolls off the row, closes, or deallocates.
+    private readonly List<LockResource> scrollTableLocks = [];
+    private readonly List<LockResource> scrollRowLocks = [];
 
     /// <summary>
     /// The value <c>CURSOR_STATUS</c> reports for this (existing) cursor:
@@ -136,19 +142,21 @@ internal sealed class Cursor(
             ? 1
             : (this.staticRows?.Count ?? this.keysetIdentities?.Count ?? 0) > 0 ? 1 : 0;
 
-    /// <summary>Stable <c>(page, slot)</c> address of the row the cursor is positioned
-    /// on, or null when not on a live row (before first FETCH, past the end, or on a
-    /// keyset hole). Read by positioned <c>WHERE CURRENT OF</c> DML.</summary>
-    public (int Page, int Slot)? CurrentRid;
+    /// <summary>Stable <c>(page, slot)</c> address of each source row the cursor is
+    /// positioned on — one slot per FROM source, null within the array on a
+    /// NULL-extended outer-join side. The whole array is null when the cursor
+    /// isn't on a live row (before first FETCH, past the end, or on a keyset
+    /// hole). Read by positioned <c>WHERE CURRENT OF</c> DML.</summary>
+    public (int Page, int Slot)?[]? CurrentRids;
 
     // STATIC: frozen projected values, walked by index.
     private List<SqlValue[]>? staticRows;
-    // KEYSET: ordered snapshot of row identities (membership frozen at OPEN).
-    // UniqueKey carries the tuple when the base table has a PK/UNIQUE — KEYSET
-    // membership tracks by that, matching SQL Server's keyset-is-identified-by-
-    // the-unique-index behavior. UniqueKey null falls back to Rid (no-unique-
-    // key heap path; simulator extension).
-    private List<(SqlValue[]? UniqueKey, (int Page, int Slot) Rid)>? keysetIdentities;
+    // KEYSET: ordered snapshot of row identities (membership frozen at OPEN),
+    // one slot per FROM source. UniqueKeys carries the tuple when that source's
+    // table has a PK/UNIQUE — KEYSET membership tracks by that, matching SQL
+    // Server's keyset-is-identified-by-the-unique-index behavior. A null slot
+    // falls back to the address (no-unique-key heap path; simulator extension).
+    private List<(SqlValue[]?[] UniqueKeys, (int Page, int Slot)?[] Rids)>? keysetIdentities;
     // Position for indexed (STATIC / KEYSET): -1 before-first, == count after-last.
     private int position;
 
@@ -172,7 +180,7 @@ internal sealed class Cursor(
                 batch.Connection.LastCursorRows = this.staticRows.Count;
                 break;
             case CursorSensitivity.Keyset:
-                this.keysetIdentities = [.. this.Selection.EnumerateForCursor(batch).Select(r => (r.UniqueKey, r.Rid))];
+                this.keysetIdentities = [.. this.Selection.EnumerateForCursor(batch).Select(r => (r.UniqueKeys, r.Rids))];
                 this.position = -1;
                 batch.Connection.LastCursorRows = this.keysetIdentities.Count;
                 break;
@@ -184,19 +192,25 @@ internal sealed class Cursor(
                 break;
         }
 
-        this.CurrentRid = null;
+        this.CurrentRids = null;
         this.IsOpen = true;
 
-        // SCROLL_LOCKS: take table-IX for the cursor's open lifetime (the
-        // per-row U locks ride the fetch position). Held cursor-scoped, so it
-        // outlives individual statements and any autocommit boundary — matching
-        // real SQL Server, where scroll locks persist while the cursor is
-        // positioned regardless of an enclosing transaction.
-        if (this.Concurrency == CursorConcurrency.ScrollLocks && this.BaseTable is { } table2)
+        // SCROLL_LOCKS: take table-IX on every participating table for the
+        // cursor's open lifetime (the per-row U locks ride the fetch position).
+        // Held cursor-scoped, so they outlive individual statements and any
+        // autocommit boundary — matching real SQL Server, where scroll locks
+        // persist while the cursor is positioned regardless of an enclosing
+        // transaction.
+        if (this.Concurrency == CursorConcurrency.ScrollLocks)
         {
             var connection = batch.Connection;
-            connection.Simulation.LockManager.Acquire(table2.TableDataLock, LockMode.IntentExclusive, connection, connection.LockTimeoutMillis);
-            this.scrollTableLock = table2.TableDataLock;
+            foreach (var table in this.BaseTables)
+            {
+                if (this.scrollTableLocks.Contains(table.TableDataLock))
+                    continue;
+                connection.Simulation.LockManager.Acquire(table.TableDataLock, LockMode.IntentExclusive, connection, connection.LockTimeoutMillis);
+                this.scrollTableLocks.Add(table.TableDataLock);
+            }
         }
     }
 
@@ -211,7 +225,7 @@ internal sealed class Cursor(
         this.staticRows = null;
         this.keysetIdentities = null;
         this.dynamicLast = null;
-        this.CurrentRid = null;
+        this.CurrentRids = null;
         this.optimisticSnapshot = null;
         this.IsOpen = false;
     }
@@ -225,40 +239,41 @@ internal sealed class Cursor(
     internal void ReleaseScrollLocks(SimulatedDbConnection connection)
     {
         var lockManager = connection.Simulation.LockManager;
-        if (this.scrollRowLock is { } row)
-        {
+        foreach (var row in this.scrollRowLocks)
             lockManager.Release(row, LockMode.Update, connection);
-            this.scrollRowLock = null;
-        }
-        if (this.scrollTableLock is { } tbl)
-        {
-            lockManager.Release(tbl, LockMode.IntentExclusive, connection);
-            this.scrollTableLock = null;
-        }
+        this.scrollRowLocks.Clear();
+        foreach (var table in this.scrollTableLocks)
+            lockManager.Release(table, LockMode.IntentExclusive, connection);
+        this.scrollTableLocks.Clear();
     }
 
     /// <summary>
-    /// Moves the SCROLL_LOCKS row-U lock onto the freshly-fetched row: releases
-    /// the row we scrolled off (if any) and acquires U on
-    /// <see cref="CurrentRid"/>. A concurrent writer of the current row then
-    /// blocks (U conflicts with the writer's X); scrolling away frees it.
+    /// Moves the SCROLL_LOCKS row-U locks onto the freshly-fetched row:
+    /// releases the rows we scrolled off (if any) and acquires U on every
+    /// non-NULL-extended slot of <see cref="CurrentRids"/>. A concurrent writer
+    /// of a currently-held row then blocks (U conflicts with the writer's X);
+    /// scrolling away frees it.
     /// </summary>
     private void MoveScrollLock(BatchContext batch)
     {
-        if (this.BaseTable is not { } table)
-            return;
         var connection = batch.Connection;
         var lockManager = connection.Simulation.LockManager;
-        if (this.scrollRowLock is { } prior)
-        {
+        foreach (var prior in this.scrollRowLocks)
             lockManager.Release(prior, LockMode.Update, connection);
-            this.scrollRowLock = null;
-        }
-        if (this.CurrentRid is { } rid)
+        this.scrollRowLocks.Clear();
+        if (this.CurrentRids is not { } rids)
+            return;
+        for (var i = 0; i < rids.Length; i++)
         {
-            var resource = table.GetOrCreateRowLock(rid.Page, rid.Slot);
+            if (rids[i] is not { } rid)
+                continue;
+            // A self-join reaches the same row through two slots; one U lock
+            // covers it, and holding one reference keeps the release balanced.
+            var resource = this.BaseTables[i].GetOrCreateRowLock(rid.Page, rid.Slot);
+            if (this.scrollRowLocks.Contains(resource))
+                continue;
             lockManager.Acquire(resource, LockMode.Update, connection, connection.LockTimeoutMillis);
-            this.scrollRowLock = resource;
+            this.scrollRowLocks.Add(resource);
         }
     }
 
@@ -271,11 +286,74 @@ internal sealed class Cursor(
     /// </summary>
     internal void CheckOptimisticConflict()
     {
-        if (this.Concurrency != CursorConcurrency.Optimistic || this.BaseTable is not { } table)
+        if (this.Concurrency != CursorConcurrency.Optimistic)
             return;
-        var current = this.CurrentRid is { } rid ? table.Heap.ReadSlotBytes(rid.Page, rid.Slot) : null;
-        if (current is null || this.optimisticSnapshot is null || !current.AsSpan().SequenceEqual(this.optimisticSnapshot))
+        if (this.CurrentRids is not { } rids || this.optimisticSnapshot is not { } snapshot)
             throw SimulatedSqlException.CursorOptimisticConflict();
+        for (var i = 0; i < rids.Length; i++)
+        {
+            var live = rids[i] is { } rid ? this.BaseTables[i].Heap.ReadSlotBytes(rid.Page, rid.Slot) : null;
+            if (live is null
+                ? snapshot[i] is not null
+                : snapshot[i] is null || !live.AsSpan().SequenceEqual(snapshot[i]))
+            {
+                throw SimulatedSqlException.CursorOptimisticConflict();
+            }
+        }
+    }
+
+    /// <summary>
+    /// The index of the first FROM slot backed by <paramref name="table"/>, or
+    /// <c>-1</c> when the cursor doesn't read it. Positioned DML binds to the
+    /// first occurrence, matching real SQL Server (which reports Msg 16961 when
+    /// a self-join makes the choice ambiguous).
+    /// </summary>
+    internal int IndexOfBaseTable(HeapTable table)
+    {
+        for (var i = 0; i < this.BaseTables.Length; i++)
+        {
+            if (ReferenceEquals(this.BaseTables[i], table))
+                return i;
+        }
+        return -1;
+    }
+
+    /// <summary>How many FROM slots are backed by <paramref name="table"/> —
+    /// more than one means a self-join, which real reports Msg 16961 for at
+    /// positioned-DML time.</summary>
+    internal int CountBaseTable(HeapTable table)
+    {
+        var count = 0;
+        foreach (var candidate in this.BaseTables)
+        {
+            if (ReferenceEquals(candidate, table))
+                count++;
+        }
+        return count;
+    }
+
+    /// <summary>
+    /// True when <paramref name="table"/> may be mutated through a positioned
+    /// <c>WHERE CURRENT OF</c>: always true unless the cursor carries a
+    /// <c>FOR UPDATE OF (…)</c> column list naming none of its columns.
+    /// Probe-confirmed: real narrows the cursor's updatable <em>tables</em> to
+    /// those owning a listed column and reports Msg 16933 (not 16932) for any
+    /// other table, including on a DELETE.
+    /// </summary>
+    internal bool IsTableUpdatable(HeapTable table, BatchContext batch)
+    {
+        if (this.ForUpdateColumns is null)
+            return true;
+        var collation = batch.CurrentDatabase.Collation;
+        foreach (var allowed in this.ForUpdateColumns)
+        {
+            foreach (var column in table.Columns)
+            {
+                if (collation.Equals(allowed, column.Name))
+                    return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>
@@ -313,14 +391,20 @@ internal sealed class Cursor(
             _ => this.FetchDynamic(batch, direction, offset),
         };
 
-        // OPTIMISTIC: snapshot the landed row's live bytes so a later positioned
-        // UPDATE / DELETE can detect out-of-band modification. SCROLL_LOCKS:
-        // move the cursor-scoped U lock onto the newly-fetched row (releasing
-        // the row we scrolled off), so a concurrent writer of the current row
-        // blocks. Both are no-ops when the fetch didn't land on a live row.
-        this.optimisticSnapshot = this.Concurrency == CursorConcurrency.Optimistic && this.CurrentRid is { } orid
-            ? this.BaseTable?.Heap.ReadSlotBytes(orid.Page, orid.Slot)
-            : null;
+        // OPTIMISTIC: snapshot the landed row's live bytes (per source) so a
+        // later positioned UPDATE / DELETE can detect out-of-band modification.
+        // SCROLL_LOCKS: move the cursor-scoped U locks onto the newly-fetched
+        // row (releasing the rows we scrolled off), so a concurrent writer of a
+        // current row blocks. Both are no-ops when the fetch didn't land on a
+        // live row.
+        this.optimisticSnapshot = null;
+        if (this.Concurrency == CursorConcurrency.Optimistic && this.CurrentRids is { } fetched)
+        {
+            var snapshot = new byte[]?[fetched.Length];
+            for (var i = 0; i < fetched.Length; i++)
+                snapshot[i] = fetched[i] is { } orid ? this.BaseTables[i].Heap.ReadSlotBytes(orid.Page, orid.Slot) : null;
+            this.optimisticSnapshot = snapshot;
+        }
         if (this.Concurrency == CursorConcurrency.ScrollLocks)
             this.MoveScrollLock(batch);
 
@@ -358,10 +442,10 @@ internal sealed class Cursor(
         var count = this.staticRows!.Count;
         if (!this.TryMoveIndex(direction, offset, count))
         {
-            this.CurrentRid = null;
+            this.CurrentRids = null;
             return (-1, null);
         }
-        // STATIC is read-only; CurrentRid stays null (WHERE CURRENT OF rejected upstream).
+        // STATIC is read-only; CurrentRids stays null (WHERE CURRENT OF rejected upstream).
         return (0, this.staticRows[this.position]);
     }
 
@@ -370,26 +454,24 @@ internal sealed class Cursor(
         var count = this.keysetIdentities!.Count;
         if (!this.TryMoveIndex(direction, offset, count))
         {
-            this.CurrentRid = null;
+            this.CurrentRids = null;
             return (-1, null);
         }
 
-        var (key, rid) = this.keysetIdentities[this.position];
+        var (keys, rids) = this.keysetIdentities[this.position];
         foreach (var row in this.Selection.EnumerateForCursor(batch))
         {
-            var match = key is not null
-                ? row.UniqueKey is not null && Selection.CompareKeyTuples(row.UniqueKey, key) == 0
-                : row.Rid.Equals(rid);
-            if (match)
+            if (Selection.CursorIdentityMatches(row, keys, rids))
             {
-                this.CurrentRid = row.Rid;
+                this.CurrentRids = row.Rids;
                 return (0, row.Values);
             }
         }
         // Member deleted out from under the keyset (or its unique-key columns
-        // changed, making the row no longer findable by the snapshotted key):
-        // status -2, no current row.
-        this.CurrentRid = null;
+        // changed, making the row no longer findable by the snapshotted key —
+        // on a join, either side going away is enough): status -2, no current
+        // row.
+        this.CurrentRids = null;
         return (-2, null);
     }
 
@@ -438,14 +520,14 @@ internal sealed class Cursor(
 
         if (target is null)
         {
-            this.CurrentRid = null;
+            this.CurrentRids = null;
             return (-1, null);
         }
 
         this.dynamicLast = target;
         this.dynamicBeforeFirst = false;
         this.dynamicAfterLast = false;
-        this.CurrentRid = target.Rid;
+        this.CurrentRids = target.Rids;
         return (0, target.Values);
     }
 

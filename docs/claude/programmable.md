@@ -1,5 +1,75 @@
 # Programmable objects — UDFs, TVFs, views
 
+## CREATE-time body binding
+
+A module's body is **bound when the module is created**, and a binder error aborts the `CREATE` — the module isn't created, and an `ALTER` / `CREATE OR ALTER` leaves the previous body standing.
+Only *missing-object* resolution defers, which is real's deferred name resolution.
+Probe-confirmed end to end against SQL Server 2025 (2026-08-01) for procedures, scalar UDFs, multi-statement TVFs and DML / DDL triggers; views and inline TVFs never deferred anything (real binds them fully, Msg 208 included) and already did so here through their output-column inference.
+
+`Simulation.BindModuleBodyAtCreate` (in `Simulation.BindModuleBody.cs`) is the one implementation.
+It re-tokenizes the captured body on a throwaway child `BatchContext` built by the same per-kind constructor the invocation uses — so the body sees the frame it will run under — and runs it through the normal dispatch loop with **skip mode** on (`BatchContext.SkipModeFlag`) plus `BatchContext.CreateTimeBinding`.
+Skip mode is the existing "parse and resolve, don't execute" machinery the un-taken-`IF` path uses ([`control-flow.md`](control-flow.md)); `CreateTimeBinding` adds the behaviors specific to binding — permission enforcement off (a bind reads nothing, and real binds under the module's own ownership chain), stop-at-first-deferral (below), and the **`SET`-option gates off** (real accepts `CREATE PROCEDURE … AS INSERT <gated table>` under `QUOTED_IDENTIFIER OFF` and raises Msg 1934 only when the body runs, though a never-taken `IF` branch at top level *does* raise — see [`grammar.md`](grammar.md#set-option-gates--msg-1934--msg-1935)).
+
+The bind runs under the **creating** session's `QUOTED_IDENTIFIER`, which is also the setting the module captures, so the text is read the same way here as it will be at every later invocation.
+Per-call re-tokenization then swaps the session flag to that capture for the body's duration ([`grammar.md`](grammar.md#per-object-creation-time-capture)) — the reason a module body is immune to whatever the caller set.
+
+Each kind seeds the bind batch the way its invocation would:
+
+| Kind | Seeded | Frame |
+| --- | --- | --- |
+| Procedure | parameters as typed NULL slots; a TVP parameter as an empty **READONLY** clone of its type; a cursor parameter as an unallocated cursor variable | `ProcFrame` |
+| Scalar UDF | parameters as typed NULL slots | `UdfFrame` (what makes value-form `RETURN` legal) |
+| Multi-statement TVF | parameters, plus the `@r` return table | **none** — the absence is what raises Msg 178 on a value-form `RETURN`, which real also reports at CREATE |
+| DML trigger | empty `INSERTED` / `DELETED` shaped like the parent | `TriggerFrame` over a stand-in `Trigger` (object id 0, never registered) carrying the parent, which `UPDATE(col)` resolves against |
+| DDL trigger | — | `TriggerFrame` over a stand-in `DdlTrigger`, empty `EVENTDATA()` |
+
+**Ordering**: the bind runs before the schema dict is touched and before the name-collision gates, matching real — probe-confirmed that a body error beats Msg 2714 for a plain `CREATE` over a taken name and Msg 208 for a bare `ALTER` of a name nothing holds.
+`CREATE TRIGGER` is the one exception in the other direction: real reports **Msg 8197** for a missing parent *ahead* of the body error, so parent resolution stays first.
+
+**Error shape**: severity / state as usual, the body's **CREATE-relative line** (Msg 111 forces the CREATE to open its batch, so that is also real's batch-relative line), and the module's **unqualified** name as `Procedure` / `ERROR_PROCEDURE()` — `pshape`, not `dbo.pshape`.
+That is the opposite of the schema-qualified attribution an *invocation*-time procedure-body error carries; see [`errors.md`](errors.md).
+The error is ordinary and catchable — a `CREATE` issued through dynamic SQL inside `TRY` / `CATCH` lands in the CATCH.
+
+### What defers
+
+The statement's whole binding defers as soon as any object in it is missing — real's rule, and the simulator reaches it two ways.
+A FROM-clause table or schema-qualified function that doesn't resolve becomes a placeholder source, which also makes unresolved column references across that statement's sources bind leniently; a missing DML / DROP target raises Msg 208, which the dispatch loop swallows.
+Probe-confirmed deferrals, all creating successfully on real and here: a missing table, a missing column on a missing table, a column qualified to a missing source, a missing table-valued function, a missing INSERT / MERGE / DROP target, a `#temp` or `##temp` that doesn't exist yet (including a bad column on a `#temp` the body creates itself), a table the body itself creates or `SELECT … INTO`s, a missing database, `EXEC` of a missing procedure, argument errors on an `EXEC` of an existing one, a not-yet-created scalar UDF (which is what makes a **recursive** UDF creatable), and anything inside a dynamic-SQL string.
+
+Statement granularity is real's: a body whose first statement names a missing table and whose second names a bad column on an existing one still reports Msg 207, in either order.
+
+**Stop-at-first-deferral is the divergence.**
+When the deferral arrives as a *swallowed Msg 208* — the DML / DROP-target case, not the placeholder one — the parser threw mid-statement and the only recovery is a scan to the next statement-boundary token, which can still land inside the failed statement (`INSERT INTO missing SELECT …` throws with the cursor already on `SELECT`).
+Binding on from there would report errors against fragments, so `CreateTimeBinding` sets `BatchContext.BatchAborted` and the rest of the body falls back to binding at first invocation.
+Real keeps binding, because it knows where the statement ended.
+
+### What binds
+
+Everything else the parser and the static type path check.
+Probe-confirmed as CREATE-time on real and matched here: **Msg 207** (invalid column on an existing table, including on `INSERTED` / `DELETED`, on a body-declared table variable, inside `UPDATE(col)`, and in a `WHERE` / `HAVING` / `MERGE`-`ON` / `SET`-value position), **209**, **8120**, **306**, **108**, **156** / **102**, **137**, **134**, **135**, **402**, **8144**, **178**, **10700** (a body writing its own READONLY TVP — see [`table-valued-parameters.md`](table-valued-parameters.md)), **8116** (a legacy-LOB string-scalar argument — see [`scalars.md`](scalars.md#legacy-lob-arguments)), and **468** / **457** (a cross-collation comparison or unification — see [`collations.md`](collations.md#compile-time-binding)).
+A never-taken `IF` or `WHILE` branch binds too, on both sides.
+
+### Divergences
+
+- **An aggregate whose only column reference doesn't resolve locally isn't reached.**
+  `HAVING MAX(nosuchcol) = 1` is taken for an aggregate over an enclosing query — unmodeled, so it raises `NotSupportedException`, which the bind swallows (below) rather than refusing a module real accepts.
+  Real reports Msg 207 at CREATE.
+  The rest of that family closed: `WHERE` / `HAVING` / a `MERGE`'s `ON` / the *value* side of a `SET` now bind through the static type path — see [`collations.md`](collations.md#compile-time-binding) for the drive sites.
+- **One error per CREATE.**
+  Real reports every binder error it finds in the body (probed: two Msg 207s from two statements); the simulator throws on the first.
+- **Msg 455** (last statement must be `RETURN`), **Msg 444** (a body `SELECT` returning to the client) and **Msg 443** (a side-effecting operator inside a function) are still unchecked — they want body-shape analysis rather than a parse, so a function real refuses is created here.
+- **A `NotSupportedException` never blocks a CREATE.** An unmodeled feature in the body is a simulator gap rather than real's binder speaking; refusing the module would be strictly worse than the status quo, so the bind swallows it and the gap resurfaces at invocation.
+
+### Skip mode had to stop executing
+
+The bind exposed places where skip mode parsed *and ran*, which for a body whose parameters stand in as typed NULLs produced errors real never reports.
+Each is now gated, and each is a fidelity gain for un-taken branches too (real runs neither):
+
+- `INSERT`'s per-row work — DEFAULT evaluation, identity / rowversion allocation, computed columns, and the NOT NULL / CHECK / key enforcement — is skipped, as is evaluating a `VALUES` tuple (a `NEXT VALUE FOR` cell was burning a sequence value) and executing an `INSERT … SELECT`'s source query.
+- `UPDATE` / `DELETE` drop their row source and `MERGE` returns before its match walk, so a body's `WHERE` / `SET` / `ON` can't raise a runtime error over the table's current contents.
+- `UserFunctionCall.Run` / `ClrFunctionCall.Run` return a typed NULL.
+  This one is load-bearing rather than an optimization: the FROM-less-`SELECT` fast path bakes its projection values during the **parse**, so without it every `SELECT dbo.f()` in a body would dispatch the function's own body while the module was being created.
+
 ## Body batches and the per-statement freeze
 
 Every module body runs on a child `BatchContext`, and the per-statement current-time freeze (`BatchContext.CurrentStatement.UtcNow`, read by `GETDATE` / `GETUTCDATE` / `CURRENT_TIMESTAMP` / `SYSDATETIME` / `SYSUTCDATETIME` / `SYSDATETIMEOFFSET` / `CURRENT_DATE`) lives on that frame — so *which* batch a body runs on decides which instant it reads.
@@ -50,8 +120,8 @@ Probed against SQL Server 2025.
   Real's state byte identifies the kind: 4 for CREATE FUNCTION, 5 for ALTER FUNCTION, 6 / 7 for CREATE / ALTER TRIGGER, 9 / 10 for CREATE / ALTER VIEW, 12 for CREATE RULE, 13 for CREATE DEFAULT, 14 for CREATE SCHEMA, and 1 for the merged `'CREATE/ALTER PROCEDURE'` label (probe-confirmed 2026-07-31; the simulator carries the ones it parses).
 
 **Fidelity gaps**:
-- **No CREATE-time body validation** (Msg 455 missing-RETURN, Msg 443 side-effects, Msg 444 result-set SELECT in body).
-  Deferred to runtime — fall-through body returns typed NULL, side-effecting statements surface their own errors.
+- **The body-shape rules stay unchecked** — Msg 455 (missing RETURN), Msg 443 (side-effects), Msg 444 (result-set SELECT in body).
+  The body itself binds at CREATE ([CREATE-time body binding](#create-time-body-binding)), but these three want shape analysis rather than a parse, so a fall-through body returns typed NULL and side-effecting statements surface their own errors at invocation.
 - **`@@ROWCOUNT` inside a UDF body** isn't isolated — body statements overwrite the caller's `LastStatementRowCount`.
   Real SQL Server preserves it across the call.
 
@@ -86,7 +156,7 @@ Probed against SQL Server 2025.
 - **`is_nullable` always True** in `sys.columns` for TVF output.
   Real SQL Server propagates per-projection nullability via the same rules SELECT INTO uses (`Expression.ResultIsNullable`); wiring it through requires exposing projection expressions on `Selection` post-parse.
   Apps reading TVF rows through raw SQL aren't affected.
-- **No CREATE-time body validation for forward refs** — self-recursive inline TVFs fail at CREATE with Msg 208 (real SQL Server also rejects, different error path).
+- **Forward refs aren't deferred** — an inline TVF binds its body in full (real does too: probe-confirmed that a body over a missing table reports Msg 208 at CREATE, unlike a procedure's or a scalar UDF's), so a self-recursive one fails at CREATE with Msg 208 where real reports a different error path.
 
 ## Multi-statement table-valued functions
 `CREATE FUNCTION schema.name(@p type [= default], ...) RETURNS @r TABLE (column-list) [WITH SCHEMABINDING | ENCRYPTION] AS BEGIN ... END`, called from a FROM clause exactly like an inline TVF.
@@ -114,9 +184,9 @@ Probed against SQL Server 2025.
   LINQ composition (`Where` / `OrderBy` / `Select`) applies to the function's result rows post-dispatch — no pushdown into the body.
 
 **Fidelity gaps**:
-- **No CREATE-time body validation**: Msg 455 (last statement must be RETURN), Msg 443 (side-effecting external DML inside function), Msg 178 (value-form RETURN).
-  Real SQL Server enforces all three at CREATE; the simulator defers to invoke time where applicable (Msg 178 via the existing return-statement parser), and silently accepts the rest.
-  Apps that produce a body real SQL Server would reject can run successfully here.
+- **The body-shape rules stay unchecked**: Msg 455 (last statement must be RETURN) and Msg 443 (side-effecting external DML inside function).
+  Real enforces both at CREATE; the simulator silently accepts them, so a body real would reject can run successfully here.
+  **Msg 178** (value-form RETURN) *does* fire at CREATE — the body bind carries no frame, which is the same absence the invocation relies on ([CREATE-time body binding](#create-time-body-binding)).
 - **Constraint enforcement is row-level strict**: PK / UNIQUE / CHECK violations in the body surface as runtime errors (Msg 2627 / Msg 547).
   Real SQL Server's probe-observed behavior is more forgiving in some cases — for shared-key collisions it returns an empty result set rather than raising.
   Stricter behavior is defensible since apps that hit it are buggy.
@@ -444,6 +514,11 @@ Both live in `RejectQualifiedModuleName` (`Simulation.ModuleDefinition.cs`), cal
 Two re-tokenizing paths in `Simulation.ExecDynamicSql.cs`.
 Both run the dynamic batch inside its own child `BatchContext` (`ProcFrame` set for `RETURN` legality but the return code is discarded), share the outer connection's database / transaction state, and forward result sets to the outer caller.
 **Outer `@`-variables are NOT visible** — probe-confirmed: a dynamic batch referencing an undeclared `@x` raises Msg 137.
+**The dynamic batch inherits the enclosing module's `QUOTED_IDENTIFIER`**, not the session's — an `EXEC ('SELECT "x"')` inside a procedure created under `SET QUOTED_IDENTIFIER OFF` reads a string literal even when the caller's session is ON (probe-confirmed).
+That falls out of how the capture is applied: invocation swaps the session flag for the body's duration, and the dynamic command seeds from the connection like any other ([`grammar.md`](grammar.md#per-object-creation-time-capture)).
+A `SET QUOTED_IDENTIFIER` *inside* the dynamic batch still scopes to that batch alone.
+**A `USE` inside the dynamic batch binds for that batch only** — probe-confirmed for both forms: the statements after it in the same dynamic string see the new database, and the caller resumes on the one it was on.
+That scoping is what lets `sp_MSforeachdb`'s `'USE [?]; …'` idiom run each command against its own database without moving the session (see [`catalog-views.md`](catalog-views.md)).
 
 **`EXEC (<string-expr>)`**:
 - Operand evaluates in the outer batch's context (so `EXEC ('SELECT ' + @col + ' FROM t')` works), then the resulting string is dispatched as a fresh batch.

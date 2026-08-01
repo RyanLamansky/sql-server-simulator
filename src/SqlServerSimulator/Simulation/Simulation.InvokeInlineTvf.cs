@@ -99,6 +99,13 @@ partial class Simulation
         // batch constructor with scalar UDF invocation keeps the per-call
         // setup uniform across kinds.
         var dummyFrame = new UdfFrame(SqlType.Int32);
+        // The body parses under the QUOTED_IDENTIFIER captured at CREATE, not
+        // the caller's. Swapping the session flag (rather than seeding the
+        // child parser) is what carries it to everything else that reads the
+        // connection — dynamic SQL, the plan-cache key, the Msg 1934 gates.
+        // Restored in the finally below; see docs/claude/grammar.md.
+        var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+        connection.QuotedIdentifiers = function.UsesQuotedIdentifier;
         // Body errors attribute to the outer invoking statement (probe-
         // confirmed: real reports the referencing SELECT's line, no procedure).
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
@@ -118,6 +125,7 @@ partial class Simulation
         finally
         {
             connection.NestingLevel--;
+            connection.QuotedIdentifiers = savedQuotedIdentifiers;
         }
     }
 }

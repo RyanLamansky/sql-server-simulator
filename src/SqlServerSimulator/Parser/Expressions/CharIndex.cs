@@ -68,7 +68,11 @@ internal sealed class CharIndex : Expression
                 : foundCu + 1);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = StringScalars.BindArgument(needle, batch, resolveColumnType, "charindex");
+        return SqlType.Int32;
+    }
 
     internal override string DebugDisplay() => start is null
         ? $"CHARINDEX({needle.DebugDisplay()}, {haystack.DebugDisplay()})"

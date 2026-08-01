@@ -46,6 +46,11 @@ internal static class ScalarArguments
     /// <c>@LockTimeout</c> (int), <c>sp_columns_100</c>'s <c>@ODBCVer</c>
     /// (int), and <c>sp_datatype_info_100</c>'s <c>@data_type</c> (int) /
     /// <c>@ODBCVer</c> (tinyint), whose narrower slot names <c>tinyint</c>.
+    /// An exact-numeric source reaches the same Msg 8114 — real spells the
+    /// family <c>numeric</c> there for a literal argument (the only decimal
+    /// form the EXEC argument grammar admits) and <c>decimal</c> only for a
+    /// declared-<c>decimal</c> variable, a distinction that needs the
+    /// deferred column/variable-source name; the literal spelling wins.
     /// </summary>
     public static int CoerceProcedureParameter(SqlValue value, SqlType target)
     {
@@ -55,8 +60,49 @@ internal static class ScalarArguments
         }
         catch (OverflowException)
         {
-            throw SimulatedSqlException.ConvertingDataTypeError(value.Type, target.SqlServerName);
+            throw ProcedureParameterConversionError(value, target);
         }
+        catch (SimulatedSqlException e) when (e.Number is 8115 or 232 or 237 or 220)
+        {
+            // The conversion-overflow family a decimal / float / money source
+            // raises internally still reports as the procedure-parameter
+            // Msg 8114 at this boundary.
+            throw ProcedureParameterConversionError(value, target);
+        }
+    }
+
+    private static SimulatedSqlException ProcedureParameterConversionError(SqlValue value, SqlType target) =>
+        value.Type is DecimalSqlType
+            ? SimulatedSqlException.ConvertingDataTypeError("numeric", target.SqlServerName)
+            : SimulatedSqlException.ConvertingDataTypeError(value.Type, target.SqlServerName);
+
+    /// <summary>
+    /// Gates the argument slots real refuses to convert into at all, reporting
+    /// Msg 8116 naming the offending family: the object-id first argument of
+    /// <c>COLUMNPROPERTY</c> / <c>INDEXPROPERTY</c> / <c>INDEXKEY_PROPERTY</c>
+    /// and <c>CONVERT</c>'s style. Only the four signed / unsigned integer
+    /// families pass (<c>int</c>, <c>bigint</c>, <c>smallint</c>,
+    /// <c>tinyint</c>) — <c>bit</c>, the exact numerics, <c>float</c> /
+    /// <c>real</c>, money, the string families and the date families all
+    /// raise. The gate is a compile-time one on real, so it precedes the
+    /// NULL short-circuit: a typed NULL raises where a bare <c>NULL</c>
+    /// (which carries the placeholder <c>int</c> type) passes through.
+    /// Probe-confirmed 2026-08-01 across all four slots; the sibling id
+    /// scalars (<c>OBJECT_NAME</c>, <c>COL_NAME</c>, <c>OBJECTPROPERTY</c>,
+    /// <c>TYPE_NAME</c>, <c>DB_NAME</c>, <c>INDEX_COL</c>) and the string
+    /// scalars' position arguments carry no such gate — they convert, so an
+    /// out-of-range value reaches the ordinary Msg 8115.
+    /// <c>reportsNumeric</c> carries the argument expression's
+    /// decimal-family naming (<c>numeric</c> for a literal, <c>decimal</c>
+    /// for a declared decimal); real spells the two apart here exactly as it
+    /// does in a projected column's type name.
+    /// </summary>
+    public static void RequireIntegerArgument(SqlValue value, bool reportsNumeric, int argumentIndex, string functionName)
+    {
+        if (SqlType.IsIntegerCategory(value.Type) && value.Type != SqlType.Bit)
+            return;
+        var typeWord = reportsNumeric && value.Type is DecimalSqlType ? "numeric" : value.Type.SqlServerName;
+        throw SimulatedSqlException.InvalidArgumentDataType(typeWord, argumentIndex, functionName);
     }
 
     private static SqlValue Narrow(SqlValue value, SqlType target)

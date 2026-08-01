@@ -34,7 +34,11 @@ internal sealed class Soundex : Expression
             : SqlValue.FromVarchar(Compute(v.CoerceTo(SqlType.NVarchar).AsString));
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = StringScalars.BindArgument(this.input, batch, resolveColumnType, "soundex");
+        return SqlType.Varchar;
+    }
 
     internal override string DebugDisplay() => $"SOUNDEX({this.input.DebugDisplay()})";
 
@@ -135,7 +139,15 @@ internal sealed class Difference : Expression
         return SqlValue.FromInt32(matches);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        // DIFFERENCE is the one member that takes a `text` argument — it
+        // converts implicitly and evaluates — so both slots carry the
+        // ANSI-text carve-out its Run does.
+        _ = StringScalars.BindArgument(this.left, batch, resolveColumnType, "difference", allowAnsiText: true);
+        _ = StringScalars.BindArgument(this.right, batch, resolveColumnType, "difference", argumentIndex: 2, allowAnsiText: true);
+        return SqlType.Int32;
+    }
 
     internal override string DebugDisplay() => $"DIFFERENCE({this.left.DebugDisplay()}, {this.right.DebugDisplay()})";
 }

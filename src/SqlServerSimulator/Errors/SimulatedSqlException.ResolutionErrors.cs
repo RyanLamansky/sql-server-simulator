@@ -96,15 +96,15 @@ partial class SimulatedSqlException
     /// this fires even when omitted parameters have declared defaults — the
     /// <c>DEFAULT</c> keyword is the only legal omission path.
     /// </summary>
-    internal static SimulatedSqlException InsufficientArgumentsToFunction(string name) =>
-        new($"An insufficient number of arguments were supplied for the procedure or function {name}.", 313, 16, 2);
+    internal static SimulatedSqlException InsufficientArgumentsToFunction(string name, byte state = 2) =>
+        new($"An insufficient number of arguments were supplied for the procedure or function {name}.", 313, 16, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 8144 — fired by a function/procedure call that
     /// supplies more arguments than the parameter list. Wording probe-confirmed.
     /// </summary>
-    internal static SimulatedSqlException TooManyArgumentsToFunction(string name) =>
-        new($"Procedure or function {name} has too many arguments specified.", 8144, 16, 2);
+    internal static SimulatedSqlException TooManyArgumentsToFunction(string name, byte state = 2) =>
+        new($"Procedure or function {name} has too many arguments specified.", 8144, 16, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 217 — fired when scalar UDF / proc / trigger /

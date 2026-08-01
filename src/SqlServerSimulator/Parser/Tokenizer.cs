@@ -41,14 +41,15 @@ static class Tokenizer
     /// <param name="index">The position of the next un-read character (0 to begin); updated to the next un-read position past the returned token.</param>
     /// <param name="activeCollation">Collation tagged onto string-literal <see cref="SqlValue"/>s; supplied by the caller's active <see cref="Database"/>.</param>
     /// <param name="quotedIdentifiers">The effective <c>QUOTED_IDENTIFIER</c> setting at this parse position: <see langword="true"/> (the default) tokenizes <c>"…"</c> as a delimited identifier, <see langword="false"/> as a varchar string literal. Threaded from <see cref="ParserContext.QuotedIdentifiers"/>.</param>
+    /// <param name="compatibilityLevel">The active database's compatibility level, which decides the words reserved only from a given level — <c>REGEXP_LIKE</c> at 170. Threaded from the current <c>Database</c>.</param>
     /// <returns>The next token, or null if the end of <paramref name="command"/> has been reached.</returns>
     /// <exception cref="SimulatedSqlException">Incorrect or unsupported syntax.</exception>
-    public static Token? NextToken(string command, ref int index, Collation activeCollation, bool quotedIdentifiers = true) =>
+    public static Token? NextToken(string command, ref int index, Collation activeCollation, bool quotedIdentifiers = true, CompatibilityLevel compatibilityLevel = CompatibilityLevel.Sql170) =>
         index >= command.Length ? null : command[index] switch
         {
             ' ' or '\r' or '\n' or '\t' => ParseWhitespace(command, ref index),
             'N' or 'n' when index + 1 < command.Length && command[index + 1] == '\'' => ParseNPrefixedStringLiteral(command, ref index, activeCollation),
-            '_' or (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') => ParseUnquotedStringOrReservedKeyword(command, ref index),
+            '_' or (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') => ParseUnquotedStringOrReservedKeyword(command, ref index, compatibilityLevel),
             '0' when index + 1 < command.Length && (command[index + 1] == 'x' || command[index + 1] == 'X') => ParseHexLiteral(command, ref index),
             >= '0' and <= '9' => ParseNumeric(command, ref index),
             // A '.' immediately followed by a digit begins a decimal literal
@@ -70,7 +71,7 @@ static class Tokenizer
             '$' when IsDollarAction(command, index) => ParseDollarAction(command, ref index),
             '$' or '¢' or '£' or '¥' or '฿' or (>= '₠' and <= '₱') => ParseCurrencyLiteral(command, ref index),
             // Non-ASCII BMP letters (fullwidth, accented, Greek, CJK, ...) start identifiers on real SQL Server — probe-confirmed against SQL Server 2025.
-            var c when char.IsLetter(c) => ParseUnquotedStringOrReservedKeyword(command, ref index),
+            var c when char.IsLetter(c) => ParseUnquotedStringOrReservedKeyword(command, ref index, compatibilityLevel),
             var c => throw SimulatedSqlException.SyntaxErrorNear(c) // Might throw on valid-but-unsupported syntax.
         };
 
@@ -102,7 +103,7 @@ static class Tokenizer
         || c is '_' or '$' or '#' or '@'
         || char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.NonSpacingMark;
 
-    private static Token ParseUnquotedStringOrReservedKeyword(string command, ref int index)
+    private static Token ParseUnquotedStringOrReservedKeyword(string command, ref int index, CompatibilityLevel compatibilityLevel)
     {
         var start = index;
         while (++index < command.Length)
@@ -111,7 +112,7 @@ static class Tokenizer
                 break;
         }
 
-        return UnquotedString.CheckReserved(command, start, index - start);
+        return UnquotedString.CheckReserved(command, start, index - start, compatibilityLevel);
     }
 
     /// <summary>

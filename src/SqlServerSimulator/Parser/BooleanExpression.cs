@@ -245,6 +245,12 @@ internal abstract class BooleanExpression
                 => throw new NotSupportedException(
                     $"Full-text search predicates ({predicate.Keyword.ToString().ToUpperInvariant()}) are not modeled."),
             ReservedKeyword { Keyword: Keyword.Exists } => ParseExists(context),
+            // REGEXP_LIKE is reserved (at compatibility level 170, where it
+            // ships) and boolean-only — real raises Msg 156 for
+            // `SELECT REGEXP_LIKE(a, b)`, so it binds here rather than in
+            // ResolveBuiltIn. Below 170 the tokenizer leaves the name
+            // unreserved and the call falls to Msg 195.
+            ReservedKeyword { Keyword: Keyword.Regexp_Like } => Expressions.RegexpLikePredicate.Parse(context),
             // `UPDATE(col)` is a trigger-body predicate, not a scalar — real
             // raises Msg 156 for `SELECT UPDATE(col)`, so it binds here rather
             // than in ResolveBuiltIn.
@@ -623,6 +629,54 @@ internal abstract class BooleanExpression
     internal abstract void VisitOperandExpressions(Action<Expression> visitor);
 
     /// <summary>
+    /// Compile-time bind of the predicate, the <see cref="BooleanExpression"/>
+    /// counterpart to <see cref="Expression.GetSqlType"/>. Resolves every
+    /// operand's static type — which surfaces an unknown column's Msg 207 and
+    /// each built-in's own argument-type errors without a row in hand — and
+    /// applies the rules that need both operands' types, namely the
+    /// cross-collation Msg 468 gate. Real SQL Server binds a predicate while
+    /// compiling, so an empty rowset reports the same errors a populated one
+    /// does; running this at parse is what puts the simulator on that footing.
+    /// The default handles a leaf that carries only operands; combinators
+    /// (<c>AND</c> / <c>OR</c> / <c>NOT</c>) and the comparison shapes override
+    /// so each node's own pairing rule runs.
+    /// </summary>
+    /// <param name="batch">The active batch context, threaded to <see cref="Expression.GetSqlType"/>.</param>
+    /// <param name="resolveColumnType">Callback mapping a column name to its declared type; raises Msg 207 when nothing resolves.</param>
+    internal virtual void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        this.VisitOperandExpressions(operand => _ = operand.GetSqlType(batch, resolveColumnType));
+
+    /// <summary>
+    /// Raises **Msg 468** when two string operands of a comparison carry
+    /// collations that can't be resolved to one. Shared by the compile-time
+    /// <see cref="Bind"/> path and the per-value
+    /// <see cref="CompareValuesPromoted"/> so the two can't drift; real
+    /// reports this while compiling, and the wording names the right operand's
+    /// collation first (probe-confirmed). Also driven from
+    /// <see cref="Expressions.CaseExpression"/>, whose simple form compares its
+    /// input against each <c>WHEN</c> value with the same <c>=</c> semantics.
+    /// </summary>
+    internal static void RequireResolvableCollation(SqlType left, SqlType right, string operatorName)
+    {
+        if (left != right && left.Category == SqlTypeCategory.String && right.Category == SqlTypeCategory.String
+            && Collation.Resolve(left, right) is null)
+        {
+            throw SimulatedSqlException.CollationConflict(right.Collation!.Name, left.Collation!.Name, operatorName);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="Bind"/> helper for a comparison shape: types both sides
+    /// through <paramref name="resolveColumnType"/> and runs
+    /// <see cref="RequireResolvableCollation"/> over the pair.
+    /// </summary>
+    private static void BindComparison(Expression left, Expression right, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string operatorName) =>
+        RequireResolvableCollation(
+            left.GetSqlType(batch, resolveColumnType),
+            right.GetSqlType(batch, resolveColumnType),
+            operatorName);
+
+    /// <summary>
     /// Flattens a top-level <c>AND</c> chain into its individual conjuncts,
     /// appending each to <paramref name="sink"/>. A non-<c>AND</c> predicate
     /// contributes itself. Used by the join planner to pull equi-join key
@@ -745,6 +799,12 @@ internal abstract class BooleanExpression
                 operand.VisitOperandExpressions(visitor);
         }
 
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+        {
+            foreach (var operand in operands)
+                operand.Bind(batch, resolveColumnType);
+        }
+
         internal override void CollectConjuncts(List<BooleanExpression> sink)
         {
             foreach (var operand in operands)
@@ -791,6 +851,12 @@ internal abstract class BooleanExpression
         {
             foreach (var operand in operands)
                 operand.VisitOperandExpressions(visitor);
+        }
+
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+        {
+            foreach (var operand in operands)
+                operand.Bind(batch, resolveColumnType);
         }
 
         internal override void CollectDisjuncts(List<BooleanExpression> sink)
@@ -888,6 +954,12 @@ internal abstract class BooleanExpression
             visitor(left);
             visitor(right);
         }
+
+        // Real names the operator "is not" here, not the "not equal to" the
+        // runtime comparator borrows (probe-confirmed on
+        // `x IS DISTINCT FROM y` across two collations).
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+            BindComparison(left, right, batch, resolveColumnType, "is not");
     }
 
     /// <summary>
@@ -919,6 +991,13 @@ internal abstract class BooleanExpression
                     return !negated;
             }
             return sawNull ? null : negated;
+        }
+
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+        {
+            var sourceType = source.GetSqlType(batch, resolveColumnType);
+            foreach (var candidate in candidates)
+                RequireResolvableCollation(sourceType, candidate.GetSqlType(batch, resolveColumnType), "equal to");
         }
 
         internal override string DebugDisplay()
@@ -1028,6 +1107,16 @@ internal abstract class BooleanExpression
             visitor(upper);
         }
 
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+        {
+            // Same order Run compares in, so the lower bound's conflict is the
+            // one reported (probe-confirmed: real names "greater than or equal
+            // to" for a BETWEEN whose every operand conflicts).
+            var valueType = value.GetSqlType(batch, resolveColumnType);
+            RequireResolvableCollation(valueType, lower.GetSqlType(batch, resolveColumnType), "greater than or equal to");
+            RequireResolvableCollation(valueType, upper.GetSqlType(batch, resolveColumnType), "less than or equal to");
+        }
+
         internal override bool TryGetBetweenOperands([NotNullWhen(true)] out Expression? v, [NotNullWhen(true)] out Expression? lo, [NotNullWhen(true)] out Expression? hi)
         {
             // NOT BETWEEN is the non-contiguous complement (two open ranges), not
@@ -1077,6 +1166,9 @@ internal abstract class BooleanExpression
         // Only the LHS source is a reachable Expression operand; the subquery
         // side is a Selection (handled by its own machinery).
         internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(source);
+
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+            RequireResolvableCollation(source.GetSqlType(batch, resolveColumnType), inner.Schema[0], "equal to");
     }
 
     /// <summary>
@@ -1146,6 +1238,9 @@ internal abstract class BooleanExpression
 
         internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(left);
 
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+            RequireResolvableCollation(left.GetSqlType(batch, resolveColumnType), inner.Schema[0], GetComparator(op).OperatorName);
+
         private static (string OperatorName, Func<SqlValue, SqlValue, bool> Compare) GetComparator(ComparisonOp op) => op switch
         {
             ComparisonOp.Equal => ("equal to", static (l, r) => l.Equals(r)),
@@ -1175,6 +1270,8 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => $"NOT {inner.DebugDisplay()}";
 
         internal override void VisitOperandExpressions(Action<Expression> visitor) => inner.VisitOperandExpressions(visitor);
+
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => inner.Bind(batch, resolveColumnType);
     }
 
     /// <summary>
@@ -1204,17 +1301,28 @@ internal abstract class BooleanExpression
         /// <see cref="SqlType.Promote"/>. LOB-typed operands (<c>text</c>,
         /// <c>ntext</c>, <c>image</c>) raise Msg 402 rather than being routed
         /// through promotion — SQL Server rejects them in any comparison /
-        /// equality slot, and the operator name is woven into the message via
-        /// the caller-supplied <paramref name="operatorName"/>.
+        /// equality slot, and <see cref="OperatorName"/> is woven into the
+        /// message.
         /// </summary>
-        protected static bool? ComparePromoted(Expression left, Expression right, RuntimeContext runtime, string operatorName, Func<SqlValue, SqlValue, bool> compare) =>
-            CompareValuesPromoted(left.Run(runtime), right.Run(runtime), operatorName, compare);
+        protected bool? ComparePromoted(RuntimeContext runtime, Func<SqlValue, SqlValue, bool> compare) =>
+            CompareValuesPromoted(this.left.Run(runtime), this.right.Run(runtime), this.OperatorName, compare);
+
+        /// <summary>
+        /// The name real SQL Server weaves into a Msg 402 / Msg 468 raised
+        /// from this comparison ("equal to", "less than", "like", …). One
+        /// declaration per subclass keeps the runtime comparator and the
+        /// compile-time <see cref="Bind"/> naming the same operator.
+        /// </summary>
+        protected abstract string OperatorName { get; }
 
         internal override void VisitOperandExpressions(Action<Expression> visitor)
         {
             visitor(this.left);
             visitor(this.right);
         }
+
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+            BindComparison(this.left, this.right, batch, resolveColumnType, this.OperatorName);
 
         // The space-free operator token this comparison renders into a filtered-
         // index definition (=, <>, >, >=, <, <=), or null for shapes with no
@@ -1266,21 +1374,11 @@ internal abstract class BooleanExpression
 
         // Cross-collation operand pair: pick the higher-coercibility side's
         // collation; same rank but different collation raises Msg 468. The
-        // check fires at bind time in real SQL Server (before NULL operand
-        // short-circuits); the simulator mirrors that ordering so a
-        // NULL-bearing row in a mixed-collation join surfaces the conflict
-        // rather than silently filtering. Same-type pairs already share a
-        // collation by virtue of the SqlType being interned per-collation.
-        if (l.Type != r.Type && l.Type.Category == SqlTypeCategory.String && r.Type.Category == SqlTypeCategory.String
-            && Collation.Resolve(l.Type, r.Type) is null)
-        {
-            // Probe-confirmed wording order: right operand's collation first,
-            // left operand's collation second.
-            throw SimulatedSqlException.CollationConflict(
-                r.Type.Collation!.Name,
-                l.Type.Collation!.Name,
-                operatorName);
-        }
+        // conflict is normally caught at parse by <see cref="Bind"/>; this
+        // per-value repeat covers the operand pairs a static type can't
+        // predict (a sql_variant, a value whose type the runtime narrowed).
+        // It sits ahead of the NULL short-circuit so the two phases agree.
+        RequireResolvableCollation(l.Type, r.Type, operatorName);
 
         if (l.IsNull || r.IsNull)
             return null;
@@ -1295,9 +1393,11 @@ internal abstract class BooleanExpression
     private sealed class EqualityExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
         public override bool? Run(RuntimeContext runtime) =>
-            ComparePromoted(left, right, runtime, "equal to", static (l, r) => l.Equals(r));
+            ComparePromoted(runtime, static (l, r) => l.Equals(r));
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} = {right.DebugDisplay()}";
+
+        protected override string OperatorName => "equal to";
 
         protected override string? FilterOperator => "=";
 
@@ -1312,9 +1412,11 @@ internal abstract class BooleanExpression
     private sealed class InequalityExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
         public override bool? Run(RuntimeContext runtime) =>
-            ComparePromoted(left, right, runtime, "not equal to", static (l, r) => !l.Equals(r));
+            ComparePromoted(runtime, static (l, r) => !l.Equals(r));
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} <> {right.DebugDisplay()}";
+
+        protected override string OperatorName => "not equal to";
 
         protected override string? FilterOperator => "<>";
     }
@@ -1322,9 +1424,11 @@ internal abstract class BooleanExpression
     private sealed class GreaterThanExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
         public override bool? Run(RuntimeContext runtime) =>
-            ComparePromoted(left, right, runtime, "greater than", static (l, r) => l.CompareTo(r) > 0);
+            ComparePromoted(runtime, static (l, r) => l.CompareTo(r) > 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} > {right.DebugDisplay()}";
+
+        protected override string OperatorName => "greater than";
 
         protected override string? FilterOperator => ">";
 
@@ -1338,9 +1442,11 @@ internal abstract class BooleanExpression
     private sealed class GreaterThanOrEqualExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
         public override bool? Run(RuntimeContext runtime) =>
-            ComparePromoted(left, right, runtime, "greater than or equal to", static (l, r) => l.CompareTo(r) >= 0);
+            ComparePromoted(runtime, static (l, r) => l.CompareTo(r) >= 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} >= {right.DebugDisplay()}";
+
+        protected override string OperatorName => "greater than or equal to";
 
         protected override string? FilterOperator => ">=";
 
@@ -1354,9 +1460,11 @@ internal abstract class BooleanExpression
     private sealed class LessThanExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
         public override bool? Run(RuntimeContext runtime) =>
-            ComparePromoted(left, right, runtime, "less than", static (l, r) => l.CompareTo(r) < 0);
+            ComparePromoted(runtime, static (l, r) => l.CompareTo(r) < 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} < {right.DebugDisplay()}";
+
+        protected override string OperatorName => "less than";
 
         protected override string? FilterOperator => "<";
 
@@ -1370,9 +1478,11 @@ internal abstract class BooleanExpression
     private sealed class LessThanOrEqualExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
         public override bool? Run(RuntimeContext runtime) =>
-            ComparePromoted(left, right, runtime, "less than or equal to", static (l, r) => l.CompareTo(r) <= 0);
+            ComparePromoted(runtime, static (l, r) => l.CompareTo(r) <= 0);
 
         internal override string DebugDisplay() => $"{left.DebugDisplay()} <= {right.DebugDisplay()}";
+
+        protected override string OperatorName => "less than or equal to";
 
         protected override string? FilterOperator => "<=";
 
@@ -1440,7 +1550,7 @@ internal abstract class BooleanExpression
                 ?? throw SimulatedSqlException.CollationConflict(
                     r.Type.Collation!.Name,
                     l.Type.Collation!.Name,
-                    "like");
+                    this.OperatorName);
 
             var matched = LikePatternBuilder.BuildAnchored(r.AsString, escapeChar, resolved.Collation.CaseSensitive).IsMatch(l.AsString);
             return matched ^ this.negated;
@@ -1450,12 +1560,20 @@ internal abstract class BooleanExpression
             ? $"{left.DebugDisplay()} {(this.negated ? "NOT LIKE" : "LIKE")} {right.DebugDisplay()}"
             : $"{left.DebugDisplay()} {(this.negated ? "NOT LIKE" : "LIKE")} {right.DebugDisplay()} ESCAPE {this.escape.DebugDisplay()}";
 
+        protected override string OperatorName => "like";
+
         internal override void VisitOperandExpressions(Action<Expression> visitor)
         {
             visitor(this.left);
             visitor(this.right);
             if (this.escape is not null)
                 visitor(this.escape);
+        }
+
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+        {
+            base.Bind(batch, resolveColumnType);
+            _ = this.escape?.GetSqlType(batch, resolveColumnType);
         }
     }
 }

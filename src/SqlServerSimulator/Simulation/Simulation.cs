@@ -1322,6 +1322,14 @@ public sealed partial class Simulation
             Operator { Character: '(' } => true,
             _ => false,
         };
+        batch.CurrentStatement.StatementVerb = batch.Parser.Token switch
+        {
+            ReservedKeyword { Keyword: Keyword.Insert } => "INSERT",
+            ReservedKeyword { Keyword: Keyword.Update } => "UPDATE",
+            ReservedKeyword { Keyword: Keyword.Delete } => "DELETE",
+            ReservedKeyword { Keyword: Keyword.Merge } => "MERGE",
+            _ => "SELECT",
+        };
         // READ_COMMITTED_SNAPSHOT readers take a fresh snapshot per statement;
         // clearing here ensures the next statement allocates a new Xid on its
         // first user-table read.
@@ -1411,6 +1419,18 @@ public sealed partial class Simulation
                 if (batch.IsSkipping && IsDeferrableNameResolutionError(ex))
                 {
                     deferredNameError = true;
+                    // CREATE-time module binding stops at the first deferral.
+                    // Real keeps binding the statements after a missing-object
+                    // one, but it knows exactly where that statement ended; the
+                    // simulator only has the recovery scan below, which stops at
+                    // the first statement-boundary token — and that token can
+                    // still be inside the failed statement (an `INSERT INTO
+                    // missing SELECT …` throws with the cursor already on
+                    // `SELECT`). Binding on from there would report errors
+                    // against fragments, so the rest of the body falls back to
+                    // the pre-existing behavior of binding at first invocation.
+                    if (batch.CreateTimeBinding)
+                        batch.BatchAborted = true;
                 }
                 else if (batch.TryFrameDepth > 0)
                 {

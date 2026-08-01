@@ -42,9 +42,22 @@ internal sealed class FromSource(
     bool isPlaceholder = false,
     CatalogView? backingCatalogView = null,
     Database? backingCatalogDatabase = null,
-    Synonym? viaSynonym = null)
+    Synonym? viaSynonym = null,
+    string? autoElementName = null)
 {
     public readonly string? Qualifier = qualifier;
+
+    /// <summary>
+    /// The name <c>FOR XML AUTO</c> / <c>FOR JSON AUTO</c> gives this source's
+    /// element / sub-array: the alias when one was written, else the object
+    /// name <em>as written</em> — SQL Server keeps the qualifier there, so
+    /// <c>FROM dbo.t</c> serializes as <c>&lt;dbo.t&gt;</c> while
+    /// <c>FROM dbo.t AS x</c> serializes as <c>&lt;x&gt;</c>. Null for the
+    /// sources that don't carry a written object name (derived tables, CTEs,
+    /// table variables, rowset functions), where the AUTO serializers fall
+    /// back to <see cref="Qualifier"/>.
+    /// </summary>
+    public readonly string? AutoElementName = autoElementName;
     public readonly string[] ColumnNames = columnNames;
     public readonly HeapColumn[] Columns = columns;
     public readonly HeapColumn[] StoredSchema = storedSchema;
@@ -192,7 +205,8 @@ internal sealed class FromSource(
         new(this.Qualifier, this.ColumnNames, this.Columns, this.StoredSchema,
             this.StorageOrdinals, this.LobStore, rows,
             lateralPlan: null, backingTable: this.BackingTable, backingView: this.BackingView,
-            heapPlan: this.HeapPlan, materializeOnce: false, viaSynonym: this.ViaSynonym);
+            heapPlan: this.HeapPlan, materializeOnce: false, viaSynonym: this.ViaSynonym,
+            autoElementName: this.AutoElementName);
 }
 
 /// <summary>

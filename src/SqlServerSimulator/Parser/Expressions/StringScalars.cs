@@ -39,8 +39,7 @@ internal static class StringScalars
         // The exception is an argument that is searched rather than
         // transformed — CHARINDEX's haystack takes an ntext document happily —
         // which opts out via <paramref name="allowLegacyLob"/>.
-        if (!allowLegacyLob && (value.Type == SqlType.Text || value.Type == SqlType.NText))
-            throw SimulatedSqlException.InvalidArgumentDataType(value.Type.SqlServerName, argumentIndex, functionLowerName);
+        RejectLegacyLobInCoercion(value.Type, functionLowerName, argumentIndex, allowLegacyLob);
         if (SqlType.IsStringCategory(value.Type))
             return value;
         if (!IsCoerceableToVarchar(value.Type))
@@ -63,11 +62,74 @@ internal static class StringScalars
     /// converts it to <c>varchar</c> implicitly and refuses only <c>ntext</c>
     /// and <c>image</c>, where its own <c>SOUNDEX</c> refuses all three.</para>
     /// </summary>
-    public static void RejectLegacyLob(SqlValue value, string functionLowerName, int argumentIndex = 1, bool allowAnsiText = false)
+    public static void RejectLegacyLob(SqlValue value, string functionLowerName, int argumentIndex = 1, bool allowAnsiText = false) =>
+        RejectLegacyLobType(value.Type, functionLowerName, argumentIndex, allowAnsiText);
+
+    /// <summary>
+    /// Type-level form of <see cref="RejectLegacyLob"/>, so the gate can run
+    /// off a static type as well as a runtime value. Real SQL Server binds the
+    /// rule while compiling — probe-confirmed that <c>SELECT LEN(nt) FROM t</c>
+    /// raises on an empty rowset, inside a never-taken branch, and at
+    /// <c>CREATE</c> of a module whose body carries it — and the two callers
+    /// share this body so the compile-time and per-value gates can't drift.
+    /// </summary>
+    public static void RejectLegacyLobType(SqlType type, string functionLowerName, int argumentIndex = 1, bool allowAnsiText = false)
     {
-        var type = value.Type;
         if (type is NTextSqlType or ImageSqlType || (!allowAnsiText && type is TextSqlType))
             throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex, functionLowerName);
+    }
+
+    /// <summary>
+    /// The legacy-LOB half of <see cref="CoerceToVarchar"/>'s gate, split out
+    /// so the compile-time path applies exactly the same rule. Narrower than
+    /// <see cref="RejectLegacyLobType"/>: the coercing sites refuse
+    /// <c>text</c> / <c>ntext</c> and leave <c>image</c> to the
+    /// coerceable-family check that follows it at runtime.
+    /// </summary>
+    public static void RejectLegacyLobInCoercion(SqlType type, string functionLowerName, int argumentIndex = 1, bool allowLegacyLob = false)
+    {
+        if (!allowLegacyLob && (type == SqlType.Text || type == SqlType.NText))
+            throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex, functionLowerName);
+    }
+
+    /// <summary>
+    /// Compile-time argument bind for a string scalar's
+    /// <see cref="Expression.GetSqlType"/> override: resolves the argument's
+    /// static type — which is what carries an unknown column's Msg 207 out of
+    /// a predicate — and applies <see cref="RejectLegacyLobType"/> to it.
+    /// Returns the resolved type so the caller can derive its result from it.
+    /// </summary>
+    public static SqlType BindArgument(Expression argument, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionLowerName, int argumentIndex = 1, bool allowAnsiText = false)
+    {
+        var type = argument.GetSqlType(batch, resolveColumnType);
+        RejectLegacyLobType(type, functionLowerName, argumentIndex, allowAnsiText);
+        return type;
+    }
+
+    /// <summary>
+    /// <see cref="BindArgument"/> for the two-argument <c>LTRIM</c> /
+    /// <c>RTRIM</c> shape: the source is argument 1 and the optional character
+    /// set argument 2, mirroring <see cref="ResolveTrimCharacters"/>'s runtime
+    /// gate. Returns the source's type.
+    /// </summary>
+    public static SqlType BindTrimmed(Expression source, Expression? trimChars, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionLowerName)
+    {
+        var type = BindArgument(source, batch, resolveColumnType, functionLowerName);
+        if (trimChars is not null)
+            _ = BindArgument(trimChars, batch, resolveColumnType, functionLowerName, argumentIndex: 2);
+        return type;
+    }
+
+    /// <summary>
+    /// <see cref="BindArgument"/> for an argument whose runtime path goes
+    /// through <see cref="CoerceToVarchar"/> rather than
+    /// <see cref="RejectLegacyLob"/>, so it applies that site's narrower gate.
+    /// </summary>
+    public static SqlType BindCoercedArgument(Expression argument, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionLowerName, int argumentIndex = 1)
+    {
+        var type = argument.GetSqlType(batch, resolveColumnType);
+        RejectLegacyLobInCoercion(type, functionLowerName, argumentIndex);
+        return type;
     }
 
     /// <summary>

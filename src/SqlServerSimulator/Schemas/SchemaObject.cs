@@ -111,6 +111,21 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     public string? DefinitionText;
 
     /// <summary>
+    /// The session <c>QUOTED_IDENTIFIER</c> setting captured when this object
+    /// was created, re-stamped by <c>ALTER</c> / <c>CREATE OR ALTER</c>.
+    /// A module's body executes under this setting rather than the calling
+    /// session's, so a procedure created under <c>OFF</c> keeps reading
+    /// <c>"…"</c> as a string literal no matter who invokes it. Surfaces in
+    /// <c>sys.sql_modules.uses_quoted_identifier</c> and
+    /// <c>OBJECTPROPERTY(id, 'IsQuotedIdentOn' | 'ExecIsQuotedIdentOn')</c>.
+    /// Non-module objects leave it at the <see langword="true"/> default:
+    /// real answers 1 for a table regardless of the creating session
+    /// (probe-confirmed), and a table's computed-column / constraint
+    /// expressions are parsed once at CREATE, never re-read.
+    /// </summary>
+    public bool UsesQuotedIdentifier = true;
+
+    /// <summary>
     /// True for the object kinds that carry a T-SQL module body — the set
     /// <c>sys.sql_modules</c> emits a row for, and the set whose null
     /// <see cref="DefinitionText"/> therefore means <c>WITH ENCRYPTION</c>

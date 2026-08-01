@@ -35,6 +35,12 @@ internal readonly struct JsonPath
     }
 
     /// <summary>
+    /// The bare lax <c>$</c> path — the whole document. Backs the path-less
+    /// <c>JSON_QUERY(json)</c> form without re-parsing a literal per row.
+    /// </summary>
+    public static readonly JsonPath Root = Parse("$");
+
+    /// <summary>
     /// Parses the path text. Throws <see cref="SimulatedSqlException"/>
     /// (Msg 13607) on a syntactically invalid path. The empty segment list
     /// (just <c>$</c>) is valid — it self-references the current element.

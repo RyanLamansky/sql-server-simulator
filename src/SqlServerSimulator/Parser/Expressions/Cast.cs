@@ -139,7 +139,7 @@ internal sealed class Cast : Expression
 
     internal override bool IsRowIndependent => this.source.IsRowIndependent;
 
-    internal override bool IsWrittenConstant => this.source.IsWrittenConstant;
+    private protected override bool IsStructuralConstant => this.source.IsWrittenConstant;
 
     /// <summary>
     /// Parses the optional <c>(length)</c> or <c>(precision, scale)</c> spec

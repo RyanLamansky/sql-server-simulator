@@ -83,7 +83,7 @@ partial class Simulation
             {
                 if (command is null)
                     continue;
-                var expanded = ForEachTableSubstitute(command, replaceChar, tableName);
+                var expanded = ForEachSubstitute(command, replaceChar, tableName, bare: tableName);
                 foreach (var outcome in this.ExecuteDynamicBatch(batch, expanded, preDeclaredVariables: null))
                     yield return outcome;
             }
@@ -120,11 +120,15 @@ partial class Simulation
     }
 
     // One pass over the template, replacing each @replacechar occurrence with
-    // the table name escaped for the context the character sits in.
-    private static string ForEachTableSubstitute(string command, char replaceChar, string tableName)
+    // the name escaped for the context the character sits in — real's worker
+    // rules, shared by sp_MSforeachtable and sp_MSforeachdb. `bare` is what an
+    // occurrence outside quotes and brackets substitutes: a table name arrives
+    // already bracketed so it goes in as-is, while a database name is a plain
+    // identifier the worker QUOTENAMEs.
+    private static string ForEachSubstitute(string command, char replaceChar, string name, string bare)
     {
-        var quoted = tableName.Replace("'", "''", StringComparison.Ordinal);
-        var bracketed = tableName.Replace("]", "]]", StringComparison.Ordinal);
+        var quoted = name.Replace("'", "''", StringComparison.Ordinal);
+        var bracketed = name.Replace("]", "]]", StringComparison.Ordinal);
         var text = new StringBuilder(command.Length);
         for (var i = 0; i < command.Length; i++)
         {
@@ -139,7 +143,7 @@ partial class Simulation
             {
                 '\'' => quoted,
                 '[' => bracketed,
-                _ => tableName,
+                _ => bare,
             });
         }
 

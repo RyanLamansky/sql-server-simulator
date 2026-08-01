@@ -42,7 +42,7 @@ internal sealed class Right : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(source.GetSqlType(batch, resolveColumnType), batch);
+        ResolveResultType(StringScalars.BindArgument(source, batch, resolveColumnType, "right"), batch);
 
     /// <summary>
     /// RIGHT preserves the input's string family; a constant count tightens the

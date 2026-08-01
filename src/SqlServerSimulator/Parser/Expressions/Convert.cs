@@ -70,15 +70,15 @@ internal sealed class ConvertExpression : Expression
         if (this.style is { } styleExpr)
         {
             var styleValue = styleExpr.Run(runtime);
+            // SQL Server admits only the four integer families in the style
+            // slot and reports anything else — including a typed NULL, and
+            // including the `numeric(digit_count, 0)` an integer literal past
+            // int's range carries — as Msg 8116 before the NULL
+            // short-circuit. An in-family value past int narrows through the
+            // ordinary overflow surface instead (Msg 8115).
+            ScalarArguments.RequireIntegerArgument(styleValue, styleExpr.ResultReportsNumeric, 3, this.tryMode ? "try_convert" : "convert");
             if (styleValue.IsNull)
                 return SqlValue.Null(this.targetType);
-            // SQL Server requires the style argument to be an integer
-            // (Msg 8116 names varchar/decimal/etc. when it isn't). Coerce
-            // explicitly so a numeric literal that parsed as decimal
-            // (3.14-style) routes through the same overflow surface as
-            // any other narrowing-to-int.
-            if (styleValue.Type.Category is SqlTypeCategory.String or SqlTypeCategory.UniqueIdentifier or SqlTypeCategory.DateTime)
-                throw SimulatedSqlException.InvalidArgumentDataType(styleValue.Type.SqlServerName, 3, this.tryMode ? "try_convert" : "convert");
             styleCode = ScalarArguments.CoerceToInt(styleValue);
         }
 
@@ -144,5 +144,5 @@ internal sealed class ConvertExpression : Expression
     // constant / variable and never row-varying.
     internal override Expression? PureConversionOperand => this.source;
 
-    internal override bool IsWrittenConstant => this.source.IsWrittenConstant;
+    private protected override bool IsStructuralConstant => this.source.IsWrittenConstant;
 }

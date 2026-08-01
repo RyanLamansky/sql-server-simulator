@@ -11,7 +11,7 @@ Execution lives in `Selection.Execution.Joins.cs`.
 `FROM a, b WHERE a.id = b.id` parses as a sequence of explicit-join chains spliced with `JoinKind.Cross` joins.
 Each comma starts a fresh chain via the same `ParseExplicitJoinChain` helper the JOIN-keyword loop calls, so any explicit JOINs *within* a chain bind before the cross-splice.
 
-**Quirk — back-reference across a comma silently succeeds** (e.g. `FROM a, b JOIN c ON c.id = a.id`): real SQL Server binds `b JOIN c ON …` as its own scope and raises Msg 4104 because `a` isn't visible there; the simulator doesn't do parse-time scope-checking on ON predicates (column refs resolve at runtime through `ResolveAcrossTuple` across all FROM sources in the tuple), so the query runs and returns the Cartesian-filtered rowset.
+**Quirk — back-reference across a comma silently succeeds** (e.g. `FROM a, b JOIN c ON c.id = a.id`): real SQL Server binds `b JOIN c ON …` as its own scope and raises Msg 4104 because `a` isn't visible there; the simulator binds an ON predicate against the statement's *whole* source set rather than the chain's own scope (and `ResolveAcrossTuple` resolves the same way per row), so the query runs and returns the Cartesian-filtered rowset.
 The common shapes — basic `FROM a, b WHERE …`, multi-comma chains, comma + derived table, explicit JOIN followed by comma — all match real SQL Server byte-for-byte; only this rare back-reference-across-comma case diverges, toward "more permissive" rather than wrong rowset.
 
 ### Cross→Inner equi-join rewrite

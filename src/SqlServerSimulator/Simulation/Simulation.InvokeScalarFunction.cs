@@ -84,6 +84,13 @@ partial class Simulation
         }
 
         var udfFrame = new UdfFrame(function.ReturnType);
+        // The body parses under the QUOTED_IDENTIFIER captured at CREATE, not
+        // the caller's. Swapping the session flag (rather than seeding the
+        // child parser) is what carries it to everything else that reads the
+        // connection — dynamic SQL, the plan-cache key, the Msg 1934 gates.
+        // Restored in the finally below; see docs/claude/grammar.md.
+        var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+        connection.QuotedIdentifiers = function.UsesQuotedIdentifier;
         // Errors inside a scalar-UDF body attribute to the outer invoking
         // statement (probe-confirmed: real reports the SELECT's line, no
         // procedure) — so this frame leaves the exception unresolved.
@@ -108,6 +115,7 @@ partial class Simulation
         finally
         {
             connection.NestingLevel--;
+            connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.Security.RevertTo(savedImpersonationDepth);
         }
 

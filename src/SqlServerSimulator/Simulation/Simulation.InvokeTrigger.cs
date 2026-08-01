@@ -48,12 +48,15 @@ partial class Simulation
         int affectedRowCount,
         IReadOnlyList<int>? updatedColumnOrdinals = null)
     {
-        // Find matching AFTER triggers across all schemas. Relative order is
-        // whatever the schema dict enumerates — not necessarily creation
-        // order, and nothing depends on it: SQL Server leaves multi-trigger
-        // order unspecified too, without sp_settriggerorder.
+        // Find matching AFTER triggers across all schemas of the target's own
+        // database, which is the session's only until a three-part name names
+        // another. Relative order is whatever the schema dict enumerates — not
+        // necessarily creation order, and nothing depends on it: SQL Server
+        // leaves multi-trigger order unspecified too, without
+        // sp_settriggerorder.
+        var targetDatabase = outerBatch.DatabaseFor(targetTable);
         var matching = new List<Trigger>();
-        foreach (var schema in outerBatch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in targetDatabase.Schemas.Values)
         {
             foreach (var trigger in schema.Triggers.Values)
             {
@@ -84,7 +87,7 @@ partial class Simulation
         var insertedPseudo = MaterializePseudoTable(targetTable.Columns, "inserted", insertedRows ?? [], outerBatch);
         var deletedPseudo = MaterializePseudoTable(targetTable.Columns, "deleted", deletedRows ?? [], outerBatch);
         var mask = BuildColumnsUpdatedMask(targetTable, targetTable.Columns.Length, action, updatedColumnOrdinals);
-        RunTriggerBodies(outerBatch, matching, insertedPseudo, deletedPseudo, affectedRowCount, mask);
+        RunTriggerBodies(outerBatch, targetDatabase, matching, insertedPseudo, deletedPseudo, affectedRowCount, mask);
     }
 
     /// <summary>
@@ -182,7 +185,8 @@ partial class Simulation
         IReadOnlyList<int>? updatedColumnOrdinals = null)
     {
         Trigger? matched = null;
-        foreach (var schema in outerBatch.CurrentDatabase.Schemas.Values)
+        var targetDatabase = outerBatch.DatabaseFor(parent);
+        foreach (var schema in targetDatabase.Schemas.Values)
         {
             foreach (var trigger in schema.Triggers.Values)
             {
@@ -202,7 +206,7 @@ partial class Simulation
         var insertedPseudo = MaterializePseudoTable(pseudoColumns, "inserted", insertedRows ?? [], outerBatch);
         var deletedPseudo = MaterializePseudoTable(pseudoColumns, "deleted", deletedRows ?? [], outerBatch);
         var mask = BuildColumnsUpdatedMask(parent as HeapTable, pseudoColumns.Length, action, updatedColumnOrdinals);
-        RunTriggerBodies(outerBatch, [matched], insertedPseudo, deletedPseudo, affectedRowCount, mask);
+        RunTriggerBodies(outerBatch, targetDatabase, [matched], insertedPseudo, deletedPseudo, affectedRowCount, mask);
         return true;
     }
 
@@ -214,6 +218,7 @@ partial class Simulation
     /// </summary>
     private void RunTriggerBodies(
         BatchContext outerBatch,
+        Database targetDatabase,
         List<Trigger> triggers,
         HeapTable insertedPseudo,
         HeapTable deletedPseudo,
@@ -249,6 +254,7 @@ partial class Simulation
                 // the stack, since each body pops its own frame on exit.
                 RunOneTriggerBody(
                     outerBatch,
+                    targetDatabase,
                     new TriggerFrame(trigger, insertedPseudo, deletedPseudo, columnsUpdatedMask),
                     trigger.BodyText,
                     trigger.BodyLineOffset,
@@ -256,7 +262,8 @@ partial class Simulation
                     trigger.ExecuteAsClause,
                     trigger.ObjectId,
                     trigger.Timing == TriggerTiming.After,
-                    affectedRowCount);
+                    affectedRowCount,
+                    trigger.UsesQuotedIdentifier);
             }
         }
         finally
@@ -277,6 +284,14 @@ partial class Simulation
     /// the atomic scope they publish around the whole set.
     /// </summary>
     /// <param name="outerBatch">The firing statement's batch, which buffers any result sets the body yields.</param>
+    /// <param name="bodyDatabase">
+    /// The database the body resolves names in — the trigger's own, which is
+    /// the firing statement's only until a three-part name mutates another
+    /// database. Probe-confirmed against SQL Server 2025: a trigger fired by
+    /// <c>INSERT other.dbo.t</c> reads <c>DB_NAME()</c> as <c>other</c> (and
+    /// <c>ORIGINAL_DB_NAME()</c> as the session's), so its unqualified writes
+    /// land in the table's database, not the caller's.
+    /// </param>
     /// <param name="frame">The pseudo-table / event-data frame the body resolves against.</param>
     /// <param name="bodyText">Raw body source, re-tokenized in the child batch.</param>
     /// <param name="bodyLineOffset">Newlines from the CREATE verb to the body, for error-line attribution.</param>
@@ -288,8 +303,13 @@ partial class Simulation
     /// the <c>nested triggers</c> rule — true only for AFTER DML triggers.
     /// </param>
     /// <param name="affectedRowCount">The firing statement's row count, which <c>@@ROWCOUNT</c> reads on body entry.</param>
+    /// <param name="usesQuotedIdentifier">
+    /// The trigger's creation-time <c>QUOTED_IDENTIFIER</c> capture, which the
+    /// body parses under instead of the firing session's setting.
+    /// </param>
     private void RunOneTriggerBody(
         BatchContext outerBatch,
+        Database bodyDatabase,
         TriggerFrame frame,
         string bodyText,
         int bodyLineOffset,
@@ -297,7 +317,8 @@ partial class Simulation
         string? executeAsClause,
         int objectId,
         bool countsAsAfterFrame,
-        int affectedRowCount)
+        int affectedRowCount,
+        bool usesQuotedIdentifier)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
@@ -307,9 +328,23 @@ partial class Simulation
 
         var savedImpersonationDepth = connection.Security.ImpersonationDepth;
         var savedBodyErrorRaised = connection.TriggerBodyErrorRaised;
+        // The body resolves names in the trigger's own database — the session's
+        // unless the firing statement wrote through a three-part name. Not a
+        // USE: the switch is invisible to the firing batch, which resumes in
+        // its own database when the body returns.
+        var savedDatabase = connection.CurrentDatabase;
+        // A trigger body parses under the QUOTED_IDENTIFIER captured at its
+        // CREATE, not the firing session's (probe-confirmed). Swapping the
+        // session flag rather than seeding the child parser directly is what
+        // carries the setting to everything downstream of the body — dynamic
+        // SQL it EXECs, the plan-cache key, and the Msg 1934 gates — all of
+        // which read the connection.
+        var savedQuotedIdentifiers = connection.QuotedIdentifiers;
         BatchContext? innerBatch = null;
         try
         {
+            connection.CurrentDatabase = bodyDatabase;
+            connection.QuotedIdentifiers = usesQuotedIdentifier;
             connection.NestingLevel++;
             connection.TriggerNestLevel++;
             connection.FiringTriggers.Add((objectId, countsAsAfterFrame));
@@ -354,6 +389,8 @@ partial class Simulation
         }
         finally
         {
+            connection.CurrentDatabase = savedDatabase;
+            connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.NestingLevel--;
             connection.TriggerNestLevel--;
             connection.FiringTriggers.RemoveAt(connection.FiringTriggers.Count - 1);
@@ -419,7 +456,7 @@ partial class Simulation
         // reach the heap, because the trigger can't run a second time.
         // Probe-confirmed: real SQL Server's INSTEAD OF body's nested INSERT
         // writes the heap directly.
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var schema in batch.DatabaseFor(parent).Schemas.Values)
         {
             foreach (var trigger in schema.Triggers.Values)
             {

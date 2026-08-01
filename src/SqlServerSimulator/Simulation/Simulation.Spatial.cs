@@ -111,6 +111,11 @@ partial class Simulation
         // spatial indexes (probed: index_id = 384000). Synthesize a stable
         // value from the SpatialIndexes count so two indexes on the same
         // table don't collide.
+        // Msg 1934, but with real's spatial-only verify clause and the bare
+        // CREATE INDEX verb rather than CREATE SPATIAL INDEX (probe-confirmed).
+        if (!context.QuotedIdentifiers)
+            throw SimulatedSqlException.IncorrectSetOptionsForSpatialIndex(QuotedIdentifierOptionName);
+
         var indexId = 384000 + table.SpatialIndexes.Count;
         table.SpatialIndexes.Add(new SpatialIndex(
             objectId, indexName, indexId, colOrdinal + 1, kind, tessellationScheme,

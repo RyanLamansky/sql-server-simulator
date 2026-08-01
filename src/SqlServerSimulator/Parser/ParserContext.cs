@@ -90,6 +90,18 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public int CaseDepth;
 
     /// <summary>
+    /// Whether every expression parsed so far inside the innermost
+    /// constant-foldable construct — a call to one of
+    /// <see cref="ConstantFolding.IsFoldedBuiltIn"/>'s built-ins, or a
+    /// <c>CASE</c> — has been a written constant. The construct's parser sets
+    /// it on entry, reads it to decide whether the node folds, and restores
+    /// the enclosing construct's value in a <c>finally</c>;
+    /// <see cref="Expression.Parse"/> clears it for a non-constant return.
+    /// False outside any such construct.
+    /// </summary>
+    public bool FoldableArguments;
+
+    /// <summary>
     /// SQL Server's fixed <c>CASE</c> / <c>IIF</c> lexical-nesting cap: ten
     /// levels succeed, an eleventh raises Msg 125 ("Case expressions may only
     /// be nested to level 10.").
@@ -202,21 +214,25 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
 
     /// <summary>
     /// Named-window definitions from a trailing <c>WINDOW w AS (…)</c> clause,
-    /// keyed by window name. Populated when the clause is parsed (after HAVING);
-    /// consumed to resolve bare <c>OVER w</c> references. Query-block scoped in
-    /// practice: resolved and cleared at the block's projection build. (A
-    /// WINDOW clause nested in a subquery of the same statement is a known
-    /// limitation of the shared context list.)
+    /// in written order. Populated when the clause is parsed (after HAVING);
+    /// consumed to resolve <c>OVER w</c> references. A list rather than a
+    /// dictionary because window names compare under the database collation,
+    /// which isn't reachable from a field initializer, and a clause never holds
+    /// more than a handful of entries. Query-block scoped in practice: resolved
+    /// and cleared at the block's projection build. (A WINDOW clause nested in
+    /// a subquery of the same statement is a known limitation of the shared
+    /// context list.)
     /// </summary>
-    public readonly Dictionary<string, Expressions.WindowExpression.WindowBody> NamedWindowDefinitions = [];
+    public readonly List<(string Name, Expressions.WindowExpression.WindowBody Body)> NamedWindowDefinitions = [];
 
     /// <summary>
-    /// Bare <c>OVER w</c> references awaiting resolution against
+    /// <c>OVER w</c> / <c>OVER (w …)</c> references awaiting resolution against
     /// <see cref="NamedWindowDefinitions"/> — the definition parses after the
-    /// projection that references it, so the window is registered spec-less and
-    /// patched once the WINDOW clause is read.
+    /// projection that references it, so the window is registered carrying only
+    /// the reference's own refining elements and patched once the WINDOW clause
+    /// is read.
     /// </summary>
-    public readonly List<(Expressions.WindowExpression Window, string Name)> PendingNamedWindows = [];
+    public readonly List<(Expressions.WindowExpression Window, Expressions.WindowExpression.WindowBody Reference)> PendingNamedWindows = [];
 
     /// <summary>
     /// When false, registering a <see cref="Expressions.WindowExpression"/>
@@ -463,7 +479,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     [MemberNotNullWhen(true, nameof(Token))]
     public bool MoveNext()
     {
-        while (Tokenizer.NextToken(commandText, ref index, this.CurrentDatabase.Collation, this.QuotedIdentifiers) is Token token)
+        while (Tokenizer.NextToken(commandText, ref index, this.CurrentDatabase.Collation, this.QuotedIdentifiers, this.CurrentDatabase.CompatibilityLevel) is Token token)
         {
             if (token is Whitespace or Comment)
                 continue;

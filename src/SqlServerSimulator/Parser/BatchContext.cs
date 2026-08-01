@@ -229,6 +229,25 @@ internal sealed class BatchContext
     public bool SkipModeFlag;
 
     /// <summary>
+    /// True on the throwaway batch that binds a module body at
+    /// <c>CREATE</c> / <c>ALTER</c> time (see
+    /// <c>Simulation.BindModuleBodyAtCreate</c>). The batch also runs with
+    /// <see cref="SkipModeFlag"/> set, so every statement parses and resolves
+    /// without mutating state; this flag adds the two behaviors that are
+    /// specific to binding rather than to skipping:
+    /// <list type="bullet">
+    /// <item>permission enforcement is off (<see cref="EnforcesPermissions"/>)
+    /// — a bind resolves names, it never reads or writes anything, and real
+    /// binds a body under the module's own ownership chain;</item>
+    /// <item>a swallowed deferred-name error abandons the rest of the bind
+    /// (<see cref="BatchAborted"/>), because the parse cursor is left
+    /// mid-statement and anything the recovery scan reaches after it would be
+    /// bound from an unreliable position.</item>
+    /// </list>
+    /// </summary>
+    public bool CreateTimeBinding;
+
+    /// <summary>
     /// In-flight loop-flow signal. <see cref="LoopControl.Break"/> /
     /// <see cref="LoopControl.Continue"/> set by their dispatch sites;
     /// <see cref="LoopControl.None"/> the default. Only the
@@ -543,9 +562,14 @@ internal sealed class BatchContext
     /// <see cref="Parser.ProcFrame.IsDynamicSql"/>, so checks re-engage. The
     /// <c>dbo</c> bypass is a separate, cheaper short-circuit the enforcement
     /// helper applies on top of this.
+    /// Also false while a module body is being bound at CREATE time
+    /// (<see cref="CreateTimeBinding"/>) — the bind resolves names without
+    /// reading or writing a row, and a multi-statement-TVF bind carries no
+    /// frame of its own to suppress it.
     /// </summary>
     public bool EnforcesPermissions =>
-        this.UdfFrame is null && this.TriggerFrame is null
+        !this.CreateTimeBinding
+        && this.UdfFrame is null && this.TriggerFrame is null
         && (this.ProcFrame is null || this.ProcFrame.IsDynamicSql);
 
     /// <summary>
@@ -1086,6 +1110,23 @@ internal sealed class BatchContext
 
     /// <summary>The database this batch is executing against.</summary>
     public Database CurrentDatabase => this.Parser.CurrentDatabase;
+
+    /// <summary>
+    /// The database <paramref name="target"/> lives in — the one a write
+    /// against it must charge its per-database state to (the rowversion
+    /// counter, the version store, trigger dispatch), which is not the
+    /// session's database when the statement names the target with a
+    /// three-part name. Falls back to <see cref="CurrentDatabase"/> for the
+    /// objects that belong to no database: temp tables, table variables,
+    /// table-valued parameters, trigger pseudo-tables, and the shared system
+    /// tables.
+    /// </summary>
+    public Database DatabaseFor(SchemaObject target) => target switch
+    {
+        Storage.HeapTable table => table.OwningDatabase ?? this.CurrentDatabase,
+        View view => view.Schema.Database,
+        _ => this.CurrentDatabase,
+    };
 
     /// <summary>
     /// Comparer for <c>@</c>-variable and table-variable names. Unlike
@@ -1680,44 +1721,20 @@ internal sealed class BatchContext
     }
 
     /// <summary>
-    /// Resolves <paramref name="name"/> to the <see cref="Schema"/> a CREATE /
-    /// DROP / TRUNCATE / SELECT-INTO / FROM target lives in. Returns false
-    /// when the schema doesn't exist, when a 3-part name's db segment
-    /// doesn't match any database in <see cref="Simulation.Databases"/>, or
-    /// when the name is 4-part (linked-server names aren't modeled — the
-    /// simulator returns false rather than silently ignoring the server
-    /// segment). 3-part names route to the named database, enabling
-    /// cross-database SELECT / JOIN / catalog-view inspection; the
-    /// returned <see cref="Schema"/> carries its owning <see cref="Database"/>
-    /// via <see cref="Schema.Database"/> so callers (catalog-view enumerators,
-    /// constraint-violation error messages, etc.) can scope correctly.
-    /// A 1-part name resolves to the connection's <see cref="CurrentDatabase"/>
-    /// + <see cref="Database.DefaultSchemaName"/> (always present, so the
-    /// 1-part branch never returns false).
-    /// </summary>
-    /// <summary>
     /// Throws <see cref="NotSupportedException"/> when <paramref name="name"/>
-    /// is a 3-part name targeting a database other than the connection's
-    /// <see cref="CurrentDatabase"/>. Called from DML / DDL parsers that
-    /// mutate state: the simulator routes 3-part-name SELECT / JOIN /
-    /// catalog reads across databases but defers writes — trigger scoping
-    /// (a trigger fires in its owning database's name-resolution scope),
-    /// identity allocation routing, undo-log scoping, and FK validation
-    /// across DB boundaries aren't modeled yet. Callers should issue
-    /// <c>USE &lt;db&gt;</c> from the same connection and use a 1- or 2-part
-    /// name to mutate a different database.
+    /// is a 4-part name targeting a linked server. Called from the DML parsers
+    /// that mutate state: three-part cross-database writes route to the named
+    /// database (the write charges that database's rowversion counter, version
+    /// store and triggers — see <see cref="DatabaseFor"/>), but a write across
+    /// a <see cref="Simulation"/> boundary is a separate step, since the
+    /// remote's lock manager and undo log are its own.
     /// </summary>
-    public void RejectCrossDatabaseMutation(MultiPartName name)
+    public void RejectCrossServerMutation(MultiPartName name)
     {
         // A synonym is a name indirection, so the mutation's real target is its
-        // base — `INSERT syn` where `syn FOR otherdb.dbo.t` writes across the
-        // database boundary just as the spelled-out 3-part name would.
+        // base — `INSERT syn` where `syn FOR srv.db.dbo.t` crosses the server
+        // boundary just as the spelled-out 4-part name would.
         name = this.ExpandSynonym(name);
-        if (name.Count == 3 && !this.CurrentDatabase.Collation.Equals(name[0], this.CurrentDatabase.Name))
-        {
-            throw new NotSupportedException(
-                $"Cross-database write to '{name}' isn't modeled. The simulator routes 3-part-name reads (SELECT / JOIN / catalog views) across databases but defers cross-database INSERT / UPDATE / DELETE / MERGE / TRUNCATE / DDL — trigger scope swapping, identity allocation routing, and FK validation across DB boundaries are pending. Issue USE [{name[0]}] from this connection and reference the target with a 1- or 2-part name.");
-        }
         if (name.Count >= 4)
         {
             throw new NotSupportedException(
@@ -1725,6 +1742,22 @@ internal sealed class BatchContext
         }
     }
 
+    /// <summary>
+    /// Resolves <paramref name="name"/> to the <see cref="Schema"/> a CREATE /
+    /// DROP / TRUNCATE / SELECT-INTO / FROM target lives in. Returns false
+    /// when the schema doesn't exist, when a 3-part name's db segment
+    /// doesn't match any database in <see cref="Simulation.Databases"/>, or
+    /// when the name is 4-part (linked-server names aren't modeled — the
+    /// simulator returns false rather than silently ignoring the server
+    /// segment). 3-part names route to the named database, enabling
+    /// cross-database SELECT / JOIN / catalog-view inspection and DML; the
+    /// returned <see cref="Schema"/> carries its owning <see cref="Database"/>
+    /// via <see cref="Schema.Database"/> so callers (catalog-view enumerators,
+    /// constraint-violation error messages, etc.) can scope correctly.
+    /// A 1-part name resolves to the connection's <see cref="CurrentDatabase"/>
+    /// + <see cref="Database.DefaultSchemaName"/> (always present, so the
+    /// 1-part branch never returns false).
+    /// </summary>
     public bool TryResolveSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
     {
         if (name.Count >= 4)

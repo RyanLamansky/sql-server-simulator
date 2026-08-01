@@ -49,7 +49,13 @@ internal abstract class Expression
         // term — matching real SQL Server's tolerance of thousands of terms.
         EnsureParseStack();
         var primary = ParsePrimary(context);
-        return ParseBinaryContinuation(primary, minTightness: 1, context);
+        var parsed = ParseBinaryContinuation(primary, minTightness: 1, context);
+        // Argument bookkeeping for the enclosing constant-folded call, if any:
+        // every argument of such a call is parsed through this entry point, so
+        // one AND per return decides whether the call folds.
+        if (context.FoldableArguments && !parsed.IsWrittenConstant)
+            context.FoldableArguments = false;
+        return parsed;
     }
 
     /// <summary>
@@ -206,7 +212,7 @@ internal abstract class Expression
         return context.Token switch
         {
             Operator { Character: '+' } => ParsePrimary(context.MoveNextRequiredReturnSelf()),
-            Operator { Character: '-' } => new Negate(ParsePrimary(context.MoveNextRequiredReturnSelf())),
+            Operator { Character: '-' } => Negate.Of(ParsePrimary(context.MoveNextRequiredReturnSelf())),
             Operator { Character: '~' } => BitwiseNot.Create(ParsePrimary(context.MoveNextRequiredReturnSelf())),
             _ => ParsePostfix(ParseLeadingAtom(context), context),
         };
@@ -382,7 +388,16 @@ internal abstract class Expression
                         }
                         else
                         {
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                            // A reserved keyword can't be a name segment, and
+                            // real names it: `dbo.user('a')` / `t.user` →
+                            // Msg 156, not the generic Msg 102. The
+                            // compatibility-gated `REGEXP_LIKE` reaches here
+                            // the same way at level 170, which is what makes
+                            // the unbracketed `dbo.REGEXP_LIKE(...)` CLR-UDF
+                            // spelling fail to parse there.
+                            throw afterDot is ReservedKeyword afterDotKeyword
+                                ? SimulatedSqlException.SyntaxErrorNearKeyword(afterDotKeyword)
+                                : SimulatedSqlException.SyntaxErrorNear(context);
                         }
                     }
                     continue;
@@ -588,9 +603,11 @@ internal abstract class Expression
     /// return it sits on the closing <c>)</c> of the WITHIN GROUP, matching
     /// the lookahead contract that <see cref="Parse"/>'s binary loop's next
     /// <see cref="ParserContext.GetNextOptional"/> expects. Raises Msg 10757
-    /// if the aggregate isn't <c>STRING_AGG</c>; Msg 5308 if any ORDER BY
-    /// item is a bare integer literal (ordinal indices aren't allowed in this
-    /// position, unlike the projection's ORDER BY).
+    /// if the aggregate isn't <c>STRING_AGG</c>; a constant ORDER BY item
+    /// lands on Msg 5308 / 5309 via
+    /// <see cref="ConstantFolding.RejectConstantWindowOrderByTerm"/> (this
+    /// position carries no ordinal semantics, unlike the projection's
+    /// ORDER BY).
     /// </summary>
     private static void ParseWithinGroupOrderBy(AggregateExpression aggregate, ParserContext context)
     {
@@ -615,15 +632,7 @@ internal abstract class Expression
         {
             context.MoveNextRequired();
             var expr = Expression.Parse(context);
-            // Reject bare integer ordinals (Msg 5308). A wrapped expression
-            // like `1 + 0` falls through to the per-row path, matching SQL
-            // Server's rejection-by-token-shape rather than constant folding.
-            if (expr is Value valExpr
-                && valExpr.Constant.Type == Storage.SqlType.Int32
-                && !valExpr.Constant.IsNull)
-            {
-                throw SimulatedSqlException.IntegerIndexNotAllowedInOrderedAggregate();
-            }
+            ConstantFolding.RejectConstantWindowOrderByTerm(expr, context);
 
             var descending = false;
             switch (context.Token)
@@ -811,16 +820,40 @@ internal abstract class Expression
     /// NULL arms yield to their typed siblings (all-NULL → <see cref="SqlType.Int32"/>),
     /// and integer-literal arms are sized by digit count against a decimal
     /// sibling. See <see cref="SqlType.PromoteBranches"/>.
+    /// <para>Two string arms whose collations can't resolve raise
+    /// <strong>Msg 457</strong> naming the <c>CASE</c> operator — real reports
+    /// the unification failure there for <c>COALESCE</c> too (probe-confirmed:
+    /// <c>COALESCE</c> desugars to <c>CASE</c>, so its message says
+    /// <c>CASE</c>), while <c>ISNULL</c>, which takes the first argument's
+    /// collation outright rather than unifying, never conflicts.</para>
     /// </summary>
     internal static SqlType PromoteValueArms(ReadOnlySpan<Expression> arms, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var branches = new (SqlType, int)[arms.Length];
         var count = 0;
+        SqlType? stringSoFar = null;
         foreach (var arm in arms)
         {
             if (IsUntypedNullLiteral(arm))
                 continue;
-            branches[count++] = (arm.GetSqlType(batch, resolveColumnType), IntegerLiteralDigits(arm));
+            var armType = arm.GetSqlType(batch, resolveColumnType);
+            if (armType.Category == SqlTypeCategory.String)
+            {
+                if (stringSoFar is { } accumulated && accumulated != armType)
+                {
+                    // Right-then-left naming, matching every other collation
+                    // conflict message: the arm being folded in is named first.
+                    stringSoFar = Collation.Resolve(accumulated, armType) is null
+                        ? throw SimulatedSqlException.UnresolvedCollationInImplicitConversion(
+                            SqlType.Promote(accumulated, armType), armType.Collation!.Name, accumulated.Collation!.Name, "CASE")
+                        : SqlType.Promote(accumulated, armType);
+                }
+                else
+                {
+                    stringSoFar = armType;
+                }
+            }
+            branches[count++] = (armType, IntegerLiteralDigits(arm));
         }
         return SqlType.PromoteBranches(branches.AsSpan(0, count));
     }
@@ -896,25 +929,41 @@ internal abstract class Expression
     internal virtual bool IsRowIndependent => false;
 
     /// <summary>
-    /// True when this expression is built purely from written literals —
-    /// a literal, a parenthesization or unary minus over one, arithmetic /
-    /// concatenation / <c>CAST</c> / <c>CONVERT</c> / <c>COALESCE</c> over
-    /// literal operands. Narrower than <see cref="IsRowIndependent"/>, which
-    /// also admits variables and parameters. Consumed by the ORDER BY parser's
-    /// Msg 408 gate: real rejects a term whose value it folds at compile time,
-    /// while a variable, a subquery, a UDF call and any function reading server
-    /// or session state all sort fine (probe-confirmed — <c>@v + 1</c>,
+    /// True when real SQL Server folds this expression to a constant at
+    /// compile time — a literal, a parenthesization or unary minus over one,
+    /// arithmetic / concatenation / <c>CAST</c> / <c>CONVERT</c> /
+    /// <c>COALESCE</c> / <c>COLLATE</c> over such operands, a <c>CASE</c>
+    /// whose conditions and arms are all constant, and a call to one of
+    /// <see cref="ConstantFolding.IsFoldedBuiltIn"/>'s built-ins over constant
+    /// arguments. Narrower than <see cref="IsRowIndependent"/>, which also
+    /// admits variables and parameters. Consumed by the ORDER BY parsers'
+    /// Msg 408 (statement) and Msg 5308 / 5309 (<c>OVER</c> /
+    /// <c>WITHIN GROUP</c>) gates: real rejects a folded term, while a
+    /// variable, a subquery, a UDF call and any function reading server or
+    /// session state all sort fine (probe-confirmed — <c>@v + 1</c>,
     /// <c>(SELECT 1)</c>, <c>GETDATE()</c>, <c>@@SPID</c>, <c>ISNULL(NULL, 1)</c>
     /// are all accepted, <c>'x'</c> / <c>1 + 0</c> / <c>CAST(1 AS int)</c> /
-    /// <c>COALESCE(NULL, 1)</c> are not).
-    /// The default is a conservative <see langword="false"/>: a node that
-    /// doesn't opt in is assumed non-constant, so the gate under-rejects rather
-    /// than refusing a term real accepts. Real additionally folds deterministic
-    /// scalar calls over literals (<c>ABS(-1)</c>, <c>LEN('abc')</c>) and
-    /// <c>CASE</c> / <c>IIF</c> over literal arms; those stay accepted here (see
-    /// docs/claude/query.md).
+    /// <c>COALESCE(NULL, 1)</c> / <c>ABS(-1)</c> / <c>LEN('abc')</c> are not).
     /// </summary>
-    internal virtual bool IsWrittenConstant => false;
+    internal bool IsWrittenConstant => this.FoldedOverConstantArguments || this.IsStructuralConstant;
+
+    /// <summary>
+    /// Set by <see cref="ResolveBuiltIn"/> (and <c>CaseExpression.ParseCase</c>)
+    /// when the node is a call real folds and every argument parsed inside it
+    /// was itself a written constant. The decision is recorded at parse time
+    /// because the operand fields live on ~50 unrelated built-in classes with
+    /// no shared shape to walk.
+    /// </summary>
+    private protected bool FoldedOverConstantArguments;
+
+    /// <summary>
+    /// The structural half of <see cref="IsWrittenConstant"/>: node kinds that
+    /// answer from their own operands rather than from a parse-time mark.
+    /// The default is a conservative <see langword="false"/>, so a node that
+    /// doesn't opt in is assumed non-constant and the gates under-reject
+    /// rather than refusing a term real accepts.
+    /// </summary>
+    private protected virtual bool IsStructuralConstant => false;
 
     /// <summary>
     /// Maximum shared nesting budget (see <see cref="ParserContext.NestingDepth"/>)
@@ -1101,7 +1150,33 @@ internal abstract class Expression
     {
         Span<char> uppercaseName = stackalloc char[name.Length];
         RecordNondeterministicBuiltIn(name, context);
-        return name.ToUpperInvariant(uppercaseName) switch
+        _ = name.ToUpperInvariant(uppercaseName);
+        if (!ConstantFolding.IsFoldedBuiltIn(uppercaseName))
+            return ResolveBuiltInCore(uppercaseName, name, context);
+
+        // A folded call's arguments parse inside its own frame: the flag comes
+        // back false the moment any of them isn't a written constant.
+        var savedFoldableArguments = context.FoldableArguments;
+        context.FoldableArguments = true;
+        try
+        {
+            var call = ResolveBuiltInCore(uppercaseName, name, context);
+            if (context.FoldableArguments)
+                call.FoldedOverConstantArguments = true;
+            return call;
+        }
+        finally
+        {
+            context.FoldableArguments = savedFoldableArguments;
+        }
+    }
+
+    /// <summary>
+    /// Dispatches an uppercased built-in name to its expression parser,
+    /// raising Msg 195 when no built-in answers to it.
+    /// </summary>
+    private static Expression ResolveBuiltInCore(ReadOnlySpan<char> uppercaseName, string name, ParserContext context) =>
+        uppercaseName.Length switch
         {
             2 => uppercaseName switch
             {
@@ -1312,6 +1387,8 @@ internal abstract class Expression
                 "FILEPROPERTY" => new FileProperty(context),
                 "HAS_DBACCESS" => new HasDbAccess(context),
                 "PERCENT_RANK" => WindowExpression.ParsePercentRank(context),
+                "REGEXP_COUNT" => RegexpScalar.ParseCall(context, RegexpScalarKind.Count),
+                "REGEXP_INSTR" => RegexpScalar.ParseCall(context, RegexpScalarKind.Instr),
                 "ROWCOUNT_BIG" => new RowCountBig(context),
                 "SWITCHOFFSET" => new SwitchOffset(context),
                 "TYPEPROPERTY" => new TypeProperty(context),
@@ -1328,6 +1405,7 @@ internal abstract class Expression
                 "IS_ROLEMEMBER" => new RoleMemberCheck(context, serverScope: false),
                 "JSON_ARRAYAGG" => AggregateExpression.Parse(context, AggregateKind.JsonArrayAgg),
                 "LOGINPROPERTY" => new LoginProperty(context),
+                "REGEXP_SUBSTR" => RegexpScalar.ParseCall(context, RegexpScalarKind.Substr),
                 "STRING_ESCAPE" => new StringEscape(context),
                 "TIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.TimeFromParts),
                 _ => null
@@ -1341,6 +1419,7 @@ internal abstract class Expression
                 "JSON_OBJECTAGG" => AggregateExpression.Parse(context, AggregateKind.JsonObjectAgg),
                 "OBJECTPROPERTY" => new ObjectProperty(context),
                 "ORIGINAL_LOGIN" => new OriginalLogin(context),
+                "REGEXP_REPLACE" => RegexpScalar.ParseCall(context, RegexpScalarKind.Replace),
                 "SCOPE_IDENTITY" => new LastIdentityExpression(context),
                 "SERVERPROPERTY" => new ServerProperty(context),
                 "SYSUTCDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysUtcDateTime),
@@ -1422,7 +1501,6 @@ internal abstract class Expression
             },
             _ => (Expression?)null
         } ?? throw SimulatedSqlException.UnrecognizedBuiltInFunction(name);
-    }
 
     /// <summary>
     /// Handles the <c>NEXT VALUE FOR [schema.]sequence [OVER (ORDER BY ...)]</c>
@@ -1453,9 +1531,12 @@ internal abstract class Expression
 
         // Optional OVER (ORDER BY ...) — parsed and discarded. The simulator
         // iterates rows in one deterministic order regardless of the OVER
-        // hint; the sequence-advance pattern across rows is unchanged. Peek
-        // for OVER via a save/restore so the outer loop's GetNextOptional
-        // resumes at the correct token whether OVER is present or not.
+        // hint; the sequence-advance pattern across rows is unchanged. The
+        // body still goes through the window parser rather than a token skip
+        // so its ORDER BY reaches the Msg 5308 / 5309 constant gate — the
+        // message real reports here names NEXT VALUE FOR by name. Peek for
+        // OVER via a save/restore so the outer loop's GetNextOptional resumes
+        // at the correct token whether OVER is present or not.
         var overCheckpoint = context.SaveCheckpoint();
         if (context.GetNextOptional() is not ReservedKeyword { Keyword: Keyword.Over })
         {
@@ -1464,19 +1545,8 @@ internal abstract class Expression
         }
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        var depth = 1;
-        while (depth > 0)
-        {
-            switch (context.GetNextRequired())
-            {
-                case Operator { Character: '(' }:
-                    depth++;
-                    break;
-                case Operator { Character: ')' }:
-                    depth--;
-                    break;
-            }
-        }
+        context.MoveNextRequired();
+        _ = WindowExpression.ParseWindowBody(context);
         return nvf;
     }
 }

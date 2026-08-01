@@ -178,6 +178,79 @@ partial class SimulatedSqlException
         new($"Window '{windowName}' is undefined.", 5362, 15, 3);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 4123 — an <c>OVER (w …)</c> refinement supplied
+    /// an element (<c>PARTITION BY</c> / <c>ORDER BY</c> / frame) the named
+    /// window it refines already carries. Wording verbatim, including the
+    /// two-word "can not". Probe-confirmed against SQL Server 2025
+    /// (2026-08-01): Class 15, and the state tracks the *referenced* window
+    /// rather than the conflicting element — State 2 when that window carries
+    /// a frame, State 3 when it doesn't.
+    /// </summary>
+    internal static SimulatedSqlException WindowElementAlreadySpecified(bool referencedWindowHasFrame) =>
+        new("Window element in OVER clause can not also be specified in WINDOW clause.", 4123, 15, referencedWindowHasFrame ? (byte)2 : (byte)3);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4106 — a frame-rejecting window function
+    /// referenced a named window that carries a frame. Distinct from
+    /// <see cref="FunctionMayNotHaveWindowFrame"/> (Msg 10752, the inline
+    /// <c>OVER (… ROWS …)</c> and <c>OVER (w ROWS …)</c> refinement form)
+    /// despite the identical wording. Probe-confirmed against SQL Server 2025
+    /// (2026-08-01): Class 15, State 2 for the ranking / distribution family
+    /// and State 1 for <c>lag</c> / <c>lead</c> / the percentile pair.
+    /// </summary>
+    internal static SimulatedSqlException NamedWindowMayNotHaveWindowFrame(string functionLowerName, bool isRankingFamily) =>
+        new($"The function '{functionLowerName}' may not have a window frame.", 4106, 15, isRankingFamily ? (byte)2 : (byte)1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 5366 — an ORDER-BY-requiring window function
+    /// referenced a named window whose definition has no <c>ORDER BY</c>.
+    /// Counterpart of Msg 4112 (the inline <c>OVER (…)</c> form), with its own
+    /// wording. Probe-confirmed against SQL Server 2025 (2026-08-01): Class 15,
+    /// State 3 for the ranking / distribution family and State 2 for the offset
+    /// (<c>lag</c> / <c>lead</c>) and value (<c>first_value</c> /
+    /// <c>last_value</c>) families.
+    /// </summary>
+    internal static SimulatedSqlException FunctionMustHaveWindowWithOrderBy(string functionLowerName, bool isRankingFamily) =>
+        new($"The function '{functionLowerName}' must have an OVER clause or a WINDOW with ORDER BY.", 5366, 15, isRankingFamily ? (byte)3 : (byte)2);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 5363 — an ordered-set analytic function
+    /// (<c>percentile_cont</c> / <c>percentile_disc</c>) referenced a named
+    /// window whose definition carries an <c>ORDER BY</c>. Counterpart of
+    /// Msg 10758 (the inline form), with its own wording. Probe-confirmed
+    /// against SQL Server 2025 (2026-08-01): Class 15, State 1.
+    /// </summary>
+    internal static SimulatedSqlException FunctionMayNotHaveOrderByInNamedWindow(string functionLowerName) =>
+        new($"The function '{functionLowerName}' may not have ORDER BY in OVER or WINDOW clause.", 5363, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 5364 — the frame a named-window reference
+    /// resolved to has no <c>ORDER BY</c> to frame against. Shares its wording
+    /// with Msg 10756 (the inline form) but carries its own number.
+    /// Probe-confirmed against SQL Server 2025 (2026-08-01): Class 15, State 1.
+    /// </summary>
+    internal static SimulatedSqlException NamedWindowFrameRequiresOrderBy() =>
+        new("Window frame with ROWS or RANGE must have an ORDER BY clause.", 5364, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 5365 — named-window definitions reference each
+    /// other in a loop (<c>WINDOW a AS (b …), b AS (a …)</c>). A window
+    /// referencing *itself* is not this error: real reports it as Msg 5362
+    /// (the name isn't in its own scope). Wording verbatim. Probe-confirmed
+    /// against SQL Server 2025 (2026-08-01): Class 15, State 1.
+    /// </summary>
+    internal static SimulatedSqlException CyclicWindowReferences() =>
+        new("Cyclic window references are not permitted.", 5365, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 16211 — one <c>WINDOW</c> clause defined the
+    /// same name twice. Wording verbatim. Probe-confirmed against SQL Server
+    /// 2025 (2026-08-01): Class 15, State 1.
+    /// </summary>
+    internal static SimulatedSqlException DuplicateWindowName() =>
+        new("Cannot repeat window name in the WINDOW clause.", 16211, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 153 — fired when a FETCH clause appears
     /// without a preceding OFFSET (FETCH alone is invalid; OFFSET must
     /// always come first). Wording verbatim from the probed server.
@@ -639,13 +712,29 @@ partial class SimulatedSqlException
         new("Input parameter of percentile function is outside of range [0, 1].", 8727, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 5308 — windowed/aggregate ORDER BY rejects
-    /// integer-ordinal expressions (e.g. <c>STRING_AGG(x, ',') WITHIN GROUP
-    /// (ORDER BY 1)</c>). The projection-level ORDER BY accepts ordinals;
-    /// these inner ORDER BY positions don't.
+    /// Mimics SQL Server's Msg 5308 — an <c>OVER (ORDER BY …)</c> or
+    /// <c>WITHIN GROUP (ORDER BY …)</c> term folds to an <c>int</c> constant
+    /// that could pass for a column index (<c>1</c>, <c>1 + 1</c>,
+    /// <c>ABS(-1)</c>, <c>LEN('abc')</c>). The projection-level ORDER BY
+    /// accepts ordinals; these inner ORDER BY positions carry no ordinal
+    /// semantics, so real has nothing to bind the number to. A folded
+    /// constant of any other shape lands on
+    /// <see cref="ConstantNotAllowedInOrderedAggregate"/> instead.
     /// </summary>
     internal static SimulatedSqlException IntegerIndexNotAllowedInOrderedAggregate() =>
         new("Windowed functions, aggregates and NEXT VALUE FOR functions do not support integer indices as ORDER BY clause expressions.", 5308, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 5309 — an <c>OVER (ORDER BY …)</c> or
+    /// <c>WITHIN GROUP (ORDER BY …)</c> term folds to a constant that isn't
+    /// index-shaped: a string, a <c>NULL</c>, a non-<c>int</c> number, or an
+    /// <c>int</c> below 1 (<c>'x'</c>, <c>1.5</c>, <c>0</c>, <c>-1</c>,
+    /// <c>CAST(1 AS bigint)</c>). Probe-confirmed against SQL Server 2025:
+    /// Class 15, State 1, and it reaches the named-window (<c>WINDOW w AS</c>)
+    /// and <c>NEXT VALUE FOR … OVER</c> forms alike.
+    /// </summary>
+    internal static SimulatedSqlException ConstantNotAllowedInOrderedAggregate() =>
+        new("Windowed functions, aggregates and NEXT VALUE FOR functions do not support constants as ORDER BY clause expressions.", 5309, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 8133 — every result expression in a

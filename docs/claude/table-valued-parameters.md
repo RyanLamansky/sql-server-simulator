@@ -82,9 +82,8 @@ Grammar restrictions on a TVP-typed parameter (all probe-confirmed Msg 102):
 The procedure-body source capture is the same as scalar / table-returning procs: re-tokenized per invocation.
 DML statements (`INSERT` / `UPDATE` / `DELETE` / `MERGE`) targeting the parameter raise **Msg 10700** ("The table-valued parameter '@X' is READONLY and cannot be modified.") at body parse time (probe-confirmed wording; check fires when the resolved target table has `IsTableValuedParameter = true`).
 
-**Fidelity gap on error timing**: real SQL Server raises Msg 10700 at `CREATE PROCEDURE` time (body validation runs at CREATE).
-The simulator captures the body as text and validates at first invocation, so Msg 10700 surfaces from `EXEC dbo.p1 @t` rather than from the CREATE itself.
-Same gap as scalar UDFs / regular procs.
+That lands at **`CREATE PROCEDURE`**, matching real: the CREATE binds the body against a seeded READONLY clone of the parameter's type, so the write is caught there and the procedure isn't created (probe-confirmed level 16, state 1, `Procedure p`, line 1, with `OBJECT_ID('p')` still NULL) — see [`programmable.md`](programmable.md#create-time-body-binding).
+The parameter-list rule is checked at CREATE too: a table-type parameter without `READONLY` raises **Msg 352** (level 15, state 1) and the procedure isn't created.
 
 `DROP TYPE` reference-scan walks every schema's `Procedures` dict and rejects with Msg 3732 if any parameter's `TableType` matches.
 
@@ -169,10 +168,6 @@ The common idiom `IF type_id('dbo.MyType') IS NOT NULL DROP TYPE dbo.MyType` wor
 
 ## Fidelity gaps remaining
 
-- **CREATE-time body validation** — Msg 10700 against a TVP parameter surfaces at first EXEC, not at CREATE PROC (gap with all stored-proc bodies).
-  Real SQL Server binds the whole body at CREATE and refuses to create the procedure: probe-confirmed 2026-07-31 that `CREATE PROCEDURE p @t dbo.tt READONLY AS INSERT @t VALUES (1)` raises Msg 10700 (level 16, state 1, `Procedure p`, line 1) with `OBJECT_ID('p')` still NULL afterwards.
-  The *parameter-list* rule is checked at CREATE and matches for procedures: a table-type parameter without `READONLY` raises **Msg 352** (level 15, state 1) and the procedure isn't created.
-  Missing-object references stay deferred on real too — a body over a nonexistent table creates fine.
 - **Table-type parameters outside `CREATE PROCEDURE`** — real accepts one in a scalar `CREATE FUNCTION` parameter list and in an `sp_executesql` parameter declaration, raising the same Msg 352 when `READONLY` is missing; the simulator's parameter-type parsers there don't consult `Schema.TableTypes`, so both report **Msg 243** (`Type <name> is not a defined system type.`).
 - **Inline non-unique `INDEX` clause** — Msg 102 in v1; real SQL Server accepts it.
   Adding it via the shared parser would close the gap for both `DECLARE @t TABLE` and `CREATE TYPE`.
@@ -196,7 +191,7 @@ The common idiom `IF type_id('dbo.MyType') IS NOT NULL DROP TYPE dbo.MyType` wor
 - **`HeapTable.IsTableValuedParameter` distinct from `IsTableVariable`**: every TVP is also a table variable; the extra flag gates the Msg 10700 enforcement at the four DML sites (INSERT / UPDATE / DELETE / MERGE).
   TVP parameter clones set both flags; `DECLARE @t MyType` only sets `IsTableVariable`.
 - **Row copy at TVP binding**: real SQL Server's TVP semantics are pass-by-value (the proc body's modifications don't affect the caller).
-  Since Msg 10700 already blocks all body-side modifications, pass-by-reference would be observably equivalent — but the simulator does a row-copy for clarity (and to match the documented semantics if Msg 10700 enforcement ever moves to CREATE-time validation).
+  Since Msg 10700 already blocks all body-side modifications, pass-by-reference would be observably equivalent — but the simulator does a row-copy for clarity, and to keep the documented semantics true independently of where the gate fires.
   The per-row insert routes through `Simulation.InsertTableValuedParameterRow`, which enforces the table type's NOT NULL / CHECK / PK / UNIQUE constraints (shared with the TDS-wire TVP path).
 - **`SeedTableVariablesFromStructuredParameters` runs after `Parser` is initialized**: needs `BatchContext.CurrentDatabase` (which routes through `Parser.CurrentDatabase`).
   Constructor ordering matters.

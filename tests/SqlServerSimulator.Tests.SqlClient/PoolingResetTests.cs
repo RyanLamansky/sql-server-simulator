@@ -40,4 +40,35 @@ public sealed class PoolingResetTests
         await using var ok = new SqlCommand("select 1", second);
         AreEqual(1, await ok.ExecuteScalarAsync(TestContext.CancellationToken));
     }
+
+    /// <summary>
+    /// An application role set on a pooled connection does not survive the
+    /// reset: the reused physical connection is back to its login's own
+    /// principal and is usable. Real SQL Server instead refuses to reset a
+    /// connection with an active application role and kills the session
+    /// (Msg 596, class 21, on the reopen) — the simulator's reset clears the
+    /// role rather than poisoning the pooled connection.
+    /// </summary>
+    [TestMethod]
+    public async Task PooledReopen_ClearsAnActiveApplicationRole()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        Wire.ExecInProc(simulation, "create application role app1 with password = 'App!Pass123'");
+        var connectionString = Wire.PooledConnectionString(listener);
+
+        await using (var first = new SqlConnection(connectionString))
+        {
+            await first.OpenAsync(TestContext.CancellationToken);
+            await using var set = new SqlCommand("exec sp_setapprole 'app1', 'App!Pass123'", first);
+            _ = await set.ExecuteNonQueryAsync(TestContext.CancellationToken);
+            await using var during = new SqlCommand("select user_name()", first);
+            AreEqual("app1", await during.ExecuteScalarAsync(TestContext.CancellationToken));
+        }
+
+        await using var second = new SqlConnection(connectionString);
+        await second.OpenAsync(TestContext.CancellationToken);
+        await using var after = new SqlCommand("select user_name()", second);
+        AreEqual("dbo", await after.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
 }

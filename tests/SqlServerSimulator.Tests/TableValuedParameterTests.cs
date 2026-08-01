@@ -182,24 +182,23 @@ public sealed class TableValuedParameterTests
     public void ProcBody_InsertTvpParam_RaisesMsg10700()
     {
         var simulation = new Simulation();
-        simulation.ExecuteBatches(
-            "create type dbo.t1 as table (id int)",
-            "create proc dbo.p1 @rows dbo.t1 readonly as insert @rows values (99)");
+        _ = simulation.ExecuteNonQuery("create type dbo.t1 as table (id int)");
+        // The CREATE binds the body, so the write is caught there and the
+        // procedure never lands (probe-confirmed against SQL Server 2025).
         simulation.AssertSqlError(
-            "declare @t dbo.t1; exec dbo.p1 @t",
+            "create proc dbo.p1 @rows dbo.t1 readonly as insert @rows values (99)",
             10700,
             "The table-valued parameter \"@rows\" is READONLY and cannot be modified.");
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.procedures where name = 'p1'"));
     }
 
     [TestMethod]
     public void ProcBody_UpdateTvpParam_RaisesMsg10700()
     {
         var simulation = new Simulation();
-        simulation.ExecuteBatches(
-            "create type dbo.t1 as table (id int)",
-            "create proc dbo.p1 @rows dbo.t1 readonly as update @rows set id = 0");
+        _ = simulation.ExecuteNonQuery("create type dbo.t1 as table (id int)");
         _ = simulation.AssertSqlError(
-            "declare @t dbo.t1; exec dbo.p1 @t",
+            "create proc dbo.p1 @rows dbo.t1 readonly as update @rows set id = 0",
             10700);
     }
 
@@ -207,11 +206,9 @@ public sealed class TableValuedParameterTests
     public void ProcBody_DeleteTvpParam_RaisesMsg10700()
     {
         var simulation = new Simulation();
-        simulation.ExecuteBatches(
-            "create type dbo.t1 as table (id int)",
-            "create proc dbo.p1 @rows dbo.t1 readonly as delete @rows");
+        _ = simulation.ExecuteNonQuery("create type dbo.t1 as table (id int)");
         _ = simulation.AssertSqlError(
-            "declare @t dbo.t1; exec dbo.p1 @t",
+            "create proc dbo.p1 @rows dbo.t1 readonly as delete @rows",
             10700);
     }
 

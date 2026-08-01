@@ -103,6 +103,22 @@ internal sealed class CaseExpression : Expression
     // (`CASE … 1 … 2.5` → numeric(2, 1)). Both rules live in PromoteValueArms.
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        // The WHEN side binds too: a searched CASE carries whole predicates and
+        // a simple one an implicit `=` per compare value, and real reports a
+        // cross-collation conflict (or a legacy-LOB argument, or an unknown
+        // column) in either while compiling.
+        if (this.searchedWhens is { } whens)
+        {
+            foreach (var when in whens)
+                when.Bind(batch, resolveColumnType);
+        }
+        else
+        {
+            var inputType = this.input!.GetSqlType(batch, resolveColumnType);
+            foreach (var compareValue in this.compareValues!)
+                BooleanExpression.RequireResolvableCollation(inputType, compareValue.GetSqlType(batch, resolveColumnType), "equal to");
+        }
+
         var arms = this.elseBranch is null ? this.thens : [.. this.thens, this.elseBranch];
         this.cachedResultType = PromoteValueArms(arms, batch, resolveColumnType);
         return this.cachedResultType;
@@ -160,12 +176,23 @@ internal sealed class CaseExpression : Expression
         // it persists across a scalar-subquery boundary (both probe-confirmed).
         if (++context.CaseDepth > ParserContext.MaxCaseNestingDepth)
             throw SimulatedSqlException.CaseExpressionsNestedTooDeeply(4);
+
+        // Real folds a CASE whose conditions and arms are all constant, so
+        // `ORDER BY CASE WHEN 1 = 1 THEN 1 ELSE 2 END` is Msg 408 while any
+        // column, variable or subquery inside it sorts (probe-confirmed).
+        // IIF reaches the same treatment through the built-in dispatcher.
+        var savedFoldableArguments = context.FoldableArguments;
+        context.FoldableArguments = true;
         try
         {
-            return ParseCaseBody(context);
+            var parsed = ParseCaseBody(context);
+            if (context.FoldableArguments)
+                parsed.FoldedOverConstantArguments = true;
+            return parsed;
         }
         finally
         {
+            context.FoldableArguments = savedFoldableArguments;
             context.CaseDepth--;
         }
     }

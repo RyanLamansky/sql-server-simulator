@@ -12,6 +12,23 @@ partial class SimulatedSqlException
         new("Unnamed tables cannot be used as XML identifiers as well as unnamed columns cannot be used for attribute names. Name unnamed columns/tables using AS in the SELECT statement.", 6809, 16, 1);
 
     /// <summary>
+    /// Msg 6800: <c>FOR XML AUTO</c> on a SELECT with no FROM clause — AUTO
+    /// names every element after a table, so it has nothing to name.
+    /// Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlAutoRequiresTable() =>
+        new("FOR XML AUTO requires at least one table for generating XML tags. Use FOR XML RAW or add a FROM clause with a table name.", 6800, 16, 1);
+
+    /// <summary>
+    /// Msg 6851: a <c>FOR XML PATH</c> projection maps an <c>xml</c>-typed
+    /// column to an attribute (<c>[@name]</c>) — an xml value serializes as
+    /// nodes, which an attribute can't hold. Probe-confirmed wording against
+    /// SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlAttributeInvalidType(string column) =>
+        new($"Column '{column}' has invalid data type for attribute-centric XML serialization in FOR XML PATH.", 6851, 16, 1);
+
+    /// <summary>
     /// Msg 6864: a <c>FOR XML PATH('')</c> (row-tag omission) projection maps
     /// a column to an attribute — attributes have no element to attach to when
     /// the row wrapper is suppressed. Probe-confirmed wording against SQL

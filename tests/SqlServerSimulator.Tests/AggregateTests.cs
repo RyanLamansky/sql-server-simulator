@@ -349,6 +349,37 @@ public sealed class AggregateTests
             "Windowed functions, aggregates and NEXT VALUE FOR functions do not support integer indices as ORDER BY clause expressions.");
 
     [TestMethod]
+    public void StringAgg_WithinGroup_OrderByConstant_RaisesMsg5309()
+        => new Simulation().AssertSqlError("""
+            create table t (s nvarchar(20));
+            insert t values ('a');
+            select string_agg(s, ',') within group (order by 'x') from t
+            """, 5309,
+            "Windowed functions, aggregates and NEXT VALUE FOR functions do not support constants as ORDER BY clause expressions.");
+
+    /// <summary>
+    /// The WITHIN GROUP gate folds like the OVER one: a call real folds over
+    /// literal arguments is rejected by the value it folds to (Msg 5308 for an
+    /// index-shaped <c>int</c>), while a variable or subquery sorts.
+    /// </summary>
+    [TestMethod]
+    public void StringAgg_WithinGroup_OrderByFoldedCall_RaisesMsg5308()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (s nvarchar(20));
+            insert t values ('a');
+            select string_agg(s, ',') within group (order by abs(-1)) from t
+            """, 5308);
+
+    [TestMethod]
+    public void StringAgg_WithinGroup_OrderByVariable_Sorts()
+        => AreEqual("b,a", new Simulation().ExecuteScalar("""
+            create table t (s nvarchar(20), k int);
+            insert t values ('a', 2), ('b', 1);
+            declare @p int = 1;
+            select string_agg(s, ',') within group (order by k * @p) from t
+            """));
+
+    [TestMethod]
     public void StringAgg_WithinGroup_NoParens_RaisesSyntaxError()
         => _ = new Simulation().AssertSqlError("""
             create table t (s nvarchar(20));

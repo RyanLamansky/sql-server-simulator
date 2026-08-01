@@ -177,7 +177,7 @@ internal sealed class Value : Expression
 
     internal override bool IsRowIndependent => true;
 
-    internal override bool IsWrittenConstant => this.IsLiteral;
+    private protected override bool IsStructuralConstant => this.IsLiteral;
 
     internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => this.Constant.IsNull;
 

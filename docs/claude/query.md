@@ -97,11 +97,42 @@ An **unaliased** derived table is still accepted, where real requires the alias 
 - Both flags ride the existing TOP parse (`topPercent` / `topWithTies` on the projection build) and are honored by the buffered, windowed, and aggregate projection paths via `ComputeTopCap`.
 
 ## `WINDOW w AS (…)` named-window clause (SQL Server 2022+)
-- A trailing `WINDOW name AS (<over-body>) [, …]` clause (between HAVING and ORDER BY) defines named windows a bare `OVER w` resolves to.
-- `OVER w` registers spec-less at parse (the definition follows the projection) and is patched once the WINDOW clause is read; an undefined name → **Msg 5362**.
+- A trailing `WINDOW name AS (<over-body>) [, …]` clause (between HAVING and ORDER BY) defines named windows an `OVER w` reference resolves to.
+- Every window kind reaches one — the ranking family (`ROW_NUMBER` / `RANK` / `DENSE_RANK` / `NTILE`), the distribution pair (`CUME_DIST` / `PERCENT_RANK`), the offset pair (`LAG` / `LEAD`), the value pair (`FIRST_VALUE` / `LAST_VALUE`), the ordered-set pair (`PERCENTILE_CONT` / `PERCENTILE_DISC`) and aggregate-OVER.
+- The reference registers carrying only what it wrote inline (the definition follows the projection) and is patched once the WINDOW clause is read; an undefined name → **Msg 5362**.
+- Window names are identifiers: they resolve under the database collation, so `OVER W` finds `WINDOW w AS (…)` under a case-insensitive one.
+  One clause defining the same name twice → **Msg 16211**.
+- References resolve from the statement's ORDER BY as well as its select list.
 - WINDOW is **contextual** (still a valid identifier / table alias) — recognized as the clause only in the `WINDOW <name> AS (` shape via lookahead.
-- **Deferred**: the partial-inheritance form `OVER (w ORDER BY …)` (real SQL Server accepts it) is not modeled — it stays Msg 102, as does real's own rejection of empty `OVER (w)`.
-  Named windows are resolved per top-level query block; a WINDOW clause nested in a subquery of the same statement is a known limitation of the shared parse-context list.
+- Named windows are resolved per top-level query block; a WINDOW clause nested in a subquery of the same statement is a known limitation of the shared parse-context list.
+
+### Refinement (`OVER (w …)`) and definition chaining
+
+A reference may add the elements the window it names doesn't already carry, and a *definition* may refine another the same way (`WINDOW w AS (PARTITION BY g), w2 AS (w ORDER BY id)`) in either written order.
+The reference must lead the body — `OVER (PARTITION BY g w)` is Msg 102.
+
+- Each of PARTITION BY / ORDER BY / frame may be supplied by exactly one side; an overlap → **Msg 4123** ("Window element in OVER clause can not also be specified in WINDOW clause.").
+  Real's state tracks the *referenced* window rather than the conflicting element — State 2 when that window carries a frame, State 3 when it doesn't (probe-confirmed).
+- In the OVER position at least one refining element is required: `OVER (w)` is **Msg 102**, even though the bare `WINDOW w2 AS (w)` definition form is legal.
+- A definition may carry a frame with no ORDER BY of its own — the reference that resolves it can supply the ordering — so the frame-needs-ordering gate waits until the merge.
+- Definitions referencing each other in a loop → **Msg 5365**.
+  A definition naming *itself* is not that error: real doesn't put a name in its own scope, so `WINDOW w AS (w ORDER BY id)` is **Msg 5362**.
+
+### Per-kind rules through a named window
+
+Real answers this position with its own error numbers rather than the inline ones, and the wording differs even where the number's inline twin shares it.
+
+| Condition | Through a named window | Inline `OVER (…)` |
+| --- | --- | --- |
+| Frame on a kind that rejects one | **Msg 4106** (State 2 ranking / distribution, State 1 for `lag` / `lead` / the percentile pair) | Msg 10752 |
+| Missing ORDER BY on a kind that requires one | **Msg 5366** ("must have an OVER clause or a WINDOW with ORDER BY"; State 3 ranking / distribution, State 2 offset / value) | Msg 4112 |
+| ORDER BY on `PERCENTILE_CONT` / `PERCENTILE_DISC` | **Msg 5363** ("may not have ORDER BY in OVER or WINDOW clause") | Msg 10758 |
+| Frame with nothing to order against | **Msg 5364** | Msg 10756 |
+
+A frame written in the *refinement* rather than inherited stays on the inline Msg 10752 path, and the refinement's ORDER BY reaches the same Msg 5308 / 5309 constant gate an inline one does.
+`PERCENTILE_CONT` / `PERCENTILE_DISC` take only PARTITION BY from the definition — their ordering always comes from WITHIN GROUP.
+
+**Not modeled yet**: `NEXT VALUE FOR seq OVER w` (real accepts a named window there; the simulator's OVER-after-NEXT-VALUE-FOR parse takes only the inline body) → Msg 102.
 
 ## `TABLESAMPLE`
 - `TABLESAMPLE [SYSTEM] (n PERCENT | n ROWS) [REPEATABLE (seed)]` on a FROM source parses and is **discarded** — the query returns every row.
@@ -126,16 +157,48 @@ The gate is syntactic on the written term, not on what it resolves to: `SELECT 5
 
 The **ordinal form is a signed integer literal**, parentheses included — `(1)` and `+1` name the first column, `-1` and `-(1)` are position -1 (Msg 108) — while an arithmetic expression folding to the same number is a constant instead (`2 - 1` → Msg 408).
 
-Rejected (probe-confirmed): a literal of any type (`'x'`, `1.5`, `1e0`, `0x01`, `NULL`), arithmetic or concatenation over literals (`1 + 0`, `'a' + 'b'`), `CAST` / `CONVERT` of one, `COALESCE` over literals, and any of those in parentheses.
-Accepted: a variable inside an expression (`@v + 1`), a subquery (`(SELECT 1)`), a scalar UDF call, and every function reading server or session state (`GETDATE()`, `NEWID()`, `RAND()`, `DB_NAME()`, `@@SPID`, `@@VERSION`) — real evaluates rather than folds those.
+Rejected (probe-confirmed): a literal of any type (`'x'`, `1.5`, `1e0`, `0x01`, `NULL`), arithmetic or concatenation over literals (`1 + 0`, `'a' + 'b'`), `CAST` / `CONVERT` of one, `COALESCE` over literals, a `COLLATE` postfix over one (`'x' COLLATE Latin1_General_CI_AS`), a `CASE` / `IIF` whose conditions and arms are all constant, a call to a **folded built-in** over constant arguments (below), and any of those in parentheses.
+Accepted: a variable inside an expression (`@v + 1`), a subquery (`(SELECT 1)`), a scalar UDF call — schema-bound-deterministic or not — and every function reading server or session state (`GETDATE()`, `NEWID()`, `RAND()`, `DB_NAME()`, `@@SPID`, `@@VERSION`) — real evaluates rather than folds those.
 `ISNULL(NULL, 1)` is accepted where `COALESCE(NULL, 1)` is rejected, matching real's own split (COALESCE desugars to a CASE the folder reaches; ISNULL stays a runtime call).
 
 A **variable** term is real's variable-column-position shape and gets its own error, **Msg 1008** (`The SELECT item identified by the ORDER BY number N contains a variable …`), whenever the variable is reachable through pure conversions only — `@v`, `(@v)`, `((@v))`, `CAST(@v AS int)`.
 A variable inside arithmetic is a sort expression and orders the rows: `@v + 1`, `-@v` and `(@v) + 0` all sort (probe-confirmed).
 
-Detection is `Expression.IsWrittenConstant`, a conservative opt-in walk (default false) over the literal-bearing node types, so a shape it doesn't recognize sorts rather than raising.
-**Divergences**: real additionally folds deterministic scalar calls over literals (`ABS(-1)`, `LEN('abc')`) and `CASE` / `IIF` over literal arms, which sort here; and where real reports every ORDER BY error it finds, the simulator raises the first, so `ORDER BY nosuch, 'x'` is Msg 408 (position 2) rather than real's leading Msg 207.
-The window and ordered-aggregate clauses (`OVER (ORDER BY 'x')`, `WITHIN GROUP (ORDER BY 'x')`) have their own rejection on real — **Msg 5309** — which isn't modeled; those terms sort.
+#### The folded built-in catalog
+
+Real folds a call whose name is in its own intrinsic-folding list and whose every argument is itself constant, then rejects the folded term.
+The list is **not** the deterministic set, in both directions (all probe-confirmed): `DATENAME` folds although `OBJECTPROPERTY(…, 'IsDeterministic')` calls it nondeterministic, while `UPPER`, `LOWER`, `QUOTENAME`, `STRING_ESCAPE`, `HASHBYTES`, `COMPRESS`, `DECOMPRESS`, `ISJSON`, `CHOOSE`, `ISNULL`, `PARSENAME`, `JSON_MODIFY`, `JSON_ARRAY`, `JSON_OBJECT`, `SQL_VARIANT_PROPERTY`, `FORMATMESSAGE` and `TRY_PARSE` are deterministic yet sort fine over literal arguments.
+So the simulator carries its own probed list in `ConstantFolding.FoldedBuiltIns` (ABS / LEN / CHARINDEX / CONCAT / the math, date-part, date-from-parts, regexp, bit and JSON-read families, the CAST / CONVERT / TRY_ pair, NULLIF, GREATEST / LEAST, IIF …), and sharing the determinism table instead would have rejected terms real accepts.
+
+Folding is bottom-up and one non-foldable argument stops it: `ABS(LEN('abc'))` is rejected, `LEN(UPPER('abc'))` and `CONCAT('a', GETDATE())` sort.
+A column, variable or subquery anywhere inside likewise stops it — `IIF(1 = 1, col, 2)`, `CASE WHEN col = 1 THEN 1 ELSE 2 END` and `CASE WHEN EXISTS (SELECT 1) THEN 1 ELSE 2 END` all sort.
+
+Detection is `Expression.IsWrittenConstant` = a parse-time mark (set by the built-in dispatcher and the CASE parser when every argument parsed inside came back constant) OR a conservative structural walk over the literal-bearing node types, default false — so a shape neither half recognizes sorts rather than raising.
+
+**Divergences** on this path: where real reports every ORDER BY error it finds, the simulator raises the first, so `ORDER BY nosuch, 'x'` is Msg 408 (position 2) rather than real's leading Msg 207; and a term whose *fold itself raises* reports Msg 408 here where real reports the folding error (`ORDER BY 1/0` → real Msg 8134, `ORDER BY CAST('a' AS int)` → real Msg 245, `ORDER BY POWER(CAST(2 AS int), 40)` → real Msg 232).
+
+#### Inside `OVER` / `WITHIN GROUP` (Msg 5308 and 5309)
+
+The same folded-constant predicate drives a second pair of rejections in the ORDER BY positions that carry **no ordinal semantics** — an inline `OVER (ORDER BY …)`, a named `WINDOW w AS (…)` definition, `WITHIN GROUP (ORDER BY …)` on `STRING_AGG` / `PERCENTILE_CONT` / `PERCENTILE_DISC`, and `NEXT VALUE FOR seq OVER (ORDER BY …)`.
+Probing the two paths cell by cell found them in exact agreement on *what* counts as constant; only the message differs, and which of the two fires is decided on the **folded value**:
+
+| Folded term | Message |
+| --- | --- |
+| An `int` of at least 1, however written — `1`, `+1`, `(1)`, `300`, `1 + 1`, `CAST(1 AS int)`, `COALESCE(NULL, 1)`, `ABS(-1)`, `LEN('abc')`, `IIF(1 = 1, 1, 2)` | **Msg 5308** `Windowed functions, aggregates and NEXT VALUE FOR functions do not support integer indices as ORDER BY clause expressions.` |
+| Everything else — `'x'`, `NULL`, `1.5`, `0x01`, `$1`, `0`, `-1`, `1 - 2`, `CAST(1 AS bigint)`, `CAST(1 AS tinyint)`, `'a' + 'b'`, `CASE WHEN 1 = 1 THEN 'a' ELSE 'b' END` | **Msg 5309** `Windowed functions, aggregates and NEXT VALUE FOR functions do not support constants as ORDER BY clause expressions.` |
+
+Both are Class 15, State 1.
+Real applies **no range check** against the select list: `OVER (ORDER BY 100)` over a one-column SELECT is Msg 5308, not Msg 108.
+`PARTITION BY` has no such rule — `OVER (PARTITION BY 'x' ORDER BY col)` and `PARTITION BY 1 + 1` sort (probe-confirmed) — and a bare variable is accepted here, so **Msg 1008 has no counterpart in this position** (`OVER (ORDER BY @v)` ranks the rows).
+
+Deciding 5308 vs 5309 needs the folded *value*, so the gate evaluates the term at parse time; **a fold that raises leaves the term standing**, matching real (`OVER (ORDER BY 1/0)`, `OVER (ORDER BY CAST('a' AS int))` and `OVER (ORDER BY POWER(CAST(2 AS int), 40))` are all accepted — the opposite of the statement-level path, which reports the folding error).
+
+**Divergences** on the window path:
+
+- A term whose fold raises is accepted at parse time as real does, but the simulator then evaluates it per row and raises the folding error at execution (`OVER (ORDER BY 1/0)` → Msg 8134) where real returns rows.
+- An `int`-typed NULL a `TRY_` conversion produced is Msg 5308 on real — its index test is a "not less than one" comparison, which NULL answers UNKNOWN — while the simulator reports 5309 for every NULL, matching real only for the written `NULL` and `CAST(NULL AS int)` spellings.
+- Two cells land on the wrong side of the 5308 / 5309 split for type-modeling reasons unrelated to the gate: `NULLIF(1, 2)` is `tinyint` on real (small integer literals are typed by magnitude) but `int` here, and `JSON_PATH_EXISTS` returns `int` on real but `bit` here.
+- `ROW_NUMBER() OVER w` — a named-window reference from a *non-aggregate* window function — isn't parsed at all (Msg 102); the aggregate form (`SUM(v) OVER w`) is, and carries the gate.
 
 ### Top-level ORDER BY over a set operation
 
@@ -175,8 +238,8 @@ Sort keys decode only the ORDER BY columns off each row (`ComputeTopLevelOrderKe
 ## Outer-scope correlation in the select list
 
 A SELECT's FROM clause is bound **before** its select list, matching SQL Server's binder rather than the written order.
-The reason is that a select-list subquery can reference the enclosing query (`SELECT (SELECT t.col) FROM t` returns one value per outer row on real), and a projection's type is resolved statically by `GetSqlType` — unlike a WHERE reference, which defers to `Run` and so never needed the scope at parse time.
-That asymmetry is why correlation through WHERE always worked while the same reference in the select list raised Msg 207.
+The reason is that a select-list subquery can reference the enclosing query (`SELECT (SELECT t.col) FROM t` returns one value per outer row on real), and a projection's type is resolved statically by `GetSqlType`, which needs the scope in place at parse time.
+The same scope now also backs the compile-time bind of WHERE / HAVING / GROUP BY / a JOIN's ON — see [`collations.md`](collations.md#compile-time-binding).
 
 `FindOwnFromClause` locates this SELECT's own FROM by a depth-aware token scan; `ParseInner` then parses the sources there, rewinds to the select list, installs `ResolveColumnTypeAcrossSources` over them as `ParserContext.OuterTypeResolver`, and the FROM arm resumes after the already-parsed sources rather than re-parsing.
 Sources are parsed exactly once.

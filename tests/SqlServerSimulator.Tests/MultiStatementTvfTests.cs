@@ -158,20 +158,20 @@ public sealed class MultiStatementTvfTests
     public void Body_ValueFormReturn_RaisesMsg178()
     {
         // Probed: real SQL Server rejects RETURN <expr> at CREATE time
-        // (Msg 178). The simulator defers Msg 178 to invoke time — same
-        // convention scalar UDFs use for the falling-through-without-RETURN
-        // case. The error fires when the function is actually called.
+        // (Msg 178) and leaves the function uncreated. The CREATE-time body
+        // bind reaches it through the same frame-less batch the invocation
+        // uses, so the message arrives at the CREATE.
         using var connection = Open();
-        _ = connection.CreateCommand("""
+        var ex = Throws<DbException>(() => connection.CreateCommand("""
             create function dbo.fBadRet()
             returns @r table (Id int not null)
             as
             begin
                 return 5;
             end
-            """).ExecuteNonQuery();
-        var ex = Throws<DbException>(() => connection.CreateCommand("select * from dbo.fBadRet()").ExecuteReader().Read());
+            """).ExecuteNonQuery());
         AreEqual("178", ex.Data["HelpLink.EvtID"]);
+        AreEqual(0, connection.CreateCommand("select count(*) from sys.objects where name = 'fBadRet'").ExecuteScalar());
     }
 
     [TestMethod]

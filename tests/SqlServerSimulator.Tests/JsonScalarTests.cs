@@ -181,6 +181,47 @@ public sealed class JsonScalarTests
     public void JsonQuery_NullPath_ReturnsNull()
         => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select json_query('{\"x\":[1]}', null)"));
 
+    /// <summary>
+    /// The path argument is optional — <c>JSON_QUERY(json)</c> reads as
+    /// <c>JSON_QUERY(json, '$')</c> and hands back the whole document. Real
+    /// returns the input's own text, so interior whitespace survives while the
+    /// padding outside the document does not.
+    /// </summary>
+    [TestMethod]
+    [DataRow("json_query('{\"a\":1}')", "{\"a\":1}")]
+    [DataRow("json_query('[1,2,3]')", "[1,2,3]")]
+    [DataRow("json_query('  {\"a\" : 1 , \"b\":[1, 2]}  ')", "{\"a\" : 1 , \"b\":[1, 2]}")]
+    public void JsonQuery_NoPath_ReturnsWholeDocument(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    public void JsonQuery_NoPath_NullJson_ReturnsNull()
+        => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select json_query(null)"));
+
+    /// <summary>
+    /// A root-level JSON scalar has no object / array to extract, so the
+    /// path-less form answers the same NULL the explicit <c>'$'</c> path does.
+    /// (Real rejects the whole family with Msg 13609 — it treats a root scalar
+    /// as malformed JSON text; see the divergence note in
+    /// <c>docs/claude/json.md</c>.)
+    /// </summary>
+    [TestMethod]
+    public void JsonQuery_NoPath_RootScalar_ReturnsNull()
+        => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select json_query('\"abc\"')"));
+
+    /// <summary>The path-less form still embeds raw inside a JSON builder.</summary>
+    [TestMethod]
+    public void JsonQuery_NoPath_EmbedsRawInJsonObject()
+        => AreEqual("{\"k\":{\"a\":1}}", new Simulation().ExecuteScalar("select json_object('k': json_query('{\"a\":1}'))"));
+
+    /// <summary>Msg 189 names the accepted range verbatim, unlike JSON_VALUE's fixed-arity Msg 174.</summary>
+    [TestMethod]
+    public void JsonQuery_ThreeArguments_RaisesMsg189()
+        => new Simulation().AssertSqlError(
+            "select json_query('{\"a\":1}', '$', '$')",
+            189,
+            "The json_query function requires 1 to 2 arguments.");
+
     [TestMethod]
     public void JsonQuery_RoundTripThroughOpenJson()
         => AreEqual(

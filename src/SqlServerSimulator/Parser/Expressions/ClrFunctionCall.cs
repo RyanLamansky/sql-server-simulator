@@ -36,6 +36,12 @@ internal sealed class ClrFunctionCall(ClrScalarFunction function, Expression?[] 
 
     public override SqlValue Run(RuntimeContext runtime)
     {
+        // Same gate the T-SQL scalar-UDF call carries: a skipped statement —
+        // a dead branch, or a module body binding at CREATE time — must not
+        // reach managed code through the FROM-less-SELECT parse-time fold.
+        if (runtime.Batch.IsSkipping)
+            return SqlValue.Null(this.function.ReturnType);
+
         if (!runtime.Batch.Connection.Simulation.EnableClr)
             throw SimulatedSqlException.ClrExecutionDisabled();
 

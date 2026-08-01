@@ -41,9 +41,11 @@ internal sealed partial class TdsSession
         /// </summary>
         public readonly List<TdsRpcParameter> BoundParameters = boundParameters;
 
-        /// <summary>Stable RIDs of the rows delivered by the most recent fetch, in fetch order.
-        /// A positioned <c>sp_cursor</c> op indexes into this (1-based) via its rownum.</summary>
-        public readonly List<(int Page, int Slot)> Buffer = [];
+        /// <summary>Stable per-source RIDs of the rows delivered by the most recent fetch,
+        /// in fetch order (one slot per FROM source, so a join cursor's positioned edit
+        /// reaches every participating row). A positioned <c>sp_cursor</c> op indexes into
+        /// this (1-based) via its rownum.</summary>
+        public readonly List<(int Page, int Slot)?[]> Buffer = [];
 
         /// <summary>1-based absolute row number of the last row the last fetch landed on (for the INFO fetch's position report).</summary>
         public int CurrentRowNumber;
@@ -296,8 +298,8 @@ internal sealed partial class TdsSession
                 if (status != 0 || values is null)
                     break;
                 rows.Add(values);
-                if (api.Cursor.CurrentRid is { } rid)
-                    api.Buffer.Add(rid);
+                if (api.Cursor.CurrentRids is { } rids)
+                    api.Buffer.Add(rids);
                 api.CurrentRowNumber += 1;
             }
         }
@@ -339,7 +341,7 @@ internal sealed partial class TdsSession
 
         // Position the engine cursor on the requested buffer row so its
         // WHERE CURRENT OF matching targets it; SETPOSITION (0x20) stops here.
-        api.Cursor.CurrentRid = api.Buffer[rownum - 1];
+        api.Cursor.CurrentRids = api.Buffer[rownum - 1];
         if ((optype & 0x20) != 0 && (optype & 0x3) == 0)
         {
             writer.WriteReturnStatus(0);
@@ -459,7 +461,7 @@ internal sealed partial class TdsSession
     {
         var requestedScroll = scrollopt & 0x1F;
         var requestedCc = ccopt & 0xF;
-        if (cursor.BaseTable is null)
+        if (cursor.BaseTables.Length == 0)
             return (0x8, 0x1, lastCursorRows);
 
         var rowcount = requestedScroll is 0x2 or 0x4 or 0x10 ? -1 : lastCursorRows;

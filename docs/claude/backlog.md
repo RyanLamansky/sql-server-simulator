@@ -43,16 +43,19 @@ The subsections that follow carry the areas with work in flight.
   and the **constructive operations** (`STUnion` / `STBuffer` / …), which want polygon clipping.
   Also open: `STCentroid` / `STPointOnSurface` / `EnvelopeAngle` / `EnvelopeCenter`, a spatial *column*'s property form (`Location.Lat` reads as a two-part column name — the method form works), curved shapes and FULLGLOBE, GML, SRID transformation, `sys.spatial_reference_systems` seed rows, `ALTER SPATIAL INDEX`, and query-planner use of the spatial index → [`spatial.md`](spatial.md#not-modeled-yet).
 - **XML mutation and XQuery beyond the path subset** — `.modify()` XML-DML plus its `UPDATE … SET` integration, FLWOR / comparison / boolean / arithmetic operators, value predicates, constructors, XSD validation against `xml(collection)` bindings, `ALTER XML SCHEMA COLLECTION ADD` → [`xml.md`](xml.md#known-gaps).
-- **Multi-source cursors** — a cursor over a JOIN / derived table / view is forced STATIC where real is DYNAMIC, costing mid-loop change visibility, `@@CURSOR_ROWS = -1`, and positioned DML; it needs per-source row identity carried through the join driver plus live re-execution → [`cursors.md`](cursors.md).
+- **Cursors over a deferred source** — a cursor whose FROM reaches a derived table, view, CTE or APPLY right side is forced STATIC where real is DYNAMIC, costing mid-loop change visibility, `@@CURSOR_ROWS = -1`, and positioned DML (real allows `WHERE CURRENT OF` naming the *view*, enforcing its CHECK OPTION, and Msg 16933 when the statement names the base table under it instead).
+  JOIN / comma-FROM / self-join cursors ship — those fold live per FETCH over the per-source stable addresses; the deferred shapes need that same identity threaded out of a `LateralPlan`, which yields projected bytes carrying no heap address → [`cursors.md`](cursors.md).
+  Two smaller neighbours of the same gap: a `TOP` / `OFFSET` cursor is forced STATIC where real is KEYSET, and a `FOR SYSTEM_TIME` cursor is forced STATIC (correct rowset, no sensitivity).
 - **Temporal history-table indexing** — real gives every history table a clustered index on `(period end, period start)` and requires one before it accepts a finite `HISTORY_RETENTION_PERIOD` (Msg 13765); the simulator's history sibling is a plain heap, so it accepts retention unconditionally and can't raise that.
   Retention filtering, auto-named history tables, and the base-vs-history shape validation all ship → [`temporal-tables.md`](temporal-tables.md#divergences).
-- **Cross-database writes through a synonym** — the same `RejectCrossDatabaseMutation` gap a spelled-out 3-part name hits.
-  The rest of the synonym surface, permission provenance included, ships → [`schemas.md`](schemas.md#synonyms-create-synonym--drop-synonym).
+- **Cross-database permission and snapshot-read scoping** — three-part-name writes ship, but two per-database surfaces still read the *session's* database: the permission check (a write through `other.dbo.t` tests the session principal's grants, where real resolves the login's user in the target) and a SNAPSHOT / RCSI reader's snapshot stamp (so cross-database versioned reads compare stamps from two independent counters).
+  The write side is self-consistent — rowversion, version-store commit ids and trigger dispatch all follow the target → [`schemas.md`](schemas.md#cross-database-writes).
 - **Key-range locks** — the one unbuilt piece of the locking model; HOLDLOCK widens to table-S in their place → [`locking.md`](locking.md).
 - **`sys.sql_expression_dependencies` / `sys.dm_sql_referencing_entities` / `sys.dm_sql_referenced_entities`** — neither the catalog view nor the two DMVs resolve, so a tool asking "what depends on this" gets Msg 208.
   The [schema-binding gate](programmable.md#schema-binding-with-schemabinding) now derives a reference set from a module body, but only for schema-bound modules and only name-approximately at column granularity, where these surfaces want dependency rows for **every** module (real records them for plain views and procedures too, resolving late-bound names when it can) down to `referenced_minor_id` per column — probed shape: one row per (referencing module, referenced object) plus one per referenced column, carrying `is_schema_bound_reference` / `referenced_class_desc` / `is_caller_dependent` / `is_ambiguous`.
   Building it means capturing column bindings at parse time, which the per-row name-keyed resolver doesn't do today; that capture is the real cost and would also sharpen the schema-binding gate's column granularity.
-- **`GRANT … ON SERVER` / `ON LOGIN::` securables and application roles** — server-scope permission *names* and server roles ship → [`permissions.md`](permissions.md#known-gaps).
+- **Server-permission enforcement past the four gated points** — the DMV `VIEW …STATE` gate, `EXECUTE AS LOGIN`, server-principal metadata visibility and login DDL consult the server registry; the rest of the stored server permissions (`CONNECT SQL` as a connect-time gate, `ALTER ANY DATABASE`, `CREATE ANY DATABASE`, …) are catalog truth only, and `CONTROL SERVER` is folded into the sysadmin bypass rather than modeled → [`permissions.md`](permissions.md#known-gaps).
+  `ON SERVER::` / `ON LOGIN::` securables and application roles ship.
 - **Multi-statement plan caching** — the cache keys single-SELECT batches, so every SaveChanges INSERT-then-`SELECT SCOPE_IDENTITY()` round trip re-parses → [`plan-cache.md`](plan-cache.md).
   **Measured 2026-07-30 before building, and the headroom is smaller than this entry used to imply.** Against a 200-row table, one process per case, 20k warm + best of 5×20k: a cache **hit** costs 14.4 µs/op, the same SELECT forced to always miss costs 26.8, and `SET NOCOUNT ON; SELECT` — never cached — costs 20.1.
   So the cache is worth ~46% where it applies, but the ceiling on extending it to the two-statement shape is ~5.7 µs/op (~28%), and collecting it means making **every** statement kind produce a replayable plan: batches are parsed-and-executed statement by statement, and `Selection` is the only reusable plan object today.
@@ -88,8 +91,7 @@ Running Django 5.1's own ORM test apps over the wire (mssql-django 1.7 / pyodbc)
 
 Fixed across the passes (parity-closing): `SET NOCOUNT ON` count suppression (blocked every identity insert — [`control-flow.md`](control-flow.md) / the DONE-token contract); year-first slash/dot date parsing ([`casting.md`](casting.md)); `INSERT … VALUES (DEFAULT)` / `db_default` ([`dml.md`](dml.md)); the implicit-conversion cluster (varchar→temporal in DATEDIFF/DATEPART, varchar operand in numeric arithmetic, DATEADD `bigint` interval — [`casting.md`](casting.md) / [`arithmetic.md`](arithmetic.md)); universal non-string→varchar coercion in `LIKE`; `@ $ #` in unquoted identifier bodies ([`grammar.md`](grammar.md)).
 A `dbo.REGEXP_LIKE` built-in was **tried and reverted** — faking it as a built-in is a fidelity break, because on real the name resolves only when mssql-django's regex **CLR assembly** is installed. CLR scalar functions now ship, so the authentic path works: `EnableClr` + mssql-django's own `install_regex_clr` sequence loads `regex_clr.dll` and `dbo.REGEXP_LIKE(...)` evaluates (verified end-to-end against the real `regex_clr.dll`, with `clr_name` and MvID matching the live server byte-for-byte). See [`clr-assemblies.md`](clr-assemblies.md).
-
-One residual, probed on the same server: `REGEXP_LIKE` is a reserved keyword at **compatibility level 170**, so real raises Msg 156 on the unbracketed `dbo.REGEXP_LIKE(...)` there and accepts it at 160 and below. The simulator defaults to compat 170 and does *not* reserve the keyword, so it accepts the unbracketed form at every level — over-permissive at 170. Closing it belongs with the native bare `REGEXP_LIKE(col, pattern [, flags])` **predicate** (a reserved keyword, distinct from the UDF), which is a separate, genuinely-faithful builtin worth adding independently and would supply the reservation.
+The compatibility-level-170 keyword reservation that makes that unbracketed spelling a Msg 156 syntax error now ships too, alongside the native `REGEXP_*` family — see [`grammar.md`](grammar.md#compatibility-gated-reservation-regexp_like) and [`scalars.md`](scalars.md#the-native-regexp_-family-sql-server-2025).
 
 Re-measured 2026-07-29 on a 21-app ORM slice (**2069 tests**): **sim-only 0**, real-only 27, 74 failing on both.
 The simulator now fails only tests that fail on real too — mssql-django's own emulation limits — so this oracle is exhausted at this slice width.
@@ -104,7 +106,7 @@ Getting there took eleven roots, and the pattern worth keeping is that failures 
 The set-op ORDER BY binding this exposed (Msg 104 for a term that binds in the first branch's FROM scope but isn't projected, Msg 207 / 4104 for one that binds nowhere) ships — see [`query.md`](query.md#top-level-order-by-over-a-set-operation).
 The DISTINCT counterpart (qualified term leaf-matched against the output names) is fixed.
 
-The constant-term rejection that exposed (**Msg 408**, plus **Msg 1008** for a bare variable term) ships — see [`query.md`](query.md#constant-terms-msg-408-and-bare-variables-msg-1008).
+The constant-term rejection that exposed (**Msg 408**, plus **Msg 1008** for a bare variable term, and **Msg 5308** / **5309** for the same folded constant inside `OVER` / `WITHIN GROUP`) ships — see [`query.md`](query.md#constant-terms-msg-408-and-bare-variables-msg-1008).
 
 **Over-permissive validation — the simulator *accepts* what real *rejects*.** This is the more dangerous divergence direction (an app query works on the simulator and breaks on real), and it is invisible to a sim-only failure list: surface it with the *reverse* delta `comm -13 <sim fails> <real fails>`, where real-only failures mean the simulator over-passes. **Whole-suite audits should always run the reverse delta — a green "matches real" claim requires both directions.**
 
@@ -117,21 +119,21 @@ Not sim bugs (**fail on real too** — leave alone): boolean-expression `=` comp
 
 The JSON/XML *functions* (OPENJSON / JSON_VALUE / JSON_QUERY / JSON_MODIFY / JSON_OBJECT / JSON_ARRAY / etc.; the XML type + XQuery-subset methods — see [`json.md`](json.md), [`xml.md`](xml.md)) all ship.
 
-**`FOR JSON` ships** — PATH (fully, incl. dotted-alias nesting + all four options), AUTO flat, the probed value-formatting/escaping table, raw-embedding of nested FOR JSON / JSON_QUERY, Msg 13601 / 13605 / 13620.
+**`FOR JSON` ships** — PATH (fully, incl. dotted-alias nesting + all four options), AUTO including join-nesting, the probed value-formatting/escaping table, raw-embedding of nested FOR JSON / JSON_QUERY, Msg 13600 / 13601 / 13605 / 13620.
 See [`json.md`](json.md#for-json-result-serialization).
-Two deferrals within it, both low-demand:
-- **AUTO join-nesting** (nesting a secondary table as a sub-array) — raises `NotSupportedException`; PATH covers the same cases.
-- **One-row chunking** — real chunks the string across ~2033-char rows; the simulator returns it whole.
 
-**`FOR XML` ships** — RAW / AUTO (flat) / PATH (fully: `@attr` / element / `parent/child` nesting / `text()` / `data()` / unnamed-as-text / `PATH('')` row-tag omission / same-name concatenation), the `ELEMENTS [XSINIL|ABSENT]` and `ROOT[('name')]` options, the probed value-formatting (bit → `1`/`0`, scientific float, ISO dates, base64 binary, uppercase GUID) + position-dependent escaping table, NULL handling, empty-rowset → NULL, and Msg 6809 / 6864 / 6852 / 6861 / 6829 / 6830.
+**`FOR XML` ships** — RAW / AUTO / PATH (fully: `@attr` / element / `parent/child` nesting / `text()` / `data()` / unnamed-as-text / `PATH('')` row-tag omission / same-name concatenation), the `ELEMENTS [XSINIL|ABSENT]`, `TYPE` and `ROOT[('name')]` options, the probed value-formatting (bit → `1`/`0`, scientific float, ISO dates, base64 binary, uppercase GUID) + position-dependent escaping table, NULL handling, the typed-vs-untyped result column and its empty-rowset asymmetry, node-embedding of every `xml`-typed column, and Msg 6800 / 6809 / 6851 / 6864 / 6852 / 6861 / 6829 / 6830.
+AUTO's join-nesting heuristics (level order, computed-column placement, consecutive-row collapse) are tabulated in [`xml.md`](xml.md#auto-nesting-shared-with-for-json-auto) and shared with FOR JSON AUTO.
 See [`xml.md`](xml.md#for-xml-result-serialization).
 
-Deferrals within it (each raises `NotSupportedException` naming the feature, or the noted Msg):
+Not built yet within them:
 - **EXPLICIT mode** — the universal-table format; complex, rarely hand-authored.
-- **`TYPE` option** — typed-xml node embedding (nested `(SELECT … FOR XML …, TYPE)` embeds as raw child nodes rather than escaped text); the untyped escaped-text nesting is real's default and ships.
-- **AUTO join-nesting** — nesting a secondary table under the first; PATH covers the same cases.
-- **`BINARY BASE64`/`HEX`, `XMLSCHEMA`, `WITH NAMESPACES`** options, and the exotic PATH node functions beyond `text()`/`data()` (`comment()`, `processing-instruction()`, `node()`, `*`, `@*`).
-- **One-row chunking** — real chunks the string across ~2033-char rows; the simulator returns it whole (shared with FOR JSON).
+- **`BINARY BASE64`/`HEX`, `XMLSCHEMA`, `WITH NAMESPACES`** options, and the exotic PATH node functions beyond `text()`/`data()` (`comment()`, `processing-instruction()`, `node()`, `*`, `@*`) — each raises `NotSupportedException` naming the feature.
+- **AUTO over a set-operation result** — `NotSupportedException`; real names every element after the first branch's table.
+- **One-row chunking** — real chunks the string across ~2033-char rows; the simulator returns it whole (shared by both clauses).
+- **Msg 6819** — real rejects `FOR XML` inside an `INSERT … SELECT`; the simulator accepts it.
+- **XML-name encoding** — RAW / AUTO escape a name that isn't a legal XML identifier as `_xHHHH_` (`[a b]` → `a_x0020_b`, `FROM #tmp` → `<_x0023_tmp>`), and PATH rejects one with **Msg 6850**; the simulator emits names verbatim, so an odd identifier yields ill-formed XML.
+  The probed encoding table is in [`xml.md`](xml.md#not-modeled-yet) — a self-contained next step.
 
 ### Built-in functions
 
@@ -149,8 +151,8 @@ Blocked on a larger unmodeled parent feature (shipping a function here implies t
   Probed: real *parses* `OPENROWSET('MSDASQL', …)` then errors on disabled ad-hoc access (**Msg 7222**) and `OPENROWSET(BULK 'file', SINGLE_CLOB)` on the missing file (**Msg 4860**); the simulator doesn't parse the FROM-source form at all (Msg 102). Ad-hoc / external data access is a feature, not a syntax tweak — the parse-then-runtime-error shape depends on the whole external-data model.
 
 - **System stored procedures** (`sp_*` family) — formatted-metadata / management procs invoked via `EXEC sp_name`.
-  Shipped so far: the `sp_help` family (`sp_help` / `sp_helptext` / `sp_helpindex` / `sp_helpconstraint` / `sp_helpdb` / `sp_helptrigger` / `sp_helpuser`), the ODBC/JDBC catalog set (`sp_tables` / `sp_columns_100` / `sp_pkeys` / `sp_statistics_100` / `sp_stored_procedures` / `sp_datatype_info_100`), `sp_spaceused`, `sp_who` / `sp_who2`, `sp_MSforeachtable`, `sp_rename` and `sp_configure` — see [`catalog-views.md`](catalog-views.md).
-  Still unregistered → **Msg 2812** ("Could not find stored procedure '…'."): `sp_helprotect`, `sp_depends` (wants the dependency graph), `sp_helpstats`, `sp_helpfile` as a proc of its own (only `sp_helpdb`'s appended set reaches it), `sp_MSforeachdb` / `sp_MSforeach_worker`, the `sp_add*` management family.
+  Shipped so far: the `sp_help` family (`sp_help` / `sp_helptext` / `sp_helpindex` / `sp_helpconstraint` / `sp_helpdb` / `sp_helpfile` / `sp_helpstats` / `sp_helprotect` / `sp_helptrigger` / `sp_helpuser`), the ODBC/JDBC catalog set (`sp_tables` / `sp_columns_100` / `sp_pkeys` / `sp_statistics_100` / `sp_stored_procedures` / `sp_datatype_info_100`), `sp_spaceused`, `sp_who` / `sp_who2`, `sp_MSforeachtable` / `sp_MSforeachdb`, `sp_rename` and `sp_configure` — see [`catalog-views.md`](catalog-views.md).
+  Still unregistered → **Msg 2812** ("Could not find stored procedure '…'."): `sp_depends` (wants the dependency graph), `sp_MSforeach_worker` (the two `sp_MSforeach*` procs materialize their name lists rather than driving the global cursor it consumes), the `sp_add*` management family.
   A broad surface — each proc is its own result-shape contract over the catalog views.
   Ships piecemeal by popularity, not as a bundle.
 
@@ -167,36 +169,44 @@ The simulator accepting what real rejects is the more dangerous divergence direc
 This is the standing list: each entry names the error real raises that the simulator doesn't, and the linked deep-dive carries the detail.
 Entries are verified against the simulator, so one that no longer reproduces is removed rather than re-worded.
 
-- **Cross-collation comparison / concatenation binds per row, not at compile time** — `c1.x = c2.x` across differently-collated columns raises Msg 468 once a row is evaluated, but the same statement over an **empty** rowset passes silently where real rejects it during compilation (probe-confirmed: real's is an uncatchable bind-time failure).
-  Set operations bind at compile time and match real exactly; this is the residual, and closing it means carrying collation through the static type path at every comparison site.
+- **`CONCAT(a, b)` doesn't resolve its operands' collations** — real raises **Msg 451**, a message of its own distinct from `+`'s Msg 457: `Cannot resolve collation conflict between "R" and "L" in concat operator occurring in SELECT statement column 1.` (no leading *the*, and it names the projection ordinal the expression node doesn't know).
+  The variadic form silently picks a collation; `+` and `||` both bind.
   → [`collations.md`](collations.md#known-gaps).
 - **Statement-permission gates stop at the modeled set** — CREATE TABLE / VIEW / PROCEDURE / FUNCTION / SEQUENCE / ROLE / USER / SCHEMA, ALTER TABLE, DROP TABLE and DROP USER are checked; other CREATE / ALTER / DROP statements run unchecked, as does `ALTER` / `CREATE OR ALTER` of an existing module.
   → [`permissions.md`](permissions.md#known-gaps).
 - **Non-Framework CLR assemblies load** — real resolves every `AssemblyRef` against a fixed .NET Framework catalog and raises **Msg 6503** otherwise (probe-confirmed for .NET 10 and for .NET Standard 2.0); the simulator runs on .NET so all of them bind, which is also what lets the tests emit a fixture assembly without a Framework toolchain.
   → [`clr-assemblies.md`](clr-assemblies.md#divergences).
-- **`REGEXP_LIKE` isn't reserved at compatibility level 170** — detail under the Django shakedown above; closing it belongs with the native predicate.
-- **A constant `ORDER BY` term inside `OVER` / `WITHIN GROUP` is accepted** — real raises **Msg 5309** (`Windowed functions, aggregates and NEXT VALUE FOR functions do not support constants as ORDER BY clause expressions.`) for `OVER (ORDER BY 'x')` and `WITHIN GROUP (ORDER BY 'x')`; the statement-level ORDER BY's Msg 408 gate ships and the same `Expression.IsWrittenConstant` predicate would drive this one.
-  Two folded shapes escape the statement-level gate as well: a deterministic scalar call over literals (`ABS(-1)`, `LEN('abc')`) and `CASE` / `IIF` over literal arms, both of which real folds to a constant and rejects.
-  → [`query.md`](query.md#constant-terms-msg-408-and-bare-variables-msg-1008).
-- **Module bodies aren't bound at CREATE** — real compiles the body at `CREATE PROCEDURE` / `FUNCTION` and raises whatever the binder finds (probe-confirmed: **Msg 10700** for a body that writes its own READONLY TVP, **Msg 207** for an invalid column, **Msg 8116** for a legacy LOB in a string scalar — and the module is not created), deferring only *missing-object* resolution.
-  The simulator re-tokenizes the body at first EXEC, so all of those surface there instead.
-  The two module-level rules that are checked at CREATE both ship: **Msg 352** for a TVP parameter declared without `READONLY`, and **Msg 111** for a CREATE that isn't first in its batch (per-kind state bytes included).
-  → [`table-valued-parameters.md`](table-valued-parameters.md#fidelity-gaps-remaining), [`programmable.md`](programmable.md).
-- **The legacy-LOB string-scalar gate runs per row** — `SELECT LEN(nt) FROM t` raises Msg 8116 as real does, but only once a row reaches the expression, so the same statement over an **empty** rowset passes silently where real rejects it at compile time.
-  Same shape as the cross-collation entry above, and closing it means carrying the rule through the static type path.
-  → [`scalars.md`](scalars.md#legacy-lob-arguments).
-- **Non-integer id / style arguments aren't type-rejected** — real answers **Msg 8116** naming the type (`Argument data type numeric is invalid for argument 1 of columnproperty function.`) for a `numeric` / `float` / `money` / `bit` / `varbinary` argument at `COLUMNPROPERTY` / `INDEXPROPERTY` / `INDEXKEY_PROPERTY`'s first argument and at `CONVERT`'s style; the simulator converts it and reports only the conversion outcome.
-  The **bit-manipulation family does gate its arguments** this way, and every out-of-range argument now raises a real error rather than leaking .NET's — see [`scalars.md`](scalars.md#integer-arguments-outside-the-parameters-range).
-  Closing the rest is worth pairing with the literal-typing divergence beside it (real types `3000000000` as `numeric(10, 0)`, the simulator as `bigint`), since the gate only changes the answer for a bare literal once that matches.
+- **An aggregate whose only column reference doesn't resolve locally isn't bound** — `HAVING MAX(nosuchcol) = 1` is taken for an [aggregate over an enclosing query](#unbuilt-feature-areas), so it raises `NotSupportedException`, which a module bind swallows rather than refusing a module real accepts — real reports **Msg 207 at CREATE**.
+  The rest of that family closed: `WHERE` / `HAVING` / a `MERGE`'s `ON` / the value side of a `SET` bind through the static type path, carrying the collation and legacy-LOB rules with them.
+  Capturing (source, ordinal) bindings at parse rather than re-resolving by name is still what [`sys.sql_expression_dependencies`](#unbuilt-feature-areas) wants.
+  → [`programmable.md`](programmable.md#divergences), [`collations.md`](collations.md#compile-time-binding).
+- **A module body reports one binder error, not all of them** — real emits every Msg 207 the body contains (probed: two statements, two errors) before refusing the CREATE; the simulator throws on the first.
+  Worth pairing with a wider "collect rather than throw" pass if one is ever attempted; on its own it changes only how much a developer sees per round trip.
+  → [`programmable.md`](programmable.md#divergences).
+- **Malformed JSON input swallowed on the lax paths** — real raises **Msg 13609** ("JSON text is not properly formatted. Unexpected character '<c>' is found at position <n>.") whenever the *document* argument doesn't parse, regardless of the path's lax/strict prefix, and it counts a root-level JSON scalar (`'1'`, `'"abc"'`) as not parsing; the simulator answers NULL (0 for `JSON_PATH_EXISTS`) under lax across `JSON_VALUE` / `JSON_QUERY` / `JSON_MODIFY` / `JSON_PATH_EXISTS`.
+  Closing it needs the position-bearing message text as well as the object-or-array root rule; `ISJSON` already matches.
+  → [`json.md`](json.md).
+- **A module body's shape rules stay unchecked** — **Msg 455** (a function's last statement must be `RETURN`), **Msg 444** (a body `SELECT` returning to the client) and **Msg 443** (a side-effecting operator inside a function) are all CREATE-time on real and absent here, so a function real refuses is created.
+  These want body-shape analysis rather than a parse, which is why the body bind didn't pick them up; Msg 178's companion rule does ship.
+  → [`programmable.md`](programmable.md#multi-statement-table-valued-functions).
 Tracked elsewhere: the recursive-CTE construct restrictions (Msg 460 / 461 / 462 / 467) now ship — see [`ctes.md`](ctes.md#recursive-member-restrictions).
+Integer-literal typing and the Msg 8116 id / style argument gates that depend on it now ship too — see [`arithmetic.md`](arithmetic.md#integer-literals-past-ints-range-type-numericdigit_count-0) and [`scalars.md`](scalars.md#gated-argument-slots).
+So does compile-time binding of predicates: a cross-collation comparison / unification (Msg 468 / 457), a legacy-LOB string-scalar argument (Msg 8116) and an unknown column (Msg 207) now all report over an **empty** rowset and at CREATE of a module — see [`collations.md`](collations.md#compile-time-binding).
 
 ## Fidelity gaps in shipped behavior
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
-- **Per-object creation-time `QUOTED_IDENTIFIER` capture not modeled** — real SQL Server stamps procedures / views / triggers / tables with the QI setting in effect at CREATE (`sys.sql_modules.uses_quoted_identifier`, `OBJECTPROPERTY(id, 'IsQuotedIdentOn')`) and executes bodies under the captured setting; the simulator re-parses bodies under the executing session's current setting.
-  See [`grammar.md`](grammar.md).
-  Rare legacy-pattern impact.
+- **The six non-`QUOTED_IDENTIFIER` components of the Msg 1934 SET-option gate** — real also requires `ANSI_NULLS` / `ANSI_PADDING` / `ANSI_WARNINGS` / `ARITHABORT` / `CONCAT_NULL_YIELDS_NULL` ON and `NUMERIC_ROUNDABORT` OFF, listing every offending name comma-separated in one message; the QI component ships alone.
+  Each already has a session field on `SimulatedDbConnection`, so the work is collecting names in `RejectIncorrectSetOptionsForWrite` rather than new plumbing.
+  Low urgency: the four ON-by-default ones are only turned off deliberately, and the two OFF-by-default ones already match what the gate wants.
+  See [`grammar.md`](grammar.md#set-option-gates--msg-1934--msg-1935).
+- **`SELECT … WITH (NOEXPAND)` over an indexed view under `QUOTED_IDENTIFIER OFF`** — real raises Msg 1934; the simulator accepts it, because `NOEXPAND` parses into the table-hint accept-list with no field on `Selection.TableHintInfo` to carry it to the gate.
+  The rest of the Msg 1934 matrix ships.
+- **Creation-time `QUOTED_IDENTIFIER` capture on CHECK / DEFAULT constraints** — real answers `OBJECTPROPERTY(<constraint>, 'IsQuotedIdentOn')` with the capture (0 for one created under OFF); the simulator's `ObjectProperty.FindObject` doesn't resolve constraint object ids at all, so the property answers NULL.
+  Metadata-only — constraint definitions are stored normalized at CREATE and never re-parsed, so nothing behavioral rides on it.
+  Module and table capture ship — see [`grammar.md`](grammar.md#per-object-creation-time-capture).
+- **`ALTER TABLE … ADD c AS <expr> PERSISTED` as a batch's final token** raises Msg 102 near `PERSISTED` — `ParseComputedSuffix` advances with `MoveNextRequired` after the keyword, so the form needs a following token; a trailing `;` or another column in the list parses fine.
 - **`GROUP BY '<literal>'` binds before the trailing token parses** — the simulator raises Msg 164 on the constant grouping term where real parses the whole clause first and reports Msg 102 at the stray token after it (`group by 'a' 'b'`).
   An ordering divergence between binding and parsing, surfaced while probing the Msg 102 token-rendering fix; the `group by c 'b'` shape agrees on both sides.
 - **Skip-mode deferred name resolution — DML target tables not placeholder-continued** — the skip-mode parse-continuation fix substitutes placeholder metadata for a missing *FROM-clause table* or *schema-qualified function* so an un-taken branch parses to completion and is discarded whole (killing the orphaned-`ELSE` cascade — see [`control-flow.md`](control-flow.md)).
@@ -217,6 +227,9 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   All are metadata-only over-claims (nullable is the safe direction); low demand, no clean rule.
 - **`OBJECTPROPERTY(id, 'IsDeterministic')` and the `CAST` / `CONVERT` style rule** — the module walk ships (schema-binding precondition, nondeterministic-built-in table, transitive module references — see [`catalog-views.md`](catalog-views.md#isdeterministic)), but it classifies conversions between a date/time type and a character string as deterministic where real keys off the style argument.
   Closing it needs the conversion's source and target types, which the token-level body scan doesn't carry; the probed style table is recorded in `catalog-views.md` for whoever picks it up.
+- **`COUNT(*) OVER (… ROWS …)` without ORDER BY** — real accepts a frame with no ordering for `COUNT(*)` alone and applies it (probe-confirmed 2026-08-01: `COUNT(*) OVER (PARTITION BY g ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` runs, while `COUNT(v)` / `SUM(v)` / `MIN(v)` in the same shape raise Msg 10756); the simulator raises Msg 10756 for the whole family.
+  An unexplained real-side exemption rather than a rule — closing it means special-casing the star operand in `ParseOptionalFrameSpec`'s ORDER BY gate.
+  See [`query.md`](query.md).
 - **Runtime-error streaming shape** — a per-row runtime error (`SELECT 10/0`, arithmetic overflow) is emitted by real *after* COLMETADATA, so a streaming client surfaces it while draining rows; the simulator raises it at execute-time before any COLMETADATA, so the client sees it from the initial execute call.
   Message / number / class match; only the wire position differs.
   Deferred — deep change to statement execution ordering, low practical impact.

@@ -84,4 +84,21 @@ internal sealed class DatabasePrincipal(
     public readonly bool IsFixedRole = isFixedRole;
 
     public readonly DateTime CreateDate = createDate;
+
+    /// <summary>
+    /// The <c>sys.database_principals.default_schema_name</c> value, non-null
+    /// only for an application role (<c>CREATE APPLICATION ROLE … [DEFAULT_SCHEMA
+    /// = s]</c>, defaulting to <c>dbo</c>). Every other principal projects NULL,
+    /// the shape the catalog view has always had.
+    /// </summary>
+    public string? DefaultSchemaName;
+
+    /// <summary>
+    /// The application role's password hash (<c>CREATE / ALTER APPLICATION ROLE
+    /// … WITH PASSWORD</c>), verified by <c>sp_setapprole</c>. Null for every
+    /// other principal kind. Uses the same legacy <c>0x0200</c> single-pass
+    /// format as <see cref="ServerLogin"/> — never persisted, so PBKDF2
+    /// hardening would only bill activation.
+    /// </summary>
+    public byte[]? PasswordHash;
 }

@@ -107,6 +107,13 @@ partial class Simulation
             checkConstraints: function.CheckConstraints,
             isTableVariable: true);
 
+        // The body parses under the QUOTED_IDENTIFIER captured at CREATE, not
+        // the caller's. Swapping the session flag (rather than seeding the
+        // child parser) is what carries it to everything else that reads the
+        // connection — dynamic SQL, the plan-cache key, the Msg 1934 gates.
+        // Restored in the finally below; see docs/claude/grammar.md.
+        var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+        connection.QuotedIdentifiers = function.UsesQuotedIdentifier;
         // MS-TVF body batches have no UdfFrame / ProcFrame — see Msg 178 note
         // on the dedicated BatchContext constructor's remarks.
         // Body errors attribute to the outer invoking statement (probe-
@@ -131,6 +138,7 @@ partial class Simulation
         finally
         {
             connection.NestingLevel--;
+            connection.QuotedIdentifiers = savedQuotedIdentifiers;
         }
 
         // Yield the accumulated @r rows. Iterating the table-variable's Heap

@@ -60,7 +60,11 @@ internal sealed class StringEscape : Expression
         return SqlValue.FromNVarchar(SqlType.NVarcharMax, sb.ToString());
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = StringScalars.BindArgument(this.textArg, batch, resolveColumnType, "string_escape");
+        return SqlType.NVarcharMax;
+    }
 
     internal override string DebugDisplay() => $"STRING_ESCAPE({this.textArg.DebugDisplay()}, {this.modeArg.DebugDisplay()})";
 }
@@ -118,7 +122,20 @@ internal sealed class Translate : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(this.inputArg.GetSqlType(batch, resolveColumnType));
+        ResolveResultType(BindArguments(batch, resolveColumnType));
+
+    /// <summary>
+    /// Compile-time mirror of the three <c>RejectLegacyLob</c> calls in
+    /// <see cref="Run"/>, keeping the same argument numbering. Returns the
+    /// input's type, which the result type derives from.
+    /// </summary>
+    private SqlType BindArguments(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var inputType = StringScalars.BindArgument(this.inputArg, batch, resolveColumnType, "translate");
+        _ = StringScalars.BindArgument(this.charsArg, batch, resolveColumnType, "translate", argumentIndex: 2);
+        _ = StringScalars.BindArgument(this.translationsArg, batch, resolveColumnType, "translate", argumentIndex: 3);
+        return inputType;
+    }
 
     /// <summary>
     /// TRANSLATE returns a value of the same length family as its input. A

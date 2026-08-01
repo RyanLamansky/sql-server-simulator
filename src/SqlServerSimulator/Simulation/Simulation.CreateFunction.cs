@@ -231,6 +231,14 @@ partial class Simulation
         if (!isAlter && !createOrAlter)
             PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
 
+        // Bind the body before the schema dict is touched — see
+        // BindModuleBodyAtCreate. Value-form RETURN raises Msg 178 from here,
+        // which is where real reports it too.
+        context.Simulation.BindMultiStatementTvfBodyAtCreate(
+            context, functionName.Leaf, parameters, returnVariableName, outputColumns,
+            keyConstraints, checkConstraints, bodyText,
+            CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart));
+
         var replaced = ResolveFunctionAlterTarget<MultiStatementTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
 
         if (isSchemaBound)
@@ -250,6 +258,7 @@ partial class Simulation
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
             IsSchemaBound = isSchemaBound,
+            UsesQuotedIdentifier = context.QuotedIdentifiers,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -397,6 +406,12 @@ partial class Simulation
         if (!isAlter && !createOrAlter)
             PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
 
+        // Bind the body before the schema dict is touched — see
+        // BindModuleBodyAtCreate.
+        context.Simulation.BindScalarFunctionBodyAtCreate(
+            context, functionName.Leaf, parameters, returnType, bodyText,
+            CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart));
+
         var replaced = ResolveFunctionAlterTarget<ScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
 
         if (isSchemaBound)
@@ -415,6 +430,7 @@ partial class Simulation
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
             IsSchemaBound = isSchemaBound,
+            UsesQuotedIdentifier = context.QuotedIdentifiers,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -500,6 +516,7 @@ partial class Simulation
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
             IsSchemaBound = isSchemaBound,
+            UsesQuotedIdentifier = context.QuotedIdentifiers,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;

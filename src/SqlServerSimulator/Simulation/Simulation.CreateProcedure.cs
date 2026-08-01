@@ -153,6 +153,19 @@ partial class Simulation
         if (!isAlter && !createOrAlter)
             PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE PROCEDURE", procName.Leaf, schema);
 
+        // Newlines before the body start, so body errors — at bind time below
+        // and per call later — report a line relative to the whole CREATE
+        // statement (probe-confirmed).
+        var bodyLineOffset = CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart);
+
+        // Bind the body before anything touches the schema dict, so a binder
+        // error leaves the procedure uncreated and an ALTER's previous body
+        // standing. Ahead of the name-collision gates too: probe-confirmed that
+        // real reports a body error rather than Msg 2714 for a plain CREATE over
+        // an existing name, and rather than Msg 208 for a bare ALTER of a name
+        // that doesn't exist.
+        context.Simulation.BindProcedureBodyAtCreate(context, procName.Leaf, parameters, bodyText, bodyLineOffset);
+
         // CREATE-only (no OR ALTER) collides with any existing object of the
         // same name (procs share the namespace with tables / views /
         // functions); either ALTER leg over a name another kind holds is Msg
@@ -163,8 +176,6 @@ partial class Simulation
             context, schema, procName, isAlter, createOrAlter,
             schema.Procedures.TryGetValue(procName.Leaf, out var existing) ? existing : null);
 
-        // Newlines before the body start, so per-call body errors report a
-        // line relative to the whole CREATE statement (probe-confirmed).
         var procedure = new Procedure(
             schema,
             procName.Leaf,
@@ -174,10 +185,11 @@ partial class Simulation
             [.. parameters],
             bodyText,
             createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow,
-            bodyLineOffset: CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart))
+            bodyLineOffset: bodyLineOffset)
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
+            UsesQuotedIdentifier = context.QuotedIdentifiers,
         };
         if (replaced is not null)
             procedure.ModifyDate = context.Batch.CurrentStatement.UtcNow;

@@ -581,8 +581,8 @@ public sealed class CommonTableExpressionTests
     /// <summary>
     /// Every parenthesized query position refuses a prefix — real answers
     /// Msg 156 (followed by Msg 319 and Msg 102, of which the simulator raises
-    /// the first). The scalar UDF's <c>RETURN (…)</c> is an expression, so it
-    /// creates and fails at invocation.
+    /// the first). The scalar UDF's <c>RETURN (…)</c> is an expression in the
+    /// body, so the CREATE's body bind is where it fails.
     /// </summary>
     [TestMethod]
     public void CtePrefix_InParenthesizedQueryPosition_Raises156()
@@ -593,7 +593,7 @@ public sealed class CommonTableExpressionTests
         _ = sim.AssertSqlError("select (with c as (select max(id) m from dbo.b) select m from c)", 156);
         _ = sim.AssertSqlError("select id from dbo.b where id in (with c as (select id from dbo.b) select id from c)", 156);
 
-        sim.ExecuteBatches("create function dbo.f() returns int as begin return (with c as (select id from dbo.b) select max(id) from c) end");
-        _ = sim.AssertSqlError("select dbo.f()", 156);
+        _ = sim.AssertSqlError(
+            "create function dbo.f() returns int as begin return (with c as (select id from dbo.b) select max(id) from c) end", 156);
     }
 }

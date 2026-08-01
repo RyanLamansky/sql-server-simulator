@@ -153,15 +153,16 @@ partial class Simulation
         if (batch.IsSkipping)
             return null;
 
-        // Resolve updatability + effective sensitivity. A non-updatable query
-        // (no single base table) is forced to STATIC, as is an explicit
-        // STATIC / INSENSITIVE / FAST_FORWARD request. Otherwise honor the
-        // requested type; an unspecified type defaults to KEYSET when SCROLL
-        // was asked for and DYNAMIC for the forward-only default. A base
-        // table without a unique key is fine — cursor identity rides the
-        // heap's stable <c>(page, slot)</c> address, not the row's values.
-        var baseTable = selection.CursorBaseTable;
-        var updatable = baseTable is not null;
+        // Resolve updatability + effective sensitivity. A query whose FROM the
+        // cursor can't re-fold (no CursorSourcePlan) is forced to STATIC, as is
+        // an explicit STATIC / INSENSITIVE / FAST_FORWARD request. Otherwise
+        // honor the requested type; an unspecified type defaults to KEYSET when
+        // SCROLL was asked for and DYNAMIC for the forward-only default. A base
+        // table without a unique key is fine — cursor identity rides the heap's
+        // stable (page, slot) addresses, not the row's values. A JOIN is
+        // updatable exactly like a single table (probe-confirmed).
+        var cursorPlan = selection.CursorPlan;
+        var updatable = cursorPlan is not null;
 
         var sensitivity = !updatable || reqStatic || reqFastForward
             ? CursorSensitivity.Static
@@ -208,7 +209,7 @@ partial class Simulation
             sensitivity,
             scrollable,
             readOnly,
-            updatable ? baseTable : null,
+            cursorPlan?.Tables ?? [],
             concurrency,
             forUpdateColumns);
 
@@ -526,13 +527,15 @@ partial class Simulation
     /// <c>WHERE CURRENT OF</c> clause (cursor on entry: the <c>CURRENT</c>
     /// keyword) and validates the cursor against the DML target
     /// <paramref name="table"/>: Msg 16929 when the cursor is read-only,
-    /// Msg 16931 when it isn't positioned on a live row (or is positioned on a
-    /// different table), Msg 16932 when a positioned UPDATE assigns a column
-    /// outside the cursor's <c>FOR UPDATE OF</c> list
+    /// Msg 16933 when the cursor doesn't read that table (or a
+    /// <c>FOR UPDATE OF</c> list names none of its columns), Msg 16931 when it
+    /// isn't positioned on a live row, Msg 16947 when the table's slot is the
+    /// NULL-extended side of an outer join, Msg 16932 when a positioned UPDATE
+    /// assigns a column outside the cursor's <c>FOR UPDATE OF</c> list
     /// (<paramref name="assignedColumns"/>, null for DELETE), and the
-    /// optimistic-conflict chain (Msg 16947) when an OPTIMISTIC cursor's current
-    /// row was modified out-of-band. Returns the validated cursor whose
-    /// <see cref="Cursor.CurrentRid"/> identifies the row to mutate.
+    /// optimistic-conflict chain (Msg 16947 + 16934) when an OPTIMISTIC cursor's
+    /// current row was modified out-of-band. Returns the validated cursor whose
+    /// <see cref="Cursor.CurrentRids"/> identifies the rows to mutate.
     /// </summary>
     internal static Cursor ParseWhereCurrentOf(ParserContext context, HeapTable table, IReadOnlyList<string>? assignedColumns = null)
     {
@@ -546,8 +549,27 @@ partial class Simulation
         var cursor = ResolveCursor(batch, reference);
         if (cursor.ReadOnly)
             throw SimulatedSqlException.CursorIsReadOnly();
-        if (cursor.CurrentRid is null || !ReferenceEquals(cursor.BaseTable, table))
+
+        // The DML target must be one of the cursor's own FROM sources — real
+        // resolves positioned DML against the cursor's tables, so naming an
+        // unrelated table (or the base table behind a view the cursor reads) is
+        // Msg 16933, not "no current row". A FOR UPDATE OF list further narrows
+        // the updatable tables to those owning a listed column.
+        var slot = cursor.IndexOfBaseTable(table);
+        if (slot < 0 || !cursor.IsTableUpdatable(table, batch))
+            throw SimulatedSqlException.CursorTableNotIncluded();
+
+        // A self-join reaches the same table through several slots; real binds
+        // the first one and says so through the severity-0 Msg 16961.
+        if (cursor.CountBaseTable(table) > 1)
+            batch.AppendInfoError(@class: 0, state: 1, number: 16961, "One or more FOR UPDATE columns have been adjusted to the first instance of their table in the query.");
+
+        if (cursor.CurrentRids is not { } rids)
             throw SimulatedSqlException.CursorNoCurrentRow();
+        // The cursor is on a row, but this table's slot is NULL-extended (the
+        // unmatched side of an outer join), so there is nothing to mutate.
+        if (rids[slot] is null)
+            throw SimulatedSqlException.CursorNoRowsAffected();
 
         // FOR UPDATE OF (…): every assigned column must be in the list.
         if (assignedColumns is not null)
@@ -565,12 +587,14 @@ partial class Simulation
     }
 
     /// <summary>
-    /// True when the heap row at <paramref name="rid"/> is the one the
-    /// positioned <paramref name="cursor"/> is sitting on — i.e. the row's
-    /// stable address equals <see cref="Cursor.CurrentRid"/>.
+    /// True when the row of <paramref name="table"/> at <paramref name="rid"/>
+    /// is the one the positioned <paramref name="cursor"/> is sitting on — i.e.
+    /// the stable address recorded for that table's first FROM slot in
+    /// <see cref="Cursor.CurrentRids"/>.
     /// </summary>
-    internal static bool CursorRowMatches(Cursor cursor, (int Page, int Slot) rid) =>
-        cursor.CurrentRid is { } current && current.Equals(rid);
+    internal static bool CursorRowMatches(Cursor cursor, HeapTable table, (int Page, int Slot) rid) =>
+        cursor.IndexOfBaseTable(table) is var slot && slot >= 0
+            && cursor.CurrentRids is { } rids && rids[slot] is { } current && current.Equals(rid);
 
     private static readonly (string Word, FetchDirection Direction)[] FetchDirectionWords =
     [

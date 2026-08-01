@@ -46,6 +46,7 @@ internal sealed class IndexKeyProperty : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var objectIdValue = this.objectIdArg.Run(runtime);
+        ScalarArguments.RequireIntegerArgument(objectIdValue, this.objectIdArg.ResultReportsNumeric, 1, "indexkey_property");
         var indexIdValue = this.indexIdArg.Run(runtime);
         var keyIdValue = this.keyIdArg.Run(runtime);
         var propValue = this.propertyArg.Run(runtime);

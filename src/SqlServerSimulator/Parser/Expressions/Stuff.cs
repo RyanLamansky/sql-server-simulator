@@ -79,8 +79,8 @@ internal sealed class Stuff : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
         ResolveResultType(
-            StringScalars.ResolveResultType(this.input.GetSqlType(batch, resolveColumnType), batch),
-            StringScalars.ResolveResultType(this.replacement.GetSqlType(batch, resolveColumnType), batch),
+            StringScalars.ResolveResultType(StringScalars.BindCoercedArgument(this.input, batch, resolveColumnType, "stuff"), batch),
+            StringScalars.ResolveResultType(StringScalars.BindCoercedArgument(this.replacement, batch, resolveColumnType, "stuff", argumentIndex: 4), batch),
             batch);
 
     /// <summary>

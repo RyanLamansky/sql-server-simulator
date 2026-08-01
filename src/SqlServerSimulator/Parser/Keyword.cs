@@ -136,6 +136,12 @@ enum Keyword
     ReadText,
     Reconfigure,
     References,
+    // Reserved only at compatibility level 170 (SQL Server 2025), where the
+    // native REGEXP_LIKE predicate ships. UnquotedString.CheckReserved gates
+    // this member on the active database's level so a 160-and-below database
+    // still accepts the name as an identifier — which is how mssql-django's
+    // CLR UDF spelling dbo.REGEXP_LIKE(...) resolves there.
+    Regexp_Like,
     Replication,
     Restore,
     Restrict,

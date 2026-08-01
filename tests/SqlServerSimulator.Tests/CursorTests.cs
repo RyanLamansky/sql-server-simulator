@@ -337,48 +337,6 @@ public sealed class CursorTests
             """));
 
     [TestMethod]
-    public void MultiSourceCursor_ForcedStatic_KnownDivergence()
-    {
-        // KNOWN DIVERGENCE (probed against SQL Server 2025): a cursor whose
-        // source isn't a direct single base table — JOIN, derived table, or
-        // view — is DYNAMIC on the real server (@@CURSOR_ROWS = -1, sees
-        // mid-loop changes, WHERE CURRENT OF updates the named base table).
-        // The simulator forces it to a read-only STATIC snapshot: the rowset
-        // is correct, but @@CURSOR_ROWS reports the materialized count and a
-        // base change after OPEN isn't reflected. See docs/claude/cursors.md.
-        var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("""
-            create table a (id int primary key, name varchar(20));
-            create table b (id int primary key, a_id int, tag varchar(20));
-            insert a values (1,'x'),(2,'y');
-            insert b values (10,1,'p'),(11,2,'q');
-            """);
-        AreEqual(2, sim.ExecuteScalar<int>("""
-            declare c cursor for select a.name, b.tag from a join b on b.a_id = a.id;
-            open c;
-            select @@cursor_rows
-            """));
-        // Snapshot taken at OPEN ignores a mid-loop UPDATE to a joined column.
-        AreEqual("p;q;", new Simulation().ExecuteScalar("""
-            create table a (id int primary key, name varchar(20));
-            create table b (id int primary key, a_id int, tag varchar(20));
-            insert a values (1,'x'),(2,'y');
-            insert b values (10,1,'p'),(11,2,'q');
-            declare @name varchar(20), @tag varchar(20), @log varchar(200) = '';
-            declare c cursor for select a.name, b.tag from a join b on b.a_id = a.id order by b.id;
-            open c;
-            fetch next from c into @name, @tag;
-            update b set tag = 'CHANGED';
-            while @@fetch_status = 0
-            begin
-              set @log = @log + @tag + ';';
-              fetch next from c into @name, @tag;
-            end
-            select @log
-            """));
-    }
-
-    [TestMethod]
     public void ReopenAfterClose_RestartsFromFirstRow()
         => AreEqual(1, ExecuteScalar<int>(Seed + """
             declare @id int;

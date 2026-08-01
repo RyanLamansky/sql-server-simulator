@@ -187,4 +187,331 @@ public sealed class ServerRoleAndScopeTests
         var ex = new Simulation().AssertSqlError("use master; grant view server state to nosuchlogin", 15151);
         Contains("Cannot find the login 'nosuchlogin'", ex.Message);
     }
+
+    // ---- ON SERVER:: / ON LOGIN:: securables ----
+
+    [TestMethod]
+    public void OnServerSecurable_IsAnAliasOfTheOnLessForm()
+    {
+        // Real accepts any name after SERVER:: and stores the ordinary
+        // class-100 row (probe-confirmed — the name is ignored).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login app with password = 'P@ss1word'");
+        _ = sim.ExecuteNonQuery("use master; grant view server state on server::anything to app");
+        AreEqual(1, sim.ExecuteScalar(
+            "select count(*) from sys.server_permissions where class = 100 and major_id = 0 and type = 'VWSS' and state = 'G'"));
+    }
+
+    [TestMethod]
+    public void OnLoginSecurable_ProjectsClass101()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login target with password = 'P@ss1word'; create login grantee with password = 'P@ss1word'");
+        _ = sim.ExecuteNonQuery("use master; grant impersonate on login::target to grantee");
+        AreEqual((byte)101, sim.ExecuteScalar("select class from sys.server_permissions where type = 'IM'"));
+        AreEqual("SERVER_PRINCIPAL", ((string)sim.ExecuteScalar(
+            "select class_desc from sys.server_permissions where type = 'IM'")!).Trim());
+        // major_id is the target login's principal_id, not the grantee's.
+        AreEqual(sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'target'"),
+            sim.ExecuteScalar("select major_id from sys.server_permissions where type = 'IM'"));
+        AreEqual(sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'grantee'"),
+            sim.ExecuteScalar("select grantee_principal_id from sys.server_permissions where type = 'IM'"));
+    }
+
+    [TestMethod]
+    public void OnLoginSecurable_TypeCodesMatchTheCatalog()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login target with password = 'P@ss1word'; create login grantee with password = 'P@ss1word'");
+        _ = sim.ExecuteNonQuery("""
+            use master;
+            grant alter on login::target to grantee;
+            grant view definition on login::target to grantee
+            """);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_permissions where class = 101 and type = 'AL'"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_permissions where class = 101 and type = 'VW'"));
+        AreEqual("VIEW DEFINITION", sim.ExecuteScalar("select permission_name from sys.server_permissions where type = 'VW'"));
+    }
+
+    [TestMethod]
+    public void OnLoginSecurable_UnknownLogin_Raises15151()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login grantee with password = 'P@ss1word'");
+        var ex = sim.AssertSqlError("use master; grant impersonate on login::ghost to grantee", 15151);
+        Contains("Cannot find the login 'ghost'", ex.Message);
+    }
+
+    [TestMethod]
+    public void OnLoginSecurable_OutsideMaster_Raises4621()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login target with password = 'P@ss1word'; create login grantee with password = 'P@ss1word'");
+        _ = sim.AssertSqlError("grant impersonate on login::target to grantee", 4621);
+    }
+
+    [TestMethod]
+    public void OnLoginSecurable_Revoke_RemovesOnlyItsOwnRow()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create login a with password = 'P@ss1word';
+            create login b with password = 'P@ss1word';
+            create login grantee with password = 'P@ss1word'
+            """);
+        _ = sim.ExecuteNonQuery("""
+            use master;
+            grant impersonate on login::a to grantee;
+            grant impersonate on login::b to grantee;
+            revoke impersonate on login::a from grantee
+            """);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_permissions where class = 101 and type = 'IM'"));
+        AreEqual(sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'b'"),
+            sim.ExecuteScalar("select major_id from sys.server_permissions where class = 101 and type = 'IM'"));
+    }
+
+    // ---- EXECUTE AS LOGIN enforcement ----
+
+    /// <summary>Two logins, each with a database user, so EXECUTE AS LOGIN can map either way.</summary>
+    private static Simulation TwoMappedLogins()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create login caller with password = 'P@ss1word';
+            create login target with password = 'P@ss1word';
+            create user ucaller for login caller;
+            create user utarget for login target
+            """);
+        return sim;
+    }
+
+    [TestMethod]
+    public void ExecuteAsLogin_WithoutImpersonate_Raises15406()
+    {
+        var ex = TwoMappedLogins().AssertSqlError(
+            "execute as user = 'ucaller'; execute as login = 'target'", 15406);
+        Contains("Cannot execute as the server principal", ex.Message);
+    }
+
+    [TestMethod]
+    public void ExecuteAsLogin_WithImpersonateOnLogin_Succeeds()
+    {
+        var sim = TwoMappedLogins();
+        _ = sim.ExecuteNonQuery("use master; grant impersonate on login::target to caller");
+        AreEqual("target", sim.ExecuteScalar(
+            "execute as user = 'ucaller'; execute as login = 'target'; select suser_name()"));
+    }
+
+    [TestMethod]
+    public void ExecuteAsLogin_WithImpersonateAnyLogin_Succeeds()
+    {
+        var sim = TwoMappedLogins();
+        _ = sim.ExecuteNonQuery("use master; grant impersonate any login to caller");
+        AreEqual("target", sim.ExecuteScalar(
+            "execute as user = 'ucaller'; execute as login = 'target'; select suser_name()"));
+    }
+
+    [TestMethod]
+    public void ExecuteAsLogin_DenyOnLogin_BeatsImpersonateAnyLogin()
+    {
+        // Probe-confirmed: a class-101 DENY overrides the class-100 blanket grant.
+        var sim = TwoMappedLogins();
+        _ = sim.ExecuteNonQuery("""
+            use master;
+            grant impersonate any login to caller;
+            deny impersonate on login::target to caller
+            """);
+        _ = sim.AssertSqlError("execute as user = 'ucaller'; execute as login = 'target'", 15406);
+    }
+
+    [TestMethod]
+    public void ExecuteAsLogin_ImpersonateViaServerRole_Succeeds()
+    {
+        var sim = TwoMappedLogins();
+        _ = sim.ExecuteNonQuery("""
+            use master;
+            create server role impersonators;
+            alter server role impersonators add member caller;
+            grant impersonate on login::target to impersonators
+            """);
+        AreEqual("target", sim.ExecuteScalar(
+            "execute as user = 'ucaller'; execute as login = 'target'; select suser_name()"));
+    }
+
+    [TestMethod]
+    public void ExecuteAsLogin_ControlOnLogin_CoversImpersonate()
+    {
+        var sim = TwoMappedLogins();
+        _ = sim.ExecuteNonQuery("use master; grant control on login::target to caller");
+        AreEqual("target", sim.ExecuteScalar(
+            "execute as user = 'ucaller'; execute as login = 'target'; select suser_name()"));
+    }
+
+    // ---- Server-principal metadata visibility ----
+
+    /// <summary>Three logins; only <c>caller</c> has a database user, so it is the session principal under test.</summary>
+    private static Simulation ThreeLogins()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create login caller with password = 'P@ss1word';
+            create login other1 with password = 'P@ss1word';
+            create login other2 with password = 'P@ss1word';
+            create user ucaller for login caller
+            """);
+        return sim;
+    }
+
+    [TestMethod]
+    public void RestrictedSession_SeesOnlyItsOwnLoginRow()
+    {
+        var sim = ThreeLogins();
+        AreEqual("caller", sim.ExecuteScalar(
+            "execute as user = 'ucaller'; select name from sys.server_principals where principal_id > 20"));
+        AreEqual(1, sim.ExecuteScalar(
+            "execute as user = 'ucaller'; select count(*) from sys.server_principals where principal_id > 20"));
+    }
+
+    [TestMethod]
+    public void RestrictedSession_StillSeesTheFixedBlock()
+        // sa (1) + public (2) + the 18 fixed server roles (3-20).
+        => AreEqual(20, ThreeLogins().ExecuteScalar(
+            "execute as user = 'ucaller'; select count(*) from sys.server_principals where principal_id <= 20"));
+
+    [TestMethod]
+    public void ViewDefinitionOnLogin_RevealsThatRow()
+    {
+        var sim = ThreeLogins();
+        _ = sim.ExecuteNonQuery("use master; grant view definition on login::other1 to caller");
+        AreEqual(2, sim.ExecuteScalar(
+            "execute as user = 'ucaller'; select count(*) from sys.server_principals where principal_id > 20"));
+        AreEqual(1, sim.ExecuteScalar(
+            "execute as user = 'ucaller'; select count(*) from sys.server_principals where name = 'other1'"));
+        AreEqual(0, sim.ExecuteScalar(
+            "execute as user = 'ucaller'; select count(*) from sys.server_principals where name = 'other2'"));
+    }
+
+    [TestMethod]
+    public void AlterOnLogin_AlsoRevealsThatRow()
+    {
+        var sim = ThreeLogins();
+        _ = sim.ExecuteNonQuery("use master; grant alter on login::other1 to caller");
+        AreEqual(1, sim.ExecuteScalar(
+            "execute as user = 'ucaller'; select count(*) from sys.server_principals where name = 'other1'"));
+    }
+
+    [TestMethod]
+    public void ViewAnyDefinition_RevealsEveryLogin()
+    {
+        var sim = ThreeLogins();
+        _ = sim.ExecuteNonQuery("use master; grant view any definition to caller");
+        AreEqual(3, sim.ExecuteScalar(
+            "execute as user = 'ucaller'; select count(*) from sys.server_principals where principal_id > 20"));
+    }
+
+    [TestMethod]
+    public void DenyOnLogin_ReHidesUnderABlanketGrant()
+    {
+        // Probe-confirmed: the class-101 DENY nullifies the class-100 reveal.
+        var sim = ThreeLogins();
+        _ = sim.ExecuteNonQuery("""
+            use master;
+            grant view any definition to caller;
+            deny view definition on login::other1 to caller
+            """);
+        AreEqual(0, sim.ExecuteScalar(
+            "execute as user = 'ucaller'; select count(*) from sys.server_principals where name = 'other1'"));
+        AreEqual(1, sim.ExecuteScalar(
+            "execute as user = 'ucaller'; select count(*) from sys.server_principals where name = 'other2'"));
+    }
+
+    [TestMethod]
+    public void SqlLogins_IsFilteredTheSameWay()
+    {
+        var sim = ThreeLogins();
+        AreEqual(1, sim.ExecuteScalar(
+            "execute as user = 'ucaller'; select count(*) from sys.sql_logins where principal_id > 20"));
+        _ = sim.ExecuteNonQuery("use master; grant view definition on login::other1 to caller");
+        AreEqual(2, sim.ExecuteScalar(
+            "execute as user = 'ucaller'; select count(*) from sys.sql_logins where principal_id > 20"));
+    }
+
+    [TestMethod]
+    public void ServerRoleMembership_RevealsTheRole()
+    {
+        var sim = ThreeLogins();
+        _ = sim.ExecuteNonQuery("use master; create server role srv1; alter server role srv1 add member caller");
+        AreEqual(1, sim.ExecuteScalar(
+            "execute as user = 'ucaller'; select count(*) from sys.server_principals where name = 'srv1'"));
+    }
+
+    [TestMethod]
+    public void DboSession_SeesEveryServerPrincipal()
+        => AreEqual(3, ThreeLogins().ExecuteScalar("select count(*) from sys.server_principals where principal_id > 20"));
+
+    // ---- Login DDL gating ----
+
+    [TestMethod]
+    public void CreateLogin_ByRestrictedPrincipal_Raises15247()
+    {
+        var ex = ThreeLogins().AssertSqlError(
+            "execute as user = 'ucaller'; create login zz with password = 'P@ss1word'", 15247);
+        AreEqual("User does not have permission to perform this action.", ex.Message);
+    }
+
+    [TestMethod]
+    public void CreateLogin_WithAlterAnyLogin_Succeeds()
+    {
+        var sim = ThreeLogins();
+        _ = sim.ExecuteNonQuery("use master; grant alter any login to caller");
+        AreEqual(1, sim.ExecuteScalar("""
+            execute as user = 'ucaller';
+            create login zz with password = 'P@ss1word';
+            revert;
+            select count(*) from sys.server_principals where name = 'zz'
+            """));
+    }
+
+    [TestMethod]
+    public void AlterLogin_ByRestrictedPrincipal_Raises15151()
+    {
+        var ex = ThreeLogins().AssertSqlError(
+            "execute as user = 'ucaller'; alter login other1 with password = 'P@ss2word'", 15151);
+        Contains("Cannot alter the login 'other1'", ex.Message);
+    }
+
+    [TestMethod]
+    public void DropLogin_ByRestrictedPrincipal_Raises15151()
+    {
+        var ex = ThreeLogins().AssertSqlError(
+            "execute as user = 'ucaller'; drop login other1", 15151);
+        Contains("Cannot drop the login 'other1'", ex.Message);
+    }
+
+    [TestMethod]
+    public void AlterLogin_WithAlterOnThatLogin_Succeeds()
+    {
+        var sim = ThreeLogins();
+        _ = sim.ExecuteNonQuery("use master; grant alter on login::other1 to caller");
+        _ = sim.ExecuteNonQuery("execute as user = 'ucaller'; alter login other1 with password = 'P@ss2word'");
+        // The unrelated login stays out of reach.
+        _ = sim.AssertSqlError("execute as user = 'ucaller'; alter login other2 with password = 'P@ss2word'", 15151);
+    }
+
+    [TestMethod]
+    public void DropLogin_WithAlterAnyLogin_Succeeds()
+    {
+        var sim = ThreeLogins();
+        _ = sim.ExecuteNonQuery("use master; grant alter any login to caller");
+        _ = sim.ExecuteNonQuery("execute as user = 'ucaller'; drop login other1");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.server_principals where name = 'other1'"));
+    }
+
+    [TestMethod]
+    public void DboLoginDdl_IsUngated()
+    {
+        var sim = ThreeLogins();
+        _ = sim.ExecuteNonQuery("alter login other1 with password = 'P@ss2word'; drop login other2");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.server_principals where name = 'other2'"));
+    }
 }

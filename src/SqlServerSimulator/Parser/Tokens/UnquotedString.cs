@@ -35,9 +35,19 @@ sealed class UnquotedString : Name
     /// <summary>
     /// Returns either an <see cref="UnquotedString"/> or <see cref="ReservedKeyword"/> depending on input.
     /// </summary>
+    /// <param name="command">The command text being tokenized.</param>
+    /// <param name="index">Start of the word within <paramref name="command"/>.</param>
+    /// <param name="length">Length of the word.</param>
+    /// <param name="compatibilityLevel">
+    /// The active database's compatibility level, which decides the words
+    /// reserved only from a given level. <c>REGEXP_LIKE</c> is the one such
+    /// word: real reserves it at 170 (SQL Server 2025), where the native
+    /// predicate ships, and leaves it usable as an identifier at 160 and below.
+    /// </param>
     /// <returns>The appropriate token.</returns>
-    public static Token CheckReserved(string command, int index, int length) =>
-        Enum.TryParse<Keyword>(command.AsSpan(index, length), true, out var keyword) ?
+    public static Token CheckReserved(string command, int index, int length, CompatibilityLevel compatibilityLevel = CompatibilityLevel.Sql170) =>
+        Enum.TryParse<Keyword>(command.AsSpan(index, length), true, out var keyword)
+            && (keyword != Keyword.Regexp_Like || compatibilityLevel >= CompatibilityLevel.Sql170) ?
         new ReservedKeyword(keyword, command, index, length) :
         new UnquotedString(command, index, length);
 }

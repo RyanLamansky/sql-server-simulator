@@ -368,6 +368,7 @@ partial class Simulation
         var innerBatch = new BatchContext(dynCommand, variables, procFrame);
 
         connection.NestingLevel++;
+        var enteredDatabase = connection.CurrentDatabase;
         List<SimulatedStatementOutcome> outcomes;
         try
         {
@@ -378,6 +379,12 @@ partial class Simulation
         finally
         {
             connection.NestingLevel--;
+            // A USE inside the dynamic batch binds for that batch only — the
+            // caller resumes on the database it was on (probe-confirmed for
+            // both EXEC('…') and sp_executesql). This is what makes
+            // sp_MSforeachdb's `USE [?]` idiom run each command against its
+            // own database without leaving the session there.
+            connection.CurrentDatabase = enteredDatabase;
             // A temp table created by the dynamic batch is dropped when it
             // returns (SQL Server's module-scoped lifetime — so re-running the
             // same `create table #t` through sp_executesql, as tedious does,

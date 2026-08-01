@@ -37,6 +37,17 @@ partial class Simulation
         var collation = context.Batch.CurrentDatabase.Collation;
         var qualifiedViewName = $"{view.Schema.Name}.{view.Name}";
 
+        // The view's stored body is what the index materializes, so both the
+        // view's own creation-time capture and the indexing session have to
+        // read `"…"` the same way. Real checks the view first: a view created
+        // under OFF raises Msg 1935 even from a session with QI ON, and only
+        // an ON-created view falls through to the session's own Msg 1934
+        // (probe-confirmed).
+        if (!view.UsesQuotedIdentifier)
+            throw SimulatedSqlException.CannotCreateIndexObjectCreatedWithOptionsOff(view.Name, QuotedIdentifierOptionName);
+        if (!context.QuotedIdentifiers)
+            throw SimulatedSqlException.IncorrectSetOptions("CREATE INDEX", QuotedIdentifierOptionName);
+
         if (!view.IsSchemaBound)
             throw SimulatedSqlException.CannotIndexViewNotSchemaBound(view.Name);
         if (isClustered && !isUnique)
@@ -207,6 +218,12 @@ partial class Simulation
 #pragma warning restore CA2100
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var dummyFrame = new UdfFrame(SqlType.Int32);
+        // The view body re-parses under the view's own creation-time
+        // QUOTED_IDENTIFIER capture, not the mutating session's — same rule
+        // as InvokeViewCore, and the reason a QI-OFF session can still have
+        // its writes maintained against an ON-created indexed view.
+        var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+        connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
         connection.NestingLevel++;
@@ -230,6 +247,7 @@ partial class Simulation
             // connection), and the next connection's Sch-M on that table
             // waits forever.
             innerBatch.ReleaseStatementSchemaLocks();
+            connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.NestingLevel--;
         }
     }
@@ -268,6 +286,12 @@ partial class Simulation
 #pragma warning restore CA2100
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var dummyFrame = new UdfFrame(SqlType.Int32);
+        // The view body re-parses under the view's own creation-time
+        // QUOTED_IDENTIFIER capture, not the mutating session's — same rule
+        // as InvokeViewCore, and the reason a QI-OFF session can still have
+        // its writes maintained against an ON-created indexed view.
+        var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+        connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
         var nestedViews = new HashSet<View>();
@@ -282,6 +306,7 @@ partial class Simulation
         finally
         {
             innerBatch.ReleaseStatementSchemaLocks();
+            connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.NestingLevel--;
         }
         foreach (var nested in nestedViews)

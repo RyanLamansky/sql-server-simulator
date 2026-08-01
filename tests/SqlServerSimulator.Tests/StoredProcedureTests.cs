@@ -564,22 +564,18 @@ public sealed class StoredProcedureTests
     }
 
     [TestMethod]
-    public void BeginAtomic_Empty_Body_RaisesSyntax_On_Exec()
+    public void BeginAtomic_Empty_Body_RaisesSyntax_At_Create()
     {
         // Empty atomic body should be rejected (matches the regular
-        // BEGIN…END empty-body rule). The procedure CREATE captures the
-        // body as opaque text; the rejection fires when EXEC re-parses
-        // and dispatches the body. ExecuteBatches keeps the CREATE and
-        // EXEC in separate batches so the body text doesn't accidentally
-        // include the EXEC.
-        var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("""
+        // BEGIN…END empty-body rule). The CREATE binds the body, so the
+        // rejection lands there — real reports a body's syntax error at
+        // CREATE too (probe-confirmed with the plain `select from t` shape).
+        var ex = Throws<DbException>(() => new Simulation().ExecuteNonQuery("""
             create procedure dbo.p
             as
             begin atomic with (transaction isolation level = snapshot, language = N'English')
             end
-            """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("exec dbo.p"));
+            """));
         AreEqual("102", ex.Data["HelpLink.EvtID"]);
     }
 

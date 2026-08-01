@@ -48,7 +48,6 @@ partial class Simulation
         if (batch.IsSkipping)
             return new SimulatedNonQuery(0);
 
-        var destTable = new HeapTable(leaf, destColumns, batch.CurrentDatabase.AllocateObjectId());
         var isLocalTemp = BatchContext.IsLocalTempName(leaf);
         var isGlobalTemp = !isLocalTemp && BatchContext.IsGlobalTempName(leaf);
         Schema? schema = null;
@@ -58,6 +57,13 @@ partial class Simulation
                 ? batch.Connection.Simulation.GlobalTempTables
                 : batch.TryResolveSchema(targetName, out schema) ? schema.HeapTables
                     : throw SimulatedSqlException.InvalidObjectName(targetName);
+        // A three-part target lands in the named database, so both the object
+        // id and the owning-database stamp come from the resolved schema.
+        var owningDatabase = schema?.Database;
+        var destTable = new HeapTable(leaf, destColumns, (owningDatabase ?? batch.CurrentDatabase).AllocateObjectId())
+        {
+            OwningDatabase = owningDatabase,
+        };
         if (isGlobalTemp)
             destTable.OwnerConnection = batch.Connection;
         // SELECT INTO creates a table, so it collides with every name in the

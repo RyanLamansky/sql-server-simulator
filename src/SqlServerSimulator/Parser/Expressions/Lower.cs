@@ -27,7 +27,7 @@ internal sealed class Lower(ParserContext context) : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        StringScalars.ResolveResultType(source.GetSqlType(batch, resolveColumnType), batch);
+        StringScalars.ResolveResultType(StringScalars.BindArgument(source, batch, resolveColumnType, "lower"), batch);
 
     internal override string DebugDisplay() => $"LOWER({source.DebugDisplay()})";
 }

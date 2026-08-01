@@ -342,12 +342,11 @@ public sealed class SynonymTests
     }
 
     /// <summary>
-    /// The cross-database write gate reads through the synonym, so an INSERT
-    /// naming a synonym over another database's table is refused exactly as the
-    /// spelled-out three-part name would be.
+    /// A write through a synonym follows the base across the database
+    /// boundary, exactly as the spelled-out three-part name does.
     /// </summary>
     [TestMethod]
-    public void CrossDatabaseBase_WriteHitsTheCrossDatabaseGate()
+    public void CrossDatabaseBase_WritesThroughTheThreePartPath()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
@@ -357,8 +356,11 @@ public sealed class SynonymTests
             use simulated;
             create synonym s_x for other.dbo.rt
             """);
-        var ex = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("insert s_x (id) values (1)"));
-        Assert.Contains("other.dbo.rt", ex.Message);
+        AreEqual(1, sim.ExecuteNonQuery("insert s_x (id) values (1)"));
+        _ = sim.ExecuteNonQuery("update s_x set id = 2 where id = 1");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from other.dbo.rt where id = 2"));
+        _ = sim.ExecuteNonQuery("delete s_x");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from other.dbo.rt"));
     }
 
     // === Name collisions, both directions ===

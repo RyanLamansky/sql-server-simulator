@@ -33,6 +33,10 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        // Login DDL is server-scope: a restricted session needs ALTER ANY
+        // LOGIN. CREATE reports Msg 15247 (probe-confirmed); ALTER / DROP
+        // report the same 15151 as a missing login, leaking nothing.
+        RequireCreateLoginPermission(context);
         if (password!.Length > PasswordHash.MaxClearTextChars)
             throw SimulatedSqlException.PasswordEncryptionInvalidValue();
         var simulation = context.Batch.Connection.Simulation;
@@ -66,8 +70,11 @@ partial class Simulation
             return true;
 
         var simulation = context.Batch.Connection.Simulation;
-        if (!simulation.Logins.TryGetValue(name, out var existing))
+        if (!simulation.Logins.TryGetValue(name, out var existing)
+            || !HoldsLoginDdlPermission(context, name))
+        {
             throw SimulatedSqlException.CannotAlterOrDropLogin("alter", name);
+        }
         if (password is not null)
         {
             if (password.Length > PasswordHash.MaxClearTextChars)
@@ -93,9 +100,41 @@ partial class Simulation
         var name = ParseLoginName(context);
         context.MoveNextOptional();
         return context.Batch.IsSkipping
-            || (context.Batch.Connection.Simulation.Logins.TryRemove(name, out _)
+            || (HoldsLoginDdlPermission(context, name)
+                && context.Batch.Connection.Simulation.Logins.TryRemove(name, out _)
                 ? true
                 : throw SimulatedSqlException.CannotAlterOrDropLogin("drop", name));
+    }
+
+    /// <summary>
+    /// Whether the session may run login DDL against <paramref name="name"/>:
+    /// dbo / sysadmin always, else the server-wide <c>ALTER ANY LOGIN</c> or an
+    /// <c>ALTER ON LOGIN::&lt;name&gt;</c> grant on that specific login.
+    /// </summary>
+    private static bool HoldsLoginDdlPermission(ParserContext context, string name)
+    {
+        var security = context.Connection.Security;
+        if (security.EffectiveIsDbo)
+            return true;
+        var simulation = context.Batch.Connection.Simulation;
+        return simulation.TryResolveServerPrincipalId(name, out var targetId)
+            && simulation.HoldsServerPrincipalPermission(
+                security.Effective.LoginName, targetId, Permission.Alter, Permission.AlterAnyLogin);
+    }
+
+    /// <summary>
+    /// The <c>CREATE LOGIN</c> gate, which has no per-login target: a
+    /// restricted session needs the server-wide <c>ALTER ANY LOGIN</c>, else
+    /// Msg 15247 (probe-confirmed — real reports the generic
+    /// permission wording, not the 15151 family the ALTER / DROP forms use).
+    /// </summary>
+    private static void RequireCreateLoginPermission(ParserContext context)
+    {
+        var security = context.Connection.Security;
+        if (security.EffectiveIsDbo)
+            return;
+        if (!context.Batch.Connection.Simulation.HoldsServerPermission(security.Effective.LoginName, Permission.AlterAnyLogin))
+            throw SimulatedSqlException.UserDoesNotHavePermission();
     }
 
     /// <summary>

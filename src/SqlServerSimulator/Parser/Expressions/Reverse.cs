@@ -34,7 +34,7 @@ internal sealed class Reverse(ParserContext context) : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        StringScalars.ResolveResultType(source.GetSqlType(batch, resolveColumnType), batch);
+        StringScalars.ResolveResultType(StringScalars.BindArgument(source, batch, resolveColumnType, "reverse"), batch);
 
     internal override string DebugDisplay() => $"REVERSE({source.DebugDisplay()})";
 }

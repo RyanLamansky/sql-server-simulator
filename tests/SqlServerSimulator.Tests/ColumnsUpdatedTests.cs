@@ -162,20 +162,19 @@ public sealed class ColumnsUpdatedTests
     // === Error paths ===
 
     /// <summary>
-    /// A predicate, not a scalar — resolution happens where the body parses,
-    /// which for the simulator's deferred module-body validation is the first
-    /// fire rather than CREATE TRIGGER.
+    /// The column resolves against the parent when the body binds, which is at
+    /// CREATE TRIGGER — probe-confirmed that real reports Msg 207 there and
+    /// leaves the trigger uncreated.
     /// </summary>
     [TestMethod]
     public void UpdatePredicate_UnknownColumn_RaisesMsg207()
     {
         var sim = new Simulation();
-        sim.ExecuteBatches(
-            "create table t (c1 int, c2 int)",
-            "create trigger tr on t after update as begin if update(no_such_col) select 1; end",
-            "insert t values (1, 2)");
-        var ex = sim.AssertSqlError("update t set c1 = 9", 207);
+        _ = sim.ExecuteNonQuery("create table t (c1 int, c2 int)");
+        var ex = sim.AssertSqlError(
+            "create trigger tr on t after update as begin if update(no_such_col) select 1; end", 207);
         AreEqual("Invalid column name 'no_such_col'.", ex.Message);
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.triggers where name = 'tr'"));
     }
 
     [TestMethod]

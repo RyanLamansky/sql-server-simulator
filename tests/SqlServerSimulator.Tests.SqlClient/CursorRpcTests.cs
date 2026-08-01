@@ -224,6 +224,56 @@ public sealed class CursorRpcTests
         CollectionAssert.AreEqual(new object?[] { 2, 4, 5 }, rows.Skip(1).Select(r => r[0]).ToArray());
     }
 
+    /// <summary>
+    /// A join cursor stays updatable over the wire: the fetch buffer holds each
+    /// row's per-source addresses, so <c>sp_cursor</c> reaches whichever
+    /// participating table the <c>@table</c> parameter names.
+    /// </summary>
+    [TestMethod]
+    public async Task PositionedUpdate_ViaSpCursor_OverAJoinCursor()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
+        await using var connection = await OpenWithTableAsync(listener, Token);
+        await using (var extra = new SqlCommand(
+            "CREATE TABLE dbo.curc (id int PRIMARY KEY, p_id int NOT NULL, note nvarchar(50));" +
+            "INSERT INTO dbo.curc VALUES (10,1,N'one'),(20,2,N'two');",
+            connection))
+        {
+            _ = await extra.ExecuteNonQueryAsync(Token);
+        }
+
+        var (handle, _, _, rowcount) = await OpenAsync(
+            connection,
+            "SELECT p.id, c.id, c.note FROM dbo.curp p JOIN dbo.curc c ON c.p_id = p.id ORDER BY p.id",
+            0x2,
+            0x2,
+            Token);
+        AreEqual(-1, rowcount);
+        _ = await FetchAsync(connection, handle, 0x1, 1, 2, Token);
+
+        await using (var upd = Proc("sp_cursor", connection))
+        {
+            var ret = new SqlParameter("@RETURN_VALUE", SqlDbType.Int) { Direction = ParameterDirection.ReturnValue };
+            _ = upd.Parameters.Add(ret);
+            _ = upd.Parameters.Add(new SqlParameter("@cursor", SqlDbType.Int) { Value = handle });
+            _ = upd.Parameters.Add(new SqlParameter("@optype", SqlDbType.Int) { Value = 0x1 });
+            _ = upd.Parameters.Add(new SqlParameter("@rownum", SqlDbType.Int) { Value = 2 });
+            _ = upd.Parameters.Add(new SqlParameter("@table", SqlDbType.NVarChar, 128) { Value = "dbo.curc" });
+            _ = upd.Parameters.Add(new SqlParameter("@note", SqlDbType.NVarChar, 50) { Value = "edited" });
+            _ = await upd.ExecuteNonQueryAsync(Token);
+            AreEqual(0, ret.Value);
+        }
+
+        _ = await CloseAsync(connection, handle, Token);
+
+        await using var verify = new SqlCommand("SELECT id, note FROM dbo.curc ORDER BY id", connection);
+        await using var reader = await verify.ExecuteReaderAsync(Token);
+        var rows = Wire.Drain(reader);
+        AreEqual("one", rows[0][1]);
+        AreEqual("edited", rows[1][1]);
+    }
+
     [TestMethod]
     public async Task PositionedUpdate_PastFetchBuffer_Msg16930()
     {

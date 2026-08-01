@@ -80,6 +80,16 @@ partial class Simulation
         "status_enabled", "status_for_replication", "constraint_keys",
     ];
 
+    // sp_helpstats' #spstattab declares stats_keys nvarchar(2078) — the
+    // 16-column key budget ((16 * 128) + (15 * 2)) without sp_helpindex's
+    // bracket allowance.
+    private static readonly NVarcharSqlType HelpStatsKeysType =
+        NVarcharSqlType.Get(2078, Collation.Baseline, Coercibility.Implicit);
+
+    private static readonly SqlType[] SpHelpStatsSchema = [SqlType.SystemName, HelpStatsKeysType];
+
+    private static readonly string[] SpHelpStatsColumnNames = ["statistics_name", "statistics_keys"];
+
     private static readonly SqlType[] SpHelpReferencingFkSchema = [HelpReferencingFkType];
 
     private static readonly string[] SpHelpReferencingFkColumnNames = ["Table is referenced by foreign key"];
@@ -182,14 +192,18 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Binds a help proc's arguments, which are uniformly <c>@objname</c> plus
-    /// at most one more. Positional and named forms both bind; anything the
-    /// proc doesn't declare — an extra positional or an unknown name — is
-    /// Msg 8144, matching real. <paramref name="secondName"/> is null for the
-    /// single-parameter procs, which then reject a second positional.
+    /// Binds a help proc's arguments — one leading name parameter plus at most
+    /// one more. Positional and named forms both bind; anything the proc
+    /// doesn't declare — an extra positional or an unknown name — is Msg 8144,
+    /// matching real. <paramref name="secondName"/> is null for the
+    /// single-parameter procs, which then reject a second positional, and
+    /// <paramref name="firstName"/> is the leading parameter's declared name
+    /// (<c>@objname</c> for most of the family, <c>@dbname</c> for
+    /// <c>sp_helpdb</c>, <c>@filename</c> for <c>sp_helpfile</c>).
     /// </summary>
     private static (string? First, string? Second) ParseHelpArgs(
-        List<ProcArgument> arguments, string procedureName, string? secondName = null)
+        List<ProcArgument> arguments, string procedureName, string? secondName = null,
+        string firstName = "objname")
     {
         string? first = null, second = null;
         var positional = 0;
@@ -207,7 +221,7 @@ partial class Simulation
                 continue;
             }
 
-            if (BuiltInToken.Equals(arg.Name, "objname"))
+            if (BuiltInToken.Equals(arg.Name, firstName))
                 first = CatalogStringArg(arg);
             else if (secondName is not null && BuiltInToken.Equals(arg.Name, secondName))
                 second = CatalogStringArg(arg);
@@ -286,30 +300,100 @@ partial class Simulation
     // Key columns in key order, comma-separated, with real's "(-)" suffix on a
     // descending key. Constraint-backed indexes read their storage ordinals;
     // CREATE INDEX-backed ones read their declared key columns.
-    private static string HelpIndexKeys(HelpTarget target, IndexIdentity identity)
+    // markDescending is false for sp_helpstats, which builds its key list from
+    // index_col() — a lookup that reports the column name alone.
+    private static string HelpIndexKeys(HelpTarget target, IndexIdentity identity, bool markDescending = true)
     {
         if (identity.Constraint is { } constraint)
-            return HelpKeyList(target.Table!, constraint);
+            return HelpKeyList(target.Table!, constraint, markDescending);
 
         var columns = target.Columns!;
         var names = new List<string>(identity.Index!.KeyColumns.Length);
         foreach (var key in identity.Index.KeyColumns)
-            names.Add(columns[key.ColumnOrdinal].Name + (key.IsDescending ? "(-)" : ""));
+            names.Add(columns[key.ColumnOrdinal].Name + (markDescending && key.IsDescending ? "(-)" : ""));
         return string.Join(", ", names);
     }
 
     // A PRIMARY KEY / UNIQUE constraint's key columns in the same rendering
     // sp_helpindex and sp_helpconstraint both use.
-    private static string HelpKeyList(HeapTable table, KeyConstraint constraint)
+    private static string HelpKeyList(HeapTable table, KeyConstraint constraint, bool markDescending = true)
     {
         var names = new List<string>(constraint.StorageOrdinals.Length);
         for (var i = 0; i < constraint.StorageOrdinals.Length; i++)
         {
             names.Add(table.StoredColumns[constraint.StorageOrdinals[i]].Name
-                + (constraint.IsDescending(i) ? "(-)" : ""));
+                + (markDescending && constraint.IsDescending(i) ? "(-)" : ""));
         }
 
         return string.Join(", ", names);
+    }
+
+    /// <summary>
+    /// Handles <c>EXEC sp_helpstats @objname [, @results]</c> — the statistics
+    /// on a table or indexed view as <c>statistics_name sysname</c> /
+    /// <c>statistics_keys nvarchar(2078)</c>, sorted by name. <c>@results</c>
+    /// defaults to <c>STATS</c> (statistics that aren't backed by an index) and
+    /// accepts <c>ALL</c> (those plus the index-backed ones); the key list is
+    /// real's <c>index_col</c> walk, so it names key columns only and marks no
+    /// direction.
+    /// </summary>
+    /// <remarks>
+    /// Name resolution shares the sp_help preamble (Msg 15250 / Msg 15009), and
+    /// real validates <c>@results</c> only after it — an unknown value emits
+    /// the severity-1 Msg 50000 <c>Invalid option: …</c> and no result set.
+    /// <c>@results</c> is declared <c>nvarchar(5)</c>, so a longer argument is
+    /// truncated before validation (probe-confirmed: <c>'statsZZZ'</c> is
+    /// accepted, <c>'ALLXX'</c> is not). An empty report emits the severity-10
+    /// Msg 15574 (<c>STATS</c>) or Msg 15575 (<c>ALL</c>) and no result set.
+    /// The simulator models only index-backed statistics, so the default
+    /// <c>STATS</c> form always takes that branch.
+    /// </remarks>
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelpStats(BatchContext batch)
+    {
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+
+        var (objectName, results) = ParseHelpArgs(arguments, "sp_helpstats", "results");
+        var target = ResolveHelpTarget(batch, "sp_helpstats", objectName);
+
+        // The @results parameter's own nvarchar(5) width applies before the
+        // value check, so anything longer is compared by its first 5 chars.
+        var option = results ?? "STATS";
+        if (option.Length > 5)
+            option = option[..5];
+        var includeIndexes = BuiltInToken.Equals(option, "ALL");
+        if (!includeIndexes && !BuiltInToken.Equals(option, "STATS"))
+        {
+            batch.AppendInfoError(@class: 1, state: 1, number: 50000, message: "Invalid option: " + option);
+            yield break;
+        }
+
+        var rows = new List<SqlValue[]>();
+        if (includeIndexes)
+        {
+            foreach (var identity in target.IndexIdentities())
+            {
+                if (identity.IsHeap)
+                    continue;
+                rows.Add([
+                    SqlValue.FromSystemName(identity.Name!),
+                    SqlValue.FromString(HelpStatsKeysType, HelpIndexKeys(target, identity, markDescending: false)),
+                ]);
+            }
+        }
+
+        if (rows.Count == 0)
+        {
+            batch.AppendInfoError(@class: 10, state: 1, number: includeIndexes ? 15575 : 15574,
+                message: includeIndexes
+                    ? "This object does not have any statistics or indexes."
+                    : "This object does not have any statistics.");
+            yield break;
+        }
+
+        rows.Sort(ByFirstCell);
+        yield return new SimulatedSqlResultSet(SpHelpStatsSchema, SpHelpStatsColumnNames, rows);
     }
 
     /// <summary>

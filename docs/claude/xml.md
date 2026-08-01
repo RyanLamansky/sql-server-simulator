@@ -82,6 +82,7 @@ The navigator is positioned on the document element of the parsed input, so a re
 
 - Only the path subset above is modeled.
   FLWOR, arithmetic / comparison / boolean XQuery operators, `local-name()`-style functions in the source text, and constructors are not — they'd surface as malformed XPath or wrong results rather than a clean error.
+- The evaluator parses its input as a **document**, so a multi-root fragment (`'<a/><b/>'`, or the typical `FOR XML …, TYPE` result) raises `XmlException` where real accepts it — real's `xml` is CONTENT-typed and admits several top-level elements.
 - `.value()` casts go through the standard string→type coercion (`casting.md`'s flexible string→date-like parser), so the AdventureWorks `vJobCandidateEducation` / `vJobCandidateEmployment` / `vPersonDemographics` views — which wrap `.value()` date strings in `CONVERT(datetime, …, 101)` — now resolve.
 
 ## Catalog views in `BuiltInResources.cs`
@@ -108,25 +109,77 @@ DacFx's bacpac export calls this per user collection while scripting `sys.xml_sc
 
 ## FOR XML result serialization
 
-`Parser/Selection.ForXml.cs` — the trailing `FOR XML { RAW[('elem')] | AUTO | PATH[('row')] } [, ELEMENTS [XSINIL|ABSENT]] [, ROOT[('name')]]` clause, parsed in the same `SELECT`-tail slot as FOR JSON (`Selection.ParseOptionalForXml` runs right after `ParseOptionalForJson`; a non-XML `FOR` restores the cursor for the downstream Msg 102).
+`Parser/Selection.ForXml.cs` — the trailing `FOR XML { RAW[('elem')] | AUTO | PATH[('row')] } [, ELEMENTS [XSINIL|ABSENT]] [, TYPE] [, ROOT[('name')]]` clause, parsed in the same `SELECT`-tail slot as FOR JSON (`Selection.ParseOptionalForXml` runs right after `ParseOptionalForJson`; a non-XML `FOR` restores the cursor for the downstream Msg 102).
 Mirrors the FOR JSON shape: a trailing-clause parser + a `StringBuilder` serializer over `SqlValue` rows.
-The result is a single row, one column named `XML_F52E2B61-18A1-11d1-B105-00805F49916B`, typed `xml`.
-An **empty input rowset yields NULL** (zero result rows), matching real.
+The option list is order-free (`, TYPE, ROOT('r')` and `, ROOT('r'), TYPE` are the same clause).
 Real chunks large XML across ~2033-char rows; the simulator returns the whole fragment in one row (documented approximation, shared with FOR JSON).
+
+### The result column, and the `TYPE` option
+
+| | column name | column type | empty input rowset |
+|---|---|---|---|
+| without `TYPE` | `XML_F52E2B61-18A1-11d1-B105-00805F49916B` | `nvarchar(max)` | zero rows |
+| with `TYPE` | `""` (unnamed) | `xml` | **one row, NULL** |
+
+Probe-confirmed against SQL Server 2025 through `GetSchemaTable` over SqlClient.
+The row-count asymmetry is real's: a top-level untyped `FOR XML` over no rows returns an empty result set, while the typed form returns one NULL `xml` value — as a scalar subquery both read SQL NULL either way.
+
+`TYPE` is what makes a **nested** `FOR XML` embed as nodes rather than escaped text, and that falls out of the column *type* rather than any marker: the serializer emits any `xml`-typed value verbatim, so a stored `xml` column, a `CAST(… AS xml)`, and a `(SELECT … FOR XML …, TYPE)` subquery all embed as markup while every other type is escaped.
+
+```
+select p.id, (select c.cnm from cc c where c.pid = p.id for xml path('c'), type) as kids
+from pp p for xml path('p')
+    → <p><id>1</id><kids><c><cnm>a1</cnm></c></kids></p>
+
+-- the same without TYPE
+    → <p><id>1</id><kids>&lt;c&gt;&lt;cnm&gt;a1&lt;/cnm&gt;&lt;/c&gt;</kids></p>
+```
+
+An **unnamed** nested TYPE column (the `(SELECT … FOR XML PATH, TYPE)` idiom with no alias) inlines its child nodes directly into the parent element, since PATH maps an unnamed column to the row element's content.
+An `xml`-typed column in an **attribute** position raises **Msg 6851** in PATH (an attribute can't hold nodes); in RAW / AUTO's attribute-centric default it silently becomes a child element named after the column instead.
+
+Real's untyped result column reports `ntext` (max length 1073741823) in its wire metadata while typing the same expression `nvarchar(max)` in subquery position; the simulator carries one type for both and picks `nvarchar(max)`, so the string-building idioms real supports (`STUFF((SELECT … FOR XML PATH('')), 1, 1, '')`, concatenation) work rather than tripping the legacy-LOB restrictions.
 
 ### Modes
 
 - **RAW** — one `<row …/>` per row, attribute-centric by default; `RAW('elem')` renames the row element.
   `RAW, ELEMENTS` switches to element-centric (`<row><col>v</col></row>`).
   An unnamed column raises **Msg 6809**; a binary column raises **Msg 6829** (needs the unmodeled BINARY BASE64 option).
-- **AUTO** — flat single-source only: the row element is named after the table/alias (`<t id="1"/>`), attribute-centric or `ELEMENTS`; unnamed column → Msg 6809, binary column → **Msg 6830**.
-  Join-nesting (a secondary table nested under the first) raises `NotSupportedException` (use PATH).
+- **AUTO** — one element per FROM source, nested (see below); the row element is named after the table/alias (`<t id="1"/>`), attribute-centric or `ELEMENTS`; unnamed column → Msg 6809, binary column → **Msg 6830**, no FROM clause at all → **Msg 6800**.
 - **PATH** — always element-centric; the column alias drives node placement (compiled once into a shared per-row element template, `ForXmlElement`):
   - `[@x]` → attribute `x` on the row element; `[name]` → child element; `[parent/child]` → nested elements at arbitrary depth (contiguous same-prefix steps share the parent).
   - `[text()]` / an **unnamed** column → the row element's text content; `[data()]` → text content, but adjacent `data()` atomic values are space-separated (`10 30 50`) where `text()` concatenates (`123`).
   - Consecutive same-name element columns concatenate their text into one element (`[x],[x]` → `<x>1020</x>`).
   - `PATH('')` suppresses the row wrapper (bare elements at document level); an attribute column under `PATH('')` raises **Msg 6864**.
   - An attribute column after a non-attribute sibling at the same level raises **Msg 6852**.
+
+### AUTO nesting (shared with `FOR JSON AUTO`)
+
+Each FROM source becomes one nesting level, built in `Parser/Selection.AutoNesting.cs` (`BuildAutoLevels`) from the per-column source binding `Selection.AutoColumnSource` / `AutoSourceNames` that `BuildSelectionCore` records — `Selection.ForXml.cs` renders the levels as nested elements, `Selection.ForJson.cs` as nested arrays, off the same level model.
+The rules are heuristic and were probed one at a time against SQL Server 2025; the whole matrix below is byte-identical between the simulator and real.
+
+| rule | behavior |
+|---|---|
+| what makes a level | a FROM source contributing at least one **bare column reference** to the select list; a source no column reads contributes no level |
+| level order | order of each source's **first** column in the select list — not FROM order — and always a linear chain, whatever the join topology (two tables both joined to the first still nest one inside the other) |
+| level name | the alias, else the object name **as written** (`FROM dbo.t` → `<dbo.t>`, `FROM dbo.t AS x` → `<x>`) |
+| column placement | a column joins its own source's level even when another table's columns intervene, keeping its relative order there — so `p.id, c.cnm, p.nm` puts `id` and `nm` on `p` and `cnm` on the nested `c` |
+| computed columns | any expression that isn't a bare column reference — including a CAST or function call **over another table's column**, and aggregates — joins the level of the nearest *preceding* table column; one that precedes every table column joins the first level, ahead of that level's own columns |
+| all-computed projection | one level, named after the first FROM source (`select 1 as a from t` → `<t a="1"/>`) |
+| no FROM clause | **Msg 6800** (FOR XML) / **Msg 13600** (FOR JSON) |
+| row grouping | an outer level collapses **consecutive** rows whose values for that level are all equal (two NULLs count as equal); the same values after an intervening different row open a **new** element |
+| innermost level | never collapses — one element / object per row, even for two identical rows |
+| `xml` column in a level | that level never collapses at all: SQL Server can't compare `xml`, so every row opens a fresh element (`AutoLevel.AlwaysRestarts`) |
+| NULL-filled outer-join side | still emits its element (`<c/>`) / object (`[{}]`) |
+
+`ELEMENTS`, `ROOT`, `XSINIL` and the value formatting apply per level unchanged; the `xmlns:xsi` declaration lands on the outermost element (or the ROOT).
+
+Divergences:
+
+- A **set-operation** result raises `NotSupportedException` (no per-column source binding survives the union); real names every element after the *first branch's* table.
+- A source with no written object name (derived table, CTE, table variable, `OPENJSON` / `STRING_SPLIT`) is named after its alias.
+  That matches real for derived tables and CTEs; for the rowset functions real instead raises Msg 6800 (they aren't tables), which the simulator doesn't.
+- Grouping compares values through `SqlValue.Equals`, so it is **collation-aware** — under a case-insensitive collation `'A'` and `'a'` group together.
 
 ### Options
 
@@ -145,9 +198,27 @@ Escaping is position-dependent:
 | element text | `&`→`&amp;`, `<`→`&lt;`, `>`→`&gt;`, CR→`&#x0D;` (`"` and `'` stay literal) |
 | attribute value | the above plus `"`→`&quot;`, tab→`&#x09;`, LF→`&#x0A;` (`'` stays literal) |
 
-### Deferrals
+### Not modeled yet
 
-EXPLICIT mode, the `TYPE` option (typed-node embedding — the untyped escaped-text nesting is real's default and works), AUTO join-nesting, `BINARY BASE64`/`HEX` / `XMLSCHEMA` / `WITH NAMESPACES`, and PATH node functions beyond `text()`/`data()` (`comment()`, `processing-instruction()`, `node()`, `*`, `@*`) all raise `NotSupportedException` (or the noted Msg).
+EXPLICIT mode, `BINARY BASE64`/`HEX` / `XMLSCHEMA` / `WITH NAMESPACES`, and PATH node functions beyond `text()`/`data()` (`comment()`, `processing-instruction()`, `node()`, `*`, `@*`) all raise `NotSupportedException`.
+**Msg 6819** — real rejects a `FOR XML` clause inside an `INSERT … SELECT` (`The FOR XML clause is not allowed in a INSERT statement.`); the simulator accepts it.
+One-row chunking is the shared approximation noted above.
+
+**XML-name encoding** — RAW / AUTO run every element and attribute name through SQL Server's `_xHHHH_` escaping so the output is well-formed whatever the SQL identifier was, while PATH rejects an unusable name outright.
+Probed against SQL Server 2025:
+
+| written name | RAW / AUTO output |
+|---|---|
+| `[a b]` | `a_x0020_b` |
+| `[1a]` (leading digit) | `_x0031_a` |
+| `[a$b]` | `a_x0024_b` |
+| `[a_x0020_b]` (already-escaped text) | `a_x005F_x0020_b` |
+| `[a-b]` / `[a.b]` / `[é]` | unchanged (valid XML name characters) |
+| `FROM #tmp` / `FROM @v` (AUTO element name) | `_x0023_tmp` / `_x0040_v` |
+
+The simulator emits every name verbatim, so `SELECT … FROM #tmp FOR XML AUTO` yields `<#tmp …>` — not well-formed XML.
+PATH's counterpart is **Msg 6850** (`Row name 'r x' contains an invalid XML identifier as required by FOR XML; ' '(0x0020) is the first character at fault.`, with `Column name` / `ROOT name` variants), which the simulator doesn't raise either.
+
 See [`backlog.md`](backlog.md).
 
 ## Leading byte-order mark

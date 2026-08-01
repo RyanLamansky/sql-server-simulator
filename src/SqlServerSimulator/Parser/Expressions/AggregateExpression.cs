@@ -229,12 +229,28 @@ internal sealed class AggregateExpression : Expression
         AggregateKind.CountBig or AggregateKind.ApproxCountDistinct => SqlType.BigInt,
         AggregateKind.ChecksumAgg => SqlType.Int32,
         AggregateKind.Stdev or AggregateKind.StdevP or AggregateKind.Var or AggregateKind.VarP => SqlType.Float,
-        AggregateKind.Max or AggregateKind.Min or AggregateKind.StringAgg => this.Operand!.GetSqlType(batch, resolveColumnType),
+        AggregateKind.Max or AggregateKind.Min => this.Operand!.GetSqlType(batch, resolveColumnType),
+        // STRING_AGG refuses a legacy LOB in either slot, and real binds that
+        // while compiling — so the gate runs here as well as per value.
+        AggregateKind.StringAgg => BindStringAggArguments(batch, resolveColumnType),
         AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg => NVarcharMax,
         AggregateKind.Sum => DeriveSumResultType(this.Operand!.GetSqlType(batch, resolveColumnType)),
         AggregateKind.Avg => DeriveAvgResultType(this.Operand!.GetSqlType(batch, resolveColumnType)),
         _ => throw new InvalidOperationException($"Unknown aggregate kind {this.Kind}."),
     };
+
+    /// <summary>
+    /// Compile-time mirror of the two <c>RejectLegacyLob</c> calls STRING_AGG's
+    /// execution makes — the value slot in <c>StringAggAggregator</c> and the
+    /// separator in the aggregate executor. Returns the operand's type, which
+    /// is the aggregate's result type.
+    /// </summary>
+    private SqlType BindStringAggArguments(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var operandType = StringScalars.BindArgument(this.Operand!, batch, resolveColumnType, "string_agg");
+        _ = StringScalars.BindArgument(this.Separator!, batch, resolveColumnType, "string_agg", argumentIndex: 2);
+        return operandType;
+    }
 
     // SUM / AVG / MIN / MAX preserve the operand's decimal-vs-numeric name; the other
     // kinds have non-decimal results the projection-time gate filters out.

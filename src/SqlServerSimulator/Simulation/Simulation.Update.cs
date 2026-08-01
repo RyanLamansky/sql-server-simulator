@@ -46,7 +46,7 @@ partial class Simulation
         context.MoveNextRequired();
         var top = Selection.ParseDmlTopClause(context);
         var leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-        context.Batch.RejectCrossDatabaseMutation(leadingIdent);
+        context.Batch.RejectCrossServerMutation(leadingIdent);
 
         // View target: route to base table with view-aware column lookups,
         // visibility filtering, and (optional) WITH CHECK OPTION enforcement.
@@ -99,6 +99,7 @@ partial class Simulation
         if (leadingTable is not null)
         {
             RejectDisabledClusteredIndex(leadingTable);
+            RejectIncorrectSetOptionsForWrite(leadingTable, context.Batch, "UPDATE");
             _ = context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: true);
         }
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Set })
@@ -220,6 +221,15 @@ partial class Simulation
     {
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, sourceView);
 
+        // Compile-time bind of the predicate and the SET values, matching
+        // real's compiling binder — a cross-collation comparison, a legacy-LOB
+        // string-scalar argument and an unknown column all report here rather
+        // than waiting for a row to reach the per-row resolver (so an empty
+        // table and a module body at CREATE report them too).
+        var targetTypeResolver = Selection.TargetColumnTypeResolver(context.Batch, table, sourceView);
+        foreach (var (_, expr) in rawAssignments)
+            _ = expr.GetSqlType(context.Batch, targetTypeResolver);
+
         BooleanExpression? where = null;
         Cursor? positionedCursor = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -228,7 +238,7 @@ partial class Simulation
             if (context.Token is ReservedKeyword { Keyword: Keyword.Current })
                 positionedCursor = ParseWhereCurrentOf(context, table, [.. rawAssignments.Select(a => a.ColumnName)]);
             else
-                where = BooleanExpression.Parse(context);
+                where = Selection.ParseAndBindPredicate(context, targetTypeResolver);
         }
 
         if (!context.Batch.IsSkipping && PermissionEnforcement.Applies(context.Batch))
@@ -279,11 +289,20 @@ partial class Simulation
         var rowSource = where is not null
             ? Selection.SeekMutationTarget(table, where, context.Batch) ?? table.Heap.EnumerateRowsWithAddress()
             : table.Heap.EnumerateRowsWithAddress();
+        // Skip mode commits nothing (CommitUpdate returns early), so the walk
+        // is pure cost — and running WHERE / SET against live rows can raise a
+        // runtime error (a division by zero, a conversion failure) on behalf of
+        // a statement that never ran. That matters at CREATE-time module
+        // binding, where it would refuse a body real accepts. Everything the
+        // bind needs — the target, the SET column ordinals, the predicate — was
+        // resolved above.
+        if (context.Batch.IsSkipping)
+            rowSource = [];
         foreach (var (pageIndex, slotIndex, rowBytes) in rowSource)
         {
             // Positioned UPDATE (WHERE CURRENT OF): target only the row the
             // cursor is sitting on, identified by its stable heap address.
-            if (positionedCursor is not null && !CursorRowMatches(positionedCursor, (pageIndex, slotIndex)))
+            if (positionedCursor is not null && !CursorRowMatches(positionedCursor, table, (pageIndex, slotIndex)))
                 continue;
 
             var fullValues = DecodeFullRow(table, rowBytes);
@@ -416,7 +435,7 @@ partial class Simulation
             if (where is not null && where.Run(new RuntimeContext(Resolve, batch)) != true)
                 continue;
             batch.Connection.CurrentTransaction?.Rollback();
-            throw SimulatedSqlException.SnapshotIsolationUpdateConflict($"{Database.DefaultSchemaName}.{table.Name}", batch.CurrentDatabase.Name);
+            throw SimulatedSqlException.SnapshotIsolationUpdateConflict($"{Database.DefaultSchemaName}.{table.Name}", batch.DatabaseFor(table).Name);
         }
     }
 
@@ -467,15 +486,22 @@ partial class Simulation
         // wasn't yet known. Now that the FROM clause identified it, acquire
         // table-IX + the standard row-X-per-mutation will happen at the
         // mutation site (matching the simple-form UPDATE path).
+        RejectIncorrectSetOptionsForWrite(table, context.Batch, "UPDATE");
         _ = context.Batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
 
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase);
+
+        // Compile-time bind of the predicate and the SET values — see
+        // ExecuteUpdateAgainstTable for why.
+        var tupleTypeResolver = Selection.ColumnTypeResolverFor(sources);
+        foreach (var (_, expr) in rawAssignments)
+            _ = expr.GetSqlType(context.Batch, tupleTypeResolver);
 
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
             context.MoveNextRequired();
-            where = BooleanExpression.Parse(context);
+            where = Selection.ParseAndBindPredicate(context, tupleTypeResolver);
         }
 
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
@@ -611,7 +637,7 @@ partial class Simulation
         // Capture pre-update payloads so the version-store CaptureWrite call
         // after UpdateAt can pair each row's stable Rid with its pre-update
         // bytes.
-        var oldBytesPerAffected = Storage.VersionStore.IsVersioningEnabled(context.CurrentDatabase) && lockableTable
+        var oldBytesPerAffected = Storage.VersionStore.IsVersioningEnabled(context.Batch.DatabaseFor(table)) && lockableTable
             ? new byte[affected.Count][]
             : null;
         if (oldBytesPerAffected is not null)
@@ -717,7 +743,7 @@ partial class Simulation
     /// once no snapshot needs them.
     /// </summary>
     internal static bool ReclaimSuperseded(HeapTable table, ParserContext context) =>
-        !Storage.VersionStore.WillCaptureVersions(context.CurrentDatabase, table);
+        !Storage.VersionStore.WillCaptureVersions(context.Batch.DatabaseFor(table), table);
 
     private static List<byte[]> ProjectMutationOutput(
         List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
@@ -1040,7 +1066,7 @@ partial class Simulation
         for (var ci = 0; ci < table.Columns.Length; ci++)
         {
             if (table.Columns[ci].Type == SqlType.RowVersion)
-                newValues[ci] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
+                newValues[ci] = SqlValue.FromRowVersion(context.Batch.DatabaseFor(table).AllocateRowVersion());
         }
 
         // Advance the current row's ROW START on a system-versioned UPDATE.

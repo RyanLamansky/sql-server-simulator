@@ -291,10 +291,7 @@ internal sealed partial class Selection
             // ISNULL(sql_modules.definition, …)) types as MAX and streams as
             // PLP over the wire, rather than losing MAX to the bounded 2-byte
             // length prefix and overflowing on a large value.
-            var column = sources[s].Columns[c];
-            return column.MaxLength == SqlType.MaxLengthSentinel
-                ? SqlType.AsMaxVariant(column.Type)
-                : column.Type;
+            return ColumnTypeWithMaxLength(sources[s].Columns[c]);
         }
 
         // A placeholder source (skip-mode stand-in for an unresolvable table)
@@ -309,6 +306,85 @@ internal sealed partial class Selection
             : outerTypeResolver is not null
                 ? outerTypeResolver(name)
                 : throw SimulatedSqlException.InvalidColumnName(name);
+    }
+
+    /// <summary>
+    /// A column's declared type with its MAX-ness folded back in: a
+    /// <see cref="HeapColumn"/> can carry that in <see cref="HeapColumn.MaxLength"/>
+    /// while its <c>Type</c> stays a length-0 "value-width" variant.
+    /// </summary>
+    private static SqlType ColumnTypeWithMaxLength(HeapColumn column) =>
+        column.MaxLength == SqlType.MaxLengthSentinel
+            ? SqlType.AsMaxVariant(column.Type)
+            : column.Type;
+
+    /// <summary>
+    /// <see cref="ResolveColumnTypeAcrossSources"/> as a resolver the DML
+    /// paths can hand to <see cref="BooleanExpression.Bind"/> /
+    /// <see cref="Expression.GetSqlType"/> — a joined UPDATE / DELETE parses
+    /// its own <see cref="FromSource"/> set and needs the same
+    /// compile-time column binding a SELECT gets.
+    /// </summary>
+    internal static Func<MultiPartName, SqlType> ColumnTypeResolverFor(FromSource[] sources) =>
+        name => ResolveColumnTypeAcrossSources(sources, name, null);
+
+    /// <summary>
+    /// The single-table DML counterpart: a compile-time resolver mirroring the
+    /// per-row resolver an UPDATE / DELETE with no FROM clause builds — the
+    /// name binds on its leaf against the target's columns, through the view's
+    /// own projection when the statement goes through one, and anything else
+    /// is Msg 207. Qualifiers are ignored on both sides, matching the per-row
+    /// resolver exactly.
+    /// </summary>
+    internal static Func<MultiPartName, SqlType> TargetColumnTypeResolver(BatchContext batch, HeapTable table, Schemas.View? sourceView) =>
+        name =>
+        {
+            var collation = batch.CurrentDatabase.Collation;
+            if (sourceView is not null)
+            {
+                for (var v = 0; v < sourceView.OutputColumns.Length; v++)
+                {
+                    if (collation.Equals(sourceView.OutputColumns[v].Name, name.Leaf))
+                    {
+                        var baseOrdinal = sourceView.BaseColumnOrdinals[v];
+                        return baseOrdinal < 0
+                            ? throw SimulatedSqlException.InvalidColumnName(name)
+                            : ColumnTypeWithMaxLength(table.Columns[baseOrdinal]);
+                    }
+                }
+                throw SimulatedSqlException.InvalidColumnName(name);
+            }
+            for (var k = 0; k < table.Columns.Length; k++)
+            {
+                if (collation.Equals(table.Columns[k].Name, name.Leaf))
+                    return ColumnTypeWithMaxLength(table.Columns[k]);
+            }
+            throw SimulatedSqlException.InvalidColumnName(name);
+        };
+
+    /// <summary>
+    /// Parses a DML statement's <c>WHERE</c> with
+    /// <paramref name="resolveColumnType"/> installed as the enclosing scope —
+    /// the same chaining <see cref="ConsumeWhereOrderByWithOuterScope"/> gives
+    /// a SELECT, so a subquery inside the predicate resolves the statement's
+    /// target columns while typing its own projection — then binds the
+    /// predicate itself through <see cref="BooleanExpression.Bind"/>.
+    /// </summary>
+    internal static BooleanExpression ParseAndBindPredicate(ParserContext context, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var saved = context.OuterTypeResolver;
+        context.OuterTypeResolver = resolveColumnType;
+        BooleanExpression predicate;
+        try
+        {
+            predicate = BooleanExpression.Parse(context);
+        }
+        finally
+        {
+            context.OuterTypeResolver = saved;
+        }
+        predicate.Bind(context.Batch, resolveColumnType);
+        return predicate;
     }
 
     /// <summary>
@@ -601,6 +677,24 @@ internal sealed partial class Selection
             outputColumnNames[i] = expressions[i].Name;
         }
 
+        // Compile-time bind of the predicates and grouping terms. Real SQL
+        // Server binds these while compiling — probe-confirmed that a
+        // cross-collation comparison (Msg 468), a legacy-LOB string-scalar
+        // argument (Msg 8116) and an unknown column (Msg 207) each report on
+        // an empty rowset, in a never-taken branch, and at CREATE of a module
+        // whose body carries them. Without this the only path to those errors
+        // is the per-row resolver, so a row-less result passed silently.
+        // Placed after the projection so a select-list error keeps reporting
+        // first, and driven off the non-recording resolver because the
+        // read-column sink walks these clauses structurally just below.
+        foreach (var excluder in fromClause.Excluders)
+            excluder.Bind(parseBatch, ResolveColumnType);
+        foreach (var join in joins)
+            join.OnPredicate?.Bind(parseBatch, ResolveColumnType);
+        foreach (var grouping in fromClause.AllGroupingExpressions)
+            _ = grouping.GetSqlType(parseBatch, ResolveColumnType);
+        fromClause.Having?.Bind(parseBatch, ResolveColumnType);
+
         if (readColumnSink is not null)
         {
             foreach (var aggregate in aggregates)
@@ -740,17 +834,21 @@ internal sealed partial class Selection
             destColumnSchema,
             updatabilityProfile,
             updatabilityRejection);
-        // Capture ORDER BY for the updatable-cursor enumeration path; only
-        // meaningful when the shape is updatable (single base table).
-        if (updatabilityProfile is not null)
+        // Capture the cursor-navigable FROM shape plus its ORDER BY, so a
+        // KEYSET / DYNAMIC cursor can re-fold the live base heaps per FETCH
+        // and order rows the same way a read would.
+        selection.CursorPlan = ComputeCursorPlan(
+            sources, joins, expressions, fromClause, distinct, aggregates, windows,
+            hasTopOrOffsetOrFetch: selection.HasTopOrOffsetOrFetch);
+        if (selection.CursorPlan is not null)
             selection.CursorOrderBy = orderBy;
         selection.ColumnNullability = columnNullability;
         selection.ProjectionExpressions = [.. expressions];
         selection.ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions);
         selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
         selection.BranchFromSources = sources;
-        selection.MultipleFromSources = sources.Length > 1;
-        selection.AutoElementName = sources.Length == 1 ? sources[0].Qualifier : null;
+        selection.AutoSourceNames = AutoSourceNamesOf(sources);
+        selection.AutoColumnSource = AutoColumnSourceOf(expressions, sources);
         return selection;
     }
 
@@ -787,6 +885,38 @@ internal sealed partial class Selection
         for (var i = 0; i < expressions.Count; i++)
             nullability[i] = expressions[i].ResultIsNullable(ResolveNullable);
         return nullability;
+    }
+
+    /// <summary>
+    /// The FOR XML AUTO / FOR JSON AUTO element name of each FROM source: the
+    /// written alias-or-object-name when the source carries one, else its
+    /// column-resolution qualifier.
+    /// </summary>
+    private static string?[] AutoSourceNamesOf(FromSource[] sources)
+    {
+        var names = new string?[sources.Length];
+        for (var i = 0; i < sources.Length; i++)
+            names[i] = sources[i].AutoElementName ?? sources[i].Qualifier;
+        return names;
+    }
+
+    /// <summary>
+    /// Binds each projection column to the FROM source it reads, for the AUTO
+    /// serializers' nesting levels. Only a bare column reference (through any
+    /// number of <c>AS alias</c> wrappers) binds; every other expression —
+    /// including a CAST or function call over a column — is SQL Server's
+    /// "computed column" and reports -1.
+    /// </summary>
+    private static int[] AutoColumnSourceOf(List<Expression> expressions, FromSource[] sources)
+    {
+        var map = new int[expressions.Count];
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            map[i] = UnwrapDirectRef(expressions[i]) is Reference reference
+                ? FindSourceColumn(sources, reference.ReferencedName).SourceIndex
+                : -1;
+        }
+        return map;
     }
 
     /// <summary>
@@ -843,6 +973,61 @@ internal sealed partial class Selection
             projections: [.. expressions],
             excluders: [.. fromClause.Excluders]);
         return (profile, ViewUpdatabilityRejection.None);
+    }
+
+    /// <summary>
+    /// Captures the FROM shape a KEYSET / DYNAMIC cursor navigates, or null
+    /// when the SELECT must fall back to a STATIC snapshot. Probe-confirmed
+    /// against SQL Server 2025: a JOIN (any arity / kind), a comma FROM and a
+    /// self-join all stay DYNAMIC there, while DISTINCT / GROUP BY /
+    /// aggregates / set ops convert to a read-only snapshot, so the gates
+    /// below mirror that split. Every source must be a direct base-table scan:
+    /// cursor identity is the tuple of stable <c>(page, slot)</c> addresses, and
+    /// a deferred source (derived table, view, CTE, TVF, catalog view, APPLY
+    /// right side) yields projected bytes carrying no heap address — as does a
+    /// <c>FOR SYSTEM_TIME</c> source, which reads the history sibling too.
+    /// </summary>
+    private static CursorSourcePlan? ComputeCursorPlan(
+        FromSource[] sources,
+        JoinSpec[] joins,
+        List<Expression> expressions,
+        FromClause fromClause,
+        bool distinct,
+        List<AggregateExpression> aggregates,
+        List<WindowExpression> windows,
+        bool hasTopOrOffsetOrFetch)
+    {
+        if (distinct || aggregates.Count > 0 || windows.Count > 0 || hasTopOrOffsetOrFetch
+            || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
+            || sources.Length == 0)
+        {
+            return null;
+        }
+
+        var tables = new HeapTable[sources.Length];
+        for (var i = 0; i < sources.Length; i++)
+        {
+            if (sources[i] is not { BackingTable: { } table, LateralPlan: null, IsPlaceholder: false } source
+                || source.Rows is TemporalRowSource)
+            {
+                return null;
+            }
+            tables[i] = table;
+        }
+
+        // A parenthesized join group spans several slots per level, which the
+        // flat left-deep cursor fold doesn't model; APPLY is lateral, so its
+        // right side is a plan rather than a scannable base table.
+        foreach (var join in joins)
+        {
+            if (join.GroupCount != 1
+                || join.Kind is not (JoinKind.Inner or JoinKind.Cross or JoinKind.Left or JoinKind.Right or JoinKind.Full))
+            {
+                return null;
+            }
+        }
+
+        return new CursorSourcePlan(sources, joins, tables, [.. expressions], [.. fromClause.Excluders]);
     }
 
     /// <summary>

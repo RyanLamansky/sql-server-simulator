@@ -75,7 +75,7 @@ partial class Simulation
             {
                 throw SimulatedSqlException.CannotExecuteAsServerPrincipal(targetName);
             }
-            RequireImpersonatePermission(security, database, mapped.PrincipalId, isLogin: true, targetName);
+            RequireImpersonateLoginPermission(connection, targetName);
             security.Push(new SecurityPrincipalFrame(mapped.PrincipalId, mapped.Name, targetName));
             return;
         }
@@ -88,18 +88,19 @@ partial class Simulation
         {
             throw SimulatedSqlException.CannotExecuteAsDatabasePrincipal(targetName);
         }
-        RequireImpersonatePermission(security, database, target.PrincipalId, isLogin: false, targetName);
+        RequireImpersonatePermission(security, database, target.PrincipalId, targetName);
         security.Push(new SecurityPrincipalFrame(target.PrincipalId, target.Name, target.EffectiveLoginIdentity));
     }
 
     /// <summary>
-    /// Gates nested impersonation: dbo may impersonate anyone; a non-dbo
-    /// principal needs an explicit class-4 (DATABASE_PRINCIPAL) IMPERSONATE
-    /// grant on the target (state G or W). A direct <see cref="Database.Permissions"/>
-    /// scan against the current effective principal — role-closure expansion is
-    /// a later stage.
+    /// Gates nested <c>EXECUTE AS USER</c>: dbo may impersonate anyone; a
+    /// non-dbo principal needs an explicit class-4 (DATABASE_PRINCIPAL)
+    /// IMPERSONATE grant on the target (state G or W). A direct
+    /// <see cref="Database.Permissions"/> scan against the current effective
+    /// principal — role-closure expansion is a later stage. The LOGIN form
+    /// gates at server scope instead (<see cref="RequireImpersonateLoginPermission"/>).
     /// </summary>
-    private static void RequireImpersonatePermission(SessionSecurityContext security, Database database, int targetPrincipalId, bool isLogin, string targetName)
+    private static void RequireImpersonatePermission(SessionSecurityContext security, Database database, int targetPrincipalId, string targetName)
     {
         if (security.EffectiveIsDbo)
             return;
@@ -114,9 +115,30 @@ partial class Simulation
                 return;
             }
         }
-        throw isLogin
-            ? SimulatedSqlException.CannotExecuteAsServerPrincipal(targetName)
-            : SimulatedSqlException.CannotExecuteAsDatabasePrincipal(targetName);
+        throw SimulatedSqlException.CannotExecuteAsDatabasePrincipal(targetName);
+    }
+
+    /// <summary>
+    /// Gates <c>EXECUTE AS LOGIN</c>: a server-scope check, unlike the
+    /// database-principal <see cref="RequireImpersonatePermission"/>. dbo /
+    /// sysadmin may impersonate anyone; anyone else needs <c>IMPERSONATE ON
+    /// LOGIN::&lt;target&gt;</c> (class 101) or the server-wide <c>IMPERSONATE
+    /// ANY LOGIN</c> (class 100), with a class-101 DENY overriding the blanket
+    /// grant. A refusal reports the same Msg 15406 as a missing login — real
+    /// leaks no distinction (probe-confirmed).
+    /// </summary>
+    private static void RequireImpersonateLoginPermission(SimulatedDbConnection connection, string targetName)
+    {
+        var security = connection.Security;
+        if (security.EffectiveIsDbo)
+            return;
+        var simulation = connection.Simulation;
+        if (!simulation.TryResolveServerPrincipalId(targetName, out var targetId)
+            || !simulation.HoldsServerPrincipalPermission(
+                security.Effective.LoginName, targetId, Permission.Impersonate, Permission.ImpersonateAnyLogin))
+        {
+            throw SimulatedSqlException.CannotExecuteAsServerPrincipal(targetName);
+        }
     }
 
     /// <summary>

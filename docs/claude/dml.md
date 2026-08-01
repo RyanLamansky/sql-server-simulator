@@ -213,6 +213,7 @@ Probe-confirmed schema-inference rules:
 | **10711** | WHEN MATCHED or WHEN NOT MATCHED BY SOURCE clause specified INSERT (only UPDATE / DELETE are legal). |
 | **10713** | MERGE statement missing the required trailing `;`. The dispatch loop accepts either `;` or end-of-batch; anything else here raises. |
 | **10714** | More than one WHEN NOT MATCHED [BY TARGET] clause (real SQL Server admits at most one INSERT branch — different from MATCHED / NOT MATCHED BY SOURCE which allow multiple AND-conditioned clauses). |
+| **207** / **4104** | A name in the `ON` predicate or a `WHEN … AND` that neither side answers to. Which side failed decides the message, matching real: a name whose qualifier is the target or source alias — or that carries no qualifier at all — is a bad *column* (Msg 207), while a qualifier neither side answers to is an unbindable identifier (Msg 4104). Both bind while compiling, so they fire over an empty rowset and at CREATE of a module carrying the MERGE. |
 
 ### Execution
 

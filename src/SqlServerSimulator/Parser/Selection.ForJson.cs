@@ -28,14 +28,6 @@ partial class Selection
     internal Expression[]? ProjectionExpressions;
 
     /// <summary>
-    /// True when the SELECT reads more than one FROM source. FOR JSON AUTO
-    /// nests each secondary table as a sub-array; that row-collapsing is
-    /// deferred, so AUTO over a multi-source query raises
-    /// <see cref="NotSupportedException"/> (PATH covers the same cases).
-    /// </summary>
-    internal bool MultipleFromSources;
-
-    /// <summary>
     /// The fixed single-column name SQL Server assigns a top-level FOR JSON
     /// result set (a GUID-shaped sentinel; consumers concatenate the chunks).
     /// </summary>
@@ -120,24 +112,11 @@ partial class Selection
 
     private static Selection WrapForJson(Selection inner, ForJsonOptions options)
     {
-        if (options.Mode == ForJsonMode.Auto && inner.MultipleFromSources)
-            throw new NotSupportedException("FOR JSON AUTO over a join (nesting secondary tables as sub-arrays) isn't modeled; use FOR JSON PATH.");
-
         // Every column needs a name (Msg 13605), checked once at parse.
         for (var i = 0; i < inner.ColumnNames.Length; i++)
         {
             if (inner.ColumnNames[i].Length == 0)
                 throw SimulatedSqlException.ForJsonColumnWithoutName();
-        }
-
-        // PATH splits dotted aliases into a contiguity-checked nesting tree;
-        // AUTO keeps each column name as one flat literal key.
-        var root = new List<ForJsonNode>();
-        for (var i = 0; i < inner.ColumnNames.Length; i++)
-        {
-            var name = inner.ColumnNames[i];
-            var segments = options.Mode == ForJsonMode.Path ? name.Split('.') : [name];
-            InsertForJsonPath(root, segments, 0, i, name, options.Mode);
         }
 
         // Compile-time raw-embed detection per column (nested FOR JSON /
@@ -152,6 +131,37 @@ partial class Selection
         var schema = new SqlType[] { SqlType.NVarcharMax };
         var columnNames = new[] { ForJsonColumnName };
         var innerSchema = inner.Schema;
+
+        if (options.Mode == ForJsonMode.Auto)
+        {
+            // AUTO nests each FROM source one level deeper as an array-valued
+            // property keyed by the source's name; each level's own columns
+            // are flat keys (dots are not split).
+            var levels = BuildAutoLevels(inner, forJson: true);
+            var levelNodes = new List<ForJsonNode>[levels.Length];
+            for (var i = 0; i < levels.Length; i++)
+            {
+                levelNodes[i] = [];
+                foreach (var column in levels[i].Columns)
+                    levelNodes[i].Add(new ForJsonNode(inner.ColumnNames[column], column, null));
+            }
+
+            return new Selection(schema, columnNames,
+                hasOrderBy: false,
+                hasTopOrOffsetOrFetch: false,
+                (batch, outerResolver) => SerializeForJsonAuto(inner, innerSchema, levels, levelNodes, rawColumns, options, batch, outerResolver))
+            {
+                ForJson = options,
+            };
+        }
+
+        // PATH splits dotted aliases into a contiguity-checked nesting tree.
+        var root = new List<ForJsonNode>();
+        for (var i = 0; i < inner.ColumnNames.Length; i++)
+        {
+            var name = inner.ColumnNames[i];
+            InsertForJsonPath(root, name.Split('.'), 0, i, name);
+        }
 
         return new Selection(schema, columnNames,
             hasOrderBy: false,
@@ -181,6 +191,16 @@ partial class Selection
         if (!any)
             yield break;
 
+        yield return ForJsonRow(body, options);
+    }
+
+    /// <summary>
+    /// Wraps the comma-separated per-row objects in the array wrapper (unless
+    /// <c>WITHOUT_ARRAY_WRAPPER</c>) and the <c>ROOT</c> object, then encodes
+    /// the whole document as the single result row.
+    /// </summary>
+    private static byte[] ForJsonRow(StringBuilder body, ForJsonOptions options)
+    {
         var document = new StringBuilder();
         if (options.WithoutArrayWrapper)
             _ = document.Append(body);
@@ -196,7 +216,7 @@ partial class Selection
             document = wrapped;
         }
 
-        yield return RowEncoder.EncodeRow(
+        return RowEncoder.EncodeRow(
             [SqlType.NVarcharMax],
             [SqlValue.FromNVarchar(SqlType.NVarcharMax, document.ToString())]);
     }
@@ -212,6 +232,20 @@ partial class Selection
         StringBuilder sb, List<ForJsonNode> nodes, byte[] rowBytes, SqlType[] innerSchema, bool[] rawColumns, bool includeNulls)
     {
         _ = sb.Append('{');
+        var any = AppendForJsonProperties(sb, nodes, rowBytes, innerSchema, rawColumns, includeNulls);
+        _ = sb.Append('}');
+        return any;
+    }
+
+    /// <summary>
+    /// Appends one row's properties from <paramref name="nodes"/> — the body
+    /// of <see cref="RenderForJsonObject"/>, split out so the AUTO nesting
+    /// serializer can write a level's own properties into an object it keeps
+    /// open for the nested levels. Returns whether any property was written.
+    /// </summary>
+    private static bool AppendForJsonProperties(
+        StringBuilder sb, List<ForJsonNode> nodes, byte[] rowBytes, SqlType[] innerSchema, bool[] rawColumns, bool includeNulls)
+    {
         var first = true;
         foreach (var node in nodes)
         {
@@ -241,8 +275,75 @@ partial class Selection
             else
                 AppendForJsonValue(sb, value, rawColumns[node.LeafColumn]);
         }
-        _ = sb.Append('}');
         return !first;
+    }
+
+    /// <summary>
+    /// Serializes a <c>FOR JSON AUTO</c> projection whose sources nest: each
+    /// level past the first is an array-valued property on its parent object,
+    /// keyed by the source's name. Consecutive rows sharing an outer level's
+    /// values extend that level's open object (their inner objects accumulate
+    /// in one array) while the innermost level emits one object per row —
+    /// the same grouping FOR XML AUTO applies to its elements.
+    /// </summary>
+    private static IEnumerable<byte[]> SerializeForJsonAuto(
+        Selection inner, SqlType[] innerSchema, AutoLevel[] levels, List<ForJsonNode>[] levelNodes, bool[] rawColumns,
+        ForJsonOptions options, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        var body = new StringBuilder();
+        // Whether the object currently open at each level wrote a property of
+        // its own — decides the comma before a nested level's array key.
+        var hasProperties = new bool[levels.Length];
+        var openDepth = 0;
+        byte[]? previous = null;
+
+        foreach (var rowBytes in inner.Execute(batch, outerResolver).RowBytes)
+        {
+            var depth = previous is null ? 0 : AutoRestartDepth(levels, innerSchema, previous, rowBytes);
+            for (var i = openDepth - 1; i >= depth; i--)
+            {
+                _ = body.Append('}');
+                // A level deeper than the restart point loses its whole array;
+                // at the restart point itself the array stays open for the
+                // sibling object about to be written.
+                if (i > depth)
+                    _ = body.Append(']');
+            }
+
+            var sibling = openDepth > depth;
+            for (var i = depth; i < levels.Length; i++)
+            {
+                if (i == depth && sibling)
+                {
+                    _ = body.Append(',');
+                }
+                else if (i > 0)
+                {
+                    if (hasProperties[i - 1])
+                        _ = body.Append(',');
+                    AppendForJsonString(body, levels[i].Name);
+                    _ = body.Append(":[");
+                }
+                _ = body.Append('{');
+                hasProperties[i] = AppendForJsonProperties(body, levelNodes[i], rowBytes, innerSchema, rawColumns, options.IncludeNulls);
+                openDepth = i + 1;
+            }
+            previous = rowBytes;
+        }
+
+        // Empty input rowset → no output row at all (a scalar subquery then
+        // yields SQL NULL, matching real SQL Server).
+        if (previous is null)
+            yield break;
+
+        for (var i = openDepth - 1; i >= 0; i--)
+        {
+            _ = body.Append('}');
+            if (i > 0)
+                _ = body.Append(']');
+        }
+
+        yield return ForJsonRow(body, options);
     }
 
     /// <summary>
@@ -253,7 +354,7 @@ partial class Selection
     /// object), a leaf name reused as an object prefix, or a duplicate leaf all
     /// raise Msg 13601 naming the offending column alias.
     /// </summary>
-    private static void InsertForJsonPath(List<ForJsonNode> level, string[] segments, int index, int column, string alias, ForJsonMode mode)
+    private static void InsertForJsonPath(List<ForJsonNode> level, string[] segments, int index, int column, string alias)
     {
         var key = segments[index];
         var isLeaf = index == segments.Length - 1;
@@ -261,24 +362,17 @@ partial class Selection
         if (level.Count > 0 && level[^1].Key == key)
         {
             var last = level[^1];
-            if (mode == ForJsonMode.Path && (isLeaf || last.Children is null))
+            if (isLeaf || last.Children is null)
                 throw SimulatedSqlException.ForJsonPropertyConflict(alias);
-            if (last.Children is { } children)
-            {
-                InsertForJsonPath(children, segments, index + 1, column, alias, mode);
-                return;
-            }
+            InsertForJsonPath(last.Children, segments, index + 1, column, alias);
+            return;
         }
 
-        // A key matching a non-last sibling means the object was already closed
-        // (AUTO permits duplicate flat keys, so this only applies to PATH).
-        if (mode == ForJsonMode.Path)
+        // A key matching a non-last sibling means the object was already closed.
+        for (var i = 0; i < level.Count - 1; i++)
         {
-            for (var i = 0; i < level.Count - 1; i++)
-            {
-                if (level[i].Key == key)
-                    throw SimulatedSqlException.ForJsonPropertyConflict(alias);
-            }
+            if (level[i].Key == key)
+                throw SimulatedSqlException.ForJsonPropertyConflict(alias);
         }
 
         if (isLeaf)
@@ -288,7 +382,7 @@ partial class Selection
         }
         var node = new ForJsonNode(key, -1, []);
         level.Add(node);
-        InsertForJsonPath(node.Children!, segments, index + 1, column, alias, mode);
+        InsertForJsonPath(node.Children!, segments, index + 1, column, alias);
     }
 
     /// <summary>
@@ -455,7 +549,7 @@ internal enum ForJsonMode
 {
     /// <summary>Column aliases drive nesting via dotted paths (the workhorse).</summary>
     Path,
-    /// <summary>Column names become flat keys (join-nesting is deferred).</summary>
+    /// <summary>Column names become flat keys; each FROM source nests one level deeper as a sub-array.</summary>
     Auto,
 }
 

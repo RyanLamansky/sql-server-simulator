@@ -54,6 +54,23 @@ Two canonical entries are **deliberately omitted** from the enum because real SQ
   SMO's SSMS column-node query reads `CAST(clmns.precision AS int)` off `sys.all_columns`, so reserving it blocked a real client.
   Server behavior is authoritative over the doc list, so `Precision` is not a `Keyword`.
 
+The Msg 156 rejection reaches two sites the generic Msg 102 path used to cover, both probe-confirmed against real: a select-list alias (`Selection.ReadAliasName` — `SELECT 1 AS user`) and a dotted name segment (`Expression`'s postfix `.` arm — `dbo.user('a')`, `t.user`).
+
+## Compatibility-gated reservation: `REGEXP_LIKE`
+
+One word is reserved only from a given compatibility level.
+`REGEXP_LIKE` is reserved at **170** — where SQL Server 2025's native predicate ships — and usable as an identifier at 160 and below.
+Probe-confirmed: at 170, `SELECT 1 AS REGEXP_LIKE`, `CREATE TABLE REGEXP_LIKE (a int)` and the unbracketed `dbo.REGEXP_LIKE(...)` spelling all raise **Msg 156**; at 160 all three succeed (the last resolving as an ordinary two-part function name, so a miss is Msg 4121).
+
+That last case is the one applications hit: mssql-django installs its regex support as a **CLR scalar function** named `dbo.REGEXP_LIKE`, and the generated SQL calls it unbracketed — which stops parsing the moment the database moves to 170.
+Bracketing or double-quoting the name (`dbo.[REGEXP_LIKE]`) is the escape hatch, and it works at every level.
+The reservation covers only `REGEXP_LIKE`; the other six `REGEXP_*` names are ordinary identifiers.
+
+Mechanically, the tokenizer is the gate.
+`Tokenizer.NextToken` takes the active database's `CompatibilityLevel` alongside the collation and `QUOTED_IDENTIFIER` flag it already threaded, and `UnquotedString.CheckReserved` returns an `UnquotedString` rather than a `ReservedKeyword` for `Keyword.Regexp_Like` below 170.
+`ReservedKeywordsTests.DocumentedAdditions` records the enum entry as a deliberate departure from the canonical list, which hasn't caught up.
+No plan-cache key change is needed: `ALTER DATABASE … SET COMPATIBILITY_LEVEL` runs through the Alter dispatch arm, which bumps `SchemaVersion` and so re-parses every cached plan.
+
 # Double-quoted identifiers / `SET QUOTED_IDENTIFIER`
 
 `"…"` is dual-natured, switched by the session `QUOTED_IDENTIFIER` option (**default ON**).
@@ -89,6 +106,87 @@ The application is **parse-time and NOT gated on skip-mode**, matching SQL Serve
 - **Top level → flips both** the in-flight tokenizer flag and the session setting (`SimulatedDbConnection.QuotedIdentifiers`), so it crosses command boundaries on the same connection.
 - **Dynamic SQL** (`EXEC('…')` / `sp_executesql`, marked by `ProcFrame.IsDynamicSql`) flips **only its own batch** — the session is unaffected (`@@OPTIONS & 256` unchanged afterward).
 - **Procedure / function / trigger bodies ignore the `SET` entirely** (SQL Server's "ignored in a stored procedure" rule) — neither the body's own reading nor the session changes.
+  A body's reading comes from the module's creation-time capture instead — see below.
+
+## Per-object creation-time capture
+
+Every programmable module stamps the `QUOTED_IDENTIFIER` in effect at its `CREATE` onto `SchemaObject.UsesQuotedIdentifier`, and **its body parses under that capture rather than the invoking session's setting**.
+So a procedure created under OFF keeps reading `"…"` as a string literal no matter who `EXEC`s it, and one created under ON keeps reading identifiers even from an OFF session.
+`ALTER` and the ALTER leg of `CREATE OR ALTER` re-stamp; the unified per-kind construction sites (`Simulation.Create{Procedure,View,Trigger,Function}.cs`) carry one assignment each, so both legs are covered at once.
+Probe-confirmed across all six kinds — procedure, view, DML trigger, scalar UDF, inline TVF, multi-statement TVF (DDL triggers ride the same path).
+
+Mechanically, invocation **swaps `SimulatedDbConnection.QuotedIdentifiers` to the capture for the body's duration** and restores it in the existing `finally` (the precedent is the `savedTextSize` restore beside it in `Simulation.InvokeProcedure.cs`).
+Seeding the child `ParserContext` directly would fix only the tokenizer; the session swap is what carries the setting to everything else that reads the connection:
+
+- **`@@OPTIONS & 256` and `SESSIONPROPERTY('QUOTED_IDENTIFIER')` report the capture inside the body** — 0 in an OFF-created module even when the caller is ON (probe-confirmed).
+- **Dynamic SQL inherits it** — `EXEC('SELECT "x"')` inside an OFF-created procedure reads a literal.
+- **The plan-cache key stays honest** — `PlanCacheKey` includes the bool, so two identically-worded bodies captured under different settings never share a plan.
+- **The Msg 1934 gates below read it**, which is how an OFF-created procedure trips them from an ON session.
+
+Each module in a call chain runs under its own capture; nesting is naturally handled by the save/restore pair, and the session is unchanged once the outermost body returns.
+The swap is held across `yield return` at the two lazily-enumerated sites (`InvokeViewCore`, `InvokeInlineTvfCore`) — the module is still producing rows there, and every nested re-parse swaps to its own capture, so the only window is a `SESSIONPROPERTY('QUOTED_IDENTIFIER')` evaluated by the *outer* statement between two rows of a view body.
+
+**Tables don't capture.**
+`OBJECTPROPERTY(<table>, 'IsQuotedIdentOn')` answers 1 for any table regardless of the creating session (probe-confirmed), which the `UsesQuotedIdentifier = true` default reproduces — a table's computed-column and constraint expressions are parsed once at CREATE and stored normalized (`([a]+'x')` for a `"x"` written under OFF), never re-read.
+Catalog projection is in [`catalog-views.md`](catalog-views.md).
+
+## `SET`-option gates — Msg 1934 / Msg 1935
+
+Real refuses to touch a stored expression from a session that would read the expression's `"…"` the other way.
+Only the `QUOTED_IDENTIFIER` component is enforced; real's full required set is `ANSI_NULLS` / `ANSI_PADDING` / `ANSI_WARNINGS` / `ARITHABORT` / `CONCAT_NULL_YIELDS_NULL` ON and `NUMERIC_ROUNDABORT` OFF, and the message lists every offending name comma-separated.
+Message shape (class 16, state 1), the verb echoing the statement:
+
+```
+<VERB> failed because the following SET options have incorrect settings: 'QUOTED_IDENTIFIER'.
+Verify that SET options are correct for use with indexed views and/or indexes on computed columns
+and/or filtered indexes and/or query notifications and/or XML data type methods and/or spatial
+index operations.
+```
+
+The probed matrix, all under `QUOTED_IDENTIFIER OFF`:
+
+| Operation | Msg 1934? | Verb |
+| --- | --- | --- |
+| `INSERT` / `UPDATE` / `DELETE` / `MERGE` on a table with a **PERSISTED** computed column | yes | the DML verb |
+| …with an **enabled** index keying or including a computed column (persisted or not) | yes | the DML verb |
+| …with an **enabled filtered** index | yes | the DML verb |
+| …with an **XML** or **spatial** index | yes | the DML verb |
+| …that an **indexed view** is built on | yes | the DML verb |
+| …with a non-persisted computed column and **no index over it** | no | — |
+| …with a **disabled** filtered index | no | — |
+| `SELECT` from any of the above | no | — |
+| An XML data-type method — `.value()` / `.exist()` / `.query()` / `.modify()` — even on an `xml` **variable** | yes | enclosing statement |
+| `.nodes()` alone | no | — |
+| `CREATE TABLE` / `ALTER TABLE ADD` declaring a **PERSISTED** computed column | yes | `CREATE TABLE` / `ALTER TABLE` |
+| …declaring a non-persisted one | no | — |
+| `CREATE INDEX` that is filtered, over a computed column, or on a view | yes | `CREATE INDEX` |
+| `CREATE INDEX` over plain columns | no | — |
+| `CREATE SPATIAL INDEX` | yes | `CREATE INDEX`, **spatial-only verify clause** |
+| `CREATE PRIMARY XML INDEX` / `CREATE XML INDEX` | yes | that exact statement name |
+| `TRUNCATE TABLE`, `ALTER TABLE ADD <plain column>`, `UPDATE STATISTICS`, `SELECT … INTO` | no | — |
+
+Two wording notes.
+`CREATE SPATIAL INDEX` alone narrows the verify clause to `Verify that SET options are correct for use with spatial index operations.` while keeping the bare `CREATE INDEX` verb.
+The XML-method verb follows the enclosing statement — `INSERT @t SELECT @x.value(…)` reports `INSERT` — while a bare `SET @i = @x.value(…)` reports `SELECT`; `StatementContext.StatementVerb`, stamped from the leading token beside `LeadingKeywordReturnsRows`, supplies it.
+
+**Msg 1935** is the object-side companion: indexing a view whose *own* capture is OFF fails even from a session with QI ON, because no session setting repairs it — the view has to be recreated.
+Real checks the view first, so an OFF-created view raises 1935 and only an ON-created one falls through to the session's 1934.
+
+```
+Cannot create index. Object 'v' was created with the following SET options off: 'QUOTED_IDENTIFIER'.
+```
+
+Timing: the gate is a **batch-level compile check, not a runtime one** — a never-taken `IF 1 = 0 INSERT …` still raises — but **create-time module-body binding is exempt**: real accepts `CREATE PROCEDURE … AS INSERT …` under OFF and raises only when the body runs, so the write gate and the XML-method gate both skip when `BatchContext.CreateTimeBinding` is set.
+
+### Not modeled yet
+
+- **`SELECT … WITH (NOEXPAND)` over an indexed view under OFF** — real raises Msg 1934 with the `SELECT` verb; the simulator accepts it, because `NOEXPAND` is a bare member of `TableHintNames` with no field on `Selection.TableHintInfo` to carry it to the gate.
+  Every other row in the matrix above ships.
+- **The six non-`QUOTED_IDENTIFIER` components** of real's required set.
+  Each has a session field already (`SimulatedDbConnection.AnsiNulls` / `AnsiPadding` / `AnsiWarnings` / `Arithabort` / `ConcatNullYieldsNull` / `NumericRoundabort`), so extending `RejectIncorrectSetOptionsForWrite` to collect the offending names into the comma-separated list is the shape it would take.
+  Note `Arithabort` and `NumericRoundabort` default to the values real's gate wants, and the ADO.NET / TDS front doors leave the other four ON, so a session only fails these by asking to.
+- **The LOGIN7 option flags** — `Network/Login7Request.cs` reads name / credential / database fields and ignores `OptionFlags2`, whose `fODBC` bit is what a client uses to request the `ANSI_DEFAULTS` bundle (`QUOTED_IDENTIFIER` included) at connect time.
+  The session default is ON either way, which is what SqlClient asks for, so the omission shows only for a client that deliberately connects with QI OFF.
 
 ## Trailing-token tightening
 
@@ -141,11 +239,9 @@ Real reaches that last clip through a 200-digit numeric literal — which the si
 
 ## Divergences
 
-- **Per-object creation-time QI capture is NOT modeled.**
-  Real SQL Server stamps procedures / views / triggers / tables with the `QUOTED_IDENTIFIER` in effect at CREATE time (`sys.sql_modules.uses_quoted_identifier`, `OBJECTPROPERTY(id, 'IsQuotedIdentOn')`) and executes their bodies under that captured setting regardless of the caller's session.
-  The simulator re-parses bodies under the **executing session's** current setting instead.
-  Rare legacy pattern (creating an object under a non-default QI and relying on the stamp); most code runs everything under the default ON.
 - **Multi-statement-TVF bodies treat a `SET QUOTED_IDENTIFIER` as top-level** rather than rejecting it (real SQL Server disallows `SET QUOTED_IDENTIFIER` inside a function body).
+- **`ALTER TABLE … ADD c AS <expr> PERSISTED` as the batch's last token** falls to Msg 102 near `PERSISTED` — `ParseComputedSuffix` advances with `MoveNextRequired` after consuming the keyword, so the form needs a following token (a trailing `;` or another column suffices).
+  Unrelated to the SET-option gate above, which the multi-column and semicolon-terminated spellings reach normally.
 
 ## Expression depth limits (Msg 8631 / Msg 191 / Msg 125)
 

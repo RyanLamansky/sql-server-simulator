@@ -26,6 +26,7 @@ A numeric value overflowing an integer conversion target picks its error by **so
 
 - `tinyint`/`smallint`/`int` source → **Msg 220** `Arithmetic overflow error for data type <t>, value = <v>.` (state: tinyint 2, smallint 1).
 - `bigint` or `decimal`/`numeric` source → generic **Msg 8115**.
+  A bare integer literal past int's range is a `numeric(digit_count, 0)` source rather than a `bigint` one (see [`arithmetic.md`](arithmetic.md#integer-literals-past-ints-range-type-numericdigit_count-0)), so `CAST(3000000000 AS int)` lands on this arm — same number, state and "expression" wording either way.
 - `float`/`real` source → **Msg 232** `Arithmetic overflow error for type <t>, value = <v>.` with six fractional digits (`F6`), state target-keyed tinyint 1 / smallint 2 / int 3; a `bigint` target stays Msg 8115.
 - `money` source splinters per target: tinyint → Msg 232 state 11; smallint → **Msg 220 state 7 with the value in money's ×10000 tick representation** (70000 reports `value = 700000000`); int → **Msg 237** `There is insufficient result space to convert a money value to int.`; `smallmoney` takes none of these and stays Msg 8115.
 - String source → Msg 244 (`INT1`/`INT2`, state 1/2 target-keyed) for tinyint/smallint, Msg 248 for int, Msg 8115 for bigint — see the string→integer section.

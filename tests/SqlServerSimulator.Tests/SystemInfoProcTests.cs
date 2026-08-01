@@ -7,9 +7,10 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Tests for the size / session / database-and-principal metadata procs —
 /// <c>sp_spaceused</c>, <c>sp_who</c> / <c>sp_who2</c>, <c>sp_helpdb</c>,
-/// <c>sp_helptrigger</c>, <c>sp_helpuser</c> and <c>sp_MSforeachtable</c>.
-/// Every asserted shape and wording is probe-confirmed against SQL Server 2025
-/// (2026-07-31).
+/// <c>sp_helpfile</c>, <c>sp_helpstats</c>, <c>sp_helprotect</c>,
+/// <c>sp_helptrigger</c>, <c>sp_helpuser</c>, <c>sp_MSforeachtable</c> and
+/// <c>sp_MSforeachdb</c>. Every asserted shape and wording is probe-confirmed
+/// against SQL Server 2025 (2026-07-31 / 2026-08-01).
 /// </summary>
 [TestClass]
 public sealed class SystemInfoProcTests
@@ -445,6 +446,236 @@ public sealed class SystemInfoProcTests
         => new Simulation().AssertSqlError("exec sp_helpdb 'nosuchdb'", 15010,
             "The database 'nosuchdb' does not exist. Supply a valid database name. To see available databases, use sys.databases.");
 
+    [TestMethod]
+    public void HelpDb_NamedArgumentSelectsTheOneDatabase()
+        => HasCount(1, Sets(new Simulation(), "exec sp_helpdb @dbname = 'simulated'")[0].Rows);
+
+    // ===== sp_helpfile =====
+
+    [TestMethod]
+    public void HelpFile_NoArgument_ListsBothFilesWithTheFileId()
+    {
+        var sets = Sets(new Simulation(), "exec sp_helpfile");
+        HasCount(1, sets);
+        CollectionAssert.AreEqual(
+            new[] { "name", "fileid", "filename", "filegroup", "size", "maxsize", "growth", "usage" }, sets[0].Names);
+        CollectionAssert.AreEqual(
+            new[] { "simulated_Data", "simulated_Log" }, sets[0].Rows.ConvertAll(r => (string)r[0]!));
+        AreEqual((short)1, sets[0].Rows[0][1]);
+        AreEqual((short)2, sets[0].Rows[1][1]);
+    }
+
+    [TestMethod]
+    public void HelpFile_NamedFile_DropsTheFileIdColumn()
+    {
+        var sets = Sets(new Simulation(), "exec sp_helpfile @filename = 'simulated_Log'");
+        CollectionAssert.AreEqual(
+            new[] { "name", "filename", "filegroup", "size", "maxsize", "growth", "usage" }, sets[0].Names);
+        var row = sets[0].Rows.Single();
+        AreEqual("simulated_Log", row[0]);
+        // nvarchar(260), so the path carries no padding.
+        AreEqual("/var/opt/mssql/data/simulated_log.ldf", row[1]);
+        IsNull(row[2]);
+        AreEqual("log only", row[6]);
+    }
+
+    [TestMethod]
+    public void HelpFile_AgreesWithSpHelpDbsAppendedSet()
+        => AreEqual(
+            Sets(new Simulation(), "exec sp_helpdb 'simulated'")[1].Rows[0][4],
+            Sets(new Simulation(), "exec sp_helpfile")[0].Rows[0][4]);
+
+    [TestMethod]
+    public void HelpFile_UnknownFile_Raises15325()
+        => new Simulation().AssertSqlError("exec sp_helpfile 'nope'", 15325,
+            "The current database does not contain a file named 'nope'.");
+
+    // ===== sp_helpstats =====
+
+    private static Simulation StatsFixture()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table dbo.st (a int not null constraint pk_st primary key, b int, c int);
+            create index ix_st_b on dbo.st (b desc);
+            create table dbo.st_bare (a int)
+            """);
+        return sim;
+    }
+
+    [TestMethod]
+    public void HelpStats_AllForm_ListsIndexBackedStatisticsWithUndirectedKeys()
+    {
+        var sets = Sets(StatsFixture(), "exec sp_helpstats 'dbo.st', 'ALL'");
+        CollectionAssert.AreEqual(new[] { "statistics_name", "statistics_keys" }, sets[0].Names);
+        CollectionAssert.AreEqual(new[] { "ix_st_b", "pk_st" }, sets[0].Rows.ConvertAll(r => (string)r[0]!));
+        // index_col() reports the column name alone — no sp_helpindex "(-)".
+        AreEqual("b", sets[0].Rows[0][1]);
+    }
+
+    [TestMethod]
+    public void HelpStats_DefaultStatsForm_ReportsNoneAndYieldsNoResultSet()
+    {
+        // Only index-backed statistics are modeled, so the STATS form — which
+        // real filters to statistics that are not indexes — always lands here.
+        var (sets, errors) = Run(StatsFixture(), "exec sp_helpstats 'dbo.st'");
+        Assert.IsEmpty(sets);
+        AreEqual(15574, errors[0].Number);
+        AreEqual("This object does not have any statistics.", errors[0].Message);
+    }
+
+    [TestMethod]
+    public void HelpStats_AllForm_WithoutIndexes_Raises15575()
+    {
+        var (sets, errors) = Run(StatsFixture(), "exec sp_helpstats 'dbo.st_bare', 'ALL'");
+        Assert.IsEmpty(sets);
+        AreEqual(15575, errors[0].Number);
+        AreEqual("This object does not have any statistics or indexes.", errors[0].Message);
+    }
+
+    [TestMethod]
+    public void HelpStats_ResultsArgumentIsTruncatedToItsDeclaredWidth()
+    {
+        // @results is nvarchar(5), so 'statsZZZ' is compared as 'stats'.
+        var (_, errors) = Run(StatsFixture(), "exec sp_helpstats 'dbo.st', 'statsZZZ'");
+        AreEqual(15574, errors[0].Number);
+    }
+
+    [TestMethod]
+    public void HelpStats_UnknownResultsOption_ReportsInvalidOption()
+    {
+        var (sets, errors) = Run(StatsFixture(), "exec sp_helpstats 'dbo.st', 'ALLXX'");
+        Assert.IsEmpty(sets);
+        AreEqual(50000, errors[0].Number);
+        AreEqual("Invalid option: ALLXX", errors[0].Message);
+    }
+
+    [TestMethod]
+    public void HelpStats_UnknownObject_Raises15009()
+        => StatsFixture().AssertSqlError("exec sp_helpstats 'dbo.nope'", 15009,
+            "The object 'dbo.nope' does not exist in database 'simulated' or is invalid for this operation.");
+
+    // ===== sp_helprotect =====
+
+    // One report row as pipe-joined text; the char(10) ProtectType cell is
+    // trimmed so the comparison reads as the report does.
+    private static string ProtectRowText(object?[] row) =>
+        string.Join("|", Array.ConvertAll(row, c => ((string)c!).TrimEnd()));
+
+    private static Simulation ProtectFixture()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table dbo.pt (id int, a int, b int);
+            create user pu1 without login;
+            create user pu2 without login;
+            grant select on dbo.pt to pu1;
+            grant update (b) on dbo.pt to pu1;
+            deny delete on dbo.pt to pu1;
+            grant create table to pu1;
+            grant select on dbo.pt to pu2 with grant option
+            """);
+        return sim;
+    }
+
+    [TestMethod]
+    public void HelpProtect_ReportsObjectRowsThenStatementRows()
+    {
+        var sets = Sets(ProtectFixture(), "exec sp_helprotect");
+        CollectionAssert.AreEqual(
+            new[] { "Owner", "Object", "Grantee", "Grantor", "ProtectType", "Action", "Column" }, sets[0].Names);
+        var rendered = sets[0].Rows.ConvertAll(ProtectRowText);
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "dbo|pt|pu1|dbo|Deny|Delete|.",
+                "dbo|pt|pu1|dbo|Grant|Select|(All+New)",
+                "dbo|pt|pu1|dbo|Grant|Update|b",
+                "dbo|pt|pu2|dbo|Grant_WGO|Select|(All+New)",
+                ".|.|pu1|dbo|Grant|CONNECT|.",
+                ".|.|pu1|dbo|Grant|Create Table|.",
+                ".|.|pu2|dbo|Grant|CONNECT|.",
+            },
+            rendered);
+    }
+
+    [TestMethod]
+    public void HelpProtect_NameFiltersToTheObject()
+        => HasCount(4, Sets(ProtectFixture(), "exec sp_helprotect 'dbo.pt'")[0].Rows);
+
+    [TestMethod]
+    public void HelpProtect_StatementNameFiltersToThePermission()
+    {
+        var row = Sets(ProtectFixture(), "exec sp_helprotect 'CREATE TABLE'")[0].Rows.Single();
+        AreEqual(".", row[0]);
+        AreEqual("Create Table", row[5]);
+    }
+
+    [TestMethod]
+    public void HelpProtect_PermissionAreaSelectsTheStatementRowsOnly()
+    {
+        var rows = Sets(ProtectFixture(), "exec sp_helprotect null, null, null, 's'")[0].Rows;
+        HasCount(3, rows);
+        CollectionAssert.AreEqual(new[] { ".", ".", "." }, rows.ConvertAll(r => (string)r[1]!));
+    }
+
+    [TestMethod]
+    public void HelpProtect_ColumnWidthsTrackTheReportedRows()
+    {
+        // Real types the report through substring(col, 1, max(datalength(col))),
+        // so each width is twice the longest value's character count, and
+        // ProtectType stays the temp table's char(10).
+        var row = Sets(ProtectFixture(), "exec sp_helprotect 'CREATE TABLE'")[0].Rows.Single();
+        AreEqual(1, ((string)row[0]!).Length);      // '.' → nvarchar(2)
+        AreEqual("Grant     ", row[4]);             // char(10)
+        AreEqual("Create Table", row[5]);           // nvarchar(24)
+    }
+
+    [TestMethod]
+    public void HelpProtect_ObjectLevelGrantExpandsAcrossTheColumnsItStillCovers()
+    {
+        var sim = ProtectFixture();
+        _ = sim.ExecuteNonQuery("""
+            grant select on dbo.pt to pu2;
+            grant select (id) on dbo.pt to pu2;
+            deny select (b) on dbo.pt to pu2
+            """);
+        var rendered = Sets(sim, "exec sp_helprotect 'dbo.pt', 'pu2'")[0].Rows.ConvertAll(ProtectRowText);
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "dbo|pt|pu2|dbo|Deny|Select|b",
+                "dbo|pt|pu2|dbo|Grant|Select|(New)",
+                "dbo|pt|pu2|dbo|Grant|Select|id",
+                "dbo|pt|pu2|dbo|Grant|Select|a",
+            },
+            rendered);
+    }
+
+    [TestMethod]
+    public void HelpProtect_SchemaScopeGrantIsNotReported()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create role pr1; grant select on schema::dbo to pr1");
+        sim.AssertSqlError("exec sp_helprotect null, 'pr1'", 15330,
+            "There are no matching rows on which to report.");
+    }
+
+    [TestMethod]
+    public void HelpProtect_NoMatchingRows_Raises15330()
+        => ProtectFixture().AssertSqlError("exec sp_helprotect null, 'nosuchuser'", 15330,
+            "There are no matching rows on which to report.");
+
+    [TestMethod]
+    public void HelpProtect_UnrecognizedPermissionArea_Raises15300()
+        => ProtectFixture().AssertSqlError("exec sp_helprotect null, null, null, 'x'", 15300,
+            "No recognized letter is contained in the parameter value for General Permission Type (X). Valid letters are in this set: o,s .");
+
+    [TestMethod]
+    public void HelpProtect_DatabaseQualifiedName_Raises15302()
+        => ProtectFixture().AssertSqlError("exec sp_helprotect 'simulated.dbo.pt'", 15302,
+            "Database_Name should not be used to qualify owner.object for the parameter into this procedure.");
+
     // ===== sp_helptrigger =====
 
     private static Simulation TriggerFixture()
@@ -671,5 +902,74 @@ public sealed class SystemInfoProcTests
         _ = Sets(sim, "exec sp_MSforeachtable 'delete from ?'");
         AreEqual(0, sim.ExecuteScalar("select count(*) from dbo.fe_a"));
         AreEqual(0, sim.ExecuteScalar("select count(*) from dbo.fe_b"));
+    }
+
+    // ===== sp_MSforeachdb =====
+
+    // The accessible databases in database_id order — model is left out
+    // because HAS_DBACCESS reports 0 for it, the same filter sp_helpdb applies.
+    private static readonly string[] ForEachDbNames = ["master", "tempdb", "msdb", "simulated"];
+
+    [TestMethod]
+    public void ForEachDb_RunsTheCommandOncePerAccessibleDatabaseInIdOrder()
+        => CollectionAssert.AreEqual(ForEachDbNames, Sets(new Simulation(),
+            "exec sp_MSforeachdb 'select ''?'' as d'").ConvertAll(s => (string)s.Rows[0][0]!));
+
+    [TestMethod]
+    public void ForEachDb_DoesNotSwitchDatabaseContextOnItsOwn()
+    {
+        // Probe-confirmed: the proc leaves the session's database alone, so a
+        // command reading DB_NAME() reports the caller's every time.
+        var names = Sets(new Simulation(), "exec sp_MSforeachdb 'select db_name() as ctx'")
+            .ConvertAll(s => (string)s.Rows[0][0]!);
+        CollectionAssert.AreEqual(new[] { "simulated", "simulated", "simulated", "simulated" }, names);
+    }
+
+    [TestMethod]
+    public void ForEachDb_UseCommandScopesToTheOneCommandAndLeavesTheSessionPut()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateOpenConnection();
+        var names = Run(connection, "exec sp_MSforeachdb 'use [?]; select db_name() as ctx'")
+            .Sets.ConvertAll(s => (string)s.Rows[0][0]!);
+        CollectionAssert.AreEqual(ForEachDbNames, names);
+        AreEqual("simulated", Run(connection, "select db_name()").Sets[0].Rows[0][0]);
+    }
+
+    [TestMethod]
+    public void ForEachDb_BareReplaceCharIsQuoteNamed()
+        => CollectionAssert.AreEqual(
+            ForEachDbNames,
+            Sets(new Simulation(), "exec sp_MSforeachdb 'select 1 as ?'").ConvertAll(s => s.Names[0]));
+
+    [TestMethod]
+    public void ForEachDb_ReplaceCharOverrideAndPrePostCommandsRunOnce()
+    {
+        var sets = Sets(new Simulation(),
+            """
+            exec sp_MSforeachdb
+                @command1 = 'select ''$'' as d',
+                @replacechar = '$',
+                @precommand = 'select ''pre'' as tag',
+                @postcommand = 'select ''post'' as tag'
+            """);
+        HasCount(ForEachDbNames.Length + 2, sets);
+        AreEqual("pre", sets[0].Rows[0][0]);
+        AreEqual("master", sets[1].Rows[0][0]);
+        AreEqual("post", sets[^1].Rows[0][0]);
+    }
+
+    [TestMethod]
+    public void ForEachDb_RunsAllThreeCommandsPerDatabase()
+    {
+        var sets = Sets(new Simulation(),
+            """
+            exec sp_MSforeachdb
+                @command1 = 'select 1 as c',
+                @command2 = 'select 2 as c',
+                @command3 = 'select 3 as c'
+            """);
+        HasCount(ForEachDbNames.Length * 3, sets);
+        CollectionAssert.AreEqual(new[] { 1, 2, 3 }, sets.GetRange(0, 3).ConvertAll(s => (int)s.Rows[0][0]!));
     }
 }

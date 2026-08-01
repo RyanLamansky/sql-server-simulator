@@ -65,6 +65,7 @@ internal sealed class ColumnProperty : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var idValue = this.idArg.Run(runtime);
+        ScalarArguments.RequireIntegerArgument(idValue, this.idArg.ResultReportsNumeric, 1, "columnproperty");
         var columnValue = this.columnArg.Run(runtime);
         var propValue = this.propertyArg.Run(runtime);
         if (idValue.IsNull || columnValue.IsNull || propValue.IsNull)

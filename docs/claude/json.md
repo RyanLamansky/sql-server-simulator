@@ -16,7 +16,8 @@ Object/array match → raw JSON text via `JsonElement.GetRawText` (preserves the
 Scalar match → NULL in lax, Msg 13624 in strict.
 Missing path → NULL in lax, Msg 13608 in strict.
 NULL `json` or NULL path → NULL.
-Two-arg form only (the 1-arg `JSON_QUERY(json)` shorthand for `JSON_QUERY(json, '$')` raises Msg 102 at parse).
+The path is optional: `JSON_QUERY(json)` is shorthand for `JSON_QUERY(json, '$')` and hands back the whole document — the input's own text, so interior whitespace survives while the padding outside the document does not (`'  {"a" : 1}  '` → `{"a" : 1}`).
+A root-level JSON scalar has nothing to extract, so it answers NULL like any other scalar match; a third argument → **Msg 189** ("The json_query function requires 1 to 2 arguments.", against `JSON_VALUE`'s fixed-arity Msg 174).
 DACFx-emitted computed columns (WWI's `Application.People.OtherLanguages`, `Warehouse.StockItems.Tags`) always supply explicit paths.
 Pipes cleanly into `OPENJSON` for round-trip on extracted arrays.
 
@@ -83,6 +84,11 @@ Routes through the same `JsonPath.Walk` infrastructure as `JSON_VALUE` / `JSON_Q
 NULL `json` or NULL `path` → NULL.
 Lax-mode invalid JSON → 0; strict-mode invalid JSON → Msg 13609.
 
+**Divergence — malformed input under lax paths.**
+Real raises **Msg 13609** ("JSON text is not properly formatted. Unexpected character '<c>' is found at position <n>.") whenever the *input document* doesn't parse, regardless of the path's lax/strict prefix, and it counts a root-level JSON scalar (`'1'`, `'"abc"'`) as not parsing — only an object or array is JSON text to it.
+The simulator swallows both to NULL (0 for `JSON_PATH_EXISTS`) under lax across `JSON_VALUE` / `JSON_QUERY` / `JSON_MODIFY` / `JSON_PATH_EXISTS`, and reserves Msg 13609 for the strict paths.
+Closing it means the position-bearing message text as well as the root-shape rule; `ISJSON` already matches real (a root scalar → 0).
+
 `ISJSON(expression)` returns `int` (1 / 0 / NULL).
 Wraps `JsonDocument.Parse` in try/catch: NULL input → NULL, non-string input → 0 (real SQL Server raises Msg 8116 — the simulator's lax disposition is harmless for the CHECK-constraint use case), valid JSON object/array/scalar → 1, parse-fail → 0.
 The 2-arg shape (`VALUE | ARRAY | OBJECT | SCALAR` modifier) isn't modeled — DACFx-emitted CHECK constraints (`isjson([col])<>0`) only use the 1-arg form.
@@ -111,9 +117,16 @@ A nested object whose leaves are all omitted (NULL under omit-NULL) is dropped e
 
 ### AUTO mode
 
-Flat single-source select: same shape as PATH but column names are literal keys (dots are **not** split — `[x.y]` → `{"x.y":…}`).
-A **join** nests each secondary table as a sub-array keyed by its table/alias name; that row-collapsing is **deferred** — AUTO over a multi-source query raises `NotSupportedException` (PATH covers the same cases and is the priority).
-See [`backlog.md`](backlog.md).
+Column names are literal keys (dots are **not** split — `[x.y]` → `{"x.y":…}`), and each FROM source becomes one nesting level: the first level's objects are the top-level array elements, every deeper level is an array-valued property keyed by the source's alias / written name.
+
+```
+select p.id, p.nm, c.cnm from pp p join cc c on c.pid = p.id for json auto
+    → [{"id":1,"nm":"alpha","c":[{"cnm":"a1"},{"cnm":"a2"}]}]
+```
+
+The level model — which sources become levels, in what order, where a computed column lands, and how consecutive rows collapse — is shared with `FOR XML AUTO` and tabulated in [`xml.md`](xml.md#auto-nesting-shared-with-for-json-auto); `Parser/Selection.AutoNesting.cs` builds it for both.
+JSON-specific corners: a NULL-filled outer-join side is `"c":[{}]` (an array holding one empty object), `INCLUDE_NULL_VALUES` reaches every level, `WITHOUT_ARRAY_WRAPPER` drops only the outermost array, and a SELECT with no FROM clause raises **Msg 13600**.
+A set-operation result raises `NotSupportedException` (the same gap FOR XML AUTO has).
 
 ### Options
 

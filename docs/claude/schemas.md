@@ -12,8 +12,7 @@ Probed against SQL Server 2025.
 - **Reserved schema names** (`dbo`, `sys`, `INFORMATION_SCHEMA`) → **Msg 2760** (`"The specified schema name \"<n>\" either does not exist or you do not have permission to use it."`).
   Wording is quirky for a CREATE (says "does not exist"), but probe-confirmed verbatim — real SQL Server resolves the principal first and these schemas tie to system principals.
 - **Three-part `db.schema.t`** routes the db segment through `Simulation.Databases` (case-insensitive).
-  Missing database surfaces as Msg 208 / 3701 / 4701 per callsite (same as a missing table); existing-but-other-database resolves cross-DB for SELECT / JOIN / catalog views, but DML / DDL through 3-part names raises `NotSupportedException` via `BatchContext.RejectCrossDatabaseMutation` (cross-DB write is its own bundle — trigger scope swapping, identity allocation routing, undo-log scoping, FK validation across DBs all need plumbing).
-  Use `USE <db>` to switch the connection's `CurrentDatabase` for mutations.
+  Missing database surfaces as Msg 208 / 3701 / 4701 per callsite (same as a missing table); existing-but-other-database resolves cross-DB for reads (SELECT / JOIN / catalog views) and for writes (see [Cross-database writes](#cross-database-writes) below).
   **Four-part `server.db.schema.t`** always returns false (linked-server names aren't modeled — real SQL Server raises Msg 7202 for unknown server; the simulator surfaces Msg 208 instead).
   Empty middle segment (`db..table`) is substituted with `dbo` at parse time so `db..table` resolves identically to `db.dbo.table` — real SQL Server uses the login's default schema; the simulator has no per-login schema and routes everything through `dbo`.
   This makes cross-database short-form queries (`SELECT * FROM sales..Customer`) land in the correct database; temp-table forms (`tempdb..#foo`) still work because `TryResolveTable`'s `IsLocalTempName` check operates on the leaf regardless of qualifier.
@@ -35,7 +34,38 @@ Skip-mode (inside an un-taken `IF` / `WHILE`) suppresses the switch.
 - **Missing database** → **Msg 911** (`"Database '<n>' does not exist. Make sure that the name is entered correctly."` — Class 16 State 1, probe-confirmed verbatim against SQL Server 2025).
   The dispatch loop's mid-batch exception abort prevents subsequent statements from running, matching real-server behavior.
 - **`USE @var`** / **`USE (paren)`** → **Msg 102** via `GetNextRequired<Name>()`'s type-mismatch (probe-confirmed: real SQL Server rejects both).
-- **Switching enables cross-database mutation through 1- or 2-part names** — after `USE [other]`, an unqualified `INSERT t VALUES (…)` writes to `other.dbo.t` without tripping the 3-part-name DML guard.
+- **Switching is one of two ways to mutate another database** — after `USE [other]`, an unqualified `INSERT t VALUES (…)` writes to `other.dbo.t`; the three-part name reaches it without the switch.
+
+## Cross-database writes
+
+`INSERT` / `UPDATE` / `DELETE` / `MERGE` / `SELECT … INTO` and the table DDL (`CREATE` / `ALTER` / `DROP` / `TRUNCATE TABLE`) all route through a three-part name to the named database — as does a write through a synonym whose base is three-part, and the `db..t` short form.
+The session's own database is unaffected: `DB_NAME()` in the mutating statement still reads the session's, `@@ROWCOUNT` and `SCOPE_IDENTITY()` / `@@IDENTITY` flow back to the caller, and one transaction spans both databases (`ROLLBACK` and `ROLLBACK TRAN <savepoint>` undo the other database's write, since undo entries reference their `Heap` directly).
+Every shape here is probe-confirmed against SQL Server 2025.
+
+What follows the *target* rather than the session, all keyed off `HeapTable.OwningDatabase` (stamped when the table enters a `Schema.HeapTables` dict) via `BatchContext.DatabaseFor`:
+
+- **The rowversion counter.**
+  A cross-database INSERT / UPDATE of a `rowversion` column advances the target's `@@DBTS` and leaves the session's where it was — probed both directions.
+  Rollback doesn't give the stamp back, matching the identity / rowversion log-bypass rule ([`transactions.md`](transactions.md)).
+- **Trigger dispatch.**
+  Matching triggers are found in the target's schemas, and each body runs with the connection's current database switched to the target's for its duration (restored in a `finally`, invisible to the firing batch).
+  So `DB_NAME()` inside the body reads the target — probe-confirmed — and the body's unqualified writes land there; reaching back to the firing session's database is itself a three-part write.
+- **Object-id allocation** for a table created by a three-part `CREATE TABLE` / `SELECT … INTO`, so its `sys.tables` row carries an id from the database it lives in.
+- **The version store.**
+  Capture is gated on the target's `ALLOW_SNAPSHOT_ISOLATION` / `READ_COMMITTED_SNAPSHOT`, and `VersionStore.FinalizePendingEntries` allocates one commit Xid *per database* the transaction wrote to (the counter is per-database) — the single-database case still allocates one and takes no dictionary.
+
+Constraint enforcement, identity allocation, indexes and the seek cache all hang off the `HeapTable` and need no routing.
+Locks likewise: the `LockManager` is per-`Simulation` and its resources hang off the table, so a session holding locks in two databases at once already worked.
+
+**Not modeled yet**
+
+- **Permission enforcement stays scoped to the session's database.** A write through a three-part name checks the session principal's grants against the target's `object_id`, where real resolves the login's user in the target database.
+  Invisible to the default dbo session (which bypasses every check) and unchanged from the same stance cross-database *reads* already take — see [`permissions.md`](permissions.md).
+- **Cross-database SNAPSHOT / RCSI read visibility.** A reader takes its snapshot stamp from the session's database, so reading another database's versioned rows compares stamps from two independent counters.
+  Writers are self-consistent (each database's rows carry its own commit Xids); the reader side is the piece left.
+- **Four-part writes to a linked server** stay rejected by `BatchContext.RejectCrossServerMutation` — the remote's lock manager and undo log are its own, and that's the [`linked-servers.md`](linked-servers.md) gap, not this one.
+- **The database name in Msg 515 / 547 constraint messages** is still the literal `Simulation.DefaultDatabaseName`, so a violation in another database names `simulated` where real names the target (a pre-existing hardcode, unrelated to which database the write came from).
+- **`CREATE VIEW` / `PROCEDURE` / `FUNCTION` / `TRIGGER` with a db prefix** — real raises Msg 166 (`does not allow specifying the database name as a prefix`); the simulator doesn't enforce that yet.
 
 ## DROP SCHEMA
 `DROP SCHEMA [IF EXISTS] <name>` removes an entry from `Database.Schemas`.
@@ -60,9 +90,8 @@ The base object is **not** resolved at creation: real binds it lazily, so a syno
 ### Resolution
 
 `BatchContext.TryRedirectThroughSynonym` is the shared redirect step behind `TryResolveTable` / `TryResolveView` / `TryResolveFunction`; each recurses on the base name so a schema-qualified (or 3-part cross-database) base routes.
-`ExpandSynonym` rewrites a name to its base ahead of resolution at the two EXEC entry points, and `RejectCrossDatabaseMutation` expands before testing the db segment so a write through a synonym is gated on the base's database, not the synonym's.
-Reference sites that ship, all probe-confirmed against real: FROM-source table / view, INSERT / UPDATE / DELETE / MERGE targets, `EXEC syn` (procedure base), `SELECT dbo.syn(1)` (scalar-function base), `FROM dbo.syn(1)` (TVF base), and cross-database bases for reads.
-A cross-database *write* through a synonym raises the standard `NotSupportedException` from `RejectCrossDatabaseMutation` (real allows it) — the same gap 3-part-name writes carry.
+`ExpandSynonym` rewrites a name to its base ahead of resolution at the two EXEC entry points, and `RejectCrossServerMutation` expands before testing the server segment so a write through a synonym is gated on the base's server, not the synonym's.
+Reference sites that ship, all probe-confirmed against real: FROM-source table / view, INSERT / UPDATE / DELETE / MERGE targets, `EXEC syn` (procedure base), `SELECT dbo.syn(1)` (scalar-function base), `FROM dbo.syn(1)` (TVF base), and cross-database bases for both reads and writes.
 
 - **Missing base at first use** → **Msg 5313** ("Synonym '<n>' refers to an invalid object."), the name rendered as written at the use site.
   State 1 when the base names nothing, State 224 when it names an object the reference can't use (a procedure or sequence in a FROM clause).

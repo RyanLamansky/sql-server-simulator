@@ -2,6 +2,7 @@
 
 `CREATE [OR ALTER] TRIGGER [schema.]name ON [schema.]parent { AFTER | FOR | INSTEAD OF } { INSERT | UPDATE | DELETE } [, ...] AS body`, mutated via `ALTER TRIGGER`, dropped via `DROP TRIGGER [IF EXISTS]`, toggled via `{ DISABLE | ENABLE } TRIGGER { name | ALL } ON parent`, fired automatically by the matching DML against the parent.
 Body source is captured between `AS` and end-of-batch; re-tokenized per fire inside a child `BatchContext` with a [`TriggerFrame`](../../src/SqlServerSimulator/Parser/TriggerFrame.cs) seeded with the `INSERTED` / `DELETED` pseudo-tables.
+It is also bound once at `CREATE` / `ALTER` against *empty* pseudo-tables of the same shape, so a bad column — on the parent, on `INSERTED` / `DELETED`, or inside `UPDATE(col)` — reports Msg 207 there and the trigger isn't created; the parent's own Msg 8197 still comes first → [`programmable.md`](programmable.md#create-time-body-binding).
 AFTER (and its `FOR` synonym) attaches to heap tables only; INSTEAD OF attaches to heap tables and views.
 Probed against SQL Server 2025.
 
@@ -44,6 +45,9 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) fire on the DDL t
   For AFTER triggers, the firing DML's statement-atomic undo log walks back, reverting the heap insert/update/delete.
   For INSTEAD OF, the heap was never written, so propagation simply surfaces the error to the caller.
 - **The body runs inside the firing statement's atomic scope** — see [Trigger atomic scope](#trigger-atomic-scope).
+- **The body runs in its own table's database.**
+  A trigger fired by a write through a three-part name (`INSERT other.dbo.t …`) is found in the target's schemas and its body executes with the connection's current database switched to the target for the body's duration, so `DB_NAME()` inside reads the target and unqualified body writes land there — probe-confirmed against SQL Server 2025, which also reports the firing session's database as `ORIGINAL_DB_NAME()`.
+  The switch is restored in a `finally` and is invisible to the firing batch (not a `USE`) → [`schemas.md`](schemas.md#cross-database-writes).
 - **`UPDATE(col)` / `COLUMNS_UPDATED()`** — see [Change-detection intrinsics](#change-detection-intrinsics).
 - **AFTER triggers fire on a zero-row DML** — an UPDATE / DELETE matching nothing, an `INSERT … SELECT` producing nothing, and a MERGE with no source rows all still run the body, with empty `INSERTED` / `DELETED` and `@@ROWCOUNT` 0 (probe-confirmed for all four shapes).
   `UPDATE(col)` still reports the SET-clause columns there, because the reading is a property of the statement rather than of the rows.

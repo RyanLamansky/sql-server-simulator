@@ -73,6 +73,7 @@ internal sealed class PatIndex : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        _ = StringScalars.BindArgument(this.pattern, batch, resolveColumnType, "patindex");
         SqlType resultType = IsBigResult(this.subject.GetSqlType(batch, resolveColumnType)) ? SqlType.BigInt : SqlType.Int32;
         return resultType;
     }

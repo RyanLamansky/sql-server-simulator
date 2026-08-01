@@ -49,6 +49,8 @@ partial class Simulation
                 return TryParseAlterLogin(context);
             case Name serverWord when serverWord.Value.Equals("SERVER", StringComparison.OrdinalIgnoreCase):
                 return TryParseAlterServerRole(context);
+            case Name appWord when appWord.Value.Equals("APPLICATION", StringComparison.OrdinalIgnoreCase):
+                return TryParseAlterApplicationRole(context);
             case ReservedKeyword { Keyword: Keyword.Database }:
                 break;
             default:
@@ -763,6 +765,7 @@ partial class Simulation
             _ = sourceSchema.HeapTables.TryRemove(leafName, out _);
             destSchema.HeapTables[leafName] = heap;
             heap.SchemaId = destSchema.SchemaId;
+            heap.OwningDatabase = destSchema.Database;
             ReseatAttachedTriggers(sourceSchema, destSchema, heap);
             return;
         }
@@ -1075,6 +1078,7 @@ partial class Simulation
             // rejecting the ALTER.
             var historySchema = HistoryDestinationSchema(context, baseTable, options.HistoryTable);
             resolvedHistory = BuildHistoryTable(baseTable, options.HistoryTable?.Leaf ?? AutoHistoryTableName(historySchema, baseTable.ObjectId), historySchema.SchemaId, context);
+            resolvedHistory.OwningDatabase = historySchema.Database;
             if (!historySchema.HeapTables.TryAdd(resolvedHistory.Name, resolvedHistory))
                 throw SimulatedSqlException.ThereIsAlreadyAnObject(resolvedHistory.Name);
         }

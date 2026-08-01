@@ -14,6 +14,7 @@ internal enum Permission : byte
 {
     Other = 0,
     Alter,
+    AlterAnyLogin,
     Connect,
     Control,
     CreateFunction,
@@ -24,6 +25,7 @@ internal enum Permission : byte
     Delete,
     Execute,
     Impersonate,
+    ImpersonateAnyLogin,
     Insert,
     Receive,
     References,
@@ -31,6 +33,7 @@ internal enum Permission : byte
     TakeOwnership,
     Unmask,
     Update,
+    ViewAnyDefinition,
     ViewChangeTracking,
     ViewDatabasePerformanceState,
     ViewDatabaseState,
@@ -97,6 +100,7 @@ internal static class PermissionCatalog
     [
         new("", "    ", PermissionCategory.None),                    // Other (name/code come from the row's raw text)
         new("ALTER", "AL  ", PermissionCategory.Ddl),               // Alter
+        new("ALTER ANY LOGIN", "ALLG", PermissionCategory.None),    // AlterAnyLogin (server scope)
         new("CONNECT", "CO  ", PermissionCategory.None),            // Connect
         new("CONTROL", "CL  ", PermissionCategory.None),            // Control
         new("CREATE FUNCTION", "CRFN", PermissionCategory.Ddl),     // CreateFunction
@@ -107,6 +111,7 @@ internal static class PermissionCatalog
         new("DELETE", "DL  ", PermissionCategory.Write),            // Delete
         new("EXECUTE", "EX  ", PermissionCategory.None),            // Execute
         new("IMPERSONATE", "IM  ", PermissionCategory.None),        // Impersonate
+        new("IMPERSONATE ANY LOGIN", "IAL ", PermissionCategory.None), // ImpersonateAnyLogin (server scope)
         new("INSERT", "IN  ", PermissionCategory.Write),            // Insert
         new("RECEIVE", "RC  ", PermissionCategory.None),            // Receive
         new("REFERENCES", "RF  ", PermissionCategory.None),         // References
@@ -114,6 +119,7 @@ internal static class PermissionCatalog
         new("TAKE OWNERSHIP", "TO  ", PermissionCategory.None),     // TakeOwnership
         new("UNMASK", "UMSK", PermissionCategory.None),             // Unmask
         new("UPDATE", "UP  ", PermissionCategory.Write),            // Update
+        new("VIEW ANY DEFINITION", "VWAD", PermissionCategory.None), // ViewAnyDefinition (server scope)
         new("VIEW CHANGE TRACKING", "VWCT", PermissionCategory.None), // ViewChangeTracking
         new("VIEW DATABASE PERFORMANCE STATE", "VDP ", PermissionCategory.None), // ViewDatabasePerformanceState
         new("VIEW DATABASE STATE", "VWDS", PermissionCategory.None), // ViewDatabaseState
@@ -134,6 +140,7 @@ internal static class PermissionCatalog
             return upper switch
             {
                 "ALTER" => Permission.Alter,
+                "ALTER ANY LOGIN" => Permission.AlterAnyLogin,
                 "CONNECT" => Permission.Connect,
                 "CONTROL" => Permission.Control,
                 "CREATE FUNCTION" => Permission.CreateFunction,
@@ -144,6 +151,7 @@ internal static class PermissionCatalog
                 "DELETE" => Permission.Delete,
                 "EXECUTE" => Permission.Execute,
                 "IMPERSONATE" => Permission.Impersonate,
+                "IMPERSONATE ANY LOGIN" => Permission.ImpersonateAnyLogin,
                 "INSERT" => Permission.Insert,
                 "RECEIVE" => Permission.Receive,
                 "REFERENCES" => Permission.References,
@@ -151,6 +159,7 @@ internal static class PermissionCatalog
                 "TAKE OWNERSHIP" => Permission.TakeOwnership,
                 "UNMASK" => Permission.Unmask,
                 "UPDATE" => Permission.Update,
+                "VIEW ANY DEFINITION" => Permission.ViewAnyDefinition,
                 "VIEW CHANGE TRACKING" => Permission.ViewChangeTracking,
                 "VIEW DATABASE PERFORMANCE STATE" => Permission.ViewDatabasePerformanceState,
                 "VIEW DATABASE STATE" => Permission.ViewDatabaseState,

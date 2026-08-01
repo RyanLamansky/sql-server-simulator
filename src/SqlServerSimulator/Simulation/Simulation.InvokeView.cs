@@ -38,6 +38,13 @@ partial class Simulation
         // a view body is a plain SELECT with no RETURN.
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var dummyFrame = new UdfFrame(SqlType.Int32);
+        // The body parses under the QUOTED_IDENTIFIER captured at CREATE, not
+        // the caller's. Swapping the session flag (rather than seeding the
+        // child parser) is what carries it to everything else that reads the
+        // connection — dynamic SQL, the plan-cache key, the Msg 1934 gates.
+        // Restored in the finally below; see docs/claude/grammar.md.
+        var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+        connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
         // Body errors attribute to the outer statement that referenced the view
         // (probe-confirmed: real reports the outer SELECT's line, no procedure).
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
@@ -57,6 +64,7 @@ partial class Simulation
         finally
         {
             connection.NestingLevel--;
+            connection.QuotedIdentifiers = savedQuotedIdentifiers;
         }
     }
 }

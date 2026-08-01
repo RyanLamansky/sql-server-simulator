@@ -44,6 +44,12 @@ internal static partial class BuiltInResources
         "sp_set_session_context",
         "sp_getapplock",
         "sp_releaseapplock",
+        // Application-role activation: sp_setapprole swaps the session's
+        // database principal for the role's and pins the session to its
+        // database; sp_unsetapprole takes it back with the issued cookie.
+        // See docs/claude/permissions.md.
+        "sp_setapprole",
+        "sp_unsetapprole",
         // sp_configure: reads / stages server-configuration options, installed
         // by RECONFIGURE. 'nested triggers' is the one option with behavior
         // wired — see docs/claude/triggers.md.
@@ -93,12 +99,19 @@ internal static partial class BuiltInResources
         "sp_helpconstraint",
         "sp_helpindex",
         "sp_helptext",
-        // sp_helpdb / sp_helpuser / sp_helptrigger: the same formatted-metadata
-        // family one scope out — the database list + its file allocation, the
-        // database's users and roles, and a table's or view's DML triggers.
+        // sp_helpdb / sp_helpfile / sp_helpuser / sp_helptrigger: the same
+        // formatted-metadata family one scope out — the database list, its file
+        // allocation on its own, the database's users and roles, and a table's
+        // or view's DML triggers.
         "sp_helpdb",
+        "sp_helpfile",
         "sp_helptrigger",
         "sp_helpuser",
+        // sp_helprotect / sp_helpstats: the permission report over
+        // sys.database_permissions' object and statement rows, and a table's
+        // or indexed view's statistics.
+        "sp_helprotect",
+        "sp_helpstats",
         // sp_spaceused: the size report for one object or the whole database,
         // computed from the same page counts sys.dm_db_partition_stats projects.
         "sp_spaceused",
@@ -106,8 +119,10 @@ internal static partial class BuiltInResources
         // connection registry with the lock manager supplying the blocking spid.
         "sp_who",
         "sp_who2",
-        // sp_MSforeachtable: runs command templates once per user table with
-        // the table's bracketed name substituted for each '?'.
+        // sp_MSforeachdb / sp_MSforeachtable: run command templates once per
+        // accessible database / per user table, with that name substituted for
+        // each '?'.
+        "sp_MSforeachdb",
         "sp_MSforeachtable",
     ];
 

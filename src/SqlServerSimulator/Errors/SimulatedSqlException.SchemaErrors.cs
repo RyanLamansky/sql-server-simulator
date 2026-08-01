@@ -1978,4 +1978,44 @@ partial class SimulatedSqlException
 
     private static SimulatedSqlException RenameError(string message, int number) =>
         new(message, new SimulatedError(@class: 11, lineNumber: 0, message, number, procedure: "sp_rename", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 1));
+
+    /// <summary>
+    /// Mimics SQL Server error 1934: the statement touches a feature that
+    /// requires a fixed set of SET options and the session has one of them
+    /// wrong. <paramref name="verb"/> names the statement real echoes —
+    /// <c>INSERT</c> / <c>UPDATE</c> / <c>DELETE</c> / <c>MERGE</c> /
+    /// <c>SELECT</c> / <c>CREATE TABLE</c> / <c>ALTER TABLE</c> /
+    /// <c>CREATE INDEX</c> / <c>CREATE PRIMARY XML INDEX</c> — and
+    /// <paramref name="options"/> the offending option names, quoted and
+    /// comma-separated. Only the <c>QUOTED_IDENTIFIER</c> component is
+    /// enforced; real's full required set is
+    /// <c>ANSI_NULLS</c> / <c>ANSI_PADDING</c> / <c>ANSI_WARNINGS</c> /
+    /// <c>ARITHABORT</c> / <c>CONCAT_NULL_YIELDS_NULL</c> ON and
+    /// <c>NUMERIC_ROUNDABORT</c> OFF.
+    /// Probe-confirmed wording, class 16 state 1 (SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IncorrectSetOptions(string verb, string options) =>
+        new($"{verb} failed because the following SET options have incorrect settings: '{options}'. Verify that SET options are correct for use with indexed views and/or indexes on computed columns and/or filtered indexes and/or query notifications and/or XML data type methods and/or spatial index operations.", 1934, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1934's spatial-only wording: <c>CREATE SPATIAL
+    /// INDEX</c> names only spatial index operations in its verify clause,
+    /// where every other 1934 site lists the full feature set
+    /// (probe-confirmed against SQL Server 2025). The verb is still the bare
+    /// <c>CREATE INDEX</c>.
+    /// </summary>
+    internal static SimulatedSqlException IncorrectSetOptionsForSpatialIndex(string options) =>
+        new($"CREATE INDEX failed because the following SET options have incorrect settings: '{options}'. Verify that SET options are correct for use with spatial index operations.", 1934, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1935: <c>CREATE INDEX</c> targets a view whose
+    /// own creation-time SET-option capture is wrong, which no amount of
+    /// fixing the current session repairs — the view has to be recreated.
+    /// Distinct from Msg 1934, which reports the <i>session's</i> settings:
+    /// real raises 1935 for a view created under <c>QUOTED_IDENTIFIER OFF</c>
+    /// even when the indexing session has it ON (probe-confirmed). The name
+    /// is unqualified.
+    /// </summary>
+    internal static SimulatedSqlException CannotCreateIndexObjectCreatedWithOptionsOff(string viewName, string options) =>
+        new($"Cannot create index. Object '{viewName}' was created with the following SET options off: '{options}'.", 1935, 16, 1);
 }

@@ -50,9 +50,11 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
         (Collation Collation, Coercibility Coercibility) collation;
         if (leftIsString && rightIsString)
         {
+            // Real names this operator `concat`, where the `+` form's identical
+            // Msg 457 says `add` (probe-confirmed both ways).
             collation = Collation.Resolve(leftType, rightType)
                 ?? throw SimulatedSqlException.UnresolvedCollationInImplicitConversion(
-                    baseType, rightType.Collation!.Name, leftType.Collation!.Name, "add");
+                    baseType, rightType.Collation!.Name, leftType.Collation!.Name, "concat");
         }
         else
         {
@@ -95,5 +97,5 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
 
     internal override bool IsRowIndependent => left.IsRowIndependent && right.IsRowIndependent;
 
-    internal override bool IsWrittenConstant => left.IsWrittenConstant && right.IsWrittenConstant;
+    private protected override bool IsStructuralConstant => left.IsWrittenConstant && right.IsWrittenConstant;
 }

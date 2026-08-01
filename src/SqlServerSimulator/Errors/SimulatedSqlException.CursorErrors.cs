@@ -82,6 +82,33 @@ partial class SimulatedSqlException
         new("There are no rows in the current fetch buffer.", 16931, 16, 1);
 
     /// <summary>
+    /// Msg 16933: a positioned <c>UPDATE</c> / <c>DELETE … WHERE CURRENT OF</c>
+    /// names a table the cursor's SELECT doesn't read — an unrelated table, or
+    /// the base table behind a view the cursor reads (real binds the view, not
+    /// what's under it). Also raised when the cursor's <c>FOR UPDATE OF (…)</c>
+    /// list names no column of the target table, which narrows the cursor's
+    /// updatable tables. Probe-confirmed verbatim against SQL Server 2025
+    /// (class 16, state 1).
+    /// </summary>
+    internal static SimulatedSqlException CursorTableNotIncluded() =>
+        new("The cursor does not include the table being modified or the table is not updatable through the cursor.", 16933, 16, 1);
+
+    /// <summary>
+    /// A positioned <c>UPDATE</c> / <c>DELETE … WHERE CURRENT OF</c> found no
+    /// row to mutate for the named table even though the cursor is positioned —
+    /// the table's slot is the NULL-extended side of an outer join. Real
+    /// SQL Server raises <b>Msg 16947</b> (class 16, state 1) plus the standard
+    /// <b>Msg 3621</b> statement-terminated companion; unlike
+    /// <see cref="CursorOptimisticConflict"/> there is no descriptive Msg 16934,
+    /// since nothing was modified out-of-band (probe-confirmed).
+    /// </summary>
+    internal static SimulatedSqlException CursorNoRowsAffected() =>
+        new(
+            "No rows were updated or deleted.\nThe statement has been terminated.",
+            new SimulatedError(@class: 16, lineNumber: 0, "No rows were updated or deleted.", 16947, procedure: "", server: "", source: "Core Microsoft SqlClient Data Provider", state: 1),
+            new SimulatedError(@class: 0, lineNumber: 0, "The statement has been terminated.", 3621, procedure: "", server: "", source: "Core Microsoft SqlClient Data Provider", state: 0));
+
+    /// <summary>
     /// Msg 16932: a positioned <c>UPDATE … WHERE CURRENT OF</c> assigns a
     /// column that isn't in the cursor's <c>FOR UPDATE OF (…)</c> list.
     /// Probe-confirmed verbatim against SQL Server 2025 (state 1).

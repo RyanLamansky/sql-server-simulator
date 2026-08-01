@@ -541,7 +541,11 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(p.PrincipalId),
                 SqlValue.FromChar(charTwo, p.TypeCode),
                 SqlValue.FromNVarchar(p.TypeDescription),
-                nullSchemaName,
+                // Only application roles carry a tracked default schema
+                // (CREATE APPLICATION ROLE … DEFAULT_SCHEMA, defaulting to
+                // dbo); every other principal keeps the NULL this column has
+                // always projected.
+                p.DefaultSchemaName is { } defaultSchema ? SqlValue.FromSystemName(defaultSchema) : nullSchemaName,
                 createDate,
                 createDate,
                 p.TypeCode == "R" ? dboOwningId : nullOwningId,
@@ -688,8 +692,31 @@ internal static partial class BuiltInResources
             ]));
         }
 
-        foreach (var (_, row) in rows.OrderBy(r => r.Id))
-            yield return row;
+        var visibility = ServerPrincipalVisibility(batch);
+        foreach (var (id, row) in rows.OrderBy(r => r.Id))
+        {
+            if (visibility is null || visibility(id))
+                yield return row;
+        }
+    }
+
+    /// <summary>
+    /// The per-row visibility predicate a restricted session's
+    /// <c>sys.server_principals</c> / <c>sys.sql_logins</c> read is filtered
+    /// through, or <see langword="null"/> when the session sees everything
+    /// (dbo / sysadmin — the fast path, one bool read before any allocation).
+    /// Real reveals a login row only to a principal holding some permission on
+    /// it; a bare login sees just itself plus the always-visible fixed block
+    /// (probe-confirmed).
+    /// </summary>
+    private static Func<int, bool>? ServerPrincipalVisibility(Parser.BatchContext batch)
+    {
+        var security = batch.Connection.Security;
+        if (security.EffectiveIsDbo)
+            return null;
+        var simulation = batch.Connection.Simulation;
+        var login = security.Effective.LoginName;
+        return id => simulation.CanViewServerPrincipal(login, id);
     }
 
     /// <summary>Projects <c>sys.server_role_members</c> over <see cref="Simulation.ServerRoleMembers"/>.</summary>
@@ -703,13 +730,19 @@ internal static partial class BuiltInResources
             yield return [SqlValue.FromInt32(roleId), SqlValue.FromInt32(memberId)];
     }
 
-    /// <summary>Projects <c>sys.server_permissions</c> over <see cref="Simulation.ServerPermissions"/> (class 100 / class_desc SERVER / major 0).</summary>
+    /// <summary>
+    /// Projects <c>sys.server_permissions</c> over
+    /// <see cref="Simulation.ServerPermissions"/>: class 100 / <c>SERVER</c> /
+    /// major 0 for the ON-less and <c>ON SERVER::</c> forms, class 101 /
+    /// <c>SERVER_PRINCIPAL</c> / major = the target login's
+    /// <c>principal_id</c> for <c>ON LOGIN::</c>.
+    /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysServerPermissions(Parser.BatchContext batch, Database database)
     {
         var typeChar = SqlType.GetChar(4);
         var stateChar = SqlType.GetChar(1);
-        var classDesc = SqlValue.FromNVarchar("SERVER");
-        var serverClass = SqlValue.FromByte(100);
+        var serverDesc = SqlValue.FromNVarchar("SERVER");
+        var principalDesc = SqlValue.FromNVarchar("SERVER_PRINCIPAL");
         var zeroMajor = SqlValue.FromInt32(0);
         ServerPermission[] snapshot;
         var permissions = batch.Connection.Simulation.ServerPermissions;
@@ -717,10 +750,11 @@ internal static partial class BuiltInResources
             snapshot = [.. permissions];
         foreach (var perm in snapshot)
         {
+            var isPrincipalClass = perm.Class == PermissionChecker.ClassServerPrincipal;
             yield return [
-                serverClass,
-                classDesc,
-                zeroMajor,
+                SqlValue.FromByte(perm.Class),
+                isPrincipalClass ? principalDesc : serverDesc,
+                SqlValue.FromInt32(perm.MajorId),
                 zeroMajor,
                 SqlValue.FromInt32(perm.GranteeId),
                 SqlValue.FromInt32(perm.GrantorId),
@@ -769,8 +803,11 @@ internal static partial class BuiltInResources
             nullPasswordHash,
         ];
 
+        var visibility = ServerPrincipalVisibility(batch);
         foreach (var login in simulation.Logins.Values.OrderBy(l => l.PrincipalId))
         {
+            if (visibility is not null && !visibility(login.PrincipalId))
+                continue;
             yield return [
                 SqlValue.FromSystemName(login.Name),
                 SqlValue.FromInt32(login.PrincipalId),

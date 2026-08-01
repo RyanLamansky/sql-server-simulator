@@ -149,6 +149,14 @@ The simulator has no compile/run split — it resolves inline with parsing — s
   `IsDeferrableNameResolutionError` is `{208}` (Msg 207 removed — it must reach the batch-aborting path per the matrix); the wrapper swallows the 208, advances the cursor to the next statement boundary, and drops the statement with **no** `@@ERROR` / `InFlightError` mutation.
   Runs *ahead* of the TRY-frame path so a skipped `BEGIN TRY` body's missing-name error doesn't activate its CATCH.
   Residual divergence: because this path uses the flat recovery scan rather than placeholder parse-continuation, the astronomically-rare shape of a deferred *DML / sequence / XML-collection* reference immediately followed by an orphan-prone `ELSE` / `END` can still mis-navigate — the common table / column / function shapes are fully covered by the placeholder path.
+  It is also why a CREATE-time module bind stops at its first swallowed 208 rather than binding on from an unreliable cursor ([`programmable.md`](programmable.md#what-defers)).
+
+**Skip mode parses; it must not execute.**
+Several statement processors used to run per-row work in skip mode, which was invisible while the only skip-mode client was a dead branch over literal values — and became wrong the moment [CREATE-time module binding](programmable.md#create-time-body-binding) started binding every body in skip mode with its parameters standing in as typed NULLs.
+Each of these is now gated on `IsSkipping`, and each is a fidelity gain for dead branches too (real runs neither):
+`INSERT`'s per-row loop (DEFAULT evaluation, identity / rowversion allocation, computed columns, NOT NULL / CHECK / key enforcement), the evaluation of an `INSERT`'s `VALUES` tuples (a `NEXT VALUE FOR` cell burned a sequence value) and the execution of an `INSERT … SELECT`'s source query;
+`UPDATE` / `DELETE`'s row source and `MERGE`'s whole match walk;
+and `UserFunctionCall.Run` / `ClrFunctionCall.Run`, which return a typed NULL — load-bearing rather than an optimization, since the FROM-less-`SELECT` fast path bakes its projection values during the *parse* and would otherwise dispatch a scalar UDF's body from a statement that never ran.
 
 A missing-column Msg 207 (or ambiguity / unbindable-identifier) surfacing from a skipped statement is **batch-aborting** (`IsBatchAbortingNameResolution`), so it stops the batch even from a dead branch, matching real.
 `ParseBeginBlock` / `ParseBeginAtomicBlock` short-circuit their "expect END" check on `BatchContext.BatchAborted` (alongside `ReturnSignaled`) so a batch-abort mid-block surfaces the real error instead of a spurious Msg 102 near the abandoned token.

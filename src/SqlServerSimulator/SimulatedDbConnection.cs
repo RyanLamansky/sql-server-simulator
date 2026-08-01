@@ -741,6 +741,10 @@ public sealed class SimulatedDbConnection : DbConnection
         // authenticated login mapped to a non-dbo user) can't cross databases —
         // Msg 916, session stays put. A dbo / sa session (the in-process
         // default) keeps today's unrestricted switch.
+        // An active application role pins the session to its database (Msg 505),
+        // the same gate USE applies.
+        if (this.Security.HasApplicationRole)
+            throw SimulatedSqlException.CannotChangeDatabaseUnderApplicationRole();
         if (!this.Security.EffectiveIsDbo)
             throw SimulatedSqlException.CannotAccessDatabaseUnderSecurityContext(this.Security.Effective.LoginName, databaseName);
 

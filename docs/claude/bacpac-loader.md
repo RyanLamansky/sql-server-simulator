@@ -31,8 +31,7 @@ It's a sealed `record class` so callers can `options with { … }`; passing the 
 The lazy-create makes `new Simulation().ImportBacpac(stream, out _)` succeed against a fresh simulation — the stream-default `"simulated"` name has nothing to collide with until the first connection materializes the seed.
 Once a connection has opened (or an `ImportBacpac` has imported a database named `"simulated"`), a subsequent default-name stream import collides and throws — correct create-only behavior.
 `sys.databases` iterates every hosted database regardless of which one a given connection points at.
-`USE <db>` switches the session's current database (Msg 911 on miss); 3-part names route reads (SELECT / JOIN / catalog views) across databases.
-Cross-DB writes raise `NotSupportedException` — issue `USE` first.
+`USE <db>` switches the session's current database (Msg 911 on miss); 3-part names route both reads (SELECT / JOIN / catalog views) and writes across databases.
 See [`docs/claude/schemas.md`](schemas.md) for the full multi-database resolution rules.
 
 ## Resilient-loader contract

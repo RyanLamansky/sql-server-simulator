@@ -181,12 +181,15 @@ The OUT scrollopt/ccopt are the *effective* (resolved) options, and @rowcount is
 
 | scrollopt (low bits) | requested | effective OUT scrollopt | @rowcount |
 |---|---|---|---|
-| 0x1 KEYSET | updatable single table | 0x1 | row count |
-| 0x2 DYNAMIC | updatable single table | 0x2 | −1 |
-| 0x4 FORWARD_ONLY | updatable single table | 0x4 | −1 |
+| 0x1 KEYSET | navigable (base tables, joined or not) | 0x1 | row count |
+| 0x2 DYNAMIC | navigable | 0x2 | −1 |
+| 0x4 FORWARD_ONLY | navigable | 0x4 | −1 |
 | 0x8 STATIC | any | 0x8 | row count |
-| 0x10 FAST_FORWARD | updatable single table | 0x10 | −1 |
-| any | **non-updatable** (GROUP BY / DISTINCT / join) | **0x8** (forced STATIC), ccopt → **0x1** READ_ONLY | row count |
+| 0x10 FAST_FORWARD | navigable | 0x10 | −1 |
+| any | **non-navigable** (GROUP BY / DISTINCT / set op / a deferred source) | **0x8** (forced STATIC), ccopt → **0x1** READ_ONLY | row count |
+
+"Navigable" is the engine's cursor-plan eligibility — see [`cursors.md`](cursors.md#which-shapes-are-navigable).
+A JOIN qualifies, and the fetch buffer holds each row's per-source addresses so `sp_cursor`'s positioned edit reaches whichever participating table `@table` names.
 
 ccopt low bits: 0x1 READ_ONLY, 0x2 SCROLL_LOCKS, 0x4 OPTIMISTIC (values), 0x8 OPTIMISTIC (rowversion).
 The `0x1000`-series flag bits (PARAMETERIZED_STMT / AUTO_FETCH / AUTO_CLOSE / …) are stripped from the effective value.

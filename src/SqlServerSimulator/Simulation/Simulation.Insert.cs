@@ -20,7 +20,7 @@ partial class Simulation
             context.MoveNextRequired();
 
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-        context.Batch.RejectCrossDatabaseMutation(destinationName);
+        context.Batch.RejectCrossServerMutation(destinationName);
 
         // Advance past the target name so the optional WITH (hint …) clause
         // has a token to peek at. INSERT accepts the WITH form only — the
@@ -201,6 +201,7 @@ partial class Simulation
     private static SimulatedStatementOutcome ProcessHeapInsert(HeapTable destinationTable, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName, View? destinationView = null)
     {
         RejectDisabledClusteredIndex(destinationTable);
+        RejectIncorrectSetOptionsForWrite(destinationTable, context.Batch, "INSERT");
         // Direct INSERT into a history sibling is rejected — history rows
         // are populated only by the engine via UPDATE / DELETE on the parent.
         if (destinationTable.IsHistoryTable)
@@ -326,7 +327,12 @@ partial class Simulation
         long[]? valueTupleStamps = null;
         if (valueTuples is not null)
         {
-            sourceRows = EvaluateParsedTuples(valueTuples, context.Batch, out valueTupleStamps);
+            // Parsing the tuples is the binding; evaluating them is execution,
+            // and in skip mode it is pure side effect — a `NEXT VALUE FOR`
+            // cell would burn a sequence value for a row that never lands.
+            sourceRows = context.Batch.IsSkipping
+                ? []
+                : EvaluateParsedTuples(valueTuples, context.Batch, out valueTupleStamps);
         }
         else if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
         {
@@ -358,6 +364,18 @@ partial class Simulation
         // ApplyDmlTopCap's tail removal on sourceRows.
         if (valueTuples is not null && valueTuples.Count > sourceRows.Count)
             valueTuples.RemoveRange(sourceRows.Count, valueTuples.Count - sourceRows.Count);
+
+        // Skip mode never writes a row, so none of the per-row work below is
+        // reachable behavior either: DEFAULT evaluation, identity / rowversion
+        // allocation, computed columns and the NOT NULL / CHECK / key
+        // enforcement are all execution. Dropping the rows here is what lets a
+        // module body bind at CREATE time — its parameters stand in as typed
+        // NULLs, and real resolves a body's names without ever evaluating a
+        // row, so `INSERT INTO t (notnull_col) VALUES (@p)` must not report
+        // Msg 515 from the bind. The view-insert path returns early on the same
+        // gate a few frames up.
+        if (context.Batch.IsSkipping)
+            sourceRows.Clear();
 
         decimal? lastIdentityValue = null;
         var outputRows = output is null ? null : new List<byte[]>(sourceRows.Count);
@@ -483,7 +501,7 @@ partial class Simulation
             for (var i = 0; i < destinationTable.Columns.Length; i++)
             {
                 if (destinationTable.Columns[i].Type == SqlType.RowVersion)
-                    rowValues[i] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
+                    rowValues[i] = SqlValue.FromRowVersion(context.Batch.DatabaseFor(destinationTable).AllocateRowVersion());
             }
 
             // Auto-populate period columns whose ordinals carry the GENERATED
@@ -762,6 +780,14 @@ partial class Simulation
             throw SimulatedSqlException.InsertSelectListFewerThanInsertList();
         if (selection.Schema.Length > expectedColumnCount)
             throw SimulatedSqlException.InsertSelectListMoreThanInsertList();
+
+        // The arity checks above are binding, so they still run; running the
+        // query itself is not. A skipped statement's source SELECT must not
+        // surface a runtime error (a division by zero, a conversion failure)
+        // from a statement that conceptually never ran — least of all during
+        // CREATE-time module binding.
+        if (context.Batch.IsSkipping)
+            return [];
 
         var resultSet = selection.Execute(context.Batch);
         var rows = new List<SqlValue[]>();

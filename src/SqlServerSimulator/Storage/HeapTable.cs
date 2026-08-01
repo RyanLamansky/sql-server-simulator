@@ -329,6 +329,19 @@ internal sealed class HeapTable : SchemaObject
     public SimulatedDbConnection? OwnerConnection;
 
     /// <summary>
+    /// The <see cref="Database"/> this table is registered in, stamped when it
+    /// enters a <see cref="Schema.HeapTables"/> dict. Null for the tables that
+    /// belong to no database — temp tables, table variables, table-valued
+    /// parameters, trigger pseudo-tables, TVF return shapes, and the shared
+    /// system tables — whose callers fall back to the session's current
+    /// database via <see cref="Parser.BatchContext.DatabaseFor(SqlServerSimulator.Schemas.SchemaObject)"/>.
+    /// Load-bearing for a write through a three-part name: the rowversion
+    /// counter, the version store, and trigger dispatch are all per-database
+    /// and must follow the table rather than the session.
+    /// </summary>
+    public Database? OwningDatabase;
+
+    /// <summary>
     /// FOREIGN KEY constraints declared on this table (the referring side).
     /// Each entry's <see cref="ForeignKey.ReferencedTable"/> points at the
     /// parent table whose PK/UNIQUE the FK targets. Populated post-construction

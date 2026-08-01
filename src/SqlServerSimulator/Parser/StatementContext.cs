@@ -144,4 +144,18 @@ internal sealed class StatementContext
     /// <c>SimulatedErrorOutcome</c>.
     /// </summary>
     public bool LeadingKeywordReturnsRows;
+
+    /// <summary>
+    /// The statement name Msg 1934 echoes when a SET-option gate rejects an
+    /// expression buried inside the statement rather than the statement's own
+    /// target — an XML data-type method is the case that needs it. Real names
+    /// the enclosing DML verb (<c>INSERT … SELECT @x.value(…)</c> reports
+    /// <c>INSERT</c>) and falls back to <c>SELECT</c> everywhere else,
+    /// including a bare <c>SET @i = @x.value(…)</c> (probe-confirmed). Set at
+    /// dispatch entry from the leading token, alongside
+    /// <see cref="LeadingKeywordReturnsRows"/>; the gates whose statement is
+    /// unambiguous (DML targets, CREATE TABLE / INDEX) pass their own verb
+    /// instead of reading this.
+    /// </summary>
+    public string StatementVerb = "SELECT";
 }

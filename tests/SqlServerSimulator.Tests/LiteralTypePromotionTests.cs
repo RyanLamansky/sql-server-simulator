@@ -223,4 +223,160 @@ public sealed class LiteralTypePromotionTests
     [TestMethod]
     public void BareNull_WithNoTypedSibling_StaysInt() =>
         AreEqual("int", TypeOf("NULL").TypeName);
+
+    // ---- integer literals past int's range type numeric(digit_count, 0) ----
+
+    [TestMethod]
+    [DataRow("2147483647", 10, 0)]            // last int
+    [DataRow("-2147483647", 10, 0)]
+    [DataRow("0", 10, 0)]
+    [DataRow("5", 10, 0)]
+    public void IntegerLiteral_WithinIntRange_StaysInt(string expr, int precision, int scale)
+    {
+        AreEqual("int", TypeOf(expr).TypeName, $"{expr} type name");
+        // int's fixed precision, not the literal's digit count.
+        AreEqual(precision, TypeOf(expr).Precision, $"{expr} precision");
+        AreEqual(scale, TypeOf(expr).Scale, $"{expr} scale");
+    }
+
+    /// <summary>
+    /// SQL Server never types a bare integer literal <c>bigint</c> — past
+    /// <c>int</c> it goes straight to <c>numeric(digit_count, 0)</c>, scaling
+    /// with the written digit count, and only a CAST reaches <c>bigint</c>.
+    /// Probe-confirmed 2026-08-01 via <c>sql_variant_property</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("2147483648", 10)]               // first past int
+    [DataRow("3000000000", 10)]
+    [DataRow("9999999999", 10)]
+    [DataRow("10000000000", 11)]
+    [DataRow("-3000000000", 10)]              // sign doesn't change the count
+    [DataRow("-9999999999", 10)]
+    [DataRow("+2147483648", 10)]
+    [DataRow("0000000003000000000", 10)]      // leading zeros excluded
+    [DataRow("99999999999999999999", 20)]
+    public void IntegerLiteral_PastIntRange_IsNumericAtDigitCount(string expr, int precision) =>
+        AssertDecimal(expr, precision, 0);
+
+    [TestMethod]
+    public void IntegerLiteral_PastIntRange_KeepsItsValue()
+    {
+        AreEqual(3000000000m, ExecuteScalar("select 3000000000"));
+        AreEqual(-3000000000m, ExecuteScalar("select -3000000000"));
+        AreEqual(99999999999999999999m, ExecuteScalar("select 99999999999999999999"));
+    }
+
+    /// <summary>
+    /// The one magnitude where the negated constant lands back inside
+    /// <c>int</c>: real folds <c>- &lt;integer constant&gt;</c> and types the
+    /// resulting value, so <c>-2147483648</c> — parenthesized or not — is
+    /// <c>int</c> even though <c>2147483648</c> alone is
+    /// <c>numeric(10, 0)</c>. The fold is literal-only; the same value in a
+    /// <c>numeric(10, 0)</c> variable stays numeric under unary minus.
+    /// </summary>
+    [TestMethod]
+    [DataRow("-2147483648")]
+    [DataRow("- 2147483648")]
+    [DataRow("-(2147483648)")]
+    public void NegatedIntMinLiteral_FoldsToInt(string expr)
+    {
+        AreEqual("int", TypeOf(expr).TypeName, expr);
+        AreEqual(int.MinValue, ExecuteScalar<int>($"select {expr}"));
+    }
+
+    [TestMethod]
+    public void NegatedIntMinVariable_StaysNumeric()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("declare @d numeric(10, 0) = 2147483648; select -@d as v into t");
+        AreEqual("decimal", (string)sim.ExecuteScalar("select data_type from information_schema.columns where table_name = 't'")!);
+    }
+
+    /// <summary>
+    /// Arithmetic over a past-int literal follows the ordinary decimal
+    /// formulas, so it widens by one for <c>+</c> and sums the operand
+    /// precisions for <c>*</c> — probe-confirmed <c>3000000000 + 1</c> →
+    /// <c>numeric(11, 0)</c>, <c>3000000000 * 2</c> → <c>numeric(12, 0)</c>,
+    /// <c>3000000000 / 2</c> → <c>numeric(16, 6)</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("3000000000 + 1", 11, 0)]
+    [DataRow("3000000000 * 2", 12, 0)]
+    [DataRow("3000000000 / 2", 16, 6)]
+    public void PastIntLiteral_Arithmetic_FollowsDecimalFormulas(string expr, int precision, int scale) =>
+        AssertDecimal(expr, precision, scale);
+
+    [TestMethod]
+    public void PastIntLiteral_Arithmetic_KeepsItsValue() =>
+        AreEqual(3000000001m, ExecuteScalar("select 3000000000 + 1"));
+
+    /// <summary>
+    /// Past 38 digits real reports Msg 1007 rather than letting the literal
+    /// reach the type factory — the same gate the decimal-literal branch uses.
+    /// </summary>
+    [TestMethod]
+    public void IntegerLiteral_Past38Digits_RaisesMsg1007() =>
+        new Simulation().AssertSqlError(
+            "select 999999999999999999999999999999999999999",
+            1007,
+            "The number '999999999999999999999999999999999999999' is out of the range for numeric representation (maximum precision 38).");
+
+    /// <summary>
+    /// A past-int literal still narrows into an <c>int</c> target through the
+    /// ordinary arithmetic-overflow surface — the expression-worded Msg 8115,
+    /// not a decimal-specific family.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(3000000000 as int)")]
+    [DataRow("convert(int, 3000000000)")]
+    public void PastIntLiteral_NarrowedToInt_RaisesMsg8115(string expr) =>
+        new Simulation().AssertSqlError(
+            $"select {expr}",
+            8115,
+            "Arithmetic overflow error converting expression to data type int.");
+
+    /// <summary>
+    /// A past-int literal inserts into a <c>bigint</c> column unchanged —
+    /// numeric(10, 0) converts implicitly on the way in.
+    /// </summary>
+    [TestMethod]
+    public void PastIntLiteral_InsertsIntoBigintColumn()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (b bigint, d decimal(20, 0))",
+            "insert t values (3000000000, 99999999999999999999)");
+        AreEqual(3000000000L, sim.ExecuteScalar<long>("select b from t"));
+        AreEqual(99999999999999999999m, sim.ExecuteScalar("select d from t"));
+        AreEqual(1, sim.ExecuteScalar<int>("select count(*) from t where b = 3000000000"));
+    }
+
+    /// <summary>
+    /// <c>TOP</c> / <c>OFFSET</c> / <c>FETCH</c> accept any scale-0 exact
+    /// numeric, so a past-int row count is an ordinary accepted value rather
+    /// than the grammar's Msg 1060 (which a fractional scale still gets).
+    /// </summary>
+    [TestMethod]
+    public void PastIntLiteral_AsRowCount_IsAccepted()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (v int)",
+            "insert t values (1), (2), (3)");
+        AreEqual(3, sim.ExecuteNonQuery("update top (9999999999) t set v = v + 100"));
+        AreEqual(3, sim.ExecuteScalar<int>("select count(*) from (select top (3000000000) * from t) u"));
+        AreEqual(0, sim.ExecuteScalar<int>("select count(*) from (select * from t order by v offset 3000000000 rows) u"));
+        AreEqual(3, sim.ExecuteScalar<int>("select count(*) from (select * from t order by v offset 0 rows fetch next 3000000000 rows only) u"));
+    }
+
+    [TestMethod]
+    public void FractionalRowCount_StillRaisesMsg1060()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (v int)");
+        sim.AssertSqlError(
+            "select top (2.5) * from t",
+            1060,
+            "The number of rows provided for a TOP or FETCH clauses row count parameter must be an integer.");
+    }
 }

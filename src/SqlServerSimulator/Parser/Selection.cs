@@ -52,13 +52,24 @@ internal sealed partial class Selection
     public readonly string[] ColumnNames;
 
     /// <summary>
-    /// The exposed name (alias, else table name) of the single FROM source,
-    /// captured for <c>FOR XML AUTO</c>, which names each row element after
-    /// its owning table. Null when the query has no single named source
-    /// (set-op chains, join shapes); <c>FOR XML AUTO</c> over such a shape
-    /// falls back to the multi-source rejection.
+    /// The exposed name of each FROM source in FROM order (alias, else the
+    /// object name as written), captured for <c>FOR XML AUTO</c> /
+    /// <c>FOR JSON AUTO</c>, which name each nesting level after its owning
+    /// table. An empty array means the SELECT has no FROM clause at all
+    /// (Msg 6800 / 13600); null means the shape carries no source binding
+    /// (set-op chains), where AUTO falls back to the unmodeled rejection.
+    /// Paired with <see cref="AutoColumnSource"/>.
     /// </summary>
-    internal string? AutoElementName;
+    internal string?[]? AutoSourceNames;
+
+    /// <summary>
+    /// Per projection column, the index into <see cref="AutoSourceNames"/> of
+    /// the FROM source it reads, or -1 when the column is an expression
+    /// (SQL Server's "computed column", which joins the level of the table
+    /// column that precedes it). Null exactly when
+    /// <see cref="AutoSourceNames"/> is.
+    /// </summary>
+    internal int[]? AutoColumnSource;
 
     /// <summary>
     /// True when this plan internally bakes an ORDER BY clause into its
@@ -168,12 +179,21 @@ internal sealed partial class Selection
     internal readonly ViewUpdatabilityRejection UpdatabilityRejection;
 
     /// <summary>
+    /// The FROM shape an updatable cursor navigates — every source a direct
+    /// base-table scan, joined by kinds the cursor fold handles. Non-null makes
+    /// the cursor KEYSET / DYNAMIC-eligible and positioned <c>WHERE CURRENT
+    /// OF</c> DML legal against any participating table; null forces STATIC.
+    /// Set post-construction by <see cref="BuildSqlProjection"/>.
+    /// </summary>
+    internal CursorSourcePlan? CursorPlan;
+
+    /// <summary>
     /// The SELECT's ORDER BY items, captured for the updatable-cursor
     /// enumeration path (<see cref="EnumerateForCursor"/>) so KEYSET / DYNAMIC
     /// cursors and positioned DML can order rows the same way a read would.
-    /// Non-null only when <see cref="UpdatabilityProfile"/> is set (single
-    /// base table, no set-op chain); empty when the cursor's SELECT has no
-    /// ORDER BY. Set post-construction by <see cref="BuildSqlProjection"/>.
+    /// Non-null only when <see cref="CursorPlan"/> is set (base-table sources,
+    /// no set-op chain); empty when the cursor's SELECT has no ORDER BY. Set
+    /// post-construction by <see cref="BuildSqlProjection"/>.
     /// </summary>
     internal List<OrderBySpec>? CursorOrderBy;
 
@@ -387,8 +407,15 @@ internal sealed partial class Selection
     /// <returns>The prepared plan; call <see cref="Execute"/> to materialize results.</returns>
     /// <exception cref="SimulatedSqlException">A variety of messages are possible for various problems with the command.</exception>
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
-    public static Selection Parse(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver = null) =>
-        ParseQueryExpression(context, depth, outerTypeResolver);
+    public static Selection Parse(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver = null)
+    {
+        // A subquery is never constant, and the predicate forms that hold one
+        // without routing it through Expression.Parse (EXISTS, IN (SELECT …),
+        // the quantified comparisons) would otherwise leave an enclosing
+        // constant-fold frame believing every operand was a literal.
+        context.FoldableArguments = false;
+        return ParseQueryExpression(context, depth, outerTypeResolver);
+    }
 
     /// <summary>
     /// Parses a full query expression: a chain of set-op-combined SELECT
@@ -672,15 +699,35 @@ internal sealed partial class Selection
         if (expression is null)
             return null;
         var resolved = expression.Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
-        var count = !resolved.IsNull && resolved.Type == SqlType.Int32
-            ? resolved.AsInt32
-            : throw SimulatedSqlException.TopFetchRequiresInteger();
+        var count = ClampRowCount(resolved);
         return kind switch
         {
             RowLimitKind.Offset when count < 0 => throw SimulatedSqlException.OffsetMustNotBeNegative(),
             RowLimitKind.Fetch when count < 1 => throw SimulatedSqlException.FetchMustBeGreaterThanZero(),
             _ => count,
         };
+    }
+
+    /// <summary>
+    /// The row count a <c>TOP</c> / <c>OFFSET</c> / <c>FETCH</c> operand
+    /// yields. Real accepts any integer-family value and any exact numeric at
+    /// <b>scale 0</b> — an integer literal past int's range is
+    /// <c>numeric(digit_count, 0)</c>, so <c>TOP (9999999999)</c> is an
+    /// ordinary accepted row count — narrowing the operand to <c>bigint</c>
+    /// (a 20-digit literal overflows there with Msg 8115 naming
+    /// <c>bigint</c>). A fractional scale is the grammar's Msg 1060, as is
+    /// any other family and NULL. The result clamps to <c>int</c>: no
+    /// simulated row source reaches 2^31 rows, so a wider cap or offset is
+    /// indistinguishable from the clamp.
+    /// </summary>
+    private static int ClampRowCount(SqlValue resolved)
+    {
+        if (resolved.IsNull || !(SqlType.IsIntegerCategory(resolved.Type) || resolved.Type is DecimalSqlType { scale: 0 }))
+            throw SimulatedSqlException.TopFetchRequiresInteger();
+        var wide = resolved.CoerceTo(SqlType.BigInt).AsInt64;
+        return wide > int.MaxValue ? int.MaxValue
+            : wide < int.MinValue ? int.MinValue
+            : (int)wide;
     }
 
     /// <summary>
@@ -799,7 +846,7 @@ internal sealed partial class Selection
                 ? throw SimulatedSqlException.TopPercentOutOfRange()
                 : (int)Math.Ceiling(candidateCount * pct / 100.0);
         }
-        var count = resolved.IsNull || !SqlType.IsIntegerCategory(resolved.Type)
+        var count = resolved.IsNull || !(SqlType.IsIntegerCategory(resolved.Type) || resolved.Type is DecimalSqlType { scale: 0 })
             ? throw SimulatedSqlException.TopFetchRequiresInteger()
             : resolved.CoerceTo(SqlType.BigInt).AsInt64;
         return count < 0
@@ -1305,6 +1352,11 @@ internal sealed partial class Selection
     {
         Name name => name.Value,
         Literal { Value.Type.Category: SqlTypeCategory.String } literal => literal.Value.AsString,
+        // A reserved keyword can't stand in as an alias, and real names it:
+        // `SELECT 1 AS user` → Msg 156, not the generic Msg 102. The
+        // compatibility-gated `REGEXP_LIKE` reaches here the same way at
+        // level 170.
+        ReservedKeyword reserved => throw SimulatedSqlException.SyntaxErrorNearKeyword(reserved),
         _ => throw SimulatedSqlException.SyntaxErrorNear(token),
     };
 
@@ -1525,7 +1577,7 @@ internal sealed partial class Selection
                 else
                 {
                     context.MoveNextRequired();
-                    groupOn = BooleanExpression.Parse(context);
+                    groupOn = ParseOnPredicateWithScope(context, sources, outerTypeResolver);
                 }
                 joins.Insert(groupJoinIndex, new JoinSpec(kind, groupOn) { GroupCount = groupCount });
                 continue;
@@ -1555,7 +1607,7 @@ internal sealed partial class Selection
                 context.RejectNextValueFor = true;
                 try
                 {
-                    on = BooleanExpression.Parse(context);
+                    on = ParseOnPredicateWithScope(context, sources, outerTypeResolver);
                 }
                 finally
                 {
@@ -1563,6 +1615,31 @@ internal sealed partial class Selection
                 }
             }
             joins.Add(new JoinSpec(kind, on));
+        }
+    }
+
+    /// <summary>
+    /// Parses a JOIN's <c>ON</c> predicate with the sources parsed so far
+    /// installed as the enclosing scope, so a subquery inside the predicate
+    /// types its own projection against them — the same chaining
+    /// <see cref="ConsumeWhereOrderByWithOuterScope"/> gives the WHERE clause.
+    /// SMO's index-scripting query nests
+    /// <c>(select min(index_id) from sys.indexes where object_id =
+    /// tbl.object_id)</c> inside an ON, which needs the outer <c>tbl</c> in
+    /// scope for the inner query to bind.
+    /// </summary>
+    private static BooleanExpression ParseOnPredicateWithScope(ParserContext context, List<FromSource> sources, Func<MultiPartName, SqlType>? outerTypeResolver)
+    {
+        var scope = sources.ToArray();
+        var saved = context.OuterTypeResolver;
+        context.OuterTypeResolver = name => ResolveColumnTypeAcrossSources(scope, name, outerTypeResolver);
+        try
+        {
+            return BooleanExpression.Parse(context);
+        }
+        finally
+        {
+            context.OuterTypeResolver = saved;
         }
     }
 
@@ -1668,7 +1745,8 @@ internal sealed partial class Selection
             // SQL Server's grammar.
             if (string.Equals(nextName.Value, "OPENJSON", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(nextName.Value, "STRING_SPLIT", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(nextName.Value, "GENERATE_SERIES", StringComparison.OrdinalIgnoreCase))
+                || string.Equals(nextName.Value, "GENERATE_SERIES", StringComparison.OrdinalIgnoreCase)
+                || IsRegexpRowsetName(nextName.Value, context))
             {
                 context.RestoreCheckpoint(checkpoint);
                 return ParseSingleFromSource(context, depth, ChainedResolverForName);
@@ -1834,6 +1912,16 @@ internal sealed partial class Selection
                 // GENERATE_SERIES: single-column (`value`) plan, SQL Server 2022+.
                 if (string.Equals(tableName.Value, "GENERATE_SERIES", StringComparison.OrdinalIgnoreCase))
                     return BuiltInRowsetSource(context, ParseGenerateSeries(context, outerTypeResolver));
+
+                // The two REGEXP rowset members ship only at compatibility
+                // level 170; below it the name falls through to the ordinary
+                // object-name path, which raises the Msg 208 real raises.
+                if (IsRegexpRowsetName(tableName.Value, context))
+                {
+                    return BuiltInRowsetSource(context, string.Equals(tableName.Value, "REGEXP_MATCHES", StringComparison.OrdinalIgnoreCase)
+                        ? ParseRegexpMatches(context, outerTypeResolver)
+                        : ParseRegexpSplitToTable(context, outerTypeResolver));
+                }
 
                 // fn_listextendedproperty: 7-arg system TVF projecting the
                 // (objtype, objname, name, value) tuples for extended
@@ -2016,7 +2104,8 @@ internal sealed partial class Selection
                         rows: [],
                         lateralPlan: Selection.ForView(resolvedView),
                         backingView: resolvedView,
-                        viaSynonym: viewSynonym);
+                        viaSynonym: viewSynonym,
+                        autoElementName: viewAlias ?? objectName.ToString());
                 }
 
                 // TVF call from FROM clause: `FROM schema.fn(args) [alias]`.
@@ -2135,7 +2224,8 @@ internal sealed partial class Selection
                     rows: heapRows,
                     backingTable: heapTable,
                     heapPlan: temporalRowSource is null ? heapPlan : null,
-                    viaSynonym: heapSynonym);
+                    viaSynonym: heapSynonym,
+                    autoElementName: heapAlias ?? objectName.ToString());
 
             // Table-variable source: <c>FROM @t [alias]</c>. Routes through
             // BatchContext.TableVariables instead of the regular schema dict;
@@ -2810,31 +2900,92 @@ internal sealed partial class Selection
             if (context.GetNextRequired() is not Operator { Character: '(' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
-            var body = Expressions.WindowExpression.ParseWindowBody(context);
+            // A definition may carry a frame with no ORDER BY of its own — the
+            // reference that resolves it can supply the ordering — so the
+            // frame-needs-ORDER-BY gate waits until the merge.
+            var body = Expressions.WindowExpression.ParseWindowBody(context, deferFrameOrderByCheck: true, allowWindowReference: true);
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.NamedWindowDefinitions[nameToken.Value] = body;
+            if (TryFindWindowDefinition(context, nameToken.Value, out _))
+                throw SimulatedSqlException.DuplicateWindowName();
+            context.NamedWindowDefinitions.Add((nameToken.Value, body));
             context.MoveNextOptional();
         } while (context.Token is Operator { Character: ',' });
     }
 
     /// <summary>
-    /// Binds each pending bare <c>OVER w</c> reference to its named-window
-    /// definition, then clears the query-block's pending / definition state.
-    /// An unresolved name raises Msg 5362 ("Window 'w' is undefined.").
+    /// Binds each pending <c>OVER w</c> / <c>OVER (w …)</c> reference to its
+    /// named-window definition, then clears the query-block's pending /
+    /// definition state. An unresolved name raises Msg 5362 ("Window 'w' is
+    /// undefined.").
     /// </summary>
     private static void ResolvePendingNamedWindows(ParserContext context)
     {
         if (context.PendingNamedWindows.Count == 0)
             return;
-        foreach (var (window, name) in context.PendingNamedWindows)
-        {
-            if (!context.NamedWindowDefinitions.TryGetValue(name, out var body))
-                throw SimulatedSqlException.WindowIsUndefined(name);
-            window.ApplyNamedWindow(body);
-        }
+        foreach (var (window, reference) in context.PendingNamedWindows)
+            window.ApplyNamedWindow(MergeWindowReference(context, reference, []));
         context.PendingNamedWindows.Clear();
         context.NamedWindowDefinitions.Clear();
+    }
+
+    /// <summary>
+    /// Looks a <c>WINDOW</c>-clause definition up by name under the database
+    /// collation — window names are identifiers, so a case-insensitive
+    /// collation resolves <c>OVER W</c> against <c>WINDOW w AS (…)</c>.
+    /// </summary>
+    private static bool TryFindWindowDefinition(ParserContext context, string name, out Expressions.WindowExpression.WindowBody body)
+    {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        foreach (var (definedName, definedBody) in context.NamedWindowDefinitions)
+        {
+            if (collation.Equals(definedName, name))
+            {
+                body = definedBody;
+                return true;
+            }
+        }
+        body = default;
+        return false;
+    }
+
+    /// <summary>
+    /// Folds a window body that refines a named window into a single
+    /// self-contained body. A definition may itself refine another
+    /// (<c>WINDOW w AS (PARTITION BY g), w2 AS (w ORDER BY id)</c>) in either
+    /// written order, so the walk recurses; <paramref name="visiting"/> carries
+    /// the names already being folded so a loop lands on Msg 5365 rather than
+    /// recursing forever. A name absent from the clause — including a
+    /// definition naming itself, which real does not put in its own scope —
+    /// raises Msg 5362.
+    /// </summary>
+    private static Expressions.WindowExpression.WindowBody MergeWindowReference(
+        ParserContext context,
+        Expressions.WindowExpression.WindowBody refinement,
+        List<string> visiting)
+    {
+        if (refinement.BaseWindowName is not { } name)
+            return refinement;
+        var collation = context.Batch.CurrentDatabase.Collation;
+        if (visiting.Exists(pending => collation.Equals(pending, name)))
+            throw SimulatedSqlException.CyclicWindowReferences();
+        if (!TryFindWindowDefinition(context, name, out var definition) || collation.Equals(definition.BaseWindowName, name))
+            throw SimulatedSqlException.WindowIsUndefined(name);
+
+        visiting.Add(name);
+        var resolved = MergeWindowReference(context, definition, visiting);
+        visiting.RemoveAt(visiting.Count - 1);
+
+        // Each element may be supplied by exactly one side; real reports the
+        // overlap with Msg 4123 whichever element it was.
+        return (refinement.PartitionBy.Length > 0 && resolved.PartitionBy.Length > 0)
+            || (refinement.OrderBy.Length > 0 && resolved.OrderBy.Length > 0)
+            || (refinement.Frame is not null && resolved.Frame is not null)
+            ? throw SimulatedSqlException.WindowElementAlreadySpecified(resolved.Frame is not null)
+            : new Expressions.WindowExpression.WindowBody(
+                refinement.PartitionBy.Length > 0 ? refinement.PartitionBy : resolved.PartitionBy,
+                refinement.OrderBy.Length > 0 ? refinement.OrderBy : resolved.OrderBy,
+                refinement.Frame ?? resolved.Frame);
     }
 
     /// <summary>
@@ -3366,6 +3517,10 @@ internal sealed partial class Selection
             // trailing ORDER BY naming anything but one of them is Msg 207 on
             // real (`select 2 as x union all select 1 order by y`).
             BranchFromSources = [],
+            // No FROM clause: the AUTO serializers have no table to name a
+            // level after, which is their Msg 6800 / 13600 case.
+            AutoSourceNames = [],
+            AutoColumnSource = AutoColumnSourceOf(expressions, []),
             ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions),
             ColumnReportsNumeric = ColumnReportsNumericOf(expressions, schema),
             // A FROM-less projection has no sources, so column nullability is

@@ -64,6 +64,49 @@ partial class SimulatedSqlException
         new($"The database '{databaseName}' does not exist. Supply a valid database name. To see available databases, use sys.databases.", 15010, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 15325 — <c>sp_helpfile</c>'s <c>@filename</c>
+    /// argument naming no file of the current database. Real raises it as
+    /// <c>raiserror(15325, -1, -1, 'file', @filename)</c>, so the first
+    /// substitution is the fixed word <c>file</c>.
+    /// </summary>
+    internal static SimulatedSqlException HelpFileDoesNotExist(string fileName) =>
+        new($"The current database does not contain a file named '{fileName}'.", 15325, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 15300 — <c>sp_helprotect</c>'s
+    /// <c>@permissionarea</c> argument containing neither <c>O</c> nor
+    /// <c>S</c>. Real upper-cases the argument before reporting it and
+    /// substitutes a NULL with <c>?</c>; the valid-letter set is the literal
+    /// <c>o,s</c> the proc passes.
+    /// </summary>
+    internal static SimulatedSqlException HelpPermissionAreaIsNotValid(string permissionArea) =>
+        new($"No recognized letter is contained in the parameter value for General Permission Type ({permissionArea}). Valid letters are in this set: o,s .", 15300, 11, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 15302 — <c>sp_helprotect</c>'s <c>@name</c>
+    /// carrying a database qualifier. Distinct from the sp_help family's Msg
+    /// 15250: this proc refuses the qualifier outright rather than checking it
+    /// against the current database. The message carries no substitution.
+    /// </summary>
+    internal static SimulatedSqlException HelpProtectNameIsDatabaseQualified() =>
+        new("Database_Name should not be used to qualify owner.object for the parameter into this procedure.", 15302, 11, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 15253 — <c>sp_helprotect</c>'s <c>@name</c>
+    /// failing to parse as a dotted SQL identifier.
+    /// </summary>
+    internal static SimulatedSqlException HelpNameIsNotAnIdentifier(string name) =>
+        new($"Syntax error parsing SQL identifier '{name}'.", 15253, 11, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 15330 — <c>sp_helprotect</c> reporting on a
+    /// filter that selected no permission rows. The message carries no
+    /// substitution.
+    /// </summary>
+    internal static SimulatedSqlException HelpNoMatchingRowsToReport() =>
+        new("There are no matching rows on which to report.", 15330, 11, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 15007 — <c>sp_who</c> / <c>sp_who2</c>'s
     /// <c>@loginame</c> argument naming no known login.
     /// </summary>

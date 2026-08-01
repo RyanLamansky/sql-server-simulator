@@ -35,11 +35,12 @@ partial class Simulation
     private static readonly string[] SpHelpDbColumnNames =
         ["name", "db_size", "owner", "dbid", "created", "status", "compatibility_level"];
 
-    // sp_helpfile's own shape, which sp_helpdb's one-argument form appends:
-    // name sysname, fileid smallint, filename nchar(260), filegroup
-    // nvarchar(128), size / maxsize / growth nvarchar(18), usage varchar(9).
-    private static readonly NCharSqlType HelpFilePathType =
-        NCharSqlType.Get(260, Collation.Baseline, Coercibility.Implicit);
+    // sp_helpfile's no-argument shape, which sp_helpdb's one-argument form
+    // appends: name sysname, fileid smallint, filename nvarchar(260) (the
+    // sysfiles column's own width), filegroup nvarchar(128), size / maxsize /
+    // growth nvarchar(18), usage varchar(9).
+    private static readonly NVarcharSqlType HelpFilePathType =
+        NVarcharSqlType.Get(260, Collation.Baseline, Coercibility.Implicit);
 
     private static readonly NVarcharSqlType HelpFileSizeType =
         NVarcharSqlType.Get(18, Collation.Baseline, Coercibility.Implicit);
@@ -55,6 +56,17 @@ partial class Simulation
 
     private static readonly string[] SpHelpFileColumnNames =
         ["name", "fileid", "filename", "filegroup", "size", "maxsize", "growth", "usage"];
+
+    // sp_helpfile @filename's shape — real's second SELECT, which drops the
+    // fileid column (the caller already named the file) and keeps the rest.
+    private static readonly SqlType[] SpHelpFileNamedSchema =
+    [
+        SqlType.SystemName, HelpFilePathType, SqlType.SystemName,
+        HelpFileSizeType, HelpFileSizeType, HelpFileSizeType, HelpFileUsageType,
+    ];
+
+    private static readonly string[] SpHelpFileNamedColumnNames =
+        ["name", "filename", "filegroup", "size", "maxsize", "growth", "usage"];
 
     /// <summary>
     /// Handles <c>EXEC sp_helpdb [@dbname]</c>. Without an argument: one row
@@ -87,7 +99,7 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
-        var (databaseName, _) = ParseHelpArgs(arguments, "sp_helpdb", "dbname");
+        var (databaseName, _) = ParseHelpArgs(arguments, "sp_helpdb", firstName: "dbname");
         var simulation = batch.Connection.Simulation;
         Database? single = null;
         if (databaseName is not null
@@ -165,39 +177,89 @@ partial class Simulation
         return text.ToString();
     }
 
-    private static SimulatedSqlResultSet HelpFileResultSet(Database database)
+    /// <summary>
+    /// Handles <c>EXEC sp_helpfile [@filename]</c>. Without an argument: one
+    /// row per file of the current database, ordered by <c>fileid</c>. With
+    /// one: that file's row through real's <em>second</em> SELECT, which omits
+    /// the <c>fileid</c> column. A name no file in the current database
+    /// carries → Msg 15325.
+    /// </summary>
+    /// <remarks>
+    /// File identity is the synthetic two-file model <c>sys.database_files</c>
+    /// / <c>sys.master_files</c> / <c>FILE_ID</c> share — <c>&lt;db&gt;_Data</c>
+    /// (fileid 1, PRIMARY) and <c>&lt;db&gt;_Log</c> (fileid 2, NULL filegroup)
+    /// — so every surface reports the same sizes. Name matching is
+    /// trailing-space insensitive, as <c>FILE_ID</c>'s is.
+    /// </remarks>
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelpFile(BatchContext batch)
+    {
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+
+        var (fileName, _) = ParseHelpArgs(arguments, "sp_helpfile", firstName: "filename");
+        var database = batch.CurrentDatabase;
+        if (fileName is null)
+        {
+            yield return HelpFileResultSet(database);
+            yield break;
+        }
+
+        var fileId = HelpFileIdOf(database, fileName)
+            ?? throw SimulatedSqlException.HelpFileDoesNotExist(fileName);
+        yield return HelpFileResultSet(database, fileId);
+    }
+
+    // real's `file_id(@filename)` over the two modeled files; null when the
+    // name matches neither.
+    private static short? HelpFileIdOf(Database database, string fileName)
+    {
+        var name = fileName.TrimEnd(' ');
+        return Collation.Baseline.Equals(name, database.Name + "_Data") ? 1
+            : Collation.Baseline.Equals(name, database.Name + "_Log") ? 2
+            : null;
+    }
+
+    // The file report. A null fileId yields every file with the fileid column;
+    // a non-null one yields that file alone through the narrower shape.
+    private static SimulatedSqlResultSet HelpFileResultSet(Database database, short? fileId = null)
     {
         var primary = SqlValue.FromSystemName("PRIMARY");
         var nullFilegroup = SqlValue.Null(SqlType.SystemName);
         var unlimited = SqlValue.FromString(HelpFileSizeType, "Unlimited");
         var growth = SqlValue.FromString(HelpFileSizeType,
             BuiltInResources.FileGrowthKilobytes.ToString(CultureInfo.InvariantCulture) + " KB");
-        var dataUsage = SqlValue.FromString(HelpFileUsageType, "data only");
-        var logUsage = SqlValue.FromString(HelpFileUsageType, "log only");
-        return new SimulatedSqlResultSet(SpHelpFileSchema, SpHelpFileColumnNames,
+        SqlValue[] data =
         [
-            [
-                SqlValue.FromSystemName(database.Name + "_Data"),
-                SqlValue.FromInt16(1),
-                SqlValue.FromString(HelpFilePathType, BuiltInResources.DataFilePath(database.Name)),
-                primary,
-                SqlValue.FromString(HelpFileSizeType, HelpFileKilobytes(BuiltInResources.ComputeDataFileSizePages(database))),
-                unlimited,
-                growth,
-                dataUsage,
-            ],
-            [
-                SqlValue.FromSystemName(database.Name + "_Log"),
-                SqlValue.FromInt16(2),
-                SqlValue.FromString(HelpFilePathType, BuiltInResources.LogFilePath(database.Name)),
-                nullFilegroup,
-                SqlValue.FromString(HelpFileSizeType, HelpFileKilobytes(BuiltInResources.LogFileSizePages)),
-                unlimited,
-                growth,
-                logUsage,
-            ],
-        ]);
+            SqlValue.FromSystemName(database.Name + "_Data"),
+            SqlValue.FromInt16(1),
+            SqlValue.FromString(HelpFilePathType, BuiltInResources.DataFilePath(database.Name)),
+            primary,
+            SqlValue.FromString(HelpFileSizeType, HelpFileKilobytes(BuiltInResources.ComputeDataFileSizePages(database))),
+            unlimited,
+            growth,
+            SqlValue.FromString(HelpFileUsageType, "data only"),
+        ];
+        SqlValue[] log =
+        [
+            SqlValue.FromSystemName(database.Name + "_Log"),
+            SqlValue.FromInt16(2),
+            SqlValue.FromString(HelpFilePathType, BuiltInResources.LogFilePath(database.Name)),
+            nullFilegroup,
+            SqlValue.FromString(HelpFileSizeType, HelpFileKilobytes(BuiltInResources.LogFileSizePages)),
+            unlimited,
+            growth,
+            SqlValue.FromString(HelpFileUsageType, "log only"),
+        ];
+        return fileId is null
+            ? new SimulatedSqlResultSet(SpHelpFileSchema, SpHelpFileColumnNames, [data, log])
+            : new SimulatedSqlResultSet(SpHelpFileNamedSchema, SpHelpFileNamedColumnNames,
+                [WithoutFileId(fileId == 1 ? data : log)]);
     }
+
+    // The named form's row: the same cells minus the fileid at ordinal 1.
+    private static SqlValue[] WithoutFileId(SqlValue[] row) =>
+        [row[0], row[2], row[3], row[4], row[5], row[6], row[7]];
 
     private static string HelpFileKilobytes(long pages) =>
         (pages * 8).ToString(CultureInfo.InvariantCulture) + " KB";

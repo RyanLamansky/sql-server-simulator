@@ -376,6 +376,16 @@ public class OrderByTests
     [DataRow("select v from t order by (1 + 1)", 1)]
     [DataRow("select v from t order by ('x')", 1)]
     [DataRow("select v from t order by -1.5", 1)]
+    [DataRow("select v from t order by 'x' collate Latin1_General_CI_AS", 1)]
+    [DataRow("select v from t order by abs(-1)", 1)]
+    [DataRow("select v from t order by len('abc')", 1)]
+    [DataRow("select v from t order by abs(len('abc'))", 1)]
+    [DataRow("select v from t order by charindex('a', 'abc')", 1)]
+    [DataRow("select v from t order by concat('a', 'b')", 1)]
+    [DataRow("select v from t order by nullif(1, 2)", 1)]
+    [DataRow("select v from t order by datediff(day, '2020-01-01', '2020-01-02')", 1)]
+    [DataRow("select v from t order by case when 1 = 1 then 1 else 2 end", 1)]
+    [DataRow("select v from t order by iif(1 = 1, 'a', 'b')", 1)]
     [DataRow("select top 1 v from t order by 'x'", 1)]
     [DataRow("select v from t order by 'x' offset 0 rows", 1)]
     [DataRow("select v from t order by v, 'x'", 2)]
@@ -411,6 +421,19 @@ public class OrderByTests
     [DataRow("select v from t order by case when v = 1 then 1 else 2 end")]
     [DataRow("declare @p int = 1; select v from t order by @p + 1")]
     [DataRow("select 5 as x from t order by x")]
+    // Real's foldable catalog is narrower than its deterministic one: these
+    // calls over literal arguments all sort (probe-confirmed), as does any
+    // fold blocked by a non-constant argument.
+    [DataRow("select v from t order by upper('a')")]
+    [DataRow("select v from t order by lower('A')")]
+    [DataRow("select v from t order by quotename('a')")]
+    [DataRow("select v from t order by choose(1, 'a', 'b')")]
+    [DataRow("select v from t order by isjson('{}')")]
+    [DataRow("select v from t order by len(upper('abc'))")]
+    [DataRow("select v from t order by abs(v)")]
+    [DataRow("select v from t order by concat('a', getdate())")]
+    [DataRow("select v from t order by iif(1 = 1, v, 2)")]
+    [DataRow("select v from t order by case when exists (select 1) then 1 else 2 end")]
     public void OrderBy_NonConstantTerm_Sorts(string commandText)
     {
         var sim = new Simulation();

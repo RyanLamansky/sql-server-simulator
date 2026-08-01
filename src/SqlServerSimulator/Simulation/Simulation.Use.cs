@@ -38,6 +38,12 @@ partial class Simulation
         // Msg 916, session stays in the current database. A dbo / sa session
         // keeps the unrestricted switch.
         var connection = context.Connection;
+        // An active application role pins the session to the database that set
+        // it — Msg 505, ahead of the ordinary restricted-principal gate, since
+        // real reports the approle-specific wording even for a would-be-dbo
+        // session (probe-confirmed).
+        if (connection.Security.HasApplicationRole)
+            throw SimulatedSqlException.CannotChangeDatabaseUnderApplicationRole();
         if (!connection.Security.EffectiveIsDbo)
             throw SimulatedSqlException.CannotAccessDatabaseUnderSecurityContext(connection.Security.Effective.LoginName, nameToken.Value);
 

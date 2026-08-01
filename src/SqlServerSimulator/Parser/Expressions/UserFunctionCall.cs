@@ -51,6 +51,15 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
 
     public override SqlValue Run(RuntimeContext runtime)
     {
+        // A skipped statement never calls the function: the body belongs to an
+        // execution that doesn't happen. The gate is load-bearing rather than
+        // an optimization because the FROM-less-SELECT fast path bakes its
+        // projection values during the *parse*, so without it a dead branch's
+        // `SELECT dbo.f()` — and every module body's, while it binds at CREATE
+        // time — would dispatch the body and surface its runtime errors.
+        if (runtime.Batch.IsSkipping)
+            return SqlValue.Null(this.function.ReturnType);
+
         // Materialize argument values in the caller's row scope. NULL inputs
         // short-circuit when the function declared WITH RETURNS NULL ON NULL
         // INPUT (probe-confirmed: body never runs).

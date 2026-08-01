@@ -63,8 +63,9 @@ Divergences:
 
 ## Not modeled yet
 
-- **Writes** through a four-part name (INSERT / UPDATE / DELETE / MERGE targeting `srv.db.schema.t`) raise `NotSupportedException` via [`BatchContext.RejectCrossDatabaseMutation`](../../src/SqlServerSimulator/Parser/BatchContext.cs).
+- **Writes** through a four-part name (INSERT / UPDATE / DELETE / MERGE targeting `srv.db.schema.t`) raise `NotSupportedException` via [`BatchContext.RejectCrossServerMutation`](../../src/SqlServerSimulator/Parser/BatchContext.cs).
   Lock-manager and undo-log coordination across `Simulation` boundaries aren't modeled — parallels the existing `BEGIN DISTRIBUTED TRANSACTION` rejection.
+  Cross-*database* writes inside one `Simulation` do ship ([`schemas.md`](schemas.md#cross-database-writes)); the server hop is what this rejection is left holding.
   Open a `SimulatedDbConnection` directly on the target `Simulation` to mutate it.
 - **Catalog views through four-part names** (`srv.db.sys.tables`): the resolver returns false (catalog views are 2- or 3-part-only — see [`BatchContext.TryResolveCatalogView`](../../src/SqlServerSimulator/Parser/BatchContext.cs)), so the call falls through to Msg 208 instead of routing to the remote's `sys.tables`.
   Cross-server diagnostic queries should run against the remote `Simulation` directly.

@@ -18,6 +18,7 @@ All semantics below are probe-confirmed against SQL Server 2025.
 | `THROW;` (re-raise in CATCH) | the **original** error's line | not the re-raising statement's line |
 | Procedure body error | line relative to the whole **CREATE** statement (header lines counted) | + `Procedure = "dbo.<name>"` (schema-qualified) |
 | Trigger body error | CREATE-relative line | + `Procedure = "<name>"` (**unqualified** — the one asymmetry from procedures) |
+| **CREATE-time bind error** (the body error that aborts the CREATE) | CREATE-relative line | + `Procedure = "<name>"` — **unqualified for every module kind**, procedures included, so `CREATE PROCEDURE dbo.p` reports `p` where the same body failing at EXEC reports `dbo.p` |
 | Scalar-UDF / inline-TVF / multi-statement-TVF / view body error | the **outer invoking** statement's line | no `Procedure` — real inlines these for attribution (even the multi-statement TVF) |
 | Nested procedure call | **innermost** procedure/trigger frame's line + procedure | a UDF error inside a proc attributes to the **proc's** calling line, not the UDF |
 | `EXEC('…')` / `sp_executesql` | line relative to the **dynamic batch** | no `Procedure` |
@@ -27,6 +28,16 @@ All semantics below are probe-confirmed against SQL Server 2025.
 The wire ERROR/INFO token's server-name field carries `@@SERVERNAME` instead — SqlClient ignores it and substitutes the data source; token-rendering clients (sqlcmd) display it verbatim.
 
 `ERROR_PROCEDURE()` returns the same schema-qualified name as `SqlError.Procedure` (`dbo.p1`); `ERROR_LINE()` returns the same line the exception carries.
+
+## Bind errors are catchable here and aren't on real
+
+Real compiles a whole batch before running any of it, so an error the binder raises kills the batch outright — a `TRY` / `CATCH` wrapping the failing statement never reaches the CATCH.
+Probe-confirmed for the collation-conflict pair (**Msg 468** / **457**) and for the legacy-LOB argument gate (**Msg 8116**), each raised over an empty rowset inside a `BEGIN TRY`: the batch dies with the error and the CATCH block's `PRINT` never runs.
+
+The simulator's dispatch loop compiles each statement as it reaches it, so the same error arrives mid-batch and is an ordinary catchable one.
+That divergence is structural (per-statement rather than per-batch compilation) and applies to every compile-time error the simulator raises, not just those three — closing it means a whole-batch compile pass ahead of execution.
+Coverage locking in the current behavior: `PredicateCompileTimeBindTests.BindError_IsCatchableHereButNotOnReal`.
+Statement *ordering* is unaffected — the error still precedes any row the statement would have produced.
 
 ## Capture design
 
@@ -39,7 +50,7 @@ The static exception factories (`SimulatedSqlException.*Errors.cs`) can't reach 
   - `baseLine`: chosen at the boundary in `Simulation.DispatchOneStatement` — the parser's **current-token line** for severity-15 (syntax) errors, else the failing statement's `StatementContext.StartLine`.
   - `lineOffset`: `BatchContext.LineOffset`, the newline count preceding a procedure/trigger body's start within its CREATE text, so body errors report a CREATE-relative line.
     Zero for top-level and dynamic-SQL batches.
-  - `procedure`: `BatchContext.ErrorProcedureName` — the schema-qualified name for a stored-procedure body (`dbo.p`), the **unqualified** name for a trigger body (`tr`, matching real's `ERROR_PROCEDURE()` / `SqlError.Procedure` for triggers), empty otherwise.
+  - `procedure`: `BatchContext.ErrorProcedureName` — the schema-qualified name for a stored-procedure body (`dbo.p`), the **unqualified** name for a trigger body (`tr`, matching real's `ERROR_PROCEDURE()` / `SqlError.Procedure` for triggers) and for **every** module kind's CREATE-time bind batch (see [`programmable.md`](programmable.md#create-time-body-binding)), empty otherwise.
 - **Body-type attribution** hinges on which frame stamps.
   Procedures and triggers push their own attribution frame (they set `LineOffset` + `ErrorProcedureName` on the child batch); scalar UDFs, inline TVFs, multi-statement TVFs, and views **inline** — their child batch sets `BatchContext.SuppressDiagnosticsResolution`, so the dispatch catch skips `ResolveDiagnostics` and lets the error propagate unresolved to the enclosing invoking statement's frame (probe-confirmed: real reports the outer statement's line with no procedure, even for a multi-statement TVF's mid-body error).
   A UDF error inside a procedure body therefore attributes to the procedure's calling statement, not the UDF.

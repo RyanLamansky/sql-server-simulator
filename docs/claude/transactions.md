@@ -20,5 +20,8 @@ A fourth arrives over the network: TDS Transaction Manager requests map onto the
 - Locking + MVCC: full 8-mode matrix, row-X writers + row-mode readers per hints/iso, RR/SER/UPDLOCK/XLOCK/TABLOCK/HOLDLOCK/REPEATABLEREAD/NOLOCK/READPAST hints, escalation at 5000 row-locks, Msg 1205 deadlock / Msg 1222 timeout, SNAPSHOT + RCSI (version chains + GC + DMVs).
   See [`locking.md`](locking.md).
 - Table-variable mutations use a statement-only undo log disjoint from the tx-scoped one, so `ROLLBACK TRAN` skips `@t` (the `CurrentTableVarUndoLog` / `CurrentUndoLog` split on `BatchContext`).
+- **One transaction spans every database it wrote to.**
+  The undo log is per-connection and its entries reference their `Heap` directly, so a write through a three-part name rolls back with the rest of the transaction with no extra routing; `@@TRANCOUNT` / `XACT_STATE()` never reflect the crossing (probe-confirmed).
+  What *is* per-database — the rowversion counter, the version store's commit-Xid counter, trigger dispatch — follows the target table rather than the session; see the cross-database-writes section of [`schemas.md`](schemas.md#cross-database-writes).
 
 Not modeled: `BEGIN DISTRIBUTED TRANSACTION` → `NotSupportedException` at dispatch; `BEGIN TRANSACTION <name> WITH MARK 'm'` → Msg 319 at parse (bare named transactions ship).

@@ -448,7 +448,9 @@ internal static partial class BuiltInResources
     /// definition column is <see cref="SchemaObject.DefinitionText"/> (NULL for
     /// WITH ENCRYPTION). Flag columns are probe-confirmed placeholder constants
     /// except <c>null_on_null_input</c>, which reads a scalar function's
-    /// RETURNS NULL ON NULL INPUT declaration.
+    /// RETURNS NULL ON NULL INPUT declaration, and
+    /// <c>uses_quoted_identifier</c>, which reads the module's creation-time
+    /// <see cref="SchemaObject.UsesQuotedIdentifier"/> capture.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSqlModules(Parser.BatchContext batch, Database database)
     {
@@ -462,7 +464,7 @@ internal static partial class BuiltInResources
             SqlValue.FromInt32(obj.ObjectId),
             obj.DefinitionText is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(obj.DefinitionText),
             on,  // uses_ansi_nulls
-            on,  // uses_quoted_identifier
+            obj.UsesQuotedIdentifier ? on : off, // uses_quoted_identifier
             obj is View { IsSchemaBound: true } or UserDefinedFunction { IsSchemaBound: true } ? on : off, // is_schema_bound
             off, // uses_database_collation
             off, // is_recompiled

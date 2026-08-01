@@ -58,6 +58,14 @@ partial class SimulatedSqlException
         new($"Property '{property}' cannot be generated in JSON output due to a conflict with another column name or alias. FOR JSON PATH requires that the column expressions are ordered based on the JSON document paths specified in the column aliases.", 13601, 16, 1);
 
     /// <summary>
+    /// Msg 13600: <c>FOR JSON AUTO</c> on a SELECT with no FROM clause — AUTO
+    /// keys every nesting level off a table, so it has nothing to key off.
+    /// Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForJsonAutoRequiresTable() =>
+        new("FOR JSON AUTO requires at least one table for generating JSON objects. Use FOR JSON PATH or add a FROM clause with a table name.", 13600, 16, 1);
+
+    /// <summary>
     /// Msg 13605: a <c>FOR JSON</c> projection contains a column expression
     /// with no name or alias. Probe-confirmed wording against SQL Server 2025.
     /// </summary>

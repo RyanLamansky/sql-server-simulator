@@ -7,7 +7,8 @@ namespace SqlServerSimulator.Parser.Tokens;
 /// A SQL numeric literal — integer (<c>123</c>), decimal (<c>123.45</c>), or
 /// scientific (<c>1.5e2</c>). The constructor classifies the source span and
 /// produces a typed <see cref="SqlValue"/>: integer-only digits land on
-/// <see cref="SqlType.Int32"/>, fractional-without-exponent on
+/// <see cref="SqlType.Int32"/> while they fit and on
+/// <c>numeric(digit_count, 0)</c> past it, fractional-without-exponent on
 /// <c>decimal(p, s)</c> with <c>p = significant-digit count</c> and
 /// <c>s = digits-after-decimal</c> (matching SQL Server's literal-type
 /// inference, verified against SQL Server 2025: <c>100.5 → decimal(4, 1)</c>,
@@ -21,8 +22,10 @@ internal sealed class Numeric : Token
 
     /// <summary>
     /// Significant-decimal-digit count when this token is a non-negative
-    /// <b>integer</b> literal (<c>int</c> / <c>bigint</c> branch), <c>0</c> for
-    /// decimal / scientific literals. SQL Server types an integer literal as
+    /// <b>integer</b> literal that fits <c>int</c>, <c>0</c> for decimal /
+    /// scientific literals and for the past-int integer literals (whose
+    /// <c>numeric(digit_count, 0)</c> type already states the count). SQL
+    /// Server types an integer literal as
     /// <c>numeric(digit_count, 0)</c> — not <c>int</c>'s fixed precision 10 —
     /// when it is unified with a decimal/numeric partner in arithmetic /
     /// <c>CASE</c> / set-op promotion (probe-confirmed against SQL Server 2025:
@@ -80,26 +83,28 @@ internal sealed class Numeric : Token
             return;
         }
 
-        // Past int range — try bigint, then fall back to decimal at scale 0
-        // for literals up to 38 digits. Real SQL Server promotes 10-19-digit
-        // literals to bigint and 20-38-digit literals to numeric.
-        if (long.TryParse(number, out var int64))
-        {
-            this.Value = SqlValue.FromInt64(int64);
-            return;
-        }
+        // Past int range — SQL Server never types a bare integer literal
+        // `bigint`; it goes straight to `numeric(digit_count, 0)`
+        // (probe-confirmed: `2147483648` → numeric(10, 0), `10000000000` →
+        // numeric(11, 0), `99999999999999999999` → numeric(20, 0); only a CAST
+        // reaches bigint). Past 38 digits real reports Msg 1007.
+        if (this.IntegerLiteralDigitCount > 38)
+            throw SimulatedSqlException.NumberOutOfRangeForNumeric(number.ToString());
 
-        // 20-38-digit integer literal — already a scale-0 decimal whose
-        // declared precision equals its digit count, so no separate literal
-        // annotation is needed (the decimal path sees the right precision).
+        // The declared precision already equals the digit count, so the
+        // separate literal annotation the int branch carries would be
+        // redundant here (the decimal promotion path reads the type).
+        var digits = this.IntegerLiteralDigitCount;
         this.IntegerLiteralDigitCount = 0;
 
         if (decimal.TryParse(number, NumberStyles.Integer, CultureInfo.InvariantCulture, out var bigDec))
         {
-            this.Value = SqlValue.FromDecimal(SqlType.GetDecimal(number.Length, 0), bigDec);
+            this.Value = SqlValue.FromDecimal(SqlType.GetDecimal(digits, 0), bigDec);
             return;
         }
 
+        // Past .NET `decimal`'s 28-29 significant digits — the documented
+        // backing-type limit, not a SQL Server behavior.
         throw new NotSupportedException($"Simulated command tokenizer couldn't parse {number} as a number.");
     }
 }

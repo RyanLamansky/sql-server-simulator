@@ -238,13 +238,13 @@ internal sealed class WindowExpression : Expression
     /// </summary>
     private static WindowExpression ParseNoArgRankingFunction(ParserContext context, WindowKind kind)
     {
+        var functionLowerName = LowerNameFor(kind);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Over })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
+        if (TryParseWindowReference(context, functionLowerName) is { } reference)
+            return RegisterNamedWindowReference(context, new WindowExpression(kind, [], [], aggregateInfo: null), reference);
 
         var partitionBy = ParseOptionalPartitionBy(context);
 
@@ -257,15 +257,7 @@ internal sealed class WindowExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var orderBy = ParseOrderByList(context);
 
-        RejectFrameSpec(context, kind switch
-        {
-            WindowKind.RowNumber => "row_number",
-            WindowKind.Rank => "rank",
-            WindowKind.DenseRank => "dense_rank",
-            WindowKind.CumeDist => "cume_dist",
-            WindowKind.PercentRank => "percent_rank",
-            _ => throw new InvalidOperationException($"Unexpected kind {kind} in no-arg ranking parser."),
-        });
+        RejectFrameSpec(context, functionLowerName);
 
         return context.Token is not Operator { Character: ')' }
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
@@ -285,9 +277,8 @@ internal sealed class WindowExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Over })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
+        if (TryParseWindowReference(context, "ntile") is { } reference)
+            return RegisterNamedWindowReference(context, new WindowExpression(WindowKind.NTile, [], [], aggregateInfo: null, bucketCount: bucketCount), reference);
 
         var partitionBy = ParseOptionalPartitionBy(context);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Order })
@@ -335,9 +326,14 @@ internal sealed class WindowExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Over })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
+        var functionLowerName = LowerNameFor(kind);
+        if (TryParseWindowReference(context, functionLowerName) is { } reference)
+        {
+            return RegisterNamedWindowReference(
+                context,
+                new WindowExpression(kind, [], [], aggregateInfo: null, operand: operand, offsetArg: offsetArg, defaultArg: defaultArg),
+                reference);
+        }
 
         var partitionBy = ParseOptionalPartitionBy(context);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Order })
@@ -346,7 +342,7 @@ internal sealed class WindowExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var orderBy = ParseOrderByList(context);
 
-        RejectFrameSpec(context, kind == WindowKind.Lag ? "lag" : "lead");
+        RejectFrameSpec(context, functionLowerName);
 
         return context.Token is not Operator { Character: ')' }
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
@@ -383,9 +379,8 @@ internal sealed class WindowExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Over })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
+        if (TryParseWindowReference(context, frameRejectingFunction: null) is { } reference)
+            return RegisterNamedWindowReference(context, new WindowExpression(kind, [], [], aggregateInfo: null, operand: operand), reference);
 
         var partitionBy = ParseOptionalPartitionBy(context);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Order })
@@ -433,6 +428,7 @@ internal sealed class WindowExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         var sortExpr = Expression.Parse(context);
+        ConstantFolding.RejectConstantWindowOrderByTerm(sortExpr, context);
         var descending = false;
         switch (context.Token)
         {
@@ -451,9 +447,13 @@ internal sealed class WindowExpression : Expression
         // OVER is mandatory for the ordered-set analytic functions.
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Over })
             throw SimulatedSqlException.FunctionMustHaveOverClause(functionLowerName);
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
+        if (TryParseWindowReference(context, functionLowerName) is { } reference)
+        {
+            return RegisterNamedWindowReference(
+                context,
+                new WindowExpression(kind, [], orderBy, aggregateInfo: null, percentileArg: percentileArg),
+                reference);
+        }
 
         var partitionBy = ParseOptionalPartitionBy(context);
 
@@ -499,20 +499,8 @@ internal sealed class WindowExpression : Expression
         if (aggCollector is not null && aggCollector.Count > 0 && ReferenceEquals(aggCollector[^1], aggregate))
             aggCollector.RemoveAt(aggCollector.Count - 1);
 
-        // Bare `OVER w` — a named-window reference (SQL Server 2022+). The
-        // definition parses later (WINDOW clause after HAVING), so register the
-        // window spec-less and record it for resolution. Leave the cursor on the
-        // name token, matching the closing-`)` lookahead contract.
-        var afterOver = context.GetNextRequired();
-        if (afterOver is Name windowName)
-        {
-            var namedWindow = new WindowExpression(WindowKind.Aggregate, [], [], aggregate);
-            context.PendingNamedWindows.Add((namedWindow, windowName.Value));
-            return Register(context, namedWindow);
-        }
-        if (afterOver is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
+        if (TryParseWindowReference(context, frameRejectingFunction: null) is { } reference)
+            return RegisterNamedWindowReference(context, new WindowExpression(WindowKind.Aggregate, [], [], aggregate), reference);
 
         var body = ParseWindowBody(context);
 
@@ -524,22 +512,51 @@ internal sealed class WindowExpression : Expression
     /// <summary>
     /// A parsed window body — the <c>PARTITION BY</c> / <c>ORDER BY</c> / frame
     /// triple shared by an inline <c>OVER (…)</c> and a named
-    /// <c>WINDOW w AS (…)</c> definition.
+    /// <c>WINDOW w AS (…)</c> definition, plus the optional name of a window
+    /// the body refines.
     /// </summary>
-    internal readonly struct WindowBody(Expression[] partitionBy, OrderBySpec[] orderBy, FrameSpec? frame)
+    internal readonly struct WindowBody(Expression[] partitionBy, OrderBySpec[] orderBy, FrameSpec? frame, string? baseWindowName = null)
     {
         public readonly Expression[] PartitionBy = partitionBy;
         public readonly OrderBySpec[] OrderBy = orderBy;
         public readonly FrameSpec? Frame = frame;
+
+        /// <summary>
+        /// The named window this body refines — the <c>w</c> of <c>OVER w</c>,
+        /// <c>OVER (w ORDER BY …)</c> or <c>WINDOW w2 AS (w …)</c>. Null when
+        /// the body stands alone. The remaining fields hold only the elements
+        /// written alongside the reference; the referenced window supplies the
+        /// rest at resolution.
+        /// </summary>
+        public readonly string? BaseWindowName = baseWindowName;
+
+        /// <summary>True when no element was written alongside a reference.</summary>
+        public bool IsEmpty => this.PartitionBy.Length == 0 && this.OrderBy.Length == 0 && this.Frame is null;
     }
 
     /// <summary>
     /// Parses the interior of an <c>OVER ( … )</c> / <c>WINDOW w AS ( … )</c>
-    /// clause — <c>[PARTITION BY …] [ORDER BY …] [frame]</c>. Entered with the
-    /// cursor on the first body token; leaves it on the closing <c>)</c>.
+    /// clause — <c>[&lt;window-name&gt;] [PARTITION BY …] [ORDER BY …] [frame]</c>.
+    /// Entered with the cursor on the first body token; leaves it on the
+    /// closing <c>)</c>. <paramref name="frameRejectingFunction"/> names the
+    /// function when a frame written here is invalid for it (Msg 10752);
+    /// <paramref name="deferFrameOrderByCheck"/> suppresses the Msg 10756
+    /// frame-needs-ORDER-BY gate because a referenced window may supply the
+    /// ordering; <paramref name="allowWindowReference"/> admits the leading
+    /// window name a <c>WINDOW</c>-clause definition may refine.
     /// </summary>
-    internal static WindowBody ParseWindowBody(ParserContext context)
+    internal static WindowBody ParseWindowBody(
+        ParserContext context,
+        string? frameRejectingFunction = null,
+        bool deferFrameOrderByCheck = false,
+        bool allowWindowReference = false)
     {
+        string? baseWindowName = null;
+        if (allowWindowReference && context.Token is Name nameToken && !IsWindowBodyKeyword(nameToken))
+        {
+            baseWindowName = nameToken.Value;
+            context.MoveNextRequired();
+        }
         var partitionBy = ParseOptionalPartitionBy(context);
         var orderBy = Array.Empty<OrderBySpec>();
         if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
@@ -548,20 +565,142 @@ internal sealed class WindowExpression : Expression
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             orderBy = ParseOrderByList(context);
         }
-        var frame = ParseOptionalFrameSpec(context, orderByPresent: orderBy.Length > 0);
-        return new WindowBody(partitionBy, orderBy, frame);
+        if (frameRejectingFunction is not null)
+            RejectFrameSpec(context, frameRejectingFunction);
+        var frame = ParseOptionalFrameSpec(context, orderByPresent: orderBy.Length > 0 || deferFrameOrderByCheck);
+        return new WindowBody(partitionBy, orderBy, frame, baseWindowName);
     }
 
     /// <summary>
-    /// Patches a spec-less <c>OVER w</c> window with its resolved named-window
-    /// definition.
+    /// Returns true when an identifier-shaped token opens a window-body element
+    /// rather than naming a window — <c>PARTITION</c>, <c>ROWS</c> and
+    /// <c>RANGE</c> are contextual keywords, so they tokenize as names.
+    /// <c>ORDER</c> is reserved and never reaches here.
+    /// </summary>
+    private static bool IsWindowBodyKeyword(Name token) =>
+        token is UnquotedString { ContextualKeyword: ContextualKeyword.Partition or ContextualKeyword.Rows or ContextualKeyword.Range };
+
+    /// <summary>
+    /// Recognizes a named-window reference immediately after the <c>OVER</c>
+    /// keyword — the bare <c>OVER w</c> form or the refining
+    /// <c>OVER (w &lt;element&gt; …)</c> form (SQL Server 2022+). Entered with
+    /// the cursor on <c>OVER</c>. Returns the reference and leaves the cursor
+    /// on its last token (the name for the bare form, the closing <c>)</c> for
+    /// the refining one); returns null for a self-contained <c>OVER (…)</c>,
+    /// leaving the cursor on the first body token for the caller to parse.
+    /// <paramref name="frameRejectingFunction"/> names the calling function
+    /// when a frame written in the refinement is invalid for it (Msg 10752),
+    /// and is null for the kinds that accept one.
+    /// </summary>
+    private static WindowBody? TryParseWindowReference(ParserContext context, string? frameRejectingFunction)
+    {
+        var afterOver = context.GetNextRequired();
+        if (afterOver is Name bareName && !IsWindowBodyKeyword(bareName))
+            return new WindowBody([], [], null, bareName.Value);
+        if (afterOver is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        if (context.Token is not Name referenceName || IsWindowBodyKeyword(referenceName))
+            return null;
+        context.MoveNextRequired();
+
+        var body = ParseWindowBody(context, frameRejectingFunction, deferFrameOrderByCheck: true);
+        // Real requires at least one refining element after the reference:
+        // `OVER (w)` is Msg 102 even though `WINDOW w2 AS (w)` is legal.
+        return body.IsEmpty || context.Token is not Operator { Character: ')' }
+            ? throw SimulatedSqlException.SyntaxErrorNear(context)
+            : new WindowBody(body.PartitionBy, body.OrderBy, body.Frame, referenceName.Value);
+    }
+
+    /// <summary>
+    /// Registers a window function whose <c>OVER</c> clause referenced a named
+    /// window. The definition parses later (the <c>WINDOW</c> clause sits after
+    /// <c>HAVING</c>), so the expression is registered carrying only whatever
+    /// the reference wrote inline and is patched by
+    /// <c>Selection.ResolvePendingNamedWindows</c>.
+    /// </summary>
+    private static WindowExpression RegisterNamedWindowReference(ParserContext context, WindowExpression expression, WindowBody reference)
+    {
+        context.PendingNamedWindows.Add((expression, reference));
+        return Register(context, expression);
+    }
+
+    /// <summary>
+    /// The lowercase name real SQL Server uses for a kind in its window
+    /// diagnostics. <see cref="WindowKind.Aggregate"/> has none: an aggregate
+    /// window carries no per-kind restriction, so no diagnostic that names the
+    /// function can reach it.
+    /// </summary>
+    private static string LowerNameFor(WindowKind kind) => kind switch
+    {
+        WindowKind.RowNumber => "row_number",
+        WindowKind.Rank => "rank",
+        WindowKind.DenseRank => "dense_rank",
+        WindowKind.NTile => "ntile",
+        WindowKind.Lag => "lag",
+        WindowKind.Lead => "lead",
+        WindowKind.FirstValue => "first_value",
+        WindowKind.LastValue => "last_value",
+        WindowKind.CumeDist => "cume_dist",
+        WindowKind.PercentRank => "percent_rank",
+        WindowKind.PercentileCont => "percentile_cont",
+        WindowKind.PercentileDisc => "percentile_disc",
+        _ => throw new InvalidOperationException($"Window kind {kind} has no diagnostic name."),
+    };
+
+    private string FunctionLowerName => LowerNameFor(this.Kind);
+
+    /// <summary>
+    /// True for the ranking and distribution kinds, which real states
+    /// differently from the offset / value / ordered-set kinds in the
+    /// named-window diagnostics (Msg 4106 and Msg 5366).
+    /// </summary>
+    private bool IsRankingFamily => this.Kind
+        is WindowKind.RowNumber or WindowKind.Rank or WindowKind.DenseRank
+        or WindowKind.NTile or WindowKind.CumeDist or WindowKind.PercentRank;
+
+    /// <summary>
+    /// Patches an <c>OVER w</c> / <c>OVER (w …)</c> window with the definition
+    /// its reference resolved to, then applies the per-kind rules the inline
+    /// <c>OVER (…)</c> parse applies at parse time. Real answers this position
+    /// with its own error numbers rather than the inline ones — Msg 4106 for a
+    /// frame a ranking / offset / percentile function may not carry, Msg 5366
+    /// for a missing ORDER BY, Msg 5363 for an ORDER BY the percentile pair may
+    /// not carry, and Msg 5364 for a frame with nothing to order against.
     /// </summary>
     public void ApplyNamedWindow(WindowBody body)
     {
+        if (this.Kind is WindowKind.PercentileCont or WindowKind.PercentileDisc)
+        {
+            // OrderBy already holds the mandatory WITHIN GROUP ordering, so the
+            // definition contributes PARTITION BY and nothing else.
+            if (body.OrderBy.Length > 0)
+                throw SimulatedSqlException.FunctionMayNotHaveOrderByInNamedWindow(this.FunctionLowerName);
+            if (body.Frame is not null)
+                throw SimulatedSqlException.NamedWindowMayNotHaveWindowFrame(this.FunctionLowerName, this.IsRankingFamily);
+            this.PartitionBy = body.PartitionBy;
+            return;
+        }
+        if (this.Kind != WindowKind.Aggregate)
+        {
+            if (body.Frame is not null && !AllowsFrame(this.Kind))
+                throw SimulatedSqlException.NamedWindowMayNotHaveWindowFrame(this.FunctionLowerName, this.IsRankingFamily);
+            if (body.OrderBy.Length == 0)
+                throw SimulatedSqlException.FunctionMustHaveWindowWithOrderBy(this.FunctionLowerName, this.IsRankingFamily);
+        }
+        if (body.Frame is not null && body.OrderBy.Length == 0)
+            throw SimulatedSqlException.NamedWindowFrameRequiresOrderBy();
         this.PartitionBy = body.PartitionBy;
         this.OrderBy = body.OrderBy;
         this.Frame = body.Frame;
     }
+
+    /// <summary>
+    /// True for the kinds that may carry an explicit frame — aggregate windows
+    /// and the value pair. Every other kind rejects one.
+    /// </summary>
+    private static bool AllowsFrame(WindowKind kind) =>
+        kind is WindowKind.Aggregate or WindowKind.FirstValue or WindowKind.LastValue;
 
     /// <summary>
     /// Parses an optional <c>PARTITION BY expr [, expr]*</c> clause inside
@@ -795,6 +934,7 @@ internal sealed class WindowExpression : Expression
         {
             context.MoveNextRequired();
             var expr = Expression.Parse(context);
+            ConstantFolding.RejectConstantWindowOrderByTerm(expr, context);
             var descending = false;
             switch (context.Token)
             {

@@ -260,18 +260,34 @@ Probe-confirmed 2026-07-31 across: the string scalars (SUBSTRING, CHARINDEX, STU
 Three sites answer differently, each probe-confirmed:
 
 - **The bit-manipulation family never narrows at all** — see [Bit manipulation](#bit-manipulation-argument-rules) below.
-- **A system procedure's parameter** reports **Msg 8114** state 5 naming both families (`Error converting data type bigint to int.`) rather than the arithmetic-overflow family, via `ScalarArguments.CoerceProcedureParameter`.
+- **A system procedure's parameter** reports **Msg 8114** state 5 naming both families (`Error converting data type numeric to int.` for a bare literal, `… bigint to int.` for a `CAST(… AS bigint)`) rather than the arithmetic-overflow family, via `ScalarArguments.CoerceProcedureParameter`.
   Confirmed for `sp_getapplock`'s `@LockTimeout` (int), `sp_columns_100`'s `@ODBCVer` (int), and `sp_datatype_info_100`'s `@data_type` (int) / `@ODBCVer` (**tinyint**, which its message names).
 - **A cursor `FETCH ABSOLUTE` / `RELATIVE` offset *literal*** past int range is a grammar-level failure, **Msg 1080** class 15 (`The integer value 3000000000 is out of range.`); the same value through a *variable* is accepted and simply positions past the end.
 
+## Gated argument slots
+
+Four argument slots refuse a wrong type outright instead of converting it, reporting **Msg 8116** naming the offending family, the 1-based argument index and the lowercase function name (`Argument data type numeric is invalid for argument 1 of columnproperty function.`):
+
+- `COLUMNPROPERTY` / `INDEXPROPERTY` / `INDEXKEY_PROPERTY`'s **first** argument (the object id).
+- `CONVERT` / `TRY_CONVERT`'s **third** argument (the style).
+
+Only the four signed / unsigned integer families pass — `int`, `bigint`, `smallint`, `tinyint`.
+`bit`, the exact numerics, `float` / `real`, money, the string families and the date families all raise.
+An in-family value past the parameter's range still takes the ordinary conversion surface instead (Msg 8115), so `CONVERT(varchar(30), GETDATE(), CAST(3000000000 AS bigint))` overflows where the bare literal `3000000000` — typed `numeric(10, 0)` per [`arithmetic.md`](arithmetic.md#integer-literals-past-ints-range-type-numericdigit_count-0) — is type-rejected.
+
+The gate is a compile-time one on real, so it precedes the NULL short-circuit: a *typed* NULL raises (`COLUMNPROPERTY(CAST(NULL AS float), …)` → Msg 8116) where the bare `NULL` keyword returns NULL.
+A decimal-family argument is spelled `numeric` or `decimal` following the same numeric-vs-decimal naming a projected column uses, read off the argument expression's `ResultReportsNumeric`.
+`ScalarArguments.RequireIntegerArgument` is the shared implementation; probe-confirmed 2026-08-01 across all four slots.
+
+The sibling id scalars carry **no** such gate — `OBJECT_NAME`, `COL_NAME`, `OBJECTPROPERTY`, `TYPE_NAME`, `SCHEMA_NAME`, `DB_NAME`, `FILE_NAME`, `FILEGROUP_NAME`, `INDEX_COL`, `STATS_DATE` and the string scalars' position arguments all convert, so a wrong-family or out-of-range argument reaches the ordinary Msg 8115 / 232 / 237 / 220 outcomes above.
+The bit-manipulation family gates its own arguments under a separate rule — see [Bit manipulation](#bit-manipulation-argument-rules).
+
 ### Divergences
 
-- **`3000000000` types as `bigint`, not `numeric`.**
-  Real types an integer literal beyond int range as `numeric(10, 0)`, the simulator as `bigint`.
-  Where a function type-rejects `numeric` but accepts `bigint` (the bit family, COLUMNPROPERTY / INDEXPROPERTY / INDEXKEY_PROPERTY's first argument, CONVERT's style), the two therefore answer with different errors for the bare literal and agree once the argument is an explicit `CAST(… AS bigint)`.
 - **Argument evaluation order.**
   Real converts every argument before running the function body; the simulator converts each where it is used, so `INDEX_COL` / `INDEXKEY_PROPERTY` / `STATS_DATE` resolve the named object first and return NULL for a missing one where real reports the later argument's overflow.
-- **Non-integer arguments outside the bit family aren't type-rejected** — real answers Msg 8116 for a `float` / `numeric` / `bit` / `varbinary` style or id argument where the simulator converts it; tracked in the over-permissive register of [`backlog.md`](backlog.md).
+- **A system procedure's Msg 8114 spells a decimal source `numeric`.**
+  Real spells it `numeric` for a literal argument and `decimal` for a declared-`decimal` variable; the simulator's `SqlValue` carries no such name by the time it reaches the parameter boundary, so it takes the literal spelling — exact for every argument the EXEC literal grammar admits, and the same deferred column/variable-source-name boundary [`arithmetic.md`](arithmetic.md#numeric-vs-decimal-reported-type-name) records.
 
 ## Bit manipulation argument rules
 
@@ -296,6 +312,7 @@ Every argument position of a multi-argument member is covered — REPLACE and TR
 Three members deviate, each probe-confirmed:
 
 - **TRIM** numbers its arguments in written order, so the source is argument 1 in the bare `TRIM(x)` form and argument 2 once a `chars FROM` prefix claims the first slot.
+  Written order also decides which of two offending arguments is named — `TRIM(<ntext> FROM <text>)` reports argument 1 — so the character set is gated ahead of the source rather than where it's consumed.
   Its function word is also the only capitalized one real emits — `of Trim function.` beside `of len function.`.
 - **DIFFERENCE** takes a `text` argument: it converts implicitly to `varchar` and evaluates, while `ntext` and `image` raise.
   Its own SOUNDEX refuses all three.
@@ -304,13 +321,14 @@ Three members deviate, each probe-confirmed:
 An argument that is **read** rather than transformed accepts a LOB, which is how a legacy `text` column is meant to be consumed — CHARINDEX's haystack, PATINDEX's subject and SUBSTRING's source all take one, as do CONCAT / CONCAT_WS / COALESCE / ISNULL and DATALENGTH.
 `StringScalars.CoerceToVarchar`'s `allowLegacyLob` flag marks the coercing sites; `StringScalars.RejectLegacyLob` is the standalone gate for the members that read their argument directly.
 
+The gate is a **compile-time** one, as it is on real: each member's `GetSqlType` resolves the argument's static type through `StringScalars.BindArgument` (or `BindCoercedArgument` for the members whose runtime path goes through `CoerceToVarchar`), which applies the identical `RejectLegacyLobType` / `RejectLegacyLobInCoercion` body the per-value gate calls — so the two phases can't drift, and an **empty** rowset, a never-taken branch, and a module body at CREATE all raise where real raises.
+Probe-confirmed on SQL Server 2025: `SELECT LEN(nt) FROM t` fails on an empty table, `WHERE 1 = 0` doesn't rescue it, `WHERE LEN(nt) > 1` fails with the function nowhere in the projection, and `CREATE PROCEDURE` / `CREATE VIEW` / `CREATE FUNCTION` over such a body is refused.
+Binding the argument is also what carries an unknown column's Msg 207 out of a predicate — see [`collations.md`](collations.md#compile-time-binding) for the drive sites.
+
 The types are column-only besides: a local variable declared `text` / `ntext` / `image` raises **Msg 2739** (`The text, ntext, and image data types are invalid for local variables.`), so a string function only ever sees one through a column or a CAST.
 
 ### Divergences
 
-- **The gate runs per row, not at compile time.**
-  Real binds the rule while compiling, so `SELECT LEN(nt) FROM t WHERE 1 = 0` fails on an empty rowset; the simulator raises when the first row reaches the expression, so a query that returns no rows passes silently.
-  The gate does sit ahead of each function's NULL short-circuit, so a NULL-valued LOB column still raises — only a row-less result escapes.
 - **`CHARINDEX(<needle>, <image>)`** reports Msg 8116 for argument 2 where real reports Msg 206 (`image is incompatible with varchar`); real accepts the pair when the needle is binary too, which needs the unbuilt binary CHARINDEX.
 - **`SUBSTRING(<image>)` / `SUBSTRING(<varbinary>)`** raise Msg 8116 where real returns the binary slice — binary SUBSTRING isn't built.
 
@@ -774,3 +792,164 @@ The tokenizer emits `{` and `}` as single-char operators (no other T-SQL meaning
 
 **Known gap**: the ODBC `{fn}` functions with no same-arity T-SQL rename — `MOD` (→ `%`), `TRUNCATE` (→ `ROUND(x, y, 1)`), `CURDATE` / `CURTIME`, `DAYOFWEEK` / `DAYOFYEAR` / `HOUR` / `MINUTE` / `SECOND` / `WEEK` / `QUARTER` (→ `DATEPART(part, x)`), `USER` / `DATABASE`, the ODBC `CONVERT(val, SQL_type)` — are left unmapped (they fall to the normal not-a-built-in path).
 The `{oj … LEFT OUTER JOIN …}` outer-join escape (a FROM-clause construct, not expression position) is likewise not modeled.
+
+## The native `REGEXP_*` family (SQL Server 2025)
+
+Seven members ship in the box product, in three shapes.
+Probed against a live SQL Server 2025 (17.0.4065.4) reference instance.
+
+| Member | Shape | Signature | Result | Compat gate |
+| --- | --- | --- | --- | --- |
+| `REGEXP_COUNT` | scalar | `(string, pattern [, start [, flags]])` | `int` | none |
+| `REGEXP_INSTR` | scalar | `(string, pattern [, start [, occurrence [, return_option [, flags [, group]]]]])` | `int` | none |
+| `REGEXP_REPLACE` | scalar | `(string, pattern [, replacement [, start [, occurrence [, flags]]]])` | input family, container width | none |
+| `REGEXP_SUBSTR` | scalar | `(string, pattern [, start [, occurrence [, flags [, group]]]])` | input type | none |
+| `REGEXP_LIKE` | **predicate** | `(string, pattern [, flags])` | boolean | **170 only** |
+| `REGEXP_MATCHES` | rowset | `(string, pattern [, flags])` | 5 columns | **170 only** |
+| `REGEXP_SPLIT_TO_TABLE` | rowset | `(string, pattern [, flags])` | 2 columns | **170 only** |
+
+Implementation: `Parser/Expressions/RegexpScalar.cs` (one node, four kinds), `RegexpLikePredicate.cs`, `Parser/Selection.Regexp.cs`, with `RegexpArguments.cs` holding the shared argument rules and `RegexDialect.cs` the pattern translation.
+
+### `REGEXP_LIKE` is a predicate, not a scalar
+
+`SELECT REGEXP_LIKE('abc', 'a.c')` raises **Msg 156** on real, so the construct binds in the WHERE / HAVING / IF / CASE-WHEN / CHECK grammar (`BooleanExpression.ParsePredicateOperand`, beside `CONTAINS` / `FREETEXT` / `UPDATE(col)`) rather than in `ResolveBuiltIn`.
+Its arity is enforced by the grammar too — a fourth argument or a bare `REGEXP_LIKE(x)` is **Msg 102** near the offending token, not the scalars' Msg 189.
+A NULL in any argument yields UNKNOWN, so `NOT REGEXP_LIKE(NULL, 'a')` doesn't pass either.
+
+The keyword reservation that comes with it is covered in [`grammar.md`](grammar.md#compatibility-gated-reservation-regexp_like).
+
+### Argument rules
+
+**Validation order** (probe-confirmed, and observable because the members differ in which check a caller sees first):
+
+1. Operand **type** — Msg 8116, raised even for a typed NULL (`REGEXP_COUNT(CAST(NULL AS int), 'a')`).
+   The string operands take *no* implicit conversion: `REGEXP_COUNT(123, '2')` raises where the rest of the string scalars would render the number.
+   The bare `NULL` keyword is accepted (it has no type to reject).
+2. **NULL** in any argument → NULL result, before the pattern compiles — so `REGEXP_COUNT(NULL, '(')` is NULL, not a pattern error.
+   The one exception is `REGEXP_INSTR`'s `return_option`, where NULL reads as the default 0.
+3. Numeric **range** — Msg 19301.
+4. **Flags** — Msg 19303.
+5. **Pattern** compilation — Msg 19300 / 19307 / 19308 / 19309.
+
+**Msg 19301** wording is `'<ARG>' value should be greater than or equal to <min> but '<value>' is provided in '<FUNCTION>' function.`, and real's `<min>` isn't always the bound it enforces:
+
+| Function | Argument | State | Reported min | Enforced |
+| --- | --- | --- | --- | --- |
+| `REGEXP_COUNT` | `START` | 1 | 1 | `>= 1` |
+| `REGEXP_REPLACE` | `START` | 1 | 1 | `>= 1` |
+| `REGEXP_REPLACE` | `OCCURRENCE` | 2 | 0 | `>= 0` (0 = every match) |
+| `REGEXP_INSTR` | `START` | 3 | 1 | `>= 1` |
+| `REGEXP_INSTR` | `OCCURRENCE` | 4 | 1 | `>= 1` |
+| `REGEXP_INSTR` | `GROUP` | 5 | 1 | `>= 0` — 0 is the whole match |
+| `REGEXP_INSTR` | `RETURN_OPTION` | 6 | 0 | exactly `{0, 1}` — 2 is rejected with the same "greater than or equal to 0" text |
+| `REGEXP_SUBSTR` | `START` | 7 | 1 | `>= 1` |
+| `REGEXP_SUBSTR` | `OCCURRENCE` | 8 | 1 | `>= 1` |
+| `REGEXP_SUBSTR` | `GROUP` | 9 | 0 | `>= 0` |
+
+**Flags** are exactly `c` (case-sensitive, the default), `i`, `s` (dot matches newline), `m` (multiline).
+Oracle's `x` is **not** accepted.
+The match is case-sensitive (`'I'` is rejected) and the characters apply left-to-right, so `'ic'` ends case-sensitive and `'ci'` case-insensitive.
+Anything outside the set raises **Msg 19303**, which quotes the *whole* flags string rather than the offending character: `Invalid flag provided. 'imsxc' are not valid flags. Only {c,i,s,m} flags are valid.`
+
+**Arity** is Msg 189 with the lowercase name — `The regexp_count function requires 2 to 4 arguments.` — for the scalars, with maxima 4 / 7 / 6 / 6.
+The two rowset members instead report a TVF's **Msg 313** / **Msg 8144** at state 3.
+
+### Result types
+
+- `REGEXP_COUNT` / `REGEXP_INSTR` → `int`.
+- `REGEXP_REPLACE` → the **input's** family at container width (`varchar(8000)` / `nvarchar(4000)`), independent of the replacement's family, with MAX carried through unbounded.
+  A grown result **truncates silently** at that width rather than raising Msg 8152.
+- `REGEXP_SUBSTR` → the input's own declared width (`varchar(10)` in → `varchar(10)` out; `char(5)` in → `varchar(5)`), MAX carried through.
+
+### Per-member semantics
+
+- `occurrence` is 1-based and counts from `start`; `REGEXP_REPLACE` alone accepts 0, meaning every match.
+- `REGEXP_INSTR`'s `return_option` 0 reports the match's first character position, 1 reports one past its last.
+  A `group` the pattern doesn't have — or that didn't participate — reports 0; `REGEXP_SUBSTR` reports NULL for the same case.
+- `REGEXP_REPLACE`'s replacement uses **Oracle's backslash backreferences**, not `$`: `\1`…`\9` insert a capture group (out-of-range → empty), `\\` is one literal backslash, `$` is literal, and every other backslash escape passes through with its backslash intact (`\n` is two characters, `\0` is two characters).
+- An **empty pattern** makes `REGEXP_REPLACE` a no-op — `REGEXP_REPLACE('abc', '', '-')` is `'abc'` — even though `x*`, which also matches empty, replaces at every position (`'-a-b-c-'`).
+- **Collation is irrelevant** to matching: a `CI_AS` column still matches case-sensitively unless the `i` flag says otherwise, and there is no accent-insensitive mode.
+  The `i` flag applies Unicode simple case folding (É matches é).
+
+### The rowset members
+
+`REGEXP_MATCHES` projects `(match_id bigint, start_position int, end_position int, match_value <input type>, substring_matches varchar(max))`.
+`substring_matches` is `varchar(max)` whatever the input's family.
+It carries one JSON object per capture group with the group's 1-based `start` and its `length`, `null` members for a group that didn't participate, and — when the pattern has **no** capture group — a single entry for the whole match.
+
+A zero-width match reports the same value for `start_position` and `end_position`, **clamped to the input's length**: `REGEXP_MATCHES('aa', 'a*')` reports the trailing empty match at 2, not 3, and `REGEXP_MATCHES('', '')` reports 0.
+
+`REGEXP_SPLIT_TO_TABLE` projects `(value <input type>, ordinal bigint)` and runs on a **different match enumeration than every other member**: a zero-width match landing exactly where the previous match ended is discarded.
+That one rule is why `REGEXP_COUNT('aXbXc', 'X*')` is 6 while the same pattern splits into just `a` / `b` / `c`.
+Beyond it the algorithm is the familiar one: a separator ending at position 0 contributes no leading empty segment, and a trailing segment is emitted only when the last separator didn't end at the input's end — so `('abc', '')` yields three single-character rows and `(',a,', ',')` yields an empty row on both ends.
+
+A NULL in any argument yields an **empty result set** rather than a NULL row.
+Both compose with `CROSS APPLY` / `OUTER APPLY` through the same `ParseLateralFromSource` allowlist `STRING_SPLIT` uses.
+
+### Pattern dialect: RE2, not .NET
+
+The engine underneath the box's `REGEXP_*` members is **RE2**.
+Its parser error strings surface verbatim inside real's Msg 19300 wrapper, and its C++ octal quirk reproduces exactly — a bare `\1` is rejected as an unsupported backreference while `\101` parses as octal `A`, which is RE2's C++ `ParseEscape` and not Go's.
+
+.NET's `Regex` accepts a strict superset, so `RegexDialect.cs` walks the pattern and does two jobs at once: raise real's error for what RE2 rejects, and rewrite what the two engines spell differently or *mean* differently.
+
+**Rejected — Msg 19300**, `An invalid Pattern '<p>' was provided. Error '<detail>' occurred during evaluation of the Pattern.`:
+
+| Construct | RE2 detail |
+| --- | --- |
+| `(ab)\1`, `\1a`, `\8` | `invalid escape sequence: \1` / `\8` |
+| `(?=…)` / `(?!…)` / `(?<=…)` / `(?<name>…)` | `invalid perl operator: (?=` / `(?!` / `(?<` |
+| `(?>…)` atomic group | `invalid perl operator: (?>` |
+| `(?#comment)` | `invalid perl operator: (?#` |
+| `(?x)` free-spacing | `invalid perl operator: (?x` |
+| `(?P=name)` | `invalid perl operator: (?P` |
+| `a++` / `a**` / `a*??` / `a+*` / `a{1,2}*` | `bad repetition operator: ++` / … |
+| `?a` / `+a` / `\|*` / `(*a)` / `(?i)*` | `no argument for repetition operator: ?` / … |
+| `a{1001}` / `a{2,1}` | `invalid repetition size: {1001}` / `{2,1}` |
+| `\K` / `\Z` / `\e` / `\cA` / `\N{…}` | `invalid escape sequence: \K` / … |
+| `\x{110000}` | `invalid escape sequence: \x{110000` (real drops the closing brace) |
+| `[\b]` / `[a-\d]` | `invalid escape sequence: \b` / `\d` |
+| `[z-a]` / `[[:foo:]]` / `\p{Foo}` | `invalid character class range: z-a` / `[:foo:]` / `\p{Foo}` |
+| `(?P<>a)` / `(?P<a-b>a)` | `invalid named capture group: (?P<>` / `(?P<a-b>` |
+
+Four structural failures get their own numbers instead: an unclosed group → **Msg 19308** `Missing ')' in the Pattern …`, an unclosed class → **Msg 19308** `Missing ']' …`, a stray `)` → **Msg 19307**, a trailing backslash → **Msg 19309**.
+Their states split by member family — scalars and the predicate use one set, the two rowset members another:
+
+| Message | Scalar / predicate | Rowset |
+| --- | --- | --- |
+| 19300 | 1 | 2 |
+| 19307 | 1 | 2 |
+| 19308 missing `)` | 1 | 3 |
+| 19308 missing `]` | 2 | 4 |
+| 19309 | 1 | 2 |
+
+**Accepted, and rewritten for .NET**:
+
+| RE2 construct | Why it needs rewriting |
+| --- | --- |
+| `$` outside multiline | RE2 anchors at end of text; .NET also matches before a trailing newline, so it becomes `\z` |
+| `\d` `\D` `\s` `\S` `\w` `\W` | ASCII-only in RE2, Unicode-aware in .NET — each expands to its explicit ASCII class (`\s` is `[\t\n\f\r ]`, excluding vertical tab) |
+| `\b` / `\B` | RE2's word set is ASCII, so each expands to the equivalent lookaround pair |
+| `[[:alpha:]]` and the other POSIX names | no .NET spelling; expanded to ranges (negated forms to their complement) |
+| `\x{…}`, `\0oo`, `\101` | converted to the literal character |
+| `\Q…\E` | no .NET equivalent; each character emitted escaped |
+| `(?P<name>…)` | emitted as a plain capture group — the name is unobservable through the SQL surface, which sidesteps .NET's stricter naming rules (RE2 accepts `(?P<1x>…)`) |
+| `(?U)` ungreedy | no .NET option; the walk swaps each quantifier's greediness while the flag is in scope |
+
+Everything else — `(?:`, `(?i)` / `(?-i)` / `(?ims:…)`, `\A`, `\z`, `\p{L}` general categories, lazy quantifiers, leftmost-first alternation — means the same thing in both engines and passes through.
+Alternation is Perl-style leftmost-first, not POSIX leftmost-longest: `REGEXP_SUBSTR('abc', 'a|ab')` is `'a'`.
+
+**Runaway patterns.** Real's RE2 is backtracking-free, so no pattern can run away there.
+The simulator reaches the same guarantee by compiling with `RegexOptions.NonBacktracking` wherever the translation allows it, which is everywhere except the `\b` / `\B` expansions (.NET's non-backtracking engine refuses lookaround).
+A 5-second per-match timeout (`RegexDialect.MatchTimeout`) bounds those, surfacing .NET's `RegexMatchTimeoutException` — real has no error to mirror there.
+Compiled patterns are cached per translated-pattern-plus-options key, bounded at 512 entries.
+
+#### Divergences
+
+- **RE2 Unicode script names** (`\p{Greek}`, `\p{Han}`) raise `NotSupportedException` — .NET's `\p` covers general categories and named blocks, not scripts, and mapping a script onto a same-named block would be wrong.
+  The general categories themselves (`\p{L}`, `\p{Lu}`, …) and `\p{Any}` pass through; a name RE2 itself rejects still raises real's Msg 19300, which is why `RegexDialect` carries RE2's script-name table.
+- Matching runs over **UTF-16 code units** where RE2 runs over code points, so a supplementary character counts as two positions in `REGEXP_INSTR` / `REGEXP_MATCHES`.
+- `ERROR_STATE()` inside a T-SQL CATCH reads **one lower than the wire state** on real for Msg 19301 and Msg 19303 (`REGEXP_COUNT`'s START rejection is state 1 on the wire, 0 to `ERROR_STATE()`).
+  The simulator has one state field and models the wire value, which is what every client sees.
+- `sp_describe_first_result_set` on real declares `REGEXP_REPLACE(<char(N)>, …)` as `char(8000)` while the value it returns is only the input's width — internally inconsistent, and unreachable in a value model that encodes by declared type.
+  The simulator declares `varchar(8000)`, which produces identical values and identical `DATALENGTH`.

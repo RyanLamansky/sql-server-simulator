@@ -76,13 +76,22 @@ internal sealed class Trim : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var value = source.Run(runtime);
         // Argument numbering follows the written order, so the bare `TRIM(x)`
         // form makes the source argument 1 while `TRIM(chars FROM x)` makes
         // chars argument 1 and the source argument 2 (probe-confirmed
         // 2026-07-31, together with the capitalized `Trim` function word real
-        // echoes where the rest of the string family is lowercase).
+        // echoes where the rest of the string family is lowercase). Written
+        // order also decides which of two offending arguments is reported, so
+        // the character set is gated before the source rather than where it is
+        // consumed below — `TRIM(<ntext> FROM <text>)` names argument 1.
         var sourceIndex = this.trimChars is null ? 1 : 2;
+        SqlValue? charsValue = null;
+        if (this.trimChars is not null)
+        {
+            charsValue = this.trimChars.Run(runtime);
+            StringScalars.RejectLegacyLob(charsValue.Value, "Trim", argumentIndex: 1);
+        }
+        var value = source.Run(runtime);
         StringScalars.RejectLegacyLob(value, "Trim", sourceIndex);
         if (value.IsNull)
             return SqlValue.Null(value.Type);
@@ -90,13 +99,11 @@ internal sealed class Trim : Expression
             throw SimulatedSqlException.InvalidArgumentDataType(value.Type.SqlServerName, sourceIndex, "Trim");
 
         char[] chars;
-        if (this.trimChars is not null)
+        if (charsValue is { } suppliedChars)
         {
-            var charsValue = this.trimChars.Run(runtime);
-            StringScalars.RejectLegacyLob(charsValue, "Trim", argumentIndex: 1);
-            if (charsValue.IsNull)
+            if (suppliedChars.IsNull)
                 return SqlValue.Null(value.Type);
-            chars = charsValue.AsString.ToCharArray();
+            chars = suppliedChars.AsString.ToCharArray();
             // An empty trim-character set removes nothing.
             if (chars.Length == 0)
                 return SqlValue.FromString(value.Type, value.AsString);
@@ -116,7 +123,12 @@ internal sealed class Trim : Expression
         return SqlValue.FromString(value.Type, trimmed);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => source.GetSqlType(batch, resolveColumnType);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (this.trimChars is not null)
+            _ = StringScalars.BindArgument(this.trimChars, batch, resolveColumnType, "Trim", argumentIndex: 1);
+        return StringScalars.BindArgument(source, batch, resolveColumnType, "Trim", argumentIndex: this.trimChars is null ? 1 : 2);
+    }
 
     private static bool TryParseSide(ReadOnlySpan<char> span, out TrimSide side)
     {

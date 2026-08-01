@@ -209,7 +209,86 @@ public class ForJsonTests
         => _ = new Simulation().AssertSqlError(Fixture + "select id from t for json path, root('r'), without_array_wrapper", 13620);
 
     [TestMethod]
-    public void AutoJoinNesting_Deferred_Throws()
+    public void Auto_NoFromClause_Raises13600()
+    {
+        var ex = new Simulation().AssertSqlError("select 1 as a for json auto", 13600);
+        Contains("requires at least one table", ex.Message);
+    }
+
+    [TestMethod]
+    public void Auto_SetOperation_NotModeled()
         => _ = Throws<NotSupportedException>(
-            () => new Simulation().ExecuteScalar(Fixture + "select t.id, u.a from t join u on u.id=t.id for json auto"));
+            () => new Simulation().ExecuteScalar(Fixture + "select id from t union all select id from u for json auto"));
+
+    // ---- AUTO join nesting ----
+
+    /// <summary>
+    /// The FOR XML AUTO fixture (see <c>ForXmlTests</c>), reused so the two
+    /// serializers' nesting matrices sit on the same probed data.
+    /// </summary>
+    private const string JoinFixture = """
+        create table pp (id int, nm nvarchar(20));
+        create table cc (id int, pid int, cnm nvarchar(20), amt decimal(9,2));
+        create table gg (id int, pid int, gnm nvarchar(20));
+        insert pp values (1,'alpha'),(2,'beta'),(3,'gamma'),(4,'alpha');
+        insert cc values (10,1,'a1',1.5),(11,1,'a2',2.5),(12,2,'b1',null),(13,4,'d1',9.0);
+        insert gg values (100,1,'g1'),(101,1,'g2');
+        """;
+
+    private static string JoinJson(string query)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(JoinFixture);
+        return (string)sim.ExecuteScalar(query)!;
+    }
+
+    [TestMethod]
+    public void AutoNesting_SecondTableIsASubArray()
+        => AreEqual("""[{"id":1,"nm":"alpha","c":[{"id":10,"cnm":"a1"},{"id":11,"cnm":"a2"}]},{"id":2,"nm":"beta","c":[{"id":12,"cnm":"b1"}]},{"id":4,"nm":"alpha","c":[{"id":13,"cnm":"d1"}]}]""",
+            JoinJson("select p.id, p.nm, c.id, c.cnm from pp p join cc c on c.pid=p.id order by p.id, c.id for json auto"));
+
+    [TestMethod]
+    public void AutoNesting_ColumnsGroupByTable_NotSelectOrder()
+        => AreEqual("""[{"id":1,"nm":"alpha","c":[{"cnm":"a1"},{"cnm":"a2"}]},{"id":2,"nm":"beta","c":[{"cnm":"b1"}]},{"id":4,"nm":"alpha","c":[{"cnm":"d1"}]}]""",
+            JoinJson("select p.id, c.cnm, p.nm from pp p join cc c on c.pid=p.id order by p.id, c.id for json auto"));
+
+    [TestMethod]
+    public void AutoNesting_ThreeTables_NestLinearly()
+        => AreEqual("""[{"id":1,"c":[{"cnm":"a1","g":[{"gnm":"g1"},{"gnm":"g2"}]},{"cnm":"a2","g":[{"gnm":"g1"},{"gnm":"g2"}]}]}]""",
+            JoinJson("select p.id, c.cnm, g.gnm from pp p join cc c on c.pid=p.id join gg g on g.pid=p.id order by p.id, c.id, g.id for json auto"));
+
+    [TestMethod]
+    public void AutoNesting_OuterJoinNullSide_IsAnEmptyObject()
+        => AreEqual("""[{"id":1,"c":[{"cnm":"a1"},{"cnm":"a2"}]},{"id":2,"c":[{"cnm":"b1"}]},{"id":3,"c":[{}]},{"id":4,"c":[{"cnm":"d1"}]}]""",
+            JoinJson("select p.id, c.cnm from pp p left join cc c on c.pid=p.id order by p.id, c.id for json auto"));
+
+    [TestMethod]
+    public void AutoNesting_IncludeNullValues_ReachesNestedLevels()
+        => AreEqual("""[{"id":1,"c":[{"cnm":"a1"},{"cnm":"a2"}]},{"id":2,"c":[{"cnm":"b1"}]},{"id":3,"c":[{"cnm":null}]},{"id":4,"c":[{"cnm":"d1"}]}]""",
+            JoinJson("select p.id, c.cnm from pp p left join cc c on c.pid=p.id order by p.id, c.id for json auto, include_null_values"));
+
+    [TestMethod]
+    public void AutoNesting_ComputedColumn_JoinsPrecedingTable()
+        => AreEqual("""[{"id":1,"c":[{"cnm":"a1","calc":"alphaX"},{"cnm":"a2","calc":"alphaX"}]},{"id":2,"c":[{"cnm":"b1","calc":"betaX"}]},{"id":4,"c":[{"cnm":"d1","calc":"alphaX"}]}]""",
+            JoinJson("select p.id, c.cnm, p.nm+'X' as calc from pp p join cc c on c.pid=p.id order by p.id, c.id for json auto"));
+
+    [TestMethod]
+    public void AutoNesting_TableWithNoColumns_HasNoLevel()
+        => AreEqual("""[{"cnm":"a1"},{"cnm":"a2"},{"cnm":"b1"},{"cnm":"d1"}]""",
+            JoinJson("select c.cnm from pp p join cc c on c.pid=p.id order by c.id for json auto"));
+
+    [TestMethod]
+    public void AutoNesting_InnermostLevel_NeverCollapses()
+        => AreEqual("""[{"id":1,"c":[{"cnm":"a1"},{"cnm":"a1"},{"cnm":"a2"},{"cnm":"a2"}]}]""",
+            JoinJson("select p.id, c.cnm from pp p join cc c on c.pid=p.id join gg g on g.pid=1 where p.id=1 order by c.id, g.id for json auto"));
+
+    [TestMethod]
+    public void AutoNesting_Root()
+        => AreEqual("""{"r":[{"id":1,"c":[{"cnm":"a1"},{"cnm":"a2"}]}]}""",
+            JoinJson("select p.id, c.cnm from pp p join cc c on c.pid=p.id where p.id=1 order by c.id for json auto, root('r')"));
+
+    [TestMethod]
+    public void AutoNesting_WithoutArrayWrapper_DropsOnlyTheOuterArray()
+        => AreEqual("""{"id":1,"c":[{"cnm":"a1"},{"cnm":"a2"}]}""",
+            JoinJson("select p.id, c.cnm from pp p join cc c on c.pid=p.id where p.id=1 order by c.id for json auto, without_array_wrapper"));
 }

@@ -196,6 +196,7 @@ partial class Simulation
             checkOptionCheck: checkOptionCheck)
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
+            UsesQuotedIdentifier = context.QuotedIdentifiers,
         };
         if (replaced is not null)
         {

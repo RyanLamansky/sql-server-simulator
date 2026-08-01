@@ -70,7 +70,7 @@ internal sealed class Replicate : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(this.input.GetSqlType(batch, resolveColumnType), batch);
+        ResolveResultType(StringScalars.BindCoercedArgument(this.input, batch, resolveColumnType, "replicate"), batch);
 
     /// <summary>
     /// Result width mirrors SQL Server's probed rule: a <c>varchar(MAX)</c> /

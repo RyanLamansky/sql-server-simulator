@@ -31,7 +31,7 @@ partial class Simulation
             context.MoveNextRequired();
 
         var leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-        context.Batch.RejectCrossDatabaseMutation(leadingIdent);
+        context.Batch.RejectCrossServerMutation(leadingIdent);
 
         View? leadingView = null;
         HeapTable? leadingTable;
@@ -63,6 +63,7 @@ partial class Simulation
         if (leadingTable is not null)
         {
             RejectDisabledClusteredIndex(leadingTable);
+            RejectIncorrectSetOptionsForWrite(leadingTable, context.Batch, "DELETE");
             _ = context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: true);
         }
 
@@ -119,7 +120,7 @@ partial class Simulation
             if (context.Token is ReservedKeyword { Keyword: Keyword.Current })
                 positionedCursor = ParseWhereCurrentOf(context, table);
             else
-                where = BooleanExpression.Parse(context);
+                where = Selection.ParseAndBindPredicate(context, Selection.TargetColumnTypeResolver(context.Batch, table, sourceView));
         }
 
         if (!context.Batch.IsSkipping && PermissionEnforcement.Applies(context.Batch))
@@ -163,10 +164,16 @@ partial class Simulation
         var rowSource = where is not null
             ? Selection.SeekMutationTarget(table, where, context.Batch) ?? table.Heap.EnumerateRowsWithAddress()
             : table.Heap.EnumerateRowsWithAddress();
+        // Skip mode commits nothing (CommitDelete returns early) — same reason
+        // the UPDATE path drops its row source, including the runtime errors a
+        // never-run statement's WHERE would otherwise raise while a module body
+        // binds at CREATE time.
+        if (context.Batch.IsSkipping)
+            rowSource = [];
         foreach (var (pageIndex, slotIndex, rowBytes) in rowSource)
         {
             // Positioned DELETE (WHERE CURRENT OF): only the cursor's row.
-            if (positionedCursor is not null && !CursorRowMatches(positionedCursor, (pageIndex, slotIndex)))
+            if (positionedCursor is not null && !CursorRowMatches(positionedCursor, table, (pageIndex, slotIndex)))
                 continue;
 
             SqlValue[]? fullValues = null;
@@ -268,13 +275,14 @@ partial class Simulation
         // Alias-form DELETE: table-IX wasn't pre-acquired (target identified
         // post-FROM). Acquire it now; row-X per affected row fires at the
         // mutation site below.
+        RejectIncorrectSetOptionsForWrite(table, context.Batch, "DELETE");
         _ = context.Batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
 
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
             context.MoveNextRequired();
-            where = BooleanExpression.Parse(context);
+            where = Selection.ParseAndBindPredicate(context, Selection.ColumnTypeResolverFor(sources));
         }
 
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
@@ -374,7 +382,7 @@ partial class Simulation
             }
         }
         var lockableTable = IsLockableTable(table);
-        var captureVersions = Storage.VersionStore.IsVersioningEnabled(context.CurrentDatabase) && lockableTable;
+        var captureVersions = Storage.VersionStore.IsVersioningEnabled(context.Batch.DatabaseFor(table)) && lockableTable;
         foreach (var (pageIndex, slotIndex, _) in deleted)
         {
             if (lockableTable)

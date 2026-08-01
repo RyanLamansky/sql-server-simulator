@@ -31,6 +31,28 @@ internal sealed class Negate(Expression operand) : Expression
     /// minus to an integer literal.</summary>
     internal readonly Expression Operand = operand;
 
+    /// <summary>
+    /// Builds the unary-minus node, folding a negated integer <b>literal</b>
+    /// whose negation lands back inside <c>int</c> to a plain <c>int</c>
+    /// constant. Real types a bare integer literal past int's range
+    /// <c>numeric(digit_count, 0)</c>, yet types the folded constant by its
+    /// resulting value, so <c>-2147483648</c> — and <c>-(2147483648)</c>,
+    /// parentheses included — is <c>int</c> while <c>-3000000000</c> stays
+    /// <c>numeric(10, 0)</c>. <c>2147483648</c> is the only magnitude where
+    /// that applies, since int's range is asymmetric by exactly one. The fold
+    /// is literal-only: <c>-@d</c> over a <c>numeric(10, 0)</c> variable
+    /// holding the same value stays <c>numeric(10, 0)</c>.
+    /// </summary>
+    internal static Expression Of(Expression operand) =>
+        Unwrap(operand) is Value { IsLiteral: true, Constant: { Type: DecimalSqlType { scale: 0 }, IsNull: false } constant }
+            && constant.AsDecimal == -(decimal)int.MinValue
+            ? new Value(SqlValue.FromInt32(int.MinValue), integerLiteralDigitCount: 0)
+            : new Negate(operand);
+
+    /// <summary>Peels the parentheses real's own constant fold sees through.</summary>
+    private static Expression Unwrap(Expression expression) =>
+        expression is Parenthesized p ? Unwrap(p.Wrapped) : expression;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = this.Operand.Run(runtime);
@@ -79,7 +101,7 @@ internal sealed class Negate(Expression operand) : Expression
 
     internal override bool IsRowIndependent => this.Operand.IsRowIndependent;
 
-    internal override bool IsWrittenConstant => this.Operand.IsWrittenConstant;
+    private protected override bool IsStructuralConstant => this.Operand.IsWrittenConstant;
 
     internal override string DebugDisplay() => $"-{this.Operand.DebugDisplay()}";
 }

@@ -170,9 +170,44 @@ public sealed partial class SimulatedSqlException
     internal static SimulatedSqlException CannotDropFixedServerRole(string roleName) =>
         new($"Cannot drop the server role '{roleName}'.", 15150, 16, 1);
 
-    /// <summary>Mimics SQL Server error 4621: a server-scope permission granted outside the <c>master</c> database. Severity 16, state 1, probe-confirmed wording (probe6 N7).</summary>
+    /// <summary>Mimics SQL Server error 4621: a server-scope permission granted outside the <c>master</c> database. Severity 16, state 10, probe-confirmed wording (no trailing period) for both the ON-less and <c>ON LOGIN::</c> forms.</summary>
     internal static SimulatedSqlException ServerPermissionsMasterOnly() =>
-        new("Permissions at the server scope can only be granted when the current database is master", 4621, 16, 1);
+        new("Permissions at the server scope can only be granted when the current database is master", 4621, 16, 10);
+
+    /// <summary>
+    /// Mimics SQL Server error 15161: <c>sp_setapprole</c> naming an
+    /// application role that doesn't exist, or supplying the wrong password.
+    /// Real leaks no distinction between the two. Severity 16, state 1,
+    /// probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException CannotSetApplicationRole(string roleName) =>
+        new($"Cannot set application role '{roleName}' because it does not exist or the password is incorrect.", 15161, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2762: <c>sp_setapprole</c> called on a session
+    /// that already has an application role set. Severity 16, state 1,
+    /// probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException SetApplicationRoleNotInvokedCorrectly() =>
+        new("sp_setapprole was not invoked correctly. Refer to the documentation for more information.", 2762, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15592: <c>sp_unsetapprole</c> with no role set,
+    /// or with a cookie that doesn't match the one <c>sp_setapprole …
+    /// @fCreateCookie = 1</c> issued. Severity 16, state 1, probe-confirmed
+    /// wording.
+    /// </summary>
+    internal static SimulatedSqlException CannotUnsetApplicationRole() =>
+        new("Cannot unset application role because none was set or the cookie is invalid.", 15592, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 505: a <c>USE</c> / <c>ChangeDatabase</c> attempt
+    /// while an application role is active — the activation pins the session to
+    /// the database that set it. Severity 16, state 1, probe-confirmed wording
+    /// (real names SETUSER alongside sp_setapprole).
+    /// </summary>
+    internal static SimulatedSqlException CannotChangeDatabaseUnderApplicationRole() =>
+        new("The current user account was invoked with SETUSER or SP_SETAPPROLE. Changing databases is not allowed.", 505, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 1088: a TRUNCATE (which requires ALTER on the

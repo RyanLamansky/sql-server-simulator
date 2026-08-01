@@ -69,6 +69,22 @@ The literal never carries this sizing in a pure-integer context — an arithmeti
 The `Tokenizer`'s `Numeric` token records the count on the integer-literal branches; `Expression.IntegerLiteralDigits` reads it (seeing through parentheses, unary minus, and the projection-alias wrapper), and the promotion sites (`TwoSidedExpression` arithmetic, `SqlType.PromoteBranches` for `CASE`/`COALESCE`/`IIF`, and `Selection.CombineSetOps`) substitute `numeric(digit_count, 0)` for the literal's type when its partner is decimal.
 Static (`GetSqlType`) and runtime (`Run`) stay in parity: arithmetic coerces the runtime literal *value* to `numeric(digit_count, 0)` at the node so `DecimalArithmetic` derives the same result type the schema does, and `CASE`/`COALESCE`/set ops coerce each value to the cached/combined result type.
 
+### Integer literals past int's range type `numeric(digit_count, 0)`
+SQL Server never types a bare integer literal `bigint` — it is `int` while the value fits and `numeric(digit_count, 0)` past that, with the precision tracking the written digit count: `2147483648` → `numeric(10, 0)`, `9999999999` → `numeric(10, 0)`, `10000000000` → `numeric(11, 0)`, `99999999999999999999` → `numeric(20, 0)`.
+Only a CAST reaches `bigint`, so `SELECT 3000000000` and `SELECT CAST(3000000000 AS bigint)` advertise different wire types for the same value (NUMERICN at precision 10 vs BIGINT at precision 19).
+Leading zeros are excluded from the count (`0000000003000000000` → `numeric(10, 0)`) and a sign doesn't change it (`-3000000000` → `numeric(10, 0)`); past 38 digits real reports **Msg 1007** rather than letting the literal reach the type factory.
+Probe-confirmed against SQL Server 2025 via `sql_variant_property` and `sp_describe_first_result_set`.
+
+The literal is always numeric-named rather than decimal-named, so it flows through the [numeric-vs-decimal](#numeric-vs-decimal-reported-type-name) metadata like any other literal, and its arithmetic follows the ordinary decimal formulas (`3000000000 + 1` → `numeric(11, 0)`, `* 2` → `numeric(12, 0)`, `/ 2` → `numeric(16, 6)`).
+Because the declared precision already equals the digit count, these literals carry **no** separate `IntegerLiteralDigitCount` annotation — the digit-count sizing above is only needed on the `int` branch, where the type's fixed `(10, 0)` would otherwise win.
+
+**The negated-constant fold.** Real folds `- <integer constant>` and types the *resulting value*, so `-2147483648` is `int` even though `2147483648` alone is `numeric(10, 0)` — and the fold sees through parentheses (`-(2147483648)` is `int` too).
+`2147483648` is the only magnitude where this applies, since int's range is asymmetric by exactly one.
+The fold is literal-only: unary minus over a `numeric(10, 0)` *variable* holding the same value stays `numeric(10, 0)`.
+`Negate.Of` implements it at the one construction site in `Expression.ParsePrimary`.
+
+**Row counts.** `TOP` / `OFFSET` / `FETCH` accept any integer-family value and any exact numeric at **scale 0**, narrowing the operand to `bigint`, so a past-int row count is an ordinary accepted value; a fractional scale is still the grammar's **Msg 1060**, and a 20-digit literal overflows `bigint` with Msg 8115 naming it.
+
 ### Decimal-literal precision (leading zero, leading dot)
 A decimal literal's precision is its significant-digit count where an integer part of exactly `0` contributes nothing, plus the fractional digit count, floored at 1; scale is the fractional digit count.
 So `0.1` → `numeric(1, 1)`, `0.05` → `(2, 2)`, `0.00` → `(2, 2)`, `0.10` → `(2, 2)` (a written trailing zero still counts), while a significant leading digit counts normally (`1.5` → `(2, 1)`, `100.0` → `(4, 1)`) — probe-confirmed against SQL Server 2025.

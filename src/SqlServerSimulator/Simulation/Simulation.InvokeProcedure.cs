@@ -214,6 +214,13 @@ partial class Simulation
             bodyCommand.CommandText = procedure.BodyText;
 #pragma warning restore CA2100
 
+            // The body parses under the QUOTED_IDENTIFIER captured at CREATE, not
+            // the caller's. Swapping the session flag (rather than seeding the
+            // child parser) is what carries it to everything else that reads the
+            // connection — dynamic SQL, the plan-cache key, the Msg 1934 gates.
+            // Restored in the finally below; see docs/claude/grammar.md.
+            var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+            connection.QuotedIdentifiers = procedure.UsesQuotedIdentifier;
             innerBatch = new BatchContext(bodyCommand, variables, procFrame, tableVariables)
             {
                 // Body errors report a line relative to the whole CREATE
@@ -247,6 +254,7 @@ partial class Simulation
             finally
             {
                 connection.NestingLevel--;
+                connection.QuotedIdentifiers = savedQuotedIdentifiers;
                 connection.TextSize = savedTextSize;
                 // Local temp tables the body created are dropped at proc exit
                 // (SQL Server's module-scoped lifetime — so a re-entrant call

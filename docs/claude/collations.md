@@ -61,6 +61,30 @@ The parallel `SqlValue.FromString(type, value)` similarly preserves the target t
 - **String concat (`+`)** — `Add.StringConcatenation` calls `Collation.Resolve` on the operand pair.
   Conflict raises **Msg 457 State 1** (`Implicit conversion of varchar value to varchar cannot be performed because the collation of the value is unresolved due to a collation conflict between "R" and "L" in add operator.` — real names the pair and the operator, and calls string `+` *add*).
   `TwoSidedExpression.GetSqlType` mirrors the same resolution so the projection schema's result type matches the runtime value's type — RowEncoder rejects mismatched instances, so the GetSqlType / Run paths must stay aligned.
+- **ANSI concat (`||`)** — `Concatenate.ResolveResultType` (shared by `Run` and `GetSqlType`) raises the same Msg 457 naming the **`concat`** operator where `+` names `add` (probe-confirmed both ways).
+- **Value-arm unification (`CASE` / `COALESCE` / `IIF`)** — `Expression.PromoteValueArms` folds the arms pairwise and raises **Msg 457** naming the **`CASE`** operator, which is what real says for `COALESCE` too (it desugars to a CASE).
+  `ISNULL` is the exception that never conflicts: it takes its first argument's collation outright rather than unifying (probe-confirmed — `ISNULL(<CI col>, <CS col>)` returns the rowset).
+
+## Compile-time binding
+
+Every one of those sites binds at **parse**, so an **empty** rowset raises exactly what a populated one does — real compiles the rule rather than evaluating it, probe-confirmed across SQL Server 2025 on empty tables.
+
+`BooleanExpression.Bind(batch, resolveColumnType)` is the predicate-side counterpart to `Expression.GetSqlType`: it types both operands of each comparison shape and runs `BooleanExpression.RequireResolvableCollation` over the pair — the same body `CompareValuesPromoted` calls per value, so the two phases can't drift.
+The comparison subclasses each declare their `OperatorName`, which both phases weave into the message.
+Drive sites, all handing over the resolver that scope already had:
+
+| Clause | Where the bind runs | Resolver |
+|---|---|---|
+| `WHERE` / `HAVING` / `GROUP BY` term / a JOIN's `ON` | `Selection.BuildSqlProjection`, after the projection types | `ResolveColumnTypeAcrossSources` over the FROM sources |
+| single-table `UPDATE` / `DELETE` `WHERE` + the `SET` values | `Simulation.Update.cs` / `Simulation.Delete.cs` | `Selection.TargetColumnTypeResolver` (target's columns, or the view's projection) |
+| joined `UPDATE` / `DELETE` `WHERE` + the `SET` values | same files | `Selection.ColumnTypeResolverFor` over the parsed sources |
+| `MERGE`'s `ON` and each `WHEN … AND` | `Simulation.Merge.cs` | the existing two-sided `ResolveMergeColumnType` |
+| a `CASE`'s `WHEN` predicates / compare values | `CaseExpression.GetSqlType` | whatever resolver the enclosing expression got |
+
+A DML predicate parses with its resolver installed as `ParserContext.OuterTypeResolver` (`Selection.ParseAndBindPredicate`), and a JOIN's `ON` with the sources parsed so far (`ParseOnPredicateWithScope`) — the same chaining `ConsumeWhereOrderByWithOuterScope` gives a SELECT's WHERE, and what lets a subquery *inside* one of those clauses resolve the enclosing columns while typing its own projection.
+SMO's index-scripting query needs exactly that: it nests `(select min(index_id) from sys.indexes where object_id = tbl.object_id)` inside an `ON`.
+
+The check runs at parse, which a plan-cache hit skips — so a cached plan has to be invalidated when a column's collation changes, and it is: every successful `ALTER` bumps the `Simulation.SchemaVersion` the cache entry is stamped with, so the re-parse picks up the new conflict.
 
 ## `COLLATE` postfix
 
@@ -442,9 +466,14 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
 
 ## Known gaps
 
-- **Comparison / concatenation conflicts are raised per row at execution, not at compile time.**
-  `c1.x = c2.x` across two differently-collated columns raises Msg 468 (and `c1.x + c2.x` raises Msg 457) as soon as a row is evaluated, but the same statement over an **empty** rowset succeeds silently — real rejects it during compilation regardless of row count (probe-confirmed: the error isn't even catchable by TRY/CATCH in the same batch, being a bind-time failure).
-  Set operations *do* bind at compile time (below), so this is now the residual case; closing it means carrying collation through the static type path at every comparison site.
+- **`CONCAT(a, b)` doesn't resolve its operands' collations.**
+  Real raises **Msg 451** there — a message of its own, distinct from `+`'s Msg 457: `Cannot resolve collation conflict between "R" and "L" in concat operator occurring in SELECT statement column 1.` (no leading *the*, and it names the projection ordinal, which the expression node doesn't know).
+  The variadic form silently picks a collation instead.
+  `+` and `||` both bind correctly (above).
+- **A bind error is catchable here and isn't on real.**
+  Real compiles a batch as a unit, so Msg 468 / 457 / 8116 / 207 from a predicate are uncatchable bind-time failures — probe-confirmed that a `TRY` / `CATCH` around one never reaches the CATCH and the batch dies.
+  The simulator's dispatch loop compiles each statement as it reaches it, so the error is an ordinary catchable one.
+  Shared with every other compile-time error the simulator raises rather than specific to collation; see [`errors.md`](errors.md).
 - **`text` / `ntext` columns can't be declared with an explicit COLLATE in the simulator.**
   Real SQL Server allows it; the simulator's single-instance modeling collapses all text/ntext to the default, so a `text` column stores CP1252 regardless of the clause.
   The clause is still *validated* — a Unicode-only collation on `text` raises Msg 459 from the column-declaration site (see [Unicode-only collations](#unicode-only-collations--msg-459)) — it just isn't pinned.

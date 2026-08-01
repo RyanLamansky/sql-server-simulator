@@ -141,6 +141,13 @@ internal sealed class ObjectProperty : Expression
             15 => upper switch
             {
                 "ISDETERMINISTIC" => ModuleDeterminism.Evaluate(database, obj),
+                // The creation-time QUOTED_IDENTIFIER capture, under the
+                // spelling that also answers for a table. Real reports 1 for
+                // any table regardless of the creating session and NULL for a
+                // sequence / synonym / key constraint (probe-confirmed), which
+                // the UsesQuotedIdentifier default and the kind filter here
+                // reproduce; the ExecIs… spelling below is module-only.
+                "ISQUOTEDIDENTON" => obj is HeapTable || IsSqlModule(obj) ? (obj.UsesQuotedIdentifier ? 1 : 0) : null,
                 "ISTABLEFUNCTION" => obj is InlineTableValuedFunction or MultiStatementTableValuedFunction ? 1 : 0,
                 _ => null,
             },
@@ -151,11 +158,14 @@ internal sealed class ObjectProperty : Expression
                 "TABLEHASIDENTITY" => TableFlag(obj, upper),
                 _ => null,
             },
-            // The module SET-option snapshot pair: every simulator module is
-            // created under QUOTED_IDENTIFIER ON / ANSI_NULLS ON (mirroring
-            // sys.sql_modules' constant uses_quoted_identifier /
-            // uses_ansi_nulls), and real returns NULL for non-module objects
-            // (probe-confirmed table → NULL).
+            // The module SET-option snapshot pair. ANSI_NULLS is still a
+            // constant ON (every simulator module is created under it,
+            // mirroring sys.sql_modules' constant uses_ansi_nulls); the
+            // QUOTED_IDENTIFIER half below reads the real capture. Both
+            // return NULL for a non-module object — including a table, which
+            // the shorter IsQuotedIdentOn spelling answers 1 for
+            // (probe-confirmed: the two spellings agree on modules and
+            // diverge on tables).
             17 => upper switch
             {
                 "EXECISANSINULLSON" => IsSqlModule(obj) ? 1 : null,
@@ -169,7 +179,7 @@ internal sealed class ObjectProperty : Expression
             18 => TableFlag(obj, upper),
             19 => upper switch
             {
-                "EXECISQUOTEDIDENTON" => IsSqlModule(obj) ? 1 : null,
+                "EXECISQUOTEDIDENTON" => IsSqlModule(obj) ? (obj.UsesQuotedIdentifier ? 1 : 0) : null,
                 _ => null,
             },
             // The sp_settriggerorder read-backs, split by name length: the

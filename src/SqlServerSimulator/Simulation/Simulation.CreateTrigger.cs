@@ -195,6 +195,29 @@ partial class Simulation
             throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString());
         }
 
+        // Bind the body against empty INSERTED / DELETED pseudo-tables shaped
+        // like the parent, before any of the gates below and before the schema
+        // dict is touched — probe-confirmed that real reports a body error
+        // ahead of Msg 2714 / Msg 208 but behind the Msg 8197 parent
+        // resolution above. The stand-in trigger exists only to carry the
+        // parent into the frame (which is what `UPDATE(col)` resolves against)
+        // and never reaches the schema, so it takes no object id.
+        var pseudoColumns = parent is View bindView ? bindView.OutputColumns : ((HeapTable)parent).Columns;
+        var bindTrigger = new Trigger(
+            triggerSchema, triggerName.Leaf, objectId: 0, parent, actions, timing, bodyText,
+            createDate: context.Batch.CurrentStatement.UtcNow);
+        var bodyLineOffset = CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart);
+        context.Simulation.BindTriggerBodyAtCreate(
+            context,
+            triggerName.Leaf,
+            new TriggerFrame(
+                bindTrigger,
+                MaterializePseudoTable(pseudoColumns, "inserted", [], context.Batch),
+                MaterializePseudoTable(pseudoColumns, "deleted", [], context.Batch),
+                columnsUpdatedMask: []),
+            bodyText,
+            bodyLineOffset);
+
         // At most one INSTEAD OF trigger per action per target (Msg 2111).
         // ALTER / CREATE OR ALTER replacing an existing trigger by the
         // same name is permitted; collision is only with a *different*
@@ -238,8 +261,6 @@ partial class Simulation
             context.Batch.AcquireStatementLock(existing!.SchemaLock, LockMode.SchemaModification);
 
         var objectId = existed ? existing!.ObjectId : context.CurrentDatabase.AllocateObjectId();
-        // Newlines before the body start, so per-fire body errors report a
-        // line relative to the whole CREATE statement (probe-confirmed).
         var trigger = new Trigger(
             triggerSchema,
             triggerName.Leaf,
@@ -249,10 +270,11 @@ partial class Simulation
             timing,
             bodyText,
             createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow,
-            bodyLineOffset: CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart))
+            bodyLineOffset: bodyLineOffset)
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
+            UsesQuotedIdentifier = context.QuotedIdentifiers,
         };
         if (existed)
             trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -443,6 +465,21 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        // Bind the body ahead of the collision gates, same ordering the DML
+        // form uses. A DDL body has no INSERTED / DELETED, so the frame only
+        // carries the stand-in trigger and an empty EVENTDATA document; the
+        // stand-in never reaches the database and takes no object id.
+        var bodyLineOffset = CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart);
+        context.Simulation.BindTriggerBodyAtCreate(
+            context,
+            triggerName.Leaf,
+            new TriggerFrame(
+                new DdlTrigger(triggerName.Leaf, objectId: 0, triggerSchema.SchemaId, eventTypes, bodyText,
+                    createDate: context.Batch.CurrentStatement.UtcNow, bodyLineOffset),
+                eventData: ""),
+            bodyText,
+            bodyLineOffset);
+
         // DDL triggers live in their own per-database dict, but the NAME
         // collision check still applies against the per-schema shared
         // namespace (probe-confirmed: a DDL trigger named [foo] collides
@@ -463,9 +500,10 @@ partial class Simulation
             eventTypes,
             bodyText,
             createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow,
-            bodyLineOffset: CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart))
+            bodyLineOffset: bodyLineOffset)
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
+            UsesQuotedIdentifier = context.QuotedIdentifiers,
         };
         if (existed)
             trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;

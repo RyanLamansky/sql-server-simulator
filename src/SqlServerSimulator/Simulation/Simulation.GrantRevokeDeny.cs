@@ -88,6 +88,11 @@ partial class Simulation
         MultiPartName? objectSecurableName = null;
         List<string>? objectColumns = null;
         var hadOnClause = false;
+        // ON SERVER::x (the name is ignored — probe-confirmed real accepts any
+        // name there and stores the ordinary class-100 row) and ON LOGIN::x
+        // (class 101) both route to the Simulation-level server registry.
+        var serverScopeSecurable = false;
+        string? loginSecurableName = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.On })
         {
             hadOnClause = true;
@@ -129,9 +134,16 @@ partial class Simulation
                 case "DATABASE":
                     permClass = PermissionChecker.ClassDatabase;
                     break;
+                case "LOGIN":
+                    serverScopeSecurable = true;
+                    loginSecurableName = securableName.Leaf;
+                    break;
                 case "SCHEMA":
                     permClass = PermissionChecker.ClassSchema;
                     objectSecurableName = securableName;
+                    break;
+                case "SERVER":
+                    serverScopeSecurable = true;
                     break;
                 case "USER":
                     permClass = PermissionChecker.ClassDatabasePrincipal;
@@ -199,13 +211,18 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        // Server-scope GRANT / DENY / REVOKE: no ON clause and every permission
-        // is a recognized server permission (CONNECT SQL, VIEW SERVER STATE, …).
-        // Legal only in master (Msg 4621 elsewhere); stored at the Simulation
-        // level and projected through sys.server_permissions.
-        if (!hadOnClause && permissions.Count > 0 && permissions.TrueForAll(p => p.Columns is null && IsServerScopePermission(p.Name)))
+        // Server-scope GRANT / DENY / REVOKE. Three routes in: no ON clause with
+        // every permission a recognized server permission (CONNECT SQL, VIEW
+        // SERVER STATE, …), an explicit ON SERVER::x, or an ON LOGIN::x (class
+        // 101, whose permissions are the ordinary catalog names). Legal only in
+        // master (Msg 4621 elsewhere); stored at the Simulation level and
+        // projected through sys.server_permissions.
+        if (serverScopeSecurable
+            || (!hadOnClause && permissions.Count > 0 && permissions.TrueForAll(p => p.Columns is null && IsServerScopePermission(p.Name))))
         {
-            ApplyServerScopeGrant(context, kind, permissions.ConvertAll(p => p.Name), granteeNames);
+            if (permissions.Exists(p => p.Columns is not null))
+                throw SimulatedSqlException.GrantSubEntityListNotAllowed();
+            ApplyServerScopeGrant(context, kind, permissions.ConvertAll(p => p.Name), granteeNames, loginSecurableName);
             return true;
         }
 

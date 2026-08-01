@@ -45,7 +45,7 @@ partial class Simulation
             context.MoveNextRequired();
 
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-        context.Batch.RejectCrossDatabaseMutation(destinationName);
+        context.Batch.RejectCrossServerMutation(destinationName);
 
         // View target: resolve via TryResolveView first (CTE bindings are
         // already shadowed at the source level, not the target). An updatable
@@ -86,6 +86,7 @@ partial class Simulation
         // Phase 1b: acquire table-IX on the MERGE target; row-X on each
         // affected row at mutation time.
         RejectDisabledClusteredIndex(destinationTable);
+        RejectIncorrectSetOptionsForWrite(destinationTable, context.Batch, "MERGE");
         _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
 
         // Optional target alias: AS <alias> or bare <alias>.
@@ -139,6 +140,12 @@ partial class Simulation
         {
             context.OuterTypeResolver = prevResolver;
         }
+
+        // Compile-time bind of the ON predicate against the same two-sided
+        // resolver, so a cross-collation comparison, a legacy-LOB string-scalar
+        // argument or an unknown column reports while compiling the way real
+        // does rather than once a candidate row pairs up.
+        onPredicate.Bind(context.Batch, ResolveTypeBoth);
 
         // WHEN clauses.
         var whenClauses = ParseMergeWhenClauses(context, destinationTable, sourceView, targetAlias, defaultTargetName, sourceAlias, sourceColumnNames, sourceSchema);
@@ -509,7 +516,18 @@ partial class Simulation
                     return sourceSchema[i];
             }
         }
-        throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
+
+        // Which side failed decides the message, matching real: a name whose
+        // qualifier names one of the two sides (or carries no qualifier at all)
+        // is a bad *column* — Msg 207 — while a qualifier neither side answers
+        // to is an unbindable identifier — Msg 4104. Both probe-confirmed at
+        // compile time, on an empty rowset and at CREATE of a module.
+        return name.Count == 1
+            || collation.Equals(name.ImmediateQualifier, targetAlias)
+            || collation.Equals(name.ImmediateQualifier, defaultTargetName)
+            || collation.Equals(name.ImmediateQualifier, sourceAlias)
+            ? throw SimulatedSqlException.InvalidColumnName(name)
+            : throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
     }
 
     private static List<WhenClause> ParseMergeWhenClauses(
@@ -588,6 +606,7 @@ partial class Simulation
                 {
                     context.OuterTypeResolver = prevResolver;
                 }
+                searchCondition.Bind(context.Batch, ResolveType);
             }
 
             // Family-level ordering checks.
@@ -1032,6 +1051,15 @@ partial class Simulation
         List<WhenClause> whenClauses,
         OutputProjection? output)
     {
+        // Skip mode commits nothing (CommitMerge returns early), so the match
+        // walk is pure cost — and running the ON predicate / WHEN actions
+        // against live rows can raise a runtime error on behalf of a statement
+        // that never ran, which at CREATE-time module binding would refuse a
+        // body real accepts. The target, source, ON predicate and WHEN clauses
+        // are all parsed by the caller, so binding is already complete here.
+        if (context.Batch.IsSkipping)
+            return new SimulatedNonQuery(0);
+
         var sourceRows = materializeSource(context.Batch);
         var sourceMatched = new bool[sourceRows.Count];
         var defaultTargetName = sourceView?.Name ?? destinationTable.Name;
@@ -1318,7 +1346,7 @@ partial class Simulation
         for (var ci = 0; ci < destinationTable.Columns.Length; ci++)
         {
             if (destinationTable.Columns[ci].Type == SqlType.RowVersion)
-                newValues[ci] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
+                newValues[ci] = SqlValue.FromRowVersion(context.Batch.DatabaseFor(destinationTable).AllocateRowVersion());
         }
 
         EvaluateComputedColumns(destinationTable, newValues, context.Batch);
@@ -1441,7 +1469,7 @@ partial class Simulation
         for (var i = 0; i < destinationTable.Columns.Length; i++)
         {
             if (destinationTable.Columns[i].Type == SqlType.RowVersion)
-                rowValues[i] = SqlValue.FromRowVersion(context.CurrentDatabase.AllocateRowVersion());
+                rowValues[i] = SqlValue.FromRowVersion(context.Batch.DatabaseFor(destinationTable).AllocateRowVersion());
         }
 
         EvaluateComputedColumns(destinationTable, rowValues, context.Batch);

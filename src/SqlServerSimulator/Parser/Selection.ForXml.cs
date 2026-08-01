@@ -18,9 +18,10 @@ partial class Selection
 
     /// <summary>
     /// Parses the trailing <c>FOR XML { RAW[('elem')] | AUTO | PATH[('row')] }
-    /// [, ELEMENTS [XSINIL|ABSENT]] [, ROOT[('name')]]</c> clause when the
-    /// cursor sits on <c>FOR</c>, wrapping <paramref name="inner"/> in a
-    /// serializer that projects the single xml-string column. A <c>FOR</c>
+    /// [, ELEMENTS [XSINIL|ABSENT]] [, TYPE] [, ROOT[('name')]]</c> clause when
+    /// the cursor sits on <c>FOR</c>, wrapping <paramref name="inner"/> in a
+    /// serializer that projects the single result column — <c>xml</c> under
+    /// <c>TYPE</c>, else the <c>nvarchar(max)</c> string form. A <c>FOR</c>
     /// that isn't <c>XML</c> (<c>FOR BROWSE</c> / leftover) restores the cursor
     /// and returns <paramref name="inner"/> unchanged for the downstream Msg
     /// 102. Leaves the cursor on the first token past the clause.
@@ -68,6 +69,7 @@ partial class Selection
 
         var elements = false;
         var xsinil = false;
+        var typed = false;
         var rootSpecified = false;
         var rootName = "root";
 
@@ -108,7 +110,8 @@ partial class Selection
             }
             else if (Collation.Baseline.Equals(optionName.Value, "TYPE"))
             {
-                throw new NotSupportedException("FOR XML TYPE (typed-xml node embedding) isn't modeled; the untyped escaped-text nesting is the default.");
+                typed = true;
+                context.MoveNextOptional();
             }
             else if (Collation.Baseline.Equals(optionName.Value, "XMLSCHEMA"))
             {
@@ -120,7 +123,7 @@ partial class Selection
             }
         }
 
-        return WrapForXml(inner, new ForXmlOptions(mode, rowElement, elements, xsinil, rootSpecified ? rootName : null));
+        return WrapForXml(inner, new ForXmlOptions(mode, rowElement, elements, xsinil, typed, rootSpecified ? rootName : null));
     }
 
     /// <summary>
@@ -144,15 +147,31 @@ partial class Selection
 
     private static Selection WrapForXml(Selection inner, ForXmlOptions options)
     {
-        // AUTO nests secondary tables under the first; that row-collapsing is
-        // deferred (PATH covers the same cases), matching FOR JSON AUTO.
-        if (options.Mode == ForXmlMode.Auto && (inner.MultipleFromSources || inner.AutoElementName is null))
-            throw new NotSupportedException("FOR XML AUTO over a join (nesting secondary tables) isn't modeled; use FOR XML PATH.");
+        var innerSchema = inner.Schema;
+        // The TYPE option makes the result a typed xml value instead of the
+        // string form: one unnamed xml column (probe-confirmed on the wire),
+        // which an enclosing FOR XML then embeds as nodes rather than escaped
+        // text. Without it the column carries SQL Server's GUID-shaped
+        // sentinel name.
+        SqlType[] schema = [options.Typed ? SqlType.Xml : SqlType.NVarcharMax];
+        string[] columnNames = [options.Typed ? "" : ForXmlColumnName];
+
+        if (options.Mode == ForXmlMode.Auto)
+        {
+            var levels = BuildAutoLevels(inner, forJson: false);
+            var levelElements = new ForXmlElement[levels.Length];
+            for (var i = 0; i < levels.Length; i++)
+                levelElements[i] = BuildForXmlFlatElement(levels[i].Name, levels[i].Columns, inner, options);
+
+            return new Selection(schema, columnNames,
+                hasOrderBy: false,
+                hasTopOrOffsetOrFetch: false,
+                (batch, outerResolver) => SerializeForXmlAuto(inner, innerSchema, levels, levelElements, options, batch, outerResolver));
+        }
 
         var rowElement = BuildForXmlRowElement(inner, options);
-        var innerSchema = inner.Schema;
 
-        return new Selection([SqlType.Xml], [ForXmlColumnName],
+        return new Selection(schema, columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             (batch, outerResolver) => SerializeForXml(inner, innerSchema, rowElement, options, batch, outerResolver));
@@ -160,10 +179,11 @@ partial class Selection
 
     /// <summary>
     /// Compiles the projection into a single per-row element template (shared
-    /// across rows; leaves reference result-column indices). RAW / AUTO build a
-    /// flat attribute- or element-centric wrapper; PATH parses each column
-    /// alias into an XPath-like node placement. A PATH('') wrapper has an empty
-    /// <see cref="ForXmlElement.Name"/> — its content is emitted with no row tag.
+    /// across rows; leaves reference result-column indices). RAW builds a flat
+    /// attribute- or element-centric wrapper; PATH parses each column alias
+    /// into an XPath-like node placement. A PATH('') wrapper has an empty
+    /// <see cref="ForXmlElement.Name"/> — its content is emitted with no row
+    /// tag. (AUTO builds one flat wrapper per nesting level instead.)
     /// </summary>
     private static ForXmlElement BuildForXmlRowElement(Selection inner, ForXmlOptions options)
     {
@@ -171,31 +191,43 @@ partial class Selection
         {
             var pathRoot = new ForXmlElement(options.RowElement!);
             for (var i = 0; i < inner.ColumnNames.Length; i++)
-                InsertForXmlPath(pathRoot, inner.ColumnNames[i], i, options.RowElement!.Length == 0);
+                InsertForXmlPath(pathRoot, inner.ColumnNames[i], i, inner.Schema[i], options.RowElement!.Length == 0);
             return pathRoot;
         }
 
-        // RAW / AUTO: every column must be named, and binary needs the
-        // (unmodeled) BINARY BASE64 option.
-        var wrapperName = options.Mode == ForXmlMode.Auto ? inner.AutoElementName! : options.RowElement!;
-        var wrapper = new ForXmlElement(wrapperName);
-        for (var i = 0; i < inner.ColumnNames.Length; i++)
+        var columns = new int[inner.ColumnNames.Length];
+        for (var i = 0; i < columns.Length; i++)
+            columns[i] = i;
+        return BuildForXmlFlatElement(options.RowElement!, columns, inner, options);
+    }
+
+    /// <summary>
+    /// Builds one RAW row wrapper / AUTO nesting level: every column must be
+    /// named (Msg 6809), binary needs the unmodeled BINARY BASE64 option
+    /// (Msg 6829 / 6830), and an <c>xml</c>-typed column becomes a child
+    /// element holding its nodes even in the default attribute-centric shape
+    /// (probe-confirmed — an attribute can't hold nodes).
+    /// </summary>
+    private static ForXmlElement BuildForXmlFlatElement(string name, IReadOnlyList<int> columns, Selection inner, ForXmlOptions options)
+    {
+        var wrapper = new ForXmlElement(name);
+        foreach (var i in columns)
         {
-            var name = inner.ColumnNames[i];
-            if (name.Length == 0)
+            var columnName = inner.ColumnNames[i];
+            if (columnName.Length == 0)
                 throw SimulatedSqlException.ForXmlUnnamedColumn();
             if (inner.Schema[i] is BinarySqlType or VarbinarySqlType)
-                throw options.Mode == ForXmlMode.Auto ? SimulatedSqlException.ForXmlBinaryAuto(name) : SimulatedSqlException.ForXmlBinaryRaw(name);
+                throw options.Mode == ForXmlMode.Auto ? SimulatedSqlException.ForXmlBinaryAuto(columnName) : SimulatedSqlException.ForXmlBinaryRaw(columnName);
 
-            if (options.Elements)
+            if (options.Elements || inner.Schema[i] is XmlSqlType)
             {
-                var element = new ForXmlElement(name);
+                var element = new ForXmlElement(columnName);
                 element.Content.Add(new ForXmlLeaf(i, atomic: false));
                 wrapper.Content.Add(element);
             }
             else
             {
-                wrapper.Attributes.Add(new ForXmlAttribute(name, i));
+                wrapper.Attributes.Add(new ForXmlAttribute(columnName, i));
             }
         }
         return wrapper;
@@ -207,10 +239,11 @@ partial class Selection
     /// <c>data()</c> / an unnamed column → text content, a plain name → a leaf
     /// element holding the value. Adjacent same-name element steps merge (so
     /// <c>[x],[x]</c> concatenates and <c>[a/b],[a/c]</c> shares the <c>a</c>
-    /// parent). Enforces Msg 6852 (attribute after non-attribute) and Msg 6864
-    /// (attribute under a suppressed row tag).
+    /// parent). Enforces Msg 6852 (attribute after non-attribute), Msg 6864
+    /// (attribute under a suppressed row tag), and Msg 6851 (an xml-typed
+    /// column mapped to an attribute — an attribute can't hold nodes).
     /// </summary>
-    private static void InsertForXmlPath(ForXmlElement root, string alias, int column, bool rowTagOmitted)
+    private static void InsertForXmlPath(ForXmlElement root, string alias, int column, SqlType columnType, bool rowTagOmitted)
     {
         var segments = alias.Length == 0 ? [] : alias.Split('/');
         var atomic = false;
@@ -238,6 +271,8 @@ partial class Selection
 
         if (attributeName is not null && rowTagOmitted && descendCount == 0)
             throw SimulatedSqlException.ForXmlAttributeWithoutRowTag();
+        if (attributeName is not null && columnType is XmlSqlType)
+            throw SimulatedSqlException.ForXmlAttributeInvalidType(alias);
 
         // Descend/merge the element steps that precede the leaf.
         var node = root;
@@ -304,12 +339,124 @@ partial class Selection
         }
 
         if (!any)
+        {
+            if (options.Typed)
+                yield return EmptyForXmlRow();
             yield break;
+        }
 
         if (options.RootName is { } closeName)
             _ = sb.Append("</").Append(closeName).Append('>');
 
-        yield return RowEncoder.EncodeRow([SqlType.Xml], [SqlValue.FromXml(sb.ToString())]);
+        yield return ForXmlRow(sb, options);
+    }
+
+    /// <summary>
+    /// Serializes a <c>FOR XML AUTO</c> projection whose sources nest: one
+    /// element per level, opened when a row's values for that level differ
+    /// from the previous row's and closed when they change again, so
+    /// consecutive rows sharing an outer level's values collapse into one
+    /// element with several children. The innermost level restarts on every
+    /// row (SQL Server emits one element per row there even for two identical
+    /// rows). A single-level projection — the flat AUTO shape — falls out as
+    /// the degenerate case.
+    /// </summary>
+    private static IEnumerable<byte[]> SerializeForXmlAuto(
+        Selection inner, SqlType[] innerSchema, AutoLevel[] levels, ForXmlElement[] levelElements,
+        ForXmlOptions options, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        var sb = new StringBuilder();
+        var xsiOnTopLevel = options.Xsinil && options.RootName is null;
+
+        if (options.RootName is { } rootName)
+        {
+            _ = sb.Append('<').Append(rootName);
+            if (options.Xsinil)
+                _ = sb.Append(" xmlns:xsi=\"").Append(XsiNamespace).Append('"');
+            _ = sb.Append('>');
+        }
+
+        // The names of the elements left open, outermost first; the innermost
+        // level is absent whenever it self-closed.
+        var open = new List<string>();
+        byte[]? previous = null;
+        foreach (var rowBytes in inner.Execute(batch, outerResolver).RowBytes)
+        {
+            var depth = previous is null ? 0 : AutoRestartDepth(levels, innerSchema, previous, rowBytes);
+            for (var i = open.Count - 1; i >= depth; i--)
+            {
+                _ = sb.Append("</").Append(open[i]).Append('>');
+                open.RemoveAt(i);
+            }
+
+            for (var i = depth; i < levels.Length; i++)
+            {
+                var element = levelElements[i];
+                _ = sb.Append('<').Append(element.Name);
+                if (i == 0 && xsiOnTopLevel)
+                    _ = sb.Append(" xmlns:xsi=\"").Append(XsiNamespace).Append('"');
+                AppendForXmlAttributes(sb, element, rowBytes, innerSchema);
+
+                var body = new StringBuilder();
+                _ = SerializeForXmlContent(body, element.Content, rowBytes, innerSchema, options, declareXsiOnElements: false, prevAtomic: false);
+                // Only the innermost level can self-close: every outer level
+                // has the next level's element as content.
+                if (body.Length == 0 && i == levels.Length - 1)
+                {
+                    _ = sb.Append("/>");
+                    continue;
+                }
+                _ = sb.Append('>').Append(body);
+                open.Add(element.Name);
+            }
+            previous = rowBytes;
+        }
+
+        if (previous is null)
+        {
+            if (options.Typed)
+                yield return EmptyForXmlRow();
+            yield break;
+        }
+
+        for (var i = open.Count - 1; i >= 0; i--)
+            _ = sb.Append("</").Append(open[i]).Append('>');
+        if (options.RootName is { } closeName)
+            _ = sb.Append("</").Append(closeName).Append('>');
+
+        yield return ForXmlRow(sb, options);
+    }
+
+    /// <summary>
+    /// The serialized fragment as one result row — a typed <c>xml</c> value
+    /// under the TYPE option, else the <c>nvarchar(max)</c> string form.
+    /// </summary>
+    private static byte[] ForXmlRow(StringBuilder document, ForXmlOptions options) => options.Typed
+        ? RowEncoder.EncodeRow([SqlType.Xml], [SqlValue.FromXml(document.ToString())])
+        : RowEncoder.EncodeRow([SqlType.NVarcharMax], [SqlValue.FromNVarchar(SqlType.NVarcharMax, document.ToString())]);
+
+    /// <summary>
+    /// The row an empty input rowset produces under the TYPE option: one NULL
+    /// xml value (probe-confirmed — without TYPE the statement returns no rows
+    /// at all, so a scalar subquery reads NULL either way).
+    /// </summary>
+    private static byte[] EmptyForXmlRow() => RowEncoder.EncodeRow([SqlType.Xml], [SqlValue.Null(SqlType.Xml)]);
+
+    /// <summary>
+    /// Appends an element's attributes for one row, skipping the NULL ones
+    /// (attributes are always absent for NULL, whatever the ELEMENTS setting).
+    /// </summary>
+    private static void AppendForXmlAttributes(StringBuilder sb, ForXmlElement element, byte[] rowBytes, SqlType[] innerSchema)
+    {
+        foreach (var attribute in element.Attributes)
+        {
+            var value = RowDecoder.DecodeColumn(innerSchema, rowBytes, attribute.Column);
+            if (value.IsNull)
+                continue;
+            _ = sb.Append(' ').Append(attribute.Name).Append("=\"");
+            AppendForXmlText(sb, ScalarForXmlText(value), isAttribute: true);
+            _ = sb.Append('"');
+        }
     }
 
     /// <summary>
@@ -336,15 +483,7 @@ partial class Selection
         _ = sb.Append('<').Append(element.Name);
         if (declareXsi)
             _ = sb.Append(" xmlns:xsi=\"").Append(XsiNamespace).Append('"');
-        foreach (var attribute in element.Attributes)
-        {
-            var value = RowDecoder.DecodeColumn(innerSchema, rowBytes, attribute.Column);
-            if (value.IsNull)
-                continue;
-            _ = sb.Append(' ').Append(attribute.Name).Append("=\"");
-            AppendForXmlText(sb, ScalarForXmlText(value), isAttribute: true);
-            _ = sb.Append('"');
-        }
+        AppendForXmlAttributes(sb, element, rowBytes, innerSchema);
 
         var body = new StringBuilder();
         _ = SerializeForXmlContent(body, element.Content, rowBytes, innerSchema, options, declareXsiOnElements: false, prevAtomic: false);
@@ -377,7 +516,14 @@ partial class Selection
                         break;
                     if (leaf.Atomic && prevAtomic)
                         _ = sb.Append(' ');
-                    AppendForXmlText(sb, ScalarForXmlText(value), isAttribute: false);
+                    // An xml-typed value is already markup: it embeds as
+                    // nodes, not as escaped text. That covers a stored xml
+                    // column, a CAST(… AS xml), and a nested FOR XML … TYPE
+                    // subquery alike — the type is what decides, matching real.
+                    if (innerSchema[leaf.Column] is XmlSqlType)
+                        _ = sb.Append(ScalarForXmlText(value));
+                    else
+                        AppendForXmlText(sb, ScalarForXmlText(value), isAttribute: false);
                     prevAtomic = leaf.Atomic;
                     break;
             }
@@ -472,19 +618,19 @@ partial class Selection
     }
 }
 
-/// <summary>The three modeled FOR XML modes (EXPLICIT is deferred).</summary>
+/// <summary>The three modeled FOR XML modes (EXPLICIT isn't built yet).</summary>
 internal enum ForXmlMode
 {
     /// <summary>Attribute-centric (default) rows named <c>row</c> / <c>('elem')</c>.</summary>
     Raw,
-    /// <summary>Rows named after the source table/alias.</summary>
+    /// <summary>One element per FROM source, named after its table/alias and nested.</summary>
     Auto,
     /// <summary>Column aliases drive XPath-like node placement (the workhorse).</summary>
     Path,
 }
 
 /// <summary>Parsed FOR XML clause options. Immutable, so it rides the cached plan.</summary>
-internal sealed class ForXmlOptions(ForXmlMode mode, string? rowElement, bool elements, bool xsinil, string? rootName)
+internal sealed class ForXmlOptions(ForXmlMode mode, string? rowElement, bool elements, bool xsinil, bool typed, string? rootName)
 {
     public readonly ForXmlMode Mode = mode;
 
@@ -496,6 +642,13 @@ internal sealed class ForXmlOptions(ForXmlMode mode, string? rowElement, bool el
 
     /// <summary>Emit <c>xsi:nil="true"</c> elements for NULL columns instead of omitting them.</summary>
     public readonly bool Xsinil = xsinil;
+
+    /// <summary>
+    /// The <c>TYPE</c> option: the result is one unnamed <c>xml</c> column
+    /// rather than the string form, so an enclosing FOR XML embeds it as
+    /// nodes, and an empty input rowset still yields a row (NULL).
+    /// </summary>
+    public readonly bool Typed = typed;
 
     /// <summary>The ROOT wrapper name, or null when no ROOT option was given.</summary>
     public readonly string? RootName = rootName;

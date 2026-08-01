@@ -107,6 +107,7 @@ partial class Simulation
                 {
                     RunOneTriggerBody(
                         batch,
+                        database,
                         new TriggerFrame(trigger, eventData),
                         trigger.BodyText,
                         trigger.BodyLineOffset,
@@ -114,7 +115,8 @@ partial class Simulation
                         executeAsClause: null,
                         trigger.ObjectId,
                         countsAsAfterFrame: false,
-                        affectedRowCount: 0);
+                        affectedRowCount: 0,
+                        trigger.UsesQuotedIdentifier);
                 }
             }
             finally
