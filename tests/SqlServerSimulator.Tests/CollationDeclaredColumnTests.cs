@@ -190,6 +190,40 @@ public sealed class CollationDeclaredColumnTests
     }
 
     /// <summary>
+    /// <c>CONCAT</c> resolves its operands' collations the same way <c>+</c>
+    /// does, so the result carries a column's collation rather than the
+    /// database default: comparing the concatenation against a literal sorts
+    /// under the column's rules. Probe-confirmed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("SQL_Latin1_General_CP1_CS_AS", 0)]
+    [DataRow("SQL_Latin1_General_CP1_CI_AS", 1)]
+    public void Concat_ResultCarriesOperandCollation(string collation, int expectedMatches)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table t (s varchar(20) collate {collation}); insert t values ('x')");
+        AreEqual(expectedMatches, sim.ExecuteScalar("select count(*) from t where concat(s, 'y') = 'XY'"));
+    }
+
+    /// <summary>
+    /// A view's body binds at CREATE, so a projection whose operands can't
+    /// agree on a collation fails there rather than at first read.
+    /// </summary>
+    [TestMethod]
+    public void Concat_CrossCollationInViewBody_RaisesMsg451AtCreate()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table a (s varchar(20) collate Latin1_General_CI_AS);
+            create table b (s varchar(20) collate Latin1_General_CS_AS)
+            """);
+        sim.AssertSqlError(
+            "create view v as select concat(a.s, b.s) as r from a, b",
+            451,
+            "Cannot resolve collation conflict between \"Latin1_General_CS_AS\" and \"Latin1_General_CI_AS\" in concat operator occurring in SELECT statement column 1.");
+    }
+
+    /// <summary>
     /// Coercibility precedence: a column reference (Implicit) compared to a
     /// literal (CoercibleDefault) coerces the literal to the column's
     /// collation. No 468 raised even though the column's collation differs

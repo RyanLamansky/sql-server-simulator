@@ -44,9 +44,14 @@ public sealed class OpenJsonTests
     public void OpenJson_NullJson_NoRows()
         => AreEqual(0, new Simulation().ExecuteScalar("select count(*) from openjson(null)"));
 
+    /// <summary>
+    /// A document that isn't JSON text raises Msg 13609 with OPENJSON's own
+    /// State 4 — see <see cref="JsonMalformedTextTests"/> for the full rule.
+    /// </summary>
     [TestMethod]
-    public void OpenJson_InvalidJson_LaxNoRows()
-        => AreEqual(0, new Simulation().ExecuteScalar("select count(*) from openjson('not json')"));
+    public void OpenJson_InvalidJson_RaisesMsg13609()
+        => new Simulation().AssertSqlError("select count(*) from openjson('not json')", 13609,
+            "JSON text is not properly formatted. Unexpected character 'n' is found at position 0.");
 
     [TestMethod]
     public void OpenJson_WithSelfPath_PrimitiveCollection()

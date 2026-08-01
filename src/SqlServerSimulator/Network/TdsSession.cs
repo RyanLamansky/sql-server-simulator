@@ -143,7 +143,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 return;
             }
 
-            if (!this.TryOpenConnection(login.Database, login.UserName, writer))
+            if (!this.TryOpenConnection(login, writer))
             {
                 await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
                 return;
@@ -397,11 +397,18 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         || (simulation.Logins.TryGetValue(login.UserName, out var serverLogin)
             && PasswordHash.Verify(login.Password, serverLogin.PasswordHash));
 
-    private bool TryOpenConnection(string requestedDatabase, string userName, TdsTokenWriter writer)
+    private bool TryOpenConnection(Login7Request login, TdsTokenWriter writer)
     {
+        var requestedDatabase = login.Database;
+        var userName = login.UserName;
         var opened = simulation.CreateDbConnection();
         opened.Open();
         opened.InfoMessage += this.OnInfoMessage;
+        // LOGIN7 carries the client's workstation and application names; the
+        // session keeps them for HOST_NAME() / APP_NAME(),
+        // sys.dm_exec_sessions and the sp_who family.
+        opened.ClientHostName = login.HostName;
+        opened.ClientApplicationName = login.AppName;
         var target = opened.CurrentDatabase;
         if (requestedDatabase.Length > 0)
         {

@@ -248,6 +248,16 @@ internal sealed class BatchContext
     public bool CreateTimeBinding;
 
     /// <summary>
+    /// Collector for real's function body-shape rules (Msg 455 / 444 / 443),
+    /// non-null only while <c>Simulation.BindModuleBodyAtCreate</c> walks a
+    /// scalar-UDF or multi-statement-TVF body — the two module kinds real
+    /// applies those rules to. Null everywhere else, including on a procedure /
+    /// trigger bind and on every invocation batch, so the recording sites cost
+    /// one null check.
+    /// </summary>
+    public FunctionBodyShape? FunctionBodyShape;
+
+    /// <summary>
     /// In-flight loop-flow signal. <see cref="LoopControl.Break"/> /
     /// <see cref="LoopControl.Continue"/> set by their dispatch sites;
     /// <see cref="LoopControl.None"/> the default. Only the
@@ -782,9 +792,12 @@ internal sealed class BatchContext
         // statement and not BeginTransaction. The bypass paths above
         // (table-variable / local-temp / system table) are the same ones
         // real SQL Server doesn't apply Msg 3952 to — system catalogs work
-        // fine inside an SI session regardless of the database flag.
-        if (isolation == System.Data.IsolationLevel.Snapshot && !this.CurrentDatabase.AllowSnapshotIsolation)
-            throw SimulatedSqlException.SnapshotIsolationNotAllowed(this.CurrentDatabase.Name);
+        // fine inside an SI session regardless of the database flag. The flag
+        // that governs is the *table's* database, not the session's: an SI
+        // session in a snapshot-enabled database reading a three-part name in
+        // one that isn't raises 3952 naming the target (probe-confirmed).
+        if (isolation == System.Data.IsolationLevel.Snapshot && this.DatabaseFor(table) is { AllowSnapshotIsolation: false } snapshotDisabled)
+            throw SimulatedSqlException.SnapshotIsolationNotAllowed(snapshotDisabled.Name);
 
         // Read uncommitted / NOLOCK: skip everything. Dirty-read semantics.
         if (!isWrite && (hints.NoLock || isolation == System.Data.IsolationLevel.ReadUncommitted))
@@ -994,7 +1007,7 @@ internal sealed class BatchContext
 
         var connection = this.Connection;
         var isolation = connection.SessionIsolationLevel;
-        var database = this.CurrentDatabase;
+        var simulation = connection.Simulation;
 
         if (isolation == System.Data.IsolationLevel.Snapshot)
         {
@@ -1002,20 +1015,23 @@ internal sealed class BatchContext
             {
                 if (tx.SnapshotXid is null)
                 {
-                    tx.SnapshotXid = database.CurrentTransactionCommitId;
-                    database.ActiveSnapshotTxs[tx] = 0;
+                    tx.SnapshotXid = simulation.CurrentTransactionCommitId;
+                    simulation.ActiveSnapshotTxs[tx] = 0;
                 }
                 return tx.SnapshotXid;
             }
             // Auto-commit SI session — each read gets the latest commit
             // stamp (effectively current state). Rare path, mostly a
             // grammar-level use.
-            return database.CurrentTransactionCommitId;
+            return simulation.CurrentTransactionCommitId;
         }
 
-        if (isolation == System.Data.IsolationLevel.ReadCommitted && database.ReadCommittedSnapshot)
+        // RCSI is the *table's* database's flag, not the session's — a session
+        // in a non-RCSI database reading a three-part name into an RCSI one
+        // reads versioned, and the reverse blocks (probe-confirmed).
+        if (isolation == System.Data.IsolationLevel.ReadCommitted && this.DatabaseFor(table).ReadCommittedSnapshot)
         {
-            this.RcsiStatementSnapshotXid ??= database.CurrentTransactionCommitId;
+            this.RcsiStatementSnapshotXid ??= simulation.CurrentTransactionCommitId;
             return this.RcsiStatementSnapshotXid;
         }
 
@@ -1125,6 +1141,11 @@ internal sealed class BatchContext
     {
         Storage.HeapTable table => table.OwningDatabase ?? this.CurrentDatabase,
         View view => view.Schema.Database,
+        Procedure procedure => procedure.Schema.Database,
+        UserDefinedFunction function => function.Schema.Database,
+        Synonym synonym => synonym.Schema.Database,
+        Sequence sequence => sequence.Schema.Database,
+        Trigger trigger => trigger.Schema.Database,
         _ => this.CurrentDatabase,
     };
 
@@ -1758,6 +1779,20 @@ internal sealed class BatchContext
     /// + <see cref="Database.DefaultSchemaName"/> (always present, so the
     /// 1-part branch never returns false).
     /// </summary>
+    /// <summary>
+    /// The database a written object name targets — the one a three-part
+    /// name's leading segment resolves to, else <see cref="CurrentDatabase"/>.
+    /// The pre-resolution counterpart to <see cref="DatabaseFor(SchemaObject)"/>:
+    /// the DDL permission gates need the target database before the schema
+    /// lookup that would produce an object to read it off. An unrecognized
+    /// database segment falls back to the session's, leaving the miss for the
+    /// caller's own resolution step to report.
+    /// </summary>
+    public Database DatabaseForName(MultiPartName name) =>
+        name.Count == 3 && this.Connection.Simulation.Databases.TryGetValue(name[0], out var database)
+            ? database
+            : this.CurrentDatabase;
+
     public bool TryResolveSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
     {
         if (name.Count >= 4)

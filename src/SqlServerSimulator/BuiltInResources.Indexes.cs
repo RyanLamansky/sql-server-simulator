@@ -12,18 +12,20 @@ internal static partial class BuiltInResources
         // Pushdown-aware sys.<view> (see BuiltInResources.CoreObjects.cs::SysP).
         void SysP(string name, HeapColumn[] columns, string[] pushdownColumns, Func<Parser.BatchContext, Database, CatalogFilter, IEnumerable<SqlValue[]>> filtered) =>
             views["sys." + name] = new CatalogView(name, columns, (batch, database) => filtered(batch, database, CatalogFilter.None), filteredRowGenerator: filtered, pushdownColumns: pushdownColumns);
-        // sys.indexes: probe-confirmed 24-column shape against SQL Server
-        // 2025 (2026-05-14). One row per (table, index) — PK / UQ
-        // constraints surface alongside CREATE-INDEX rows, and a HEAP row
-        // (index_id = 0, type = 0, name = NULL) appears for any table with
-        // no PRIMARY KEY (matching SQL Server's "the table itself is the
-        // heap" semantic). EF Migrations introspection reads name /
-        // is_unique / is_primary_key / is_unique_constraint /
-        // has_filter / filter_definition.
+        // sys.indexes: probe-confirmed 23-column shape and column order
+        // against SQL Server 2025 (object_id leads, name second; there is no
+        // statistics_incremental column — selecting it raises Msg 207 on
+        // real). One row per (table, index) — PK / UQ constraints surface
+        // alongside CREATE-INDEX rows, and a HEAP row (index_id = 0,
+        // type = 0, name = NULL) appears for any table with no PRIMARY KEY
+        // (matching SQL Server's "the table itself is the heap" semantic).
+        // EF Migrations introspection reads name / is_unique /
+        // is_primary_key / is_unique_constraint / has_filter /
+        // filter_definition.
         SysP("indexes",
         [
-            new("name", SqlType.SystemName, 128, true),
             new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
             new("index_id", SqlType.Int32, null, false),
             new("type", SqlType.TinyInt, null, false),
             new("type_desc", nvarchar60Catalog, 60, true),
@@ -45,7 +47,6 @@ internal static partial class BuiltInResources
             new("suppress_dup_key_messages", SqlType.Bit, null, false),
             new("auto_created", SqlType.Bit, null, false),
             new("optimize_for_sequential_key", SqlType.Bit, null, false),
-            new("statistics_incremental", SqlType.Bit, null, true),
         ], ["object_id"], EnumerateSysIndexes);
 
         // sys.data_spaces: the simulator models a single PRIMARY row-filegroup
@@ -655,8 +656,8 @@ internal static partial class BuiltInResources
             SqlValue hasFilter, SqlValue filterDefinition, SqlValue ignoreDupKey, SqlValue isDisabled,
             SqlValue isPadded, SqlValue allowLocks, SqlValue fillFactor) =>
             [
-                name,
                 objectId,
+                name,
                 indexId,
                 type,
                 typeDesc,
@@ -678,7 +679,6 @@ internal static partial class BuiltInResources
                 falseBit, // suppress_dup_key_messages
                 falseBit, // auto_created
                 falseBit, // optimize_for_sequential_key
-                falseBit, // statistics_incremental
             ];
     }
 
@@ -906,12 +906,28 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Synthetic autogrowth increment, in KB — SQL Server's 64 MB default for
-    /// a database created without an explicit <c>FILEGROWTH</c>. Reported
-    /// verbatim by <c>sp_helpfile</c>'s <c>growth</c> cell and carried by
-    /// <c>sys.database_files</c> / <c>sys.master_files</c>' <c>growth</c>
-    /// column.
+    /// a database created without an explicit <c>FILEGROWTH</c>. This is the
+    /// unit <c>sp_helpfile</c>'s <c>growth</c> cell renders ("65536 KB");
+    /// the catalog views measure the same increment in pages
+    /// (<see cref="FileGrowthPages"/>).
     /// </summary>
     internal const int FileGrowthKilobytes = 65536;
+
+    /// <summary>
+    /// The same autogrowth increment as <see cref="FileGrowthKilobytes"/>,
+    /// expressed in 8 KB pages — the unit <c>sys.master_files</c> /
+    /// <c>sys.database_files</c>' <c>growth</c> column carries whenever
+    /// <c>is_percent_growth</c> is 0 (probe-confirmed: real reports 8192 for
+    /// the 64 MB default, not 65536).
+    /// </summary>
+    internal const int FileGrowthPages = FileGrowthKilobytes / 8;
+
+    /// <summary>
+    /// Synthetic log-file <c>max_size</c> in 8 KB pages — SQL Server's
+    /// 2 TB log ceiling, which a fresh database reports verbatim
+    /// (probe-confirmed). The data file reports -1 (unlimited) instead.
+    /// </summary>
+    internal const int LogFileMaxSizePages = 268435456;
 
     /// <summary>Synthetic physical path of a database's data file — shared by the file catalog views and <c>sp_helpfile</c>.</summary>
     internal static string DataFilePath(string databaseName) => "/var/opt/mssql/data/" + databaseName + ".mdf";
@@ -949,8 +965,11 @@ internal static partial class BuiltInResources
         var nullFilter = SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
         var zeroInt = SqlValue.FromInt32(0);
         var methodDesc = SqlValue.FromVarchar(VarcharSqlType.Get(80, Collation.Catalog, Coercibility.Implicit), "Sort based statistics");
-        var nullRole = SqlValue.Null(SqlType.TinyInt);
-        var nullRoleDesc = SqlValue.Null(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit));
+        // Every statistic belongs to the primary replica — the simulator hosts
+        // no secondary, and real reports 1 / PRIMARY on a stand-alone instance
+        // (probe-confirmed). replica_name stays NULL alongside it.
+        var primaryRole = SqlValue.FromByte(1);
+        var primaryRoleDesc = SqlValue.FromString(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit), "PRIMARY");
         var nullName = SqlValue.Null(SqlType.SystemName);
         foreach (var (table, indexId, name, isHeap) in EnumerateTableIndexIdentities(database))
         {
@@ -972,8 +991,8 @@ internal static partial class BuiltInResources
                 zeroInt,  // stats_generation_method
                 methodDesc,
                 falseBit, // auto_drop
-                nullRole,
-                nullRoleDesc,
+                primaryRole,
+                primaryRoleDesc,
                 nullName, // replica_name
             ];
         }
@@ -1004,8 +1023,8 @@ internal static partial class BuiltInResources
                         zeroInt,  // stats_generation_method
                         methodDesc,
                         falseBit, // auto_drop
-                        nullRole,
-                        nullRoleDesc,
+                        primaryRole,
+                        primaryRoleDesc,
                         nullName, // replica_name
                     ];
                 }
@@ -1033,8 +1052,8 @@ internal static partial class BuiltInResources
                 zeroInt,  // stats_generation_method
                 methodDesc,
                 falseBit, // auto_drop
-                nullRole,
-                nullRoleDesc,
+                primaryRole,
+                primaryRoleDesc,
                 nullName, // replica_name
             ];
         }
@@ -1196,7 +1215,7 @@ internal static partial class BuiltInResources
                 {
                     yield return [
                         tableObjectId,
-                        SqlValue.FromInt32(xmlIndex.ObjectId),
+                        SqlValue.FromInt32(xmlIndex.IndexId),
                         SqlValue.FromInt32(1),
                         SqlValue.FromInt32(FullOrdinalToColumnId(table, xmlIndex.ColumnOrdinal)),
                         zeroByte,

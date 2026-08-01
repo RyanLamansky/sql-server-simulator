@@ -538,8 +538,10 @@ Probe-confirmed semantics (SQL Server 2025):
 
 Constants whose values don't carry real session/server identity in the simulator — they exist for SQL emitted by tooling that reads them (DACFx / EF Core / migration scripts) to receive a sensible non-NULL response.
 
-- **`HOST_NAME()`** — returns `''`.
-- **`APP_NAME()`** — returns `''`.
+- **`HOST_NAME()`** — the client workstation name the session reported: the connection string's `Workstation ID` / `WSID` keyword in-process, LOGIN7's `HostName` field over the TDS endpoint, `''` when neither supplied one (the common pool default on real SQL Server).
+  The same value `sys.dm_exec_sessions.host_name` and `sp_who` / `sp_who2`'s `HostName` project.
+- **`APP_NAME()`** — the client application name, from the connection string's `Application Name` / `App` keyword or LOGIN7's `AppName`, `''` when neither supplied one.
+  The same value `sys.dm_exec_sessions.program_name` and `sp_who2`'s `ProgramName` project.
 - **`ORIGINAL_DB_NAME()`** — returns `Simulation.DefaultDatabaseName` (`"simulated"`).
 - **`GETANSINULL([db])`** — returns 1 (the simulator's ANSI-NULL behavior matches `SET ANSI_NULLS ON`, which is the only modeled mode).
 - **`@@DATEFIRST`** — constant 7 (Sunday).

@@ -32,8 +32,10 @@ internal static partial class BuiltInResources
         // INFORMATION_SCHEMA.COLUMNS: ISO-standard 23-column shape. Tooling
         // does SELECT * here so the full column set ships even though many
         // are always NULL in the simulator (DOMAIN_*, CHARACTER_SET_SCHEMA,
-        // COLLATION_CATALOG, etc.). COLUMN_DEFAULT is always NULL until
-        // expression-to-SQL serialization lands (separate bundle).
+        // COLLATION_CATALOG, etc.). Rows cover base tables and view output
+        // columns alike (probe-confirmed — the same two sources sys.columns
+        // walks); COLUMN_DEFAULT carries the captured DEFAULT text for a table
+        // column and stays NULL for a view's.
         var unicodeCs = SqlValue.FromSystemName("UNICODE");
         var isoCs = SqlValue.FromSystemName("iso_1");
         var radix10 = SqlValue.FromInt16(10);
@@ -66,12 +68,12 @@ internal static partial class BuiltInResources
         ], (batch, database) =>
             EnumerateInformationSchemaColumns(batch, database, defaultCollation, unicodeCs, isoCs, radix10, radix2));
 
-        // INFORMATION_SCHEMA.SCHEMATA: ISO-standard 6-column shape. Lists
-        // only the schemas the simulator actually models — no padding for
-        // role principals (db_owner / db_datareader / …) since there's no
-        // principal model. SCHEMA_OWNER mirrors SCHEMA_NAME (matches real
-        // SQL Server's behavior for built-in / user schemas without explicit
-        // AUTHORIZATION).
+        // INFORMATION_SCHEMA.SCHEMATA: ISO-standard 6-column shape. Rows cover
+        // the materialized schemas plus the catalog-only fixed ones (guest and
+        // the nine fixed-database-role schemas) sys.schemas already injects, so
+        // a fresh database lists real's 13. SCHEMA_OWNER follows the same
+        // ownership rule sys.schemas.principal_id does: a fixed schema mirrors
+        // its own name, a user schema reports dbo (probe-confirmed).
         var defaultCsName = SqlValue.FromSystemName("iso_1");
         var nullSysName = SqlValue.Null(SqlType.SystemName);
         Iso("SCHEMATA",
@@ -83,15 +85,7 @@ internal static partial class BuiltInResources
             new("DEFAULT_CHARACTER_SET_SCHEMA", SqlType.SystemName, 128, true),
             new("DEFAULT_CHARACTER_SET_NAME", SqlType.SystemName, 128, true),
         ], (batch, database) =>
-            database.Schemas.Values.OrderBy(s => s.SchemaId).Select(s => new SqlValue[]
-            {
-                SqlValue.FromSystemName(database.Name),
-                SqlValue.FromSystemName(s.Name),
-                SqlValue.FromSystemName(s.Name),
-                nullSysName,
-                nullSysName,
-                defaultCsName,
-            }));
+            EnumerateInformationSchemaSchemata(database, nullSysName, defaultCsName));
 
         // sys.parameters: one row per declared parameter + one row with
         // parameter_id=0 for the return type. The shipped column set covers
@@ -863,12 +857,10 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Rows for <c>sys.procedures</c>: one row per <see cref="Procedure"/> in
-    /// every schema. The full <c>create_date</c> / <c>modify_date</c> story
-    /// in real SQL Server tracks ALTER PROCEDURE separately; the simulator
-    /// uses the ALTER-preserving <see cref="SchemaObject.CreateDate"/> for both
-    /// columns (the original create date survives ALTER, matching the way
-    /// <see cref="SchemaObject.ObjectId"/> survives — minor fidelity gap on
-    /// modify_date which would shift on each ALTER in real SQL Server).
+    /// every schema. <c>create_date</c> survives <c>ALTER PROCEDURE</c> the way
+    /// <see cref="SchemaObject.ObjectId"/> does, while <c>modify_date</c> reads
+    /// <see cref="SchemaObject.ModifyDate"/>, which each <c>ALTER</c> /
+    /// <c>CREATE OR ALTER</c> advances.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateProcedures(
         Parser.BatchContext batch,
@@ -887,15 +879,14 @@ internal static partial class BuiltInResources
         {
             foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
             {
-                var createDate = SqlValue.FromDateTime(proc.CreateDate);
                 yield return [
                     SqlValue.FromInt32(proc.ObjectId),
                     SqlValue.FromSystemName(proc.Name),
                     SqlValue.FromInt32(proc.Schema.SchemaId),
                     procType,
                     procTypeDesc,
-                    createDate,
-                    createDate,
+                    SqlValue.FromDateTime(proc.CreateDate),
+                    SqlValue.FromDateTime(proc.ModifyDate),
                     notMsShipped,
                     notAutoExecuted,
                 ];
@@ -946,7 +937,12 @@ internal static partial class BuiltInResources
     /// <see cref="InlineTableValuedFunction"/> emits one row per declared
     /// parameter only — no return-row, because the return shape is a TABLE
     /// (the columns surface in <c>sys.columns</c> instead). Probe-confirmed
-    /// against SQL Server 2025.
+    /// against SQL Server 2025. <c>max_length</c> / <c>precision</c> /
+    /// <c>scale</c> come from the same <see cref="GetSysColumnMetadata"/>
+    /// computation <c>sys.columns</c> uses, so an <c>nvarchar(40)</c>
+    /// parameter reports the byte width 80 and an <c>int</c> reports 4 / 10 / 0;
+    /// a table-valued parameter reports the MAX sentinel -1 with no
+    /// precision / scale (probe-confirmed).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateParameters(Parser.BatchContext batch, Database database, CatalogFilter filter)
     {
@@ -956,7 +952,6 @@ internal static partial class BuiltInResources
         var emptyName = SqlValue.FromSystemName("");
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
-        var zeroByte = SqlValue.FromByte(0);
         var zeroInt = SqlValue.FromInt32(0);
         var nullDefault = SqlValue.Null(SqlType.SqlVariant);
         var nullVectorDims = SqlValue.Null(SqlType.Int32);
@@ -976,15 +971,18 @@ internal static partial class BuiltInResources
                     // is_readonly is true only for TVP params (probe-confirmed
                     // — scalar params with a future READONLY shape don't ship).
                     var isTvp = param.TableType is not null;
+                    var (maxLength, precision, scale) = isTvp
+                        ? ((short)SqlType.MaxLengthSentinel, (byte)0, (byte)0)
+                        : GetSysColumnMetadata(new HeapColumn(param.Name, param.Type, param.DeclaredMaxLength, nullable: true));
                     yield return [
                         procObjectId,
                         SqlValue.FromSystemName("@" + param.Name),
                         SqlValue.FromInt32(i + 1),
                         SqlValue.FromByte(isTvp ? (byte)243 : param.Type.SystemTypeId),
                         SqlValue.FromInt32(isTvp ? param.TableType!.UserTypeId : param.Type.UserTypeId),
-                        SqlValue.FromInt16(0),
-                        zeroByte,
-                        zeroByte,
+                        SqlValue.FromInt16(maxLength),
+                        SqlValue.FromByte(precision),
+                        SqlValue.FromByte(scale),
                         SqlValue.FromBoolean(param.IsOutput),
                         falseBit,
                         falseBit,
@@ -1005,19 +1003,19 @@ internal static partial class BuiltInResources
                 var fnObjectId = SqlValue.FromInt32(fn.ObjectId);
                 // Scalar UDFs get a synthetic parameter_id=0 return-type row;
                 // inline TVFs don't (their TABLE shape lives in sys.columns).
-                // max_length stays at 0 for v1 — see scalar-UDF section in
-                // CLAUDE.md.
                 if (fn is ScalarFunction scalarFn)
                 {
+                    var (returnMaxLength, returnPrecision, returnScale) =
+                        GetSysColumnMetadata(new HeapColumn(string.Empty, scalarFn.ReturnType, maxLength: null, nullable: true));
                     yield return [
                         fnObjectId,
                         emptyName,
                         SqlValue.FromInt32(0),
                         SqlValue.FromByte(scalarFn.ReturnType.SystemTypeId),
                         SqlValue.FromInt32(scalarFn.ReturnType.UserTypeId),
-                        SqlValue.FromInt16(0),
-                        zeroByte,
-                        zeroByte,
+                        SqlValue.FromInt16(returnMaxLength),
+                        SqlValue.FromByte(returnPrecision),
+                        SqlValue.FromByte(returnScale),
                         trueBit,
                         falseBit,
                         falseBit,
@@ -1033,15 +1031,17 @@ internal static partial class BuiltInResources
                 for (var i = 0; i < fn.Parameters.Length; i++)
                 {
                     var p = fn.Parameters[i];
+                    var (maxLength, precision, scale) =
+                        GetSysColumnMetadata(new HeapColumn(p.Name, p.Type, maxLength: null, nullable: true));
                     yield return [
                         fnObjectId,
                         SqlValue.FromSystemName("@" + p.Name),
                         SqlValue.FromInt32(i + 1),
                         SqlValue.FromByte(p.Type.SystemTypeId),
                         SqlValue.FromInt32(p.Type.UserTypeId),
-                        SqlValue.FromInt16(0),
-                        zeroByte,
-                        zeroByte,
+                        SqlValue.FromInt16(maxLength),
+                        SqlValue.FromByte(precision),
+                        SqlValue.FromByte(scale),
                         falseBit,
                         falseBit,
                         falseBit,
@@ -1056,6 +1056,42 @@ internal static partial class BuiltInResources
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.SCHEMATA</c>, ordered by schema_id over
+    /// the union <c>sys.schemas</c> projects: the materialized
+    /// <see cref="Database.Schemas"/> plus the catalog-only fixed schemas.
+    /// <c>SCHEMA_OWNER</c> is the schema's own name for a fixed schema
+    /// (schema_id ≤ 4 or ≥ 16384) and <c>dbo</c> for a user schema — the
+    /// ownership rule <c>sys.schemas.principal_id</c> follows.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaSchemata(Database database, SqlValue nullSysName, SqlValue defaultCsName)
+    {
+        var catalog = SqlValue.FromSystemName(database.Name);
+        var dbo = SqlValue.FromSystemName(Database.DefaultSchemaName);
+        var rows = new List<(int SchemaId, SqlValue[] Row)>();
+
+        void Add(string name, int schemaId) =>
+            rows.Add((schemaId, [
+                catalog,
+                SqlValue.FromSystemName(name),
+                schemaId is >= 5 and < 16384 ? dbo : SqlValue.FromSystemName(name),
+                nullSysName,
+                nullSysName,
+                defaultCsName,
+            ]));
+
+        foreach (var s in database.Schemas.Values)
+            Add(s.Name, s.SchemaId);
+        foreach (var (name, id) in FixedCatalogOnlySchemas)
+        {
+            if (!database.Schemas.ContainsKey(name))
+                Add(name, id);
+        }
+
+        rows.Sort((a, b) => a.SchemaId.CompareTo(b.SchemaId));
+        return rows.Select(static entry => entry.Row);
     }
 
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaTables(Parser.BatchContext batch, Database database, SqlValue baseTable, SqlValue viewTableType)
@@ -1106,6 +1142,49 @@ internal static partial class BuiltInResources
         var noNullable = SqlValue.FromVarchar("NO");
         var dbDefaultCollation = SqlValue.FromSystemName(database.CollationName);
         _ = defaultCollation;
+        // ORDINAL_POSITION resequences 1..N over the live columns — unlike
+        // sys.columns.column_id it fills the hole DROP COLUMN leaves
+        // (probe-confirmed).
+        SqlValue[] Row(SqlValue schemaName, SqlValue tableName, HeapColumn col, int position)
+        {
+            var (charLength, octetLength, numericPrecision, numericRadix, numericScale, dateTimePrecision) = GetInformationSchemaColumnMetadata(col);
+            var cs = col.Type.Category switch
+            {
+                SqlTypeCategory.String when col.Type is NVarcharSqlType or NCharSqlType || col.Type == SqlType.SystemName || col.Type == SqlType.NText => unicodeCs,
+                SqlTypeCategory.String => isoCs,
+                _ => nullSysName,
+            };
+            var collation = col.Type.Category != SqlTypeCategory.String ? nullSysName
+                : col.Collation is { } overrideName ? SqlValue.FromSystemName(overrideName)
+                : dbDefaultCollation;
+            return
+            [
+                catalog,
+                schemaName,
+                tableName,
+                SqlValue.FromSystemName(col.Name),
+                SqlValue.FromInt32(position),
+                col.DefaultConstraint?.Definition is { } defaultText ? SqlValue.FromNVarchar(defaultText) : nullString,
+                col.Nullable ? yesNullable : noNullable,
+                IsoDataTypeName(col.Type),
+                charLength is int cl ? SqlValue.FromInt32(cl) : nullInt32,
+                octetLength is int ol ? SqlValue.FromInt32(ol) : nullInt32,
+                numericPrecision is byte np ? SqlValue.FromByte(np) : nullByte,
+                numericRadix switch { 2 => radix2, 10 => radix10, _ => nullInt16 },
+                numericScale is int ns ? SqlValue.FromInt32(ns) : nullInt32,
+                dateTimePrecision is short dp ? SqlValue.FromInt16(dp) : nullInt16,
+                nullSysName,
+                nullSysName,
+                cs,
+                nullSysName,
+                nullSysName,
+                collation,
+                nullSysName,
+                nullSysName,
+                nullSysName,
+            ];
+        }
+
         foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
@@ -1113,44 +1192,17 @@ internal static partial class BuiltInResources
             {
                 var tableName = SqlValue.FromSystemName(t.Name);
                 for (var i = 0; i < t.Columns.Length; i++)
-                {
-                    var col = t.Columns[i];
-                    var (charLength, octetLength, numericPrecision, numericRadix, numericScale, dateTimePrecision) = GetInformationSchemaColumnMetadata(col);
-                    var cs = col.Type.Category switch
-                    {
-                        SqlTypeCategory.String when col.Type is NVarcharSqlType or NCharSqlType || col.Type == SqlType.SystemName || col.Type == SqlType.NText => unicodeCs,
-                        SqlTypeCategory.String => isoCs,
-                        _ => nullSysName,
-                    };
-                    var collation = col.Type.Category != SqlTypeCategory.String ? nullSysName
-                        : col.Collation is { } overrideName ? SqlValue.FromSystemName(overrideName)
-                        : dbDefaultCollation;
-                    yield return [
-                        catalog,
-                        schemaName,
-                        tableName,
-                        SqlValue.FromSystemName(col.Name),
-                        SqlValue.FromInt32(i + 1),
-                        nullString,
-                        col.Nullable ? yesNullable : noNullable,
-                        IsoDataTypeName(col.Type),
-                        charLength is int cl ? SqlValue.FromInt32(cl) : nullInt32,
-                        octetLength is int ol ? SqlValue.FromInt32(ol) : nullInt32,
-                        numericPrecision is byte np ? SqlValue.FromByte(np) : nullByte,
-                        numericRadix switch { 2 => radix2, 10 => radix10, _ => nullInt16 },
-                        numericScale is int ns ? SqlValue.FromInt32(ns) : nullInt32,
-                        dateTimePrecision is short dp ? SqlValue.FromInt16(dp) : nullInt16,
-                        nullSysName,
-                        nullSysName,
-                        cs,
-                        nullSysName,
-                        nullSysName,
-                        collation,
-                        nullSysName,
-                        nullSysName,
-                        nullSysName,
-                    ];
-                }
+                    yield return Row(schemaName, tableName, t.Columns[i], i + 1);
+            }
+            // Views project their output columns here the same way they do in
+            // sys.columns — real lists them alongside base-table columns
+            // (probe-confirmed), and INFORMATION_SCHEMA.TABLES already reports
+            // the view itself.
+            foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
+            {
+                var viewName = SqlValue.FromSystemName(view.Name);
+                for (var i = 0; i < view.OutputColumns.Length; i++)
+                    yield return Row(schemaName, viewName, view.OutputColumns[i], i + 1);
             }
         }
     }

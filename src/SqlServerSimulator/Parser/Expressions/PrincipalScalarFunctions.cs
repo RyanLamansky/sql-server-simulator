@@ -7,17 +7,11 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// resolve per-session. <see cref="CurrentLogin"/> (<c>dbo</c>) is the fixed
 /// server-login name a couple of login-lookup scalars still compare against;
 /// the session-aware identity scalars instead read
-/// <c>SimulatedDbConnection.Security</c>. <see cref="CurrentHost"/> /
-/// <see cref="CurrentApplication"/> back the empty-string pool defaults for
-/// <c>HOST_NAME()</c> / <c>APP_NAME()</c>.
+/// <c>SimulatedDbConnection.Security</c>.
 /// </summary>
 internal static class PrincipalPlaceholders
 {
     public const string CurrentLogin = "dbo";
-
-    public const string CurrentHost = "";
-
-    public const string CurrentApplication = "";
 }
 
 /// <summary>
@@ -213,10 +207,10 @@ internal sealed class OriginalLogin : Expression
 
 /// <summary>
 /// SQL <c>HOST_NAME()</c>: returns the workstation name of the connecting
-/// client. The simulator doesn't carry a workstation identity on
-/// <see cref="SimulatedDbConnection"/>, so this returns the empty string
-/// — matching the common pool-default observed on real SQL Server.
-/// Result type is <see cref="SqlType.NVarchar"/>.
+/// client — the connection string's <c>Workstation ID</c> keyword in-process,
+/// LOGIN7's <c>HostName</c> field over the TDS endpoint, and the empty string
+/// when neither supplied one (the common pool-default observed on real SQL
+/// Server). Result type is <see cref="SqlType.NVarchar"/>.
 /// </summary>
 internal sealed class HostName : Expression
 {
@@ -227,7 +221,7 @@ internal sealed class HostName : Expression
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromNVarchar(PrincipalPlaceholders.CurrentHost);
+        SqlValue.FromNVarchar(runtime.Batch.Connection.ClientHostName);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
@@ -235,10 +229,10 @@ internal sealed class HostName : Expression
 }
 
 /// <summary>
-/// SQL <c>APP_NAME()</c>: returns the application name set in the
-/// connection string. The simulator doesn't carry an application identity
-/// on <see cref="SimulatedDbConnection"/>, so this returns the empty
-/// string. Result type is <see cref="SqlType.NVarchar"/>.
+/// SQL <c>APP_NAME()</c>: returns the application name the client reported —
+/// the connection string's <c>Application Name</c> keyword in-process,
+/// LOGIN7's <c>AppName</c> field over the TDS endpoint, and the empty string
+/// when neither supplied one. Result type is <see cref="SqlType.NVarchar"/>.
 /// </summary>
 internal sealed class AppName : Expression
 {
@@ -249,7 +243,7 @@ internal sealed class AppName : Expression
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromNVarchar(PrincipalPlaceholders.CurrentApplication);
+        SqlValue.FromNVarchar(runtime.Batch.Connection.ClientApplicationName);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 

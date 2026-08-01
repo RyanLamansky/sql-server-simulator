@@ -446,7 +446,9 @@ internal static partial class BuiltInResources
     /// <see cref="XmlIndex"/> across every table. type=3 / type_desc='XML'
     /// for both primary and secondary forms (probe-confirmed). The
     /// is_primary_key column surfaces always false — primary xml indexes
-    /// aren't xml-typed PKs.
+    /// aren't xml-typed PKs. <c>index_id</c> comes from real's per-table
+    /// 256000+ XML range, and a secondary's <c>using_xml_index_id</c> is its
+    /// primary's value from that same range.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysXmlIndexes(Parser.BatchContext batch, Database database)
     {
@@ -469,7 +471,6 @@ internal static partial class BuiltInResources
         // fill_factor=0, allow_row_locks / allow_page_locks true).
         var zeroByte = SqlValue.FromByte(0);
         var oneInt = SqlValue.FromInt32(1);
-        var zeroInt = SqlValue.FromInt32(0);
         var nullFilter = SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
         var primaryXmlType = SqlValue.FromByte(0);
         var secondaryXmlType = SqlValue.FromByte(1);
@@ -488,7 +489,7 @@ internal static partial class BuiltInResources
                 foreach (var ix in table.XmlIndexes)
                 {
                     if (ix.IsPrimary)
-                        primaryIds[ix.Name] = ix.ObjectId;
+                        primaryIds[ix.Name] = ix.IndexId;
                 }
                 foreach (var ix in table.XmlIndexes)
                 {
@@ -508,7 +509,7 @@ internal static partial class BuiltInResources
                     yield return [
                         SqlValue.FromInt32(table.ObjectId),
                         SqlValue.FromSystemName(ix.Name),
-                        SqlValue.FromInt32(ix.ObjectId),
+                        SqlValue.FromInt32(ix.IndexId),
                         typeCode,
                         typeDesc,
                         usingId,
@@ -530,7 +531,10 @@ internal static partial class BuiltInResources
                         nullFilter, // filter_definition
                         xmlType,    // xml_index_type
                         xmlDesc,    // xml_index_type_description
-                        zeroInt,    // path_id
+                        // path_id names the promoted path a selective XML
+                        // index tracks; an ordinary primary or secondary index
+                        // reports NULL (probe-confirmed).
+                        nullInt,    // path_id
                         falseBit,   // auto_created
                     ];
                 }

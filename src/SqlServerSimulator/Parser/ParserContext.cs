@@ -284,6 +284,29 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool StopExpressionAtBareColon;
 
     /// <summary>
+    /// True while the source <c>SELECT</c> of an <c>INSERT … SELECT</c> is
+    /// being parsed, which is where real refuses a <c>FOR XML</c> (Msg 6819) /
+    /// <c>FOR JSON</c> (Msg 13602) clause. The INSERT parser sets and restores
+    /// it around that one parse; the trailing-clause parsers read it only at
+    /// nesting depth 0, so a derived table or subquery inside the source SELECT
+    /// keeps its own clause.
+    /// </summary>
+    public bool InInsertSourceSelect;
+
+    /// <summary>
+    /// The output slot whose collation the expression being bound has to
+    /// settle on its own — the clause name and 1-based ordinal real names in
+    /// Msg 451's <c>occurring in &lt;clause&gt; statement column &lt;n&gt;</c>
+    /// tail. Set by the plan build around each select-list / GROUP BY /
+    /// ORDER BY term and cleared once the clause is bound.
+    /// <para>Null means nothing demands a definite collation at this point:
+    /// an assignment target (INSERT … SELECT, SELECT @v = …, UPDATE SET)
+    /// supplies one, and real settles the conflict against it silently rather
+    /// than raising.</para>
+    /// </summary>
+    public (string Clause, int Ordinal)? CollationOutputSlot;
+
+    /// <summary>
     /// Parse-time chain of outer-scope column-type resolvers, used to plan
     /// the output schema of a correlated subquery whose projection references
     /// an enclosing SELECT's columns. Set by <see cref="Selection"/>'s
@@ -332,6 +355,17 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// SQL Server checks as requiring SELECT on <em>every</em> column.
     /// </summary>
     public Dictionary<int, ColumnReadTarget>? ReadColumnSink;
+
+    /// <summary>
+    /// The <c>GROUP BY</c> item-binding error (Msg 144 / Msg 164) the current
+    /// query expression owes, held until its whole statement has parsed. Real
+    /// parses a batch before binding any of it, so a syntax error anywhere
+    /// past the clause outranks the clause's own binding error:
+    /// <c>GROUP BY 'a' 'b'</c> is Msg 102 at <c>'b'</c>, not Msg 164
+    /// (probe-confirmed, both messages). The first offending item wins, which
+    /// is the order an immediate throw produced.
+    /// </summary>
+    public SimulatedSqlException? PendingGroupByBindError;
 
     public Simulation Simulation => Command.simulation;
 

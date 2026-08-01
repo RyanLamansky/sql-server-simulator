@@ -285,14 +285,58 @@ partial class Simulation
     internal const string QuotedIdentifierOptionName = "QUOTED_IDENTIFIER";
 
     /// <summary>
-    /// Raises Msg 1934 when a write to <paramref name="table"/> runs under
-    /// <c>QUOTED_IDENTIFIER OFF</c> and the table carries one of the features
-    /// whose stored expressions real re-evaluates at write time — a
+    /// The option list Msg 1934 names for the session at
+    /// <paramref name="context"/>'s parse position, or <see langword="null"/>
+    /// when every option real's gate requires is set the way it wants.
+    /// <para>
+    /// Real requires <c>QUOTED_IDENTIFIER</c> / <c>ANSI_NULLS</c> /
+    /// <c>CONCAT_NULL_YIELDS_NULL</c> / <c>ANSI_WARNINGS</c> /
+    /// <c>ANSI_PADDING</c> ON and <c>NUMERIC_ROUNDABORT</c> OFF, and names
+    /// every offending one comma-separated in that fixed order — not the
+    /// order the session set them (probe-confirmed against SQL Server 2025
+    /// with three and five options wrong at once). <c>QUOTED_IDENTIFIER</c>
+    /// is reported <i>alone</i> when it is off, whatever the other five say.
+    /// </para>
+    /// <para>
+    /// <c>ARITHABORT</c> is documented as part of the required set but never
+    /// appears: real's gate accepts a session whose <c>ARITHABORT</c> bit is
+    /// 0 as long as <c>ANSI_WARNINGS</c> is on (probe-confirmed by reading
+    /// <c>@@OPTIONS &amp; 64</c> in the failing batch), which is the
+    /// ANSI_WARNINGS-implies-ARITHABORT rule standing in for it.
+    /// </para>
+    /// </summary>
+    internal static string? IncorrectSetOptionNames(ParserContext context)
+    {
+        // The parse-position setting, so a module body answers from its own
+        // creation-time capture rather than the caller's session.
+        if (!context.QuotedIdentifiers)
+            return QuotedIdentifierOptionName;
+        var connection = context.Connection;
+        if (connection is { AnsiNulls: true, ConcatNullYieldsNull: true, AnsiWarnings: true, AnsiPadding: true, NumericRoundabort: false })
+            return null;
+        var offenders = new List<string>(5);
+        if (!connection.AnsiNulls)
+            offenders.Add("ANSI_NULLS");
+        if (!connection.ConcatNullYieldsNull)
+            offenders.Add("CONCAT_NULL_YIELDS_NULL");
+        if (!connection.AnsiWarnings)
+            offenders.Add("ANSI_WARNINGS");
+        if (!connection.AnsiPadding)
+            offenders.Add("ANSI_PADDING");
+        if (connection.NumericRoundabort)
+            offenders.Add("NUMERIC_ROUNDABORT");
+        return string.Join(", ", offenders);
+    }
+
+    /// <summary>
+    /// Raises Msg 1934 when a write to <paramref name="table"/> runs under a
+    /// SET-option setting real's gate refuses and the table carries one of the
+    /// features whose stored expressions real re-evaluates at write time — a
     /// <c>PERSISTED</c> computed column, an enabled index over a computed
     /// column, an enabled filtered index, an XML or spatial index, or an
     /// indexed view built on it. Those expressions were parsed under the
     /// creating session's setting, so real refuses to maintain them from a
-    /// session that would read <c>"…"</c> the other way.
+    /// session that would read them differently.
     /// <para>
     /// Probe-confirmed boundaries (SQL Server 2025): reads are never gated —
     /// <c>SELECT</c> from such a table succeeds; a non-persisted computed
@@ -312,13 +356,16 @@ partial class Simulation
     /// </para>
     /// </summary>
     /// <param name="table">The DML target.</param>
-    /// <param name="batch">Supplies the effective <c>QUOTED_IDENTIFIER</c>.</param>
+    /// <param name="batch">Supplies the effective SET-option settings.</param>
     /// <param name="verb">The statement name real echoes (<c>INSERT</c> / <c>UPDATE</c> / <c>DELETE</c> / <c>MERGE</c>).</param>
     internal static void RejectIncorrectSetOptionsForWrite(HeapTable table, BatchContext batch, string verb)
     {
-        if (batch.CreateTimeBinding || batch.Parser.QuotedIdentifiers || !RequiresQuotedIdentifierOn(table))
+        // Option reads first: the table walk below is per-write work, and a
+        // session with the options real wants — the overwhelmingly common
+        // case — never reaches it.
+        if (batch.CreateTimeBinding || IncorrectSetOptionNames(batch.Parser) is not { } options || !RequiresCorrectSetOptions(table))
             return;
-        throw SimulatedSqlException.IncorrectSetOptions(verb, QuotedIdentifierOptionName);
+        throw SimulatedSqlException.IncorrectSetOptions(verb, options);
     }
 
     /// <summary>
@@ -326,7 +373,7 @@ partial class Simulation
     /// captured under a creating session's SET options — the condition behind
     /// <see cref="RejectIncorrectSetOptionsForWrite"/>.
     /// </summary>
-    private static bool RequiresQuotedIdentifierOn(HeapTable table)
+    private static bool RequiresCorrectSetOptions(HeapTable table)
     {
         if (table.XmlIndexes.Count > 0 || table.SpatialIndexes.Count > 0 || table.DependentIndexedViews.Count > 0)
             return true;

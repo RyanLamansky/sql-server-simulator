@@ -276,6 +276,8 @@ public sealed class IndexedViewTests
         "Cannot create index on view 'simulated.dbo.v' because its select list does not include a proper use of COUNT_BIG. Consider adding COUNT_BIG(*) to select list.")]
     [DataRow("select id, dateadd(day, 1, getdate()) d from dbo.t", "id", 1949,
         "Cannot create index on view 'simulated.dbo.v'. The function 'getdate' yields nondeterministic results. Use a deterministic system function, or modify the user-defined function to return deterministic results.")]
+    [DataRow("select id, newid() g from dbo.t", "id", 1949,
+        "Cannot create index on view 'simulated.dbo.v'. The function 'newid' yields nondeterministic results. Use a deterministic system function, or modify the user-defined function to return deterministic results.")]
     [DataRow("select t1.id, t2.a from dbo.t t1 join dbo.t t2 on t2.id = t1.id", "id", 1947,
         "Cannot create index on view \"simulated.dbo.v\". The view contains a self join on \"simulated.dbo.t\".")]
     [DataRow("with c as (select id, a from dbo.t) select id, a from c", "id", 10137,

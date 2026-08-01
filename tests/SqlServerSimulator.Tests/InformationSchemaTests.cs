@@ -104,6 +104,11 @@ public sealed class InformationSchemaTests
         AreEqual((byte)2, reader.GetByte(3));
     }
 
+    /// <summary>
+    /// precision is the width of the rendered literal, so a non-zero
+    /// fractional precision costs its own digits plus the decimal point:
+    /// datetime2(0) is 19 and datetime2(3) is 23, not 22 (probe-confirmed).
+    /// </summary>
     [TestMethod]
     public void SysColumns_Datetime2PrecisionMetadata()
     {
@@ -114,7 +119,22 @@ public sealed class InformationSchemaTests
         var rows = new List<(string, short, byte, byte)>();
         while (reader.Read()) rows.Add((reader.GetString(0), reader.GetInt16(1), reader.GetByte(2), reader.GetByte(3)));
         CollectionAssert.AreEqual(
-            new[] { ("a", (short)6, (byte)19, (byte)0), ("b", (short)7, (byte)22, (byte)3), ("c", (short)8, (byte)26, (byte)7) },
+            new[] { ("a", (short)6, (byte)19, (byte)0), ("b", (short)7, (byte)23, (byte)3), ("c", (short)8, (byte)27, (byte)7) },
+            rows);
+    }
+
+    /// <summary>The same decimal-point rule on datetimeoffset: 26 / 30 / 34.</summary>
+    [TestMethod]
+    public void SysColumns_DatetimeOffsetPrecisionMetadata()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            create table foo (a datetimeoffset(0), b datetimeoffset(3), c datetimeoffset(7));
+            select max_length, [precision], scale from sys.columns where object_id = object_id('foo') order by column_id
+            """);
+        var rows = new List<(short, byte, byte)>();
+        while (reader.Read()) rows.Add((reader.GetInt16(0), reader.GetByte(1), reader.GetByte(2)));
+        CollectionAssert.AreEqual(
+            new[] { ((short)8, (byte)26, (byte)0), ((short)9, (byte)30, (byte)3), ((short)10, (byte)34, (byte)7) },
             rows);
     }
 
@@ -128,7 +148,7 @@ public sealed class InformationSchemaTests
         var rows = new List<(short, byte, byte)>();
         while (reader.Read()) rows.Add((reader.GetInt16(0), reader.GetByte(1), reader.GetByte(2)));
         CollectionAssert.AreEqual(
-            new[] { ((short)3, (byte)8, (byte)0), ((short)3, (byte)10, (byte)2), ((short)5, (byte)15, (byte)7) },
+            new[] { ((short)3, (byte)8, (byte)0), ((short)3, (byte)11, (byte)2), ((short)5, (byte)16, (byte)7) },
             rows);
     }
 
@@ -393,22 +413,48 @@ public sealed class InformationSchemaTests
             rows);
     }
 
+    /// <summary>
+    /// COLUMN_DEFAULT carries the captured DEFAULT text, matching real's
+    /// parenthesized rendering (probe-confirmed: <c>(N'x')</c> /
+    /// <c>((42))</c> / <c>(sysutcdatetime())</c>). A column with no default
+    /// stays NULL.
+    /// </summary>
     [TestMethod]
-    public void IsColumns_ColumnDefault_AlwaysNull_FidelityGap()
+    public void IsColumns_ColumnDefault_RendersCapturedText()
     {
-        // Real SQL Server renders the default expression as '(getutcdate())'.
-        // The simulator returns NULL until expression-to-SQL serialization
-        // lands as its own bundle; documented in CLAUDE.md.
-        using var reader = new Simulation().ExecuteReader("""
-            create table foo (ts datetime2 default getutcdate());
-            select COLUMN_DEFAULT from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 'foo'
-            """);
-        IsTrue(reader.Read());
-        IsTrue(reader.IsDBNull(0));
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table foo (id int, nm nvarchar(20) default N'x', n int default (42), ts datetime2 default sysutcdatetime())");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 'foo' and COLUMN_NAME = 'id' and COLUMN_DEFAULT is null"));
+        AreEqual("(N'x')", sim.ExecuteScalar("select COLUMN_DEFAULT from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 'foo' and COLUMN_NAME = 'nm'"));
+        AreEqual("((42))", sim.ExecuteScalar("select COLUMN_DEFAULT from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 'foo' and COLUMN_NAME = 'n'"));
+        AreEqual("(sysutcdatetime())", sim.ExecuteScalar("select COLUMN_DEFAULT from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 'foo' and COLUMN_NAME = 'ts'"));
+    }
+
+    /// <summary>
+    /// A view's output columns appear alongside base-table columns, with
+    /// ORDINAL_POSITION restarting at 1 per view and a NULL COLUMN_DEFAULT
+    /// (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void IsColumns_IncludesViewOutputColumns()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int not null, nm nvarchar(20) null)",
+            "create view v as select id, nm from t");
+        AreEqual(2, sim.ExecuteScalar("select count(*) from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 'v'"));
+        AreEqual("nm", sim.ExecuteScalar("select COLUMN_NAME from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 'v' and ORDINAL_POSITION = 2"));
+        AreEqual(2, sim.ExecuteScalar("select count(*) from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 'v' and COLUMN_DEFAULT is null"));
     }
 
     // ---- INFORMATION_SCHEMA.SCHEMATA ----
 
+    /// <summary>
+    /// The view lists real's full fixed-schema set — dbo / guest /
+    /// INFORMATION_SCHEMA / sys plus the nine fixed-database-role schemas
+    /// (13 rows on a fresh database) — each owned by its like-named principal
+    /// (probe-confirmed).
+    /// </summary>
     [TestMethod]
     public void IsSchemata_ListsBuiltInSchemas()
     {
@@ -417,16 +463,29 @@ public sealed class InformationSchemaTests
         var rows = new List<(string, string)>();
         while (reader.Read()) rows.Add((reader.GetString(0), reader.GetString(1)));
         CollectionAssert.AreEquivalent(
-            new[] { ("dbo", "dbo"), ("INFORMATION_SCHEMA", "INFORMATION_SCHEMA"), ("sys", "sys") },
+            new[]
+            {
+                ("dbo", "dbo"), ("guest", "guest"), ("INFORMATION_SCHEMA", "INFORMATION_SCHEMA"), ("sys", "sys"),
+                ("db_owner", "db_owner"), ("db_accessadmin", "db_accessadmin"), ("db_securityadmin", "db_securityadmin"),
+                ("db_ddladmin", "db_ddladmin"), ("db_backupoperator", "db_backupoperator"), ("db_datareader", "db_datareader"),
+                ("db_datawriter", "db_datawriter"), ("db_denydatareader", "db_denydatareader"), ("db_denydatawriter", "db_denydatawriter"),
+            },
             rows);
     }
 
+    /// <summary>
+    /// A user schema joins the 13 fixed rows and reports <c>dbo</c> as its
+    /// owner, not its own name (probe-confirmed) — the same ownership rule
+    /// <c>sys.schemas.principal_id</c> follows.
+    /// </summary>
     [TestMethod]
     public void IsSchemata_IncludesUserSchema()
-        => AreEqual(4, new Simulation().ExecuteScalar("""
-            create schema audit;
-            select count(*) from INFORMATION_SCHEMA.SCHEMATA
-            """));
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create schema audit");
+        AreEqual(14, sim.ExecuteScalar("select count(*) from INFORMATION_SCHEMA.SCHEMATA"));
+        AreEqual("dbo", sim.ExecuteScalar("select SCHEMA_OWNER from INFORMATION_SCHEMA.SCHEMATA where SCHEMA_NAME = 'audit'"));
+    }
 
     [TestMethod]
     public void IsSchemata_CatalogIsDatabaseName()

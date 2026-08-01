@@ -118,8 +118,8 @@ internal sealed class ConnectionProperty : Expression
 /// <summary>
 /// SQL <c>CURRENT_TRANSACTION_ID()</c>: returns a <c>bigint</c> transaction
 /// identifier. Apps use it for logging / correlation, not correctness; the
-/// simulator approximates it with the database's monotonic commit counter
-/// (<see cref="Database.CurrentTransactionCommitId"/>) — a plausible,
+/// simulator approximates it with the instance's monotonic commit counter
+/// (<see cref="Simulation.CurrentTransactionCommitId"/>) — a plausible,
 /// increasing value rather than a stable per-transaction id.
 /// </summary>
 internal sealed class CurrentTransactionId : Expression
@@ -131,7 +131,7 @@ internal sealed class CurrentTransactionId : Expression
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromInt64(runtime.Batch.CurrentDatabase.CurrentTransactionCommitId);
+        SqlValue.FromInt64(runtime.Batch.Connection.Simulation.CurrentTransactionCommitId);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.BigInt;
 

@@ -157,7 +157,9 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <c>SESSIONPROPERTY('ANSI_NULLS')</c>. Defaults to <see langword="true"/>
     /// (a fresh SqlClient session reports 1 — probe-confirmed). The simulator
     /// doesn't model the <c>= NULL</c>-comparison semantic this option governs;
-    /// the field exists so the option's recorded state reads back consistently.
+    /// the field exists so the option's recorded state reads back consistently,
+    /// and so each CREATE can stamp it onto the object's
+    /// <c>SchemaObject.UsesAnsiNulls</c> capture.
     /// Mutated by top-level <c>SET ANSI_NULLS ON|OFF</c> (including the comma-list
     /// form); like <c>QUOTED_IDENTIFIER</c>, SETs inside a procedure / function /
     /// trigger body or dynamic SQL don't write here.
@@ -305,6 +307,26 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <c>CreateDbConnection()</c>.
     /// </summary>
     internal readonly DateTime LoginTimeUtc = DateTime.UtcNow;
+
+    /// <summary>
+    /// The client workstation name this session reported: the connection
+    /// string's <c>Workstation ID</c> / <c>WSID</c> keyword in-process, the
+    /// LOGIN7 <c>HostName</c> field over the TDS endpoint. Empty when neither
+    /// supplied one — the pool default real SQL Server also reports. Surfaces
+    /// as <c>HOST_NAME()</c>, <c>sys.dm_exec_sessions.host_name</c>, and the
+    /// <c>HostName</c> column of <c>sp_who</c> / <c>sp_who2</c>.
+    /// </summary>
+    internal string ClientHostName = "";
+
+    /// <summary>
+    /// The client application name this session reported: the connection
+    /// string's <c>Application Name</c> / <c>App</c> keyword in-process, the
+    /// LOGIN7 <c>AppName</c> field over the TDS endpoint. Empty when neither
+    /// supplied one. Surfaces as <c>APP_NAME()</c>,
+    /// <c>sys.dm_exec_sessions.program_name</c>, and <c>sp_who2</c>'s
+    /// <c>ProgramName</c> column.
+    /// </summary>
+    internal string ClientApplicationName = "";
 
     /// <summary>
     /// Session-scoped transaction-isolation level. Default is
@@ -660,10 +682,11 @@ public sealed class SimulatedDbConnection : DbConnection
 
     /// <summary>
     /// Minimal <c>SqlConnectionStringBuilder</c>-style parser: splits on
-    /// <c>;</c>, matches keys case-insensitively, and captures the credential +
-    /// initial-catalog keywords that carry in-process meaning
-    /// (<c>User ID</c>/<c>UID</c>, <c>Password</c>/<c>PWD</c>,
-    /// <c>Initial Catalog</c>/<c>Database</c>). Every other keyword (Server,
+    /// <c>;</c>, matches keys case-insensitively, and captures the credential,
+    /// initial-catalog and client-identity keywords that carry in-process
+    /// meaning (<c>User ID</c>/<c>UID</c>, <c>Password</c>/<c>PWD</c>,
+    /// <c>Initial Catalog</c>/<c>Database</c>, <c>Workstation ID</c>/<c>WSID</c>,
+    /// <c>Application Name</c>/<c>App</c>). Every other keyword (Server,
     /// Encrypt, Pooling, …) is accepted and ignored — the connection is already
     /// bound to its Simulation. Values may be wrapped in matching single or
     /// double quotes.
@@ -674,6 +697,8 @@ public sealed class SimulatedDbConnection : DbConnection
         this.pendingUserId = null;
         this.pendingPassword = null;
         this.pendingInitialCatalog = null;
+        this.ClientHostName = "";
+        this.ClientApplicationName = "";
         if (string.IsNullOrEmpty(value))
             return;
         foreach (var part in value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -692,6 +717,10 @@ public sealed class SimulatedDbConnection : DbConnection
                 this.pendingPassword = unquoted;
             else if (KeyMatches(key, "Initial Catalog", "Database"))
                 this.pendingInitialCatalog = unquoted;
+            else if (KeyMatches(key, "Workstation ID", "WSID"))
+                this.ClientHostName = unquoted;
+            else if (KeyMatches(key, "Application Name", "App"))
+                this.ClientApplicationName = unquoted;
         }
     }
 
@@ -737,21 +766,7 @@ public sealed class SimulatedDbConnection : DbConnection
         if (string.IsNullOrWhiteSpace(databaseName))
             throw new ArgumentException("Database cannot be null, the empty string, or string of only whitespace.", nameof(databaseName));
 
-        // A restricted principal (an impersonated non-dbo user, or an
-        // authenticated login mapped to a non-dbo user) can't cross databases —
-        // Msg 916, session stays put. A dbo / sa session (the in-process
-        // default) keeps today's unrestricted switch.
-        // An active application role pins the session to its database (Msg 505),
-        // the same gate USE applies.
-        if (this.Security.HasApplicationRole)
-            throw SimulatedSqlException.CannotChangeDatabaseUnderApplicationRole();
-        if (!this.Security.EffectiveIsDbo)
-            throw SimulatedSqlException.CannotAccessDatabaseUnderSecurityContext(this.Security.Effective.LoginName, databaseName);
-
-        if (!this.Simulation.Databases.TryGetValue(databaseName, out var target))
-            throw SimulatedSqlException.DatabaseDoesNotExist(databaseName);
-
-        this.CurrentDatabase = target;
+        Simulation.SwitchDatabase(this, databaseName);
     }
 
     /// <summary>

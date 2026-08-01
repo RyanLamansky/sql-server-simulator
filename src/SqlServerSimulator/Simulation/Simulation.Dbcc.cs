@@ -96,7 +96,7 @@ partial class Simulation
             ? context.Connection.CurrentDatabase
             : ResolveShrinkDatabase(simulation, firstArg);
 
-        ShrinkDatabaseStorage(target);
+        ShrinkDatabaseStorage(context.Connection.Simulation, target);
 
         if (isFile)
         {
@@ -355,9 +355,9 @@ partial class Simulation
     /// stops holding pages, then drops fully-dead trailing data pages (gated by
     /// a no-version-entry / no-held-lock check) and freed trailing LOB pages.
     /// </summary>
-    private static void ShrinkDatabaseStorage(Database database)
+    private static void ShrinkDatabaseStorage(Simulation simulation, Database database)
     {
-        VersionStore.RunGarbageCollection(database);
+        VersionStore.RunGarbageCollection(simulation, database);
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)

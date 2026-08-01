@@ -8,7 +8,7 @@ namespace SqlServerSimulator.Storage;
 /// and <c>sys.dm_tran_active_snapshot_database_transactions</c>. All three
 /// project from live per-database state (the per-table
 /// <see cref="HeapTable.RowVersions"/> dicts and
-/// <see cref="Database.ActiveSnapshotTxs"/>) at iteration time — no
+/// <see cref="Simulation.ActiveSnapshotTxs"/>) at iteration time — no
 /// caching. The version-store DMV walks every committed
 /// <see cref="HistoricalVersion"/>; pending HVs (those marked with
 /// <see cref="VersionStore.PendingXmax"/>) are excluded since they don't
@@ -111,8 +111,8 @@ internal static class VersionStoreDmvs
     }
 
     /// <summary>
-    /// One row per active SNAPSHOT-isolation transaction in the current
-    /// database. <see cref="Database.ActiveSnapshotTxs"/> is the canonical
+    /// One row per active SNAPSHOT-isolation transaction.
+    /// <see cref="Simulation.ActiveSnapshotTxs"/> is the canonical
     /// registry — every SI tx that allocated a snapshot Xid via
     /// <see cref="BatchContext.ResolveSnapshotXidForRead"/> is in here
     /// until Commit / Rollback / Dispose. RCSI per-statement snapshots
@@ -124,13 +124,13 @@ internal static class VersionStoreDmvs
     /// </summary>
     internal static IEnumerable<SqlValue[]> EnumerateDmTranActiveSnapshotDatabaseTransactions(BatchContext batch, Database database)
     {
-        _ = batch;
+        _ = database;
         var trueBit = SqlValue.FromBoolean(true);
         var nullBigInt = SqlValue.Null(SqlType.BigInt);
         var zeroInt = SqlValue.FromInt32(0);
         var zeroBig = SqlValue.FromInt64(0);
         var zeroFloat = SqlValue.FromDouble(0);
-        foreach (var kv in database.ActiveSnapshotTxs)
+        foreach (var kv in batch.Connection.Simulation.ActiveSnapshotTxs)
         {
             var tx = kv.Key;
             if (tx.SnapshotXid is not { } xid)

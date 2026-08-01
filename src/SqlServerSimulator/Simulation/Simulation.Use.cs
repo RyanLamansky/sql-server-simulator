@@ -33,23 +33,32 @@ partial class Simulation
         if (batch.IsSkipping)
             return;
 
-        // A restricted principal (impersonated non-dbo user, or an
-        // authenticated login mapped to a non-dbo user) can't cross databases:
-        // Msg 916, session stays in the current database. A dbo / sa session
-        // keeps the unrestricted switch.
-        var connection = context.Connection;
-        // An active application role pins the session to the database that set
-        // it — Msg 505, ahead of the ordinary restricted-principal gate, since
-        // real reports the approle-specific wording even for a would-be-dbo
-        // session (probe-confirmed).
-        if (connection.Security.HasApplicationRole)
-            throw SimulatedSqlException.CannotChangeDatabaseUnderApplicationRole();
-        if (!connection.Security.EffectiveIsDbo)
-            throw SimulatedSqlException.CannotAccessDatabaseUnderSecurityContext(connection.Security.Effective.LoginName, nameToken.Value);
+        SwitchDatabase(context.Connection, nameToken.Value);
+    }
 
-        var simulation = connection.Simulation;
-        if (!simulation.Databases.TryGetValue(nameToken.Value, out var target))
-            throw SimulatedSqlException.DatabaseDoesNotExist(nameToken.Value);
+    /// <summary>
+    /// The database switch behind both <c>USE</c> and
+    /// <see cref="SimulatedDbConnection.ChangeDatabase"/>. A missing database
+    /// raises Msg 911 first (probe-confirmed — existence is reported even to a
+    /// principal that couldn't have opened it); an active application role
+    /// raises Msg 505 ahead of everything, since real reports the approle
+    /// wording even for a would-be-dbo session. A restricted principal then
+    /// has to resolve in the target: its login's user there becomes the
+    /// session's base identity (so <c>CURRENT_USER</c> follows the switch),
+    /// and a login with no user there gets Msg 916 with the session left put.
+    /// </summary>
+    internal static void SwitchDatabase(SimulatedDbConnection connection, string databaseName)
+    {
+        var security = connection.Security;
+        if (security.HasApplicationRole)
+            throw SimulatedSqlException.CannotChangeDatabaseUnderApplicationRole();
+        if (!connection.Simulation.Databases.TryGetValue(databaseName, out var target))
+            throw SimulatedSqlException.DatabaseDoesNotExist(databaseName);
+        if (!security.EffectiveIsDbo)
+        {
+            var principal = PermissionEnforcement.ResolveCrossDatabasePrincipal(connection, target);
+            security.RebindBaseFrameToDatabaseUser(principal);
+        }
 
         connection.CurrentDatabase = target;
     }

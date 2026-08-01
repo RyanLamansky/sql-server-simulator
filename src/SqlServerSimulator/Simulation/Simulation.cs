@@ -527,6 +527,49 @@ public sealed partial class Simulation
     /// </summary>
     internal static FrozenDictionary<string, CatalogView> CatalogViews => BuiltInResources.CatalogViews.Value;
 
+    private long transactionCommitCounter;
+
+    /// <summary>
+    /// Allocates the next transaction commit id used by SNAPSHOT and
+    /// READ_COMMITTED_SNAPSHOT visibility. Monotonic, <b>instance-scoped</b>,
+    /// never reused — one sequence for every database, mirroring real SQL
+    /// Server's server-wide transaction sequence number (its version store
+    /// lives in <c>tempdb</c>, not per database). Instance scope is what makes
+    /// a snapshot stamp comparable across databases: a SNAPSHOT transaction
+    /// fixes one stamp at its first data-access statement and reads <em>every</em>
+    /// database as of that instant (probe-confirmed against SQL Server 2025 —
+    /// a transaction whose first read was in one database still sees the
+    /// pre-update state of another it reads later). Each committing transaction
+    /// takes one stamp however many databases it wrote to. The counter starts
+    /// at zero so the implicit "Xmin = 0" for rows that pre-date the first
+    /// SI / RCSI read is visible to any snapshot.
+    /// </summary>
+    internal long AllocateTransactionCommitId() => Interlocked.Increment(ref this.transactionCommitCounter);
+
+    /// <summary>
+    /// Reads the current value of the commit-id counter without advancing it.
+    /// Used to stamp a snapshot at first read under SNAPSHOT isolation and at
+    /// each statement's first read under READ_COMMITTED_SNAPSHOT. Returning the
+    /// latest committed stamp guarantees readers see every transaction that
+    /// committed before the snapshot was taken.
+    /// </summary>
+    internal long CurrentTransactionCommitId => Interlocked.Read(ref this.transactionCommitCounter);
+
+    /// <summary>
+    /// Active SNAPSHOT-isolation transactions whose snapshot Xid is still
+    /// load-bearing — every entry's <see cref="SimulatedDbTransaction.SnapshotXid"/>
+    /// is non-null and the tx hasn't reached Commit / Rollback / Dispose yet.
+    /// Populated by <see cref="Parser.BatchContext.ResolveSnapshotXidForRead"/>
+    /// on first user-table read of an SI tx; drained by the corresponding
+    /// finalization path. Read by the version-store GC to compute the oldest
+    /// active snapshot Xid (HVs whose <c>Xmax &lt;= oldest_active</c> are safe
+    /// to drop), and by <c>sys.dm_tran_active_snapshot_database_transactions</c>
+    /// to enumerate per-session SI state. Instance-scoped alongside the commit
+    /// counter: one stamp reaches every database, so a snapshot open anywhere
+    /// pins history everywhere.
+    /// </summary>
+    internal readonly ConcurrentDictionary<SimulatedDbTransaction, byte> ActiveSnapshotTxs = new();
+
     /// <summary>
     /// Random 12-byte tail (raw bytes [4..15] of the produced GUID) for
     /// <see cref="GenerateNewSequentialId"/>. Filled once at construction —
@@ -1361,6 +1404,15 @@ public sealed partial class Simulation
         var connection = batch.Connection;
         var savedThreadId = connection.CurrentExecutingThreadId;
         connection.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
+        // Function body-shape recording (Msg 455 / 444 / 443) — active only
+        // while a scalar UDF's / multi-statement TVF's body binds at CREATE.
+        // An IF / WHILE brackets its contained statements so none of them can
+        // satisfy the last-statement rule; the nested dispatch has completed by
+        // the finally below, which materializes every outcome.
+        var shape = batch.FunctionBodyShape;
+        var opensConditional = shape is not null && NoteFunctionBodyStatement(batch, shape);
+        if (opensConditional)
+            shape!.ConditionalDepth++;
         List<SimulatedStatementOutcome>? outcomes = null;
         SimulatedSqlException? caught = null;
         SimulatedSqlException? continuedError = null;
@@ -1466,6 +1518,8 @@ public sealed partial class Simulation
         {
             batch.ReleaseStatementSchemaLocks();
             connection.CurrentExecutingThreadId = savedThreadId;
+            if (opensConditional)
+                shape!.ConditionalDepth--;
         }
 
         if (deferredNameError)
@@ -1770,6 +1824,17 @@ public sealed partial class Simulation
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     if (!batch.IsSkipping)
                         PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
+                    // Inside a function body real splits the SELECT three ways:
+                    // an assignment-only SELECT is legal, SELECT … INTO is a
+                    // side-effecting operator of its own, and anything else
+                    // would send rows to the client.
+                    if (batch.FunctionBodyShape is not null)
+                    {
+                        if (selection.IntoTarget is not null)
+                            FunctionBodyShape.NoteSideEffect(batch, "SELECT INTO", FunctionBodyShape.StatementOperatorState);
+                        else if (!selection.IsAssignmentOnly)
+                            FunctionBodyShape.NoteClientSelect(batch);
+                    }
                     if (selection.IntoTarget is not null)
                     {
                         // SELECT INTO: creates the destination table and
@@ -2365,7 +2430,7 @@ public sealed partial class Simulation
                 // FinalizePendingEntries clears the list, so capture whether
                 // this statement versioned anything before the call.
                 var versionedThisStatement = autoCommitEntries.Count > 0;
-                Storage.VersionStore.FinalizePendingEntries(autoCommitEntries, context.CurrentDatabase);
+                Storage.VersionStore.FinalizePendingEntries(autoCommitEntries, context.Connection.Simulation);
                 // Auto-commit statement: its writes are now permanent, so
                 // commit the throwaway log — reclaiming chains superseded by
                 // this statement's UPDATE/DELETEs (unversioned path). Under an
@@ -2379,9 +2444,9 @@ public sealed partial class Simulation
                 // commit (the version-store analog of the unversioned
                 // log.Commit() above). An active snapshot legitimately needs the
                 // versions, so defer — and skip the scan — until it closes.
-                var autoCommitDatabase = context.CurrentDatabase;
-                if (versionedThisStatement && autoCommitDatabase.ActiveSnapshotTxs.IsEmpty)
-                    Storage.VersionStore.RunGarbageCollection(autoCommitDatabase);
+                var autoCommitSimulation = context.Connection.Simulation;
+                if (versionedThisStatement && autoCommitSimulation.ActiveSnapshotTxs.IsEmpty)
+                    Storage.VersionStore.RunGarbageCollection(autoCommitSimulation, context.CurrentDatabase);
             }
             // Table-variable writes are non-transactional and final on
             // statement success regardless of any enclosing tx, so their

@@ -222,12 +222,12 @@ partial class Simulation
             ignoreDupKey);
 
         // A filtered index or one over a computed column stores the value of
-        // an expression, so real refuses to build it from a session whose
-        // QUOTED_IDENTIFIER would read that expression's `"…"` the other way
-        // (Msg 1934). A plain index over plain columns is unaffected
-        // (probe-confirmed).
-        if (!context.QuotedIdentifiers && (filter is not null || IndexCoversComputedColumn(table, index)))
-            throw SimulatedSqlException.IncorrectSetOptions("CREATE INDEX", QuotedIdentifierOptionName);
+        // an expression, so real refuses to build it from a session whose SET
+        // options would read that expression differently (Msg 1934, naming
+        // every offending option). A plain index over plain columns is
+        // unaffected (probe-confirmed).
+        if ((filter is not null || IndexCoversComputedColumn(table, index)) && IncorrectSetOptionNames(context) is { } setOptions)
+            throw SimulatedSqlException.IncorrectSetOptions("CREATE INDEX", setOptions);
 
         if (isUnique)
             ValidateExistingRowsForUniqueIndex(table, index, context.Batch, qualifiedTableName);

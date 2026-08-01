@@ -8,6 +8,14 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
+    /// The first <c>index_id</c> real SQL Server hands an XML index. The range
+    /// is per table, so every table's first XML index is 256000; spatial
+    /// indexes have their own 384000+ range, and ordinary indexes keep the
+    /// small ids starting at 1.
+    /// </summary>
+    private const int XmlIndexIdBase = 256000;
+
+    /// <summary>
     /// Returns true when the token after the current <c>(</c> looks like an
     /// XML schema-collection argument (a 1- or 2-part name optionally
     /// preceded by the <c>CONTENT</c> or <c>DOCUMENT</c> contextual keyword)
@@ -288,17 +296,21 @@ partial class Simulation
         // (0 for secondaries — they resolve their primary's at enumeration).
         // Msg 1934 echoes the statement as written, so the primary and
         // secondary forms report different verbs (probe-confirmed).
-        if (!context.QuotedIdentifiers)
-            throw SimulatedSqlException.IncorrectSetOptions(isPrimary ? "CREATE PRIMARY XML INDEX" : "CREATE XML INDEX", QuotedIdentifierOptionName);
+        if (IncorrectSetOptionNames(context) is { } setOptions)
+            throw SimulatedSqlException.IncorrectSetOptions(isPrimary ? "CREATE PRIMARY XML INDEX" : "CREATE XML INDEX", setOptions);
 
         var internalTableObjectId = isPrimary ? context.CurrentDatabase.AllocateObjectId() : 0;
+        // XML indexes take index ids from real's dedicated 256000+ range, one
+        // sequence per table in creation order — probe-confirmed (a second XML
+        // index on the same table is 256001, the first on a second table is
+        // 256000 again). Spatial indexes have their own 384000+ range.
         var index = new XmlIndex(
             indexName,
             ordinal,
             isPrimary,
             usingPrimaryName,
             secondaryType,
-            context.CurrentDatabase.AllocateObjectId(),
+            XmlIndexIdBase + table.XmlIndexes.Count,
             internalTableObjectId);
         table.XmlIndexes.Add(index);
         return true;
@@ -341,7 +353,7 @@ internal sealed class XmlIndex(
     bool isPrimary,
     string? usingPrimaryIndexName,
     XmlSecondaryIndexType? secondaryType,
-    int objectId,
+    int indexId,
     int internalTableObjectId)
 {
     public readonly string Name = name;
@@ -366,11 +378,13 @@ internal sealed class XmlIndex(
     /// primary indexes.</summary>
     public readonly XmlSecondaryIndexType? SecondaryType = secondaryType;
 
-    /// <summary>Stable object id (allocated from the same counter as
-    /// tables / views / etc.). Used for any future <c>sys.objects</c>
-    /// surfacing; surfaces in <c>sys.xml_indexes.index_id</c> directly
-    /// in real SQL Server convention.</summary>
-    public readonly int ObjectId = objectId;
+    /// <summary>The index's <c>sys.indexes</c> / <c>sys.xml_indexes</c>
+    /// <c>index_id</c>, taken from real's dedicated XML range: 256000 for a
+    /// table's first XML index, incrementing per index on that table. A
+    /// secondary index's primary reports the same value through
+    /// <c>using_xml_index_id</c>, and the primary's internal node table is
+    /// named after it.</summary>
+    public readonly int IndexId = indexId;
 }
 
 /// <summary>

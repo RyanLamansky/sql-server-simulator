@@ -52,17 +52,16 @@ What follows the *target* rather than the session, all keyed off `HeapTable.Owni
   So `DB_NAME()` inside the body reads the target — probe-confirmed — and the body's unqualified writes land there; reaching back to the firing session's database is itself a three-part write.
 - **Object-id allocation** for a table created by a three-part `CREATE TABLE` / `SELECT … INTO`, so its `sys.tables` row carries an id from the database it lives in.
 - **The version store.**
-  Capture is gated on the target's `ALLOW_SNAPSHOT_ISOLATION` / `READ_COMMITTED_SNAPSHOT`, and `VersionStore.FinalizePendingEntries` allocates one commit Xid *per database* the transaction wrote to (the counter is per-database) — the single-database case still allocates one and takes no dictionary.
+  Capture is gated on the target's `ALLOW_SNAPSHOT_ISOLATION` / `READ_COMMITTED_SNAPSHOT`, and so is a *reader's* versioning: whether a read is versioned at all follows the table's own database, so a session in a non-RCSI database reading a three-part name into an RCSI one reads versioned and the reverse blocks (probe-confirmed both directions), and a SNAPSHOT session's Msg 3952 names the target.
+  The commit-id sequence itself is **instance-wide** rather than per database, mirroring real's server-scoped transaction sequence number — see [`locking.md`](locking.md#commit-xid-allocator).
+- **Permission resolution.**
+  A reference through a three-part name is checked against the *login's user in the target database* — see [`permissions.md`](permissions.md#cross-database-references).
 
 Constraint enforcement, identity allocation, indexes and the seek cache all hang off the `HeapTable` and need no routing.
 Locks likewise: the `LockManager` is per-`Simulation` and its resources hang off the table, so a session holding locks in two databases at once already worked.
 
 **Not modeled yet**
 
-- **Permission enforcement stays scoped to the session's database.** A write through a three-part name checks the session principal's grants against the target's `object_id`, where real resolves the login's user in the target database.
-  Invisible to the default dbo session (which bypasses every check) and unchanged from the same stance cross-database *reads* already take — see [`permissions.md`](permissions.md).
-- **Cross-database SNAPSHOT / RCSI read visibility.** A reader takes its snapshot stamp from the session's database, so reading another database's versioned rows compares stamps from two independent counters.
-  Writers are self-consistent (each database's rows carry its own commit Xids); the reader side is the piece left.
 - **Four-part writes to a linked server** stay rejected by `BatchContext.RejectCrossServerMutation` — the remote's lock manager and undo log are its own, and that's the [`linked-servers.md`](linked-servers.md) gap, not this one.
 - **The database name in Msg 515 / 547 constraint messages** is still the literal `Simulation.DefaultDatabaseName`, so a violation in another database names `simulated` where real names the target (a pre-existing hardcode, unrelated to which database the write came from).
 - **`CREATE VIEW` / `PROCEDURE` / `FUNCTION` / `TRIGGER` with a db prefix** — real raises Msg 166 (`does not allow specifying the database name as a prefix`); the simulator doesn't enforce that yet.

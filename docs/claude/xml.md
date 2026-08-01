@@ -90,14 +90,19 @@ The navigator is positioned on the document element of the parsed input, so a re
 **`sys.xml_schema_collections`** (6-col, probe-confirmed): `xml_collection_id` / `schema_id` / `principal_id` (NULL — AUTHORIZATION clause not modeled) / `name` / `create_date` / `modify_date`.
 
 **Internal node-table + statistics surface (for DacFx export).**
-DacFx's XML-index reverse-engineering query doesn't read `sys.xml_indexes` alone — it INNER JOINs `sys.index_columns` (one row per XML index: the indexed xml column, `index_column_id` 1, `key_ordinal` 0) *and* an internal "node table" per **primary** index (`sys.objects` type `IT` / `INTERNAL_TABLE`, named `xml_index_nodes_<tableObjectId>_<primaryIndexObjectId>`, parent = base table, `schema_id` = sys, `is_ms_shipped` = 1) joined to `sys.stats` (one row per XML index, `name` = the index name, on the node table's `object_id`; a primary owns its node table, secondaries share their primary's — `stats_id` sequential within a node table).
+DacFx's XML-index reverse-engineering query doesn't read `sys.xml_indexes` alone — it INNER JOINs `sys.index_columns` (one row per XML index: the indexed xml column, `index_column_id` 1, `key_ordinal` 0) *and* an internal "node table" per **primary** index (`sys.objects` type `IT` / `INTERNAL_TABLE`, named `xml_index_nodes_<tableObjectId>_<primaryIndexId>` (the index's own 256000-range `index_id`, probe-confirmed), parent = base table, `schema_id` = sys, `is_ms_shipped` = 1) joined to `sys.stats` (one row per XML index, `name` = the index name, on the node table's `object_id`; a primary owns its node table, secondaries share their primary's — `stats_id` sequential within a node table).
 Modeled from probe (SQL Server 2025); without them DacFx NREs client-side (`SqlFullTextIndexColumnSpecifierPopulator`-style orphaned-parent) and emits no `SqlXmlIndex` elements.
 A primary XML index allocates its node-table object id at CREATE (`XmlIndex.InternalTableObjectId`); `EnumerateXmlIndexStats` resolves each index (primary or secondary) to its owning node table.
 This is the only place the simulator surfaces a type-`IT` object.
 
 **`sys.xml_indexes`** (full 26-col shape, probe-confirmed against SQL Server 2025 WWI).
 The load-bearing core keeps its original positions: `object_id` / `name` / `index_id` / `type` (=3) / `type_desc` (`XML`) / `using_xml_index_id` (NULL for primary) / `secondary_type` (char(1): `P`/`V`/`R`) / `secondary_type_desc` / `is_primary_key` (always false).
-Appended after them (real orders these interleaved; the simulator appends since consumers read by name): `is_unique` (false) / `data_space_id` (1) / `ignore_dup_key` (false) / `is_unique_constraint` (false) / `fill_factor` (0) / `is_padded` (false) / `is_disabled` (false) / `is_hypothetical` (false) / `is_ignored_in_optimization` (false) / `allow_row_locks` (true) / `allow_page_locks` (true) / `has_filter` (false) / `filter_definition` (NULL) / `xml_index_type` (0 primary, 1 secondary) / `xml_index_type_description` (`PRIMARY_XML` / `SECONDARY_XML`) / `path_id` (0) / `auto_created` (false).
+
+`index_id` comes from real's dedicated **256000+** XML range, sequenced **per table** in creation order — a table's first XML index is 256000, its second 256001, and the first on a second table is 256000 again (all probe-confirmed against SQL Server 2025).
+A secondary's `using_xml_index_id` is its primary's value from that same range, `sys.index_columns` keys the index's row on it, and the primary's internal node table is named after it.
+Ordinary indexes keep the small ids starting at 1; spatial indexes have their own 384000+ range (see [`spatial.md`](spatial.md)).
+The allocation is a per-table watermark rather than a reused slot, matching real (probed: dropping the second XML index and creating another gives 256003, not 256001) — the simulator gets that for free because `DROP INDEX` doesn't remove XML indexes.
+Appended after them (real orders these interleaved; the simulator appends since consumers read by name): `is_unique` (false) / `data_space_id` (1) / `ignore_dup_key` (false) / `is_unique_constraint` (false) / `fill_factor` (0) / `is_padded` (false) / `is_disabled` (false) / `is_hypothetical` (false) / `is_ignored_in_optimization` (false) / `allow_row_locks` (true) / `allow_page_locks` (true) / `has_filter` (false) / `filter_definition` (NULL) / `xml_index_type` (0 primary, 1 secondary) / `xml_index_type_description` (`PRIMARY_XML` / `SECONDARY_XML`) / `path_id` (NULL — the column names the promoted path a *selective* XML index tracks, and an ordinary primary or secondary index reports NULL; probe-confirmed) / `auto_created` (false).
 Values are the fresh-index defaults.
 DacFx's XML-index reverse-engineering query reads the `fill_factor` / `is_padded` / `allow_*_locks` / `is_disabled` / `xml_index_type` / `path_id` tail.
 
@@ -181,6 +186,62 @@ Divergences:
   That matches real for derived tables and CTEs; for the rowset functions real instead raises Msg 6800 (they aren't tables), which the simulator doesn't.
 - Grouping compares values through `SqlValue.Equals`, so it is **collation-aware** — under a case-insensitive collation `'A'` and `'a'` group together.
 
+### XML names — escaped in RAW / AUTO, rejected everywhere else
+
+A SQL identifier is not an XML name, and FOR XML settles the mismatch two different ways (probe-confirmed, SQL Server 2025).
+RAW and AUTO **escape** every column, table and alias name they emit — each character an XML name can't carry becomes `_xHHHH_` — while PATH's column aliases and the *explicit* names written into the clause (`RAW('elem')` / `PATH('row')` / `ROOT('name')`, whatever the mode) are **rejected** instead.
+`ForXmlName.Encode` and `ForXmlName.ValidateSimpleName` / `ValidatePathColumn` in `Parser/ForXmlName.cs` are the two halves.
+
+The character classification is the XML 1.0 **fourth-edition** `Name` production, which `XmlConvert.IsStartNCNameChar` / `IsNCNameChar` implement and real matches character for character (verified across the Latin-1, combining-mark, extender and fullwidth boundaries, so the wider fifth-edition ranges are out).
+Two SQL-Server-specific rules ride on top: `:` is a name character in every position but the first, and an `_` followed by `x` escapes itself whatever comes after — which is what keeps the encoding round-trippable.
+
+| written name | RAW / AUTO output | rule |
+|---|---|---|
+| `[a b]` / `[a#b]` / `[a$b]` | `a_x0020_b` / `a_x0023_b` / `a_x0024_b` | not a name character |
+| `[1a]` / `[-a]` / `[.a]` / `[:a]` | `_x0031_a` / `_x002D_a` / `_x002E_a` / `_x003A_a` | legal later, not first |
+| `[a-b]` / `[a.b]` / `[a1]` / `[a:b]` / `[_a]` | unchanged | legal in a non-first position |
+| `[a_x0020_b]` / `[a_xzzzz_b]` / `[_x]` | `a_x005F_x0020_b` / `a_x005F_xzzzz_b` / `_x005F_x` | `_` before a lowercase `x`, valid escape or not |
+| `[a_Xzzzz_b]` / `[x_]` | unchanged | only a lowercase `x` triggers it |
+| `[xmlfoo]` / `[XMLfoo]` / `[xml]` | unchanged | the XML-reserved name prefix is not escaped |
+| `[aé]` / `[漢字]` / `[a·b]` / `[aͅb]` | unchanged | base character / ideographic / extender / combining mark |
+| `[a«b]` / `[a×b]` / `[a€b]` / `[aͶb]` / `[a℘b]` / `[aＡb]` / `[aͥb]` | `a_x00AB_b` / `a_x00D7_b` / `a_x20AC_b` / `a_x0376_b` / `a_x2118_b` / `a_xFF21_b` / `a_x0365_b` | outside the fourth-edition ranges (uppercase hex) |
+| `[a𝐀b]` (U+1D400) | `a_x01D400_b` | one **six**-hex-digit escape per supplementary code point, not one per surrogate |
+| `FROM #tmp` / `FROM @v` / `FROM t AS [a b]` (AUTO level) | `_x0023_tmp` / `_x0040_v` / `a_x0020_b` | a level name escapes like a column name |
+
+The rejections, in the order the validator applies them:
+
+- **Msg 6867** — the name is `xmlns` or carries it as a prefix (`[xmlns]`, `[xmlns:a]`, `[@xmlns]`, `ROOT('xmlns')`): `'xmlns' is invalid in XML tag name in FOR XML PATH, or when WITH XMLNAMESPACES is used with FOR XML.`
+- **Msg 6846** state 4 — any other namespace prefix, which only the unmodeled `WITH XMLNAMESPACES` could declare: `XML name space prefix 'a' declaration is missing for FOR XML column name 'a:b'.`
+  The check precedes the character rules (`[a b:c]` reports the prefix `a b`, not the space) and the prefix comparison is ordinal — the predefined `xml:` passes, `XML:` doesn't.
+  The message says `column` / `row` / `ROOT` for the three positions.
+- **Msg 6850** — a character an XML name can't carry there: `Column name 'a b' contains an invalid XML identifier as required by FOR XML; ' '(0x0020) is the first character at fault.`, with `Row name` / `ROOT name` variants.
+  A **supplementary** character passes here though RAW would escape it (`[a𝐀]` → `<a𝐀>`), the one place the two halves disagree.
+- **Msg 6849** — a PATH alias with an empty step: `FOR XML PATH error in column '/a' - '//' and leading and trailing '/' are not allowed in simple path expressions.`
+
+A PATH alias is a path, so each `/`-separated step is validated on its own while the message quotes the whole alias (`[x/y z]` faults on the space); the last step's leading `@` is stripped first (a bare `[@]` reports the `@` itself) and its `text()` / `data()` node function is exempt.
+An explicit row / ROOT name is a single name, so a `/` in one is simply an invalid character (`PATH('a/b')` → Msg 6850 on `/`).
+The row tag is checked before the ROOT name.
+`RAW('')` is row-tag omission like `PATH('')`, which only element-centric serialization can carry: `RAW(''), ELEMENTS` emits the bare elements and the attribute-centric default raises **Msg 6864**.
+
+`FOR JSON` shares none of this — a JSON property name is a quoted string, so an alias reaches the output as written (`[a b]` → `"a b"`).
+
+### FOR XML on a SELECT that doesn't return to the client
+
+**Msg 6819** — the clause is refused on the SELECT an `INSERT … SELECT` or a `SELECT … INTO` writes from, and on a variable-assigning `SELECT @v = …`:
+
+| statement | error |
+|---|---|
+| `INSERT z SELECT … FOR XML` | Msg 6819 state 1 — `The FOR XML clause is not allowed in a INSERT statement.` |
+| `SELECT … INTO z … FOR XML` | Msg 6819 state 1 — `… in a SELECT INTO statement.` |
+| `SELECT @v = … FOR XML` | Msg 6819 state **3** — `… in a ASSIGNMENT statement.` |
+| `INSERT z SELECT … FOR JSON` / `SELECT … INTO z … FOR JSON` | **Msg 13602** state 1, same sentence with `FOR JSON` |
+| `SELECT @v = … FOR JSON` | **Msg 6819** state 3 — real reports the *FOR XML* wording for the JSON clause too |
+
+The rejection is about the statement's own SELECT, so every nested position stays legal: a scalar subquery (`INSERT z SELECT (SELECT … FOR XML RAW)`), a derived table (`… FROM (SELECT … FOR XML RAW) d(v)`) and `SET @v = (SELECT … FOR XML RAW)` all work.
+Real settles the statement shape before any name (an INSERT source SELECT with an unusable alias reports 6819, not 6850) but after parsing, so a syntax error still wins; the simulator matches by checking once the clause has parsed, at nesting depth 0 only, off `ParserContext.InInsertSourceSelect` (set by the INSERT parser) plus the parsed selection's own `IntoTarget` / `IsAssignmentOnly`.
+
+Real reaches its verdict before resolving the target table (`INSERT INTO nosuchtable SELECT … FOR XML` reports 6819); the simulator resolves the INSERT target first, so a missing table reports Msg 208 there.
+
 ### Options
 
 - `ELEMENTS` → element-centric (RAW/AUTO; a no-op on always-element-centric PATH).
@@ -201,23 +262,7 @@ Escaping is position-dependent:
 ### Not modeled yet
 
 EXPLICIT mode, `BINARY BASE64`/`HEX` / `XMLSCHEMA` / `WITH NAMESPACES`, and PATH node functions beyond `text()`/`data()` (`comment()`, `processing-instruction()`, `node()`, `*`, `@*`) all raise `NotSupportedException`.
-**Msg 6819** — real rejects a `FOR XML` clause inside an `INSERT … SELECT` (`The FOR XML clause is not allowed in a INSERT statement.`); the simulator accepts it.
 One-row chunking is the shared approximation noted above.
-
-**XML-name encoding** — RAW / AUTO run every element and attribute name through SQL Server's `_xHHHH_` escaping so the output is well-formed whatever the SQL identifier was, while PATH rejects an unusable name outright.
-Probed against SQL Server 2025:
-
-| written name | RAW / AUTO output |
-|---|---|
-| `[a b]` | `a_x0020_b` |
-| `[1a]` (leading digit) | `_x0031_a` |
-| `[a$b]` | `a_x0024_b` |
-| `[a_x0020_b]` (already-escaped text) | `a_x005F_x0020_b` |
-| `[a-b]` / `[a.b]` / `[é]` | unchanged (valid XML name characters) |
-| `FROM #tmp` / `FROM @v` (AUTO element name) | `_x0023_tmp` / `_x0040_v` |
-
-The simulator emits every name verbatim, so `SELECT … FROM #tmp FOR XML AUTO` yields `<#tmp …>` — not well-formed XML.
-PATH's counterpart is **Msg 6850** (`Row name 'r x' contains an invalid XML identifier as required by FOR XML; ' '(0x0020) is the first character at fault.`, with `Column name` / `ROOT name` variants), which the simulator doesn't raise either.
 
 See [`backlog.md`](backlog.md).
 

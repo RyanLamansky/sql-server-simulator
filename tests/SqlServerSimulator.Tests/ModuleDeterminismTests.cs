@@ -37,20 +37,21 @@ public sealed class ModuleDeterminismTests
 
     /// <summary>
     /// One representative per nondeterministic family: the current-time
-    /// readers, the side-effecting generators, session and connection state,
-    /// server / database metadata, the security scalars, the <c>ERROR_*</c>
-    /// family, and the language- or DATEFIRST-dependent formatters. Each was
-    /// probed by wrapping the same expression in a schema-bound function on
-    /// the reference instance.
+    /// readers, session and connection state, server / database metadata, the
+    /// security scalars, the <c>ERROR_*</c> family, and the language- or
+    /// DATEFIRST-dependent formatters. Each was probed by wrapping the same
+    /// expression in a schema-bound function on the reference instance.
+    /// <para>The side-effecting generators (<c>NEWID</c> / <c>NEWSEQUENTIALID</c>
+    /// / <c>RAND</c>) are nondeterministic too but can't be probed this way —
+    /// real refuses a function body that names one (Msg 443, see
+    /// <c>FunctionBodyShapeTests</c>), so their nondeterminism only shows
+    /// through a view.</para>
     /// </summary>
     [TestMethod]
     [DataRow("cast(getdate() as int)")]
     [DataRow("cast(sysdatetime() as int)")]
     [DataRow("cast(sysutcdatetime() as int)")]
     [DataRow("cast(current_timestamp as int)")]
-    [DataRow("cast(newid() as int)")]
-    [DataRow("cast(rand() as int)")]
-    [DataRow("cast(rand(5) as int)")]
     [DataRow("@@spid")]
     [DataRow("@@rowcount")]
     [DataRow("@@nestlevel")]

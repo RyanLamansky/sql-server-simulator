@@ -1,5 +1,6 @@
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
+using System.Buffers.Binary;
 using System.Globalization;
 
 namespace SqlServerSimulator;
@@ -108,10 +109,11 @@ internal static partial class BuiltInResources
         ], ["major_id"], EnumerateSysExtendedProperties);
 
         // sys.database_principals: probe-confirmed shipped subset of columns
-        // (real SQL Server's full row is ~16 cols). The simulator's principal
-        // model is a thin name + id + type triple; columns we don't track
-        // (authentication_type, default_schema_name, default_language_name,
-        // owning_principal_id, modify_date) are emitted as NULL.
+        // (real SQL Server's full row is ~16 cols). default_schema_name / sid /
+        // authentication_type follow real's per-principal rules (see
+        // EnumerateSysDatabasePrincipals); default_language_name /
+        // default_language_lcid aren't tracked and stay NULL, and modify_date
+        // mirrors create_date (no per-principal ALTER timestamp).
         Sys("database_principals",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -512,12 +514,36 @@ internal static partial class BuiltInResources
         }
     }
 
+    /// <summary>
+    /// Rows for <c>sys.database_principals</c>, ordered by principal_id.
+    /// Three columns follow per-principal rules real reports (probe-confirmed
+    /// against SQL Server 2025):
+    /// <list type="bullet">
+    /// <item><c>default_schema_name</c> is <c>dbo</c> for <c>dbo</c> and every
+    /// user, <c>guest</c> for <c>guest</c>, an application role's own declared
+    /// schema, and NULL for roles and the <c>sys</c> /
+    /// <c>INFORMATION_SCHEMA</c> catalog principals.</item>
+    /// <item><c>authentication_type</c> is <c>1</c> / <c>INSTANCE</c> for
+    /// <c>dbo</c> and <c>0</c> / <c>NONE</c> for everything else — never
+    /// NULL.</item>
+    /// <item><c>sid</c> is the well-known <c>0x01</c> for <c>dbo</c> and
+    /// <c>0x00</c> for <c>guest</c>, NULL for the catalog principals, and a
+    /// 28-byte <c>S-1-9-4-…</c> database-scoped SID for every user and role —
+    /// deterministic per name, or per principal_id for a fixed role, the way
+    /// real encodes the role id in the last sub-authority.</item>
+    /// </list>
+    /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDatabasePrincipals(Parser.BatchContext batch, Database database)
     {
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         var nullSchemaName = SqlValue.Null(SqlType.SystemName);
         var nullOwningId = SqlValue.Null(SqlType.Int32);
+        var dboSchemaName = SqlValue.FromSystemName(Database.DefaultSchemaName);
+        var authNone = SqlValue.FromByte(0);
+        var authNoneDesc = SqlValue.FromNVarchar("NONE");
+        var authInstance = SqlValue.FromByte(1);
+        var authInstanceDesc = SqlValue.FromNVarchar("INSTANCE");
         // Database roles are owned by dbo (principal_id 1) — probe-confirmed on
         // the reference (every WWI custom role: owning_principal_id = 1). This
         // must be non-NULL: DacFx's role reverse-engineering filters
@@ -526,8 +552,6 @@ internal static partial class BuiltInResources
         // export. dbo is seeded at the fixed id 1 (see Database ctor).
         var dboOwningId = SqlValue.FromInt32(1);
         var nullSid = SqlValue.Null(SqlType.Varbinary);
-        var nullAuthType = SqlValue.Null(SqlType.TinyInt);
-        var nullAuthDesc = SqlValue.Null(SqlType.NVarchar);
         var nullLanguageName = SqlValue.Null(SqlType.SystemName);
         var nullLanguageLcid = SqlValue.Null(SqlType.Int32);
         // 4-letter padding to fit char(2) — the type column is 2 bytes in
@@ -536,27 +560,74 @@ internal static partial class BuiltInResources
         foreach (var p in database.Principals.Values.OrderBy(p => p.PrincipalId))
         {
             var createDate = SqlValue.FromDateTime(p.CreateDate);
+            var isCatalogPrincipal = p.PrincipalId is Database.SysPrincipalId or Database.InformationSchemaPrincipalId;
+            var isDbo = p.PrincipalId == Database.DboPrincipalId;
+            var isGuest = p.PrincipalId == Database.GuestPrincipalId;
             yield return [
                 SqlValue.FromSystemName(p.Name),
                 SqlValue.FromInt32(p.PrincipalId),
                 SqlValue.FromChar(charTwo, p.TypeCode),
                 SqlValue.FromNVarchar(p.TypeDescription),
-                // Only application roles carry a tracked default schema
+                // An application role carries a tracked default schema
                 // (CREATE APPLICATION ROLE … DEFAULT_SCHEMA, defaulting to
-                // dbo); every other principal keeps the NULL this column has
-                // always projected.
-                p.DefaultSchemaName is { } defaultSchema ? SqlValue.FromSystemName(defaultSchema) : nullSchemaName,
+                // dbo); dbo and every user default to dbo, guest to guest,
+                // and roles / the catalog principals stay NULL.
+                p.DefaultSchemaName is { } defaultSchema ? SqlValue.FromSystemName(defaultSchema)
+                    : isGuest ? SqlValue.FromSystemName(p.Name)
+                    : p.TypeCode == "R" || isCatalogPrincipal ? nullSchemaName
+                    : dboSchemaName,
                 createDate,
                 createDate,
                 p.TypeCode == "R" ? dboOwningId : nullOwningId,
-                nullSid,
+                isDbo ? DboSid
+                    : isGuest ? GuestSid
+                    : isCatalogPrincipal ? nullSid
+                    : SqlValue.FromVarbinary(DeriveDatabasePrincipalSid(p)),
                 p.IsFixedRole ? trueBit : falseBit,
-                nullAuthType,
-                nullAuthDesc,
+                isDbo ? authInstance : authNone,
+                isDbo ? authInstanceDesc : authNoneDesc,
                 nullLanguageName,
                 nullLanguageLcid,
             ];
         }
+    }
+
+    /// <summary>The well-known single-byte <c>sid</c> <c>dbo</c> reports.</summary>
+    private static readonly SqlValue DboSid = SqlValue.FromVarbinary([0x01]);
+
+    /// <summary>The well-known single-byte <c>sid</c> <c>guest</c> reports.</summary>
+    private static readonly SqlValue GuestSid = SqlValue.FromVarbinary([0x00]);
+
+    /// <summary>
+    /// The 12-byte prefix of a database-scoped SID — revision 1, five
+    /// sub-authorities, authority 9 (SECURITY_RESOURCE_MANAGER), first
+    /// sub-authority 4 — shared by every user and role
+    /// <c>sys.database_principals</c> reports.
+    /// </summary>
+    private static readonly byte[] DatabasePrincipalSidPrefix =
+        [0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x04, 0x00, 0x00, 0x00];
+
+    /// <summary>
+    /// Derives the deterministic 28-byte <c>S-1-9-4-…</c> sid a database user
+    /// or role reports. A fixed role encodes its principal_id in the final
+    /// sub-authority over three zero words, matching real's layout
+    /// (<c>db_owner</c> = <c>…00000000 00000000 00000000 00400000</c>);
+    /// everything else fills the four words from the same per-quadrant FNV-1a
+    /// hash <see cref="DeriveLoginSid"/> uses, so the same name always maps to
+    /// the same bytes.
+    /// </summary>
+    private static byte[] DeriveDatabasePrincipalSid(DatabasePrincipal principal)
+    {
+        var sid = new byte[DatabasePrincipalSidPrefix.Length + 16];
+        DatabasePrincipalSidPrefix.CopyTo(sid, 0);
+        var body = sid.AsSpan(DatabasePrincipalSidPrefix.Length);
+        if (principal.IsFixedRole && principal.PrincipalId != 0)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(body[12..], principal.PrincipalId);
+            return sid;
+        }
+        DeriveLoginSid(principal.Name).CopyTo(body);
+        return sid;
     }
 
     private static IEnumerable<SqlValue[]> EnumerateSysDatabasePermissions(Parser.BatchContext batch, Database database)

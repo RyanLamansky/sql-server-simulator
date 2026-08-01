@@ -511,4 +511,232 @@ public sealed class ForXmlTests
         var ex = XmlColumnSimulation().AssertSqlError("select doc as [@a] from xp where id = 1 for xml path('p')", 6851);
         Contains("invalid data type for attribute-centric", ex.Message);
     }
+
+    // ---- RAW / AUTO name escaping ----
+
+    [TestMethod]
+    public void RawName_AsciiEscapes()
+        => AreEqual("""<row a_x0020_b="1" _x0031_a="1" a_x0024_b="1" a_x005F_x0020_b="1" a-b="1" _x002D_a="1" a.b="1" _x002E_a="1" _a="1" a:b="1" _x003A_a="1" a_x005F_xzzzz_b="1" xmlfoo="1" XMLfoo="1" xml="1" a_x0023_b="1" _x0024_a="1" a1="1" _x005F_x0041_="1"/>""",
+            Xml("""
+                select 1 as [a b], 1 as [1a], 1 as [a$b], 1 as [a_x0020_b], 1 as [a-b], 1 as [-a],
+                       1 as [a.b], 1 as [.a], 1 as [_a], 1 as [a:b], 1 as [:a], 1 as [a_xzzzz_b],
+                       1 as [xmlfoo], 1 as [XMLfoo], 1 as [xml], 1 as [a#b], 1 as [$a], 1 as [a1],
+                       1 as [_x0041_]
+                for xml raw
+                """));
+
+    /// <summary>
+    /// The non-ASCII half of the escaping table. The classification is the XML
+    /// 1.0 fourth-edition <c>Name</c> production, so <c>é</c> (a base
+    /// character) and <c>·</c> / <c>ͥ</c> (an extender / combining mark, in
+    /// non-first position) pass while <c>«</c>, <c>×</c>, <c>€</c> and the
+    /// fullwidth <c>Ａ</c> escape; a supplementary code point takes one
+    /// six-hex-digit escape rather than a per-surrogate one.
+    /// </summary>
+    [TestMethod]
+    public void RawName_NonAsciiEscapes()
+        => AreEqual("""<row a_Xzzzz_b="1" a_x005F_x_b="1" _="1" __="1" _x005F_x="1" x_="1" aé="1" éa="1" a_x00AB_b="1" _x00AB_a="1" a_x00D7_b="1" a·b="1" _x00B7_a="1" 漢字="1" a_x20AC_b="1" a_x01D400_b="1" _x01D400_a="1" a_x0365_b="1"/>""",
+            Xml("""
+                select 1 as [a_Xzzzz_b], 1 as [a_x_b], 1 as [_], 1 as [__], 1 as [_x], 1 as [x_],
+                       1 as [aé], 1 as [éa], 1 as [a«b], 1 as [«a], 1 as [a×b], 1 as [a·b], 1 as [·a],
+                       1 as [漢字], 1 as [a€b], 1 as [a𝐀b], 1 as [𝐀a], 1 as [aͥb]
+                for xml raw
+                """));
+
+    [TestMethod]
+    public void RawName_ElementsAndXsinil_EscapeToo()
+        => AreEqual("""<row xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><a_x0020_b>1</a_x0020_b><c_x0020_d xsi:nil="true"/></row>""",
+            Xml("select 1 as [a b], null as [c d] for xml raw, elements xsinil"));
+
+    [TestMethod]
+    public void AutoName_TempTableAndColumn_Escape()
+        => AreEqual("""<_x0023_tmp id="1" c_x0020_d="2"/>""",
+            (string)new Simulation().ExecuteScalar("""
+                create table #tmp (id int, [c d] int);
+                insert #tmp values (1, 2);
+                select id, [c d] from #tmp for xml auto
+                """)!);
+
+    [TestMethod]
+    public void AutoName_TableAlias_Escapes()
+        => AreEqual("""<a_x0020_b id="1"/><a_x0020_b id="2"/><a_x0020_b id="3"/>""",
+            Xml("select id from t as [a b] for xml auto"));
+
+    // ---- PATH / explicit names are rejected, not escaped ----
+
+    [TestMethod]
+    public void PathName_Space_Msg6850()
+        => Seeded().AssertSqlError("select 1 as [a b] from t for xml path", 6850,
+            "Column name 'a b' contains an invalid XML identifier as required by FOR XML; ' '(0x0020) is the first character at fault.");
+
+    [TestMethod]
+    public void PathName_LeadingDigit_Msg6850()
+        => Seeded().AssertSqlError("select 1 as [1a] from t for xml path", 6850,
+            "Column name '1a' contains an invalid XML identifier as required by FOR XML; '1'(0x0031) is the first character at fault.");
+
+    [TestMethod]
+    public void PathName_LeadingColon_Msg6850()
+        => Seeded().AssertSqlError("select 1 as [:a] from t for xml path", 6850,
+            "Column name ':a' contains an invalid XML identifier as required by FOR XML; ':'(0x003A) is the first character at fault.");
+
+    [TestMethod]
+    public void PathName_Tab_Msg6850()
+        => Seeded().AssertSqlError("select 1 as [a\tb] from t for xml path", 6850,
+            "Column name 'a\tb' contains an invalid XML identifier as required by FOR XML; '\t'(0x0009) is the first character at fault.");
+
+    [TestMethod]
+    public void PathName_FaultInLaterStep_QuotesWholeAlias()
+        => Seeded().AssertSqlError("select 1 as [x/y z] from t for xml path", 6850,
+            "Column name 'x/y z' contains an invalid XML identifier as required by FOR XML; ' '(0x0020) is the first character at fault.");
+
+    [TestMethod]
+    public void PathName_Attribute_Msg6850()
+        => Seeded().AssertSqlError("select 1 as [@a b] from t for xml path", 6850,
+            "Column name '@a b' contains an invalid XML identifier as required by FOR XML; ' '(0x0020) is the first character at fault.");
+
+    [TestMethod]
+    public void PathName_BareAtSign_Msg6850()
+        => Seeded().AssertSqlError("select 1 as [@] from t for xml path", 6850,
+            "Column name '@' contains an invalid XML identifier as required by FOR XML; '@'(0x0040) is the first character at fault.");
+
+    [TestMethod]
+    [DataRow("[/a]", "/a")]
+    [DataRow("[a/]", "a/")]
+    [DataRow("[a//b]", "a//b")]
+    public void PathName_EmptyStep_Msg6849(string alias, string quoted)
+        => Seeded().AssertSqlError($"select 1 as {alias} from t for xml path", 6849,
+            $"FOR XML PATH error in column '{quoted}' - '//' and leading and trailing '/' are not allowed in simple path expressions.");
+
+    [TestMethod]
+    public void PathName_AlreadyEscapedText_PassesThrough()
+        => AreEqual("<row><a_x0020_b>1</a_x0020_b></row>",
+            Xml("select 1 as [a_x0020_b] from t where id = 1 for xml path"));
+
+    /// <summary>
+    /// A supplementary character is a legal XML name character, so PATH takes
+    /// it verbatim — where RAW / AUTO escape the same character (probed both
+    /// ways: the two validators disagree in real).
+    /// </summary>
+    [TestMethod]
+    public void PathName_SupplementaryCharacter_PassesThrough()
+        => AreEqual("<row><a𝐀>1</a𝐀></row>",
+            Xml("select 1 as [a𝐀] from t where id = 1 for xml path"));
+
+    [TestMethod]
+    public void PathName_UndeclaredPrefix_Msg6846()
+        => Seeded().AssertSqlError("select 1 as [a:b] from t for xml path", 6846,
+            "XML name space prefix 'a' declaration is missing for FOR XML column name 'a:b'.");
+
+    [TestMethod]
+    public void PathName_PrefixCheckPrecedesCharacterCheck_Msg6846()
+        => Seeded().AssertSqlError("select 1 as [a b:c] from t for xml path", 6846,
+            "XML name space prefix 'a b' declaration is missing for FOR XML column name 'a b:c'.");
+
+    [TestMethod]
+    public void PathName_XmlPrefix_IsPredefined()
+        => AreEqual("<row><xml:lang>1</xml:lang></row>",
+            Xml("select 1 as [xml:lang] from t where id = 1 for xml path"));
+
+    [TestMethod]
+    public void PathName_XmlPrefixIsCaseSensitive_Msg6846()
+        => Seeded().AssertSqlError("select 1 as [XML:a] from t for xml path", 6846,
+            "XML name space prefix 'XML' declaration is missing for FOR XML column name 'XML:a'.");
+
+    [TestMethod]
+    [DataRow("[xmlns]")]
+    [DataRow("[xmlns:a]")]
+    [DataRow("[@xmlns]")]
+    public void PathName_Xmlns_Msg6867(string alias)
+        => Seeded().AssertSqlError($"select 1 as {alias} from t for xml path", 6867,
+            "'xmlns' is invalid in XML tag name in FOR XML PATH, or when WITH XMLNAMESPACES is used with FOR XML.");
+
+    [TestMethod]
+    public void RowName_Invalid_Msg6850_EvenInRaw()
+        => Seeded().AssertSqlError("select id from t for xml raw('r x')", 6850,
+            "Row name 'r x' contains an invalid XML identifier as required by FOR XML; ' '(0x0020) is the first character at fault.");
+
+    [TestMethod]
+    public void RowName_IsNotAPath_Msg6850()
+        => Seeded().AssertSqlError("select id from t for xml path('a/b')", 6850,
+            "Row name 'a/b' contains an invalid XML identifier as required by FOR XML; '/'(0x002F) is the first character at fault.");
+
+    [TestMethod]
+    public void RootName_Invalid_Msg6850()
+        => Seeded().AssertSqlError("select id from t for xml raw, root('t y')", 6850,
+            "ROOT name 't y' contains an invalid XML identifier as required by FOR XML; ' '(0x0020) is the first character at fault.");
+
+    [TestMethod]
+    public void RootName_UndeclaredPrefix_Msg6846()
+        => Seeded().AssertSqlError("select id from t for xml raw, root('a:b')", 6846,
+            "XML name space prefix 'a' declaration is missing for FOR XML ROOT name 'a:b'.");
+
+    [TestMethod]
+    public void RowName_CheckedBeforeRootName()
+        => Seeded().AssertSqlError("select id from t for xml raw('r x'), root('t y')", 6850,
+            "Row name 'r x' contains an invalid XML identifier as required by FOR XML; ' '(0x0020) is the first character at fault.");
+
+    [TestMethod]
+    public void RawName_Empty_Msg6864()
+    {
+        var ex = Seeded().AssertSqlError("select id from t for xml raw('')", 6864);
+        Contains("Row tag omission", ex.Message);
+    }
+
+    [TestMethod]
+    public void RawName_EmptyWithElements_OmitsRowTag()
+        => AreEqual("<id>1</id><id>2</id><id>3</id>",
+            Xml("select id from t for xml raw(''), elements"));
+
+    // ---- FOR XML on a SELECT that doesn't return to the client ----
+
+    private static Simulation WriteTarget()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table z (x nvarchar(max))");
+        return sim;
+    }
+
+    [TestMethod]
+    public void InsertSelect_ForXml_Msg6819()
+        => WriteTarget().AssertSqlError("insert z select 1 as a for xml raw", 6819,
+            "The FOR XML clause is not allowed in a INSERT statement.");
+
+    [TestMethod]
+    public void InsertSelect_ForXml_PrecedesNameErrors()
+        => WriteTarget().AssertSqlError("insert z select 1 as [a b] for xml path", 6819,
+            "The FOR XML clause is not allowed in a INSERT statement.");
+
+    [TestMethod]
+    public void SelectInto_ForXml_Msg6819()
+        => WriteTarget().AssertSqlError("select 1 as a into z2 for xml raw", 6819,
+            "The FOR XML clause is not allowed in a SELECT INTO statement.");
+
+    [TestMethod]
+    public void AssignmentSelect_ForXml_Msg6819State3()
+    {
+        var ex = WriteTarget().AssertSqlError("declare @x nvarchar(max); select @x = 1 for xml raw", 6819);
+        AreEqual("The FOR XML clause is not allowed in a ASSIGNMENT statement.", ex.Message);
+        AreEqual(3, ex.State);
+    }
+
+    [TestMethod]
+    public void InsertSelect_NestedForXmlSubquery_Allowed()
+    {
+        var sim = WriteTarget();
+        _ = sim.ExecuteNonQuery("insert z select (select 1 as a for xml raw)");
+        AreEqual("""<row a="1"/>""", sim.ExecuteScalar("select x from z"));
+    }
+
+    [TestMethod]
+    public void InsertSelect_ForXmlDerivedTable_Allowed()
+    {
+        var sim = WriteTarget();
+        _ = sim.ExecuteNonQuery("insert z select d.v from (select 1 as a for xml raw) d(v)");
+        AreEqual("""<row a="1"/>""", sim.ExecuteScalar("select x from z"));
+    }
+
+    [TestMethod]
+    public void SetVariable_ForXmlSubquery_Allowed()
+        => AreEqual("""<row a="1"/>""",
+            new Simulation().ExecuteScalar("declare @x nvarchar(max); set @x = (select 1 as a for xml raw); select @x"));
 }

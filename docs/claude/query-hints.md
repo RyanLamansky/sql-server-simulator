@@ -60,7 +60,8 @@ Closed accept-list (case-insensitive, in `TableHintNames`):
 
 Unknown hint name → **Msg 321** verbatim: `"<name>" is not a recognized table hints option.` (probe-confirmed against SQL Server 2025).
 
-`NOEXPAND` (`FROM <indexed_view> WITH (NOEXPAND)` — forces the optimizer to use the view's own index instead of expanding it) parses and discards: the simulator always expands an indexed view, so results are identical.
+`NOEXPAND` (`FROM <indexed_view> WITH (NOEXPAND)` — forces the optimizer to use the view's own index instead of expanding it) has no execution effect: the simulator always expands an indexed view, so results are identical.
+It is the one otherwise-discarded hint the parser tracks (`TableHintInfo.NoExpand`), because reading an indexed view through it is one of the operations real's SET-option gate covers — **Msg 1934** under the enclosing statement's verb, where a plain reference to the same view is never gated; see [`grammar.md`](grammar.md#set-option-gates--msg-1934--msg-1935).
 See [`indexes.md`](indexes.md) for indexed views.
 
 ### Legacy `(hint)` form disambiguation

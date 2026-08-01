@@ -502,7 +502,14 @@ internal sealed class WindowExpression : Expression
         if (TryParseWindowReference(context, frameRejectingFunction: null) is { } reference)
             return RegisterNamedWindowReference(context, new WindowExpression(WindowKind.Aggregate, [], [], aggregate), reference);
 
-        var body = ParseWindowBody(context);
+        // COUNT(*) / COUNT_BIG(*) — the two aggregates that carry no operand —
+        // may frame an unordered partition; every other aggregate takes
+        // Msg 10756. Probe-confirmed against SQL Server 2025:
+        // `COUNT(*) OVER (PARTITION BY g ROWS BETWEEN UNBOUNDED PRECEDING AND
+        // CURRENT ROW)` runs and the frame applies, while COUNT(v) / SUM(v) /
+        // MIN(v) in that shape raise. COUNT(1) is not the star form and raises
+        // with the rest.
+        var body = ParseWindowBody(context, frameAllowedWithoutOrderBy: aggregate.Operand is null);
 
         return context.Token is not Operator { Character: ')' }
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
@@ -543,13 +550,16 @@ internal sealed class WindowExpression : Expression
     /// <paramref name="deferFrameOrderByCheck"/> suppresses the Msg 10756
     /// frame-needs-ORDER-BY gate because a referenced window may supply the
     /// ordering; <paramref name="allowWindowReference"/> admits the leading
-    /// window name a <c>WINDOW</c>-clause definition may refine.
+    /// window name a <c>WINDOW</c>-clause definition may refine;
+    /// <paramref name="frameAllowedWithoutOrderBy"/> exempts the calling
+    /// function from that gate entirely (<c>COUNT(*)</c> / <c>COUNT_BIG(*)</c>).
     /// </summary>
     internal static WindowBody ParseWindowBody(
         ParserContext context,
         string? frameRejectingFunction = null,
         bool deferFrameOrderByCheck = false,
-        bool allowWindowReference = false)
+        bool allowWindowReference = false,
+        bool frameAllowedWithoutOrderBy = false)
     {
         string? baseWindowName = null;
         if (allowWindowReference && context.Token is Name nameToken && !IsWindowBodyKeyword(nameToken))
@@ -567,7 +577,11 @@ internal sealed class WindowExpression : Expression
         }
         if (frameRejectingFunction is not null)
             RejectFrameSpec(context, frameRejectingFunction);
-        var frame = ParseOptionalFrameSpec(context, orderByPresent: orderBy.Length > 0 || deferFrameOrderByCheck);
+        var frame = ParseOptionalFrameSpec(
+            context,
+            orderByPresent: orderBy.Length > 0 || deferFrameOrderByCheck,
+            partitionByPresent: partitionBy.Length > 0,
+            frameAllowedWithoutOrderBy: frameAllowedWithoutOrderBy);
         return new WindowBody(partitionBy, orderBy, frame, baseWindowName);
     }
 
@@ -745,16 +759,31 @@ internal sealed class WindowExpression : Expression
     /// clause, or its single-bound shorthand <c>ROWS x</c> / <c>RANGE x</c>
     /// (equivalent to <c>BETWEEN x AND CURRENT ROW</c>). Entered with cursor
     /// at the lookahead-after-ORDER-BY position; returns null and doesn't
-    /// advance if no frame keyword is present. Frame keyword without ORDER
-    /// BY → Msg 10756.
+    /// advance if no frame keyword is present.
+    /// <para>A frame written as the inline body's only element — no
+    /// <c>PARTITION BY</c> and no <c>ORDER BY</c> — is Msg 102 near the frame
+    /// keyword, whatever the function (probe-confirmed against SQL Server
+    /// 2025; real's grammar refuses the shape before the ordering rule gets a
+    /// say). With a partition but no ordering the frame takes Msg 10756,
+    /// unless <paramref name="frameAllowedWithoutOrderBy"/> exempts the
+    /// function.</para>
     /// </summary>
-    private static FrameSpec? ParseOptionalFrameSpec(ParserContext context, bool orderByPresent)
+    private static FrameSpec? ParseOptionalFrameSpec(
+        ParserContext context,
+        bool orderByPresent,
+        bool partitionByPresent = true,
+        bool frameAllowedWithoutOrderBy = false)
     {
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Rows or ContextualKeyword.Range } frameKw)
             return null;
 
         if (!orderByPresent)
-            throw SimulatedSqlException.WindowFrameRequiresOrderBy();
+        {
+            if (!partitionByPresent)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (!frameAllowedWithoutOrderBy)
+                throw SimulatedSqlException.WindowFrameRequiresOrderBy();
+        }
 
         var isRange = frameKw.ContextualKeyword == ContextualKeyword.Range;
         context.MoveNextRequired();

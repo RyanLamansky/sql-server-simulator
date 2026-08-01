@@ -33,7 +33,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch))
+        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
             throw SimulatedSqlException.UserDoesNotHavePermission();
         var database = context.CurrentDatabase;
         if (database.Principals.ContainsKey(name))
@@ -65,7 +65,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch))
+        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
             throw SimulatedSqlException.UserDoesNotHavePermission();
         var database = context.CurrentDatabase;
         if (!TryGetApplicationRole(database, name, out var role))
@@ -107,7 +107,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch))
+        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
             throw SimulatedSqlException.UserDoesNotHavePermission();
         var database = context.CurrentDatabase;
         if (!TryGetApplicationRole(database, name, out var role))

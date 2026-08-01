@@ -177,8 +177,12 @@ public sealed class QuotedIdentifierCaptureTests
 
     // ----- Msg 1934: writes to a table with a captured expression -----
 
-    private const string Msg1934Tail =
-        " failed because the following SET options have incorrect settings: 'QUOTED_IDENTIFIER'."
+    /// <summary>
+    /// Msg 1934's full text: <paramref name="verb"/> echoing the statement and
+    /// <paramref name="options"/> the comma-separated offender list.
+    /// </summary>
+    private static string Msg1934(string verb, string options = "QUOTED_IDENTIFIER") =>
+        $"{verb} failed because the following SET options have incorrect settings: '{options}'."
         + " Verify that SET options are correct for use with indexed views and/or indexes on computed columns"
         + " and/or filtered indexes and/or query notifications and/or XML data type methods and/or spatial index operations.";
 
@@ -187,7 +191,7 @@ public sealed class QuotedIdentifierCaptureTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (a int primary key, b as a * 2 persisted)");
-        simulation.AssertSqlError("set quoted_identifier off; insert t (a) values (1)", 1934, "INSERT" + Msg1934Tail);
+        simulation.AssertSqlError("set quoted_identifier off; insert t (a) values (1)", 1934, Msg1934("INSERT"));
     }
 
     [TestMethod]
@@ -198,7 +202,7 @@ public sealed class QuotedIdentifierCaptureTests
             create table t (a int primary key, b int);
             create unique index ix on t (b) where b > 5
             """);
-        simulation.AssertSqlError("set quoted_identifier off; update t set b = 3 where a = 1", 1934, "UPDATE" + Msg1934Tail);
+        simulation.AssertSqlError("set quoted_identifier off; update t set b = 3 where a = 1", 1934, Msg1934("UPDATE"));
     }
 
     [TestMethod]
@@ -209,7 +213,7 @@ public sealed class QuotedIdentifierCaptureTests
             create table t (a int primary key, b as a * 2);
             create index ix on t (b)
             """);
-        simulation.AssertSqlError("set quoted_identifier off; delete t where a = 1", 1934, "DELETE" + Msg1934Tail);
+        simulation.AssertSqlError("set quoted_identifier off; delete t where a = 1", 1934, Msg1934("DELETE"));
     }
 
     [TestMethod]
@@ -223,7 +227,7 @@ public sealed class QuotedIdentifierCaptureTests
         simulation.AssertSqlError("""
             set quoted_identifier off;
             merge t as d using (select 1 as a) s on d.a = s.a when not matched then insert (a) values (s.a)
-            """, 1934, "MERGE" + Msg1934Tail);
+            """, 1934, Msg1934("MERGE"));
     }
 
     [TestMethod]
@@ -322,7 +326,7 @@ public sealed class QuotedIdentifierCaptureTests
         => new Simulation().AssertSqlError(
             "set quoted_identifier off; create table t (a int, b as a * 2 persisted)",
             1934,
-            "CREATE TABLE" + Msg1934Tail);
+            Msg1934("CREATE TABLE"));
 
     [TestMethod]
     public void CreateTable_WithNonPersistedComputedColumn_UnderOff_Succeeds()
@@ -338,7 +342,7 @@ public sealed class QuotedIdentifierCaptureTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (a int primary key, b int)");
-        simulation.AssertSqlError("set quoted_identifier off; alter table t add c as (b * 2) persisted;", 1934, "ALTER TABLE" + Msg1934Tail);
+        simulation.AssertSqlError("set quoted_identifier off; alter table t add c as (b * 2) persisted;", 1934, Msg1934("ALTER TABLE"));
     }
 
     [TestMethod]
@@ -346,7 +350,7 @@ public sealed class QuotedIdentifierCaptureTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (a int primary key, b int)");
-        simulation.AssertSqlError("set quoted_identifier off; create unique index ix on t (b) where b > 5", 1934, "CREATE INDEX" + Msg1934Tail);
+        simulation.AssertSqlError("set quoted_identifier off; create unique index ix on t (b) where b > 5", 1934, Msg1934("CREATE INDEX"));
     }
 
     [TestMethod]
@@ -387,7 +391,7 @@ public sealed class QuotedIdentifierCaptureTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (a int primary key, x xml)");
-        simulation.AssertSqlError("set quoted_identifier off; create primary xml index ix on t (x)", 1934, "CREATE PRIMARY XML INDEX" + Msg1934Tail);
+        simulation.AssertSqlError("set quoted_identifier off; create primary xml index ix on t (x)", 1934, Msg1934("CREATE PRIMARY XML INDEX"));
     }
 
     // ----- Msg 1934: XML data type methods -----
@@ -397,7 +401,7 @@ public sealed class QuotedIdentifierCaptureTests
         => new Simulation().AssertSqlError(
             "set quoted_identifier off; declare @x xml = '<a>1</a>'; select @x.value('(/a)[1]', 'int')",
             1934,
-            "SELECT" + Msg1934Tail);
+            Msg1934("SELECT"));
 
     [TestMethod]
     public void XmlExistMethod_UnderOff_Raises1934()
@@ -414,7 +418,7 @@ public sealed class QuotedIdentifierCaptureTests
             declare @x xml = '<a>1</a>';
             declare @t table (v int);
             insert @t select @x.value('(/a)[1]', 'int')
-            """, 1934, "INSERT" + Msg1934Tail);
+            """, 1934, Msg1934("INSERT"));
 
     /// <summary>
     /// <c>.nodes()</c> on its own is exempt; a <c>.value()</c> against the node
@@ -467,4 +471,141 @@ public sealed class QuotedIdentifierCaptureTests
             "create view v with schemabinding as select a, c, count_big(*) as n from dbo.b group by a, c");
         _ = simulation.AssertSqlError("set quoted_identifier off; create unique clustered index ix on v (a, c)", 1934);
     }
+
+    // ----- Msg 1934: NOEXPAND over an indexed view -----
+
+    /// <summary>
+    /// Seeds an indexed view <c>v</c> over base table <c>b</c>.
+    /// </summary>
+    private static Simulation IndexedView()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table b (a int not null primary key, c int not null)",
+            "create view v with schemabinding as select a, c, count_big(*) as n from dbo.b group by a, c",
+            "create unique clustered index ix on v (a, c)",
+            "insert b values (1, 1)");
+        return simulation;
+    }
+
+    /// <summary>
+    /// Reading an indexed view through <c>NOEXPAND</c> uses its materialized
+    /// index, which the gate covers under the enclosing statement's verb; the
+    /// same reference without the hint is never gated (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void SelectNoExpandFromIndexedView_UnderOff_Raises1934()
+        => IndexedView().AssertSqlError("set quoted_identifier off; select a from v with (noexpand)", 1934, Msg1934("SELECT"));
+
+    [TestMethod]
+    public void SelectNoExpandFromIndexedView_UnderOff_TakesTheEnclosingStatementsVerb()
+        => IndexedView().AssertSqlError("""
+            set quoted_identifier off;
+            declare @t table (a int);
+            insert @t select a from v with (noexpand)
+            """, 1934, Msg1934("INSERT"));
+
+    [TestMethod]
+    public void SelectNoExpandFromIndexedView_UnderWrongAnsiWarnings_Raises1934()
+        => IndexedView().AssertSqlError("set ansi_warnings off; select a from v with (noexpand)", 1934, Msg1934("SELECT", "ANSI_WARNINGS"));
+
+    [TestMethod]
+    public void SelectWithoutNoExpandFromIndexedView_UnderOff_Succeeds()
+        => AreEqual(1, IndexedView().ExecuteScalar("set quoted_identifier off; select a from v"));
+
+    /// <summary>
+    /// The hint on a view with no index is not gated — there is no
+    /// materialized expression for the setting to disagree with.
+    /// </summary>
+    [TestMethod]
+    public void SelectNoExpandFromPlainView_UnderOff_Succeeds()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table b (a int not null primary key)",
+            "create view v as select a from dbo.b",
+            "insert b values (1)");
+        AreEqual(1, simulation.ExecuteScalar("set quoted_identifier off; select a from v with (noexpand)"));
+    }
+
+    // ----- Msg 1934: the non-QUOTED_IDENTIFIER components -----
+
+    /// <summary>
+    /// A table whose writes the gate covers, for the option-list tests below.
+    /// </summary>
+    private static Simulation GatedTable()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int primary key, b as a * 2 persisted)");
+        return simulation;
+    }
+
+    [TestMethod]
+    public void Insert_UnderAnsiWarningsOff_Raises1934NamingThatOption()
+        => GatedTable().AssertSqlError("set ansi_warnings off; insert t (a) values (1)", 1934, Msg1934("INSERT", "ANSI_WARNINGS"));
+
+    [TestMethod]
+    public void Insert_UnderNumericRoundabortOn_Raises1934NamingThatOption()
+        => GatedTable().AssertSqlError("set numeric_roundabort on; insert t (a) values (1)", 1934, Msg1934("INSERT", "NUMERIC_ROUNDABORT"));
+
+    /// <summary>
+    /// Real lists every offending option in one message, in a fixed order that
+    /// is neither the order they were set nor alphabetical (probe-confirmed
+    /// with three and with five wrong at once).
+    /// </summary>
+    [TestMethod]
+    public void Insert_UnderThreeWrongOptions_ListsThemInRealsOrder()
+        => GatedTable().AssertSqlError("""
+            set concat_null_yields_null off;
+            set ansi_padding off;
+            set ansi_nulls off;
+            insert t (a) values (1)
+            """, 1934, Msg1934("INSERT", "ANSI_NULLS, CONCAT_NULL_YIELDS_NULL, ANSI_PADDING"));
+
+    [TestMethod]
+    public void Insert_UnderAllFiveWrongOptions_ListsThemInRealsOrder()
+        => GatedTable().AssertSqlError("""
+            set ansi_nulls off;
+            set ansi_warnings off;
+            set numeric_roundabort on;
+            set ansi_padding off;
+            set concat_null_yields_null off;
+            insert t (a) values (1)
+            """, 1934, Msg1934("INSERT", "ANSI_NULLS, CONCAT_NULL_YIELDS_NULL, ANSI_WARNINGS, ANSI_PADDING, NUMERIC_ROUNDABORT"));
+
+    /// <summary>
+    /// QUOTED_IDENTIFIER off is reported alone whatever the other five say
+    /// (probe-confirmed with all six wrong at once).
+    /// </summary>
+    [TestMethod]
+    public void Insert_UnderQuotedIdentifierOffAndOthersWrong_ReportsQuotedIdentifierAlone()
+        => GatedTable().AssertSqlError("""
+            set quoted_identifier off;
+            set ansi_nulls off;
+            set numeric_roundabort on;
+            insert t (a) values (1)
+            """, 1934, Msg1934("INSERT"));
+
+    /// <summary>
+    /// ARITHABORT never appears: real accepts a session whose ARITHABORT bit is
+    /// 0 as long as ANSI_WARNINGS is on (probe-confirmed by reading
+    /// <c>@@OPTIONS &amp; 64</c> inside the accepted batch).
+    /// </summary>
+    [TestMethod]
+    public void Insert_UnderArithabortOff_IsNotGated()
+        => AreEqual(1, GatedTable().ExecuteScalar("set arithabort off; insert t (a) values (1); select count(*) from t"));
+
+    [TestMethod]
+    public void CreateTable_WithPersistedComputedColumn_UnderAnsiWarningsOff_Raises1934()
+        => new Simulation().AssertSqlError(
+            "set ansi_warnings off; create table t (a int primary key, b as a * 2 persisted)",
+            1934,
+            Msg1934("CREATE TABLE", "ANSI_WARNINGS"));
+
+    [TestMethod]
+    public void XmlValueMethod_UnderNumericRoundabortOn_Raises1934()
+        => new Simulation().AssertSqlError(
+            "set numeric_roundabort on; declare @x xml = '<a>1</a>'; select @x.value('(/a)[1]', 'int')",
+            1934,
+            Msg1934("SELECT", "NUMERIC_ROUNDABORT"));
 }

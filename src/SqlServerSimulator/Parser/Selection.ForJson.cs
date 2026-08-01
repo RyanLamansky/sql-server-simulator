@@ -42,8 +42,11 @@ partial class Selection
     /// cursor is restored and <paramref name="inner"/> is returned unchanged so
     /// the downstream dispatch raises its own Msg 102. Leaves the cursor on the
     /// first token past the clause.
+    /// <paramref name="depth"/> is the enclosing query's nesting depth: only a
+    /// statement's own SELECT (depth 0) can be the one an INSERT / SELECT INTO
+    /// writes from, so only there does the clause raise Msg 13602.
     /// </summary>
-    internal static Selection ParseOptionalForJson(ParserContext context, Selection inner)
+    internal static Selection ParseOptionalForJson(ParserContext context, Selection inner, uint depth)
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.For })
             return inner;
@@ -104,6 +107,8 @@ partial class Selection
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             }
         }
+
+        RejectSerializationInWriteStatement(context, inner, depth, forJson: true);
 
         return rootSpecified && withoutArrayWrapper
             ? throw SimulatedSqlException.ForJsonRootWithoutWrapperConflict()

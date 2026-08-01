@@ -31,7 +31,7 @@ partial class Simulation
             return true;
         // CREATE USER isn't a modeled named permission — a non-privileged
         // principal gets Msg 15247 (probe M3).
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch))
+        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
             throw SimulatedSqlException.UserDoesNotHavePermission();
         if (context.CurrentDatabase.Principals.ContainsKey(name))
             throw SimulatedSqlException.PrincipalAlreadyExists(name);
@@ -133,7 +133,7 @@ partial class Simulation
             return true;
         // CREATE ROLE isn't a modeled named permission — Msg 15247 for a
         // non-privileged principal (probe M3).
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch))
+        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
             throw SimulatedSqlException.UserDoesNotHavePermission();
         if (context.CurrentDatabase.Principals.ContainsKey(name))
             throw SimulatedSqlException.PrincipalAlreadyExists(name);
@@ -230,7 +230,7 @@ partial class Simulation
         // DROP USER needs db_owner (no ALTER ANY USER model) — a non-privileged
         // principal gets Msg 15151 (probe B). DROP ROLE isn't gated here (its
         // distinct 15151 wording is out of the probed scope).
-        if (!isRole && !PermissionEnforcement.IsOwner(context.Batch))
+        if (!isRole && !PermissionEnforcement.IsOwner(context.Batch, context.CurrentDatabase))
             throw SimulatedSqlException.DropUserPermissionDenied(name);
         if (!context.CurrentDatabase.Principals.TryRemove(name, out var removed))
         {

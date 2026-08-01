@@ -372,16 +372,18 @@ public sealed class CursorMultiSourceTests
     // ---- shapes that stay STATIC ----
 
     /// <summary>
-    /// A source with no stable heap address — a derived table, a view, a CTE,
-    /// an APPLY right side — keeps the cursor on the read-only STATIC snapshot,
-    /// so positioned DML through it is Msg 16929. The rowset is still correct;
-    /// see docs/claude/cursors.md for the residual.
+    /// A source whose rows a generator produces rather than a query body the
+    /// cursor can follow — a TVF, <c>OPENJSON</c>, a <c>VALUES</c> constructor
+    /// — keeps the cursor on the read-only STATIC snapshot, so positioned DML
+    /// through it is Msg 16929. Real reports these as read-only snapshots too;
+    /// the deferred shapes it keeps DYNAMIC (derived table, view, CTE, APPLY)
+    /// are covered by <see cref="CursorDeferredSourceTests"/>.
     /// </summary>
     [TestMethod]
-    [DataRow("select d.id, d.v from (select id, v from a) d")]
-    [DataRow("with k as (select id, v from a) select id, v from k")]
-    [DataRow("select a.id, x.w from a cross apply (select w from b where b.a_id = a.id) x")]
-    public void DeferredSourceShapes_StayStatic(string query)
+    [DataRow("select value n, value * 2 m from generate_series(1, 3)")]
+    [DataRow("select cast([key] as int) k, cast(value as int) n from openjson('[10,20,30]')")]
+    [DataRow("select d.n, d.m from (values (1,1),(2,2),(3,3)) d(n, m)")]
+    public void GeneratorSourceShapes_StayStatic(string query)
     {
         AreEqual(3, ExecuteScalar<int>($"{Seed} declare c cursor for {query}; open c; select @@cursor_rows"));
         _ = new Simulation().AssertSqlError($"""

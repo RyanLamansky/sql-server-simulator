@@ -74,9 +74,37 @@ public sealed class SchemaBindingDependencyTests
             "Cannot DROP FUNCTION 'dbo.tvf' because it is being referenced by object 'v'.");
     }
 
-    /// <summary>Cross-schema references qualify the target with the schema it actually lives in.</summary>
+    /// <summary>
+    /// The message echoes the target <b>as the statement spelled it</b>, so an
+    /// unqualified DROP reports the bare leaf while the two-part form reports
+    /// both segments (probe-confirmed against SQL Server 2025 for DROP TABLE
+    /// and for the ALTER leg below).
+    /// </summary>
     [TestMethod]
-    public void DropTable_ReferencedAcrossSchemas_QualifiesWithOwningSchema()
+    public void DropTable_Unqualified_EchoesTheNameAsWritten()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (a int not null)",
+            "create view dbo.v with schemabinding as select a from dbo.t");
+        sim.AssertSqlError("drop table t", 3729,
+            "Cannot DROP TABLE 't' because it is being referenced by object 'v'.");
+    }
+
+    [TestMethod]
+    public void AlterFunction_Unqualified_EchoesTheNameAsWritten()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create function dbo.leaf(@x int) returns int with schemabinding as begin return @x + 1 end",
+            "create function dbo.caller(@x int) returns int with schemabinding as begin return dbo.leaf(@x) end");
+        sim.AssertSqlError("alter function leaf(@x int) returns int with schemabinding as begin return @x + 2 end", 3729,
+            "Cannot ALTER 'leaf' because it is being referenced by object 'caller'.");
+    }
+
+    /// <summary>A cross-schema reference resolves through the written qualifier.</summary>
+    [TestMethod]
+    public void DropTable_ReferencedAcrossSchemas_EchoesTheWrittenQualifier()
     {
         var sim = new Simulation();
         sim.ExecuteBatches(

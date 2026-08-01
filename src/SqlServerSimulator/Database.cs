@@ -31,6 +31,12 @@ internal sealed class Database
     /// <summary>Principal id of the <c>guest</c> user (2) — the fallback identity for a mapped login connecting to <c>master</c>.</summary>
     public const int GuestPrincipalId = 2;
 
+    /// <summary>Principal id of the <c>INFORMATION_SCHEMA</c> catalog principal (3).</summary>
+    public const int InformationSchemaPrincipalId = 3;
+
+    /// <summary>Principal id of the <c>sys</c> catalog principal (4).</summary>
+    public const int SysPrincipalId = 4;
+
     /// <summary>Database name (the key in <see cref="Simulation.Databases"/>).</summary>
     public readonly string Name;
 
@@ -94,10 +100,10 @@ internal sealed class Database
         // public=0, dbo=1, guest=2, INFORMATION_SCHEMA=3, sys=4.
         var seedDate = DateTime.UtcNow;
         this.Principals["public"] = new DatabasePrincipal(0, "public", "R", "DATABASE_ROLE", isFixedRole: true, seedDate);
-        this.Principals["dbo"] = new DatabasePrincipal(1, "dbo", "S", "SQL_USER", isFixedRole: false, seedDate);
-        this.Principals["guest"] = new DatabasePrincipal(2, "guest", "S", "SQL_USER", isFixedRole: false, seedDate);
-        this.Principals["INFORMATION_SCHEMA"] = new DatabasePrincipal(3, "INFORMATION_SCHEMA", "S", "SQL_USER", isFixedRole: false, seedDate);
-        this.Principals["sys"] = new DatabasePrincipal(4, "sys", "S", "SQL_USER", isFixedRole: false, seedDate);
+        this.Principals["dbo"] = new DatabasePrincipal(DboPrincipalId, "dbo", "S", "SQL_USER", isFixedRole: false, seedDate);
+        this.Principals["guest"] = new DatabasePrincipal(GuestPrincipalId, "guest", "S", "SQL_USER", isFixedRole: false, seedDate);
+        this.Principals["INFORMATION_SCHEMA"] = new DatabasePrincipal(InformationSchemaPrincipalId, "INFORMATION_SCHEMA", "S", "SQL_USER", isFixedRole: false, seedDate);
+        this.Principals["sys"] = new DatabasePrincipal(SysPrincipalId, "sys", "S", "SQL_USER", isFixedRole: false, seedDate);
         // The nine fixed database roles, with real SQL Server's principal ids
         // (probe-confirmed 2026-07-21). 16388 is deliberately absent — real
         // skips it. All type R, is_fixed_role, owned by dbo. Membership is
@@ -202,28 +208,6 @@ internal sealed class Database
     /// </summary>
     public long AllocateRowVersion() => Interlocked.Increment(ref this.rowVersionCounter);
 
-    private long transactionCommitCounter;
-
-    /// <summary>
-    /// Allocates the next transaction commit id used by SNAPSHOT and
-    /// READ_COMMITTED_SNAPSHOT visibility. Monotonic, database-scoped,
-    /// never reused. Each committing transaction reads one stamp; readers
-    /// under SI or RCSI compare against this stamp to decide which version
-    /// of a row to return. The counter starts at zero so the implicit
-    /// "Xmin = 0" for rows that pre-date the first SI/RCSI read is always
-    /// visible to any snapshot.
-    /// </summary>
-    public long AllocateTransactionCommitId() => Interlocked.Increment(ref this.transactionCommitCounter);
-
-    /// <summary>
-    /// Reads the current value of the commit-id counter without advancing
-    /// it. Used to stamp a snapshot at first read under SNAPSHOT isolation
-    /// and at each statement start under READ_COMMITTED_SNAPSHOT. Returning
-    /// the latest committed stamp guarantees readers see every transaction
-    /// that committed before the snapshot was taken.
-    /// </summary>
-    public long CurrentTransactionCommitId => Interlocked.Read(ref this.transactionCommitCounter);
-
     /// <summary>
     /// <c>ALLOW_SNAPSHOT_ISOLATION</c> per-database setting. Default <c>false</c>;
     /// flipped by <c>ALTER DATABASE … SET ALLOW_SNAPSHOT_ISOLATION { ON | OFF }</c>.
@@ -259,19 +243,6 @@ internal sealed class Database
     /// either way, and INSTEAD OF triggers never self-recurse regardless.
     /// </summary>
     public bool RecursiveTriggers;
-
-    /// <summary>
-    /// Active SNAPSHOT-isolation transactions whose snapshot Xid is still
-    /// load-bearing — every entry's <see cref="SimulatedDbTransaction.SnapshotXid"/>
-    /// is non-null and the tx hasn't reached Commit / Rollback / Dispose yet.
-    /// Populated by <see cref="Parser.BatchContext.ResolveSnapshotXidForRead"/>
-    /// on first user-table read of an SI tx; drained by the corresponding
-    /// finalization path. Read by the version-store GC to compute the
-    /// oldest active snapshot Xid (HVs whose <c>Xmax &lt;= oldest_active</c>
-    /// are safe to drop), and by <c>sys.dm_tran_active_snapshot_database_transactions</c>
-    /// to enumerate per-session SI state.
-    /// </summary>
-    public readonly ConcurrentDictionary<SimulatedDbTransaction, byte> ActiveSnapshotTxs = new();
 
     private int nextObjectId = 100;
 

@@ -91,6 +91,17 @@ public sealed class AggregateBindingRuleTests
         Seeded().AssertSqlError(sql, 164, "Each GROUP BY expression must contain at least one column that is not an outer reference.");
 
     [TestMethod]
+    [DataRow("select count(*) from t group by 'a' 'b'")]
+    [DataRow("select count(*) from t group by (select max(x) from u) 'b'")]
+    [DataRow("select count(*) from t group by a 'b'")]
+    public void StrayTokenAfterGroupByClause_RaisesMsg102AheadOfTheBindingRule(string sql) =>
+        // Real parses a batch before binding any of it, so the trailing-token
+        // syntax error outranks the clause's own Msg 164 / Msg 144 — the same
+        // `GROUP BY 'a'` that reports 164 on its own reports 102 once a stray
+        // token follows it (probe-confirmed for all three shapes).
+        Seeded().AssertSqlError(sql, 102, "Incorrect syntax near 'b'.");
+
+    [TestMethod]
     [DataRow("select count(*) from t group by a + datepart(year, getdate())")]
     [DataRow("select count(*) from t group by dateadd(year, 1, d)")]
     [DataRow("select count(*) from t group by left(cast(a as varchar(9)), 1)")]

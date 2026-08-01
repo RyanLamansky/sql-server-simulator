@@ -1,4 +1,3 @@
-using System.Text.Json;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -58,25 +57,21 @@ internal sealed class JsonQuery : Expression
     /// </summary>
     private static SqlValue Extract(SqlValue jsonValue, JsonPath path)
     {
-        JsonDocument doc;
-        try
+        var scan = JsonText.Scan(jsonValue.AsString);
+        var result = JsonWalkResult.Exhausted;
+        if (scan.Text is not null)
         {
-            doc = JsonDocument.Parse(jsonValue.AsString);
-        }
-        catch (JsonException)
-        {
-            return path.Mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonInvalidText() : SqlValue.Null(SqlType.NVarcharMax);
+            using var doc = JsonText.Parse(scan.Text);
+            result = path.Walk(doc.RootElement, scan, out var match);
+            if (result == JsonWalkResult.Resolved)
+            {
+                var subtree = JsonSubtree.Extract(match, path.Mode, strictScalarState: 2);
+                return subtree is null ? SqlValue.Null(SqlType.NVarcharMax) : SqlValue.FromNVarchar(SqlType.NVarcharMax, subtree);
+            }
         }
 
-        using (doc)
-        {
-            var match = path.Walk(doc.RootElement);
-            if (match is null)
-                return SqlValue.Null(SqlType.NVarcharMax);
-
-            var subtree = JsonSubtree.Extract(match.Value, path.Mode);
-            return subtree is null ? SqlValue.Null(SqlType.NVarcharMax) : SqlValue.FromNVarchar(SqlType.NVarcharMax, subtree);
-        }
+        JsonText.RaiseUnresolved(scan, result, path.Mode);
+        return SqlValue.Null(SqlType.NVarcharMax);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;

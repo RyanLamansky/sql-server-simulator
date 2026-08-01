@@ -350,6 +350,39 @@ partial class SimulatedSqlException
         new("A RETURN statement with a return value cannot be used in this context.", 178, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 455: a function body whose last statement isn't
+    /// a <c>RETURN</c>. Probe-confirmed against SQL Server 2025 (2026-08-01):
+    /// Class 16, State 2, exact wording verbatim, for a scalar UDF and a
+    /// multi-statement TVF alike. Reported at <c>CREATE</c> / <c>ALTER</c>.
+    /// </summary>
+    internal static SimulatedSqlException FunctionMustEndWithReturn() =>
+        new("The last statement included within a function must be a return statement.", 455, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 444: a <c>SELECT</c> inside a function body that
+    /// would send its rows to the client. Probe-confirmed against SQL Server
+    /// 2025 (2026-08-01): Class 16, exact wording verbatim, with state
+    /// <c>2</c> when the query reads a rowset (a FROM clause at any depth, or a
+    /// set operator) and <c>3</c> for a wholly-computed projection such as
+    /// <c>SELECT 1</c> or <c>SELECT @x</c>.
+    /// </summary>
+    internal static SimulatedSqlException FunctionSelectReturnsDataToClient(bool readsData) =>
+        new("Select statements included within a function cannot return data to a client.", 444, 16, readsData ? (byte)2 : (byte)3);
+
+    /// <summary>
+    /// Mimics SQL Server error 443: a side-effecting operator inside a function
+    /// body. Probe-confirmed against SQL Server 2025 (2026-08-01): Class 16,
+    /// exact wording verbatim, with the operator spelled the way real spells it
+    /// — upper-case for a statement (<c>'INSERT'</c>, <c>'BEGIN TRANSACTION'</c>,
+    /// <c>'SET OPTION ON'</c>, <c>'EXECUTE STRING'</c>) and catalog-cased for a
+    /// built-in (<c>'newid'</c>, <c>'rand'</c>, <c>'Crypt_Gen_Random'</c>) — and
+    /// the state that operator family carries (see
+    /// <c>FunctionBodyShape</c>'s state constants).
+    /// </summary>
+    internal static SimulatedSqlException SideEffectingOperatorInFunction(string operatorName, byte state) =>
+        new($"Invalid use of a side-effecting operator '{operatorName}' within a function.", 443, 16, state);
+
+    /// <summary>
     /// Mimics SQL Server error 10704: a no-arg <c>THROW;</c> was used outside
     /// any enclosing <c>CATCH</c> block. Probe-confirmed against SQL Server
     /// 2025 (2026-05-12): Class 15, State 1, exact wording verbatim. The

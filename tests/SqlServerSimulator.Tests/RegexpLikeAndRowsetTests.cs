@@ -124,7 +124,7 @@ public sealed class RegexpLikeAndRowsetTests
     {
         var sim = AtCompatibilityLevel(160);
         new Simulation().AssertSqlError(
-            "alter database master set compatibility_level = 160; select 1 where REGEXP_LIKE('a', 'a')",
+            "alter database current set compatibility_level = 160; select 1 where REGEXP_LIKE('a', 'a')",
             195,
             "'REGEXP_LIKE' is not a recognized built-in function name.");
         _ = sim.AssertSqlError("select * from regexp_matches('a', 'a')", 208);

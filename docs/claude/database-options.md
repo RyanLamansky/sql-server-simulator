@@ -3,6 +3,13 @@
 Closed accept-list parser (`RecognizedDatabaseOptions` in `Simulation.Alter.cs`) covering every database-scope toggle SqlPackage emits from a bacpac's `SqlDatabaseOptions` element.
 Most options parse-and-discard; only the four "load-bearing" toggles (`COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`) drive actual behavior.
 
+## Target database
+
+`ALTER DATABASE <name>` lands on **that** database, not the session's — `CURRENT` names the session's (`ResolveAlterDatabaseTarget`).
+So a per-database flag is settable from anywhere, which is what lets one batch stage two databases' versioning options.
+A name the `Simulation` doesn't host raises **Msg 5011** sev 14 state 5 (`User does not have permission to alter database '<n>', the database does not exist, or the database is not in a state that allows access checks.`); real follows it with a trailing Msg 5069 (`ALTER DATABASE statement failed.`), which the simulator omits the way it omits the Msg 297 that trails a DMV denial.
+The name also governs the `COLLATE` clause below.
+
 ## Recognized options by value shape
 
 **`OnOff`** (`SET <name> {ON | OFF}`):

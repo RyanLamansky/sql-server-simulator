@@ -79,56 +79,67 @@ internal sealed partial class Selection
         if (jsonValue.IsNull)
             yield break;
 
-        JsonDocument doc;
-        try
+        // OPENJSON's own Msg 13609 State byte: 4 when the reader was inside the
+        // value it was after, 3 when it was still looking for it. Without a
+        // document path the value is the root, so it is always 4; with one, a
+        // scan that stopped partway through a value is the tell.
+        var scan = JsonText.Scan(jsonValue.AsString);
+        var searchState = (byte)(docPath is null || !scan.CleanCut ? 4 : 3);
+        if (scan.Text is null)
+            throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition, searchState);
+
+        using var doc = JsonText.Parse(scan.Text);
+        var root = doc.RootElement;
+
+        // Whether unfolding the target means reading past the point the
+        // document stopped making sense. Without a document path the target is
+        // the root, so that's just whether the root closed.
+        var targetTruncated = scan.OpenDepth > 0;
+        if (docPath is not null)
         {
-            doc = JsonDocument.Parse(jsonValue.AsString);
-        }
-        catch (JsonException)
-        {
-            yield break;
+            var pathValue = docPath.Run(runtime);
+            if (pathValue.IsNull)
+                yield break;
+            var path = JsonPath.Parse(pathValue.AsString);
+            var result = path.Walk(root, scan, out var match);
+            if (result is JsonWalkResult.Exhausted && scan.HasError)
+                throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition, searchState);
+            if (result is JsonWalkResult.Exhausted or JsonWalkResult.Abandoned)
+                yield break;
+            root = match;
+            targetTruncated = result == JsonWalkResult.Truncated;
         }
 
-        using (doc)
+        // An explicit WITH schema evaluates its column paths relative to
+        // the root document: an array root yields one row per element
+        // (paths relative to the element), an object root yields a single
+        // row (paths relative to the root). The default (key, value, type)
+        // schema instead unfolds the root — one row per array element or
+        // per object property.
+        if (root.ValueKind == JsonValueKind.Object && withColumns is not null)
         {
-            var root = doc.RootElement;
-            if (docPath is not null)
+            yield return BuildOpenJsonRow(root, withColumns, schema, key: "");
+        }
+        else if (root.ValueKind == JsonValueKind.Array)
+        {
+            var index = 0;
+            foreach (var element in root.EnumerateArray())
             {
-                var pathValue = docPath.Run(runtime);
-                if (pathValue.IsNull)
-                    yield break;
-                var path = JsonPath.Parse(pathValue.AsString);
-                var match = path.Walk(root);
-                if (match is null)
-                    yield break;
-                root = match.Value;
-            }
-
-            // An explicit WITH schema evaluates its column paths relative to
-            // the root document: an array root yields one row per element
-            // (paths relative to the element), an object root yields a single
-            // row (paths relative to the root). The default (key, value, type)
-            // schema instead unfolds the root — one row per array element or
-            // per object property.
-            if (root.ValueKind == JsonValueKind.Object && withColumns is not null)
-            {
-                yield return BuildOpenJsonRow(root, withColumns, schema, key: "");
-            }
-            else if (root.ValueKind == JsonValueKind.Array)
-            {
-                var index = 0;
-                foreach (var element in root.EnumerateArray())
-                {
-                    yield return BuildOpenJsonRow(element, withColumns, schema, key: index.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                    index++;
-                }
-            }
-            else if (root.ValueKind == JsonValueKind.Object)
-            {
-                foreach (var property in root.EnumerateObject())
-                    yield return BuildOpenJsonRow(property.Value, withColumns, schema, key: property.Name);
+                yield return BuildOpenJsonRow(element, withColumns, schema, key: index.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                index++;
             }
         }
+        else if (root.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in root.EnumerateObject())
+                yield return BuildOpenJsonRow(property.Value, withColumns, schema, key: property.Name);
+        }
+
+        // A target that stopped short is Msg 13609 only after the rows it did
+        // carry — real streams them, then raises. Text past a complete target
+        // is invisible: OPENJSON stops at its closing bracket.
+        if (targetTruncated)
+            throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition, 4);
     }
 
     private static byte[] BuildOpenJsonRow(JsonElement element, OpenJsonColumn[]? withColumns, SqlType[] schema, string key)

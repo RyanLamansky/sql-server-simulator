@@ -376,6 +376,21 @@ public sealed class ComputedColumnTests
         _ = sim.AssertSqlError("insert t (a) values (-5)", 547);
     }
 
+    /// <summary>
+    /// <c>PERSISTED</c> — and <c>PERSISTED NOT NULL</c> — may be a batch's very
+    /// last token: everything the suffix parser looks for past the keyword is
+    /// optional, so the form needs no trailing <c>;</c> (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (a int); alter table t add cc as a + 1 persisted")]
+    [DataRow("create table t (a int not null); alter table t add cc as a + 1 persisted not null")]
+    public void AlterTableAddComputedColumn_PersistedAsFinalToken_Succeeds(string sql)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(sql);
+        Assert.AreEqual(3, sim.ExecuteScalar("insert t (a) values (2); select cc from t"));
+    }
+
     [TestMethod]
     public void Check_AlterTableAddNonPersistedComputedColumn_InlineCheck_RaisesMsg8183()
         => _ = new Simulation().AssertSqlError(

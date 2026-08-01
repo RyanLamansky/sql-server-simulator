@@ -173,14 +173,14 @@ partial class Simulation
         {
             if (shiftedKeys.Count > 0)
             {
-                var resolved = ResolveKeyConstraints(table.Name, combined, shiftedKeys, context.CurrentDatabase);
+                var resolved = ResolveKeyConstraints(table.Name, combined, shiftedKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
                 foreach (var kc in resolved)
                     table.KeyConstraints.Add(kc);
             }
 
             if (pendingChecks.Count > 0)
             {
-                var checks = ResolveCheckConstraints(table.Name, pendingChecks, context.CurrentDatabase);
+                var checks = ResolveCheckConstraints(table.Name, pendingChecks, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
                 foreach (var ck in checks)
                     table.CheckConstraints.Add(ck);
             }
@@ -257,8 +257,8 @@ partial class Simulation
         {
             // Same PERSISTED gate CREATE TABLE applies, under ALTER's own verb
             // (probe-confirmed Msg 1934 "ALTER TABLE failed …").
-            if (pc.Persisted && !batch.Parser.QuotedIdentifiers)
-                throw SimulatedSqlException.IncorrectSetOptions("ALTER TABLE", QuotedIdentifierOptionName);
+            if (pc.Persisted && IncorrectSetOptionNames(batch.Parser) is { } setOptions)
+                throw SimulatedSqlException.IncorrectSetOptions("ALTER TABLE", setOptions);
             var computedType = pc.Expression.GetSqlType(batch, ResolveReference);
             heapColumns[pc.Index] = new HeapColumn(pc.Name, computedType, maxLength: null, nullable: pc.Nullable, computedExpression: pc.Expression, isPersisted: pc.Persisted, computedDefinition: pc.Definition);
         }

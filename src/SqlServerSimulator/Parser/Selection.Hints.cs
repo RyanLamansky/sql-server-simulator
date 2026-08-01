@@ -162,6 +162,14 @@ internal sealed partial class Selection
         /// <summary><c>TABLOCKX</c> — escalate to table-X regardless of read / write direction.</summary>
         public bool TabLockX;
         /// <summary>
+        /// <c>NOEXPAND</c> — read an indexed view's materialized index instead
+        /// of expanding its body. The simulator always expands, so the hint has
+        /// no execution effect; it is tracked because real's SET-option gate
+        /// covers it (Msg 1934 for a <c>NOEXPAND</c> reference to an indexed
+        /// view from a session whose options the gate refuses).
+        /// </summary>
+        public bool NoExpand;
+        /// <summary>
         /// <c>INDEX(…)</c>, <c>FORCESEEK</c>, <c>FORCESCAN</c> — index-selection
         /// hints. Tracked for Msg 1069 rejection on DML targets (real SQL
         /// Server forbids index hints on INSERT / UPDATE / DELETE / MERGE
@@ -422,6 +430,10 @@ internal sealed partial class Selection
         else if (sourceSpan.Equals("TABLOCKX", StringComparison.OrdinalIgnoreCase))
         {
             info.TabLockX = true;
+        }
+        else if (sourceSpan.Equals("NOEXPAND", StringComparison.OrdinalIgnoreCase))
+        {
+            info.NoExpand = true;
         }
         else if (sourceSpan.Equals("INDEX", StringComparison.OrdinalIgnoreCase))
         {

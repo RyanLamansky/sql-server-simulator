@@ -10,9 +10,28 @@ namespace SqlServerSimulator.Storage;
 /// to UNKNOWN (any NULL operand without explicit NULL handling) passes —
 /// only an explicit <c>false</c> rejects.
 /// </summary>
-internal sealed class CheckConstraint(string name, BooleanExpression predicate, string? inlineColumn, int objectId)
+internal sealed class CheckConstraint(string name, BooleanExpression predicate, string? inlineColumn, int objectId, DateTime createDate)
 {
     public readonly string Name = name;
+
+    /// <summary>
+    /// UTC creation timestamp — the declaring statement's frozen
+    /// <c>UtcNow</c>, so a constraint declared inside <c>CREATE TABLE</c>
+    /// shares the table's instant while an <c>ALTER TABLE … ADD CONSTRAINT</c>
+    /// carries the later one (probe-confirmed). Surfaces in
+    /// <c>sys.objects.create_date</c> and the per-family constraint catalog
+    /// view's <c>create_date</c>.
+    /// </summary>
+    public readonly DateTime CreateDate = createDate;
+
+    /// <summary>
+    /// UTC modification timestamp — equal to <see cref="CreateDate"/> until an
+    /// <c>ALTER TABLE … {NOCHECK|CHECK} CONSTRAINT</c> trust toggle or an
+    /// <c>sp_rename</c> of the constraint advances it (both probe-confirmed).
+    /// Surfaces in <c>sys.objects.modify_date</c> and the per-family
+    /// constraint catalog view's <c>modify_date</c>.
+    /// </summary>
+    public DateTime ModifyDate = createDate;
 
     public readonly BooleanExpression Predicate = predicate;
 

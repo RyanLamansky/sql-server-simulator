@@ -11,7 +11,8 @@ Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW STA
 - **`WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = schema.table))`** trailing clause auto-creates the sibling history `HeapTable` at parent-creation time.
   The history table mirrors the parent's column shape — names, types, nullability, hidden flag, persisted-computed expressions — but strips engine-managed flags (IDENTITY, GENERATED ALWAYS), inline constraints, and DEFAULTs (history rows carry materialized values from the parent).
   `sys.tables.temporal_type = 2` for the parent, `1` for history; `sys.tables.history_table_id` references the sibling's object_id (NULL for non-temporal and history tables themselves).
-  The auto-created history table starts as a plain heap (no PK), so its `sys.indexes` is a single HEAP row until a `CREATE CLUSTERED INDEX` is added — as the bacpac loader emits for the WWI `*_Archive` siblings — at which point it becomes a single CLUSTERED row at `index_id 1` with **no** phantom heap row (the index-id allocation authority suppresses it; see [`indexes.md`](indexes.md#index-id-allocation)).
+  An engine-**built** sibling also gets the non-unique clustered index real builds with it — see [The history cleanup index](#the-history-cleanup-index) — so its `sys.indexes` is a single CLUSTERED row at `index_id 1` with **no** phantom heap row (the index-id allocation authority suppresses it; see [`indexes.md`](indexes.md#index-id-allocation)).
+  An **adopted** table keeps whatever indexing it already had, so a plain heap stays a single HEAP row until a `CREATE CLUSTERED INDEX` lands — as the bacpac loader emits for the WWI `*_Archive` siblings.
   A history table therefore always projects exactly one `sys.indexes` row with `index_id < 2`, which is what DacFx's `SqlTable` export query joins against.
 - **Auto-named history (`HISTORY_TABLE` omitted)** generates `MSSQL_TemporalHistoryFor_<base object_id>` in **the base table's own schema** (probe-confirmed: a base in `app` keeps its sibling in `app`, not `dbo`), from both the CREATE and the ALTER form.
   A name collision — reachable by turning versioning off, leaving the old sibling behind, and turning it back on — appends an 8-hex suffix (`MSSQL_TemporalHistoryFor_1221579390_F058EC24`).
@@ -91,6 +92,7 @@ Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW STA
   Every system-versioned table reports the triple (INFINITE until one is set); history siblings and non-temporal tables report NULL for all three.
   A count of zero or less is **Msg 13743** (`0 is not a valid value for system versioning history retention period.` — the number unquoted), an unrecognized unit is **Msg 13744** at **severity 15** with the unit echoed as written, and a count with no unit is Msg 102.
   The unit is validated before the count, so `3 HOURS` is 13744 rather than anything about the 3.
+  A **finite** period additionally requires the history cleanup index (**Msg 13765**) — next section.
 - **Retention pruning is a read-side filter**: a history version whose ROW END fell before `now - retention` is invisible to every `FOR SYSTEM_TIME` form while a direct `SELECT` against the history table still returns it.
   That's real's own observable behavior — real filters aged rows out of `FOR SYSTEM_TIME` the moment the window passes and deletes them later from a background task (`sys.sp_cleanup_temporal_history` forces the delete) — see [Divergences](#divergences) for the part that isn't modeled.
   The cutoff is measured from the statement's frozen `UtcNow` and recomputed per enumeration, so widening the window back to INFINITE makes aged versions visible again.
@@ -101,6 +103,24 @@ Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW STA
   `sys.columns.generated_always_type` reports 1 (`AS_ROW_START`) / 2 (`AS_ROW_END`) for the period columns.
   See [`catalog-views.md`](catalog-views.md).
 
+## The history cleanup index
+
+Real gives every history table it **builds** a non-unique clustered index named `ix_<history table leaf>` keyed on `(period end, period start)` — the index its background aged-data cleanup seeks through — and that index is what a finite `HISTORY_RETENTION_PERIOD` requires.
+The simulator builds the same one in `BuildHistoryTable`, so it rides both sibling-building paths (CREATE TABLE's `WITH` clause and `ALTER TABLE … SET (SYSTEM_VERSIONING = ON …)` naming a table that doesn't exist yet) and both naming forms (`ix_MSSQL_TemporalHistoryFor_<id>` for an auto-named sibling).
+Storage is unchanged — a clustered index is metadata plus index-id allocation, never row ordering (see [`indexes.md`](indexes.md#index-id-allocation)) — so the index's whole visible footprint is the catalog: `sys.indexes` (`index_id 1`, `CLUSTERED`, `is_unique = 0`), `sys.index_columns` (`key_ordinal` 1 = end, 2 = start, ascending, no INCLUDE), `sys.stats`, and `sp_helpindex` (`ix_CustomersHistory | clustered located on PRIMARY | Vt, Vf`).
+
+An **adopted** history table gets no index built for it — probe-confirmed, real leaves a heap a heap — which is what makes the retention gate observable:
+
+- **Msg 13765** (`Setting finite retention period failed on system-versioned temporal table '<db.schema.base>' because the history table '<db.schema.history>' does not contain required clustered index. Consider creating a clustered columnstore or B-tree index starting with the column that matches end of SYSTEM_TIME period, on the history table.`) fires when a finite retention period is asked for and the history table carries no clustered index whose **leading** key column is the period end column.
+  **State 1** when it has no clustered index at all — a nonclustered one on the right columns doesn't count — and **state 2** when it has one leading with another column.
+  Everything past the leading column is irrelevant: `(PeriodEnd)`, `(PeriodEnd DESC)`, `(PeriodEnd, PeriodStart)` and `(PeriodEnd, Id)` all satisfy it.
+  All three entry points check identically (CREATE TABLE adopting an existing sibling, `SET (SYSTEM_VERSIONING = ON …)` turning versioning on, and a re-issue against an already-versioned base), and the statement is refused whole — a rejected CREATE TABLE leaves no base behind and a rejected ALTER leaves the link and the old retention pair untouched.
+  `HISTORY_RETENTION_PERIOD = INFINITE` (and an omitted clause) is accepted on a plain heap history table.
+- **Msg 13766** (`Cannot drop the clustered index '<schema.table.index>' because it is being used for automatic cleanup of aged data. Consider setting HISTORY_RETENTION_PERIOD to INFINITE on the corresponding system-versioned temporal table if you need to drop this index.`) refuses a `DROP INDEX` of a history table's clustered index while its base is on a finite retention period, through both the `name ON table` and the deprecated `table.name` forms.
+  The pin is on the live link rather than a flag: relaxing the base back to INFINITE — or turning versioning off — releases the index immediately, and a *nonclustered* index on the same history table drops as usual.
+
+`ALTER INDEX … DISABLE` against the cleanup index is **not** gated; real accepts it (probe-confirmed).
+
 ## Data-model footprint
 
 - **`HeapColumn`** gained `GeneratedAs` (`GeneratedAlwaysAsRow.None / Start / End`) and `IsHidden` fields.
@@ -108,9 +128,13 @@ Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW STA
   That last flag is what keeps Msg 13574 honest: `BuildHistoryTable` copies the base's `PeriodColumns` onto the sibling so the `FOR SYSTEM_TIME` row source can read the ordinals off either side, and without the flag an ex-sibling could never be re-linked after `SET (SYSTEM_VERSIONING = OFF)`.
 - **Parser scope:** `ParseColumnList`'s `pendingPeriod: List<(string StartCol, string EndCol)>?` carries the period names through column-list parsing; `ResolvePeriodColumns` (in `Simulation.Create.cs`) validates and resolves to ordinals.
   `ParseSystemVersioningOnOptions` parses the option list into a `SystemVersioningOptions` and is shared by the CREATE `WITH (…)` and ALTER `SET (…)` wrappers, so the two grammars can't drift.
-  `BuildHistoryTable` mirrors the parent column shape into the history sibling, `AutoHistoryTableName` generates the `MSSQL_TemporalHistoryFor_…` name, and `ValidateHistoryTableShape` runs the adoption checks.
+  `BuildHistoryTable` mirrors the parent column shape into the history sibling and adds the `ix_…` cleanup index, `AutoHistoryTableName` generates the `MSSQL_TemporalHistoryFor_…` name, `ValidateHistoryTableShape` runs the adoption checks, and `RequireHistoryCleanupIndex` is the Msg 13765 gate all three linking sites call.
+  Msg 13766 rides `DropOneIndex`'s `RetentionCleanupDependsOn` (`Simulation.Drop.cs`), which walks the owning database for the base pointing at this history table rather than storing a back-reference.
 - **Query scope:** `Selection.ParseOptionalForSystemTime` peeks for `FOR SYSTEM_TIME` between the FROM source's table name and any alias, and returns `null` when absent (cursor restored) or a `TemporalRowSource` when present.
   That one row source serves all five forms — a `TemporalQueryKind` discriminator plus up to two bound expressions, parsed by `ParseTemporalTimeArgument` (the literal-or-variable grammar) and evaluated once per enumeration.
+- **Cursor scope:** a `FOR SYSTEM_TIME` FROM slot never resolves into a `CursorSourcePlan` (`TryBuildCursorPlan` declines a source whose rows a `TemporalRowSource` produces), so such a cursor is a read-only snapshot.
+  That matches real, probe-confirmed: `sys.dm_exec_cursors(@@SPID).properties` reports `Snapshot | Read Only` with the row count for `AS OF` / `ALL` / `BETWEEN` / `FROM…TO` / `CONTAINED IN` alike, `SCROLL` included, so positioned `WHERE CURRENT OF` DML through one is **Msg 16929** (`The cursor is READ ONLY.`) and `DYNAMIC TYPE_WARNING` fires Msg 16956.
+  A cursor over a versioned table *without* a `FOR SYSTEM_TIME` clause reads the base heap, so it stays DYNAMIC and updatable like any other → [`cursors.md`](cursors.md#which-shapes-are-navigable).
 
 ## EF Core 10 emit shape
 
@@ -126,10 +150,8 @@ INSERT emits `INSERT INTO [tbl] ([cols-without-period]) OUTPUT INSERTED.[PeriodE
   Real filters them out of `FOR SYSTEM_TIME` at query time and a background task deletes them afterwards, so a direct `SELECT` against the history table returns an aged row until the cleanup runs (probe-confirmed on both halves, with `sys.sp_cleanup_temporal_history` forcing the delete).
   The simulator has no background task, so it models the half that `FOR SYSTEM_TIME` results depend on and leaves the rows in place: `select count(*)` against the history sibling keeps counting them, and the space is never reclaimed.
   Nothing observable through the temporal query surface differs.
-- **The auto-created history table is a plain heap**, where real gives it a clustered index named `ix_<history table name>` on `(period end, period start)`.
-  Two knock-ons: real's Msg 13765 — a finite retention period requires that clustered index — has nothing to fire on, so the simulator accepts a retention period on any history table; and a history table's `sys.indexes` stays the single HEAP row described above until a `CREATE CLUSTERED INDEX` lands (which is what the bacpac loader emits for the WWI `*_Archive` siblings).
 - **Auto-generated history names carry the simulator's own object ids**, which start at ~100 rather than real's allocator range, so `MSSQL_TemporalHistoryFor_102` is structurally right and never byte-matches a real server's name for the same DDL.
-  The collision suffix is deterministic where real's is random.
+  The collision suffix is deterministic where real's is random, and the cleanup index's `ix_`-prefixed name inherits both.
 - **Msg 13544 qualified-name format**: real SQL Server pads temp-table names with their internal allocation suffix (`#x____...___…000000000148`); the simulator emits the bare `tempdb.dbo.#x` form.
   Same Msg number / framing, less verbose name.
 

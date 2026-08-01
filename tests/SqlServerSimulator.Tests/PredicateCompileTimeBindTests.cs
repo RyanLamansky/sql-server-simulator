@@ -105,6 +105,62 @@ public sealed class PredicateCompileTimeBindTests
             EmptyFixture().AssertSqlError(sql, 457).Message);
 
     /// <summary>
+    /// <c>CONCAT</c> / <c>CONCAT_WS</c> resolve their operands' collations too,
+    /// but name the conflict with <b>Msg 451</b> — a message of its own that
+    /// carries the clause and the 1-based ordinal of the slot being settled.
+    /// The separator argument participates like any other, and the reported
+    /// pair is the operand that broke the fold followed by the collation
+    /// accumulated to its left.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select concat(c1.x, c2.x) from c1, c2", "concat", "SELECT", 1)]
+    [DataRow("select concat(c1.x, c2.x) from c1, c2 where 1 = 0", "concat", "SELECT", 1)]
+    [DataRow("select c1.y, concat(c1.x, c2.x) from c1, c2", "concat", "SELECT", 2)]
+    [DataRow("select concat(c1.x, c1.x, c2.x) from c1, c2", "concat", "SELECT", 1)]
+    [DataRow("select concat_ws('-', c1.x, c2.x) from c1, c2", "concat_ws", "SELECT", 1)]
+    [DataRow("select concat_ws(c1.x, c2.x, c2.x) from c1, c2", "concat_ws", "SELECT", 1)]
+    [DataRow("select c1.y from c1, c2 order by concat(c1.x, c2.x)", "concat", "ORDER BY", 1)]
+    [DataRow("select c1.y from c1, c2 order by c1.y, concat(c1.x, c2.x)", "concat", "ORDER BY", 2)]
+    [DataRow("select count(*) from c1, c2 group by concat(c1.x, c2.x)", "concat", "GROUP BY", 2)]
+    [DataRow("select count(*) from c1, c2 group by c1.y, concat(c1.x, c2.x)", "concat", "GROUP BY", 3)]
+    [DataRow("select concat(c1.x, c2.x) into #t from c1, c2", "concat", "SELECT", 1)]
+    public void EmptyRowset_CrossCollationConcat_Raises451(string sql, string operatorName, string clause, int ordinal)
+    {
+        var ex = EmptyFixture().AssertSqlError(sql, 451);
+        AreEqual((byte)1, ex.State);
+        AreEqual(
+            $"Cannot resolve collation conflict between \"{Cs}\" and \"{Ci}\" in {operatorName} operator occurring in {clause} statement column {ordinal}.",
+            ex.Message);
+    }
+
+    /// <summary>
+    /// Two explicit <c>COLLATE</c> postfixes take the operator's own Msg 468
+    /// instead — the same split every other operator makes between an
+    /// unresolvable pair of overrides and one of column collations.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select concat(c1.x collate " + Cs + ", c1.x collate " + Ci + ") from c1", "concat")]
+    [DataRow("select concat_ws('-', c1.x collate " + Cs + ", c1.x collate " + Ci + ") from c1", "concat_ws")]
+    public void EmptyRowset_ConcatOfTwoExplicitCollations_Raises468(string sql, string operatorName)
+    {
+        var ex = EmptyFixture().AssertSqlError(sql, 468);
+        AreEqual((byte)9, ex.State);
+        AreEqual($"Cannot resolve the collation conflict between \"{Ci}\" and \"{Cs}\" in the {operatorName} operation.", ex.Message);
+    }
+
+    /// <summary>
+    /// A target collation settles the conflict without an error: real coerces
+    /// the concat result into the column or variable being assigned rather
+    /// than making the expression name a collation of its own.
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert c1 (x) select concat(c1.x, c2.x) from c1, c2")]
+    [DataRow("declare @v varchar(40); select @v = concat(c1.x, c2.x) from c1, c2")]
+    [DataRow("update c1 set x = concat(c1.x, c2.x) from c1, c2")]
+    public void CrossCollationConcat_IntoAssignmentTarget_Succeeds(string sql)
+        => AreEqual(0, EmptyFixture().ExecuteNonQuery(sql));
+
+    /// <summary>
     /// <c>ISNULL</c> takes its first argument's collation outright rather than
     /// unifying, so it never conflicts (probe-confirmed: real returns the
     /// rowset). An explicit <c>COLLATE</c> on one arm outranks the other and

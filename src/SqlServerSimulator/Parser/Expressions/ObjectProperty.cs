@@ -35,11 +35,13 @@ internal sealed class ObjectProperty : Expression
             return SqlValue.Null(SqlType.Int32);
         var id = ScalarArguments.CoerceToInt(idValue);
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
-        var obj = FindObject(runtime.Batch.CurrentDatabase, id);
-        return obj is null ? SqlValue.Null(SqlType.Int32)
-            : EvaluateProperty(runtime.Batch.CurrentDatabase, obj, prop) is int result
-                ? SqlValue.FromInt32(result)
-                : SqlValue.Null(SqlType.Int32);
+        var database = runtime.Batch.CurrentDatabase;
+        var result = FindObject(database, id) is { } obj
+            ? EvaluateProperty(database, obj, prop)
+            : TryFindConstraint(database, id, out var parsesAnExpression)
+                ? EvaluateConstraintProperty(parsesAnExpression, prop)
+                : null;
+        return result is int value ? SqlValue.FromInt32(value) : SqlValue.Null(SqlType.Int32);
     }
 
     internal static SchemaObject? FindObject(Database database, int id)
@@ -62,6 +64,85 @@ internal sealed class ObjectProperty : Expression
                 if (sn.ObjectId == id) return sn;
         }
         return null;
+    }
+
+    /// <summary>
+    /// Resolves a constraint's object id — the ids <c>sys.objects</c> projects
+    /// as its <c>C</c> / <c>D</c> / <c>PK</c> / <c>UQ</c> / <c>F</c> rows, none
+    /// of which is a <see cref="SchemaObject"/> so
+    /// <see cref="FindObject(Database, int)"/> can't reach them.
+    /// <paramref name="parsesAnExpression"/> is set for the two families whose
+    /// declaration carries an expression (CHECK and DEFAULT), which is the one
+    /// property answer that splits the five apart.
+    /// </summary>
+    internal static bool TryFindConstraint(Database database, int id, out bool parsesAnExpression)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                foreach (var check in table.CheckConstraints)
+                    if (check.ObjectId == id) { parsesAnExpression = true; return true; }
+                foreach (var column in table.Columns)
+                    if (column.DefaultConstraint is { ObjectId: var defaultId } && defaultId == id) { parsesAnExpression = true; return true; }
+                foreach (var key in table.KeyConstraints)
+                    if (key.ObjectId == id) { parsesAnExpression = false; return true; }
+                foreach (var foreignKey in table.OutgoingForeignKeys)
+                    if (foreignKey.ObjectId == id) { parsesAnExpression = false; return true; }
+            }
+        }
+        parsesAnExpression = false;
+        return false;
+    }
+
+    /// <summary>
+    /// OBJECTPROPERTY's answers for a constraint object id. Probe-confirmed
+    /// against SQL Server 2025: every object-kind discriminator answers 0 (a
+    /// constraint is resolvable, just none of those kinds), <c>IsEncrypted</c>
+    /// and <c>IsMSShipped</c> and <c>IsSystemTable</c> answer 0, and the
+    /// module-scoped names answer NULL.
+    /// <para>
+    /// <c>IsQuotedIdentOn</c> is the interesting one: a CHECK or DEFAULT
+    /// constraint answers a constant <b>0</b> — not the creating session's
+    /// setting, which is 0 even for one created with <c>QUOTED_IDENTIFIER</c>
+    /// ON (probe-confirmed both ways, and uniformly 0 across msdb's 229
+    /// shipped constraints) — while a key or foreign-key constraint answers
+    /// NULL. <c>IsAnsiNullsOn</c> is NULL for all five.
+    /// </para>
+    /// </summary>
+    internal static int? EvaluateConstraintProperty(bool parsesAnExpression, string property)
+    {
+        // SSS003: switch on the Span<char> overload rather than allocating an
+        // uppercased temp, the same shape EvaluateProperty uses.
+        Span<char> upper = stackalloc char[property.Length];
+        return property.AsSpan().ToUpperInvariant(upper) switch
+        {
+            6 => upper switch { "ISVIEW" => 0, _ => null },
+            7 => upper switch { "ISTABLE" => 0, _ => null },
+            9 => upper switch { "ISTRIGGER" => 0, _ => null },
+            11 => upper switch
+            {
+                "ISENCRYPTED" => 0,
+                "ISMSSHIPPED" => 0,
+                "ISPROCEDURE" => 0,
+                "ISUSERTABLE" => 0,
+                _ => null,
+            },
+            13 => upper switch { "ISSYSTEMTABLE" => 0, _ => null },
+            15 => upper switch
+            {
+                "ISQUOTEDIDENTON" => parsesAnExpression ? 0 : null,
+                "ISTABLEFUNCTION" => 0,
+                _ => null,
+            },
+            16 => upper switch
+            {
+                "ISINLINEFUNCTION" => 0,
+                "ISSCALARFUNCTION" => 0,
+                _ => null,
+            },
+            _ => null,
+        };
     }
 
     /// <summary>
@@ -128,6 +209,12 @@ internal sealed class ObjectProperty : Expression
             },
             13 => upper switch
             {
+                // The creation-time ANSI_NULLS capture, under the spelling
+                // that also answers for a table — same kind filter as
+                // IsQuotedIdentOn, and NULL for a sequence / synonym /
+                // constraint (probe-confirmed). Unlike QUOTED_IDENTIFIER a
+                // table's answer is the captured value, not a constant 1.
+                "ISANSINULLSON" => obj is HeapTable || IsSqlModule(obj) ? (obj.UsesAnsiNulls ? 1 : 0) : null,
                 "ISSCHEMABOUND" => ModuleDeterminism.EvaluateSchemaBound(obj),
                 // 0 for every resolvable object — probe-confirmed even for
                 // catalog views (real's legacy system-table sense never
@@ -158,17 +245,14 @@ internal sealed class ObjectProperty : Expression
                 "TABLEHASIDENTITY" => TableFlag(obj, upper),
                 _ => null,
             },
-            // The module SET-option snapshot pair. ANSI_NULLS is still a
-            // constant ON (every simulator module is created under it,
-            // mirroring sys.sql_modules' constant uses_ansi_nulls); the
-            // QUOTED_IDENTIFIER half below reads the real capture. Both
-            // return NULL for a non-module object — including a table, which
-            // the shorter IsQuotedIdentOn spelling answers 1 for
-            // (probe-confirmed: the two spellings agree on modules and
-            // diverge on tables).
+            // The module SET-option snapshot pair, both reading the
+            // creation-time capture. Both return NULL for a non-module object
+            // — including a table, which the shorter IsAnsiNullsOn /
+            // IsQuotedIdentOn spellings answer for (probe-confirmed: the two
+            // spellings agree on modules and diverge on tables).
             17 => upper switch
             {
-                "EXECISANSINULLSON" => IsSqlModule(obj) ? 1 : null,
+                "EXECISANSINULLSON" => IsSqlModule(obj) ? (obj.UsesAnsiNulls ? 1 : 0) : null,
                 "TABLEHASCHECKCNST" => TableFlag(obj, upper),
                 _ => null,
             },

@@ -164,4 +164,106 @@ public sealed class ObjectPropertyTests
         _ = sim.ExecuteNonQuery("create view v as select 1 x");
         AreEqual(DBNull.Value, sim.ExecuteScalar("select objectproperty(object_id('v'), 'TableHasPrimaryKey')"));
     }
+
+    // ----- Constraint object ids -----
+
+    /// <summary>
+    /// Seeds a table carrying one constraint of each family and returns the
+    /// simulation; each constraint's object id is reachable through
+    /// <c>sys.objects</c>'s <c>parent_object_id</c> link.
+    /// </summary>
+    private static Simulation Constrained()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (a int not null primary key);
+            create table t (
+                k int not null constraint pk_t primary key,
+                u int not null constraint uq_t unique,
+                c int null constraint ck_t check (c > 0),
+                d int null constraint df_t default 1,
+                f int null constraint fk_t references p (a))
+            """);
+        return sim;
+    }
+
+    /// <summary>
+    /// Reads <paramref name="property"/> for the named constraint, taking its
+    /// id from <paramref name="catalogView"/> — <c>OBJECT_ID</c> doesn't
+    /// resolve a constraint name, and a DEFAULT constraint's id lives in
+    /// <c>sys.default_constraints</c> rather than <c>sys.objects</c>.
+    /// </summary>
+    private static string ConstraintProperty(string constraintName, string property, string catalogView = "sys.objects") =>
+        $"select objectproperty((select object_id from {catalogView} where name = '{constraintName}'), '{property}')";
+
+    /// <summary>
+    /// A CHECK or DEFAULT constraint answers a constant 0 — not the creating
+    /// session's setting, which is 0 even for one created under
+    /// <c>QUOTED_IDENTIFIER</c> ON (probe-confirmed both ways against SQL
+    /// Server 2025, and uniformly 0 across msdb's shipped constraints).
+    /// </summary>
+    [TestMethod]
+    public void IsQuotedIdentOn_OnCheckConstraint_Returns0()
+        => AreEqual(0, Constrained().ExecuteScalar(ConstraintProperty("ck_t", "IsQuotedIdentOn")));
+
+    [TestMethod]
+    public void IsQuotedIdentOn_OnDefaultConstraint_Returns0()
+        => AreEqual(0, Constrained().ExecuteScalar(ConstraintProperty("df_t", "IsQuotedIdentOn", "sys.default_constraints")));
+
+    /// <summary>The key and foreign-key families answer NULL instead.</summary>
+    [TestMethod]
+    [DataRow("pk_t")]
+    [DataRow("uq_t")]
+    [DataRow("fk_t")]
+    public void IsQuotedIdentOn_OnKeyOrForeignKeyConstraint_ReturnsNull(string constraintName)
+        => AreEqual(DBNull.Value, Constrained().ExecuteScalar(ConstraintProperty(constraintName, "IsQuotedIdentOn")));
+
+    /// <summary>
+    /// The capture is constant, so a constraint created under
+    /// <c>QUOTED_IDENTIFIER OFF</c> answers the same 0.
+    /// </summary>
+    [TestMethod]
+    public void IsQuotedIdentOn_OnCheckConstraintCreatedUnderOff_Returns0()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("set quoted_identifier off; create table t (c int constraint ck_t check (c > 0))");
+        AreEqual(0, sim.ExecuteScalar(ConstraintProperty("ck_t", "IsQuotedIdentOn")));
+    }
+
+    /// <summary>
+    /// Every object-kind discriminator answers 0 for a constraint — it is a
+    /// resolvable object, just none of those kinds — as do IsMSShipped,
+    /// IsEncrypted and IsSystemTable (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    [DataRow("IsTable")]
+    [DataRow("IsView")]
+    [DataRow("IsProcedure")]
+    [DataRow("IsUserTable")]
+    [DataRow("IsTrigger")]
+    [DataRow("IsScalarFunction")]
+    [DataRow("IsEncrypted")]
+    [DataRow("IsMSShipped")]
+    [DataRow("IsSystemTable")]
+    public void ObjectKindProperties_OnConstraint_Return0(string property)
+        => AreEqual(0, Constrained().ExecuteScalar(ConstraintProperty("ck_t", property)));
+
+    /// <summary>The module-scoped and table-scoped names answer NULL.</summary>
+    [TestMethod]
+    [DataRow("IsAnsiNullsOn")]
+    [DataRow("IsSchemaBound")]
+    [DataRow("IsDeterministic")]
+    [DataRow("ExecIsQuotedIdentOn")]
+    [DataRow("TableHasPrimaryKey")]
+    public void ModuleAndTableProperties_OnConstraint_ReturnNull(string property)
+        => AreEqual(DBNull.Value, Constrained().ExecuteScalar(ConstraintProperty("ck_t", property)));
+
+    /// <summary>
+    /// <c>OBJECTPROPERTYEX</c> answers a constraint the same way the plain form
+    /// does (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void ObjectPropertyEx_OnCheckConstraint_MatchesThePlainForm()
+        => AreEqual(0, Constrained().ExecuteScalar(
+            "select objectpropertyex((select object_id from sys.objects where name = 'ck_t'), 'IsQuotedIdentOn')"));
 }

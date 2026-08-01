@@ -387,8 +387,8 @@ partial class Simulation
         }
 
         resolvedColumns = [.. heapColumns!];
-        keyConstraints = ResolveKeyConstraints(fullName, heapColumns!, pendingKeys, context.CurrentDatabase);
-        checkConstraints = ResolveCheckConstraints(fullName, pendingChecks, context.CurrentDatabase);
+        keyConstraints = ResolveKeyConstraints(fullName, heapColumns!, pendingKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
+        checkConstraints = ResolveCheckConstraints(fullName, pendingChecks, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
         return !context.Batch.IsSkipping;
     }
 }

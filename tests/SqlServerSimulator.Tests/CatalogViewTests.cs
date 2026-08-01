@@ -504,22 +504,24 @@ public sealed class CatalogViewTests
         AreEqual("MULTI_USER", reader.GetString(1));
         AreEqual((byte)0, reader.GetByte(2));
         AreEqual("ONLINE", reader.GetString(3));
-        AreEqual((byte)3, reader.GetByte(4));
-        AreEqual("SIMPLE", reader.GetString(5));
+        AreEqual((byte)1, reader.GetByte(4));
+        AreEqual("FULL", reader.GetString(5));
         AreEqual((byte)0, reader.GetByte(6));
         AreEqual("OFF", reader.GetString(7));
     }
 
-    // The model template reports FULL recovery (per the reference instance);
-    // every other database reports SIMPLE.
+    // A user database inherits the model template's FULL recovery;
+    // master / tempdb / msdb report SIMPLE (probe-confirmed).
     [TestMethod]
-    public void SysDatabases_ModelRecoveryModel_IsFull()
+    public void SysDatabases_RecoveryModel_FullExceptTheSimpleSystemDatabases()
     {
-        using var reader = new Simulation().ExecuteReader(
-            "select recovery_model, recovery_model_desc from sys.databases where name = 'model'");
-        IsTrue(reader.Read());
-        AreEqual((byte)1, reader.GetByte(0));
-        AreEqual("FULL", reader.GetString(1));
+        var sim = new Simulation();
+        AreEqual("FULL", sim.ExecuteScalar("select recovery_model_desc from sys.databases where name = 'model'"));
+        AreEqual("FULL", sim.ExecuteScalar("select recovery_model_desc from sys.databases where name = 'simulated'"));
+        AreEqual(3, sim.ExecuteScalar("""
+            select count(*) from sys.databases
+            where name in ('master', 'tempdb', 'msdb') and recovery_model = 3 and recovery_model_desc = 'SIMPLE'
+            """));
     }
 
     // SMO's Object-Explorer "Databases" node enumeration for a v17 server;
@@ -540,7 +542,7 @@ public sealed class CatalogViewTests
         AreEqual(5, reader.GetInt32(1));
         AreEqual(1, reader.GetInt32(2));
         AreEqual("ONLINE", reader.GetString(3));
-        AreEqual("SIMPLE", reader.GetString(4));
+        AreEqual("FULL", reader.GetString(4));
         AreEqual((byte)0, reader.GetByte(8));
         IsFalse(reader.Read());
     }
@@ -783,5 +785,405 @@ public sealed class CatalogViewTests
         AreEqual(("id", "int", true, false), rows[0]);
         AreEqual(("name", "nvarchar", false, false), rows[1]);
         AreEqual(("total", "int", false, true), rows[2]);
+    }
+
+    // === sys.indexes: real's 23-column shape and column order ===
+
+    /// <summary>
+    /// Real leads with object_id / name and carries no
+    /// <c>statistics_incremental</c> column (selecting it is Msg 207 there).
+    /// </summary>
+    [TestMethod]
+    public void SysIndexes_ColumnShape_MatchesRealsOrder()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key)");
+        using var reader = sim.ExecuteReader("select * from sys.indexes where object_id = object_id('t')");
+        AreEqual(23, reader.FieldCount);
+        AreEqual("object_id", reader.GetName(0));
+        AreEqual("name", reader.GetName(1));
+        AreEqual("index_id", reader.GetName(2));
+        AreEqual("optimize_for_sequential_key", reader.GetName(22));
+        IsTrue(reader.Read());
+        AreEqual(sim.ExecuteScalar("select object_id('t')"), reader.GetInt32(0));
+    }
+
+    [TestMethod]
+    public void SysIndexes_StatisticsIncremental_DoesNotExist()
+        => _ = new Simulation().AssertSqlError("select statistics_incremental from sys.indexes", 207);
+
+    // === sys.tables.lob_data_space_id ===
+
+    /// <summary>
+    /// The column names the filegroup holding the LOB allocation unit: 1 once
+    /// any column is LOB-eligible, 0 otherwise (probe-confirmed —
+    /// <c>hierarchyid</c> and <c>sql_variant</c> leave it 0).
+    /// </summary>
+    [TestMethod]
+    public void SysTables_LobDataSpaceId_OneWhenALobColumnExists()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table plain (a int, b varchar(50), c nvarchar(100), d varbinary(200));
+            create table variant_only (a int, b sql_variant, c hierarchyid);
+            create table with_max (a int, b nvarchar(max));
+            create table with_text (a int, b text);
+            create table with_xml (a int, b xml);
+            create table with_geo (a int, b geography)
+            """);
+        AreEqual(0, sim.ExecuteScalar("select lob_data_space_id from sys.tables where name = 'plain'"));
+        AreEqual(0, sim.ExecuteScalar("select lob_data_space_id from sys.tables where name = 'variant_only'"));
+        AreEqual(4, sim.ExecuteScalar("""
+            select count(*) from sys.tables
+            where name in ('with_max', 'with_text', 'with_xml', 'with_geo') and lob_data_space_id = 1
+            """));
+    }
+
+    // === sys.stats.replica_role_id ===
+
+    /// <summary>
+    /// A stand-alone instance reports every statistic on the primary replica
+    /// (probe-confirmed 1 / PRIMARY, with replica_name still NULL).
+    /// </summary>
+    [TestMethod]
+    public void SysStats_ReplicaRole_IsPrimary()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int not null constraint pk_t primary key, a int); create index ix_a on t(a)");
+        AreEqual(2, sim.ExecuteScalar("""
+            select count(*) from sys.stats
+            where object_id = object_id('t') and replica_role_id = 1 and replica_role_desc = 'PRIMARY' and replica_name is null
+            """));
+    }
+
+    // === Stable column ids across the column-attached catalog views ===
+
+    /// <summary>
+    /// Every view keyed on a column projects the stable
+    /// <c>sys.columns.column_id</c>, so the permanent hole a DROP COLUMN leaves
+    /// shows up identically in all of them (probe-confirmed). The dropped
+    /// column here is the second of six, so the survivors keep ids 1, 3..6
+    /// while their positions shift down.
+    /// </summary>
+    [TestMethod]
+    public void ColumnKeyedViews_ReportStableColumnIdsAfterDropColumn()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table parent (
+                a int not null constraint pk_parent primary key,
+                filler int null,
+                b int null constraint df_b default 7,
+                c int identity(1, 1),
+                d as a * 2,
+                e int not null constraint ck_e check (e > 0));
+            create table child (x int not null primary key, junk int null, fa int not null);
+            alter table parent drop column filler;
+            alter table child drop column junk;
+            alter table child add constraint fk_x foreign key (fa) references parent(a)
+            """);
+        AreEqual(5, sim.ExecuteScalar("select column_id from sys.computed_columns where object_id = object_id('parent')"));
+        AreEqual(4, sim.ExecuteScalar("select column_id from sys.identity_columns where object_id = object_id('parent')"));
+        AreEqual(6, sim.ExecuteScalar("select parent_column_id from sys.check_constraints where name = 'ck_e'"));
+        AreEqual(3, sim.ExecuteScalar("select parent_column_id from sys.default_constraints where name = 'df_b'"));
+        using var reader = sim.ExecuteReader("""
+            select fkc.parent_column_id, fkc.referenced_column_id
+            from sys.foreign_key_columns fkc
+            join sys.foreign_keys fk on fk.object_id = fkc.constraint_object_id
+            where fk.name = 'fk_x'
+            """);
+        IsTrue(reader.Read());
+        AreEqual(3, reader.GetInt32(0));
+        AreEqual(1, reader.GetInt32(1));
+        IsFalse(reader.Read());
+    }
+
+    // === sys.foreign_keys.key_index_id ===
+
+    /// <summary>
+    /// key_index_id names the referenced table's index that backs the FK, not
+    /// a hardcoded 1: with a clustered index holding id 1, an FK pointing at a
+    /// NONCLUSTERED PK and one pointing at a UNIQUE constraint each report
+    /// their own backing index's id (probe-confirmed — real reported 3 and 2
+    /// for this shape).
+    /// </summary>
+    [TestMethod]
+    public void SysForeignKeys_KeyIndexId_ResolvesThroughTheReferencedIndex()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (
+                id int not null constraint pk_p primary key nonclustered,
+                x int not null,
+                u int not null constraint uq_p unique);
+            create clustered index ix_p_x on p(x);
+            create table c1 (id int not null primary key, pid int not null constraint fk1 references p(id));
+            create table c2 (id int not null primary key, uid int not null constraint fk2 references p(u))
+            """);
+        // The clustered index owns id 1, so neither FK may report it.
+        AreEqual(1, sim.ExecuteScalar("select index_id from sys.indexes where name = 'ix_p_x'"));
+        AreEqual(1, sim.ExecuteScalar("""
+            select count(*) from sys.foreign_keys fk join sys.indexes i
+                on i.object_id = fk.referenced_object_id and i.index_id = fk.key_index_id
+            where fk.name = 'fk1' and i.name = 'pk_p' and i.index_id > 1
+            """));
+        AreEqual(1, sim.ExecuteScalar("""
+            select count(*) from sys.foreign_keys fk join sys.indexes i
+                on i.object_id = fk.referenced_object_id and i.index_id = fk.key_index_id
+            where fk.name = 'fk2' and i.name = 'uq_p' and i.index_id > 1
+            """));
+    }
+
+    // === uses_database_collation ===
+
+    /// <summary>
+    /// Real reports 1 for every CHECK constraint and computed column it
+    /// creates, purely numeric expressions included (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void UsesDatabaseCollation_IsOneOnChecksAndComputedColumns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (
+                a int not null,
+                s nvarchar(20) null,
+                b as a * 2,
+                d as s + N'x',
+                constraint ck_a check (a > 0),
+                constraint ck_s check (s <> N'no'))
+            """);
+        AreEqual(2, sim.ExecuteScalar(
+            "select count(*) from sys.check_constraints where parent_object_id = object_id('t') and uses_database_collation = 1"));
+        AreEqual(2, sim.ExecuteScalar(
+            "select count(*) from sys.computed_columns where object_id = object_id('t') and uses_database_collation = 1"));
+    }
+
+    // === sys.parameters: max_length / precision / scale ===
+
+    /// <summary>
+    /// The triple comes from the same computation <c>sys.columns</c> uses
+    /// (probe-confirmed: nvarchar(40) → 80 / 0 / 0, int → 4 / 10 / 0,
+    /// decimal(12, 3) → 9 / 12 / 3, varchar(max) → -1, and a scalar UDF's
+    /// parameter_id 0 return row reports its own return type's width).
+    /// </summary>
+    [TestMethod]
+    public void SysParameters_ProjectsRealMetadataTriple()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create procedure p @a nvarchar(40), @b int, @c decimal(12, 3), @d varchar(max), @e datetime2(3) output as select 1",
+            "create function f (@x nvarchar(10), @y money) returns nvarchar(50) as begin return @x end");
+
+        using var reader = sim.ExecuteReader("""
+            select object_name(object_id), parameter_id, max_length, [precision], scale
+            from sys.parameters
+            where object_id in (object_id('p'), object_id('f'))
+            order by object_name(object_id), parameter_id
+            """);
+        var rows = new List<(string, int, short, byte, byte)>();
+        while (reader.Read())
+            rows.Add((reader.GetString(0), reader.GetInt32(1), reader.GetInt16(2), reader.GetByte(3), reader.GetByte(4)));
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                ("f", 0, (short)100, (byte)0, (byte)0),
+                ("f", 1, (short)20, (byte)0, (byte)0),
+                ("f", 2, (short)8, (byte)19, (byte)4),
+                ("p", 1, (short)80, (byte)0, (byte)0),
+                ("p", 2, (short)4, (byte)10, (byte)0),
+                ("p", 3, (short)9, (byte)12, (byte)3),
+                ("p", 4, (short)-1, (byte)0, (byte)0),
+                ("p", 5, (short)7, (byte)23, (byte)3),
+            },
+            rows);
+    }
+
+    /// <summary>A table-valued parameter reports the MAX sentinel and no precision / scale.</summary>
+    [TestMethod]
+    public void SysParameters_TableValuedParameter_ReportsMaxSentinel()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create type tt as table (a int)",
+            "create procedure p @t tt readonly as select 1");
+        using var reader = sim.ExecuteReader(
+            "select max_length, [precision], scale from sys.parameters where object_id = object_id('p')");
+        IsTrue(reader.Read());
+        AreEqual((short)-1, reader.GetInt16(0));
+        AreEqual((byte)0, reader.GetByte(1));
+        AreEqual((byte)0, reader.GetByte(2));
+    }
+
+    // === sys.procedures.modify_date ===
+
+    [TestMethod]
+    public void SysProcedures_ModifyDate_AdvancesOnAlter()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateOpenConnection();
+        _ = connection.CreateCommand("create procedure p as select 1").ExecuteNonQuery();
+        AreEqual(1, connection.CreateCommand(
+            "select count(*) from sys.procedures where name = 'p' and modify_date = create_date").ExecuteScalar());
+        var created = (DateTime)connection.CreateCommand("select create_date from sys.procedures where name = 'p'").ExecuteScalar()!;
+        // datetime rounds to 1/300 s, so put the ALTER in a later tick.
+        _ = connection.CreateCommand("waitfor delay '00:00:00.020'").ExecuteNonQuery();
+        _ = connection.CreateCommand("alter procedure p as select 2").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("""
+            select pr.create_date, pr.modify_date, o.modify_date
+            from sys.procedures pr join sys.objects o on o.object_id = pr.object_id
+            where pr.name = 'p'
+            """).ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(created, reader.GetDateTime(0));
+        IsGreaterThan(created, reader.GetDateTime(1));
+        AreEqual(reader.GetDateTime(2), reader.GetDateTime(1));
+    }
+
+    // === sys.database_principals: default_schema_name / sid / authentication_type ===
+
+    /// <summary>
+    /// Probe-confirmed per-principal rules: dbo carries the well-known
+    /// <c>0x01</c> sid and the only <c>INSTANCE</c> authentication_type, guest
+    /// carries <c>0x00</c> and defaults to its own schema, the catalog
+    /// principals report a NULL sid, and users / roles carry a 28-byte
+    /// database-scoped sid.
+    /// </summary>
+    [TestMethod]
+    public void SysDatabasePrincipals_FixedPrincipals_ReportRealsShape()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u without login; create role r");
+        using var reader = sim.ExecuteReader("""
+            select name, default_schema_name, sid, cast(authentication_type as int), authentication_type_desc
+            from sys.database_principals
+            where name in ('dbo', 'guest', 'sys', 'INFORMATION_SCHEMA', 'u', 'r', 'public')
+            order by principal_id
+            """);
+        var rows = new List<(string Name, string? Schema, string Sid, int Auth, string AuthDesc)>();
+        while (reader.Read())
+        {
+            // A database-scoped SID is 28 bytes; collapse it to a label so the
+            // expectation names the shape rather than the hash bytes.
+            var sid = reader.IsDBNull(2) ? "<null>" : Convert.ToHexString((byte[])reader.GetValue(2));
+            rows.Add((
+                reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                sid.Length == 56 ? "<database-scoped>" : sid,
+                reader.GetInt32(3),
+                reader.GetString(4)));
+        }
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                ("public", null, "<database-scoped>", 0, "NONE"),
+                ("dbo", "dbo", "01", 1, "INSTANCE"),
+                ("guest", "guest", "00", 0, "NONE"),
+                ("INFORMATION_SCHEMA", null, "<null>", 0, "NONE"),
+                ("sys", null, "<null>", 0, "NONE"),
+                ("u", "dbo", "<database-scoped>", 0, "NONE"),
+                ("r", null, "<database-scoped>", 0, "NONE"),
+            },
+            rows);
+    }
+
+    /// <summary>
+    /// A fixed database role encodes its principal_id in the final
+    /// sub-authority the way real does — <c>db_owner</c> (16384) ends
+    /// <c>00400000</c>.
+    /// </summary>
+    [TestMethod]
+    public void SysDatabasePrincipals_FixedRoleSid_EncodesPrincipalId()
+        => AreEqual("0x01050000000000090400000000000000000000000000000000400000",
+            new Simulation().ExecuteScalar("select convert(varchar(80), sid, 1) from sys.database_principals where name = 'db_owner'"));
+
+    // === sys.master_files / sys.database_files: page-denominated growth ===
+
+    /// <summary>
+    /// growth and max_size are both in 8 KB pages when is_percent_growth is 0
+    /// (probe-confirmed): 8192 pages of growth on both files, -1 (unlimited)
+    /// max_size on the data file and the 2 TB ceiling on the log.
+    /// </summary>
+    [TestMethod]
+    public void FileCatalogViews_GrowthAndMaxSize_AreInPages()
+    {
+        var sim = new Simulation();
+        using var reader = sim.ExecuteReader(
+            "select type, max_size, growth, cast(is_percent_growth as int) from sys.database_files order by file_id");
+        IsTrue(reader.Read());
+        AreEqual((byte)0, reader.GetByte(0));
+        AreEqual(-1, reader.GetInt32(1));
+        AreEqual(8192, reader.GetInt32(2));
+        AreEqual(0, reader.GetInt32(3));
+        IsTrue(reader.Read());
+        AreEqual((byte)1, reader.GetByte(0));
+        AreEqual(268435456, reader.GetInt32(1));
+        AreEqual(8192, reader.GetInt32(2));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void SysMasterFiles_GrowthAndMaxSize_AgreeWithDatabaseFiles()
+        => AreEqual(10, new Simulation().ExecuteScalar("""
+            select count(*) from master.sys.master_files
+            where growth = 8192 and max_size = case when [type] = 1 then 268435456 else -1 end
+            """));
+
+    /// <summary>
+    /// sp_helpfile renders the same values in KB — 65536 KB of growth, and the
+    /// log's ceiling as 2147483648 KB rather than "Unlimited" (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void SpHelpfile_RendersGrowthAndMaxSizeInKilobytes()
+    {
+        using var reader = new Simulation().ExecuteReader("exec sp_helpfile");
+        IsTrue(reader.Read());
+        AreEqual("Unlimited", reader.GetString(5).TrimEnd());
+        AreEqual("65536 KB", reader.GetString(6).TrimEnd());
+        IsTrue(reader.Read());
+        AreEqual("2147483648 KB", reader.GetString(5).TrimEnd());
+        AreEqual("65536 KB", reader.GetString(6).TrimEnd());
+        IsFalse(reader.Read());
+    }
+
+    // === sys.databases: the fresh-user-database option-flag block ===
+
+    /// <summary>
+    /// The ANSI / cursor / full-text / retention flags a freshly created SQL
+    /// Server 2025 database reports (probe-confirmed): the whole ANSI family
+    /// and is_local_cursor_default off, is_fulltext_enabled and
+    /// is_temporal_history_retention_enabled on.
+    /// </summary>
+    [TestMethod]
+    public void SysDatabases_FreshDatabaseOptionFlags_MatchReal()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            select cast(is_ansi_null_default_on as int), cast(is_ansi_nulls_on as int),
+                   cast(is_ansi_padding_on as int), cast(is_ansi_warnings_on as int),
+                   cast(is_arithabort_on as int), cast(is_concat_null_yields_null_on as int),
+                   cast(is_numeric_roundabort_on as int), cast(is_quoted_identifier_on as int),
+                   cast(is_local_cursor_default as int), cast(is_fulltext_enabled as int),
+                   cast(is_temporal_history_retention_enabled as int)
+            from sys.databases where name = 'simulated'
+            """);
+        IsTrue(reader.Read());
+        for (var i = 0; i <= 8; i++)
+            AreEqual(0, reader.GetInt32(i), $"column {i}");
+        AreEqual(1, reader.GetInt32(9));
+        AreEqual(1, reader.GetInt32(10));
+    }
+
+    /// <summary>
+    /// is_query_store_on stays 0 so it agrees with the OFF row
+    /// <c>sys.database_query_store_options</c> projects — the pair is read
+    /// together and must not contradict.
+    /// </summary>
+    [TestMethod]
+    public void SysDatabases_IsQueryStoreOn_AgreesWithQueryStoreOptions()
+    {
+        var sim = new Simulation();
+        IsFalse((bool)sim.ExecuteScalar("select is_query_store_on from sys.databases where name = 'simulated'")!);
+        AreEqual("OFF", sim.ExecuteScalar("select actual_state_desc from sys.database_query_store_options"));
     }
 }

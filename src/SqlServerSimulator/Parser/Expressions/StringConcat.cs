@@ -78,18 +78,20 @@ internal sealed class StringConcat : Expression
         var anyMax = false;
         var width = 0;
         var separatorWidth = 0;
+        var collation = new CollationAccumulator();
         for (var i = 0; i < this.arguments.Length; i++)
         {
             var type = this.arguments[i].GetSqlType(batch, resolveColumnType);
             anyNational |= IsNationalString(type);
             anyMax |= IsMaxForm(type);
+            collation.Fold(type, this.kind, batch);
             var argumentWidth = IsBareNullLiteral(this.arguments[i]) ? 0 : ArgumentWidth(type);
             if (this.kind == StringConcatKind.ConcatWs && i == 0)
                 separatorWidth = argumentWidth;
             else
                 width += argumentWidth;
         }
-        return ResolveResultType(anyNational, anyMax, width + SeparatorTotal(separatorWidth), batch);
+        return ResolveResultType(anyNational, anyMax, width + SeparatorTotal(separatorWidth), batch, collation);
     }
 
     // CONCAT / CONCAT_WS never return NULL — NULL arguments are skipped and an
@@ -113,18 +115,20 @@ internal sealed class StringConcat : Expression
         var anyMax = false;
         var width = 0;
         var separatorWidth = 0;
+        var collation = new CollationAccumulator();
         for (var i = 0; i < this.arguments.Length; i++)
         {
             values[i] = this.arguments[i].Run(runtime);
             anyNational |= IsNationalString(values[i].Type);
             anyMax |= IsMaxForm(values[i].Type);
+            collation.Fold(values[i].Type, this.kind, runtime.Batch);
             var argumentWidth = IsBareNullLiteral(this.arguments[i]) ? 0 : ArgumentWidth(values[i].Type);
             if (this.kind == StringConcatKind.ConcatWs && i == 0)
                 separatorWidth = argumentWidth;
             else
                 width += argumentWidth;
         }
-        var resultType = ResolveResultType(anyNational, anyMax, width + SeparatorTotal(separatorWidth), runtime.Batch);
+        var resultType = ResolveResultType(anyNational, anyMax, width + SeparatorTotal(separatorWidth), runtime.Batch, collation);
 
         if (this.kind == StringConcatKind.Concat)
         {
@@ -191,10 +195,67 @@ internal sealed class StringConcat : Expression
     /// <c>CONCAT('a',1,NULL,'b')</c> → <c>varchar(14)</c>,
     /// <c>CONCAT_WS('-','a','b','c')</c> → <c>varchar(5)</c>).
     /// </summary>
-    private static SqlType ResolveResultType(bool anyNational, bool anyMax, int width, BatchContext batch) =>
-        anyMax
-            ? (anyNational ? SqlType.NVarcharMax : SqlType.VarcharMax)
-            : StringScalars.SizedResultType(anyNational ? SqlType.NVarchar : SqlType.Varchar, width, batch);
+    private static SqlType ResolveResultType(bool anyNational, bool anyMax, int width, BatchContext batch, CollationAccumulator collation)
+    {
+        var resolved = collation.Value ?? batch.CurrentDatabase.Collation;
+        SqlType maxForm = anyNational ? SqlType.NVarcharMax : SqlType.VarcharMax;
+        SqlType boundedForm = anyNational ? SqlType.NVarchar : SqlType.Varchar;
+        return anyMax
+            ? maxForm.WithCollation(resolved, collation.Rank)
+            : StringScalars.SizedResultType(boundedForm.WithCollation(resolved, collation.Rank), width, batch);
+    }
+
+    /// <summary>
+    /// Left-folds the string arguments' collations the way real does — a
+    /// column outranks a literal, an explicit <c>COLLATE</c> outranks both,
+    /// and the separator argument participates like any other. Non-string
+    /// arguments stringify into the accumulated collation and contribute
+    /// nothing; an all-non-string call leaves the accumulator empty and the
+    /// result takes the database collation.
+    /// </summary>
+    /// <remarks>
+    /// A conflict between two equally-ranked operands raises differently by
+    /// rank (probe-confirmed against SQL Server 2025): two explicit
+    /// <c>COLLATE</c> postfixes take the operator's own <b>Msg 468</b>, while
+    /// two columns take <b>Msg 451</b> — but only when an output slot demands
+    /// a definite collation. Where a target supplies one (INSERT … SELECT,
+    /// <c>SELECT @v = …</c>, UPDATE SET) real settles the conflict against the
+    /// target silently, so the fold keeps the accumulated collation and lets
+    /// the assignment coerce.
+    /// <para>The <c>+</c> / <c>||</c> operators name the same conflict with
+    /// Msg 457 for a <c>varchar</c> result; CONCAT / CONCAT_WS take Msg 451
+    /// for both families.</para>
+    /// </remarks>
+    private struct CollationAccumulator
+    {
+        public Collation? Value;
+        public Coercibility Rank;
+
+        public void Fold(SqlType type, StringConcatKind kind, BatchContext batch)
+        {
+            if (type.Category != SqlTypeCategory.String)
+                return;
+            if (this.Value is null)
+            {
+                this.Value = type.Collation ?? Collation.Baseline;
+                this.Rank = type.Coercibility;
+                return;
+            }
+            if (Collation.Resolve(this.Value, this.Rank, type) is { } resolved)
+            {
+                (this.Value, this.Rank) = resolved;
+                return;
+            }
+            var operatorName = LowercaseName(kind);
+            if (this.Rank == Coercibility.Explicit)
+                throw SimulatedSqlException.CollationConflict(type.Collation!.Name, this.Value.Name, operatorName);
+            if (batch.Parser.CollationOutputSlot is { } slot)
+            {
+                throw SimulatedSqlException.UnresolvedCollationInOutputColumn(
+                    type.Collation!.Name, this.Value.Name, operatorName, slot.Clause, slot.Ordinal);
+            }
+        }
+    }
 
     /// <summary>
     /// The separators' total contribution to a CONCAT_WS width: one separator

@@ -43,7 +43,8 @@ internal sealed class FromSource(
     CatalogView? backingCatalogView = null,
     Database? backingCatalogDatabase = null,
     Synonym? viaSynonym = null,
-    string? autoElementName = null)
+    string? autoElementName = null,
+    bool lateralIsQueryBody = false)
 {
     public readonly string? Qualifier = qualifier;
 
@@ -103,6 +104,19 @@ internal sealed class FromSource(
     /// the latter null-fills the slot when the plan yields zero rows.
     /// </summary>
     public readonly Selection? LateralPlan = lateralPlan;
+
+    /// <summary>
+    /// True when <see cref="LateralPlan"/> is the source's own parsed SELECT
+    /// body — a derived table <c>(SELECT …) d</c> or a CTE reference — rather
+    /// than a generator wrapper (view, TVF, catalog view, VALUES, OPENJSON,
+    /// PIVOT, XML <c>.nodes()</c>, linked server). Cursor planning follows
+    /// only this form down to the base tables the body reads, so a source
+    /// whose rows a generator produces stays non-navigable and its cursor
+    /// stays STATIC. A view is navigable too, but through
+    /// <see cref="BackingView"/> — its body is parsed on demand rather than
+    /// held here.
+    /// </summary>
+    public readonly bool LateralIsQueryBody = lateralIsQueryBody;
 
     /// <summary>
     /// The reader-side <see cref="DataLockPlan"/> captured when this source is

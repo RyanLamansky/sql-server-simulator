@@ -258,9 +258,9 @@ This is also why `NamedExpression` forwards `VisitColumnReferences` — an alias
 
 Covered shapes (all probe-confirmed): a FROM-less subquery projecting an outer column, a derived table (VALUES or SELECT, including a FROM-less or set-operation body) in a subquery's FROM, and APPLY both at the top level and nested inside a subquery.
 
-**Not modeled: an aggregate reading only the enclosing query's columns.**
+**Not modeled: an aggregate reading only the enclosing query's columns, where there is no enclosing collector to move it to.**
 `(SELECT MAX(t.col) FROM u)` inside a query over `t` binds to the *outer* query on real, collapsing it to one row.
-The simulator binds it to the query it is written in, which would silently return one row per outer row, so `RejectAggregateOverOuterScope` raises `NotSupportedException` instead of answering.
+Where the scope has a collector the simulator moves it across and matches real ([Aggregate ownership across scopes](#aggregate-ownership-across-scopes)); where it hasn't, binding the aggregate to the query it is written in would silently return one row per outer row, so `RehomeAggregatesOverOuterScope` raises `NotSupportedException` instead of answering.
 An aggregate mixing inner and outer references, or reading no column (`COUNT(*)`, `MAX(1)`), is unaffected.
 
 ## Aggregate / GROUP BY binding rules
@@ -283,6 +283,9 @@ Probe-confirmed; oracle `AggregateBindingRuleTests`.
   The rule is purely about column presence, **not determinism** — `GROUP BY a + DATEPART(year, GETDATE())` and even a `NEWID()`-derived expression are legal because they contain `a`, while `GROUP BY 1` / `'x'` / `@v` / `GETDATE()` / `RAND()` are not.
   (`GROUP BY 1` is a constant, not an ordinal; SQL Server has no ordinal GROUP BY.)
   The empty grouping set is exempt — `GROUP BY ()`, `GROUPING SETS (())`, `GROUPING SETS ((a),())` and `GROUP BY (), a` all return rows on real, and contribute no expression for the rule to apply to.
+
+Msg 144 and Msg 164 are **held rather than thrown**: real parses a batch before binding any of it, so a stray token after the clause reports Msg 102 instead (`GROUP BY 'a' 'b'` → `near 'b'`, where `GROUP BY 'a'` alone is Msg 164 — probe-confirmed).
+The held message is raised once the statement's outermost query expression has parsed; see the trailing-token section of [`grammar.md`](grammar.md#trailing-token-tightening).
 
 ### Why these count at parse time
 
@@ -310,6 +313,9 @@ An aggregate whose operand reads only an **enclosing** query's columns belongs t
 `RehomeAggregatesOverOuterScope` moves the same `AggregateExpression` instance into the enclosing scope's collector at parse time (`ParserContext.EnclosingAggregateCollector`), so the nested expression tree keeps referencing it and reads the value the owning query bound.
 This is what makes an ORM's `GREATEST` / `LEAST` emission work — `(SELECT MAX(value) FROM (VALUES (AVG(b.rating)), (AVG(b.price))) AS _G(value))` over a joined, grouped outer query.
 An aggregate mixing inner and outer references, or reading no column (`COUNT(*)`), is untouched; with no enclosing scope to move to, it still raises `NotSupportedException`.
+
+A name that resolves in **no** scope isn't this case at all — it is real's **Msg 207**, at compile time, in a plain statement and at CREATE of a module alike (probe-confirmed: `HAVING MAX(nosuchcol) = 1` refuses a `CREATE VIEW` outright, while the genuinely-outer form creates and only misbehaves when run).
+The enclosing type resolver settles which of the two it is — it raises Msg 207 itself once the scope chain runs out — and a FROM-clause placeholder suspends the question entirely, since the name could belong to the missing object.
 
 Ownership is decided by walking the operand's column references, so **an expression wrapper that doesn't forward `VisitColumnReferences` hides them** — `CONVERT` didn't, while its `CAST` sibling did, which made `AVG(CONVERT(float, b.rating))` look reference-free and left the aggregate unbound.
 
@@ -396,6 +402,13 @@ Cross-aggregate Msg 8711 isn't modeled (EF doesn't emit).
   `Remove` is supported by SUM/AVG/COUNT/COUNT_BIG/STDEV*/VAR* (arithmetic / moment subtraction), CHECKSUM_AGG (XOR self-inverse), and MIN/MAX (a directional multiset built only when the frame start can advance — GROUP BY and forward-cumulative windows keep the cheaper single-extreme path).
   Frames whose start is pinned at `UNBOUNDED PRECEDING` (the default ORDER BY frame, and `ROWS/RANGE UNBOUNDED PRECEDING TO …`) never remove, so they're a pure forward accumulation valid for every aggregator.
   Frame rejection paths: ranking + LAG/LEAD with a frame → Msg 10752; frame without ORDER BY → Msg 10756; `BETWEEN ... FOLLOWING AND ... PRECEDING` → Msg 4193; `BETWEEN CURRENT ROW AND UNBOUNDED PRECEDING` / `BETWEEN UNBOUNDED FOLLOWING AND ...` → Msg 102 syntax.
+- **The star-count exemption from the frame-needs-ORDER-BY gate.** `COUNT(*)` and `COUNT_BIG(*)` — the two aggregates that carry no operand — may frame an unordered partition, and the frame applies (probe-confirmed against SQL Server 2025: `COUNT(*) OVER (PARTITION BY g ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` climbs 1, 2, 3 through each partition).
+  The exemption is the star operand's, not `COUNT`'s: `COUNT(1)` is a constant argument and raises Msg 10756 with `COUNT(v)` / `SUM(v)` / `MIN(v)`.
+  `RANGE` takes the exemption too, but with no ordering every row is its own partition's peer, so the extent is the whole partition.
+  A frame written as the `OVER` body's **only** element — no PARTITION BY and no ORDER BY — is Msg 102 near the frame keyword whatever the function, ahead of the ordering rule.
+  A **named window** carries no exemption: real validates the resolved body before it knows which function reads it, so `COUNT(*) OVER w` against a frame-carrying, orderless `w` is Msg 5364 like every other function's.
+  Divergence: with no ORDER BY the row order a `ROWS` frame counts along is unspecified, and real doesn't run it in the emitted order for every bound pair — a frame ending at `UNBOUNDED FOLLOWING` counts opposite to the rows it emits (probe-confirmed), which the simulator's straight partition-order walk doesn't reproduce.
+  The `PRECEDING`-anchored bounds, which is what the shape is written for, match.
 - Errors: `STRING_AGG OVER` → Msg 4113; `COUNT(DISTINCT) OVER` / `SUM(DISTINCT) OVER` → Msg 10759; windowed function in WHERE/HAVING/GROUP BY/ON → Msg 4108.
 
 ### Windows over a grouped query

@@ -259,6 +259,7 @@ partial class Simulation
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
             IsSchemaBound = isSchemaBound,
             UsesQuotedIdentifier = context.QuotedIdentifiers,
+            UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -429,8 +430,10 @@ partial class Simulation
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
+            ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
             IsSchemaBound = isSchemaBound,
             UsesQuotedIdentifier = context.QuotedIdentifiers,
+            UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -517,6 +520,7 @@ partial class Simulation
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
             IsSchemaBound = isSchemaBound,
             UsesQuotedIdentifier = context.QuotedIdentifiers,
+            UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;

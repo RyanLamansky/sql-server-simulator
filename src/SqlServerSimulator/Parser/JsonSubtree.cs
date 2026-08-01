@@ -8,7 +8,8 @@ namespace SqlServerSimulator.Parser;
 /// object/array match yields its verbatim source text (whitespace and
 /// key order preserved, via <see cref="JsonElement.GetRawText"/>), a JSON
 /// <c>null</c> yields SQL NULL, and any other (non-null) scalar yields SQL
-/// NULL under lax mode or Msg 13624 under strict.
+/// NULL under lax mode or Msg 13624 under strict — State 2 from JSON_QUERY,
+/// State 1 from an OPENJSON column.
 /// </summary>
 internal static class JsonSubtree
 {
@@ -16,12 +17,12 @@ internal static class JsonSubtree
     /// Classifies an already-resolved JSON element. Returns the verbatim
     /// subtree text for an object/array; <c>null</c> for a JSON-null match
     /// or — under lax mode — a non-null scalar. Raises Msg 13624 for a
-    /// non-null scalar under strict mode.
+    /// non-null scalar under strict mode, carrying the caller's State byte.
     /// </summary>
-    public static string? Extract(JsonElement element, JsonPathMode mode) => element.ValueKind switch
+    public static string? Extract(JsonElement element, JsonPathMode mode, byte strictScalarState = 1) => element.ValueKind switch
     {
         JsonValueKind.Object or JsonValueKind.Array => element.GetRawText(),
         JsonValueKind.Null => null,
-        _ => mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonObjectOrArrayNotFound() : null,
+        _ => mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonObjectOrArrayNotFound(strictScalarState) : null,
     };
 }

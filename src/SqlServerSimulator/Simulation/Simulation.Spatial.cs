@@ -113,8 +113,8 @@ partial class Simulation
         // table don't collide.
         // Msg 1934, but with real's spatial-only verify clause and the bare
         // CREATE INDEX verb rather than CREATE SPATIAL INDEX (probe-confirmed).
-        if (!context.QuotedIdentifiers)
-            throw SimulatedSqlException.IncorrectSetOptionsForSpatialIndex(QuotedIdentifierOptionName);
+        if (IncorrectSetOptionNames(context) is { } setOptions)
+            throw SimulatedSqlException.IncorrectSetOptionsForSpatialIndex(setOptions);
 
         var indexId = 384000 + table.SpatialIndexes.Count;
         table.SpatialIndexes.Add(new SpatialIndex(

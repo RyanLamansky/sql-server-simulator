@@ -389,4 +389,106 @@ public sealed class CursorBreadthTests
         // Lock released → writer proceeds.
         AreEqual(1, c2.CreateCommand("set lock_timeout 0; update t set a = 5 where id = 1").ExecuteNonQuery());
     }
+
+    // ---- FOR SYSTEM_TIME sources ----
+
+    private const string TemporalSeed = """
+        create table s (
+            id int not null primary key,
+            v int not null,
+            Vf datetime2 generated always as row start hidden not null,
+            Vt datetime2 generated always as row end hidden not null,
+            period for system_time (Vf, Vt)
+        ) with (system_versioning = on (history_table = dbo.sHistory));
+        insert s (id, v) values (1,10),(2,20),(3,30);
+        update s set v = 111 where id = 1;
+        """;
+
+    /// <summary>
+    /// Every <c>FOR SYSTEM_TIME</c> form is a read-only snapshot on real SQL
+    /// Server — probed against SQL Server 2025, where
+    /// <c>sys.dm_exec_cursors(@@SPID).properties</c> reports
+    /// <c>Snapshot | Read Only</c> with the row count for <c>AS OF</c>,
+    /// <c>ALL</c>, <c>BETWEEN</c>, <c>FROM … TO</c> and <c>CONTAINED IN</c>
+    /// alike, and adding <c>SCROLL</c> changes nothing. A temporal read mixes
+    /// the base heap with the history sibling, so there is no live set to
+    /// navigate. <c>@@CURSOR_ROWS</c> is therefore positive, never <c>-1</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select id, v from s for system_time all", 4)]
+    [DataRow("select id, v from s for system_time as of '2099-01-01'", 3)]
+    [DataRow("select id, v from s for system_time between '2000-01-01' and '2099-01-01'", 4)]
+    [DataRow("select id, v from s for system_time from '2000-01-01' to '2099-01-01'", 4)]
+    [DataRow("select id, v from s for system_time contained in ('2000-01-01', '2099-01-01')", 1)]
+    public void TemporalSourceCursor_IsAReadOnlySnapshot(string query, int cursorRows)
+        => AreEqual(cursorRows, new Simulation().ExecuteScalar<int>($"{TemporalSeed} declare c cursor for {query}; open c; select @@cursor_rows"));
+
+    /// <summary>Being a snapshot makes it read-only, so positioned DML through
+    /// a <c>FOR SYSTEM_TIME</c> cursor is Msg 16929 — probe-confirmed
+    /// verbatim, class 16 state 1.</summary>
+    [TestMethod]
+    public void TemporalSourceCursor_PositionedUpdateIsReadOnly()
+        => new Simulation().AssertSqlError($"""
+            {TemporalSeed}
+            declare @id int, @v int;
+            declare c cursor for select id, v from s for system_time as of '2099-01-01';
+            open c; fetch next from c into @id, @v;
+            update s set v = 5 where current of c;
+            """, 16929, "The cursor is READ ONLY.");
+
+    /// <summary>An <c>AS OF</c> read is time-fixed: a mid-loop UPDATE to the
+    /// base row doesn't change what the cursor returns.</summary>
+    [TestMethod]
+    public void TemporalAsOfCursor_IgnoresMidLoopUpdates()
+        => AreEqual("111;20;30;", new Simulation().ExecuteScalar($$"""
+            {{TemporalSeed}}
+            declare @id int, @v int, @log varchar(100) = '';
+            declare c cursor for select id, v from s for system_time as of '2099-01-01';
+            open c; fetch next from c into @id, @v;
+            while @@fetch_status = 0
+            begin
+              set @log = @log + convert(varchar, @v) + ';';
+              update s set v = 999 where id = 3;
+              fetch next from c into @id, @v;
+            end
+            select @log
+            """));
+
+    /// <summary>A cursor over a temporal table <em>without</em> a
+    /// <c>FOR SYSTEM_TIME</c> clause reads the current rows through the base
+    /// heap, so it stays DYNAMIC (<c>@@CURSOR_ROWS = -1</c>) and positioned DML
+    /// works — probe-confirmed <c>Dynamic | Optimistic</c>.</summary>
+    [TestMethod]
+    public void CurrentTimeCursorOverTemporalTable_IsDynamicAndUpdatable()
+        => AreEqual("-1|8888", new Simulation().ExecuteScalar($"""
+            {TemporalSeed}
+            declare @id int, @v int, @rows int;
+            declare c cursor for select id, v from s order by id;
+            open c;
+            set @rows = @@cursor_rows;
+            fetch next from c into @id, @v;
+            update s set v = 8888 where current of c;
+            close c; deallocate c;
+            select convert(varchar, @rows) + '|' + convert(varchar, (select v from s where id = 1))
+            """));
+
+    /// <summary><c>DYNAMIC TYPE_WARNING</c> over a <c>FOR SYSTEM_TIME</c>
+    /// source fires Msg 16956 — the request was converted to a snapshot
+    /// (probe-confirmed).</summary>
+    [TestMethod]
+    public void TypeWarning_TemporalSource_EmitsMsg16956()
+    {
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
+        var messages = new List<SimulatedError>();
+        connection.InfoMessage += (_, e) =>
+        {
+            foreach (var error in e.Errors)
+                messages.Add(error);
+        };
+        _ = connection.CreateCommand(TemporalSeed).ExecuteNonQuery();
+        _ = connection.CreateCommand("declare c cursor dynamic type_warning for select id, v from s for system_time all").ExecuteNonQuery();
+        HasCount(1, messages);
+        AreEqual(16956, messages[0].Number);
+    }
 }

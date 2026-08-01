@@ -156,16 +156,19 @@ Each FK emits a `'F '` / `FOREIGN_KEY_CONSTRAINT` row interleaved after its chil
 | `parent_object_id` | child table's object id |
 | `type` | `'F '` |
 | `type_desc` | `FOREIGN_KEY_CONSTRAINT` |
-| `create_date` / `modify_date` | child table's create date |
+| `create_date` / `modify_date` | `ForeignKey.CreateDate` / `.ModifyDate` — the declaring statement's instant (see [`alter-table.md`](alter-table.md#per-constraint-dates)) |
 | `is_ms_shipped` / `is_published` / `is_schema_published` | 0 |
 | `referenced_object_id` | parent table's object id |
-| `key_index_id` | `1` (the simulator doesn't model indexes — see [Fidelity gaps](#fidelity-gaps)) |
+| `key_index_id` | the referenced table's index that backs the FK, resolved through `HeapTable.IndexIdentities()` |
 | `is_disabled` / `is_not_for_replication` / `is_not_trusted` | 0 |
 | `delete_referential_action` | 0/1/2/3 |
 | `delete_referential_action_desc` | `NO_ACTION` / `CASCADE` / `SET_NULL` / `SET_DEFAULT` |
 | `update_referential_action` | 0/1/2/3 |
 | `update_referential_action_desc` | matching string |
 | `is_system_named` | `ForeignKey.IsSystemNamed` |
+
+`key_index_id` resolves through the same `HeapTable.IndexIdentities()` allocation authority `sys.key_constraints.unique_index_id` reads: the referenced table's PRIMARY KEY / UNIQUE constraint (or unique index) whose key columns are exactly the columns the FK targets reports its own `sys.indexes.index_id`.
+So an FK pointing at a NONCLUSTERED PK reports whatever id that PK landed on rather than 1 — probe-confirmed: with a clustered index holding id 1, real reported 3 for the PK-referencing FK and 2 for one referencing a UNIQUE constraint.
 
 ### `sys.foreign_key_columns` — 6 columns
 
@@ -177,9 +180,9 @@ Composite FKs emit one row per participating column with `constraint_column_id` 
 | `constraint_object_id` | FK object id |
 | `constraint_column_id` | 1-based position in the FK's column list |
 | `parent_object_id` | child table's object id |
-| `parent_column_id` | 1-based ordinal of the child's FK column |
+| `parent_column_id` | stable `sys.columns.column_id` of the child's FK column |
 | `referenced_object_id` | parent table's object id |
-| `referenced_column_id` | 1-based ordinal of the parent's referenced column |
+| `referenced_column_id` | stable `sys.columns.column_id` of the parent's referenced column |
 
 ### `OBJECT_ID(name, 'F')`
 
@@ -206,8 +209,6 @@ Once tables exist:
 
 ## Fidelity gaps
 
-- **`key_index_id` in `sys.foreign_keys`** — Always reports `1`.
-  Real SQL Server reports the index id on the parent table that backs the FK's referenced columns; the simulator has no index storage, so 1 is the canonical "the FK is backed by the parent's PK / first UQ" answer.
 - *(the referenced-column order gap is closed — `ReferencedColumnsFormKey` matches in declared order, so `REFERENCES p(y, x)` against `UNIQUE (x, y)` raises **Msg 1776 State 1** as real does; probe-confirmed)*
 - **`OBJECT_ID(name, 'F')`** — Returns NULL.
   The handful of `F`-filter callers in the wild can use `select object_id from sys.foreign_keys where name = …` instead.

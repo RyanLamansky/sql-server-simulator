@@ -200,9 +200,10 @@ partial class Simulation
         var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
             ? SimulatedSqlException.MustDeclareTableVariable(leadingIdent.Leaf)
             : context.Batch.UnresolvableObjectName(leadingIdent));
-        return table.IsTableValuedParameter
-            ? throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf)
-            : ExecuteUpdateAgainstTable(context, leadingIdent, table, rawAssignments, output, top, leadingView);
+        if (table.IsTableValuedParameter)
+            throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf);
+        FunctionBodyShape.NoteTableWrite(context.Batch, "UPDATE", table);
+        return ExecuteUpdateAgainstTable(context, leadingIdent, table, rawAssignments, output, top, leadingView);
     }
 
     /// <summary>
@@ -231,17 +232,20 @@ partial class Simulation
             _ = expr.GetSqlType(context.Batch, targetTypeResolver);
 
         BooleanExpression? where = null;
-        Cursor? positionedCursor = null;
+        PositionedCursorTarget? positionedCursor = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
             context.MoveNextRequired();
             if (context.Token is ReservedKeyword { Keyword: Keyword.Current })
-                positionedCursor = ParseWhereCurrentOf(context, table, [.. rawAssignments.Select(a => a.ColumnName)]);
+                positionedCursor = ParseWhereCurrentOf(context, table, [.. rawAssignments.Select(a => a.ColumnName)], sourceView);
             else
                 where = Selection.ParseAndBindPredicate(context, targetTypeResolver);
         }
 
-        if (!context.Batch.IsSkipping && PermissionEnforcement.Applies(context.Batch))
+        var updateSecurable = context.Batch.IsSkipping
+            ? null
+            : PermissionEnforcement.SecurableFor(context.Batch, targetName, (SchemaObject?)sourceView ?? table);
+        if (updateSecurable is not null && PermissionEnforcement.Applies(context.Batch, context.Batch.DatabaseFor(updateSecurable)))
         {
             // UPDATE reads the target when it has a WHERE clause or a SET
             // expression that references a target column — real then also
@@ -249,7 +253,7 @@ partial class Simulation
             // UPDATE are missing the SELECT denial surfaces (probe M1). A
             // constant-SET UPDATE with no WHERE reads nothing and needs only
             // UPDATE (M1b).
-            if (PermissionEnforcement.SecurableFor(context.Batch, targetName, (SchemaObject?)sourceView ?? table) is Synonym synonym)
+            if (updateSecurable is Synonym synonym)
             {
                 // A synonym takes no column grants at all, so a reference
                 // through one is checked object-grain against the synonym.
@@ -302,7 +306,7 @@ partial class Simulation
         {
             // Positioned UPDATE (WHERE CURRENT OF): target only the row the
             // cursor is sitting on, identified by its stable heap address.
-            if (positionedCursor is not null && !CursorRowMatches(positionedCursor, table, (pageIndex, slotIndex)))
+            if (positionedCursor is { } positioned && !CursorRowMatches(positioned, (pageIndex, slotIndex)))
                 continue;
 
             var fullValues = DecodeFullRow(table, rowBytes);
@@ -472,6 +476,10 @@ partial class Simulation
 
         var table = sources[targetIndex].BackingTable
             ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
+        // The alias form names its target through the FROM clause, so the write
+        // is classified for a function body's Msg 443 here rather than at the
+        // leading identifier.
+        FunctionBodyShape.NoteTableWrite(context.Batch, "UPDATE", table);
         if (!context.Batch.IsSkipping)
         {
             // A joined UPDATE reads every FROM source (target + join sources);

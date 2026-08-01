@@ -120,10 +120,11 @@ internal static partial class BuiltInResources
             // always NULL — SMO's CREATE-scripting table query selects
             // t.ledger_view_id to detect a ledger table.
             new("ledger_view_id", SqlType.Int32, null, true),
-            // uses_ansi_nulls reflects the SET ANSI_NULLS state at CREATE time;
-            // every simulator table is created under ANSI_NULLS ON, so it is a
-            // constant 1. is_dropped_ledger_table is 0 (ledger unmodeled); SMO's
-            // CREATE-scripting table query reads both.
+            // uses_ansi_nulls reflects the session SET ANSI_NULLS state
+            // captured at CREATE TABLE (SchemaObject.UsesAnsiNulls) — a table
+            // created under OFF reports 0, matching real. is_dropped_ledger_table
+            // is 0 (ledger unmodeled); SMO's CREATE-scripting table query reads
+            // both.
             new("uses_ansi_nulls", SqlType.Bit, null, true),
             new("is_dropped_ledger_table", SqlType.Bit, null, true),
             // Lock escalation isn't tunable in the simulator, so every table
@@ -215,12 +216,19 @@ internal static partial class BuiltInResources
                         durabilityDescSchemaAndData,
                         ledgerTypeNone,
                         SqlValue.Null(SqlType.Int32),
-                        SqlValue.FromBoolean(true),
+                        SqlValue.FromBoolean(t.UsesAnsiNulls),
                         falseTableFlag,
                         SqlValue.FromByte(0),
                         lockEscalationTable,
                         SqlValue.Null(SqlType.Int32), // filestream_data_space_id
-                        SqlValue.FromInt32(0), // lob_data_space_id
+                        // lob_data_space_id names the filegroup holding the
+                        // table's LOB allocation unit: the single PRIMARY
+                        // filegroup (1) once any column is LOB-eligible —
+                        // varchar/nvarchar/varbinary(MAX), text/ntext/image,
+                        // xml, geography/geometry — and 0 otherwise
+                        // (probe-confirmed; hierarchyid and sql_variant leave
+                        // it 0).
+                        SqlValue.FromInt32(HasLobColumn(t) ? 1 : 0),
                         SqlValue.FromInt32(t.MaxColumnIdUsed),
                         falseTableFlag, // is_replicated
                         falseTableFlag, // lock_on_bulk_load
@@ -717,6 +725,21 @@ internal static partial class BuiltInResources
         }
     }
 
+    /// <summary>
+    /// True when any of <paramref name="table"/>'s columns routes through the
+    /// LOB-page chain (<see cref="HeapColumn.IsLob"/>) — the condition real
+    /// reports through a non-zero <c>sys.tables.lob_data_space_id</c>.
+    /// </summary>
+    private static bool HasLobColumn(HeapTable table)
+    {
+        foreach (var column in table.Columns)
+        {
+            if (column.IsLob)
+                return true;
+        }
+        return false;
+    }
+
     // The fixed schemas real SQL Server ships that the simulator does not
     // materialize as object-hosting Schema instances (dbo / INFORMATION_SCHEMA /
     // sys are materialized). guest and the nine fixed-database-role schemas
@@ -745,9 +768,12 @@ internal static partial class BuiltInResources
     /// <c>16</c> for text/ntext/image (LOB pointer size); <c>256</c> for
     /// sysname (= nvarchar(128)).</item>
     /// <item>precision / scale are 0 for non-numeric, non-date/time types.
-    /// Decimals carry their declared (p, s). Date/time fractional precision
-    /// types follow <c>(time(N): 8+N, N)</c> / <c>(datetime2(N): 19+N, N)</c>
-    /// / <c>(datetimeoffset(N): 26+N, N)</c>.</item>
+    /// Decimals carry their declared (p, s). A fractional date/time type's
+    /// precision is the width of its rendered literal, so the fractional
+    /// digits cost their own count plus the decimal point they need:
+    /// <c>time(N)</c> is 8 (+ 1 + N when N &gt; 0), <c>datetime2(N)</c> 19,
+    /// <c>datetimeoffset(N)</c> 26 — probe-confirmed
+    /// (<c>datetime2(3)</c> → 23, <c>datetime2(7)</c> → 27).</item>
     /// </list>
     /// </summary>
     private static (short MaxLength, byte Precision, byte Scale) GetSysColumnMetadata(HeapColumn col)
@@ -768,9 +794,9 @@ internal static partial class BuiltInResources
             _ when t == SqlType.Date => (3, 10, 0),
             _ when t == SqlType.SmallDateTime => (4, 16, 0),
             _ when t == SqlType.DateTime => (8, 23, 3),
-            DateTime2SqlType dt2 => ((short)dt2.FixedLength, (byte)(19 + dt2.precision), (byte)dt2.precision),
-            TimeSqlType tm => ((short)tm.FixedLength, (byte)(8 + tm.precision), (byte)tm.precision),
-            DateTimeOffsetSqlType dto => ((short)dto.FixedLength, (byte)(26 + dto.precision), (byte)dto.precision),
+            DateTime2SqlType dt2 => ((short)dt2.FixedLength, FractionalTimePrecision(19, dt2.precision), (byte)dt2.precision),
+            TimeSqlType tm => ((short)tm.FixedLength, FractionalTimePrecision(8, tm.precision), (byte)tm.precision),
+            DateTimeOffsetSqlType dto => ((short)dto.FixedLength, FractionalTimePrecision(26, dto.precision), (byte)dto.precision),
             _ when t == SqlType.UniqueIdentifier => (16, 0, 0),
             _ when t == SqlType.RowVersion => (8, 0, 0),
             _ when t == SqlType.Text || t == SqlType.NText || t == SqlType.Image => (16, 0, 0),
@@ -800,6 +826,14 @@ internal static partial class BuiltInResources
             _ => throw new NotSupportedException($"No sys.columns metadata for {t}."),
         };
     }
+
+    /// <summary>
+    /// The <c>sys.columns.precision</c> of a fractional date/time type: the
+    /// width of its zero-fraction literal plus, when the declared fractional
+    /// precision is non-zero, that many digits and the decimal point they need.
+    /// </summary>
+    private static byte FractionalTimePrecision(byte zeroFractionWidth, int fractionalPrecision) =>
+        (byte)(fractionalPrecision == 0 ? zeroFractionWidth : zeroFractionWidth + 1 + fractionalPrecision);
 
     /// <summary>
     /// Projects <c>sys.synonyms</c> over every schema's <c>Synonyms</c> dict in
@@ -913,6 +947,9 @@ internal static partial class BuiltInResources
                 var createDate = SqlValue.FromDateTime(t.CreateDate);
                 var modifyDate = SqlValue.FromDateTime(t.ModifyDate);
                 var tableObjectId = SqlValue.FromInt32(t.ObjectId);
+                // Constraints carry their own dates: an inline declaration
+                // shares the table's CREATE instant, an ALTER TABLE ADD the
+                // later one, and a trust toggle advances modify_date alone.
                 foreach (var key in t.KeyConstraints)
                 {
                     yield return [
@@ -923,8 +960,8 @@ internal static partial class BuiltInResources
                         nullPrincipal,
                         key.Kind == KeyConstraintKind.PrimaryKey ? pkType : uqType,
                         key.Kind == KeyConstraintKind.PrimaryKey ? pkTypeDesc : uqTypeDesc,
-                        createDate,
-                        modifyDate,
+                        SqlValue.FromDateTime(key.CreateDate),
+                        SqlValue.FromDateTime(key.ModifyDate),
                         notMsShipped,
                         notPublished,
                         notPublished,
@@ -940,8 +977,8 @@ internal static partial class BuiltInResources
                         nullPrincipal,
                         checkType,
                         checkTypeDesc,
-                        createDate,
-                        modifyDate,
+                        SqlValue.FromDateTime(chk.CreateDate),
+                        SqlValue.FromDateTime(chk.ModifyDate),
                         notMsShipped,
                         notPublished,
                         notPublished,
@@ -957,8 +994,8 @@ internal static partial class BuiltInResources
                         nullPrincipal,
                         SqlValue.FromChar(charTwo, "F "),
                         SqlValue.FromNVarchar("FOREIGN_KEY_CONSTRAINT"),
-                        createDate,
-                        modifyDate,
+                        SqlValue.FromDateTime(fk.CreateDate),
+                        SqlValue.FromDateTime(fk.ModifyDate),
                         notMsShipped,
                         notPublished,
                         notPublished,
@@ -966,7 +1003,8 @@ internal static partial class BuiltInResources
                 }
                 // Each primary XML index owns an internal "node table"
                 // (type 'IT' / INTERNAL_TABLE), named
-                // xml_index_nodes_<tableObjectId>_<primaryIndexObjectId>, homed
+                // xml_index_nodes_<tableObjectId>_<primaryIndexId> (the index's
+                // own 256000-range index_id, probe-confirmed), homed
                 // in the sys schema with is_ms_shipped = 1 (probe-confirmed
                 // against SQL Server 2025). DacFx's XML-index reverse-
                 // engineering joins sys.objects (this row) → sys.stats (the
@@ -978,7 +1016,7 @@ internal static partial class BuiltInResources
                         continue;
                     yield return [
                         SqlValue.FromInt32(xmlIndex.InternalTableObjectId),
-                        SqlValue.FromSystemName($"xml_index_nodes_{t.ObjectId}_{xmlIndex.ObjectId}"),
+                        SqlValue.FromSystemName($"xml_index_nodes_{t.ObjectId}_{xmlIndex.IndexId}"),
                         sysSchemaIdValue,
                         tableObjectId,
                         nullPrincipal,

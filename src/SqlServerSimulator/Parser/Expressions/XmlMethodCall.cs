@@ -73,13 +73,17 @@ internal sealed class XmlMethodCall : Expression
     public static XmlMethodCall Parse(Expression target, string methodName, ParserContext context)
     {
         // Evaluating an XQuery expression is one of the operations real gates
-        // on the SET-option set, so a session with QUOTED_IDENTIFIER OFF can't
-        // call one at all — not even against an xml variable with no index in
-        // sight (Msg 1934, probe-confirmed). `.nodes()` alone is exempt; a
-        // `.value()` on the node it produced is not, so gating the other four
-        // methods reproduces both halves.
-        if (!context.QuotedIdentifiers && !context.Batch.CreateTimeBinding && !methodName.Equals("nodes", StringComparison.Ordinal))
-            throw SimulatedSqlException.IncorrectSetOptions(context.Batch.CurrentStatement.StatementVerb, Simulation.QuotedIdentifierOptionName);
+        // on the SET-option set, so a session holding any of them the wrong way
+        // can't call one at all — not even against an xml variable with no
+        // index in sight (Msg 1934, probe-confirmed for QUOTED_IDENTIFIER and
+        // for NUMERIC_ROUNDABORT). `.nodes()` alone is exempt; a `.value()` on
+        // the node it produced is not, so gating the other four methods
+        // reproduces both halves.
+        if (!context.Batch.CreateTimeBinding && !methodName.Equals("nodes", StringComparison.Ordinal)
+            && Simulation.IncorrectSetOptionNames(context) is { } setOptions)
+        {
+            throw SimulatedSqlException.IncorrectSetOptions(context.Batch.CurrentStatement.StatementVerb, setOptions);
+        }
 
         var isValue = methodName.Equals("value", StringComparison.Ordinal);
         var isNodesOrValueOrQueryOrExist = isValue

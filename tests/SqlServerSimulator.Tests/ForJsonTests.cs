@@ -291,4 +291,54 @@ public class ForJsonTests
     public void AutoNesting_WithoutArrayWrapper_DropsOnlyTheOuterArray()
         => AreEqual("""{"id":1,"c":[{"cnm":"a1"},{"cnm":"a2"}]}""",
             JoinJson("select p.id, c.cnm from pp p join cc c on c.pid=p.id where p.id=1 order by c.id for json auto, without_array_wrapper"));
+
+    // ---- FOR JSON on a SELECT that doesn't return to the client ----
+
+    private static Simulation WriteTarget()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table z (x nvarchar(max))");
+        return sim;
+    }
+
+    [TestMethod]
+    public void InsertSelect_ForJson_Msg13602()
+        => WriteTarget().AssertSqlError("insert z select 1 as a for json path", 13602,
+            "The FOR JSON clause is not allowed in a INSERT statement.");
+
+    [TestMethod]
+    public void SelectInto_ForJson_Msg13602()
+        => WriteTarget().AssertSqlError("select 1 as a into z2 for json path", 13602,
+            "The FOR JSON clause is not allowed in a SELECT INTO statement.");
+
+    /// <summary>
+    /// Real reports the <em>FOR XML</em> wording (Msg 6819 state 3) when a
+    /// variable-assigning SELECT carries FOR JSON, where its INSERT and
+    /// SELECT INTO paths give FOR JSON its own Msg 13602 — probe-confirmed.
+    /// </summary>
+    [TestMethod]
+    public void AssignmentSelect_ForJson_ReportsTheForXmlError()
+    {
+        var ex = WriteTarget().AssertSqlError("declare @x nvarchar(max); select @x = 1 for json path", 6819);
+        AreEqual("The FOR XML clause is not allowed in a ASSIGNMENT statement.", ex.Message);
+        AreEqual(3, ex.State);
+    }
+
+    [TestMethod]
+    public void InsertSelect_NestedForJsonSubquery_Allowed()
+    {
+        var sim = WriteTarget();
+        _ = sim.ExecuteNonQuery("insert z select (select 1 as a for json path)");
+        AreEqual("""[{"a":1}]""", sim.ExecuteScalar("select x from z"));
+    }
+
+    /// <summary>
+    /// A JSON property name is a quoted string, so nothing is escaped the way
+    /// FOR XML escapes an unusable XML name — the alias reaches the output as
+    /// written (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void Path_PropertyNames_AreNotXmlEncoded()
+        => AreEqual("""[{"a b":1,"1a":2,"a_x0020_b":3}]""",
+            Json("select 1 as [a b], 2 as [1a], 3 as [a_x0020_b] for json path"));
 }

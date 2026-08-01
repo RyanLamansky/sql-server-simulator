@@ -140,7 +140,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// <summary>
     /// Stable per-transaction snapshot timestamp used by SNAPSHOT-isolation
     /// readers. Allocated lazily at the first user-table access inside the
-    /// transaction (via <see cref="Database.CurrentTransactionCommitId"/>),
+    /// transaction (via <see cref="Simulation.CurrentTransactionCommitId"/>),
     /// immutable for the transaction's lifetime, and consulted by every
     /// subsequent SI read to walk the row's version chain. Null while the
     /// transaction has not yet read any user table; null for transactions
@@ -178,7 +178,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         if (this.TranCount > 0)
             return;
         var db = this.Connection.CurrentDatabase;
-        Storage.VersionStore.FinalizePendingEntries(this.PendingVersionEntries, db);
+        Storage.VersionStore.FinalizePendingEntries(this.PendingVersionEntries, this.simulation);
         // Commit() (vs the former discard-only Clear) reclaims the off-row LOB
         // chains superseded by this tx's committed UPDATE/DELETEs in the
         // unversioned case; under SNAPSHOT/RCSI those chains are pinned by the
@@ -186,8 +186,8 @@ public sealed class SimulatedDbTransaction : DbTransaction
         // instead by RunGarbageCollection below once no snapshot needs them.
         this.UndoLog.Commit();
         ReleaseAllLocks();
-        UnregisterActiveSnapshot(db);
-        Storage.VersionStore.RunGarbageCollection(db);
+        UnregisterActiveSnapshot();
+        Storage.VersionStore.RunGarbageCollection(this.simulation, db);
         RestoreSessionIsolation();
         this.Connection.CurrentTransaction = null;
         this.finished = true;
@@ -203,8 +203,8 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.UndoLog.Rollback();
         this.TranCount = 0;
         ReleaseAllLocks();
-        UnregisterActiveSnapshot(db);
-        Storage.VersionStore.RunGarbageCollection(db);
+        UnregisterActiveSnapshot();
+        Storage.VersionStore.RunGarbageCollection(this.simulation, db);
         RestoreSessionIsolation();
         this.Connection.CurrentTransaction = null;
         this.finished = true;
@@ -224,8 +224,8 @@ public sealed class SimulatedDbTransaction : DbTransaction
             Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
             this.UndoLog.Rollback();
             ReleaseAllLocks();
-            UnregisterActiveSnapshot(db);
-            Storage.VersionStore.RunGarbageCollection(db);
+            UnregisterActiveSnapshot();
+            Storage.VersionStore.RunGarbageCollection(this.simulation, db);
             RestoreSessionIsolation();
             this.Connection.CurrentTransaction = null;
             this.finished = true;
@@ -233,10 +233,10 @@ public sealed class SimulatedDbTransaction : DbTransaction
         base.Dispose(disposing);
     }
 
-    private void UnregisterActiveSnapshot(Database db)
+    private void UnregisterActiveSnapshot()
     {
         if (this.SnapshotXid is not null)
-            _ = db.ActiveSnapshotTxs.TryRemove(this, out _);
+            _ = this.simulation.ActiveSnapshotTxs.TryRemove(this, out _);
     }
 
     private void RestoreSessionIsolation()

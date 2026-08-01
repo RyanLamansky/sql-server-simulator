@@ -103,6 +103,10 @@ partial class Simulation
             // behavior).
             if (context.Token is Operator { Character: '(' })
             {
+                // Real refuses the string form inside a function (Msg 443
+                // 'EXECUTE STRING') while leaving `EXEC <proc>` and
+                // `EXEC sp_executesql` creatable — probe-confirmed.
+                FunctionBodyShape.NoteSideEffect(batch, "EXECUTE STRING", FunctionBodyShape.ControlOperatorState);
                 foreach (var outcome in ParseExecDynamicSql(batch, returnCodeVar, insertExecSource))
                     yield return outcome;
                 yield break;

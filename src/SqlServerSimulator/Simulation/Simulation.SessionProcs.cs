@@ -107,9 +107,12 @@ partial class Simulation
     /// <remarks>
     /// <c>CPUTime</c> and <c>DiskIO</c> report <c>0</c>: the simulator meters
     /// neither CPU nor physical I/O per session, and <c>0</c> is what real
-    /// reports for a session that has done neither. <c>ProgramName</c> is the
-    /// empty string and <c>HostName</c> renders as real's <c>"  ."</c>
-    /// placeholder, since no client program / host name reaches the session.
+    /// reports for a session that has done neither. <c>HostName</c> and
+    /// <c>ProgramName</c> carry the session's reported client identity (the
+    /// connection string's <c>Workstation ID</c> / <c>Application Name</c>, or
+    /// LOGIN7's <c>HostName</c> / <c>AppName</c>); a session that reported
+    /// neither renders <c>HostName</c> as real's <c>"  ."</c> placeholder and
+    /// <c>ProgramName</c> as the empty string.
     /// <c>LastBatch</c> is the session's login instant in real's
     /// <c>MM/DD hh:mm:ss</c> rendering — the simulator's nearest analogue to
     /// the last-batch timestamp.
@@ -133,7 +136,7 @@ partial class Simulation
         var cpuWidth = WhoColumnWidth(sessions, 7, static _ => 1);
         var diskWidth = WhoColumnWidth(sessions, 6, static _ => 1);
         var lastBatchWidth = WhoColumnWidth(sessions, 9, static _ => WhoLastBatchWidth);
-        var programWidth = WhoColumnWidth(sessions, 11, static _ => 0);
+        var programWidth = WhoColumnWidth(sessions, 11, static s => s.ProgramName.Length);
 
         var spidType = CharSqlType.Get(5, Collation.Baseline, Coercibility.Implicit);
         var loginType = NVarcharSqlType.Get(loginWidth, Collation.Baseline, Coercibility.Implicit);
@@ -173,7 +176,7 @@ partial class Simulation
                 SqlValue.FromString(cpuType, Truncate(zero, cpuWidth)),
                 SqlValue.FromString(diskType, Truncate(zero, diskWidth)),
                 SqlValue.FromString(lastBatchType, Truncate(WhoLastBatch(session.LoginTimeUtc), lastBatchWidth)),
-                SqlValue.FromString(programType, ""),
+                SqlValue.FromString(programType, Truncate(session.ProgramName, programWidth)),
                 spid,
                 SqlValue.FromString(spidType, "0"),
             ]);
@@ -212,7 +215,7 @@ partial class Simulation
     /// </summary>
     private readonly struct WhoSession(
         int spid, string status, string login, string hostName, int blockedBy,
-        string databaseName, string command, DateTime loginTimeUtc)
+        string databaseName, string command, DateTime loginTimeUtc, string programName)
     {
         public readonly int Spid = spid;
         public readonly string Status = status;
@@ -222,6 +225,7 @@ partial class Simulation
         public readonly string DatabaseName = databaseName;
         public readonly string Command = command;
         public readonly DateTime LoginTimeUtc = loginTimeUtc;
+        public readonly string ProgramName = programName;
     }
 
     // The three shapes @loginame takes: every session, one spid, one login, or
@@ -267,8 +271,9 @@ partial class Simulation
                 continue;
 
             sessions.Add(new WhoSession(
-                connection.Spid, status, login, hostName: "", blockedBy,
-                connection.CurrentDatabase.Name, command, connection.LoginTimeUtc));
+                connection.Spid, status, login, connection.ClientHostName, blockedBy,
+                connection.CurrentDatabase.Name, command, connection.LoginTimeUtc,
+                connection.ClientApplicationName));
         }
 
         sessions.Sort(static (a, b) => a.Spid.CompareTo(b.Spid));

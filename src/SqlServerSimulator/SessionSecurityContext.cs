@@ -7,7 +7,7 @@ namespace SqlServerSimulator;
 /// principal; <c>EXECUTE AS</c> and module <c>WITH EXECUTE AS</c> push additional
 /// frames.
 /// </summary>
-internal readonly struct SecurityPrincipalFrame(int databasePrincipalId, string databasePrincipalName, string loginName)
+internal readonly struct SecurityPrincipalFrame(int databasePrincipalId, string databasePrincipalName, string loginName, bool isDatabaseScoped = false)
 {
     /// <summary><c>sys.database_principals.principal_id</c> of the effective database user.</summary>
     public readonly int DatabasePrincipalId = databasePrincipalId;
@@ -17,6 +17,20 @@ internal readonly struct SecurityPrincipalFrame(int databasePrincipalId, string 
 
     /// <summary>The login this frame reports through <c>SYSTEM_USER</c> / <c>SUSER_SNAME()</c> — a login name or a WITHOUT-LOGIN SID string.</summary>
     public readonly string LoginName = loginName;
+
+    /// <summary>
+    /// Whether this identity exists only inside one database — an
+    /// <c>EXECUTE AS USER</c> frame, a module's <c>WITH EXECUTE AS &lt;user&gt;</c>
+    /// frame, or an activated application role. Such an identity carries no
+    /// server principal, so it cannot reach another database at all: every
+    /// cross-database reference raises Msg 916 naming <see cref="LoginName"/>
+    /// (probe-confirmed against SQL Server 2025 — the refusal stands even when
+    /// the session's own login is <c>sa</c>, and even with the database's
+    /// <c>TRUSTWORTHY</c> option on). A login-based frame
+    /// (connect-time or <c>EXECUTE AS LOGIN</c>) is false and maps into the
+    /// target database normally.
+    /// </summary>
+    public readonly bool IsDatabaseScoped = isDatabaseScoped;
 }
 
 /// <summary>
@@ -87,7 +101,7 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
     public void SetApplicationRole(string roleName, int rolePrincipalId, string loginName, byte[]? cookie)
     {
         this.preApplicationRoleFrame = baseFrame;
-        baseFrame = new SecurityPrincipalFrame(rolePrincipalId, roleName, loginName);
+        baseFrame = new SecurityPrincipalFrame(rolePrincipalId, roleName, loginName, isDatabaseScoped: true);
         this.ApplicationRoleName = roleName;
         this.ApplicationRoleCookie = cookie;
     }
@@ -112,6 +126,17 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
         this.ApplicationRoleCookie = null;
         return true;
     }
+
+    /// <summary>
+    /// Reseats the base frame on the database user <paramref name="principal"/>
+    /// after the session switched databases — a login's identity is per
+    /// database, so <c>USE other</c> makes <c>CURRENT_USER</c> the login's user
+    /// in <c>other</c> while <c>SYSTEM_USER</c> / <c>ORIGINAL_LOGIN()</c> stay
+    /// put (probe-confirmed). Never reached while impersonating or under an
+    /// application role — both refuse the switch outright.
+    /// </summary>
+    public void RebindBaseFrameToDatabaseUser(DatabasePrincipal principal) =>
+        baseFrame = new SecurityPrincipalFrame(principal.PrincipalId, principal.Name, baseFrame.LoginName);
 
     /// <summary>Pushes one impersonation frame (<c>EXECUTE AS</c> or a module's <c>WITH EXECUTE AS</c>).</summary>
     public void Push(SecurityPrincipalFrame frame) => this.impersonation.Add(frame);

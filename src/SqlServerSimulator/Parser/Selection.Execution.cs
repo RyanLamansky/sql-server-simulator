@@ -492,9 +492,25 @@ internal sealed partial class Selection
     /// guessing. An aggregate mixing inner and outer references, or reading no
     /// column at all (<c>COUNT(*)</c>, <c>MAX(1)</c>), is left alone — only the
     /// wholly-outer case is ambiguous.
+    /// <para>A name that resolves in <em>no</em> scope isn't that case at all:
+    /// it is real's Msg 207, which real reports at compile time (probe-confirmed
+    /// — <c>HAVING MAX(nosuchcol) = 1</c> refuses a <c>CREATE VIEW</c> outright,
+    /// while the genuinely-outer <c>(SELECT MAX(t.a) FROM u)</c> creates and
+    /// only misbehaves at run time). The enclosing type resolver is what tells
+    /// the two apart; it raises Msg 207 itself once the scope chain runs
+    /// out.</para>
     /// </remarks>
-    private static void RehomeAggregatesOverOuterScope(BatchContext parseBatch, FromSource[] sources, List<AggregateExpression> aggregates)
+    private static void RehomeAggregatesOverOuterScope(
+        BatchContext parseBatch,
+        FromSource[] sources,
+        List<AggregateExpression> aggregates,
+        Func<MultiPartName, SqlType>? outerTypeResolver)
     {
+        // A placeholder source means the statement's whole binding defers to
+        // the missing object, so an unresolved name says nothing about scope.
+        if (AnyPlaceholderSource(sources))
+            return;
+
         List<AggregateExpression>? rehomed = null;
         foreach (var aggregate in aggregates)
         {
@@ -506,15 +522,26 @@ internal sealed partial class Selection
 
             var referenced = 0;
             var resolvedHere = 0;
+            MultiPartName? unresolved = null;
             operand.VisitColumnReferences(name =>
             {
                 referenced++;
                 if (FindSourceColumn(sources, name).SourceIndex >= 0)
                     resolvedHere++;
+                else
+                    unresolved ??= name;
             });
 
             if (referenced == 0 || resolvedHere > 0)
                 continue;
+
+            // Resolve the outer scope chain before concluding anything: with no
+            // enclosing scope at all, or with one that doesn't know the name,
+            // this is a bad column reference rather than an outer-bound
+            // aggregate.
+            if (outerTypeResolver is null)
+                throw SimulatedSqlException.InvalidColumnName(unresolved!.Value);
+            _ = outerTypeResolver(unresolved!.Value);
 
             // The aggregate reads only the enclosing query's columns, so it
             // belongs to that query: real evaluates it there, which makes the
@@ -567,7 +594,7 @@ internal sealed partial class Selection
     {
         RecordIndexedViewShape(parseBatch, sources, joins, fromClause, distinct, topExpression, aggregates);
 
-        RehomeAggregatesOverOuterScope(parseBatch, sources, aggregates);
+        RehomeAggregatesOverOuterScope(parseBatch, sources, aggregates, parseBatch.Parser.OuterTypeResolver ?? outerTypeResolver);
 
         // Convert a comma-join / CROSS JOIN carrying an equi-join predicate in
         // WHERE into an INNER JOIN, so it rides the equi-join seek / hash path
@@ -671,11 +698,20 @@ internal sealed partial class Selection
             }
         }
 
+        // A projection that reaches the client, or that materializes a column
+        // (SELECT … INTO, a view's output), has to name one collation itself
+        // and reports Msg 451 when its operands can't agree on one. An
+        // assignment target supplies the collation instead — real settles the
+        // same conflict against it silently — so an INSERT … SELECT source or
+        // a `SELECT @v = …` list leaves the slot unset.
+        var projectionNamesOwnCollation = !isAssignmentOnly && !parseBatch.Parser.InInsertSourceSelect;
         for (var i = 0; i < expressions.Count; i++)
         {
+            parseBatch.Parser.CollationOutputSlot = projectionNamesOwnCollation ? ("SELECT", i + 1) : null;
             outputSchema[i] = expressions[i].GetSqlType(parseBatch, readColumnSink is null ? ResolveColumnType : RecordingResolver);
             outputColumnNames[i] = expressions[i].Name;
         }
+        parseBatch.Parser.CollationOutputSlot = null;
 
         // Compile-time bind of the predicates and grouping terms. Real SQL
         // Server binds these while compiling — probe-confirmed that a
@@ -691,8 +727,17 @@ internal sealed partial class Selection
             excluder.Bind(parseBatch, ResolveColumnType);
         foreach (var join in joins)
             join.OnPredicate?.Bind(parseBatch, ResolveColumnType);
+        // A grouping term names a collation too, and real numbers those slots
+        // from 2 — the grouped projection it builds carries one column ahead of
+        // the keys (probe-confirmed: a lone `GROUP BY concat(a, b)` reports
+        // column 2, and a second key reports column 3).
+        var groupingOrdinal = 2;
         foreach (var grouping in fromClause.AllGroupingExpressions)
+        {
+            parseBatch.Parser.CollationOutputSlot = ("GROUP BY", groupingOrdinal++);
             _ = grouping.GetSqlType(parseBatch, ResolveColumnType);
+        }
+        parseBatch.Parser.CollationOutputSlot = null;
         fromClause.Having?.Bind(parseBatch, ResolveColumnType);
 
         if (readColumnSink is not null)
@@ -747,12 +792,14 @@ internal sealed partial class Selection
 
         for (var i = 0; i < orderBy.Count; i++)
         {
+            parseBatch.Parser.CollationOutputSlot = ("ORDER BY", i + 1);
             var keyType = orderBy[i].IsOrdinal
                 ? outputSchema[orderBy[i].Ordinal - 1]
                 : orderBy[i].Expr!.GetSqlType(parseBatch, ResolveOrderByType);
             if (keyType.IsLob)
                 throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
         }
+        parseBatch.Parser.CollationOutputSlot = null;
 
         // Msg 8120 / 8121 / 8127: in an aggregate query (any aggregate, GROUP
         // BY, or HAVING present) every column referenced outside an aggregate
@@ -836,11 +883,14 @@ internal sealed partial class Selection
             updatabilityRejection);
         // Capture the cursor-navigable FROM shape plus its ORDER BY, so a
         // KEYSET / DYNAMIC cursor can re-fold the live base heaps per FETCH
-        // and order rows the same way a read would.
-        selection.CursorPlan = ComputeCursorPlan(
+        // and order rows the same way a read would. A row limit rides along
+        // unresolved — its operands re-evaluate against the batch that OPENs.
+        selection.CursorShape = ComputeCursorShape(
             sources, joins, expressions, fromClause, distinct, aggregates, windows,
-            hasTopOrOffsetOrFetch: selection.HasTopOrOffsetOrFetch);
-        if (selection.CursorPlan is not null)
+            selection.HasTopOrOffsetOrFetch
+                ? new CursorRowLimit(topExpression, topPercent, topWithTies, offsetExpression, fetchExpression)
+                : null);
+        if (selection.CursorShape is not null)
             selection.CursorOrderBy = orderBy;
         selection.ColumnNullability = columnNullability;
         selection.ProjectionExpressions = [.. expressions];
@@ -976,18 +1026,22 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Captures the FROM shape a KEYSET / DYNAMIC cursor navigates, or null
+    /// Captures the FROM shape a KEYSET / DYNAMIC cursor may navigate, or null
     /// when the SELECT must fall back to a STATIC snapshot. Probe-confirmed
-    /// against SQL Server 2025: a JOIN (any arity / kind), a comma FROM and a
-    /// self-join all stay DYNAMIC there, while DISTINCT / GROUP BY /
-    /// aggregates / set ops convert to a read-only snapshot, so the gates
-    /// below mirror that split. Every source must be a direct base-table scan:
-    /// cursor identity is the tuple of stable <c>(page, slot)</c> addresses, and
-    /// a deferred source (derived table, view, CTE, TVF, catalog view, APPLY
-    /// right side) yields projected bytes carrying no heap address — as does a
-    /// <c>FOR SYSTEM_TIME</c> source, which reads the history sibling too.
+    /// against SQL Server 2025: a JOIN (any arity / kind), a comma FROM, a
+    /// self-join, a derived table, a CTE, a view and an APPLY all stay DYNAMIC
+    /// there, while DISTINCT / GROUP BY / aggregates / set ops convert to a
+    /// read-only snapshot, so the statement-level gates below mirror that
+    /// split. A <c>TOP</c> / <c>OFFSET</c> / <c>FETCH</c> row limit stays
+    /// navigable and rides along as <see cref="CursorShape.RowLimit"/>: real
+    /// converts such a cursor to KEYSET, whose membership the limit picks at
+    /// OPEN. Whether each individual source bottoms out in base tables — the
+    /// stable <c>(page, slot)</c> addresses cursor identity rides on — is
+    /// settled later by <see cref="TryBuildCursorPlan"/>, which is where a view
+    /// body gets parsed; this pass only rejects the shapes no source set can
+    /// rescue.
     /// </summary>
-    private static CursorSourcePlan? ComputeCursorPlan(
+    private static CursorShape? ComputeCursorShape(
         FromSource[] sources,
         JoinSpec[] joins,
         List<Expression> expressions,
@@ -995,39 +1049,28 @@ internal sealed partial class Selection
         bool distinct,
         List<AggregateExpression> aggregates,
         List<WindowExpression> windows,
-        bool hasTopOrOffsetOrFetch)
+        CursorRowLimit? rowLimit)
     {
-        if (distinct || aggregates.Count > 0 || windows.Count > 0 || hasTopOrOffsetOrFetch
+        if (distinct || aggregates.Count > 0 || windows.Count > 0
             || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
             || sources.Length == 0)
         {
             return null;
         }
 
-        var tables = new HeapTable[sources.Length];
-        for (var i = 0; i < sources.Length; i++)
-        {
-            if (sources[i] is not { BackingTable: { } table, LateralPlan: null, IsPlaceholder: false } source
-                || source.Rows is TemporalRowSource)
-            {
-                return null;
-            }
-            tables[i] = table;
-        }
-
         // A parenthesized join group spans several slots per level, which the
-        // flat left-deep cursor fold doesn't model; APPLY is lateral, so its
-        // right side is a plan rather than a scannable base table.
+        // flat left-deep cursor fold doesn't model.
         foreach (var join in joins)
         {
             if (join.GroupCount != 1
-                || join.Kind is not (JoinKind.Inner or JoinKind.Cross or JoinKind.Left or JoinKind.Right or JoinKind.Full))
+                || join.Kind is not (JoinKind.Inner or JoinKind.Cross or JoinKind.Left or JoinKind.Right
+                    or JoinKind.Full or JoinKind.CrossApply or JoinKind.OuterApply))
             {
                 return null;
             }
         }
 
-        return new CursorSourcePlan(sources, joins, tables, [.. expressions], [.. fromClause.Excluders]);
+        return new CursorShape(sources, joins, [.. expressions], [.. fromClause.Excluders], rowLimit);
     }
 
     /// <summary>

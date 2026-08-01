@@ -1,6 +1,7 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -155,32 +156,42 @@ partial class Simulation
 
         // Resolve updatability + effective sensitivity. A query whose FROM the
         // cursor can't re-fold (no CursorSourcePlan) is forced to STATIC, as is
-        // an explicit STATIC / INSENSITIVE / FAST_FORWARD request. Otherwise
+        // an explicit STATIC / INSENSITIVE / FAST_FORWARD request. Building the
+        // plan here rather than at SELECT-parse time is what lets a view slot
+        // be followed into its body: the body is parsed once, at DECLARE, the
+        // point real SQL Server fixes the cursor's plan at too. Otherwise
         // honor the requested type; an unspecified type defaults to KEYSET when
         // SCROLL was asked for and DYNAMIC for the forward-only default. A base
         // table without a unique key is fine — cursor identity rides the heap's
         // stable (page, slot) addresses, not the row's values. A JOIN is
         // updatable exactly like a single table (probe-confirmed).
-        var cursorPlan = selection.CursorPlan;
+        var cursorPlan = Selection.TryBuildCursorPlan(selection, batch);
         var updatable = cursorPlan is not null;
+        // A TOP / OFFSET / FETCH limit — on the statement or inside a body the
+        // cursor follows — caps sensitivity at KEYSET: the limit chooses which
+        // rows are members at OPEN, so there is no live set for DYNAMIC to
+        // walk. Probe-confirmed against sys.dm_exec_cursors, including the
+        // bare forward-only default, which real reports as Keyset too.
+        var rowLimited = cursorPlan is { HasRowLimit: true };
 
         var sensitivity = !updatable || reqStatic || reqFastForward
             ? CursorSensitivity.Static
-            : reqKeyset
+            : reqKeyset || rowLimited
                 ? CursorSensitivity.Keyset
                 : reqDynamic
                     ? CursorSensitivity.Dynamic
                     : scroll ? CursorSensitivity.Keyset : CursorSensitivity.Dynamic;
 
         var readOnly = sensitivity == CursorSensitivity.Static || reqFastForward || readOnlyOption;
-        // Naming a sensitivity implies SCROLL unless FORWARD_ONLY says otherwise
-        // — probe-confirmed for DYNAMIC as well as STATIC / KEYSET. A cursor
-        // that names none defaults to dynamic sensitivity *and* forward-only,
-        // so the check is on the requested keyword, not the resolved
-        // sensitivity.
+        // Naming a sensitivity implies SCROLL unless FORWARD_ONLY says
+        // otherwise — probe-confirmed for DYNAMIC as well as STATIC / KEYSET.
+        // A cursor that names none is forward-only whatever it resolved to:
+        // probe-confirmed that a bare cursor over a DISTINCT query (converted
+        // to a snapshot) and a bare cursor over a TOP query (converted to
+        // Keyset) both report Msg 16911 for a scrolling direction. So the test
+        // is on the requested keyword, never the resolved sensitivity.
         var scrollable = scroll
-            || ((sensitivity is CursorSensitivity.Static or CursorSensitivity.Keyset || reqDynamic)
-                && !forwardOnly && !reqFastForward);
+            || ((reqStatic || reqKeyset || reqDynamic) && !forwardOnly && !reqFastForward);
 
         // Concurrency model (updatable cursors only): SCROLL_LOCKS holds a
         // cursor-scoped U lock on the fetched row; OPTIMISTIC detects out-of-
@@ -209,7 +220,7 @@ partial class Simulation
             sensitivity,
             scrollable,
             readOnly,
-            cursorPlan?.Tables ?? [],
+            cursorPlan,
             concurrency,
             forUpdateColumns);
 
@@ -529,15 +540,32 @@ partial class Simulation
     /// <paramref name="table"/>: Msg 16929 when the cursor is read-only,
     /// Msg 16933 when the cursor doesn't read that table (or a
     /// <c>FOR UPDATE OF</c> list names none of its columns), Msg 16931 when it
-    /// isn't positioned on a live row, Msg 16947 when the table's slot is the
-    /// NULL-extended side of an outer join, Msg 16932 when a positioned UPDATE
+    /// isn't positioned on a live row (before the first FETCH or past the end),
+    /// Msg 16947 when the table's slot is the NULL-extended side of an outer
+    /// join or the cursor sits on a keyset hole, Msg 16932 when a positioned UPDATE
     /// assigns a column outside the cursor's <c>FOR UPDATE OF</c> list
     /// (<paramref name="assignedColumns"/>, null for DELETE), and the
     /// optimistic-conflict chain (Msg 16947 + 16934) when an OPTIMISTIC cursor's
-    /// current row was modified out-of-band. Returns the validated cursor whose
-    /// <see cref="Cursor.CurrentRids"/> identifies the rows to mutate.
+    /// current row was modified out-of-band. Returns the validated cursor and
+    /// the identity slot whose address in <see cref="Cursor.CurrentRids"/>
+    /// identifies the row to mutate.
     /// </summary>
-    internal static Cursor ParseWhereCurrentOf(ParserContext context, HeapTable table, IReadOnlyList<string>? assignedColumns = null)
+    /// <remarks>
+    /// The target is matched by the reference <em>as written</em>:
+    /// <paramref name="sourceView"/> is the view the statement named (the
+    /// UPDATE / DELETE parsers already resolved it to its base
+    /// <paramref name="table"/>), and it must equal the view the cursor's own
+    /// FROM was written through. Probe-confirmed against SQL Server 2025: a
+    /// cursor over <c>v</c> accepts <c>UPDATE v … WHERE CURRENT OF</c> and
+    /// reports Msg 16933 for the base table under it — and for the inner view
+    /// of a view-over-view — while a derived table or CTE is transparent and
+    /// the statement must name the base table.
+    /// </remarks>
+    internal static PositionedCursorTarget ParseWhereCurrentOf(
+        ParserContext context,
+        HeapTable table,
+        IReadOnlyList<string>? assignedColumns = null,
+        View? sourceView = null)
     {
         context.MoveNextRequired(); // consume CURRENT
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Of })
@@ -555,17 +583,26 @@ partial class Simulation
         // unrelated table (or the base table behind a view the cursor reads) is
         // Msg 16933, not "no current row". A FOR UPDATE OF list further narrows
         // the updatable tables to those owning a listed column.
-        var slot = cursor.IndexOfBaseTable(table);
-        if (slot < 0 || !cursor.IsTableUpdatable(table, batch))
+        var slot = cursor.IndexOfTarget(table, sourceView);
+        if (slot < 0 || !cursor.IsSlotUpdatable(slot, batch))
             throw SimulatedSqlException.CursorTableNotIncluded();
 
         // A self-join reaches the same table through several slots; real binds
         // the first one and says so through the severity-0 Msg 16961.
-        if (cursor.CountBaseTable(table) > 1)
+        if (cursor.CountTarget(table, sourceView) > 1)
             batch.AppendInfoError(@class: 0, state: 1, number: 16961, "One or more FOR UPDATE columns have been adjusted to the first instance of their table in the query.");
 
+        // Off a live row: real splits by cause (probe-confirmed). Before the
+        // first FETCH or past the end is Msg 16931 "no rows in the current
+        // fetch buffer"; a keyset hole — the last FETCH reported -2 because the
+        // member was deleted or its key changed — is Msg 16947 + 3621, since
+        // the row the statement means is simply gone.
         if (cursor.CurrentRids is not { } rids)
-            throw SimulatedSqlException.CursorNoCurrentRow();
+        {
+            throw cursor.OnKeysetHole
+                ? SimulatedSqlException.CursorNoRowsAffected()
+                : SimulatedSqlException.CursorNoCurrentRow();
+        }
         // The cursor is on a row, but this table's slot is NULL-extended (the
         // unmatched side of an outer join), so there is nothing to mutate.
         if (rids[slot] is null)
@@ -583,18 +620,16 @@ partial class Simulation
 
         // OPTIMISTIC: raise the conflict chain if the row changed since fetch.
         cursor.CheckOptimisticConflict();
-        return cursor;
+        return new PositionedCursorTarget(cursor, slot);
     }
 
     /// <summary>
-    /// True when the row of <paramref name="table"/> at <paramref name="rid"/>
-    /// is the one the positioned <paramref name="cursor"/> is sitting on — i.e.
-    /// the stable address recorded for that table's first FROM slot in
-    /// <see cref="Cursor.CurrentRids"/>.
+    /// True when the row at <paramref name="rid"/> is the one the positioned
+    /// cursor is sitting on — i.e. the stable address recorded for the bound
+    /// identity slot in <see cref="Cursor.CurrentRids"/>.
     /// </summary>
-    internal static bool CursorRowMatches(Cursor cursor, HeapTable table, (int Page, int Slot) rid) =>
-        cursor.IndexOfBaseTable(table) is var slot && slot >= 0
-            && cursor.CurrentRids is { } rids && rids[slot] is { } current && current.Equals(rid);
+    internal static bool CursorRowMatches(PositionedCursorTarget target, (int Page, int Slot) rid) =>
+        target.Cursor.CurrentRids is { } rids && rids[target.Slot] is { } current && current.Equals(rid);
 
     private static readonly (string Word, FetchDirection Direction)[] FetchDirectionWords =
     [

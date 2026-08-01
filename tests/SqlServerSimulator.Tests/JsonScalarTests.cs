@@ -83,9 +83,15 @@ public sealed class JsonScalarTests
     public void JsonValue_QuotedPropertyEmpty_EfWrapShape()
         => AreEqual("Shelbyville", ExecuteScalar("select json_value('{\"\":\"Shelbyville\"}', '$.\"\"')"));
 
+    /// <summary>
+    /// A document that isn't JSON text raises Msg 13609 whatever the path's
+    /// lax / strict prefix says — see <see cref="JsonMalformedTextTests"/> for
+    /// the full rule.
+    /// </summary>
     [TestMethod]
-    public void JsonValue_InvalidJson_ReturnsNullLax()
-        => IsInstanceOfType<DBNull>(ExecuteScalar("select json_value('{not valid}', '$.x')"));
+    public void JsonValue_InvalidJson_RaisesMsg13609()
+        => AssertSqlError("select json_value('{not valid}', '$.x')", 13609,
+            "JSON text is not properly formatted. Unexpected character 'n' is found at position 1.");
 
     [TestMethod]
     public void JsonValue_StrictPrefix_OnMissingPathRaises()
@@ -199,15 +205,13 @@ public sealed class JsonScalarTests
         => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select json_query(null)"));
 
     /// <summary>
-    /// A root-level JSON scalar has no object / array to extract, so the
-    /// path-less form answers the same NULL the explicit <c>'$'</c> path does.
-    /// (Real rejects the whole family with Msg 13609 — it treats a root scalar
-    /// as malformed JSON text; see the divergence note in
-    /// <c>docs/claude/json.md</c>.)
+    /// Only an object or an array is JSON text, so a root-level scalar is
+    /// malformed input rather than a subtree-less document.
     /// </summary>
     [TestMethod]
-    public void JsonQuery_NoPath_RootScalar_ReturnsNull()
-        => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select json_query('\"abc\"')"));
+    public void JsonQuery_NoPath_RootScalar_RaisesMsg13609()
+        => new Simulation().AssertSqlError("select json_query('\"abc\"')", 13609,
+            "JSON text is not properly formatted. Unexpected character '\"' is found at position 0.");
 
     /// <summary>The path-less form still embeds raw inside a JSON builder.</summary>
     [TestMethod]

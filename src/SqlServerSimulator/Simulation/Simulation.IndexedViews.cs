@@ -38,15 +38,15 @@ partial class Simulation
         var qualifiedViewName = $"{view.Schema.Name}.{view.Name}";
 
         // The view's stored body is what the index materializes, so both the
-        // view's own creation-time capture and the indexing session have to
-        // read `"…"` the same way. Real checks the view first: a view created
-        // under OFF raises Msg 1935 even from a session with QI ON, and only
-        // an ON-created view falls through to the session's own Msg 1934
-        // (probe-confirmed).
+        // view's own creation-time QUOTED_IDENTIFIER capture and the indexing
+        // session's SET options have to read it the same way. Real checks the
+        // view first: a view created under OFF raises Msg 1935 even from a
+        // session with QI ON, and only an ON-created view falls through to the
+        // session's own Msg 1934 (probe-confirmed).
         if (!view.UsesQuotedIdentifier)
             throw SimulatedSqlException.CannotCreateIndexObjectCreatedWithOptionsOff(view.Name, QuotedIdentifierOptionName);
-        if (!context.QuotedIdentifiers)
-            throw SimulatedSqlException.IncorrectSetOptions("CREATE INDEX", QuotedIdentifierOptionName);
+        if (IncorrectSetOptionNames(context) is { } setOptions)
+            throw SimulatedSqlException.IncorrectSetOptions("CREATE INDEX", setOptions);
 
         if (!view.IsSchemaBound)
             throw SimulatedSqlException.CannotIndexViewNotSchemaBound(view.Name);

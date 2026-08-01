@@ -440,17 +440,64 @@ public sealed class ModuleBodyBindingTests
     }
 
     /// <summary>
-    /// <strong>Divergence.</strong> An aggregate whose only column reference
-    /// fails to resolve locally is taken for one over an enclosing query —
-    /// unmodeled, so it raises <see cref="NotSupportedException"/>, which a
-    /// bind swallows rather than refusing a module real accepts. Real reports
-    /// Msg 207 at CREATE here.
+    /// An aggregate whose only column reference resolves in no scope at all is
+    /// a bad column reference, not an aggregate over an enclosing query — real
+    /// reports Msg 207 at CREATE, and the outer scope chain is what tells the
+    /// two apart.
     /// </summary>
     [TestMethod]
-    public void HavingAggregateOverUnknownColumn_IsNotReachedByTheBind()
+    [DataRow("create procedure dbo.presidual as select id from dbo.bt group by id having max(nosuchcol) = 1")]
+    [DataRow("create view dbo.presidual as select id from dbo.bt group by id having max(nosuchcol) = 1")]
+    [DataRow("create function dbo.presidual() returns int as begin declare @v int; select @v = 1 from dbo.bt group by id having max(nosuchcol) = 1; return @v; end")]
+    public void HavingAggregateOverUnknownColumn_FailsCreateWithMsg207(string create)
     {
         var sim = WithFixture();
-        sim.ExecuteBatches("create procedure dbo.presidual as select id from dbo.bt group by id having max(nosuchcol) = 1");
-        AreEqual(1, ObjectCount(sim, "presidual"));
+        var ex = sim.AssertSqlError(create, 207);
+        AreEqual("Invalid column name 'nosuchcol'.", ex.Message);
+        AreEqual(1, ex.State);
+        AreEqual(0, ObjectCount(sim, "presidual"));
+    }
+
+    /// <summary>
+    /// The same shape outside a module: the statement is a compile error there
+    /// too, rather than the unmodeled-feature refusal it used to raise.
+    /// </summary>
+    [TestMethod]
+    public void HavingAggregateOverUnknownColumn_IsMsg207InAPlainStatement()
+    {
+        var sim = WithFixture();
+        _ = sim.AssertSqlError("select id from dbo.bt group by id having max(nosuchcol) = 1", 207);
+    }
+
+    /// <summary>
+    /// The genuinely-outer shape stays creatable — real binds the aggregate to
+    /// the enclosing query and accepts the <c>CREATE</c>, so the
+    /// resolves-nowhere rule above must not catch it. Running it then reports
+    /// Msg 512 on both, because the aggregate collapses the outer query while
+    /// the subquery still yields a row per row of its own source.
+    /// </summary>
+    [TestMethod]
+    public void AggregateOverEnclosingQuery_StillCreatesAndMatchesRealAtRuntime()
+    {
+        var sim = WithFixture();
+        sim.ExecuteBatches(
+            "create table dbo.bu (b int)",
+            "insert dbo.bt (id) values (5), (7)",
+            "insert dbo.bu values (1), (2)",
+            "create view dbo.vouter as select (select max(t.id) from dbo.bu) as m from dbo.bt t");
+        AreEqual(1, ObjectCount(sim, "vouter"));
+        _ = sim.AssertSqlError("select * from dbo.vouter", 512);
+    }
+
+    /// <summary>
+    /// A missing FROM object defers the whole statement's binding, so an
+    /// aggregate over a column that could only belong to it isn't a Msg 207.
+    /// </summary>
+    [TestMethod]
+    public void HavingAggregateOverMissingTablesColumn_Defers()
+    {
+        var sim = WithFixture();
+        sim.ExecuteBatches("create procedure dbo.pdefer as select x from dbo.missing_xyz group by x having max(nosuchcol) = 1");
+        AreEqual(1, ObjectCount(sim, "pdefer"));
     }
 }

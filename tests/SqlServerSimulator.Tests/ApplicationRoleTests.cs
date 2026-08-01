@@ -46,12 +46,18 @@ public sealed class ApplicationRoleTests
             select default_schema_name from sys.database_principals where name = 'app2'
             """));
 
+    /// <summary>
+    /// A user without an explicit DEFAULT_SCHEMA lands on dbo, the way real
+    /// reports it; a database role keeps the NULL (probe-confirmed).
+    /// </summary>
     [TestMethod]
-    public void OtherPrincipals_KeepNullDefaultSchema()
-        => AreEqual(1, new Simulation().ExecuteScalar("""
-            create user u without login;
-            select count(*) from sys.database_principals where name = 'u' and default_schema_name is null
-            """));
+    public void OtherPrincipals_DefaultSchemaFollowsPrincipalKind()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u without login; create role r");
+        AreEqual("dbo", sim.ExecuteScalar("select default_schema_name from sys.database_principals where name = 'u'"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.database_principals where name = 'r' and default_schema_name is null"));
+    }
 
     [TestMethod]
     public void AlterApplicationRole_RenameAndDefaultSchema()

@@ -126,14 +126,23 @@ Seeding the child `ParserContext` directly would fix only the tokenizer; the ses
 Each module in a call chain runs under its own capture; nesting is naturally handled by the save/restore pair, and the session is unchanged once the outermost body returns.
 The swap is held across `yield return` at the two lazily-enumerated sites (`InvokeViewCore`, `InvokeInlineTvfCore`) — the module is still producing rows there, and every nested re-parse swaps to its own capture, so the only window is a `SESSIONPROPERTY('QUOTED_IDENTIFIER')` evaluated by the *outer* statement between two rows of a view body.
 
-**Tables don't capture.**
+**Tables don't capture `QUOTED_IDENTIFIER`.**
 `OBJECTPROPERTY(<table>, 'IsQuotedIdentOn')` answers 1 for any table regardless of the creating session (probe-confirmed), which the `UsesQuotedIdentifier = true` default reproduces — a table's computed-column and constraint expressions are parsed once at CREATE and stored normalized (`([a]+'x')` for a `"x"` written under OFF), never re-read.
-Catalog projection is in [`catalog-views.md`](catalog-views.md).
+
+**Nor do constraints, in the other direction.**
+A CHECK or DEFAULT constraint answers a constant **0** — probe-confirmed both ways, including for one created with `QUOTED_IDENTIFIER` ON, and uniformly 0 across msdb's 229 shipped constraints — while a PRIMARY KEY / UNIQUE / FOREIGN KEY constraint answers NULL, and `IsAnsiNullsOn` is NULL for all five.
+Constraint object ids resolve through `ObjectProperty.TryFindConstraint` (they aren't `SchemaObject`s, so the object walk can't reach them) and answer through `EvaluateConstraintProperty`: every object-kind discriminator plus `IsEncrypted` / `IsMSShipped` / `IsSystemTable` is 0, and the module- and table-scoped names are NULL.
+`OBJECTPROPERTYEX` gives the same answers.
+`OBJECT_ID('<constraint name>')` doesn't resolve a constraint, so the id comes from `sys.objects` (or `sys.default_constraints` for a DEFAULT, which `sys.objects` has no row for).
+
+**`ANSI_NULLS` captures alongside it, tables included, but only as metadata.**
+`SchemaObject.UsesAnsiNulls` records the session's `SET ANSI_NULLS` at every `CREATE` the same way — modules and tables both, since real answers 0 for a table created under OFF.
+Nothing behavioral rides on it: real freezes a module's `= NULL` comparison semantics to the capture, while the simulator doesn't model `SET ANSI_NULLS OFF` comparison semantics at all, so every comparison stays ANSI whatever the capture says.
+Catalog projection for both captures is in [`catalog-views.md`](catalog-views.md#creation-time-set-option-capture).
 
 ## `SET`-option gates — Msg 1934 / Msg 1935
 
-Real refuses to touch a stored expression from a session that would read the expression's `"…"` the other way.
-Only the `QUOTED_IDENTIFIER` component is enforced; real's full required set is `ANSI_NULLS` / `ANSI_PADDING` / `ANSI_WARNINGS` / `ARITHABORT` / `CONCAT_NULL_YIELDS_NULL` ON and `NUMERIC_ROUNDABORT` OFF, and the message lists every offending name comma-separated.
+Real refuses to touch a stored expression from a session whose SET options would read that expression differently.
 Message shape (class 16, state 1), the verb echoing the statement:
 
 ```
@@ -143,7 +152,20 @@ and/or filtered indexes and/or query notifications and/or XML data type methods 
 index operations.
 ```
 
-The probed matrix, all under `QUOTED_IDENTIFIER OFF`:
+### The option list
+
+Six options are checked, and every offending one is named comma-separated in the single message: `QUOTED_IDENTIFIER` / `ANSI_NULLS` / `CONCAT_NULL_YIELDS_NULL` / `ANSI_WARNINGS` / `ANSI_PADDING` ON and `NUMERIC_ROUNDABORT` OFF.
+The order is fixed and is neither the order the session set them nor alphabetical — probe-confirmed with three and with five wrong at once, the five-wrong case reading `'ANSI_NULLS, CONCAT_NULL_YIELDS_NULL, ANSI_WARNINGS, ANSI_PADDING, NUMERIC_ROUNDABORT'`.
+`QUOTED_IDENTIFIER` is reported **alone** when it is off, whatever the other five say (probe-confirmed with all six wrong at once), which is why it reads as the only component in the common case.
+
+`ARITHABORT` is documented as part of the required set but never appears: real accepts a session whose `ARITHABORT` bit is 0 as long as `ANSI_WARNINGS` is on, probe-confirmed by reading `@@OPTIONS & 64` inside the batch real accepted.
+The ANSI_WARNINGS-implies-ARITHABORT rule stands in for it, so the gate has six components rather than seven.
+
+`Simulation.IncorrectSetOptionNames` is the single source of the list; every site below calls it, and the `QUOTED_IDENTIFIER` component alone reads the **parse-position** setting so a module body answers from its own creation-time capture rather than the caller's session.
+
+### The probed matrix
+
+Each row raises for any of the six, shown here under `QUOTED_IDENTIFIER OFF`:
 
 | Operation | Msg 1934? | Verb |
 | --- | --- | --- |
@@ -155,6 +177,8 @@ The probed matrix, all under `QUOTED_IDENTIFIER OFF`:
 | …with a non-persisted computed column and **no index over it** | no | — |
 | …with a **disabled** filtered index | no | — |
 | `SELECT` from any of the above | no | — |
+| `SELECT … FROM <indexed view> WITH (NOEXPAND)` | yes | the enclosing statement's verb |
+| …the same view without the hint, or `NOEXPAND` on an unindexed view | no | — |
 | An XML data-type method — `.value()` / `.exist()` / `.query()` / `.modify()` — even on an `xml` **variable** | yes | enclosing statement |
 | `.nodes()` alone | no | — |
 | `CREATE TABLE` / `ALTER TABLE ADD` declaring a **PERSISTED** computed column | yes | `CREATE TABLE` / `ALTER TABLE` |
@@ -180,11 +204,7 @@ Timing: the gate is a **batch-level compile check, not a runtime one** — a nev
 
 ### Not modeled yet
 
-- **`SELECT … WITH (NOEXPAND)` over an indexed view under OFF** — real raises Msg 1934 with the `SELECT` verb; the simulator accepts it, because `NOEXPAND` is a bare member of `TableHintNames` with no field on `Selection.TableHintInfo` to carry it to the gate.
-  Every other row in the matrix above ships.
-- **The six non-`QUOTED_IDENTIFIER` components** of real's required set.
-  Each has a session field already (`SimulatedDbConnection.AnsiNulls` / `AnsiPadding` / `AnsiWarnings` / `Arithabort` / `ConcatNullYieldsNull` / `NumericRoundabort`), so extending `RejectIncorrectSetOptionsForWrite` to collect the offending names into the comma-separated list is the shape it would take.
-  Note `Arithabort` and `NumericRoundabort` default to the values real's gate wants, and the ADO.NET / TDS front doors leave the other four ON, so a session only fails these by asking to.
+- **Msg 1935's own option list** — the object-side companion reads only the view's `QUOTED_IDENTIFIER` capture, which is the only SET option a view records beyond `ANSI_NULLS`.
 - **The LOGIN7 option flags** — `Network/Login7Request.cs` reads name / credential / database fields and ignores `OptionFlags2`, whose `fODBC` bit is what a client uses to request the `ANSI_DEFAULTS` bundle (`QUOTED_IDENTIFIER` included) at connect time.
   The session default is ON either way, which is what SqlClient asks for, so the omission shows only for a client that deliberately connects with QI OFF.
 
@@ -194,6 +214,11 @@ The per-statement dispatch normalizer advances one token past a parser that stop
 A general "any unconsumed trailing token → Msg 102" rule proved too invasive (dozens of statement parsers legitimately end on a last-consumed token; the parenthesized-join FROM form leaves its alias dangling).
 The narrow fix: a completed top-level SELECT that left the cursor on a **value literal** (`Numeric` / `Literal`) — which a well-formed SELECT never does — raises Msg 102, matching real for `SELECT … LIMIT n` and `SELECT … OFFSET n` (both Msg 102 without an ORDER BY on real).
 An identifier or other token still routes through the normalizer; the alias-swallow case it used to leave open (`SELECT 1 xyz 2` parsing as two columns) is now caught inside the projection loop instead — see [Select-list element positions](#select-list-element-positions).
+
+**A binding error the statement owes waits for that check.**
+Real parses a batch before binding any of it, so a syntax error past a clause outranks the clause's own binding error: `GROUP BY 'a' 'b'` is Msg 102 at `'b'` where `GROUP BY 'a'` alone is Msg 164, and the same holds for the Msg 144 shape `GROUP BY (SELECT …) 'b'` (all three probe-confirmed).
+`ParserContext.PendingGroupByBindError` holds the clause's message until the statement's outermost query expression has parsed, and the flush yields to a trailing value literal — the same token class this rule rejects — so the syntax error wins.
+The first offending item still supplies the message, which is what an immediate throw produced.
 
 `ALTER TABLE … ADD COLUMN c TYPE` is rejected with **Msg 156** near COLUMN (unlike `DROP COLUMN` / `ALTER COLUMN`, the ADD form names the column directly) — a prior "COLUMN is optional here" note was based on a mistaken probe; the live reference rejects it.
 
@@ -240,8 +265,6 @@ Real reaches that last clip through a 200-digit numeric literal — which the si
 ## Divergences
 
 - **Multi-statement-TVF bodies treat a `SET QUOTED_IDENTIFIER` as top-level** rather than rejecting it (real SQL Server disallows `SET QUOTED_IDENTIFIER` inside a function body).
-- **`ALTER TABLE … ADD c AS <expr> PERSISTED` as the batch's last token** falls to Msg 102 near `PERSISTED` — `ParseComputedSuffix` advances with `MoveNextRequired` after consuming the keyword, so the form needs a following token (a trailing `;` or another column suffices).
-  Unrelated to the SET-option gate above, which the multi-column and semicolon-terminated spellings reach normally.
 
 ## Expression depth limits (Msg 8631 / Msg 191 / Msg 125)
 

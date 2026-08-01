@@ -95,9 +95,10 @@ partial class Simulation
         var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
             ? SimulatedSqlException.MustDeclareTableVariable(leadingIdent.Leaf)
             : context.Batch.UnresolvableObjectName(leadingIdent));
-        return table.IsTableValuedParameter
-            ? throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf)
-            : ExecuteDeleteAgainstTable(context, leadingIdent, table, output, top, leadingView);
+        if (table.IsTableValuedParameter)
+            throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf);
+        FunctionBodyShape.NoteTableWrite(context.Batch, "DELETE", table);
+        return ExecuteDeleteAgainstTable(context, leadingIdent, table, output, top, leadingView);
     }
 
     /// <summary>
@@ -113,26 +114,28 @@ partial class Simulation
         View? sourceView = null)
     {
         BooleanExpression? where = null;
-        Cursor? positionedCursor = null;
+        PositionedCursorTarget? positionedCursor = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
             context.MoveNextRequired();
             if (context.Token is ReservedKeyword { Keyword: Keyword.Current })
-                positionedCursor = ParseWhereCurrentOf(context, table);
+                positionedCursor = ParseWhereCurrentOf(context, table, assignedColumns: null, sourceView);
             else
                 where = Selection.ParseAndBindPredicate(context, Selection.TargetColumnTypeResolver(context.Batch, table, sourceView));
         }
 
-        if (!context.Batch.IsSkipping && PermissionEnforcement.Applies(context.Batch))
+        // DELETE reads the target when it has a WHERE clause — real then
+        // also requires SELECT, checked first so the SELECT denial surfaces
+        // when both SELECT and DELETE are missing (probe M1d). A bare DELETE
+        // with no WHERE reads nothing and needs only DELETE (M1e). DELETE
+        // itself is not column-grantable, so it stays object-grain; only the
+        // read-implies-SELECT is column-grain — on a base table or a view,
+        // but not through a synonym, which takes no column grants at all.
+        var deleteSecurable = context.Batch.IsSkipping
+            ? null
+            : PermissionEnforcement.SecurableFor(context.Batch, targetName, (SchemaObject?)sourceView ?? table);
+        if (deleteSecurable is { } securable && PermissionEnforcement.Applies(context.Batch, context.Batch.DatabaseFor(securable)))
         {
-            // DELETE reads the target when it has a WHERE clause — real then
-            // also requires SELECT, checked first so the SELECT denial surfaces
-            // when both SELECT and DELETE are missing (probe M1d). A bare DELETE
-            // with no WHERE reads nothing and needs only DELETE (M1e). DELETE
-            // itself is not column-grantable, so it stays object-grain; only the
-            // read-implies-SELECT is column-grain — on a base table or a view,
-            // but not through a synonym, which takes no column grants at all.
-            var securable = PermissionEnforcement.SecurableFor(context.Batch, targetName, (SchemaObject?)sourceView ?? table);
             if (where is not null && securable is not Synonym)
             {
                 var read = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
@@ -173,7 +176,7 @@ partial class Simulation
         foreach (var (pageIndex, slotIndex, rowBytes) in rowSource)
         {
             // Positioned DELETE (WHERE CURRENT OF): only the cursor's row.
-            if (positionedCursor is not null && !CursorRowMatches(positionedCursor, table, (pageIndex, slotIndex)))
+            if (positionedCursor is { } positioned && !CursorRowMatches(positioned, (pageIndex, slotIndex)))
                 continue;
 
             SqlValue[]? fullValues = null;
@@ -263,6 +266,10 @@ partial class Simulation
 
         var table = sources[targetIndex].BackingTable
             ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
+        // The alias form names its target through the FROM clause, so the write
+        // is classified for a function body's Msg 443 here rather than at the
+        // leading identifier.
+        FunctionBodyShape.NoteTableWrite(context.Batch, "DELETE", table);
         if (!context.Batch.IsSkipping)
         {
             // A joined DELETE reads every FROM source (target + join sources);

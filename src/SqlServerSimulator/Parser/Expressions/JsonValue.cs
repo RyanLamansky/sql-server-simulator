@@ -40,42 +40,35 @@ internal sealed class JsonValue : Expression
             return SqlValue.Null(SqlType.NVarchar);
 
         var path = JsonPath.Parse(pathValue.AsString);
-
-        JsonDocument doc;
-        try
+        var scan = JsonText.Scan(jsonValue.AsString);
+        var result = JsonWalkResult.Exhausted;
+        if (scan.Text is not null)
         {
-            doc = JsonDocument.Parse(jsonValue.AsString);
-        }
-        catch (JsonException)
-        {
-            return path.Mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonInvalidText() : SqlValue.Null(SqlType.NVarchar);
-        }
-
-        using (doc)
-        {
-            var match = path.Walk(doc.RootElement);
-            if (match is null)
-                return SqlValue.Null(SqlType.NVarchar);
-
-            var element = match.Value;
-            return element.ValueKind switch
+            using var doc = JsonText.Parse(scan.Text);
+            result = path.Walk(doc.RootElement, scan, out var element);
+            if (result == JsonWalkResult.Resolved)
             {
-                // JSON_VALUE returns nvarchar(4000); a scalar string longer than
-                // 4000 chars yields NULL in the default lax mode (probe-confirmed
-                // against SQL Server 2025: 4000 → value, 4001 → NULL). Enforcing
-                // the cap also keeps the length-0 result within the bounded wire
-                // prefix — an uncapped multi-KB value would overflow it.
-                JsonValueKind.String => element.GetString() is { Length: <= MaxScalarChars } s ? SqlValue.FromNVarchar(s) : SqlValue.Null(SqlType.NVarchar),
-                JsonValueKind.Number => SqlValue.FromNVarchar(element.GetRawText()),
-                JsonValueKind.True => SqlValue.FromNVarchar("true"),
-                JsonValueKind.False => SqlValue.FromNVarchar("false"),
-                JsonValueKind.Null => SqlValue.Null(SqlType.NVarchar),
-                // Object / Array — JSON_VALUE returns NULL on non-scalar
-                // matches in lax mode (the documented behavior); strict
-                // raises Msg 13623, which EF Core never depends on.
-                _ => SqlValue.Null(SqlType.NVarchar),
-            };
+                return element.ValueKind switch
+                {
+                    // JSON_VALUE returns nvarchar(4000); a scalar string longer than
+                    // 4000 chars yields NULL in the default lax mode (probe-confirmed
+                    // against SQL Server 2025: 4000 → value, 4001 → NULL). Enforcing
+                    // the cap also keeps the length-0 result within the bounded wire
+                    // prefix — an uncapped multi-KB value would overflow it.
+                    JsonValueKind.String => element.GetString() is { Length: <= MaxScalarChars } s ? SqlValue.FromNVarchar(s) : SqlValue.Null(SqlType.NVarchar),
+                    JsonValueKind.Number => SqlValue.FromNVarchar(element.GetRawText()),
+                    JsonValueKind.True => SqlValue.FromNVarchar("true"),
+                    JsonValueKind.False => SqlValue.FromNVarchar("false"),
+                    JsonValueKind.Null => SqlValue.Null(SqlType.NVarchar),
+                    // Object / Array — there is no scalar to hand back, which
+                    // lax mode answers as NULL and strict raises Msg 13623 for.
+                    _ => path.Mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonScalarNotFound() : SqlValue.Null(SqlType.NVarchar),
+                };
+            }
         }
+
+        JsonText.RaiseUnresolved(scan, result, path.Mode);
+        return SqlValue.Null(SqlType.NVarchar);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;

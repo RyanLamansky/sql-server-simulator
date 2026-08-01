@@ -1,3 +1,6 @@
+using System.Globalization;
+using SqlServerSimulator.Parser;
+
 namespace SqlServerSimulator;
 
 partial class SimulatedSqlException
@@ -52,6 +55,77 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ForXmlEmptyRootTag() =>
         new("Empty root tag name can't be specified with FOR XML.", 6861, 16, 1);
+
+    /// <summary>
+    /// Msg 6850: a <c>FOR XML PATH</c> column alias, or any mode's explicit row
+    /// tag / <c>ROOT</c> name, isn't a legal XML name — RAW and AUTO escape
+    /// such a name as <c>_xHHHH_</c> instead, but these positions reject it.
+    /// The message names the first offending character and its code point.
+    /// Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlInvalidName(ForXmlNameKind kind, string name, char offender) =>
+        new($"{NameKindWord(kind)} name '{name}' contains an invalid XML identifier as required by FOR XML; '{offender}'(0x{((int)offender).ToString("X4", CultureInfo.InvariantCulture)}) is the first character at fault.", 6850, 16, 1);
+
+    /// <summary>
+    /// Msg 6846: a <c>FOR XML</c> name carries a namespace prefix other than
+    /// the predefined <c>xml</c>, which only the unmodeled
+    /// <c>WITH XMLNAMESPACES</c> clause could declare. Probe-confirmed wording
+    /// (and state 4) against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlUndeclaredPrefix(string prefix, string name, ForXmlNameKind kind) =>
+        new($"XML name space prefix '{prefix}' declaration is missing for FOR XML {NameKindPhrase(kind)} name '{name}'.", 6846, 16, 4);
+
+    /// <summary>
+    /// Msg 6867: a <c>FOR XML</c> name is <c>xmlns</c> or carries it as a
+    /// prefix — the namespace-declaration name, which no column alias, row tag
+    /// or ROOT name may claim. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlXmlnsName() =>
+        new("'xmlns' is invalid in XML tag name in FOR XML PATH, or when WITH XMLNAMESPACES is used with FOR XML.", 6867, 16, 1);
+
+    /// <summary>
+    /// Msg 6849: a <c>FOR XML PATH</c> column alias has an empty path step — a
+    /// leading or trailing <c>/</c>, or a <c>//</c>. Probe-confirmed wording
+    /// against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlPathSlashPlacement(string column) =>
+        new($"FOR XML PATH error in column '{column}' - '//' and leading and trailing '/' are not allowed in simple path expressions.", 6849, 16, 1);
+
+    /// <summary>
+    /// Msg 6819: a <c>FOR XML</c> clause sits on the SELECT an
+    /// <c>INSERT … SELECT</c> or <c>SELECT … INTO</c> writes from
+    /// (<paramref name="statementKind"/> is real's own word for the statement).
+    /// Probe-confirmed wording against SQL Server 2025, including the missing
+    /// article agreement.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlNotAllowedIn(string statementKind) =>
+        new($"The FOR XML clause is not allowed in a {statementKind} statement.", 6819, 16, 1);
+
+    /// <summary>
+    /// Msg 6819 state 3: a <c>FOR XML</c> — or, quirk-faithfully, a
+    /// <c>FOR JSON</c> — clause sits on a variable-assigning
+    /// <c>SELECT @v = …</c>. Real reports the FOR XML wording for both clauses
+    /// here (probe-confirmed against SQL Server 2025), where the INSERT and
+    /// SELECT INTO paths give FOR JSON its own Msg 13602.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlNotAllowedInAssignment() =>
+        new("The FOR XML clause is not allowed in a ASSIGNMENT statement.", 6819, 16, 3);
+
+    /// <summary>The Msg 6850 leading word for each name position.</summary>
+    private static string NameKindWord(ForXmlNameKind kind) => kind switch
+    {
+        ForXmlNameKind.Column => "Column",
+        ForXmlNameKind.Root => "ROOT",
+        _ => "Row",
+    };
+
+    /// <summary>The Msg 6846 mid-sentence form for each name position.</summary>
+    private static string NameKindPhrase(ForXmlNameKind kind) => kind switch
+    {
+        ForXmlNameKind.Column => "column",
+        ForXmlNameKind.Root => "ROOT",
+        _ => "row",
+    };
 
     /// <summary>
     /// Msg 6829: a <c>FOR XML RAW</c> projection includes a binary column,

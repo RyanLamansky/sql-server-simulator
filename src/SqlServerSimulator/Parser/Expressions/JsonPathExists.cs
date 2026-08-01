@@ -1,4 +1,3 @@
-using System.Text.Json;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -6,9 +5,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <summary>
 /// SQL <c>JSON_PATH_EXISTS(json, path)</c>: returns <c>1</c> when the path
 /// resolves to an existing value in the JSON document, <c>0</c> otherwise.
-/// NULL on either input returns NULL. Invalid JSON returns 0 under
-/// lax mode (the path-prefix default), and raises Msg 13609 under strict
-/// mode (matching <see cref="JsonValue"/>'s parity). Result type is
+/// NULL on either input returns NULL. It never raises: a document that isn't
+/// JSON text is 0 rather than the Msg 13609 its siblings raise, and a
+/// <c>strict</c> path that misses is 0 rather than Msg 13608. Result type is
 /// <see cref="SqlType.Bit"/>.
 /// </summary>
 internal sealed class JsonPathExists : Expression
@@ -33,21 +32,18 @@ internal sealed class JsonPathExists : Expression
         if (jv.IsNull || pv.IsNull)
             return SqlValue.Null(SqlType.Bit);
         var path = JsonPath.Parse(pv.AsString);
-        JsonDocument doc;
-        try
-        {
-            doc = JsonDocument.Parse(jv.AsString);
-        }
-        catch (JsonException)
-        {
-            return path.Mode == JsonPathMode.Strict
-                ? throw SimulatedSqlException.JsonInvalidText()
-                : SqlValue.FromBoolean(false);
-        }
-        using (doc)
-        {
-            return SqlValue.FromBoolean(path.Walk(doc.RootElement) is not null);
-        }
+
+        // JSON_PATH_EXISTS is the one member of the family that never raises:
+        // a document the scan objects to is 0, and so is a strict-mode miss
+        // that would be Msg 13608 anywhere else. Like JSON_MODIFY it answers
+        // for the whole document, so trailing text counts against it even when
+        // the path itself would have resolved.
+        var scan = JsonText.Scan(jv.AsString);
+        if (scan.HasError)
+            return SqlValue.FromBoolean(false);
+
+        using var doc = JsonText.Parse(scan.Text!);
+        return SqlValue.FromBoolean(path.Walk(doc.RootElement, scan, out _) == JsonWalkResult.Resolved);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Bit;

@@ -70,7 +70,7 @@ partial class Simulation
         // CREATE SCHEMA isn't a modeled named permission — Msg 15247 for a
         // non-privileged principal (probe M3). Real follows with Msg 2759, which
         // the simulator omits (the single 15247 is the load-bearing signal).
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch))
+        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
             throw SimulatedSqlException.UserDoesNotHavePermission();
 
         // Built-ins: dbo lives in every database; sys / INFORMATION_SCHEMA are

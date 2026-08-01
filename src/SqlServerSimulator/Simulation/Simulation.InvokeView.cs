@@ -23,6 +23,61 @@ partial class Simulation
             ? throw SimulatedSqlException.MaximumNestingLevelExceeded()
             : InvokeViewCore(outerBatch, view);
 
+    /// <summary>
+    /// Parses a view's stored body and returns its plan without executing it —
+    /// the seam cursor planning uses to look through a view down to the base
+    /// tables it reads. Mirrors <see cref="InvokeViewCore"/>'s child-batch
+    /// setup (the CREATE-time <c>QUOTED_IDENTIFIER</c> swap, the shared nesting
+    /// cap) but stops at parse.
+    /// </summary>
+    /// <remarks>
+    /// Returns null rather than propagating when the body won't parse or bind:
+    /// the caller then leaves the cursor STATIC, and the body's own error
+    /// surfaces at OPEN through <see cref="InvokeViewCore"/> exactly as it did
+    /// before the cursor asked. Declaring a cursor is not the place to report
+    /// a broken view.
+    /// </remarks>
+    internal Selection? TryParseViewBodyPlan(BatchContext outerBatch, View view)
+    {
+        var connection = outerBatch.Connection;
+        if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
+            return null;
+
+        using var bodyCommand = new SimulatedDbCommand(this, connection);
+#pragma warning disable CA2100 // view.BodyText is the view's pre-validated stored body, not external input
+        bodyCommand.CommandText = view.BodyText;
+#pragma warning restore CA2100
+        var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
+        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32))
+        {
+            SuppressDiagnosticsResolution = true,
+        };
+        innerBatch.AdoptStatementFreezeFrom(outerBatch);
+        var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+        connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
+        connection.NestingLevel++;
+        try
+        {
+            var parser = innerBatch.Parser;
+            parser.MoveNextRequired();
+            return ParseBodyQuery(parser);
+        }
+        catch (SimulatedSqlException)
+        {
+            return null;
+        }
+        catch (NotSupportedException)
+        {
+            return null;
+        }
+        finally
+        {
+            connection.NestingLevel--;
+            connection.QuotedIdentifiers = savedQuotedIdentifiers;
+            innerBatch.ReleaseStatementSchemaLocks();
+        }
+    }
+
     private IEnumerable<byte[]> InvokeViewCore(BatchContext outerBatch, View view)
     {
         var connection = outerBatch.Connection;
@@ -57,6 +112,12 @@ partial class Simulation
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
             var bodySelection = ParseBodyQuery(parser);
+            // A view body is inlined into the referencing statement, so its
+            // reads reach no ordinary check site — and every same-database one
+            // is chained anyway. What isn't chained is a read into another
+            // database: DB_CHAINING off breaks the chain at that boundary, so
+            // the caller needs its own rights there (probe-confirmed).
+            PermissionEnforcement.CheckCrossDatabaseReads(outerBatch, view.Schema.Database, bodySelection.ReferencedSecurables);
             var resultSet = bodySelection.Execute(innerBatch, outerResolver: null);
             foreach (var rowBytes in resultSet.RowBytes)
                 yield return rowBytes;

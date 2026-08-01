@@ -193,14 +193,15 @@ internal static partial class BuiltInResources
         // here — SQL-auth against master), and monitoring-flavored tooling
         // reads the session-option columns. Where the simulator genuinely
         // tracks session state the row reflects it live (quoted_identifier,
-        // lock_timeout, transaction_isolation_level, context_info, row_count
-        // = @@ROWCOUNT, prev_error = @@ERROR, open_transaction_count,
-        // database_id); the remainder are probe-confirmed fresh-session
-        // defaults from SQL Server 2025 (endpoint_id 4, group_id 2,
-        // client_version 7, text_size -1, arithabort 0, the ANSI bits).
-        // login_name mirrors the principal placeholders SUSER_SNAME() uses;
-        // security_id is sa's well-known single-byte SID. status is
-        // 'running' for the querying session, 'sleeping' for the rest.
+        // arithabort, the ANSI bits, text_size, lock_timeout,
+        // transaction_isolation_level, context_info, row_count = @@ROWCOUNT,
+        // prev_error = @@ERROR, open_transaction_count, database_id,
+        // host_name / program_name off the connection string or LOGIN7,
+        // login_name / original_login_name and their derived SIDs); the
+        // remainder are probe-confirmed fresh-session defaults from SQL Server
+        // 2025 (endpoint_id 4, group_id 2, client_version 7,
+        // ansi_null_dflt_on 1). status is 'running' for the querying session,
+        // 'sleeping' for the rest.
         Sys("dm_exec_sessions",
         [
             new("session_id", SqlType.SmallInt, null, false),
@@ -1035,9 +1036,10 @@ internal static partial class BuiltInResources
     /// columns carry the stock defaults a freshly created user database
     /// reports on SQL Server 2025 (user_access MULTI_USER, page_verify
     /// CHECKSUM, containment NONE, log_reuse_wait NOTHING, delayed_durability
-    /// DISABLED, catalog_collation DATABASE_DEFAULT). recovery_model is FULL
-    /// for the <c>model</c> template and SIMPLE elsewhere, mirroring the
-    /// reference instance. Code↔desc pairs are always internally consistent.
+    /// DISABLED, catalog_collation DATABASE_DEFAULT). recovery_model is
+    /// SIMPLE for <c>master</c> / <c>tempdb</c> / <c>msdb</c> and FULL for
+    /// <c>model</c> and every user database, which inherits the template's
+    /// (probe-confirmed). Code↔desc pairs are always internally consistent.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDatabases(Parser.BatchContext batch, Database database)
     {
@@ -1069,7 +1071,11 @@ internal static partial class BuiltInResources
         foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation))
         {
             var snapshotOn = db.AllowSnapshotIsolation;
-            var isModel = Collation.Baseline.Equals(db.Name, "model");
+            // master / tempdb / msdb ship SIMPLE; model is FULL and every user
+            // database inherits that (probe-confirmed against a fresh
+            // CREATE DATABASE).
+            var isSimpleRecovery = !Collation.Baseline.Equals(db.Name, "model")
+                && Simulation.SystemDatabaseNames.Contains(db.Name);
             yield return [
                 SqlValue.FromSystemName(db.Name),
                 SqlValue.FromInt32(id),
@@ -1091,36 +1097,39 @@ internal static partial class BuiltInResources
                 SqlValue.FromByte((byte)(snapshotOn ? 1 : 0)),
                 SqlValue.FromNVarchar(snapshotOn ? "ON" : "OFF"),
                 SqlValue.FromBoolean(db.ReadCommittedSnapshot),
-                SqlValue.FromByte(isModel ? (byte)1 : (byte)3),
-                SqlValue.FromNVarchar(isModel ? "FULL" : "SIMPLE"),
+                SqlValue.FromByte(isSimpleRecovery ? (byte)3 : (byte)1),
+                SqlValue.FromNVarchar(isSimpleRecovery ? "SIMPLE" : "FULL"),
                 SqlValue.FromByte(2),
                 checksum,
-                trueBit,
-                falseBit,
-                trueBit,
-                falseBit,
-                falseBit,
-                trueBit,
-                falseBit,
-                trueBit,
-                trueBit,
-                trueBit,
-                falseBit,
-                falseBit,
+                trueBit,  // is_auto_create_stats_on
+                falseBit, // is_auto_create_stats_incremental_on
+                trueBit,  // is_auto_update_stats_on
+                falseBit, // is_auto_update_stats_async_on
+                falseBit, // is_ansi_null_default_on
+                falseBit, // is_ansi_nulls_on
+                falseBit, // is_ansi_padding_on
+                falseBit, // is_ansi_warnings_on
+                falseBit, // is_arithabort_on
+                falseBit, // is_concat_null_yields_null_on
+                falseBit, // is_numeric_roundabort_on
+                falseBit, // is_quoted_identifier_on
                 SqlValue.FromBoolean(db.RecursiveTriggers),
-                falseBit,
-                trueBit,
-                falseBit,
-                falseBit,
-                falseBit,
-                falseBit,
-                falseBit,
-                falseBit,
-                falseBit,
-                falseBit,
-                falseBit,
-                falseBit,
-                falseBit,
+                falseBit, // is_cursor_close_on_commit_on
+                falseBit, // is_local_cursor_default
+                trueBit,  // is_fulltext_enabled
+                falseBit, // is_trustworthy_on
+                falseBit, // is_db_chaining_on
+                falseBit, // is_parameterization_forced
+                falseBit, // is_master_key_encrypted_by_server
+                // is_query_store_on stays 0 so it agrees with the OFF row
+                // sys.database_query_store_options projects; see that
+                // generator for why Query Store reads disabled.
+                falseBit, // is_query_store_on
+                falseBit, // is_published
+                falseBit, // is_subscribed
+                falseBit, // is_merge_published
+                falseBit, // is_distributor
+                falseBit, // is_sync_with_backup
                 brokerGuid,
                 falseBit,
                 zeroByte,
@@ -1144,11 +1153,11 @@ internal static partial class BuiltInResources
                 recoveryTime,
                 zeroInt,
                 disabled,
-                falseBit,
-                falseBit,
-                falseBit,
-                falseBit,
-                falseBit,
+                falseBit, // is_memory_optimized_elevate_to_snapshot_on
+                falseBit, // is_federation_member
+                falseBit, // is_remote_data_archive_enabled
+                falseBit, // is_mixed_page_allocation_on
+                trueBit,  // is_temporal_history_retention_enabled
                 zeroInt,
                 databaseDefault,
                 SqlValue.FromNVarchar(db.Name),
@@ -1199,8 +1208,6 @@ internal static partial class BuiltInResources
 
         var emptyName = SqlValue.FromNVarchar(string.Empty);
         var nullName = SqlValue.Null(SqlType.NVarchar);
-        var saSid = SqlValue.FromVarbinary([0x01]);
-        var loginName = SqlValue.FromNVarchar(Parser.Expressions.PrincipalPlaceholders.CurrentLogin);
         var zero = SqlValue.FromInt32(0);
         var zeroBig = SqlValue.FromInt64(0);
         var bitOn = SqlValue.FromBoolean(true);
@@ -1227,16 +1234,18 @@ internal static partial class BuiltInResources
                 System.Data.IsolationLevel.Snapshot => (short)5,
                 _ => (short)2,
             };
+            var effectiveLogin = connection.Security.Effective.LoginName;
+            var originalLogin = connection.Security.OriginalLoginName;
             yield return [
                 SqlValue.FromInt16((short)connection.Spid),
                 loginTime,
-                emptyName,
-                emptyName,
+                connection.ClientHostName.Length == 0 ? emptyName : SqlValue.FromNVarchar(connection.ClientHostName),
+                connection.ClientApplicationName.Length == 0 ? emptyName : SqlValue.FromNVarchar(connection.ClientApplicationName),
                 SqlValue.FromInt32(Environment.ProcessId),
                 SqlValue.FromInt32(7),
                 SqlValue.FromNVarchar("SqlServerSimulator"),
-                saSid,
-                loginName,
+                SqlValue.FromVarbinary(DeriveLoginSid(effectiveLogin)),
+                SqlValue.FromNVarchar(effectiveLogin),
                 nullName,
                 nullName,
                 SqlValue.FromString(NVarcharSqlType.Get(30, Collation.Catalog, Coercibility.Implicit), ReferenceEquals(connection, batch.Connection) ? "running" : "sleeping"),
@@ -1251,26 +1260,27 @@ internal static partial class BuiltInResources
                 zeroBig,
                 zeroBig,
                 zeroBig,
-                bitOn,
-                SqlValue.FromInt32(-1),
+                bitOn, // is_user_process
+                SqlValue.FromInt32(connection.TextSize),
                 SqlValue.FromNVarchar("us_english"),
                 SqlValue.FromNVarchar("mdy"),
                 SqlValue.FromInt16(7),
                 connection.QuotedIdentifiers ? bitOn : bitOff,
-                bitOff,
-                bitOn,
-                bitOff,
-                bitOn,
-                bitOn,
-                bitOn,
-                bitOn,
+                connection.Arithabort ? bitOn : bitOff,
+                bitOn,  // ansi_null_dflt_on — SET ANSI_NULL_DFLT_ON/OFF is
+                        // parse-and-discard, so no session field backs it
+                bitOff, // ansi_defaults
+                connection.AnsiWarnings ? bitOn : bitOff,
+                connection.AnsiPadding ? bitOn : bitOff,
+                connection.AnsiNulls ? bitOn : bitOff,
+                connection.ConcatNullYieldsNull ? bitOn : bitOff,
                 SqlValue.FromInt16(isolation),
                 SqlValue.FromInt32(connection.LockTimeoutMillis),
                 zero,
                 SqlValue.FromInt64(connection.LastStatementRowCount),
                 SqlValue.FromInt32(connection.LastErrorNumber),
-                saSid,
-                loginName,
+                SqlValue.FromVarbinary(DeriveLoginSid(originalLogin)),
+                SqlValue.FromNVarchar(originalLogin),
                 nullDateTime,
                 nullDateTime,
                 SqlValue.Null(SqlType.BigInt),
@@ -1379,8 +1389,11 @@ internal static partial class BuiltInResources
     /// (FILESTREAM / memory-optimized) files, so SSMS's in-memory-OLTP probe
     /// (<c>where mf.[type] = 2</c>) returns nothing. Contents are synthetic:
     /// logical name <c>&lt;db&gt;_Data</c> / <c>&lt;db&gt;_Log</c>, a plausible
-    /// physical path, a small page count, unlimited <c>max_size</c>, 64 MB
-    /// growth. All LSN columns surface NULL (no physical log).
+    /// physical path, a small page count, and the 64 MB default autogrowth.
+    /// <c>max_size</c> / <c>growth</c> are both in 8 KB pages here (the unit
+    /// real uses whenever <c>is_percent_growth</c> is 0): the data file
+    /// reports -1 (unlimited) and the log file the 2 TB ceiling. All LSN
+    /// columns surface NULL (no physical log).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysMasterFiles(Parser.BatchContext batch, Database database)
     {
@@ -1395,7 +1408,8 @@ internal static partial class BuiltInResources
         var rowsDesc = SqlValue.FromNVarchar("ROWS");
         var logDesc = SqlValue.FromNVarchar("LOG");
         var unlimited = SqlValue.FromInt32(-1);
-        var growthKb = SqlValue.FromInt32(FileGrowthKilobytes);
+        var logMaxSize = SqlValue.FromInt32(LogFileMaxSizePages);
+        var growthPages = SqlValue.FromInt32(FileGrowthPages);
 
         SqlValue[] BuildFile(short id, int fileId, byte type, SqlValue typeDesc, int dataSpaceId, string logicalName, string physicalName, int sizePages) =>
         [
@@ -1410,8 +1424,8 @@ internal static partial class BuiltInResources
             zeroByte,
             onlineState,
             SqlValue.FromInt32(sizePages),
-            unlimited,
-            growthKb,
+            type == 1 ? logMaxSize : unlimited,
+            growthPages,
             falseBit,
             falseBit,
             falseBit,
@@ -1450,7 +1464,9 @@ internal static partial class BuiltInResources
     /// a three-part <c>master.sys.database_files</c> read returns master's two
     /// files. Synthetic contents mirror master_files: logical name
     /// <c>&lt;db&gt;_Data</c> / <c>&lt;db&gt;_Log</c>, a plausible physical
-    /// path, a small page count, unlimited <c>max_size</c>, 64 MB growth.
+    /// path, a small page count, and the page-denominated <c>max_size</c> /
+    /// <c>growth</c> pair (-1 unlimited on the data file, the 2 TB ceiling on
+    /// the log, 8192 pages of growth on both).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDatabaseFiles(Parser.BatchContext batch, Database database)
     {
@@ -1462,7 +1478,8 @@ internal static partial class BuiltInResources
         var rowsDesc = SqlValue.FromNVarchar("ROWS");
         var logDesc = SqlValue.FromNVarchar("LOG");
         var unlimited = SqlValue.FromInt32(-1);
-        var growthKb = SqlValue.FromInt32(FileGrowthKilobytes);
+        var logMaxSize = SqlValue.FromInt32(LogFileMaxSizePages);
+        var growthPages = SqlValue.FromInt32(FileGrowthPages);
         var nullLsn = SqlValue.Null(lsnNumeric);
 
         SqlValue[] BuildFile(int fileId, byte type, SqlValue typeDesc, int dataSpaceId, string logicalName, string physicalName, int sizePages) =>
@@ -1477,8 +1494,8 @@ internal static partial class BuiltInResources
             zeroByte,
             onlineState,
             SqlValue.FromInt32(sizePages),
-            unlimited,
-            growthKb,
+            type == 1 ? logMaxSize : unlimited,
+            growthPages,
             falseBit,
             falseBit,
             falseBit,

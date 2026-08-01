@@ -105,8 +105,8 @@ internal sealed class TableType(
             batch.CurrentDatabase.AllocateObjectId(),
             schemaId: Database.DboSchemaId,
             createDate: batch.CurrentStatement.UtcNow,
-            keyConstraints: Simulation.ResolveKeyConstraints(fullName, this.Columns, this.PendingKeys, batch.CurrentDatabase),
-            checkConstraints: Simulation.ResolveCheckConstraints(fullName, this.PendingChecks, batch.CurrentDatabase),
+            keyConstraints: Simulation.ResolveKeyConstraints(fullName, this.Columns, this.PendingKeys, batch.CurrentDatabase, batch.CurrentStatement.UtcNow),
+            checkConstraints: Simulation.ResolveCheckConstraints(fullName, this.PendingChecks, batch.CurrentDatabase, batch.CurrentStatement.UtcNow),
             isTableVariable: true,
             isTableValuedParameter: isTableValuedParameter);
 }

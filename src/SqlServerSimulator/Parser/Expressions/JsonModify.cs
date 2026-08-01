@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Text.Json.Nodes;
 using SqlServerSimulator.Storage;
 using StjValue = System.Text.Json.Nodes.JsonValue;
@@ -50,15 +49,23 @@ internal sealed class JsonModify : Expression
 
         var path = JsonPath.Parse(pathValue.AsString);
 
-        JsonNode? root;
-        try
+        // JSON_MODIFY reproduces the whole document, so once it has an edit to
+        // make it reads the lot and anything the scan objects to — trailing
+        // text included — is Msg 13609 (State 7). A path that can't apply to
+        // what it finds is a no-op the reader settles early, and the input
+        // comes straight back however malformed the rest of it is.
+        var scan = JsonText.Scan(jsonInputValue.AsString);
+        if (scan.HasError)
         {
-            root = JsonNode.Parse(jsonInputValue.AsString);
+            if (scan.Text is not null)
+            {
+                using var settled = JsonText.Parse(scan.Text);
+                if (path.Walk(settled.RootElement, scan, out _) == JsonWalkResult.Abandoned)
+                    return SqlValue.FromNVarchar(SqlType.NVarcharMax, jsonInputValue.AsString);
+            }
+            throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition, 7);
         }
-        catch (JsonException)
-        {
-            return path.Mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonInvalidText() : SqlValue.Null(SqlType.NVarcharMax);
-        }
+        var root = JsonText.ParseNode(scan.Text!);
 
         if (path.Segments.Length == 0)
         {
@@ -66,9 +73,9 @@ internal sealed class JsonModify : Expression
             return SqlValue.FromNVarchar(SqlType.NVarcharMax, SqlValueAsJsonText(newSqlValue));
         }
 
-        var (parent, leaf) = path.WalkForModify(root!);
+        var (parent, leaf) = path.WalkForModify(root);
         if (parent is null)
-            return SqlValue.FromNVarchar(SqlType.NVarcharMax, root!.ToJsonString());
+            return SqlValue.FromNVarchar(SqlType.NVarcharMax, root.ToJsonString());
 
         var newNode = SqlValueToJsonNode(newSqlValue);
         if (leaf.IsIndex)
@@ -77,7 +84,7 @@ internal sealed class JsonModify : Expression
             {
                 return path.Mode == JsonPathMode.Strict
                     ? throw SimulatedSqlException.JsonStrictPathNotFound()
-                    : SqlValue.FromNVarchar(SqlType.NVarcharMax, root!.ToJsonString());
+                    : SqlValue.FromNVarchar(SqlType.NVarcharMax, root.ToJsonString());
             }
             if (leaf.Index < array.Count)
             {
@@ -98,7 +105,7 @@ internal sealed class JsonModify : Expression
             {
                 return path.Mode == JsonPathMode.Strict
                     ? throw SimulatedSqlException.JsonStrictPathNotFound()
-                    : SqlValue.FromNVarchar(SqlType.NVarcharMax, root!.ToJsonString());
+                    : SqlValue.FromNVarchar(SqlType.NVarcharMax, root.ToJsonString());
             }
             var leafName = leaf.Property!;
             if (obj.ContainsKey(leafName))
@@ -122,7 +129,7 @@ internal sealed class JsonModify : Expression
             }
         }
 
-        return SqlValue.FromNVarchar(SqlType.NVarcharMax, root!.ToJsonString());
+        return SqlValue.FromNVarchar(SqlType.NVarcharMax, root.ToJsonString());
     }
 
     /// <summary>Renders a SQL value as standalone JSON text (the bare-<c>$</c> branch).</summary>

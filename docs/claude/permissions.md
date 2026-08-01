@@ -2,7 +2,7 @@
 
 `GRANT` / `REVOKE` / `DENY` plus the principal DDL surface (`CREATE USER` / `CREATE ROLE` / `ALTER ROLE` / `DROP USER` / `DROP ROLE`, and the server-scope `CREATE LOGIN` / `ALTER LOGIN` / `DROP LOGIN`) + catalog views.
 **Permissions are enforced**: a non-dbo session's SELECT / INSERT / UPDATE / DELETE / EXECUTE / TRUNCATE(=ALTER) / CREATE TABLE is checked at execution time against its effective principal, with role closure, fixed roles, DENY-beats-GRANT, covering permissions, and ownership chaining.
-**Session identity is real**: a per-connection principal (original login + database user + impersonation stack) drives the identity scalars, `EXECUTE AS` / `REVERT`, module `WITH EXECUTE AS`, connection-string / TDS authentication, and the Msg 916 restricted-principal `USE` gate.
+**Session identity is real**: a per-connection principal (original login + database user + impersonation stack) drives the identity scalars, `EXECUTE AS` / `REVERT`, module `WITH EXECUTE AS`, connection-string / TDS authentication, and the per-database identity a cross-database reference or a `USE` resolves through.
 A session that never authenticates and never runs `EXECUTE AS` is `dbo`, and **dbo bypasses every check** — the enforcement layer short-circuits on `SessionSecurityContext.EffectiveIsDbo` before any allocation, so existing (dbo) consumers see byte-identical behavior.
 Logins are enforced as connection credentials at both front doors (TDS endpoint — see [`tds-endpoint.md`](tds-endpoint.md) — and in-process `User ID=` connection strings).
 
@@ -18,7 +18,7 @@ Logins are enforced as connection credentials at both front doors (TDS endpoint 
 - `LoginName` (string?) — the mapped server login from `CREATE USER … FOR LOGIN` (null otherwise); drives login → database-user resolution at connect.
 - `SecurityIdentifierString` (string?) — the deterministic `S-1-9-3-…` SID a `CREATE USER … WITHOUT LOGIN` user reports through `SYSTEM_USER` / Msg 916 (FNV-derived from the name).
 - `EffectiveLoginIdentity` — the `SYSTEM_USER` value while impersonating this user (login ?? SID ?? name).
-- `DefaultSchemaName` (string?) — the `sys.database_principals.default_schema_name` value, non-null **only for an application role** (`dbo` unless `DEFAULT_SCHEMA` said otherwise); every other principal keeps the NULL the column has always projected.
+- `DefaultSchemaName` (string?) — an **application role's** declared `DEFAULT_SCHEMA` (`dbo` unless it said otherwise); null for every other principal, which the catalog view then fills in per real's own rules (see below).
 - `PasswordHash` (byte[]?) — an application role's password, in the same legacy `0x0200` single-pass format `ServerLogin` uses (never persisted, so PBKDF2 hardening would only bill activation).
 
 **`DatabasePermission`** (`src/SqlServerSimulator/DatabasePermission.cs`) carries class + major_id + minor_id + grantee/grantor ids + a `Permission` enum + a `PermissionState` enum (Grant / GrantWithGrantOption / Deny / Revoke, projecting the `G`/`W`/`D`/`R` state codes).
@@ -50,7 +50,8 @@ User principals start at 5 via `Database.AllocatePrincipalId`.
 
 `SessionSecurityContext` (`src/SqlServerSimulator/SessionSecurityContext.cs`) lives on `SimulatedDbConnection.Security` (session scope).
 It carries the original login name, a base `SecurityPrincipalFrame` (database-principal id + name + login), and an impersonation stack.
-`Effective` is the top frame (or the base); `EffectiveIsDbo` (principal id == 1) is the "unrestricted, may USE" gate today and the read a future enforcement stage's dbo bypass consumes.
+`Effective` is the top frame (or the base); `EffectiveIsDbo` (principal id == 1) is the bypass every enforcement gate short-circuits on.
+Each frame also records whether its identity is `IsDatabaseScoped` — see [Cross-database references](#cross-database-references).
 An unauthenticated in-process connection uses `CreateDefault()` — dbo as login, database user, and original login everywhere — so existing consumers see byte-identical identity output.
 
 **Identity scalars read the effective frame**: `CURRENT_USER` / `SESSION_USER` / `USER` / `USER_NAME()` / `USER_ID()` / `DATABASE_PRINCIPAL_ID()` → the effective database user; `SYSTEM_USER` / `SUSER_SNAME()` / `SUSER_NAME()` → the effective login (or the WITHOUT-LOGIN SID string); `ORIGINAL_LOGIN()` → the session's original login.
@@ -64,6 +65,7 @@ An unauthenticated in-process connection uses `CreateDefault()` — dbo as login
   A refusal reports the same Msg 15406 as a missing login — real leaks no distinction (probe-confirmed).
   See [`ON LOGIN::` securables](#on-login-securables).
 - Module `WITH EXECUTE AS {CALLER | SELF | OWNER | 'user'}` is captured (on `Procedure.ExecuteAsClause` / `UserDefinedFunction.ExecuteAsClause` / `Trigger.ExecuteAsClause`) and pushed/popped around the body via the shared `PushModuleExecuteAsFrame` — procedures (`InvokeProcedure`), scalar UDFs / TVFs (`InvokeScalarFunction`), and triggers (`InvokeTrigger`) all honor it at runtime (OWNER / SELF → dbo, CALLER → no-op, a named user → that principal).
+  The clause also resolves to a principal id at CREATE, stored on `SchemaObject.ExecuteAsPrincipalId` and projected by `sys.sql_modules.execute_as_principal_id` — see [`catalog-views.md`](catalog-views.md#execute_as_principal_id) for real's encoding.
   A scalar UDF's own `EXECUTE` permission is checked at the invocation seam (once per statement, memoized on `BatchContext.ExecuteCheckedFunctionIds`), covering the SET / IF operand contexts the query read-source sink doesn't reach.
 
 **Authentication.** A login validates against `Simulation.Logins` at TDS connect and at in-process `Open()` when the connection string carries `User ID=`, then maps to a database user via `Simulation.TryMapLoginToDatabaseUser`.
@@ -75,7 +77,7 @@ The mapping is faithful (probe-confirmed against SQL Server 2025, PROBE_NOTES_HA
 5. Otherwise **refuse** — the login cannot open `D`: at connect, the Msg 4060 shape (`Cannot open database "<D>" requested by the login. The login failed.`, on the wire followed by Msg 18456 `Login failed for user '<l>'.`, then the connection closes); the session never opens on `D`.
 There is **no permissive dbo fallback** for an authenticated login once the registry is non-empty — an unmapped login lands on `guest` where accessible or is refused, matching real SQL Server.
 The unauthenticated in-process path (`CreateDbConnection()` with no `User ID=`) stays **dbo** always — the trusted in-process front door EF Core rides.
-`USE` / `ChangeDatabase` under a restricted (non-dbo effective) principal raises Msg 916; the session stays put.
+The same mapping answers `USE` / `ChangeDatabase` mid-session — see [Cross-database references](#cross-database-references).
 
 ## Parser
 
@@ -185,6 +187,42 @@ All probe-confirmed against SQL Server 2025.
 Column collection uses the structural expression visitors, which don't recurse through every container (fixed-return scalar functions like `DATALENGTH(col)`, and columns buried in some non-arithmetic function args, are missed) — a residual gap that can under- or over-report a column in those uncommon shapes.
 Direct references, arithmetic / comparison, `CAST`, aggregates, and `SELECT *` are covered.
 
+### Cross-database references
+
+A login's rights are **per database**, so a reference through a three-part name (`other.dbo.t`, a synonym whose base is one, or the `db..t` short form) is checked against the login's user *in the target*, not the session's principal.
+`PermissionEnforcement.TryResolveScope(batch, targetDatabase, out principalId)` is the seam every object-scoped check runs through; the target database comes off the securable (`BatchContext.DatabaseFor`, or `DatabaseForName` at the DDL gates that run before the object resolves) and rides the cached plan on `ReferencedSecurable.Database`.
+All probe-confirmed against SQL Server 2025.
+
+| Situation | Result |
+|---|---|
+| The login's user in the target holds the permission | allowed |
+| It holds nothing (the session-database user's grant does **not** travel) | **Msg 229** naming the *target* database — `The SELECT permission was denied on the object 't2', database 'other', schema 'dbo'.` |
+| The login has **no user** in the target | **Msg 916** sev 14 state 2 — `The server principal "app" is not able to access the database "other" under the current security context.` |
+| The effective principal is `dbo` (sysadmin, or the unauthenticated in-process default) | unrestricted |
+
+The `dbo` bypass stays a single bool read on the session's effective principal, so nothing but a genuinely restricted principal ever pays a lookup, and the lookup only runs when the touched database differs from the session's.
+That bypass is exact in the simulator's principal model: an effective `dbo` can only have come from a sysadmin login or the empty-registry dev mode, both of which are `dbo` in every database.
+
+**A database-scoped identity can't cross at all.**
+An `EXECUTE AS USER` frame, a module's `WITH EXECUTE AS <user>` frame, and an activated application role carry no server principal, so *every* cross-database reference raises Msg 916 whatever the target's grants say — probe-confirmed, and unchanged by turning the source database's `TRUSTWORTHY` on.
+The name in the message is the frame's reported login identity: the login for a `FOR LOGIN` user or an application role (the session's login survives the activation), and the `S-1-9-3-…` SID for a `WITHOUT LOGIN` user.
+`SecurityPrincipalFrame.IsDatabaseScoped` is the marker.
+
+**Ownership chaining breaks at the database boundary.**
+With `DB_CHAINING` off (the default, and the only state modeled), a dbo-owned module does not lend its owner's rights to an object in another database — the caller needs its own grant there, and the denial names the base object.
+Probe-confirmed for a view; the same holds for the statement-dispatching bodies.
+Mechanically, `PermissionEnforcement.Applies(batch, target)` keeps the module-body suppression only for a same-database securable, which covers procedure / trigger / scalar-UDF bodies through the ordinary per-statement check sites; a **view or inline-TVF body is inlined** into the referencing statement and reaches none of those, so its plan's cross-database reads are checked once at invocation via `PermissionEnforcement.CheckCrossDatabaseReads`.
+A create-time bind suppresses everything either way — it reads no row.
+
+**`USE` / `ChangeDatabase` ask the same question.**
+A restricted principal may switch to a database its login maps into, and the session's base frame **rebinds to that database's user** — `CURRENT_USER` follows the switch while `SYSTEM_USER` / `ORIGINAL_LOGIN()` stay put (probe-confirmed: a login with different user names in two databases reports each in turn).
+A login with no user there gets Msg 916 and the session stays put; a missing database is Msg 911 first (probe-confirmed — existence is reported even to a principal that could not have opened it); an active application role is Msg 505 ahead of both.
+`Simulation.SwitchDatabase` is the shared implementation.
+
+**Not modeled yet.**
+`TRUSTWORTHY` and `DB_CHAINING` aren't on the `ALTER DATABASE` accept-list at all ([`database-options.md`](database-options.md)), so the configurations that would *widen* cross-database access — a trustworthy database plus a matching authenticator, or chaining on in both — can't be reached and everything behaves as the default-configuration refusals above.
+Cross-database **catalog-view** reads also still pass the metadata filter unchanged — see [Metadata visibility](#metadata-visibility).
+
 ### Reference provenance: synonyms
 
 A synonym is **its own securable**, and a reference written through one is checked against the synonym — never walked through to the base object.
@@ -225,7 +263,9 @@ Filtered views: `sys.objects` / `all_objects` / `tables` / `views` / `all_views`
 Deliberately unfiltered (probe-confirmed broadly visible to a restricted principal): `sys.database_principals` / `sys.schemas` / `sys.database_permissions` / `sys.database_role_members` / `sys.types` / `sys.databases` and the DMVs.
 `sys.server_principals` / `sys.sql_logins` carry their own server-scope filter — see [Server-principal metadata visibility](#server-principal-metadata-visibility).
 `sys.databases` stays unfiltered because real grants `VIEW ANY DATABASE` to `public` by default, so a plain login does see every database (probe-confirmed); the seeded `public` grant row itself isn't modeled.
-Scope limits (noted): filtering engages only for a same-database read (a cross-database catalog read passes through, since the session principal is a current-database user — a cross-database *write* through a three-part name likewise checks the session database's grants against the target's `object_id`, where real resolves the login's user in the target, see [`schemas.md`](schemas.md#cross-database-writes)); `db_datareader` slightly over-reveals procedure metadata; a column-scope grant (`minor_id > 0`) reveals its object object-grain — `sys.columns` shows every column of a column-granted object, including the ungranted / denied ones (probe Q2).
+Scope limits (noted): filtering engages only for a same-database read — a cross-database catalog read (`other.sys.tables`) passes through unfiltered, where real resolves the login's user in the target and filters by *its* visibility (and raises Msg 916 when the login has no user there, exactly as it does for a data read).
+The data-side surfaces resolve that principal — see [Cross-database references](#cross-database-references) — the catalog-view filter is the piece left.
+`db_datareader` slightly over-reveals procedure metadata; a column-scope grant (`minor_id > 0`) reveals its object object-grain — `sys.columns` shows every column of a column-granted object, including the ungranted / denied ones (probe Q2).
 
 ### Principal DDL
 
@@ -405,7 +445,14 @@ Canonical names project their catalog spelling regardless of the GRANT's casing 
 
 In `BuiltInResources.cs`:
 
-**`sys.database_principals`** (14-col probe-confirmed subset): `name` / `principal_id` / `type` / `type_desc` / `default_schema_name` (NULL except for application roles) / `create_date` / `modify_date` / `owning_principal_id` / `sid` (NULL) / `is_fixed_role` / `authentication_type` / `authentication_type_desc` (both NULL) / `default_language_name` / `default_language_lcid` (both NULL — untracked; SMO's User property-bag reads them via `ISNULL(u.default_language_lcid, -1)` / `ISNULL(u.default_language_name, N'')`).
+**`sys.database_principals`** (14-col probe-confirmed subset): `name` / `principal_id` / `type` / `type_desc` / `default_schema_name` / `create_date` / `modify_date` / `owning_principal_id` / `sid` / `is_fixed_role` / `authentication_type` / `authentication_type_desc` / `default_language_name` / `default_language_lcid` (both NULL — untracked; SMO's User property-bag reads them via `ISNULL(u.default_language_lcid, -1)` / `ISNULL(u.default_language_name, N'')`).
+Three of those follow per-principal rules real reports (probe-confirmed against SQL Server 2025):
+
+- `default_schema_name` is `dbo` for `dbo` and every user, `guest` for `guest`, an application role's own declared schema, and NULL for roles and the `sys` / `INFORMATION_SCHEMA` catalog principals.
+- `authentication_type` / `_desc` is `1` / `INSTANCE` for `dbo` and `0` / `NONE` for everything else — never NULL.
+- `sid` is the well-known `0x01` for `dbo` and `0x00` for `guest`, NULL for the two catalog principals, and a 28-byte `S-1-9-4-…` database-scoped SID for every user and role.
+  That SID is deterministic: a fixed database role encodes its principal_id in the final sub-authority the way real does (`db_owner` → `…00400000`), and everything else fills the four trailing words from the same per-quadrant FNV-1a hash `BuiltInResources.DeriveLoginSid` uses for logins.
+  The bytes are stable per name but don't byte-match a real instance's.
 `owning_principal_id` is **dbo (1) for database roles** (`type='R'`), NULL otherwise — probe-confirmed on WWI's custom roles.
 This is load-bearing for bacpac export: DacFx's `SqlRole` reverse-engineering filters `USER_NAME(owning_principal_id) != N'cdc'`, and a NULL owner makes that predicate UNKNOWN, silently dropping every role from the model (WWI's 9 custom roles vanished until this was fixed).
 

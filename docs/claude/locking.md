@@ -248,6 +248,8 @@ Neither DMV takes the manager's gate during enumeration — concurrent acquires 
 When either flag is on, every INSERT / UPDATE / DELETE captures a row-version entry in the per-table `HeapTable.RowVersions` dict; readers under SNAPSHOT or RCSI consult the chain to substitute pre-write payloads.
 
 ### Database flags
+Both flags are read off the **table's own database**, not the session's (probe-confirmed in all four combinations): a session in a non-RCSI database reading a three-part name into an RCSI one reads versioned, the reverse blocks on the writer's X lock, and a SNAPSHOT session's Msg 3952 names the target database it reached rather than the one it sits in.
+
 - `Database.AllowSnapshotIsolation` — gates `SET TRANSACTION ISOLATION LEVEL SNAPSHOT` reads.
   When OFF and a session at the Snapshot iso level accesses a user table, **Msg 3952** fires verbatim: `Snapshot isolation transaction failed accessing database '<db>' because snapshot isolation is not allowed in this database. Use ALTER DATABASE to allow snapshot isolation.` (Cls 16, State 1).
   Probe-confirmed the rejection point is the first user-table access — `set transaction isolation level snapshot` is silent, system-catalog reads (sys.tables / sys.objects) succeed silently, and the check fires whether the access is read or write.
@@ -258,8 +260,12 @@ When either flag is on, every INSERT / UPDATE / DELETE captures a row-version en
   Real SQL Server's "requires single-user-mode" semantic on the flip is not modeled.
 
 ### Commit-Xid allocator
-`Database.AllocateTransactionCommitId()` is a monotonic per-database counter (parallels `AllocateRowVersion`); each committing transaction reads one stamp via `Database.AllocateTransactionCommitId`, SI readers acquire their snapshot via `Database.CurrentTransactionCommitId`.
+`Simulation.AllocateTransactionCommitId()` is a monotonic **instance-wide** counter; each committing transaction reads one stamp however many databases it wrote to, and SI readers acquire their snapshot via `Simulation.CurrentTransactionCommitId`.
 Counter starts at zero so pre-versioning rows (implicit Xmin = 0) are visible to every snapshot.
+
+Instance scope mirrors real, whose transaction sequence number is server-wide (its version store lives in `tempdb`, not per database), and it is what makes a snapshot stamp comparable across databases.
+Probed: a SNAPSHOT transaction fixes **one** stamp at its first data-access statement and reads *every* database as of that instant — a transaction whose first read was in one database still sees another's pre-update state when it reads it later, and `BEGIN TRAN` alone fixes nothing (a commit landing before the first read is visible).
+`Simulation.ActiveSnapshotTxs` is instance-wide for the same reason: an open snapshot anywhere pins history everywhere, so the GC cutoff reads the simulation's oldest active Xid.
 
 ### Version-store data structures
 Per-`HeapTable`: `ConcurrentDictionary<(int Page, int Slot), RowVersionChain> RowVersions`.
@@ -323,10 +329,10 @@ Three DMVs cover version-store state, with column shapes probe-confirmed against
 
 `VersionStore.RunGarbageCollection(Database)` runs at every `SimulatedDbTransaction.Commit / Rollback / Dispose`.
 Walks every per-table `RowVersions` chain and drops trailing `HistoricalVersion` nodes whose `Xmax <= oldest_active_snapshot_xid` (no active SI transaction needs them anymore).
-When no SI tx is in flight, the cutoff is `Database.CurrentTransactionCommitId` so every finalized HV becomes collectible.
+When no SI tx is in flight, the cutoff is `Simulation.CurrentTransactionCommitId` so every finalized HV becomes collectible.
 Chains that lose their only HV AND aren't `IsDeletedLive` AND have no in-flight `WriterTx` get removed from the dict entirely; chains with non-null `WriterTx` are skipped (a `PendingXmax`-marked HV must not be disturbed mid-tx).
 
-The oldest active Xid comes from `Database.ActiveSnapshotTxs`, a `ConcurrentDictionary<SimulatedDbTransaction, byte>` populated at `BatchContext.ResolveSnapshotXidForRead` (first user-table read of an SI tx) and drained at tx finalization.
+The oldest active Xid comes from `Simulation.ActiveSnapshotTxs`, a `ConcurrentDictionary<SimulatedDbTransaction, byte>` populated at `BatchContext.ResolveSnapshotXidForRead` (first user-table read of an SI tx) and drained at tx finalization.
 RCSI per-statement snapshots don't register here — their sub-statement lifetime means the once-per-tx GC cadence won't observe them as load-bearing, and the short window of risk is bounded by statement execution time.
 
 ### Known MVCC limitations

@@ -49,15 +49,37 @@ Everything else the parser and the static type path check.
 Probe-confirmed as CREATE-time on real and matched here: **Msg 207** (invalid column on an existing table, including on `INSERTED` / `DELETED`, on a body-declared table variable, inside `UPDATE(col)`, and in a `WHERE` / `HAVING` / `MERGE`-`ON` / `SET`-value position), **209**, **8120**, **306**, **108**, **156** / **102**, **137**, **134**, **135**, **402**, **8144**, **178**, **10700** (a body writing its own READONLY TVP — see [`table-valued-parameters.md`](table-valued-parameters.md)), **8116** (a legacy-LOB string-scalar argument — see [`scalars.md`](scalars.md#legacy-lob-arguments)), and **468** / **457** (a cross-collation comparison or unification — see [`collations.md`](collations.md#compile-time-binding)).
 A never-taken `IF` or `WHILE` branch binds too, on both sides.
 
+An aggregate whose only column reference resolves in **no** scope is part of that set: `HAVING MAX(nosuchcol) = 1` is Msg 207 here as it is on real, at CREATE and in a plain statement alike.
+The outer scope chain is what separates it from the genuinely-outer `(SELECT MAX(t.a) FROM u)`, which real binds to the enclosing query and creates without complaint (see [`query.md`](query.md#outer-scope-correlation-in-the-select-list)); a FROM-clause placeholder suspends the question entirely, since the name could belong to the missing object.
+
+### Body-shape rules — Msg 455 / 444 / 443
+
+A **scalar UDF** and a **multi-statement TVF** carry three rules beyond name binding, all reported at `CREATE` / `ALTER`.
+Procedures, triggers and inline TVFs are exempt (probe-confirmed: a procedure body may `SELECT`, `PRINT`, `INSERT` and `SET NOCOUNT ON` freely).
+The walk that binds the body gathers them into `FunctionBodyShape` (`Parser/FunctionBodyShape.cs`), reached through `BatchContext.FunctionBodyShape`, which is non-null only for those two kinds.
+
+- **Msg 455** class 16 state 2, *"The last statement included within a function must be a return statement."*
+  Real means the last **top-level** statement literally: a trailing `IF` whose every arm returns doesn't satisfy it (`IF @x = 1 RETURN 1 ELSE RETURN 2` as the final statement is still Msg 455), nor does a `WHILE` whose body ends in `RETURN` — but a bare `BEGIN … END` is transparent, so a trailing block ending in `RETURN` is accepted.
+  The line it reports is the innermost trailing statement's, even when the rule fails because that statement sits inside the `IF` / `WHILE`.
+- **Msg 444** class 16, *"Select statements included within a function cannot return data to a client."*
+  State **2** when the query reads a rowset — a FROM clause at any depth, or a set operator — and **3** for a wholly-computed projection (`SELECT 1`, `SELECT @x`).
+  An assignment-only `SELECT @v = …` is legal; `SELECT … INTO` is Msg 443 instead.
+- **Msg 443** class 16, *"Invalid use of a side-effecting operator '&lt;name&gt;' within a function."*
+  The name is real's own spelling, and the state groups the operator family: **15** for writing / state-changing statements — `INSERT` / `UPDATE` / `DELETE` / `MERGE`, `TRUNCATE TABLE`, `SELECT INTO`, `BEGIN TRANSACTION` / `COMMIT TRANSACTION` / `ROLLBACK TRANSACTION` / `SAVEPOINT`, and every `SET` form (`SET OPTION ON` / `SET OPTION OFF` for the boolean toggles, `SET TRANSACTION ISOLATION LEVEL`, `SET ROW COUNT`, `SET TEXTSIZE`, `SET STATISTICS ON` / `OFF`, `SET IDENTITY_INSERT ON` / `OFF`, and `SET COMMAND` for the remaining value-taking ones); **14** for `PRINT`, `RAISERROR`, `THROW`, `WAITFOR`, `EXECUTE STRING` (the `EXEC (…)` form) and the `BEGIN TRY` / `END TRY` / `BEGIN CATCH` / `END CATCH` delimiters; **1** for a side-effecting built-in, named the way the catalog spells it — `newid`, `newsequentialid`, `rand`.
+  A DML write whose target is a **table variable** is legal, in a scalar UDF's own `DECLARE @t TABLE` and a TVF's return table alike, so only a write reaching a persistent table is recorded.
+  `EXEC <proc>` and `EXEC sp_executesql` stay creatable (the runtime Msg 557 is a separate story), as do the current-time readers.
+
+**Ordering**: real reports *every* binder error in the body before *any* shape error — probed with a `PRINT` on line 3 and a bad column on line 4, which reports Msg 207 first.
+That is why violations are gathered through the walk and the first is raised only once the body has bound: a binder error thrown during the walk propagates and wins, matching which error a one-exception client sees.
+Among shape violations, source order decides, and Msg 455 comes last because its statement is the body's last.
+
 ### Divergences
 
-- **An aggregate whose only column reference doesn't resolve locally isn't reached.**
-  `HAVING MAX(nosuchcol) = 1` is taken for an aggregate over an enclosing query — unmodeled, so it raises `NotSupportedException`, which the bind swallows (below) rather than refusing a module real accepts.
-  Real reports Msg 207 at CREATE.
-  The rest of that family closed: `WHERE` / `HAVING` / a `MERGE`'s `ON` / the *value* side of a `SET` now bind through the static type path — see [`collations.md`](collations.md#compile-time-binding) for the drive sites.
 - **One error per CREATE.**
-  Real reports every binder error it finds in the body (probed: two Msg 207s from two statements); the simulator throws on the first.
-- **Msg 455** (last statement must be `RETURN`), **Msg 444** (a body `SELECT` returning to the client) and **Msg 443** (a side-effecting operator inside a function) are still unchecked — they want body-shape analysis rather than a parse, so a function real refuses is created here.
+  Real reports every binder error it finds in the body (probed: two Msg 207s from two statements), and every shape violation after them; the simulator throws on the first.
+- **`NEWSEQUENTIALID()` in a function body** is the simulator's own Msg 302 (real's outside-a-`DEFAULT` gate, which real raises everywhere else) rather than real's Msg 443 — the call's parse rejects it before the shape walk has a say.
+- **A bind abandoned at a deferral leaves Msg 455 unrun.**
+  The stop-at-first-deferral divergence above means the walk never saw the body's real last statement, so the rule is skipped rather than guessed at; real, which knows where the deferred statement ended, keeps checking.
 - **A `NotSupportedException` never blocks a CREATE.** An unmodeled feature in the body is a simulator gap rather than real's binder speaking; refusing the module would be strictly worse than the status quo, so the bind swallows it and the gap resurfaces at invocation.
 
 ### Skip mode had to stop executing
@@ -119,9 +141,9 @@ Probed against SQL Server 2025.
 - **Msg 111 batch-first rule** is enforced: `CREATE FUNCTION` must open its batch, and since there is no `GO`, a batch is one `CommandText` — so `IF OBJECT_ID(…) IS NOT NULL DROP FUNCTION …; CREATE FUNCTION …` raises where two commands succeed (`ExecuteBatches` in the tests is the split).
   Real's state byte identifies the kind: 4 for CREATE FUNCTION, 5 for ALTER FUNCTION, 6 / 7 for CREATE / ALTER TRIGGER, 9 / 10 for CREATE / ALTER VIEW, 12 for CREATE RULE, 13 for CREATE DEFAULT, 14 for CREATE SCHEMA, and 1 for the merged `'CREATE/ALTER PROCEDURE'` label (probe-confirmed 2026-07-31; the simulator carries the ones it parses).
 
+- **The body-shape rules apply**: Msg 455 (last statement must be `RETURN`), Msg 444 (a body `SELECT` returning to the client) and Msg 443 (a side-effecting operator) all refuse the `CREATE` — see [Body-shape rules](#body-shape-rules--msg-455--444--443).
+
 **Fidelity gaps**:
-- **The body-shape rules stay unchecked** — Msg 455 (missing RETURN), Msg 443 (side-effects), Msg 444 (result-set SELECT in body).
-  The body itself binds at CREATE ([CREATE-time body binding](#create-time-body-binding)), but these three want shape analysis rather than a parse, so a fall-through body returns typed NULL and side-effecting statements surface their own errors at invocation.
 - **`@@ROWCOUNT` inside a UDF body** isn't isolated — body statements overwrite the caller's `LastStatementRowCount`.
   Real SQL Server preserves it across the call.
 
@@ -183,10 +205,11 @@ Probed against SQL Server 2025.
 - **EF Core integration**: `HasDbFunction` mapped to an `IQueryable<T>`-returning DbContext method emits `SELECT ... FROM dbo.fn(@p)` through the SqlServer provider; the simulator dispatches the body and yields rows back through the same FROM-source pipeline.
   LINQ composition (`Where` / `OrderBy` / `Select`) applies to the function's result rows post-dispatch — no pushdown into the body.
 
+- **The body-shape rules apply**: Msg 455 (last statement must be `RETURN`, which for this kind means the bare form), Msg 444 and Msg 443 all refuse the `CREATE` — see [Body-shape rules](#body-shape-rules--msg-455--444--443).
+  `INSERT` / `UPDATE` / `DELETE` against the `@r` return table is legal; a write reaching a persistent table is Msg 443.
+  **Msg 178** (value-form RETURN) fires at CREATE too — the body bind carries no frame, which is the same absence the invocation relies on ([CREATE-time body binding](#create-time-body-binding)).
+
 **Fidelity gaps**:
-- **The body-shape rules stay unchecked**: Msg 455 (last statement must be RETURN) and Msg 443 (side-effecting external DML inside function).
-  Real enforces both at CREATE; the simulator silently accepts them, so a body real would reject can run successfully here.
-  **Msg 178** (value-form RETURN) *does* fire at CREATE — the body bind carries no frame, which is the same absence the invocation relies on ([CREATE-time body binding](#create-time-body-binding)).
 - **Constraint enforcement is row-level strict**: PK / UNIQUE / CHECK violations in the body surface as runtime errors (Msg 2627 / Msg 547).
   Real SQL Server's probe-observed behavior is more forgiving in some cases — for shared-key collisions it returns an empty result set rather than raising.
   Stricter behavior is defensible since apps that hit it are buggy.
@@ -250,6 +273,8 @@ The body walk re-tokenizes the stored source and lifts every dotted name chain o
 | `ALTER SCHEMA … TRANSFER` of a referenced object | **Msg 15348** — `Cannot transfer a schemabound object.` |
 
 Deliberately *not* blocked, each probe-confirmed: `ALTER TABLE … ADD` a new column; `TRUNCATE TABLE` on a referenced table; `ALTER SCHEMA … TRANSFER` of the schema-bound module itself; and every one of these against a **non**-schema-bound dependent, where real's late binding lets the DROP / ALTER through and the dependent breaks at its next call.
+Both echo the target **as the statement spelled it** — `DROP TABLE t` reports `'t'` and `DROP TABLE dbo.t` reports `'dbo.t'`, and the ALTER leg does the same (probe-confirmed) — while the blocking module surfaces as its bare leaf however it was referenced.
+
 `DROP TABLE` runs the FK gate first: a table that is both an FK parent and a schema-bound view's base reports **Msg 3726**, not 3729.
 
 **What a schema-bound body may reference.**
@@ -405,7 +430,7 @@ Each `DbParameter` binds to a proc parameter by name (the `@` prefix is stripped
 - `OBJECT_ID(name, 'P')` resolves procedures only; no-filter form tries function → view → procedure → table in order.
 
 **Fidelity gaps**:
-- **`sys.parameters`** ships the full documented 16-column shape — `object_id` / `name` / `parameter_id` / `system_type_id` / `user_type_id` / `max_length` / `precision` / `scale` / `is_output` / `is_cursor_ref` / `has_default_value` / `is_xml_document` / `default_value` (first-class **`sql_variant`** matching real SQL Server; always a NULL variant — parameter default values aren't tracked) / `xml_collection_id` / `is_readonly` / `is_nullable`.
+- **`sys.parameters`** ships the full documented 16-column shape — `object_id` / `name` / `parameter_id` / `system_type_id` / `user_type_id` / `max_length` / `precision` / `scale` (the same triple `sys.columns` computes, so `nvarchar(40)` reports the byte width 80, `int` reports 4 / 10 / 0, and a table-valued parameter the MAX sentinel -1 with no precision / scale) / `is_output` / `is_cursor_ref` / `has_default_value` / `is_xml_document` / `default_value` (first-class **`sql_variant`** matching real SQL Server; always a NULL variant — parameter default values aren't tracked) / `xml_collection_id` / `is_readonly` / `is_nullable`.
   **`sys.all_parameters`** shares the same shape and row generator (`EnumerateParameters`) — user-object parity, like `sys.all_columns` / `sys.all_objects` (real SQL Server's `all_parameters` also surfaces system-object parameters; SMO filters by `object_id` so the identical user-object set suffices).
   SMO's UserDefinedFunction / StoredProcedure scripting reads the return / parameter metadata through `sys.all_parameters` (`LEFT JOIN … ret_param.object_id = udf.object_id AND ret_param.is_output = 1`), reading `max_length` / `precision` / `scale` / `is_xml_document` / `xml_collection_id`.
 - **`sys.parameters.has_default_value`** is hardcoded `False` (matches probed real SQL Server behavior: the column reflects CLR-side DEFAULT_VALUE metadata, not the `= value` parameter default — even `@x int = 5` shows `has_default_value=False`).

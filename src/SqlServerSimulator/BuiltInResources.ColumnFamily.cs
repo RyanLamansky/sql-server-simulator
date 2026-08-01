@@ -263,11 +263,13 @@ internal static partial class BuiltInResources
         // keyed by object_id. The definition column carries the verbatim
         // CREATE-statement source captured at CREATE / ALTER time
         // (SchemaObject.DefinitionText); NULL for WITH ENCRYPTION modules.
-        // The boolean flags are probe-confirmed placeholder constants
-        // (uses_ansi_nulls / uses_quoted_identifier default ON, the rest OFF);
-        // null_on_null_input reflects a scalar function's RETURNS NULL ON NULL
-        // INPUT declaration. execute_as_principal_id is always NULL (no
-        // EXECUTE AS principal modeled).
+        // uses_ansi_nulls / uses_quoted_identifier carry the module's
+        // creation-time SET-option capture, null_on_null_input a scalar
+        // function's RETURNS NULL ON NULL INPUT declaration,
+        // execute_as_principal_id the resolved WITH EXECUTE AS principal, and
+        // the inline_type / is_inlineable pair the scalar-UDF-inlining
+        // analysis; uses_database_collation / is_recompiled /
+        // uses_native_compilation are probe-confirmed placeholder constants.
         Sys("sql_modules",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -333,12 +335,14 @@ internal static partial class BuiltInResources
     /// Rows for <c>sys.computed_columns</c>: one row per computed column
     /// across every table. <c>definition</c> is the captured parenthesized
     /// source text of the computed expression (NULL only if a column somehow
-    /// lacks captured text).
+    /// lacks captured text). <c>column_id</c> is the column's stable
+    /// <c>sys.columns.column_id</c>, and <c>uses_database_collation</c> is 1 —
+    /// real reports 1 for every computed column, purely numeric expressions
+    /// included (probe-confirmed).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateComputedColumns(Parser.BatchContext batch, Database database)
     {
         _ = batch;
-        var falseBit = SqlValue.FromBoolean(false);
         var trueBit = SqlValue.FromBoolean(true);
         var nullDefinition = SqlValue.Null(SqlType.NVarchar);
         foreach (var schema in database.Schemas.Values)
@@ -346,18 +350,17 @@ internal static partial class BuiltInResources
             foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
             {
                 var objectId = SqlValue.FromInt32(t.ObjectId);
-                for (var i = 0; i < t.Columns.Length; i++)
+                foreach (var col in t.Columns)
                 {
-                    var col = t.Columns[i];
                     if (col.Computed is null)
                         continue;
                     yield return [
                         objectId,
                         SqlValue.FromSystemName(col.Name),
-                        SqlValue.FromInt32(i + 1),
+                        SqlValue.FromInt32(col.ColumnId),
                         SqlValue.FromBoolean(col.Nullable),
                         col.ComputedDefinition is { } def ? SqlValue.FromNVarchar(def) : nullDefinition,
-                        falseBit,
+                        trueBit, // uses_database_collation
                         SqlValue.FromBoolean(col.IsPersisted),
                         trueBit,
                     ];
@@ -370,7 +373,10 @@ internal static partial class BuiltInResources
     /// Rows for <c>sys.identity_columns</c>: one row per IDENTITY column.
     /// seed / increment / last are sql_variant carrying the column's declared
     /// type as inner base type. last_value is the identity high-water mark,
-    /// a NULL sql_variant before the first insert.
+    /// a NULL sql_variant before the first insert. A table's <c>column_id</c>
+    /// is the stable <c>sys.columns.column_id</c>; a table type's stays its
+    /// position, matching that view's own table-type rows (a table type's
+    /// columns can't be dropped, so the two never part).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateIdentityColumns(Parser.BatchContext batch, Database database)
     {
@@ -383,15 +389,14 @@ internal static partial class BuiltInResources
             foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
             {
                 var objectId = SqlValue.FromInt32(t.ObjectId);
-                for (var i = 0; i < t.Columns.Length; i++)
+                foreach (var col in t.Columns)
                 {
-                    var col = t.Columns[i];
                     if (col.Identity is not { } identity)
                         continue;
                     yield return [
                         objectId,
                         SqlValue.FromSystemName(col.Name),
-                        SqlValue.FromInt32(i + 1),
+                        SqlValue.FromInt32(col.ColumnId),
                         IdentityVariant(identity.Seed, col.Type),
                         IdentityVariant(identity.Increment, col.Type),
                         identity.Snapshot() is { } last ? IdentityVariant(last, col.Type) : nullLast,
@@ -446,11 +451,14 @@ internal static partial class BuiltInResources
     /// every schema (procedure / view / DML trigger / scalar / inline /
     /// multi-statement function) plus the database-scoped DDL triggers. The
     /// definition column is <see cref="SchemaObject.DefinitionText"/> (NULL for
-    /// WITH ENCRYPTION). Flag columns are probe-confirmed placeholder constants
-    /// except <c>null_on_null_input</c>, which reads a scalar function's
-    /// RETURNS NULL ON NULL INPUT declaration, and
-    /// <c>uses_quoted_identifier</c>, which reads the module's creation-time
-    /// <see cref="SchemaObject.UsesQuotedIdentifier"/> capture.
+    /// WITH ENCRYPTION). <c>uses_ansi_nulls</c> / <c>uses_quoted_identifier</c>
+    /// read the module's creation-time SET-option captures,
+    /// <c>null_on_null_input</c> a scalar function's RETURNS NULL ON NULL INPUT
+    /// declaration, <c>execute_as_principal_id</c> the resolved WITH EXECUTE AS
+    /// principal (<see cref="SchemaObject.ExecuteAsPrincipalId"/>), and the
+    /// <c>inline_type</c> / <c>is_inlineable</c> pair
+    /// <see cref="ModuleInlining"/>; the rest are probe-confirmed placeholder
+    /// constants.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSqlModules(Parser.BatchContext batch, Database database)
     {
@@ -459,21 +467,25 @@ internal static partial class BuiltInResources
         var off = SqlValue.FromBoolean(false);
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
 
-        SqlValue[] Row(SchemaObject obj) =>
-        [
-            SqlValue.FromInt32(obj.ObjectId),
-            obj.DefinitionText is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(obj.DefinitionText),
-            on,  // uses_ansi_nulls
-            obj.UsesQuotedIdentifier ? on : off, // uses_quoted_identifier
-            obj is View { IsSchemaBound: true } or UserDefinedFunction { IsSchemaBound: true } ? on : off, // is_schema_bound
-            off, // uses_database_collation
-            off, // is_recompiled
-            obj is ScalarFunction { ReturnsNullOnNullInput: true } ? on : off, // null_on_null_input
-            nullPrincipal, // execute_as_principal_id
-            off, // uses_native_compilation
-            off, // inline_type
-            off, // is_inlineable
-        ];
+        SqlValue[] Row(SchemaObject obj)
+        {
+            var (inlineType, isInlineable) = ModuleInlining.Evaluate(obj);
+            return
+            [
+                SqlValue.FromInt32(obj.ObjectId),
+                obj.DefinitionText is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(obj.DefinitionText),
+                obj.UsesAnsiNulls ? on : off, // uses_ansi_nulls
+                obj.UsesQuotedIdentifier ? on : off, // uses_quoted_identifier
+                obj is View { IsSchemaBound: true } or UserDefinedFunction { IsSchemaBound: true } ? on : off, // is_schema_bound
+                off, // uses_database_collation
+                off, // is_recompiled
+                obj is ScalarFunction { ReturnsNullOnNullInput: true } ? on : off, // null_on_null_input
+                obj.ExecuteAsPrincipalId is { } principalId ? SqlValue.FromInt32(principalId) : nullPrincipal,
+                off, // uses_native_compilation
+                inlineType ? on : off,
+                isInlineable ? on : off,
+            ];
+        }
 
         foreach (var schema in database.Schemas.Values)
         {

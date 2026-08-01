@@ -8,8 +8,15 @@ namespace SqlServerSimulator;
 /// permission check can run at execution against the current principal — the
 /// list is principal-independent, so it caches with the plan.
 /// </summary>
-internal readonly struct ReferencedSecurable(int objectId, int schemaId, string objectName, string schemaName, string permission = "SELECT")
+internal readonly struct ReferencedSecurable(Database database, int objectId, int schemaId, string objectName, string schemaName, string permission = "SELECT")
 {
+    /// <summary>
+    /// The database the securable lives in — the session's for an ordinary
+    /// reference, the named one for a three-part name. Permission checks
+    /// resolve the login's principal <em>there</em>, and a denial names it.
+    /// </summary>
+    public readonly Database Database = database;
+
     public readonly int ObjectId = objectId;
     public readonly int SchemaId = schemaId;
     public readonly string ObjectName = objectName;
@@ -103,9 +110,67 @@ internal sealed class ColumnReadTarget(Schemas.SchemaObject securable, Storage.H
 /// </summary>
 internal static class PermissionEnforcement
 {
-    /// <summary>Whether permission checks apply for this batch: a genuinely restricted principal, not inside an ownership-chained module body.</summary>
-    internal static bool Applies(BatchContext batch) =>
-        batch.EnforcesPermissions && !batch.Connection.Security.EffectiveIsDbo;
+    /// <summary>
+    /// Whether permission checks apply to a reference into
+    /// <paramref name="target"/>: a genuinely restricted principal, and — for
+    /// the session's own database — not inside an ownership-chained module
+    /// body. For another database the module-body suppression does
+    /// <em>not</em> hold: an ownership chain breaks at the
+    /// database boundary with <c>DB_CHAINING</c> off (the default), so real
+    /// checks the caller's rights on the object the module reached across
+    /// (probe-confirmed: a dbo-owned view selecting from another database
+    /// raises Msg 229 naming the base table there). A create-time bind still
+    /// suppresses everything — it reads no row.
+    /// </summary>
+    internal static bool Applies(BatchContext batch, Database target) =>
+        !batch.Connection.Security.EffectiveIsDbo
+        && !batch.CreateTimeBinding
+        && (batch.EnforcesPermissions || !ReferenceEquals(target, batch.CurrentDatabase));
+
+    /// <summary>
+    /// Resolves the principal that answers for a reference into
+    /// <paramref name="target"/> and reports whether it needs checking at all.
+    /// The session's own database answers with the effective principal
+    /// directly; another database resolves the session's <em>login</em> to its
+    /// user there — real's rule, since a login's rights are per database —
+    /// raising Msg 916 when it has none. Returns <see langword="false"/> (no
+    /// check) for a session that bypasses, and for a cross-database reference
+    /// whose target principal is <c>dbo</c>.
+    /// </summary>
+    private static bool TryResolveScope(BatchContext batch, Database target, out int principalId)
+    {
+        if (!Applies(batch, target))
+        {
+            principalId = 0;
+            return false;
+        }
+        if (ReferenceEquals(target, batch.CurrentDatabase))
+        {
+            principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
+            return true;
+        }
+        principalId = ResolveCrossDatabasePrincipal(batch.Connection, target).PrincipalId;
+        return principalId != Database.DboPrincipalId;
+    }
+
+    /// <summary>
+    /// The database user <paramref name="connection"/>'s login runs as in
+    /// <paramref name="target"/>, or Msg 916 when it can't reach that database
+    /// at all. Shared by the cross-database permission checks and by
+    /// <c>USE</c> / <c>ChangeDatabase</c>, which ask the same question.
+    /// A <see cref="SecurityPrincipalFrame.IsDatabaseScoped"/> identity — an
+    /// <c>EXECUTE AS USER</c> frame or an activated application role — never
+    /// resolves: it carries no server principal, so real refuses the crossing
+    /// outright (probe-confirmed, <c>TRUSTWORTHY</c> on or off).
+    /// </summary>
+    internal static DatabasePrincipal ResolveCrossDatabasePrincipal(SimulatedDbConnection connection, Database target)
+    {
+        var effective = connection.Security.Effective;
+        return effective.IsDatabaseScoped
+            || !Simulation.TryMapLoginToDatabaseUser(connection.Simulation, target, effective.LoginName, out var principal)
+            ? throw SimulatedSqlException.CannotAccessDatabaseUnderSecurityContext(effective.LoginName, target.Name)
+            : principal;
+    }
 
     /// <summary>
     /// Whether metadata-visibility filtering applies for this batch: a genuinely
@@ -135,12 +200,13 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static void CheckReadSources(BatchContext batch, List<ReferencedSecurable>? securables, Dictionary<int, ColumnReadTarget>? readColumns = null)
     {
-        if (securables is null || securables.Count == 0 || !Applies(batch))
+        if (securables is null || securables.Count == 0 || batch.Connection.Security.EffectiveIsDbo)
             return;
-        var database = batch.CurrentDatabase;
-        var principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
         foreach (var s in securables)
         {
+            var database = s.Database;
+            if (!TryResolveScope(batch, database, out var principalId))
+                continue;
             var permission = Permission.Resolve(s.Permission);
             // Column-grain path: a SELECT read with tracked columns.
             if (permission == Permission.Select && readColumns is not null && readColumns.TryGetValue(s.ObjectId, out var target))
@@ -158,6 +224,34 @@ internal static class PermissionEnforcement
     }
 
     /// <summary>
+    /// Checks the reads a module body makes into a database other than
+    /// <paramref name="moduleDatabase"/> — the ownership chain the body's own
+    /// frame suppresses breaks at the database boundary, so those references
+    /// answer to the caller's rights in the database they reached. Same-database
+    /// reads are skipped here (the chain holds), which is what keeps an ordinary
+    /// view free. The statement-dispatching bodies (procedures, triggers, scalar
+    /// UDFs) reach the ordinary check sites per statement and need no call here;
+    /// a view body is inlined into the referencing statement and reaches none,
+    /// so its plan is checked at invocation.
+    /// </summary>
+    internal static void CheckCrossDatabaseReads(BatchContext batch, Database moduleDatabase, List<ReferencedSecurable>? securables)
+    {
+        if (securables is null || batch.Connection.Security.EffectiveIsDbo || batch.CreateTimeBinding)
+            return;
+        foreach (var s in securables)
+        {
+            if (ReferenceEquals(s.Database, moduleDatabase))
+                continue;
+            var principalId = ResolveCrossDatabasePrincipal(batch.Connection, s.Database).PrincipalId;
+            if (principalId != Database.DboPrincipalId
+                && !PermissionChecker.IsGranted(s.Database, principalId, Permission.Resolve(s.Permission), PermissionChecker.ClassObject, s.ObjectId, s.SchemaId))
+            {
+                throw SimulatedSqlException.PermissionDenied(s.Permission.ToUpperInvariant(), s.ObjectName, s.Database.Name, s.SchemaName);
+            }
+        }
+    }
+
+    /// <summary>
     /// Column-level enforcement over an ordinal set gathered inline (the UPDATE /
     /// DELETE write and read-implies-SELECT paths, which don't ride a
     /// <see cref="Parser.Selection"/> plan). No-op for dbo / module bodies, and
@@ -166,9 +260,11 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static void CheckColumns(BatchContext batch, Permission permission, ColumnReadTarget target)
     {
-        if (target.Ordinals.Count == 0 || !Applies(batch))
+        if (target.Ordinals.Count == 0)
             return;
-        CheckColumnGrants(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId, permission, target);
+        var database = batch.DatabaseFor(target.Securable);
+        if (TryResolveScope(batch, database, out var principalId))
+            CheckColumnGrants(database, principalId, permission, target);
     }
 
     /// <summary>
@@ -206,24 +302,21 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static void CheckScalarFunctionExecute(BatchContext batch, Schemas.ScalarFunction function)
     {
-        if (!Applies(batch))
+        var database = batch.DatabaseFor(function);
+        if (!TryResolveScope(batch, database, out var principalId))
             return;
         var checkedIds = batch.ExecuteCheckedFunctionIds ??= [];
         if (!checkedIds.Add(function.ObjectId))
             return;
-        var database = batch.CurrentDatabase;
-        var principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
         if (!PermissionChecker.IsGranted(database, principalId, Permission.Execute, PermissionChecker.ClassObject, function.ObjectId, function.SchemaId))
             throw SimulatedSqlException.PermissionDenied("EXECUTE", function.Name, database.Name, function.Schema.Name);
     }
 
-    /// <summary>Checks one permission on one object; throws Msg 229 (with optional Procedure attribution) on denial. No-op when checks don't apply.</summary>
-    internal static void CheckObject(BatchContext batch, string permission, int objectId, int schemaId, string objectName, string schemaName, string procedure = "")
+    /// <summary>Checks one permission on one object in <paramref name="database"/>; throws Msg 229 (with optional Procedure attribution) on denial. No-op when checks don't apply.</summary>
+    internal static void CheckObject(BatchContext batch, Database database, string permission, int objectId, int schemaId, string objectName, string schemaName, string procedure = "")
     {
-        if (!Applies(batch))
+        if (!TryResolveScope(batch, database, out var principalId))
             return;
-        var database = batch.CurrentDatabase;
-        var principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
         if (!PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), PermissionChecker.ClassObject, objectId, schemaId))
             throw SimulatedSqlException.PermissionDenied(permission.ToUpperInvariant(), objectName, database.Name, schemaName, procedure);
     }
@@ -231,9 +324,8 @@ internal static class PermissionEnforcement
     /// <summary>Checks a permission on a resolved securable — a table, view, synonym or module; no-op when checks don't apply.</summary>
     internal static void CheckSchemaObject(BatchContext batch, string permission, Schemas.SchemaObject securable, string procedure = "")
     {
-        if (!Applies(batch))
-            return;
-        CheckObject(batch, permission, securable.ObjectId, securable.SchemaId, securable.Name, SchemaNameFor(batch.CurrentDatabase, securable.SchemaId), procedure);
+        var database = batch.DatabaseFor(securable);
+        CheckObject(batch, database, permission, securable.ObjectId, securable.SchemaId, securable.Name, SchemaNameFor(database, securable.SchemaId), procedure);
     }
 
     /// <summary>
@@ -241,12 +333,8 @@ internal static class PermissionEnforcement
     /// <paramref name="writtenName"/> reached (see <see cref="SecurableFor"/>);
     /// no-op when checks don't apply.
     /// </summary>
-    internal static void CheckReference(BatchContext batch, string permission, MultiPartName writtenName, Schemas.SchemaObject resolved, string procedure = "")
-    {
-        if (!Applies(batch))
-            return;
+    internal static void CheckReference(BatchContext batch, string permission, MultiPartName writtenName, Schemas.SchemaObject resolved, string procedure = "") =>
         CheckSchemaObject(batch, permission, SecurableFor(batch, writtenName, resolved), procedure);
-    }
 
     /// <summary>
     /// The securable a reference written as <paramref name="writtenName"/> is
@@ -272,42 +360,42 @@ internal static class PermissionEnforcement
         return Database.DefaultSchemaName;
     }
 
-    /// <summary>Whether the effective principal may run any DDL (a <c>db_owner</c> / <c>db_ddladmin</c> member) — the gate for the statements that raise Msg 15247 (CREATE SEQUENCE / ROLE / USER / SCHEMA). True for dbo / module bodies.</summary>
-    internal static bool HasDdlAdminCapability(BatchContext batch) =>
-        !Applies(batch)
-        || PermissionChecker.IsDdlAdminOrOwner(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId);
+    /// <summary>Whether the effective principal may run any DDL in <paramref name="database"/> (a <c>db_owner</c> / <c>db_ddladmin</c> member) — the gate for the statements that raise Msg 15247 (CREATE SEQUENCE / ROLE / USER / SCHEMA). True for dbo / module bodies.</summary>
+    internal static bool HasDdlAdminCapability(BatchContext batch, Database database) =>
+        !TryResolveScope(batch, database, out var principalId)
+        || PermissionChecker.IsDdlAdminOrOwner(database, principalId);
 
-    /// <summary>Whether the effective principal is a <c>db_owner</c> member (the DROP USER gate). True for dbo / module bodies.</summary>
-    internal static bool IsOwner(BatchContext batch) =>
-        !Applies(batch)
-        || PermissionChecker.IsOwner(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId);
+    /// <summary>Whether the effective principal is a <c>db_owner</c> member of <paramref name="database"/> (the DROP USER gate). True for dbo / module bodies.</summary>
+    internal static bool IsOwner(BatchContext batch, Database database) =>
+        !TryResolveScope(batch, database, out var principalId)
+        || PermissionChecker.IsOwner(database, principalId);
 
-    /// <summary>Whether the effective principal holds a database-scope permission (CREATE TABLE gate, CONNECT, etc.). Always true for dbo / module bodies.</summary>
-    internal static bool HasDatabasePermission(BatchContext batch, string permission) =>
-        !Applies(batch)
-        || PermissionChecker.IsGranted(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId,
+    /// <summary>Whether the effective principal holds a database-scope permission in <paramref name="database"/> (CREATE TABLE gate, CONNECT, etc.). Always true for dbo / module bodies.</summary>
+    internal static bool HasDatabasePermission(BatchContext batch, Database database, string permission) =>
+        !TryResolveScope(batch, database, out var principalId)
+        || PermissionChecker.IsGranted(database, principalId,
             Permission.Resolve(permission), PermissionChecker.ClassDatabase, 0, 0);
 
     /// <summary>
-    /// Whether the effective principal holds ALTER on the given schema (the DDL
-    /// gate for CREATE TABLE / VIEW / PROCEDURE / FUNCTION and DROP TABLE). True
-    /// for dbo / module bodies; satisfied by schema-scope ALTER / CONTROL,
-    /// database-scope ALTER / CONTROL, and the <c>db_ddladmin</c> / <c>db_owner</c>
-    /// fixed roles — but NOT by an object-scope ALTER (probe M5b).
+    /// Whether the effective principal holds ALTER on <paramref name="schema"/>
+    /// (the DDL gate for CREATE TABLE / VIEW / PROCEDURE / FUNCTION and DROP
+    /// TABLE). True for dbo / module bodies; satisfied by schema-scope ALTER /
+    /// CONTROL, database-scope ALTER / CONTROL, and the <c>db_ddladmin</c> /
+    /// <c>db_owner</c> fixed roles — but NOT by an object-scope ALTER (probe M5b).
     /// </summary>
-    internal static bool HasSchemaAlter(BatchContext batch, int schemaId) =>
-        !Applies(batch)
-        || PermissionChecker.IsGranted(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId,
-            Permission.Alter, PermissionChecker.ClassSchema, schemaId, 0);
+    internal static bool HasSchemaAlter(BatchContext batch, Schema schema) =>
+        !TryResolveScope(batch, schema.Database, out var principalId)
+        || PermissionChecker.IsGranted(schema.Database, principalId,
+            Permission.Alter, PermissionChecker.ClassSchema, schema.SchemaId, 0);
 
     /// <summary>
     /// Whether the effective principal holds ALTER on the given object (the DDL
     /// gate for ALTER TABLE — object-scope ALTER suffices, probe M5b). True for
     /// dbo / module bodies.
     /// </summary>
-    internal static bool HasObjectAlter(BatchContext batch, int objectId, int schemaId) =>
-        !Applies(batch)
-        || PermissionChecker.IsGranted(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId,
+    internal static bool HasObjectAlter(BatchContext batch, Database database, int objectId, int schemaId) =>
+        !TryResolveScope(batch, database, out var principalId)
+        || PermissionChecker.IsGranted(database, principalId,
             Permission.Alter, PermissionChecker.ClassObject, objectId, schemaId);
 
     /// <summary>
@@ -318,11 +406,11 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static void CheckCreateModule(BatchContext batch, string permission, string moduleName, Schema schema)
     {
-        if (!Applies(batch))
+        if (!Applies(batch, schema.Database))
             return;
-        if (!HasDatabasePermission(batch, permission))
-            throw SimulatedSqlException.CreateModulePermissionDenied(permission, batch.CurrentDatabase.Name, moduleName);
-        if (!HasSchemaAlter(batch, schema.SchemaId))
+        if (!HasDatabasePermission(batch, schema.Database, permission))
+            throw SimulatedSqlException.CreateModulePermissionDenied(permission, schema.Database.Name, moduleName);
+        if (!HasSchemaAlter(batch, schema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
     }
 }

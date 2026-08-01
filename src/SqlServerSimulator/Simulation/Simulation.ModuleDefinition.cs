@@ -56,7 +56,7 @@ public sealed partial class Simulation
             return existing is View or UserDefinedFunction
                 && SchemaBinding.FindReferencingModule(context.CurrentDatabase, existing) is { } referencing
                 ? throw SimulatedSqlException.CannotAlterReferencedBySchemaBoundObject(
-                    $"{schema.Name}.{existing.Name}", existing.Name, referencing.Name)
+                    name.ToString(), existing.Name, referencing.Name)
                 : existing;
         }
         return schema.HasNameInSharedNamespace(name.Leaf)

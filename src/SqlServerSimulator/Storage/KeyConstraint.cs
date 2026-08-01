@@ -19,9 +19,28 @@ internal enum KeyConstraintKind
 /// declaration ordinals) so the enforcement loop can decode key columns
 /// directly from row bytes via <see cref="RowDecoder"/>.
 /// </summary>
-internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals, int objectId, bool isClustered, bool ignoreDupKey, bool[]? descending = null)
+internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals, int objectId, bool isClustered, bool ignoreDupKey, DateTime createDate, bool[]? descending = null)
 {
     public readonly KeyConstraintKind Kind = kind;
+
+    /// <summary>
+    /// UTC creation timestamp — the declaring statement's frozen
+    /// <c>UtcNow</c>, so a constraint declared inside <c>CREATE TABLE</c>
+    /// shares the table's instant while an <c>ALTER TABLE … ADD CONSTRAINT</c>
+    /// carries the later one (probe-confirmed). Surfaces in
+    /// <c>sys.objects.create_date</c> and the per-family constraint catalog
+    /// view's <c>create_date</c>.
+    /// </summary>
+    public readonly DateTime CreateDate = createDate;
+
+    /// <summary>
+    /// UTC modification timestamp — equal to <see cref="CreateDate"/> until an
+    /// <c>ALTER TABLE … {NOCHECK|CHECK} CONSTRAINT</c> trust toggle or an
+    /// <c>sp_rename</c> of the constraint advances it (both probe-confirmed).
+    /// Surfaces in <c>sys.objects.modify_date</c> and the per-family
+    /// constraint catalog view's <c>modify_date</c>.
+    /// </summary>
+    public DateTime ModifyDate = createDate;
 
     public readonly string Name = name;
 

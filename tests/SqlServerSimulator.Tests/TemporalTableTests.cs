@@ -991,4 +991,232 @@ public sealed class TemporalTableTests
             "Setting SYSTEM_VERSIONING to ON failed because column 'Nom' at ordinal 2 in history table 'simulated.dbo.CustomersHistory' has a different name than the column 'Name' at the same ordinal in table 'simulated.dbo.Customers'.");
         AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.tables where name = 'Customers'"));
     }
+
+    /// <summary>
+    /// Real gives every engine-built history table a non-unique clustered
+    /// index named <c>ix_&lt;history table&gt;</c> keyed on <c>(period end,
+    /// period start)</c> — probe-confirmed on SQL Server 2025, including that
+    /// the index takes <c>index_id 1</c> (so the history table projects no
+    /// HEAP row) and that <c>key_ordinal</c> puts the end column first.
+    /// </summary>
+    [TestMethod]
+    public void HistoryIndex_AutoCreatedSibling_IsClusteredOnPeriodEndThenStart()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(CreateTemporalCustomers);
+        AreEqual("ix_CustomersHistory", simulation.ExecuteScalar("select name from sys.indexes where object_id = object_id('dbo.CustomersHistory')"));
+        AreEqual(1, simulation.ExecuteScalar("select index_id from sys.indexes where object_id = object_id('dbo.CustomersHistory')"));
+        AreEqual("CLUSTERED", simulation.ExecuteScalar("select type_desc from sys.indexes where object_id = object_id('dbo.CustomersHistory')"));
+        IsFalse((bool)simulation.ExecuteScalar("select is_unique from sys.indexes where object_id = object_id('dbo.CustomersHistory')")!);
+        // Exactly one row: the clustered entry suppresses the HEAP row.
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('dbo.CustomersHistory')"));
+        AreEqual("Vt", simulation.ExecuteScalar("select c.name from sys.index_columns ic join sys.columns c on c.object_id = ic.object_id and c.column_id = ic.column_id where ic.object_id = object_id('dbo.CustomersHistory') and ic.key_ordinal = 1"));
+        AreEqual("Vf", simulation.ExecuteScalar("select c.name from sys.index_columns ic join sys.columns c on c.object_id = ic.object_id and c.column_id = ic.column_id where ic.object_id = object_id('dbo.CustomersHistory') and ic.key_ordinal = 2"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.index_columns where object_id = object_id('dbo.CustomersHistory') and (is_descending_key = 1 or is_included_column = 1)"));
+    }
+
+    [TestMethod]
+    public void HistoryIndex_AutoNamedSibling_TakesIxPrefixedName()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table Customers (
+                Id int not null primary key,
+                Vf datetime2 generated always as row start not null,
+                Vt datetime2 generated always as row end not null,
+                period for system_time (Vf, Vt)
+            ) with (system_versioning = on)
+            """);
+        var historyName = (string)simulation.ExecuteScalar("select name from sys.tables where temporal_type = 1")!;
+        StartsWith("MSSQL_TemporalHistoryFor_", historyName);
+        AreEqual($"ix_{historyName}", simulation.ExecuteScalar("select name from sys.indexes where object_id = (select object_id from sys.tables where temporal_type = 1)"));
+    }
+
+    [TestMethod]
+    public void HistoryIndex_SiblingBuiltByAlter_GetsTheSameIndex()
+    {
+        // The ALTER path builds a named-but-missing history table from the
+        // base's shape, so it carries the cleanup index too.
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("""
+            create table Customers (
+                Id int not null primary key,
+                Vf datetime2 generated always as row start not null,
+                Vt datetime2 generated always as row end not null,
+                period for system_time (Vf, Vt)
+            );
+            """,
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory))");
+        AreEqual("ix_CustomersHistory", simulation.ExecuteScalar("select name from sys.indexes where object_id = object_id('dbo.CustomersHistory') and type_desc = 'CLUSTERED'"));
+    }
+
+    [TestMethod]
+    public void HistoryIndex_SurfacesThroughSpHelpindex()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(CreateTemporalCustomers);
+        using var reader = simulation.ExecuteReader("exec sp_helpindex 'dbo.CustomersHistory'");
+        IsTrue(reader.Read());
+        AreEqual("ix_CustomersHistory", reader.GetString(0));
+        AreEqual("clustered located on PRIMARY", reader.GetString(1));
+        AreEqual("Vt, Vf", reader.GetString(2));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void HistoryIndex_AdoptedExistingTable_StaysAHeap()
+    {
+        // Probe-confirmed: real only builds the index when it builds the
+        // table — an adopted history table keeps whatever indexing it had.
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            CreateUnversionedTemporalPair,
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory))");
+        AreEqual("HEAP", simulation.ExecuteScalar("select type_desc from sys.indexes where object_id = object_id('dbo.CustomersHistory')"));
+    }
+
+    [TestMethod]
+    public void HistoryRetention_FiniteOnHeapHistory_RaisesMsg13765State1()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(CreateUnversionedTemporalPair);
+        // Same ALTER that turns versioning on.
+        var error = simulation.AssertSqlError(
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 3 months))",
+            13765);
+        AreEqual("Setting finite retention period failed on system-versioned temporal table 'simulated.dbo.Customers' because the history table 'simulated.dbo.CustomersHistory' does not contain required clustered index. Consider creating a clustered columnstore or B-tree index starting with the column that matches end of SYSTEM_TIME period, on the history table.", error.Message);
+        AreEqual((byte)1, error.State);
+        // Nothing linked: the whole statement is refused.
+        AreEqual((byte)0, simulation.ExecuteScalar("select temporal_type from sys.tables where name = 'Customers'"));
+
+        // And the re-issue order — versioning already on, retention added later.
+        _ = simulation.ExecuteNonQuery("alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory))");
+        var reissue = simulation.AssertSqlError(
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 3 months))",
+            13765);
+        AreEqual((byte)1, reissue.State);
+        AreEqual("INFINITE", simulation.ExecuteScalar("select history_retention_period_unit_desc from sys.tables where name = 'Customers'"));
+    }
+
+    [TestMethod]
+    public void HistoryRetention_FiniteWithNonclusteredEndIndex_RaisesMsg13765State1()
+    {
+        // State 1 is "no clustered index at all" — a nonclustered index on the
+        // right columns doesn't count (probe-confirmed).
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"{CreateUnversionedTemporalPair} create index ix_h on CustomersHistory (Vt, Vf);");
+        var error = simulation.AssertSqlError(
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 3 months))",
+            13765);
+        AreEqual((byte)1, error.State);
+    }
+
+    [TestMethod]
+    public void HistoryRetention_FiniteWithWrongLeadingClustered_RaisesMsg13765State2()
+    {
+        // State 2 is "a clustered index that leads with another column"
+        // (probe-confirmed, from both the versioning-on and re-issue paths).
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"{CreateUnversionedTemporalPair} create clustered index ix_h on CustomersHistory (Vf, Vt);");
+        var error = simulation.AssertSqlError(
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 3 months))",
+            13765);
+        AreEqual((byte)2, error.State);
+
+        _ = simulation.ExecuteNonQuery("alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory))");
+        AreEqual((byte)2, simulation.AssertSqlError(
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 3 months))",
+            13765).State);
+    }
+
+    [TestMethod]
+    public void HistoryRetention_FiniteWithEndLeadingClustered_IsAccepted()
+    {
+        // The requirement is the leading key column alone: the columns after
+        // it and the ASC / DESC direction are both irrelevant.
+        foreach (var keys in new[] { "Vt", "Vt desc", "Vt, Vf", "Vt desc, Vf", "Vt, Id" })
+        {
+            var simulation = new Simulation();
+            simulation.ExecuteBatches(
+                $"{CreateUnversionedTemporalPair} create clustered index ix_h on CustomersHistory ({keys});",
+                "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 3 months))");
+            AreEqual("MONTH", simulation.ExecuteScalar("select history_retention_period_unit_desc from sys.tables where name = 'Customers'"));
+        }
+    }
+
+    [TestMethod]
+    public void HistoryRetention_InfiniteOnHeapHistory_IsAccepted()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            CreateUnversionedTemporalPair,
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = infinite))");
+        AreEqual("INFINITE", simulation.ExecuteScalar("select history_retention_period_unit_desc from sys.tables where name = 'Customers'"));
+    }
+
+    [TestMethod]
+    public void HistoryRetention_CreateTableWithHeapHistory_RaisesMsg13765AndLeavesNoBase()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table CustomersHistory (Id int not null, Name nvarchar(30) not null, Vf datetime2 not null, Vt datetime2 not null)");
+        var error = simulation.AssertSqlError(
+            CreateTemporalCustomers.Replace("hidden ", "", StringComparison.Ordinal)
+                .Replace("history_table = dbo.CustomersHistory", "history_table = dbo.CustomersHistory, history_retention_period = 3 months", StringComparison.Ordinal),
+            13765);
+        AreEqual((byte)1, error.State);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.tables where name = 'Customers'"));
+        AreEqual((byte)0, simulation.ExecuteScalar("select temporal_type from sys.tables where name = 'CustomersHistory'"));
+    }
+
+    [TestMethod]
+    public void HistoryIndex_DropWhileFiniteRetention_RaisesMsg13766()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            CreateTemporalCustomers,
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 3 months))");
+        simulation.AssertSqlError(
+            "drop index ix_CustomersHistory on CustomersHistory",
+            13766,
+            "Cannot drop the clustered index 'dbo.CustomersHistory.ix_CustomersHistory' because it is being used for automatic cleanup of aged data. Consider setting HISTORY_RETENTION_PERIOD to INFINITE on the corresponding system-versioned temporal table if you need to drop this index.");
+        // The deprecated two-part DROP INDEX form reports it identically.
+        AreEqual(13766, simulation.AssertSqlError("drop index dbo.CustomersHistory.ix_CustomersHistory", 13766).Number);
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('dbo.CustomersHistory') and type_desc = 'CLUSTERED'"));
+    }
+
+    [TestMethod]
+    public void HistoryIndex_DropOnceRetentionRelaxed_Succeeds()
+    {
+        // Real releases the index the moment the base stops needing it —
+        // retention back to INFINITE, or versioning off entirely.
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            CreateTemporalCustomers,
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 3 months))",
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = infinite))",
+            "drop index ix_CustomersHistory on CustomersHistory");
+        AreEqual("HEAP", simulation.ExecuteScalar("select type_desc from sys.indexes where object_id = object_id('dbo.CustomersHistory')"));
+
+        var versioningOff = new Simulation();
+        versioningOff.ExecuteBatches(
+            CreateTemporalCustomers,
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 3 months))",
+            "alter table Customers set (system_versioning = off)",
+            "drop index ix_CustomersHistory on CustomersHistory");
+        AreEqual("HEAP", versioningOff.ExecuteScalar("select type_desc from sys.indexes where object_id = object_id('dbo.CustomersHistory')"));
+    }
+
+    [TestMethod]
+    public void HistoryIndex_DropNonclusteredWhileFiniteRetention_Succeeds()
+    {
+        // Msg 13766 pins the clustered index alone; a secondary index on the
+        // same history table drops as usual.
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            CreateTemporalCustomers,
+            "create index ix_extra on CustomersHistory (Id)",
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, history_retention_period = 3 months))",
+            "drop index ix_extra on CustomersHistory");
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('dbo.CustomersHistory')"));
+    }
 }

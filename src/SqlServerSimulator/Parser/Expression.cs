@@ -1146,10 +1146,38 @@ internal abstract class Expression
         };
     }
 
+    /// <summary>
+    /// Notes a side-effecting built-in inside a function body being bound at
+    /// <c>CREATE</c> — real's Msg 443, which embeds the name the way the
+    /// catalog spells it (probe-confirmed lower-case for these three; the
+    /// unmodeled <c>CRYPT_GEN_RANDOM</c> real reports as
+    /// <c>'Crypt_Gen_Random'</c>). The date / time built-ins are deterministic
+    /// enough for real to allow them here even though the indexed-view battery
+    /// above rejects them, so the two sets deliberately differ.
+    /// </summary>
+    private static void RecordSideEffectingBuiltIn(string name, ParserContext context)
+    {
+        if (context.Batch.FunctionBodyShape is null)
+            return;
+
+        Span<char> upper = stackalloc char[name.Length];
+        var length = name.ToUpperInvariant(upper);
+        var operatorName = length switch
+        {
+            4 => upper[..length] is "RAND" ? "rand" : null,
+            5 => upper[..length] is "NEWID" ? "newid" : null,
+            15 => upper[..length] is "NEWSEQUENTIALID" ? "newsequentialid" : null,
+            _ => null,
+        };
+        if (operatorName is not null)
+            FunctionBodyShape.NoteSideEffect(context.Batch, operatorName, FunctionBodyShape.BuiltInOperatorState);
+    }
+
     private static Expression ResolveBuiltIn(string name, ParserContext context)
     {
         Span<char> uppercaseName = stackalloc char[name.Length];
         RecordNondeterministicBuiltIn(name, context);
+        RecordSideEffectingBuiltIn(name, context);
         _ = name.ToUpperInvariant(uppercaseName);
         if (!ConstantFolding.IsFoldedBuiltIn(uppercaseName))
             return ResolveBuiltInCore(uppercaseName, name, context);

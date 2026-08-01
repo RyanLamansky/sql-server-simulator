@@ -629,6 +629,24 @@ partial class SimulatedSqlException
         new($"Implicit conversion of {type.SqlServerName} value to {type.SqlServerName} cannot be performed because the collation of the value is unresolved due to a collation conflict between \"{rightCollation}\" and \"{leftCollation}\" in {operatorName} operator.", 457, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 451: an operator couldn't pick one collation for
+    /// an output column that has to name one. Probe-confirmed against SQL
+    /// Server 2025: Class 16 State 1, the conflicting pair in the same
+    /// right-then-left order Msg 457 / 468 use, and a tail naming the clause
+    /// and the 1-based ordinal of the slot being settled —
+    /// <c>SELECT</c> / <c>ORDER BY</c> / <c>GROUP BY</c>, each spelled
+    /// "&lt;clause&gt; statement". Note the wording carries no leading
+    /// <i>the</i> where Msg 468's does.
+    /// </summary>
+    internal static SimulatedSqlException UnresolvedCollationInOutputColumn(
+        string rightCollation,
+        string leftCollation,
+        string operatorName,
+        string clause,
+        int ordinal) =>
+        new($"Cannot resolve collation conflict between \"{rightCollation}\" and \"{leftCollation}\" in {operatorName} operator occurring in {clause} statement column {ordinal}.", 451, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 8116 — the bit-manipulation family
     /// (<c>BIT_COUNT</c> / <c>GET_BIT</c> / <c>SET_BIT</c> / <c>LEFT_SHIFT</c> /
     /// <c>RIGHT_SHIFT</c>) raises this when argument 1 isn't an integer

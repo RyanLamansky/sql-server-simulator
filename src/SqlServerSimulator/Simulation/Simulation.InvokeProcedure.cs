@@ -58,7 +58,7 @@ partial class Simulation
         }
         else
         {
-            PermissionEnforcement.CheckObject(outerBatch, "EXECUTE", procedure.ObjectId, procedure.SchemaId,
+            PermissionEnforcement.CheckObject(outerBatch, procedure.Schema.Database, "EXECUTE", procedure.ObjectId, procedure.SchemaId,
                 procedure.Name, procedure.Schema.Name, procedure: $"{procedure.Schema.Name}.{procedure.Name}");
         }
 

@@ -82,6 +82,17 @@ partial class SimulatedSqlException
         new($"Database '{databaseName}' does not exist. Make sure that the name is entered correctly.", 911, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 5011: <c>ALTER DATABASE &lt;name&gt;</c> names a
+    /// database this <see cref="Simulation"/> doesn't host. Wording
+    /// probe-confirmed against SQL Server 2025 (severity 14, state 5), where a
+    /// trailing Msg 5069 (<c>ALTER DATABASE statement failed.</c>) follows it —
+    /// the simulator surfaces the informative first error alone, the same
+    /// stance it takes on the Msg 300 / 297 pair.
+    /// </summary>
+    internal static SimulatedSqlException CannotAlterDatabase(string databaseName) =>
+        new($"User does not have permission to alter database '{databaseName}', the database does not exist, or the database is not in a state that allows access checks.", 5011, 14, 5);
+
+    /// <summary>
     /// Mimics SQL Server error 15664: a <c>sp_set_session_context</c> call
     /// targeted a key previously set with <c>@read_only = 1</c> in this
     /// session. Wording probe-confirmed against SQL Server 2025. Class 16 State 1.
@@ -965,26 +976,28 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 3729: a <c>DROP</c> targeted an object that a
     /// <c>WITH SCHEMABINDING</c> module references. <paramref name="statement"/>
     /// is the verb pair real echoes (<c>DROP TABLE</c> / <c>DROP VIEW</c> /
-    /// <c>DROP FUNCTION</c>), the target is schema-qualified, and the blocking
+    /// <c>DROP FUNCTION</c>), the target is echoed as the statement spelled it
+    /// (<c>'t'</c> unqualified, <c>'dbo.t'</c> qualified), and the blocking
     /// module surfaces as its bare leaf. Probe-confirmed verbatim against SQL
     /// Server 2025 — state 1, distinct from the ALTER form's state 3.
     /// </summary>
     internal static SimulatedSqlException CannotDropReferencedBySchemaBoundObject(
-        string statement, string qualifiedName, string referencingName) =>
-        new($"Cannot {statement} '{qualifiedName}' because it is being referenced by object '{referencingName}'.", 3729, 16, 1);
+        string statement, string writtenName, string referencingName) =>
+        new($"Cannot {statement} '{writtenName}' because it is being referenced by object '{referencingName}'.", 3729, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 3729: an <c>ALTER</c> (or <c>CREATE OR
     /// ALTER</c>) of a view or function that a <c>WITH SCHEMABINDING</c>
     /// module references. Real omits the object kind here — the message reads
-    /// <c>Cannot ALTER 'dbo.f'</c> — carries state 3, and attributes the error
-    /// to the altered module as its Procedure. Probe-confirmed verbatim.
+    /// <c>Cannot ALTER 'dbo.f'</c> — echoes the name as the statement spelled
+    /// it, carries state 3, and attributes the error to the altered module as
+    /// its Procedure. Probe-confirmed verbatim.
     /// </summary>
     internal static SimulatedSqlException CannotAlterReferencedBySchemaBoundObject(
-        string qualifiedName, string moduleLeafName, string referencingName) =>
-        new($"Cannot ALTER '{qualifiedName}' because it is being referenced by object '{referencingName}'.",
+        string writtenName, string moduleLeafName, string referencingName) =>
+        new($"Cannot ALTER '{writtenName}' because it is being referenced by object '{referencingName}'.",
             new SimulatedError(@class: 16, lineNumber: 0,
-                message: $"Cannot ALTER '{qualifiedName}' because it is being referenced by object '{referencingName}'.",
+                message: $"Cannot ALTER '{writtenName}' because it is being referenced by object '{referencingName}'.",
                 number: 3729, procedure: moduleLeafName, server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 3));
 
     /// <summary>
@@ -1288,6 +1301,28 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException InvalidHistoryRetentionUnit(string unit) =>
         new($"'{unit}' is not a valid history retention period unit for system versioning.", 13744, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13765: a finite <c>HISTORY_RETENTION_PERIOD</c>
+    /// was asked for on a base whose history table carries no clustered index
+    /// leading with the period end column — the index real's aged-data cleanup
+    /// task seeks through. State 1 when the history table has no clustered
+    /// index at all, state 2 when it has one that leads with another column;
+    /// both probe-confirmed, as is the wording and the database-qualified
+    /// naming of both tables.
+    /// </summary>
+    internal static SimulatedSqlException FiniteRetentionRequiresHistoryClusteredIndex(string qualifiedTableName, string qualifiedHistoryName, byte state) =>
+        new($"Setting finite retention period failed on system-versioned temporal table '{qualifiedTableName}' because the history table '{qualifiedHistoryName}' does not contain required clustered index. Consider creating a clustered columnstore or B-tree index starting with the column that matches end of SYSTEM_TIME period, on the history table.", 13765, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 13766: <c>DROP INDEX</c> targeted the clustered
+    /// index a finite-retention history table needs. Real releases it once the
+    /// corresponding base is back at INFINITE retention (or versioning is off),
+    /// which is what the message's second sentence points at. Probe-confirmed
+    /// wording; the index is named <c>schema.table.index</c> like Msg 3701's.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropRetentionCleanupIndex(string qualifiedTableName, string indexName) =>
+        new($"Cannot drop the clustered index '{qualifiedTableName}.{indexName}' because it is being used for automatic cleanup of aged data. Consider setting HISTORY_RETENTION_PERIOD to INFINITE on the corresponding system-versioned temporal table if you need to drop this index.", 13766, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 4902: <c>ALTER TABLE</c> named a target that

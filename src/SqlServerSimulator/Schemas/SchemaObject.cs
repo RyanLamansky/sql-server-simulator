@@ -126,6 +126,34 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     public bool UsesQuotedIdentifier = true;
 
     /// <summary>
+    /// The session <c>ANSI_NULLS</c> setting captured when this object was
+    /// created, re-stamped by <c>ALTER</c> / <c>CREATE OR ALTER</c>. Surfaces
+    /// in <c>sys.tables.uses_ansi_nulls</c> /
+    /// <c>sys.sql_modules.uses_ansi_nulls</c> and
+    /// <c>OBJECTPROPERTY(id, 'IsAnsiNullsOn' | 'ExecIsAnsiNullsOn')</c>.
+    /// Unlike <see cref="UsesQuotedIdentifier"/> a table captures it too —
+    /// real answers 0 for a table created under <c>SET ANSI_NULLS OFF</c>
+    /// (probe-confirmed).
+    /// Metadata only: real also freezes a module's <c>=</c>-against-NULL
+    /// comparison semantics to the captured setting, which the simulator does
+    /// not model — <c>SET ANSI_NULLS OFF</c> parses and discards, so every
+    /// comparison stays ANSI whatever this records.
+    /// </summary>
+    public bool UsesAnsiNulls = true;
+
+    /// <summary>
+    /// The database principal a module's <c>WITH EXECUTE AS</c> clause
+    /// resolved to at CREATE, or <see langword="null"/> for <c>CALLER</c> and
+    /// for a module with no clause. <c>OWNER</c> stores the sentinel
+    /// <c>-2</c>, <c>SELF</c> the creating session's principal id, and a named
+    /// user that user's id — real's own encoding, surfaced verbatim in
+    /// <c>sys.sql_modules.execute_as_principal_id</c>. The textual clause
+    /// stays on the concrete module type, which is what the invocation path
+    /// pushes as an impersonation frame.
+    /// </summary>
+    public int? ExecuteAsPrincipalId;
+
+    /// <summary>
     /// True for the object kinds that carry a T-SQL module body — the set
     /// <c>sys.sql_modules</c> emits a row for, and the set whose null
     /// <see cref="DefinitionText"/> therefore means <c>WITH ENCRYPTION</c>

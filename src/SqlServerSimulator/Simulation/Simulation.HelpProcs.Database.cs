@@ -240,6 +240,9 @@ partial class Simulation
             growth,
             SqlValue.FromString(HelpFileUsageType, "data only"),
         ];
+        // The log file's maxsize renders its 2 TB ceiling in KB rather than
+        // "Unlimited" (probe-confirmed), the same ceiling
+        // sys.database_files.max_size reports in pages.
         SqlValue[] log =
         [
             SqlValue.FromSystemName(database.Name + "_Log"),
@@ -247,7 +250,7 @@ partial class Simulation
             SqlValue.FromString(HelpFilePathType, BuiltInResources.LogFilePath(database.Name)),
             nullFilegroup,
             SqlValue.FromString(HelpFileSizeType, HelpFileKilobytes(BuiltInResources.LogFileSizePages)),
-            unlimited,
+            SqlValue.FromString(HelpFileSizeType, HelpFileKilobytes(BuiltInResources.LogFileMaxSizePages)),
             growth,
             SqlValue.FromString(HelpFileUsageType, "log only"),
         ];

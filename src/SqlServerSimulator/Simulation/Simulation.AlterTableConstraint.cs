@@ -92,7 +92,7 @@ partial class Simulation
         // raised whether or not WITH NOCHECK skipped the data validation.
         RejectCheckOverNonPersistedComputedColumn(context.Batch.CurrentDatabase.Collation, table.Name, table.Columns, predicate);
         var name = explicitName ?? AutoCheckName(table.Name, null, table.CheckConstraints.Count);
-        var constraint = new CheckConstraint(name, predicate, null, context.CurrentDatabase.AllocateObjectId())
+        var constraint = new CheckConstraint(name, predicate, null, context.CurrentDatabase.AllocateObjectId(), context.Batch.CurrentStatement.UtcNow)
         {
             IsSystemNamed = explicitName is null,
             IsNotTrusted = withNoCheck,
@@ -308,7 +308,7 @@ partial class Simulation
                 throw SimulatedSqlException.MoreThanOneClusteredIndex(table.Name, existingClustered);
         }
 
-        var constraint = new KeyConstraint(kind, name, storageOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered, ignoreDupKey, [.. descending]);
+        var constraint = new KeyConstraint(kind, name, storageOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered, ignoreDupKey, context.Batch.CurrentStatement.UtcNow, [.. descending]);
         ValidateExistingRowsForKeyConstraint(table, constraint);
         table.KeyConstraints.Add(constraint);
         return true;
@@ -388,7 +388,8 @@ partial class Simulation
             expression,
             context.CurrentDatabase.AllocateObjectId(),
             isSystemNamed: explicitName is null,
-            definition: definition);
+            definition: definition,
+            createDate: context.Batch.CurrentStatement.UtcNow);
         return true;
     }
 
@@ -759,7 +760,10 @@ partial class Simulation
         // Apply. For revalidate, the scan runs against each target with
         // IsDisabled cleared so the FK / CHECK enforcement walks would
         // normally fire — but we use the AlterAdd-bundle's validation
-        // helpers, which scan independently.
+        // helpers, which scan independently. Either direction of the toggle
+        // advances the constraint's own modify_date (probe-confirmed; the
+        // parent table's advances too, through the ALTER TABLE path).
+        var toggledAt = context.Batch.CurrentStatement.UtcNow;
         foreach (var fk in fkTargets)
         {
             if (disable)
@@ -779,6 +783,7 @@ partial class Simulation
                 }
                 fk.IsDisabled = false;
             }
+            fk.ModifyDate = toggledAt;
         }
         foreach (var ck in ckTargets)
         {
@@ -796,6 +801,7 @@ partial class Simulation
                 }
                 ck.IsDisabled = false;
             }
+            ck.ModifyDate = toggledAt;
         }
         return true;
     }

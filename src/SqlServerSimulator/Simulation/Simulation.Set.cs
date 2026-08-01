@@ -89,6 +89,7 @@ partial class Simulation
             // Every listed option shares the trailing ON|OFF value.
             foreach (var listed in sessionOptionNames)
                 RecordSessionStateOption(context, listed, commaOn);
+            FunctionBodyShape.NoteSideEffect(context.Batch, commaOn ? "SET OPTION ON" : "SET OPTION OFF", FunctionBodyShape.StatementOperatorState);
             return true;
         }
 
@@ -104,6 +105,15 @@ partial class Simulation
 
         if (!ConsumeValueForKind(context, firstKind))
             return false;
+
+        // Every SET form but `SET @v = …` is a side-effecting operator inside a
+        // function body; real names the boolean toggles 'SET OPTION ON' / 'OFF'
+        // and lumps the value-taking ones under 'SET COMMAND'.
+        FunctionBodyShape.NoteSideEffect(
+            context.Batch,
+            firstKind != SetOptionKind.OnOff ? "SET COMMAND"
+                : context.Token is ReservedKeyword { Keyword: Keyword.On } ? "SET OPTION ON" : "SET OPTION OFF",
+            FunctionBodyShape.StatementOperatorState);
 
         if (IsQuotedIdentifierOption(firstName) && context.Token is ReservedKeyword { Keyword: var qiOnOff })
             ApplyQuotedIdentifierOption(context, qiOnOff == Keyword.On);
@@ -318,6 +328,7 @@ partial class Simulation
             context.MoveNextRequired();
         if (newLevel != System.Data.IsolationLevel.Unspecified)
             context.Batch.Connection.SessionIsolationLevel = newLevel;
+        FunctionBodyShape.NoteSideEffect(context.Batch, "SET TRANSACTION ISOLATION LEVEL", FunctionBodyShape.StatementOperatorState);
         return true;
     }
 
@@ -359,7 +370,13 @@ partial class Simulation
     {
         var subOption = context.GetNextRequired();
         var onOff = context.GetNextRequired();
-        return subOption is StringToken && onOff is ReservedKeyword { Keyword: Keyword.On or Keyword.Off };
+        if (subOption is not StringToken || onOff is not ReservedKeyword { Keyword: var statisticsOnOff and (Keyword.On or Keyword.Off) })
+            return false;
+        FunctionBodyShape.NoteSideEffect(
+            context.Batch,
+            statisticsOnOff == Keyword.On ? "SET STATISTICS ON" : "SET STATISTICS OFF",
+            FunctionBodyShape.StatementOperatorState);
+        return true;
     }
 
     /// <summary>
@@ -399,6 +416,13 @@ partial class Simulation
             context.Connection.TextSize = requested == -1 ? -1 : requested <= 0 ? 4096 : requested;
         }
 
+        // Real names these two apart from the generic value-taking options
+        // (probe-confirmed: 'SET ROW COUNT' with the words split, 'SET TEXTSIZE'
+        // without).
+        FunctionBodyShape.NoteSideEffect(
+            context.Batch,
+            applyTextSize ? "SET TEXTSIZE" : "SET ROW COUNT",
+            FunctionBodyShape.StatementOperatorState);
         return true;
     }
 
@@ -639,6 +663,11 @@ partial class Simulation
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: var onOff } || onOff is not (Keyword.On or Keyword.Off))
             return false;
+
+        FunctionBodyShape.NoteSideEffect(
+            context.Batch,
+            onOff == Keyword.On ? "SET IDENTITY_INSERT ON" : "SET IDENTITY_INSERT OFF",
+            FunctionBodyShape.StatementOperatorState);
 
         if (context.Batch.IsSkipping)
             return true;

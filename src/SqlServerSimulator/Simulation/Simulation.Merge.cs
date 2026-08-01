@@ -72,6 +72,7 @@ partial class Simulation
         }
         if (destinationTable.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);
+        FunctionBodyShape.NoteTableWrite(context.Batch, "MERGE", destinationTable);
 
         // MERGE target hints: hint-then-alias placement
         // (probe-confirmed: `MERGE INTO t WITH (TABLOCK) AS x USING …` works,
@@ -196,9 +197,9 @@ partial class Simulation
     /// </summary>
     private static void CheckMergePermissions(BatchContext batch, MultiPartName destinationName, SchemaObject destination, IReadOnlyList<WhenClause> whenClauses)
     {
-        if (!PermissionEnforcement.Applies(batch))
-            return;
         var target = PermissionEnforcement.SecurableFor(batch, destinationName, destination);
+        if (!PermissionEnforcement.Applies(batch, batch.DatabaseFor(target)))
+            return;
         void Check(string permission) => PermissionEnforcement.CheckSchemaObject(batch, permission, target);
 
         Check("SELECT");

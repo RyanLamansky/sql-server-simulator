@@ -4,6 +4,7 @@ using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
+using StoredIndex = SqlServerSimulator.Storage.Index;
 
 namespace SqlServerSimulator;
 
@@ -161,11 +162,11 @@ partial class Simulation
                 _ => null,
             };
             // A PERSISTED computed column stores its expression's value, so
-            // real refuses to create one from a session that would read the
-            // expression's `"…"` the other way (Msg 1934, probe-confirmed —
-            // the non-persisted form is accepted).
-            if (pending.Persisted && !context.QuotedIdentifiers)
-                throw SimulatedSqlException.IncorrectSetOptions("CREATE TABLE", QuotedIdentifierOptionName);
+            // real refuses to create one from a session whose SET options
+            // would read the expression differently (Msg 1934,
+            // probe-confirmed — the non-persisted form is accepted).
+            if (pending.Persisted && IncorrectSetOptionNames(context) is { } setOptions)
+                throw SimulatedSqlException.IncorrectSetOptions("CREATE TABLE", setOptions);
             heapColumns[pending.Index] = new HeapColumn(
                 pending.Name,
                 resolvedType,
@@ -237,8 +238,9 @@ partial class Simulation
         // CREATE TABLE requires db_ddladmin / db_owner membership (or an
         // explicit CREATE TABLE grant) for a non-dbo principal — Msg 262.
         // Temp tables are exempt (anyone may create #temp).
-        if (!isTempTable && !PermissionEnforcement.HasDatabasePermission(context.Batch, "CREATE TABLE"))
-            throw SimulatedSqlException.CreateTablePermissionDenied(context.CurrentDatabase.Name);
+        var createTargetDatabase = context.Batch.DatabaseForName(tableName);
+        if (!isTempTable && !PermissionEnforcement.HasDatabasePermission(context.Batch, createTargetDatabase, "CREATE TABLE"))
+            throw SimulatedSqlException.CreateTablePermissionDenied(createTargetDatabase.Name);
         Schema? schema = null;
         var schemaId = Database.DboSchemaId;
         ConcurrentDictionary<string, HeapTable> destination;
@@ -264,7 +266,7 @@ partial class Simulation
             // CREATE TABLE also needs ALTER on the target schema — with the
             // db-scope CREATE TABLE permission granted but no schema ALTER, real
             // raises Msg 2760 (probe M4).
-            if (!PermissionEnforcement.HasSchemaAlter(context.Batch, schema.SchemaId))
+            if (!PermissionEnforcement.HasSchemaAlter(context.Batch, schema))
                 throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
             destination = schema.HeapTables;
             schemaId = schema.SchemaId;
@@ -276,8 +278,8 @@ partial class Simulation
         if (!isTempTable && schema!.HasNameInSharedNamespace(tableName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(tableName.Leaf);
 
-        var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase);
-        var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks, context.CurrentDatabase);
+        var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
+        var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
         var resolvedPeriod = ResolvePeriodColumns(context.Batch.CurrentDatabase.Collation, heapColumns!, pendingPeriod);
 
         // History-table pre-validation when SYSTEM_VERSIONING = ON: the parent
@@ -329,6 +331,7 @@ partial class Simulation
             periodColumns: resolvedPeriod)
         {
             OwningDatabase = owningDatabase,
+            UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };
         if (isGlobalTempTable)
             heapTable.OwnerConnection = context.Batch.Connection;
@@ -351,6 +354,7 @@ partial class Simulation
                 try
                 {
                     ValidateHistoryTableShape(context, heapTable, existingHistory);
+                    RequireHistoryCleanupIndex(context, heapTable, existingHistory, versioning);
                 }
                 catch
                 {
@@ -633,6 +637,53 @@ partial class Simulation
         }
     }
 
+    /// <summary>
+    /// Enforces real's Msg 13765: a finite <c>HISTORY_RETENTION_PERIOD</c> is
+    /// accepted only when the history table carries a clustered index whose
+    /// <b>leading</b> key column is the period end column — the one real's
+    /// aged-data cleanup task seeks through. An engine-built sibling always
+    /// satisfies it (see <see cref="BuildHistoryTable"/>); an adopted table has
+    /// to have been given one.
+    /// </summary>
+    /// <remarks>
+    /// Probe-confirmed against SQL Server 2025: the state splits on whether the
+    /// history table has a clustered index at all (state 1) or has one leading
+    /// with another column (state 2); the leading column's ASC / DESC direction
+    /// and every key column after the first are irrelevant, so a clustered
+    /// index on <c>(PeriodEnd DESC)</c> alone passes while a nonclustered one on
+    /// <c>(PeriodEnd, PeriodStart)</c> does not. <c>INFINITE</c> retention is
+    /// accepted on a plain heap history table. All three entry points behave
+    /// the same — CREATE TABLE adopting an existing sibling, ALTER TABLE
+    /// turning versioning on, and a re-issue against an already-versioned base.
+    /// </remarks>
+    private static void RequireHistoryCleanupIndex(ParserContext context, HeapTable baseTable, HeapTable history, SystemVersioningOptions options)
+    {
+        if (options.RetentionUnit == HistoryRetentionUnit.Infinite)
+            return;
+
+        // A linked history table can only carry a clustered CREATE INDEX entry:
+        // the shape validation refuses to adopt one holding a PRIMARY KEY or
+        // UNIQUE constraint (Msg 13515), and an engine-built sibling declares
+        // none, so HeapTable.KeyConstraints is empty on every table reaching
+        // this gate.
+        var clusteredLeadingOrdinal = -1;
+        foreach (var index in history.Indexes)
+        {
+            if (index.IsClustered && index.KeyColumns.Length > 0)
+            {
+                clusteredLeadingOrdinal = index.KeyColumns[0].ColumnOrdinal;
+                break;
+            }
+        }
+        if (clusteredLeadingOrdinal == baseTable.PeriodColumns!.Value.EndOrdinal)
+            return;
+
+        throw SimulatedSqlException.FiniteRetentionRequiresHistoryClusteredIndex(
+            QualifyTableName(baseTable, context.CurrentDatabase),
+            QualifyTableName(history, context.CurrentDatabase),
+            state: clusteredLeadingOrdinal < 0 ? (byte)1 : (byte)2);
+    }
+
     private static void ExpectCloseParen(ParserContext context)
     {
         if (context.GetNextRequired() is not Operator { Character: ')' })
@@ -773,7 +824,7 @@ partial class Simulation
                 collation: pc.Collation,
                 computedDefinition: pc.ComputedDefinition);
         }
-        return new HeapTable(
+        var history = new HeapTable(
             historyLeaf,
             historyColumns,
             context.CurrentDatabase.AllocateObjectId(),
@@ -783,7 +834,31 @@ partial class Simulation
         {
             IsHistoryTable = true,
             PeriodInheritedFromBase = true,
+            UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };
+        // Real gives every engine-built history table a non-unique clustered
+        // index named ix_<history leaf> on (period end, period start) — in that
+        // order, so aged-version cleanup seeks on the end column — and that
+        // index is what a finite HISTORY_RETENTION_PERIOD requires (Msg 13765).
+        // Probe-confirmed on both the CREATE TABLE and the ALTER TABLE …
+        // SET (SYSTEM_VERSIONING = ON) sibling-building paths, and for an
+        // auto-named sibling alike (ix_MSSQL_TemporalHistoryFor_<id>).
+        var (startOrdinal, endOrdinal) = parent.PeriodColumns!.Value;
+        history.Indexes.Add(new StoredIndex(
+            $"ix_{historyLeaf}",
+            context.CurrentDatabase.AllocateObjectId(),
+            isUnique: false,
+            isClustered: true,
+            [
+                new IndexKeyColumn(history.StorageOrdinals[endOrdinal], endOrdinal, isDescending: false),
+                new IndexKeyColumn(history.StorageOrdinals[startOrdinal], startOrdinal, isDescending: false),
+            ],
+            [],
+            [],
+            filter: null,
+            filterDefinition: null,
+            ignoreDupKey: false));
+        return history;
     }
 
     /// <summary>
@@ -1338,7 +1413,8 @@ partial class Simulation
                 defaultExpression,
                 context.CurrentDatabase.AllocateObjectId(),
                 isSystemNamed: inlineDefaultName is null,
-                definition: defaultDefinition);
+                definition: defaultDefinition,
+                createDate: context.Batch.CurrentStatement.UtcNow);
         }
         heapColumns.Add(newColumn);
         explicitNull.Add(nullable == true);
@@ -1426,7 +1502,12 @@ partial class Simulation
             if (!persisted && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Persisted })
             {
                 persisted = true;
-                context.MoveNextRequired();
+                // Optional advance: `ALTER TABLE t ADD c AS a + 1 PERSISTED`
+                // may be a batch's final token, and everything the loop looks
+                // for past the keyword is optional — the same tolerance
+                // <see cref="ParseOneColumnIntoLists"/> applies after a
+                // no-argument type name.
+                context.MoveNextOptional();
                 continue;
             }
             if (persisted && !nullable.HasValue && context.Token is ReservedKeyword { Keyword: Keyword.Not })
@@ -1434,7 +1515,7 @@ partial class Simulation
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 nullable = false;
-                context.MoveNextRequired();
+                context.MoveNextOptional();
                 continue;
             }
             if (context.Token is ReservedKeyword { Keyword: Keyword.Identity or Keyword.Default or Keyword.Not or Keyword.Null })
@@ -1723,7 +1804,8 @@ partial class Simulation
     internal static CheckConstraint[] ResolveCheckConstraints(
         string tableName,
         IReadOnlyList<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
-        Database database)
+        Database database,
+        DateTime createDate)
     {
         if (pendingChecks.Count == 0)
             return [];
@@ -1733,7 +1815,7 @@ partial class Simulation
         {
             var pending = pendingChecks[c];
             var name = pending.Name ?? AutoCheckName(tableName, pending.InlineColumn, c);
-            resolved[c] = new CheckConstraint(name, pending.Predicate, pending.InlineColumn, database.AllocateObjectId())
+            resolved[c] = new CheckConstraint(name, pending.Predicate, pending.InlineColumn, database.AllocateObjectId(), createDate)
             {
                 Definition = pending.Definition,
                 IsSystemNamed = pending.Name is null,
@@ -1946,7 +2028,8 @@ partial class Simulation
         string tableName,
         IReadOnlyList<HeapColumn> heapColumns,
         IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
-        Database database)
+        Database database,
+        DateTime createDate)
     {
         if (pendingKeys.Count == 0)
             return [];
@@ -1996,7 +2079,7 @@ partial class Simulation
             }
 
             var isClustered = pending.Clustered ?? (pending.Kind == KeyConstraintKind.PrimaryKey);
-            resolved[c] = new KeyConstraint(pending.Kind, pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns), storageOrdinals, database.AllocateObjectId(), isClustered, pending.IgnoreDupKey, pending.Descending);
+            resolved[c] = new KeyConstraint(pending.Kind, pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns), storageOrdinals, database.AllocateObjectId(), isClustered, pending.IgnoreDupKey, createDate, pending.Descending);
         }
 
         return resolved;
@@ -2466,7 +2549,8 @@ partial class Simulation
                 refOrdinals,
                 pf.DeleteAction,
                 pf.UpdateAction,
-                isSystemNamed: pf.ConstraintName is null);
+                isSystemNamed: pf.ConstraintName is null,
+                createDate: context.Batch.CurrentStatement.UtcNow);
             resolved.Add(fk);
 
             // Cascade-cycle / multiple-cascade-paths check (Msg 1785): walks

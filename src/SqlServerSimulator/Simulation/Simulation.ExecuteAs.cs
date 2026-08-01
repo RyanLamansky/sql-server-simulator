@@ -89,7 +89,10 @@ partial class Simulation
             throw SimulatedSqlException.CannotExecuteAsDatabasePrincipal(targetName);
         }
         RequireImpersonatePermission(security, database, target.PrincipalId, targetName);
-        security.Push(new SecurityPrincipalFrame(target.PrincipalId, target.Name, target.EffectiveLoginIdentity));
+        // Database-scoped: an EXECUTE AS USER token carries no server principal,
+        // so it can't reach another database (Msg 916 at any cross-database
+        // reference) — unlike the LOGIN form above.
+        security.Push(new SecurityPrincipalFrame(target.PrincipalId, target.Name, target.EffectiveLoginIdentity, isDatabaseScoped: true));
     }
 
     /// <summary>
@@ -194,6 +197,32 @@ partial class Simulation
         }
         if (!database.Principals.TryGetValue(clause, out var target))
             throw SimulatedSqlException.CannotExecuteAsDatabasePrincipal(clause);
-        connection.Security.Push(new SecurityPrincipalFrame(target.PrincipalId, target.Name, target.EffectiveLoginIdentity));
+        connection.Security.Push(new SecurityPrincipalFrame(target.PrincipalId, target.Name, target.EffectiveLoginIdentity, isDatabaseScoped: true));
     }
+
+    /// <summary>
+    /// The <c>sys.sql_modules.execute_as_principal_id</c> a module's
+    /// <c>WITH EXECUTE AS</c> clause resolves to at CREATE:
+    /// <see langword="null"/> for <c>CALLER</c> / no clause,
+    /// <see cref="OwnerExecuteAsPrincipalId"/> for <c>OWNER</c>, the creating
+    /// session's database principal for <c>SELF</c>, and the named user's
+    /// principal id otherwise (probe-confirmed across procedures, functions
+    /// and triggers). A named user the database doesn't hold resolves to
+    /// <see langword="null"/>; real refuses the CREATE outright, which the
+    /// simulator defers to invocation time (Msg 15517).
+    /// </summary>
+    internal static int? ResolveExecuteAsPrincipalId(ParserContext context, string? clause) =>
+        clause is null || clause.Equals("CALLER", StringComparison.OrdinalIgnoreCase) ? null
+        : clause.Equals("OWNER", StringComparison.OrdinalIgnoreCase) ? OwnerExecuteAsPrincipalId
+        : clause.Equals("SELF", StringComparison.OrdinalIgnoreCase) ? context.Batch.Connection.Security.Effective.DatabasePrincipalId
+        : context.CurrentDatabase.Principals.TryGetValue(clause, out var target) ? target.PrincipalId
+        : null;
+
+    /// <summary>
+    /// Real SQL Server's sentinel for <c>WITH EXECUTE AS OWNER</c> in
+    /// <c>sys.sql_modules.execute_as_principal_id</c> — the owner is resolved
+    /// per execution rather than pinned at CREATE, so the catalog records
+    /// <c>-2</c> instead of a principal id.
+    /// </summary>
+    private const int OwnerExecuteAsPrincipalId = -2;
 }

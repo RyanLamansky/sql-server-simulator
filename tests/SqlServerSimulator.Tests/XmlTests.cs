@@ -190,7 +190,54 @@ public sealed class XmlTests
                 and is_unique = 0 and is_unique_constraint = 0 and ignore_dup_key = 0
                 and is_ignored_in_optimization = 0 and has_filter = 0
                 and filter_definition is null and data_space_id = 1
-                and path_id = 0 and auto_created = 0
+                and path_id is null and auto_created = 0
+            """));
+    }
+
+    /// <summary>
+    /// XML indexes take their <c>index_id</c> from real's dedicated 256000+
+    /// range, sequenced per table in creation order: a table's first XML index
+    /// is 256000, its second 256001, and the first on a second table is 256000
+    /// again (all probe-confirmed against SQL Server 2025). Ordinary indexes
+    /// keep their small ids.
+    /// </summary>
+    [TestMethod]
+    public void XmlIndexIds_StartAt256000_PerTable()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table dbo.doc (id int not null primary key, body xml, note xml);
+            create table dbo.other (id int not null primary key, body xml)
+            """);
+        _ = sim.ExecuteNonQuery("create primary xml index pxml_doc on dbo.doc(body)");
+        _ = sim.ExecuteNonQuery("create xml index sxml_doc on dbo.doc(body) using xml index pxml_doc for path");
+        _ = sim.ExecuteNonQuery("create primary xml index pxml_note on dbo.doc(note)");
+        _ = sim.ExecuteNonQuery("create primary xml index pxml_other on dbo.other(body)");
+        AreEqual(256000, sim.ExecuteScalar("select index_id from sys.xml_indexes where name = 'pxml_doc'"));
+        AreEqual(256001, sim.ExecuteScalar("select index_id from sys.xml_indexes where name = 'sxml_doc'"));
+        AreEqual(256002, sim.ExecuteScalar("select index_id from sys.xml_indexes where name = 'pxml_note'"));
+        AreEqual(256000, sim.ExecuteScalar("select index_id from sys.xml_indexes where name = 'pxml_other'"));
+        // The table's own PRIMARY KEY index keeps the small id range.
+        AreEqual(1, sim.ExecuteScalar("select min(index_id) from sys.indexes where object_id = object_id('dbo.doc')"));
+    }
+
+    /// <summary>
+    /// <c>sys.index_columns</c> keys the XML index's row on the same 256000+
+    /// id, and the primary's internal node table is named after it
+    /// (<c>xml_index_nodes_&lt;table object_id&gt;_&lt;index_id&gt;</c>,
+    /// probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void XmlIndexId_ReachesIndexColumnsAndTheNodeTableName()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.doc (id int not null primary key, body xml)");
+        _ = sim.ExecuteNonQuery("create primary xml index pxml_doc on dbo.doc(body)");
+        AreEqual(1, sim.ExecuteScalar(
+            "select count(*) from sys.index_columns where object_id = object_id('dbo.doc') and index_id = 256000"));
+        AreEqual(1, sim.ExecuteScalar("""
+            select count(*) from sys.objects
+            where type = 'IT' and name = 'xml_index_nodes_' + cast(object_id('dbo.doc') as varchar(20)) + '_256000'
             """));
     }
 

@@ -163,11 +163,24 @@ Probe-confirmed.
 
 Three catalog views cover constraint metadata:
 
-- **`sys.check_constraints`** — one row per CHECK constraint, with `is_not_trusted`, `is_system_named`, `parent_column_id` (1-based ordinal for inline column-level; `0` for table-level), and `definition` (the predicate's original source syntax, paren-wrapped — see [Definition columns](#definition-columns)).
+- **`sys.check_constraints`** — one row per CHECK constraint, with `is_not_trusted`, `is_system_named`, `parent_column_id` (the attached column's stable `sys.columns.column_id` for inline column-level; `0` for table-level), `uses_database_collation` (1 — real reports 1 for every CHECK, numeric-only predicates included), and `definition` (the predicate's original source syntax, paren-wrapped — see [Definition columns](#definition-columns)).
 - **`sys.key_constraints`** — one row per PRIMARY KEY / UNIQUE constraint, with `type` = `PK` / `UQ`, `type_desc` = `PRIMARY_KEY_CONSTRAINT` / `UNIQUE_CONSTRAINT`, and `is_system_named` inferred from the auto-name prefix.
-- **`sys.default_constraints`** — one row per named DEFAULT (inline + ALTER ADD), with `parent_column_id`, `is_system_named`, and `definition` (the default expression's original source syntax, paren-wrapped — see [Definition columns](#definition-columns)).
+- **`sys.default_constraints`** — one row per named DEFAULT (inline + ALTER ADD), with `parent_column_id` (the bound column's stable `sys.columns.column_id`), `is_system_named`, and `definition` (the default expression's original source syntax, paren-wrapped — see [Definition columns](#definition-columns)).
 
 `sys.foreign_keys.is_not_trusted` / `is_disabled` read from `ForeignKey.IsNotTrusted` / `IsDisabled`; `sys.check_constraints.is_not_trusted` / `is_disabled` read from the corresponding `CheckConstraint` flags.
+
+## Per-constraint dates
+
+Each `KeyConstraint` / `CheckConstraint` / `ForeignKey` / `DefaultConstraint` carries its own `CreateDate` / `ModifyDate`, stamped from the declaring statement's frozen `UtcNow` rather than borrowed from the parent table.
+Both `sys.objects` and the per-family catalog view project them.
+Probe-confirmed rules:
+
+- A constraint declared **inside `CREATE TABLE`** — inline column tail or table-level list — shares the table's instant, because it is the same statement.
+- An **`ALTER TABLE … ADD CONSTRAINT`** carries the later instant; the parent table's own `modify_date` advances alongside.
+- A **trust toggle** (`ALTER TABLE … {NOCHECK|CHECK} CONSTRAINT`, either direction, `ALL` included) advances the constraint's `modify_date` alone, leaving `create_date` put.
+
+**Not modeled yet.** Real also advances a constraint's `modify_date` on an `sp_rename` of it, which the simulator can't reach: `sp_rename`'s object form resolves only heap tables, so renaming a constraint raises Msg 15225 (or `NotSupportedException` for the `@objtype = 'OBJECT'` spelling) before any date could move.
+A **DEFAULT** constraint also has no `sys.objects` row here, so only `sys.default_constraints` carries its dates.
 
 ## Definition columns
 

@@ -67,12 +67,19 @@ partial class Simulation
     /// same frame (and therefore the same <c>RETURN</c> / <c>INSERTED</c> /
     /// TVP rules) it will see when it runs.
     /// </param>
+    /// <param name="shape">
+    /// Non-null for a scalar UDF / multi-statement TVF, whose body real also
+    /// checks for shape (Msg 455 / 444 / 443) — the walk gathers violations and
+    /// the first is raised once the whole body has bound, which is the order
+    /// real reports them in.
+    /// </param>
     private void BindModuleBodyAtCreate(
         ParserContext outerContext,
         string bodyText,
         string moduleName,
         int bodyLineOffset,
-        Func<SimulatedDbCommand, BatchContext> buildBindBatch)
+        Func<SimulatedDbCommand, BatchContext> buildBindBatch,
+        FunctionBodyShape? shape = null)
     {
         if (string.IsNullOrEmpty(bodyText))
             return;
@@ -86,6 +93,7 @@ partial class Simulation
         var bindBatch = buildBindBatch(bodyCommand);
         bindBatch.SkipModeFlag = true;
         bindBatch.CreateTimeBinding = true;
+        bindBatch.FunctionBodyShape = shape;
         bindBatch.LineOffset = bodyLineOffset;
         bindBatch.ErrorProcedureName = moduleName;
         // A FROM-less projection over GETDATE() / SYSDATETIME() evaluates its
@@ -105,6 +113,12 @@ partial class Simulation
                 // Skip mode yields no outcomes; the enumeration exists only to
                 // drive the parse.
             }
+
+            // Only a walk that reached the end of the body saw the statement
+            // the last-statement rule is about; a deferral abandoned partway
+            // (BatchAborted) leaves that rule unchecked.
+            if (shape is { } walked)
+                walked.WalkCompleted = !bindBatch.BatchAborted;
         }
         catch (NotSupportedException)
         {
@@ -115,6 +129,15 @@ partial class Simulation
         {
             connection.NestingLevel--;
         }
+
+        // Shape violations are raised only after the binder had its say, so a
+        // body carrying both reports the binder error — real's own ordering.
+        // The diagnostics are stamped here rather than by an enclosing dispatch
+        // frame: the violation belongs to a body statement, not to the CREATE.
+        if (shape?.FirstViolation() is not { } violation)
+            return;
+        violation.Error.ResolveDiagnostics(violation.Line, bodyLineOffset, moduleName);
+        throw violation.Error;
     }
 
     /// <summary>
@@ -174,7 +197,8 @@ partial class Simulation
     {
         var variables = SeedFunctionParameters(parameters);
         BindModuleBodyAtCreate(outerContext, bodyText, functionName, bodyLineOffset,
-            bodyCommand => new BatchContext(bodyCommand, variables, new UdfFrame(returnType)));
+            bodyCommand => new BatchContext(bodyCommand, variables, new UdfFrame(returnType)),
+            new FunctionBodyShape());
     }
 
     /// <summary>
@@ -211,7 +235,8 @@ partial class Simulation
             var batch = new BatchContext(bodyCommand, variables);
             batch.TableVariables[returnVariableName] = returnTable;
             return batch;
-        });
+        },
+        new FunctionBodyShape());
     }
 
     /// <summary>

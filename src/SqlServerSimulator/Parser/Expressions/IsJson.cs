@@ -1,12 +1,13 @@
-using System.Text.Json;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// SQL <c>ISJSON(expression)</c>: returns <c>int</c> <c>1</c> when the
-/// string argument parses as valid JSON (object, array, scalar, or null),
-/// <c>0</c> when it doesn't, and SQL NULL when the input itself is NULL.
+/// string argument is a well-formed JSON object or array with nothing but
+/// whitespace around it, <c>0</c> when it isn't — a root-level scalar such as
+/// <c>1</c> or <c>"abc"</c> included — and SQL NULL when the input itself is
+/// NULL.
 /// Non-string arguments return 0 — real SQL Server raises Msg 8116 for
 /// non-string types, but the simulator's tolerance here is harmless for
 /// the bacpac-loader use case (CHECK constraints like
@@ -26,21 +27,9 @@ internal sealed class IsJson(ParserContext context) : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = this.operand.Run(runtime);
-        if (value.IsNull)
-            return SqlValue.Null(SqlType.Int32);
-
-        if (!SqlType.IsStringCategory(value.Type))
-            return SqlValue.FromInt32(0);
-
-        try
-        {
-            using var doc = JsonDocument.Parse(value.AsString);
-            return SqlValue.FromInt32(1);
-        }
-        catch (JsonException)
-        {
-            return SqlValue.FromInt32(0);
-        }
+        return value.IsNull
+            ? SqlValue.Null(SqlType.Int32)
+            : SqlValue.FromInt32(SqlType.IsStringCategory(value.Type) && !JsonText.Scan(value.AsString).HasError ? 1 : 0);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;

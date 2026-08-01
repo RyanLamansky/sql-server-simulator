@@ -63,9 +63,15 @@ internal sealed class ObjectPropertyEx : Expression
 
         var obj = ObjectProperty.FindObject(runtime.Batch.CurrentDatabase, id);
         // Boolean Is-X props share OBJECTPROPERTY's dispatch verbatim; real
-        // carries them as an int inner base type inside the sql_variant.
+        // carries them as an int inner base type inside the sql_variant. A
+        // constraint id resolves through the same constraint answers (real
+        // agrees between the two functions, probe-confirmed); the EX-only
+        // properties have no constraint answer here.
         return obj is null
-            ? SqlValue.Null(SqlType.SqlVariant)
+            ? ObjectProperty.TryFindConstraint(runtime.Batch.CurrentDatabase, id, out var parsesAnExpression)
+                && ObjectProperty.EvaluateConstraintProperty(parsesAnExpression, prop) is int constraintResult
+                    ? SqlValue.FromVariant(SqlValue.FromInt32(constraintResult))
+                    : SqlValue.Null(SqlType.SqlVariant)
             : ObjectProperty.EvaluateProperty(runtime.Batch.CurrentDatabase, obj, prop) is int booleanResult
                 ? SqlValue.FromVariant(SqlValue.FromInt32(booleanResult))
                 : EvaluateExtendedProperty(obj, prop, runtime.Batch);

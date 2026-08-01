@@ -153,6 +153,82 @@ internal readonly struct JsonPath
         return current;
     }
 
+    /// <summary>
+    /// Walks <paramref name="root"/> without raising, reporting how far the
+    /// reader had to get: the strict-mode Msg 13608 is the caller's to raise,
+    /// because a malformed document's Msg 13609 comes first, and settling the
+    /// path often costs less reading than the whole document.
+    /// <paramref name="scan"/> supplies the shape of what
+    /// <see cref="JsonText.Scan"/> handed back.
+    /// </summary>
+    public JsonWalkResult Walk(JsonElement root, in JsonScan scan, out JsonElement match)
+    {
+        var current = root;
+        var lastChildChain = true;
+        for (var i = 0; i < this.Segments.Length; i++)
+        {
+            var segment = this.Segments[i];
+
+            // Asking an object for an element (or an array for a property)
+            // settles the path once the reader has the container's first
+            // member under way. A container with no member to start on
+            // doesn't settle it any sooner than searching it would — unless
+            // the scan stopped partway through one the repair dropped, which
+            // is a member the reader did get under way.
+            if (current.ValueKind == (segment.IsIndex ? JsonValueKind.Object : JsonValueKind.Array)
+                && (!IsEmpty(current) || !scan.CleanCut))
+            {
+                match = default;
+                return JsonWalkResult.Abandoned;
+            }
+
+            var next = TryStep(current, segment);
+            if (next is null)
+            {
+                match = default;
+
+                // Settling this took reading `current` to its end. The reader
+                // then unwinds through the containers above, and reaches the
+                // document's own problem only from the root itself, or from a
+                // node that was the last member at every level with nothing
+                // dropped between it and where the scan stopped.
+                return i == 0 || (lastChildChain && scan.CleanCut) ? JsonWalkResult.Exhausted : JsonWalkResult.Abandoned;
+            }
+
+            lastChildChain = lastChildChain && SelectsLastChild(current, segment);
+            current = next.Value;
+        }
+
+        match = current;
+        return lastChildChain && this.Segments.Length < scan.OpenDepth ? JsonWalkResult.Truncated : JsonWalkResult.Resolved;
+    }
+
+    private static bool IsEmpty(JsonElement current)
+    {
+        if (current.ValueKind == JsonValueKind.Array)
+            return current.GetArrayLength() == 0;
+        foreach (var _ in current.EnumerateObject())
+            return false;
+        return true;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="segment"/> selects the last member of
+    /// <paramref name="current"/> — the direction a truncated document's
+    /// unclosed containers always run in.
+    /// </summary>
+    private static bool SelectsLastChild(JsonElement current, Segment segment)
+    {
+        if (segment.IsIndex)
+            return current.ValueKind == JsonValueKind.Array && segment.Index == current.GetArrayLength() - 1;
+        if (current.ValueKind != JsonValueKind.Object)
+            return false;
+        var last = default(string);
+        foreach (var property in current.EnumerateObject())
+            last = property.Name;
+        return last is not null && string.Equals(last, segment.Property, StringComparison.Ordinal);
+    }
+
     private static JsonElement? TryStep(JsonElement current, Segment segment) => segment.IsIndex
         ? (current.ValueKind == JsonValueKind.Array && segment.Index < current.GetArrayLength()
             ? current[segment.Index]
@@ -209,6 +285,35 @@ internal readonly struct JsonPath
         public static Segment ForProperty(string name) => new(false, 0, name);
         public static Segment ForIndex(int index) => new(true, index, null);
     }
+}
+
+/// <summary>
+/// How a <see cref="JsonPath.Walk(System.Text.Json.JsonElement, in JsonScan, out System.Text.Json.JsonElement)"/>
+/// ended — which decides whether a malformed document's Msg 13609 is still
+/// ahead of the reader once the path is settled.
+/// </summary>
+internal enum JsonWalkResult
+{
+    /// <summary>The path reached a value the input itself closed.</summary>
+    Resolved,
+
+    /// <summary>
+    /// The path reached a value only the repair closed: the reader ran out of
+    /// text partway through the answer.
+    /// </summary>
+    Truncated,
+
+    /// <summary>
+    /// The path didn't resolve, and settling that left the reader short of
+    /// whatever is wrong with the document — so nothing is raised.
+    /// </summary>
+    Abandoned,
+
+    /// <summary>
+    /// The path didn't resolve, and settling that took the reader all the way
+    /// to where the document stopped making sense.
+    /// </summary>
+    Exhausted,
 }
 
 /// <summary>

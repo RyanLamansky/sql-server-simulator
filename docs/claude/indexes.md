@@ -307,13 +307,15 @@ Non-UNIQUE CREATE INDEX skips this entirely.
 ## DROP INDEX
 
 `DROP INDEX name ON table` resolves the target table, then walks `HeapTable.Indexes` for a name match.
-Three rejection paths:
+Four rejection paths:
 
 - Missing parent table: Msg 3701 State 6 (`Cannot drop the index 'dbo.t.ix', because it does not exist or you do not have permission.`).
   `IF EXISTS` suppresses.
 - Index name matches a PRIMARY KEY or UNIQUE constraint: Msg 3723 (`An explicit DROP INDEX is not allowed on index 'dbo.t.ix'. It is being used for PRIMARY KEY constraint enforcement.`).
   The PK/UQ kind word is interpolated (`PRIMARY KEY` or `UNIQUE`).
   `IF EXISTS` does NOT suppress — real SQL Server's behavior matches.
+- The index is a **history table's clustered index** and its base is on a finite `HISTORY_RETENTION_PERIOD`: Msg 13766 — the index real's aged-data cleanup seeks through, released as soon as the base returns to INFINITE retention or versioning is turned off.
+  See [`temporal-tables.md`](temporal-tables.md#the-history-cleanup-index).
 - Index not found on the resolved table: Msg 3701 State 7.
   `IF EXISTS` suppresses.
 
@@ -374,7 +376,10 @@ View indexes surface through `sys.indexes` (index_id 1 / CLUSTERED / is_unique =
 
 ## Catalog surface
 
-### `sys.indexes` — 24-column probe-confirmed shape
+### `sys.indexes` — 23-column probe-confirmed shape
+
+Real's column order, leading `object_id, name, index_id, type, type_desc, …` and ending `suppress_dup_key_messages, auto_created, optimize_for_sequential_key`.
+There is no `statistics_incremental` column — selecting it raises Msg 207 on real too.
 
 One row per (table, index), with ids allocated by the single authority described in [Index-id allocation](#index-id-allocation):
 

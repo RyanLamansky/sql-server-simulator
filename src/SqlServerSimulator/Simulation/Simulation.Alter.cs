@@ -64,17 +64,32 @@ partial class Simulation
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Scoped })
             return TryParseAlterDatabaseScopedConfiguration(context);
 
-        // Otherwise a database name (or CURRENT). The simulator has one
-        // database; accept anything that looks like an identifier. After the
-        // name the only legal continuations are SET <option> and COLLATE
-        // <name>.
-        return afterDatabase is Name or ReservedKeyword { Keyword: Keyword.Current }
-            && context.GetNextRequired() switch
-            {
-                ReservedKeyword { Keyword: Keyword.Set } => TryParseAlterDatabaseSet(context),
-                ReservedKeyword { Keyword: Keyword.Collate } => TryParseAlterDatabaseCollate(context),
-                _ => false,
-            };
+        // Otherwise a database name (or CURRENT), which names the database the
+        // option lands on — not necessarily the session's. After the name the
+        // only legal continuations are SET <option> and COLLATE <name>.
+        if (afterDatabase is not (Name or ReservedKeyword { Keyword: Keyword.Current }))
+            return false;
+        var target = ResolveAlterDatabaseTarget(context, afterDatabase);
+        return context.GetNextRequired() switch
+        {
+            ReservedKeyword { Keyword: Keyword.Set } => TryParseAlterDatabaseSet(context, target),
+            ReservedKeyword { Keyword: Keyword.Collate } => TryParseAlterDatabaseCollate(context, target),
+            _ => false,
+        };
+    }
+
+    /// <summary>
+    /// The database an <c>ALTER DATABASE</c> statement targets: the session's
+    /// for <c>CURRENT</c>, else the named one. A name this
+    /// <see cref="Simulation"/> doesn't host raises Msg 5011. Resolution is
+    /// suppressed in skip mode, where the statement parses but doesn't run.
+    /// </summary>
+    private static Database ResolveAlterDatabaseTarget(ParserContext context, Token afterDatabase)
+    {
+        return afterDatabase is not Name named ? context.CurrentDatabase
+            : context.Connection.Simulation.Databases.TryGetValue(named.Value, out var target) ? target
+            : context.Batch.IsSkipping ? context.CurrentDatabase
+            : throw SimulatedSqlException.CannotAlterDatabase(named.Value);
     }
 
     /// <summary>
@@ -87,7 +102,7 @@ partial class Simulation
     /// discard — see <see cref="RecognizedDatabaseOptions"/> for the closed
     /// list, sourced from a probe matrix against SQL Server 2025 (2026-05-14).
     /// </summary>
-    private static bool TryParseAlterDatabaseSet(ParserContext context)
+    private static bool TryParseAlterDatabaseSet(ParserContext context, Database target)
     {
         context.MoveNextRequired();
         // Load-bearing options keep their dedicated handlers. Routing on
@@ -95,16 +110,16 @@ partial class Simulation
         // and the new parse-and-discard surface lives on a parallel dict.
         return context.Token switch
         {
-            UnquotedString { ContextualKeyword: ContextualKeyword.Compatibility_Level } => TryParseAlterDatabaseSetCompatibilityLevel(context),
-            UnquotedString { ContextualKeyword: ContextualKeyword.Allow_Snapshot_Isolation } => TryParseAlterDatabaseSetBooleanOption(context, DatabaseBooleanOption.AllowSnapshotIsolation),
-            UnquotedString { ContextualKeyword: ContextualKeyword.Read_Committed_Snapshot } => TryParseAlterDatabaseSetBooleanOption(context, DatabaseBooleanOption.ReadCommittedSnapshot),
-            UnquotedString { ContextualKeyword: ContextualKeyword.Recursive_Triggers } => TryParseAlterDatabaseSetBooleanOption(context, DatabaseBooleanOption.RecursiveTriggers),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Compatibility_Level } => TryParseAlterDatabaseSetCompatibilityLevel(context, target),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Allow_Snapshot_Isolation } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.AllowSnapshotIsolation),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Read_Committed_Snapshot } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.ReadCommittedSnapshot),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Recursive_Triggers } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.RecursiveTriggers),
             UnquotedString unquoted when RecognizedDatabaseOptions.TryGetValue(unquoted.Value, out var kind) => ConsumeDatabaseOptionTail(context, kind),
             _ => false,
         };
     }
 
-    private static bool TryParseAlterDatabaseSetCompatibilityLevel(ParserContext context)
+    private static bool TryParseAlterDatabaseSetCompatibilityLevel(ParserContext context, Database target)
     {
         if (context.GetNextRequired() is not Operator { Character: '=' })
             return false;
@@ -118,7 +133,7 @@ partial class Simulation
         if (!Enum.IsDefined((CompatibilityLevel)requested))
             throw SimulatedSqlException.InvalidCompatibilityLevel();
 
-        context.CurrentDatabase.CompatibilityLevel = (CompatibilityLevel)requested;
+        target.CompatibilityLevel = (CompatibilityLevel)requested;
         return true;
     }
 
@@ -140,14 +155,14 @@ partial class Simulation
     /// state changes (Msg 5083); the simulator falls through and raises
     /// <see cref="NotSupportedException"/> on the unexpected trailer.
     /// </summary>
-    private static bool TryParseAlterDatabaseSetBooleanOption(ParserContext context, DatabaseBooleanOption option)
+    private static bool TryParseAlterDatabaseSetBooleanOption(ParserContext context, Database target, DatabaseBooleanOption option)
     {
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: var on } || on is not (Keyword.On or Keyword.Off))
             return false;
         if (context.Batch.IsSkipping)
             return true;
         var value = on == Keyword.On;
-        var database = context.CurrentDatabase;
+        var database = target;
         switch (option)
         {
             case DatabaseBooleanOption.AllowSnapshotIsolation: database.AllowSnapshotIsolation = value; break;
@@ -461,7 +476,7 @@ partial class Simulation
     /// <see cref="NotSupportedException"/> in direct SQL; the BACPAC loader
     /// catches and records on Warnings.
     /// </summary>
-    private static bool TryParseAlterDatabaseCollate(ParserContext context)
+    private static bool TryParseAlterDatabaseCollate(ParserContext context, Database target)
     {
         if (context.GetNextRequired() is not UnquotedString token)
             return false;
@@ -469,7 +484,7 @@ partial class Simulation
             return true;
         if (Collation.TryGet(token.Value) is not { } resolved)
             throw new NotSupportedException($"ALTER DATABASE COLLATE: collation '{token.Value}' isn't on the simulator's recognized list.");
-        var database = context.Batch.CurrentDatabase;
+        var database = target;
         database.Collation = resolved;
         database.CollationName = resolved.Name;
         return true;
@@ -905,7 +920,7 @@ partial class Simulation
             if (!alterTarget.IsTableVariable
                 && !BatchContext.IsLocalTempName(alterTarget.Name)
                 && !BatchContext.IsGlobalTempName(alterTarget.Name)
-                && !PermissionEnforcement.HasObjectAlter(context.Batch, alterTarget.ObjectId, alterTarget.SchemaId))
+                && !PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(alterTarget), alterTarget.ObjectId, alterTarget.SchemaId))
             {
                 throw SimulatedSqlException.AlterTablePermissionDenied(tableName.Leaf);
             }
@@ -1058,6 +1073,7 @@ partial class Simulation
                     QualifyTableName(requestedHistory, context.CurrentDatabase),
                     QualifyTableName(baseTable, context.CurrentDatabase));
             }
+            RequireHistoryCleanupIndex(context, baseTable, currentHistory, options);
             baseTable.HistoryRetentionPeriod = options.RetentionPeriod;
             baseTable.HistoryRetentionUnit = options.RetentionUnit;
             return true;
@@ -1068,6 +1084,7 @@ partial class Simulation
         {
             RejectUnusableHistoryTable(context, existingHistory);
             ValidateHistoryTableShape(context, baseTable, existingHistory);
+            RequireHistoryCleanupIndex(context, baseTable, existingHistory, options);
             resolvedHistory = existingHistory;
         }
         else

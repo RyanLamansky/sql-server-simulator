@@ -21,6 +21,11 @@ partial class Simulation
 
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
         context.Batch.RejectCrossServerMutation(destinationName);
+        // A function body may write a table variable but nothing persistent
+        // (Msg 443). An INSERT / MERGE target is always a written name, never a
+        // FROM-clause alias, so the name alone settles it.
+        if (!BatchContext.IsTableVariableName(destinationName.Leaf))
+            FunctionBodyShape.NoteSideEffect(context.Batch, "INSERT", FunctionBodyShape.StatementOperatorState);
 
         // Advance past the target name so the optional WITH (hint …) clause
         // has a token to peek at. INSERT accepts the WITH form only — the
@@ -772,7 +777,18 @@ partial class Simulation
     /// </summary>
     private static List<SqlValue[]> ExecuteSelectSource(ParserContext context, int expectedColumnCount)
     {
-        var selection = Selection.Parse(context, depth: 0);
+        var wasInsertSource = context.InInsertSourceSelect;
+        context.InInsertSourceSelect = true;
+        Selection selection;
+        try
+        {
+            selection = Selection.Parse(context, depth: 0);
+        }
+        finally
+        {
+            context.InInsertSourceSelect = wasInsertSource;
+        }
+
         if (!context.Batch.IsSkipping)
             PermissionEnforcement.CheckReadSources(context.Batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
 

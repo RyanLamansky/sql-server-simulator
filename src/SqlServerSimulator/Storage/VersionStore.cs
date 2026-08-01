@@ -155,35 +155,17 @@ internal static class VersionStore
     /// payload to <see cref="RowVersionChain.Head"/> with Xmax = commit Xid.</item>
     /// </list>
     /// </summary>
-    internal static void FinalizePendingEntries(List<PendingVersionEntry> entries, Database database)
+    internal static void FinalizePendingEntries(List<PendingVersionEntry> entries, Simulation simulation)
     {
         if (entries.Count == 0)
             return;
-        // The commit-id counter is per-database, so a transaction that wrote
-        // through a three-part name stamps each side from its own sequence:
-        // the primary (the session's database, or whichever the first entry
-        // belongs to) covers the common single-database case with no
-        // allocation, and any further database gets one id of its own.
-        var primaryDatabase = entries[0].Table.OwningDatabase ?? database;
-        var primaryXid = primaryDatabase.AllocateTransactionCommitId();
-        Dictionary<Database, long>? otherDatabaseXids = null;
+        // One commit id for the whole transaction, whatever mix of databases it
+        // wrote to: the counter is instance-wide, so a cross-database write
+        // stamps both sides from the same sequence and a snapshot taken in one
+        // database orders correctly against it.
+        var commitXid = simulation.AllocateTransactionCommitId();
         foreach (var entry in entries)
         {
-            var owner = entry.Table.OwningDatabase ?? database;
-            long commitXid;
-            if (ReferenceEquals(owner, primaryDatabase))
-            {
-                commitXid = primaryXid;
-            }
-            else
-            {
-                otherDatabaseXids ??= [];
-                if (!otherDatabaseXids.TryGetValue(owner, out commitXid))
-                {
-                    commitXid = owner.AllocateTransactionCommitId();
-                    otherDatabaseXids[owner] = commitXid;
-                }
-            }
             var newChain = entry.Table.RowVersions.GetOrAdd(entry.NewRid, static _ => new RowVersionChain());
             switch (entry.Kind)
             {
@@ -279,7 +261,7 @@ internal static class VersionStore
     /// the database and drops <see cref="HistoricalVersion"/> nodes whose
     /// <c>Xmax &lt;= oldest_active_snapshot_xid</c> — no active SI
     /// transaction needs that version anymore. When no SI tx is in flight,
-    /// the cutoff is <see cref="Database.CurrentTransactionCommitId"/>, so
+    /// the cutoff is <see cref="Simulation.CurrentTransactionCommitId"/>, so
     /// every finalized HV becomes collectible. Chains that lose their only
     /// HV AND aren't marked deleted-live AND have no in-flight writer are
     /// dropped from the dict entirely; chains that retain at least one
@@ -289,9 +271,9 @@ internal static class VersionStore
     /// writer whose pending HV uses the <c>PendingXmax</c> sentinel and
     /// must not be touched.
     /// </summary>
-    internal static void RunGarbageCollection(Database database)
+    internal static void RunGarbageCollection(Simulation simulation, Database database)
     {
-        var cutoff = OldestActiveSnapshotXid(database);
+        var cutoff = OldestActiveSnapshotXid(simulation);
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in schema.HeapTables.Values)
@@ -364,25 +346,27 @@ internal static class VersionStore
 
     /// <summary>
     /// Smallest <see cref="SimulatedDbTransaction.SnapshotXid"/> across the
-    /// database's <see cref="Database.ActiveSnapshotTxs"/> set, or the
-    /// current commit-id counter when no SI tx is in flight. The empty-set
-    /// case returns the latest stamp so the GC can drop every finalized
-    /// HV. RCSI per-statement snapshots aren't tracked in this set — they
-    /// have effectively-zero lifetime (allocated at first user-table read,
-    /// released at statement end), so the GC's once-per-tx-finalize cadence
-    /// won't observe them as load-bearing.
+    /// simulation's <see cref="Simulation.ActiveSnapshotTxs"/> set, or the
+    /// current commit-id counter when no SI tx is in flight. The set is
+    /// instance-wide because a stamp is: a snapshot open in one database can
+    /// read another's history, so any open snapshot pins every database's
+    /// versions. The empty-set case returns the latest stamp so the GC can
+    /// drop every finalized HV. RCSI per-statement snapshots aren't tracked in
+    /// this set — they have effectively-zero lifetime (allocated at first
+    /// user-table read, released at statement end), so the GC's
+    /// once-per-tx-finalize cadence won't observe them as load-bearing.
     /// </summary>
-    private static long OldestActiveSnapshotXid(Database database)
+    private static long OldestActiveSnapshotXid(Simulation simulation)
     {
-        if (database.ActiveSnapshotTxs.IsEmpty)
-            return database.CurrentTransactionCommitId;
+        if (simulation.ActiveSnapshotTxs.IsEmpty)
+            return simulation.CurrentTransactionCommitId;
         var min = long.MaxValue;
-        foreach (var kv in database.ActiveSnapshotTxs)
+        foreach (var kv in simulation.ActiveSnapshotTxs)
         {
             if (kv.Key.SnapshotXid is { } xid && xid < min)
                 min = xid;
         }
-        return min == long.MaxValue ? database.CurrentTransactionCommitId : min;
+        return min == long.MaxValue ? simulation.CurrentTransactionCommitId : min;
     }
 
     /// <summary>

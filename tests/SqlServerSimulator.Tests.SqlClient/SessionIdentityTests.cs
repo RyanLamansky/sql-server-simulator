@@ -75,4 +75,23 @@ public sealed class SessionIdentityTests
         });
         AreEqual(4060, ex.Number);
     }
+
+    /// <summary>
+    /// LOGIN7 carries the client's workstation and application names; the
+    /// session keeps them for <c>HOST_NAME()</c> / <c>APP_NAME()</c> and
+    /// <c>sys.dm_exec_sessions</c>. SqlClient sends both from the connection
+    /// string's <c>Workstation ID</c> / <c>Application Name</c> keywords.
+    /// </summary>
+    [TestMethod]
+    public async Task Login7_HostAndApplicationNames_ReachTheSession()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(
+            listener, TestContext.CancellationToken, ";Workstation ID=wire-ws;Application Name=WireApp");
+        await using var command = new SqlCommand(
+            "select host_name() + '|' + app_name() + '|' + host_name + '|' + program_name"
+            + " from sys.dm_exec_sessions where session_id = @@spid", connection);
+        AreEqual("wire-ws|WireApp|wire-ws|WireApp", await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
 }

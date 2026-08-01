@@ -444,7 +444,7 @@ partial class Simulation
             throw SimulatedSqlException.CannotDropViewDoesNotExist(name.ToString());
         }
         context.Batch.AcquireStatementLock(droppedView.SchemaLock, LockMode.SchemaModification);
-        RejectDropOfSchemaBoundReferent(context.CurrentDatabase, droppedView, "DROP VIEW", schema.Name);
+        RejectDropOfSchemaBoundReferent(context.CurrentDatabase, droppedView, "DROP VIEW", name);
         if (!schema.Views.TryRemove(name.Leaf, out _))
         {
             if (ifExists)
@@ -476,7 +476,7 @@ partial class Simulation
             throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
         }
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
-        RejectDropOfSchemaBoundReferent(context.CurrentDatabase, existing, "DROP FUNCTION", schema.Name);
+        RejectDropOfSchemaBoundReferent(context.CurrentDatabase, existing, "DROP FUNCTION", name);
         if (!schema.Functions.TryRemove(name.Leaf, out _) && !ifExists)
             throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
         RecordDdlEvent(context, "DROP_FUNCTION", schema.Name, name.Leaf, "FUNCTION");
@@ -520,7 +520,7 @@ partial class Simulation
         // DROP TABLE needs ALTER on the schema (object-scope ALTER is
         // insufficient — probe M5b); a non-privileged principal gets Msg 3701
         // sev 14 state 20. Temp tables are session-owned and exempt.
-        if (!isTempTable && !PermissionEnforcement.HasSchemaAlter(context.Batch, removedTable.SchemaId))
+        if (!isTempTable && schema is not null && !PermissionEnforcement.HasSchemaAlter(context.Batch, schema))
             throw SimulatedSqlException.DropTablePermissionDenied(name.Leaf);
         // Sch-M on the target table for the duration of the statement.
         // Waits for any concurrent Sch-S holders (readers / writers) to drain
@@ -547,7 +547,7 @@ partial class Simulation
         // schema-bound view's base reports Msg 3726). Temp tables are exempt —
         // a schema-bound body can't name one.
         if (!isTempTable && schema is not null)
-            RejectDropOfSchemaBoundReferent(context.CurrentDatabase, removedTable, "DROP TABLE", schema.Name);
+            RejectDropOfSchemaBoundReferent(context.CurrentDatabase, removedTable, "DROP TABLE", name);
         if (!destination.TryRemove(name.Leaf, out _))
         {
             if (ifExists)
@@ -684,6 +684,8 @@ partial class Simulation
         {
             if (context.Batch.CurrentDatabase.Collation.Equals(table.Indexes[i].Name, indexName))
             {
+                if (table.Indexes[i].IsClustered && RetentionCleanupDependsOn(context, table))
+                    throw SimulatedSqlException.CannotDropRetentionCleanupIndex(qualifiedTableName, indexName);
                 table.Indexes.RemoveAt(i);
                 RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
                 return;
@@ -696,18 +698,43 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Whether <paramref name="table"/> is a history sibling whose base is on a
+    /// finite <c>HISTORY_RETENTION_PERIOD</c> — the state that pins the
+    /// history table's clustered index in place (Msg 13766). Real releases the
+    /// index the moment the base returns to INFINITE retention or versioning is
+    /// turned off, both probe-confirmed, so this asks the live link rather than
+    /// recording a flag on the index.
+    /// </summary>
+    private static bool RetentionCleanupDependsOn(ParserContext context, HeapTable table)
+    {
+        if (!table.IsHistoryTable)
+            return false;
+        foreach (var schema in context.Batch.DatabaseFor(table).Schemas.Values)
+        {
+            foreach (var candidate in schema.HeapTables.Values)
+            {
+                if (ReferenceEquals(candidate.SystemVersioning, table))
+                    return candidate.HistoryRetentionUnit != HistoryRetentionUnit.Infinite;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Raises <strong>Msg 3729</strong> when a <c>WITH SCHEMABINDING</c>
     /// module references the object being dropped. <paramref name="statement"/>
-    /// is the verb pair real echoes; the target is rendered
-    /// <c>schema.leaf</c> and the blocker as its bare leaf.
+    /// is the verb pair real echoes; the target is echoed <b>as the statement
+    /// spelled it</b> — `DROP TABLE t` reports <c>'t'</c> and
+    /// `DROP TABLE dbo.t` reports <c>'dbo.t'</c> (probe-confirmed) — and the
+    /// blocker surfaces as its bare leaf.
     /// </summary>
     private static void RejectDropOfSchemaBoundReferent(
-        Database database, SchemaObject target, string statement, string schemaName)
+        Database database, SchemaObject target, string statement, MultiPartName writtenName)
     {
         if (SchemaBinding.FindReferencingModule(database, target) is { } referencing)
         {
             throw SimulatedSqlException.CannotDropReferencedBySchemaBoundObject(
-                statement, $"{schemaName}.{target.Name}", referencing.Name);
+                statement, writtenName.ToString(), referencing.Name);
         }
     }
 

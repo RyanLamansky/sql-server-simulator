@@ -204,4 +204,78 @@ public sealed class ExecuteAsTests
         sim.ExecuteBatches("create procedure dbo.p_ghost with execute as 'ghost' as select 1");
         _ = sim.AssertSqlError("exec dbo.p_ghost", 15517);
     }
+
+    // ----- sys.sql_modules.execute_as_principal_id -----
+    //
+    // Real records the clause's resolved principal at CREATE: -2 for OWNER
+    // (the owner is resolved per execution, so no id is pinned), the creating
+    // session's principal for SELF, the named user's id for a user, and NULL
+    // for CALLER and for no clause at all. Probe-confirmed across procedures,
+    // scalar functions and triggers.
+
+    private static object? ExecuteAsPrincipalId(Simulation simulation, string objectName)
+        => simulation.ExecuteScalar($"select execute_as_principal_id from sys.sql_modules where object_id = object_id('{objectName}')");
+
+    [TestMethod]
+    public void SqlModules_ExecuteAsPrincipalId_NoClauseAndCaller_AreNull()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create procedure dbo.p_none as select 1",
+            "create procedure dbo.p_caller with execute as caller as select 1");
+        AreEqual(DBNull.Value, ExecuteAsPrincipalId(sim, "dbo.p_none"));
+        AreEqual(DBNull.Value, ExecuteAsPrincipalId(sim, "dbo.p_caller"));
+    }
+
+    [TestMethod]
+    public void SqlModules_ExecuteAsPrincipalId_Owner_IsMinusTwo()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure dbo.p_owner with execute as owner as select 1");
+        AreEqual(-2, ExecuteAsPrincipalId(sim, "dbo.p_owner"));
+    }
+
+    [TestMethod]
+    public void SqlModules_ExecuteAsPrincipalId_Self_IsTheCreatingPrincipal()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure dbo.p_self with execute as self as select 1");
+        AreEqual(1, ExecuteAsPrincipalId(sim, "dbo.p_self"));
+    }
+
+    [TestMethod]
+    public void SqlModules_ExecuteAsPrincipalId_NamedUser_IsThatUsersId()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create user u without login",
+            "create procedure dbo.p_named with execute as 'u' as select 1");
+        AreEqual(sim.ExecuteScalar("select principal_id from sys.database_principals where name = 'u'"),
+            ExecuteAsPrincipalId(sim, "dbo.p_named"));
+    }
+
+    [TestMethod]
+    public void SqlModules_ExecuteAsPrincipalId_ScalarFunction_ResolvesTheSameWay()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create function dbo.f_owner() returns int with execute as owner as begin return 1 end",
+            "create function dbo.f_self() returns int with execute as self as begin return 1 end",
+            "create function dbo.f_caller() returns int with execute as caller as begin return 1 end");
+        AreEqual(-2, ExecuteAsPrincipalId(sim, "dbo.f_owner"));
+        AreEqual(1, ExecuteAsPrincipalId(sim, "dbo.f_self"));
+        AreEqual(DBNull.Value, ExecuteAsPrincipalId(sim, "dbo.f_caller"));
+    }
+
+    [TestMethod]
+    public void SqlModules_ExecuteAsPrincipalId_Trigger_ResolvesTheSameWay()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (id int)",
+            "create trigger dbo.tr_owner on dbo.t with execute as owner after insert as select 1",
+            "create trigger dbo.tr_plain on dbo.t after update as select 1");
+        AreEqual(-2, ExecuteAsPrincipalId(sim, "dbo.tr_owner"));
+        AreEqual(DBNull.Value, ExecuteAsPrincipalId(sim, "dbo.tr_plain"));
+    }
 }

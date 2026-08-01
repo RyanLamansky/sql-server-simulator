@@ -321,6 +321,98 @@ public sealed class WindowFrameTests
         AreEqual("10752", ex.Data["HelpLink.EvtID"]);
     }
 
+    /// <summary>
+    /// <c>COUNT(*)</c> and <c>COUNT_BIG(*)</c> may frame an unordered
+    /// partition, and the frame applies — the running count climbs row by row
+    /// rather than reporting the partition total. Probe-confirmed against SQL
+    /// Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("count(*)")]
+    [DataRow("count_big(*)")]
+    public void StarCount_RowsFrameWithoutOrderBy_AppliesFrame(string aggregate)
+    {
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            $"select id, {aggregate} over(partition by grp rows between unbounded preceding and current row) from t").ExecuteReader();
+        var byId = new Dictionary<int, long>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = System.Convert.ToInt64(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture);
+        // grp 1 holds ids 1-4, grp 2 holds ids 5-7; each row counts itself and
+        // everything ahead of it in its own partition.
+        CollectionAssert.AreEqual(new[] { 1L, 2L, 3L, 4L, 1L, 2L, 3L }, byId.OrderBy(p => p.Key).Select(p => p.Value).ToArray());
+    }
+
+    /// <summary>
+    /// <c>RANGE</c> takes the same exemption, but with nothing to order
+    /// against every row is its own partition's peer — so the frame spans the
+    /// whole partition and the count is the partition total.
+    /// </summary>
+    [TestMethod]
+    public void StarCount_RangeFrameWithoutOrderBy_SpansWholePartition()
+    {
+        using var connection = SeededTies();
+        using var reader = connection.CreateCommand(
+            "select id, count(*) over(partition by grp range between unbounded preceding and current row) from t").ExecuteReader();
+        var byId = new Dictionary<int, int>();
+        while (reader.Read())
+            byId[reader.GetInt32(0)] = reader.GetInt32(1);
+        AreEqual(4, byId[1]);
+        AreEqual(4, byId[4]);
+        AreEqual(3, byId[5]);
+        AreEqual(3, byId[7]);
+    }
+
+    /// <summary>
+    /// The exemption is the star operand's, not <c>COUNT</c>'s: a named
+    /// operand and a constant operand both take Msg 10756, as does every other
+    /// aggregate.
+    /// </summary>
+    [TestMethod]
+    [DataRow("count(v)")]
+    [DataRow("count(1)")]
+    [DataRow("count_big(v)")]
+    [DataRow("sum(v)")]
+    [DataRow("min(v)")]
+    public void NonStarAggregate_FrameWithoutOrderBy_Raises10756(string aggregate)
+    {
+        using var connection = SeededTies();
+        var ex = Throws<DbException>(() => _ = connection.CreateCommand(
+            $"select {aggregate} over(partition by grp rows between unbounded preceding and current row) from t").ExecuteScalar());
+        AreEqual("10756", ex.Data["HelpLink.EvtID"]);
+        AreEqual("Window frame with ROWS or RANGE must have an ORDER BY clause.", ex.Message);
+    }
+
+    /// <summary>
+    /// A frame written as the <c>OVER</c> body's only element is a grammar
+    /// error whatever the function — real refuses the shape before the
+    /// ordering rule gets a say, so the star-count exemption never reaches it.
+    /// </summary>
+    [TestMethod]
+    [DataRow("count(*)")]
+    [DataRow("sum(v)")]
+    public void FrameAsOnlyOverElement_Raises102(string aggregate)
+    {
+        using var connection = SeededTies();
+        var ex = Throws<DbException>(() => _ = connection.CreateCommand(
+            $"select {aggregate} over(rows between unbounded preceding and current row) from t").ExecuteScalar());
+        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+    }
+
+    /// <summary>
+    /// A named window carries no exemption: real validates the resolved body
+    /// before it knows which function reads it, so even <c>COUNT(*)</c> takes
+    /// Msg 5364 there.
+    /// </summary>
+    [TestMethod]
+    public void StarCount_NamedWindowFrameWithoutOrderBy_Raises5364()
+    {
+        using var connection = SeededTies();
+        var ex = Throws<DbException>(() => _ = connection.CreateCommand(
+            "select count(*) over w from t window w as (partition by grp rows between unbounded preceding and current row)").ExecuteScalar());
+        AreEqual("5364", ex.Data["HelpLink.EvtID"]);
+    }
+
     [TestMethod]
     public void Range_WithNumericOffsetBounds_Raises4194()
     {

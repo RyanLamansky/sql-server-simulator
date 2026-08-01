@@ -274,7 +274,9 @@ partial class Simulation
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
+            ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
+            UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };
         if (existed)
             trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -504,6 +506,7 @@ partial class Simulation
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
+            UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };
         if (existed)
             trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;

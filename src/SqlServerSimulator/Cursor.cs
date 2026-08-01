@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -30,6 +31,20 @@ internal enum CursorSensitivity
 internal enum FetchDirection { Next, Prior, First, Last, Absolute, Relative }
 
 /// <summary>
+/// A validated positioned <c>WHERE CURRENT OF</c> binding: the cursor plus the
+/// index into <see cref="Cursor.CurrentRids"/> the DML target resolved to.
+/// Carrying the slot rather than re-deriving it from the table keeps the
+/// reference provenance the validation applied — a view name and the base
+/// table under it reach different slots — from being lost between the WHERE
+/// parse and the mutation loop.
+/// </summary>
+internal readonly struct PositionedCursorTarget(Cursor cursor, int slot)
+{
+    public readonly Cursor Cursor = cursor;
+    public readonly int Slot = slot;
+}
+
+/// <summary>
 /// The concurrency-control model of an updatable cursor (the
 /// <c>READ_ONLY</c> / <c>SCROLL_LOCKS</c> / <c>OPTIMISTIC</c> keyword family).
 /// A read-only cursor carries <see cref="Cursor.ReadOnly"/> instead.
@@ -54,6 +69,9 @@ internal enum CursorConcurrency
 /// <summary>
 /// A session-scoped T-SQL cursor (declared with <c>DECLARE … CURSOR FOR
 /// &lt;select&gt;</c>). Lives in <see cref="SimulatedDbConnection.Cursors"/>.
+/// A <c>TOP</c> / <c>OFFSET</c> / <c>FETCH</c> row limit anywhere in the shape
+/// caps sensitivity at <see cref="CursorSensitivity.Keyset"/> (the limit picks
+/// membership at OPEN, so there is no live set to walk).
 /// Position is tracked by the tuple of source rows' stable <c>(page, slot)</c>
 /// addresses — one per FROM slot, so a JOIN cursor reaches every participating
 /// row — which <see cref="Heap.UpdateAt"/> preserves through value updates by
@@ -67,7 +85,7 @@ internal sealed class Cursor(
     CursorSensitivity sensitivity,
     bool scrollable,
     bool readOnly,
-    HeapTable[] baseTables,
+    CursorSourcePlan? plan,
     CursorConcurrency concurrency = CursorConcurrency.Default,
     List<string>? forUpdateColumns = null)
 {
@@ -77,11 +95,28 @@ internal sealed class Cursor(
     public readonly bool Scrollable = scrollable;
     public readonly bool ReadOnly = readOnly;
 
-    /// <summary>The base table behind each FROM slot, in source order —
+    /// <summary>The FROM shape this cursor re-folds per FETCH, resolved at
+    /// DECLARE; null for a STATIC (non-navigable) cursor, which walks a
+    /// snapshot instead.</summary>
+    public readonly CursorSourcePlan? Plan = plan;
+
+    /// <summary>Every base table the cursor reads, flattened through any
+    /// deferred bodies (derived table, CTE, APPLY right side, view) —
     /// non-empty for KEYSET / DYNAMIC / positioned DML, empty for a STATIC
-    /// (non-updatable) cursor. A self-join repeats a table; positioned DML
-    /// binds to its first occurrence, as real SQL Server does.</summary>
-    public readonly HeapTable[] BaseTables = baseTables;
+    /// (non-navigable) cursor. Parallel to <see cref="CurrentRids"/>. A
+    /// self-join repeats a table; positioned DML binds to its first
+    /// occurrence, as real SQL Server does.</summary>
+    public readonly HeapTable[] BaseTables = plan?.IdentityTables ?? [];
+
+    /// <summary>The view a positioned <c>WHERE CURRENT OF</c> must name to
+    /// reach the matching <see cref="BaseTables"/> entry, or null when the
+    /// statement must name the base table itself.</summary>
+    public readonly View?[] BaseViews = plan?.IdentityViews ?? [];
+
+    /// <summary>The surface columns of each <see cref="BaseTables"/> entry — a
+    /// stamping view's output columns, else the table's own — which a
+    /// <c>FOR UPDATE OF</c> list is matched against.</summary>
+    public readonly HeapColumn[][] BaseColumns = plan?.IdentityColumns ?? [];
 
     /// <summary>The concurrency model — <see cref="CursorConcurrency.ScrollLocks"/>
     /// holds a cursor-scoped U lock on the fetched row, <see cref="CursorConcurrency.Optimistic"/>
@@ -149,6 +184,12 @@ internal sealed class Cursor(
     /// hole). Read by positioned <c>WHERE CURRENT OF</c> DML.</summary>
     public (int Page, int Slot)?[]? CurrentRids;
 
+    /// <summary>True when the last FETCH reported <c>@@FETCH_STATUS = -2</c> —
+    /// a KEYSET member deleted (or key-changed) out from under the cursor.
+    /// Positioned DML there is Msg 16947 rather than the Msg 16931 an
+    /// unpositioned cursor reports (probe-confirmed split).</summary>
+    public bool OnKeysetHole;
+
     // STATIC: frozen projected values, walked by index.
     private List<SqlValue[]>? staticRows;
     // KEYSET: ordered snapshot of row identities (membership frozen at OPEN),
@@ -180,7 +221,9 @@ internal sealed class Cursor(
                 batch.Connection.LastCursorRows = this.staticRows.Count;
                 break;
             case CursorSensitivity.Keyset:
-                this.keysetIdentities = [.. this.Selection.EnumerateForCursor(batch).Select(r => (r.UniqueKeys, r.Rids))];
+                // OPEN is where a TOP / OFFSET / FETCH limit picks membership;
+                // later FETCHes re-read the frozen key set without it.
+                this.keysetIdentities = [.. Selection.EnumerateForCursor(this.Plan!, batch, applyRowLimit: true).Select(r => (r.UniqueKeys, r.Rids))];
                 this.position = -1;
                 batch.Connection.LastCursorRows = this.keysetIdentities.Count;
                 break;
@@ -193,6 +236,7 @@ internal sealed class Cursor(
         }
 
         this.CurrentRids = null;
+        this.OnKeysetHole = false;
         this.IsOpen = true;
 
         // SCROLL_LOCKS: take table-IX on every participating table for the
@@ -227,6 +271,7 @@ internal sealed class Cursor(
         this.dynamicLast = null;
         this.CurrentRids = null;
         this.optimisticSnapshot = null;
+        this.OnKeysetHole = false;
         this.IsOpen = false;
     }
 
@@ -303,51 +348,58 @@ internal sealed class Cursor(
     }
 
     /// <summary>
-    /// The index of the first FROM slot backed by <paramref name="table"/>, or
-    /// <c>-1</c> when the cursor doesn't read it. Positioned DML binds to the
-    /// first occurrence, matching real SQL Server (which reports Msg 16961 when
-    /// a self-join makes the choice ambiguous).
+    /// The index of the first identity slot a positioned <c>WHERE CURRENT OF</c>
+    /// naming <paramref name="table"/> — written directly, or through
+    /// <paramref name="throughView"/> — addresses, or <c>-1</c> when the cursor
+    /// doesn't read it that way. The reference must match as written: a cursor
+    /// over a view is mutated by naming the view, and naming the base table
+    /// under it is Msg 16933 (probe-confirmed), while a derived table or CTE is
+    /// transparent and the mutation names the base table. Positioned DML binds
+    /// to the first occurrence, matching real SQL Server (which reports Msg
+    /// 16961 when a self-join makes the choice ambiguous).
     /// </summary>
-    internal int IndexOfBaseTable(HeapTable table)
+    internal int IndexOfTarget(HeapTable table, View? throughView)
     {
         for (var i = 0; i < this.BaseTables.Length; i++)
         {
-            if (ReferenceEquals(this.BaseTables[i], table))
+            if (ReferenceEquals(this.BaseTables[i], table) && ReferenceEquals(this.BaseViews[i], throughView))
                 return i;
         }
         return -1;
     }
 
-    /// <summary>How many FROM slots are backed by <paramref name="table"/> —
-    /// more than one means a self-join, which real reports Msg 16961 for at
+    /// <summary>How many identity slots the same reference reaches — more than
+    /// one means a self-join, which real reports Msg 16961 for at
     /// positioned-DML time.</summary>
-    internal int CountBaseTable(HeapTable table)
+    internal int CountTarget(HeapTable table, View? throughView)
     {
         var count = 0;
-        foreach (var candidate in this.BaseTables)
+        for (var i = 0; i < this.BaseTables.Length; i++)
         {
-            if (ReferenceEquals(candidate, table))
+            if (ReferenceEquals(this.BaseTables[i], table) && ReferenceEquals(this.BaseViews[i], throughView))
                 count++;
         }
         return count;
     }
 
     /// <summary>
-    /// True when <paramref name="table"/> may be mutated through a positioned
-    /// <c>WHERE CURRENT OF</c>: always true unless the cursor carries a
-    /// <c>FOR UPDATE OF (…)</c> column list naming none of its columns.
-    /// Probe-confirmed: real narrows the cursor's updatable <em>tables</em> to
-    /// those owning a listed column and reports Msg 16933 (not 16932) for any
-    /// other table, including on a DELETE.
+    /// True when identity slot <paramref name="index"/> may be mutated through
+    /// a positioned <c>WHERE CURRENT OF</c>: always true unless the cursor
+    /// carries a <c>FOR UPDATE OF (…)</c> column list naming none of the
+    /// slot's surface columns (the view's output columns when a view stamps the
+    /// slot, else the base table's own). Probe-confirmed: real narrows the
+    /// cursor's updatable <em>tables</em> to those owning a listed column and
+    /// reports Msg 16933 (not 16932) for any other table, including on a
+    /// DELETE.
     /// </summary>
-    internal bool IsTableUpdatable(HeapTable table, BatchContext batch)
+    internal bool IsSlotUpdatable(int index, BatchContext batch)
     {
         if (this.ForUpdateColumns is null)
             return true;
         var collation = batch.CurrentDatabase.Collation;
         foreach (var allowed in this.ForUpdateColumns)
         {
-            foreach (var column in table.Columns)
+            foreach (var column in this.BaseColumns[index])
             {
                 if (collation.Equals(allowed, column.Name))
                     return true;
@@ -384,12 +436,13 @@ internal sealed class Cursor(
         if (!this.IsOpen)
             throw SimulatedSqlException.CursorNotOpen(state: 2);
         this.EnsureDirectionAllowed(direction);
-        var result = this.Sensitivity switch
+        var (status, values) = this.Sensitivity switch
         {
             CursorSensitivity.Static => this.FetchStatic(direction, offset),
             CursorSensitivity.Keyset => this.FetchKeyset(batch, direction, offset),
             _ => this.FetchDynamic(batch, direction, offset),
         };
+        this.OnKeysetHole = status == -2;
 
         // OPTIMISTIC: snapshot the landed row's live bytes (per source) so a
         // later positioned UPDATE / DELETE can detect out-of-band modification.
@@ -408,7 +461,7 @@ internal sealed class Cursor(
         if (this.Concurrency == CursorConcurrency.ScrollLocks)
             this.MoveScrollLock(batch);
 
-        return result;
+        return (status, values);
     }
 
     /// <summary>
@@ -459,7 +512,7 @@ internal sealed class Cursor(
         }
 
         var (keys, rids) = this.keysetIdentities[this.position];
-        foreach (var row in this.Selection.EnumerateForCursor(batch))
+        foreach (var row in Selection.EnumerateForCursor(this.Plan!, batch))
         {
             if (Selection.CursorIdentityMatches(row, keys, rids))
             {
@@ -508,7 +561,7 @@ internal sealed class Cursor(
 
     private (int, SqlValue[]?) FetchDynamic(BatchContext batch, FetchDirection direction, long offset)
     {
-        var live = this.Selection.EnumerateForCursor(batch);
+        var live = Selection.EnumerateForCursor(this.Plan!, batch);
         var target = direction switch
         {
             FetchDirection.First => live.Count > 0 ? live[0] : null,
@@ -560,7 +613,7 @@ internal sealed class Cursor(
     {
         foreach (var row in live)
         {
-            if (this.Selection.CompareCursorRows(row, this.dynamicLast!) == 0)
+            if (Selection.CompareCursorRows(this.Plan!, row, this.dynamicLast!) == 0)
                 return row;
         }
         return null;
@@ -581,7 +634,7 @@ internal sealed class Cursor(
         }
         foreach (var row in live)
         {
-            if (this.Selection.CompareCursorRows(row, this.dynamicLast) > 0)
+            if (Selection.CompareCursorRows(this.Plan!, row, this.dynamicLast) > 0)
                 return row;
         }
         this.dynamicAfterLast = true;
@@ -598,7 +651,7 @@ internal sealed class Cursor(
             return null;
         for (var i = live.Count - 1; i >= 0; i--)
         {
-            if (this.Selection.CompareCursorRows(live[i], this.dynamicLast) < 0)
+            if (Selection.CompareCursorRows(this.Plan!, live[i], this.dynamicLast) < 0)
                 return live[i];
         }
         this.dynamicBeforeFirst = true;

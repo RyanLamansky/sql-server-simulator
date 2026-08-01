@@ -25,8 +25,11 @@ partial class Selection
     /// that isn't <c>XML</c> (<c>FOR BROWSE</c> / leftover) restores the cursor
     /// and returns <paramref name="inner"/> unchanged for the downstream Msg
     /// 102. Leaves the cursor on the first token past the clause.
+    /// <paramref name="depth"/> is the enclosing query's nesting depth: only a
+    /// statement's own SELECT (depth 0) can be the one an INSERT / SELECT INTO
+    /// writes from, so only there does the clause raise Msg 6819.
     /// </summary>
-    internal static Selection ParseOptionalForXml(ParserContext context, Selection inner)
+    internal static Selection ParseOptionalForXml(ParserContext context, Selection inner, uint depth)
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.For })
             return inner;
@@ -97,8 +100,6 @@ partial class Selection
                     if (context.GetNextRequired() is not Literal { Value.Type.Category: SqlTypeCategory.String } rootLiteral)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     rootName = rootLiteral.Value.AsString;
-                    if (rootName.Length == 0)
-                        throw SimulatedSqlException.ForXmlEmptyRootTag();
                     if (context.GetNextRequired() is not Operator { Character: ')' })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     context.MoveNextOptional();
@@ -123,7 +124,48 @@ partial class Selection
             }
         }
 
+        // Real settles the statement shape before any name: an INSERT source
+        // SELECT raises Msg 6819 even when the projection also carries an
+        // unusable name (probe-confirmed), while a syntax error still wins.
+        RejectSerializationInWriteStatement(context, inner, depth, forJson: false);
+
+        // The names written into the clause are validated rather than escaped —
+        // the row tag first, then ROOT (real's order).
+        if (rowElement is { Length: > 0 })
+            ForXmlName.ValidateSimpleName(rowElement, ForXmlNameKind.Row);
+        if (rootSpecified)
+        {
+            if (rootName.Length == 0)
+                throw SimulatedSqlException.ForXmlEmptyRootTag();
+            ForXmlName.ValidateSimpleName(rootName, ForXmlNameKind.Root);
+        }
+
         return WrapForXml(inner, new ForXmlOptions(mode, rowElement, elements, xsinil, typed, rootSpecified ? rootName : null));
+    }
+
+    /// <summary>
+    /// Raises real's rejection when a <c>FOR XML</c> / <c>FOR JSON</c> clause
+    /// lands on a SELECT whose rows go somewhere other than the client: the
+    /// source of an <c>INSERT … SELECT</c> or a <c>SELECT … INTO</c>
+    /// (Msg 6819 / Msg 13602), or a variable-assigning <c>SELECT @v = …</c>
+    /// (Msg 6819 for both clauses — real reports the FOR XML wording even for
+    /// FOR JSON there). Nested scopes are unaffected: the clause is legal in a
+    /// derived table, a scalar subquery and a <c>SET @v = (SELECT … FOR XML)</c>
+    /// alike, so only <paramref name="depth"/> 0 is checked.
+    /// </summary>
+    private static void RejectSerializationInWriteStatement(ParserContext context, Selection inner, uint depth, bool forJson)
+    {
+        if (depth != 0)
+            return;
+        if (inner.IsAssignmentOnly)
+            throw SimulatedSqlException.ForXmlNotAllowedInAssignment();
+
+        var statementKind = context.InInsertSourceSelect ? "INSERT" : inner.IntoTarget is not null ? "SELECT INTO" : null;
+        if (statementKind is null)
+            return;
+        throw forJson
+            ? SimulatedSqlException.ForJsonNotAllowedIn(statementKind)
+            : SimulatedSqlException.ForXmlNotAllowedIn(statementKind);
     }
 
     /// <summary>
@@ -161,7 +203,12 @@ partial class Selection
             var levels = BuildAutoLevels(inner, forJson: false);
             var levelElements = new ForXmlElement[levels.Length];
             for (var i = 0; i < levels.Length; i++)
-                levelElements[i] = BuildForXmlFlatElement(levels[i].Name, levels[i].Columns, inner, options);
+            {
+                // A level is named after a table or alias as written, so it
+                // takes the same escaping a column name does: FROM #tmp emits
+                // <_x0023_tmp>.
+                levelElements[i] = BuildForXmlFlatElement(ForXmlName.Encode(levels[i].Name), levels[i].Columns, inner, options);
+            }
 
             return new Selection(schema, columnNames,
                 hasOrderBy: false,
@@ -195,6 +242,12 @@ partial class Selection
             return pathRoot;
         }
 
+        // RAW('') is row-tag omission, which only element-centric
+        // serialization can carry (probe-confirmed: RAW(''), ELEMENTS emits
+        // <a>1</a> while the attribute-centric default raises).
+        if (options.RowElement!.Length == 0 && !options.Elements)
+            throw SimulatedSqlException.ForXmlAttributeWithoutRowTag();
+
         var columns = new int[inner.ColumnNames.Length];
         for (var i = 0; i < columns.Length; i++)
             columns[i] = i;
@@ -219,15 +272,19 @@ partial class Selection
             if (inner.Schema[i] is BinarySqlType or VarbinarySqlType)
                 throw options.Mode == ForXmlMode.Auto ? SimulatedSqlException.ForXmlBinaryAuto(columnName) : SimulatedSqlException.ForXmlBinaryRaw(columnName);
 
+            // RAW / AUTO escape a name XML can't carry instead of rejecting it,
+            // so [a b] becomes a_x0020_b (the errors above still quote the name
+            // as written).
+            var xmlName = ForXmlName.Encode(columnName);
             if (options.Elements || inner.Schema[i] is XmlSqlType)
             {
-                var element = new ForXmlElement(columnName);
+                var element = new ForXmlElement(xmlName);
                 element.Content.Add(new ForXmlLeaf(i, atomic: false));
                 wrapper.Content.Add(element);
             }
             else
             {
-                wrapper.Attributes.Add(new ForXmlAttribute(columnName, i));
+                wrapper.Attributes.Add(new ForXmlAttribute(xmlName, i));
             }
         }
         return wrapper;
@@ -245,6 +302,10 @@ partial class Selection
     /// </summary>
     private static void InsertForXmlPath(ForXmlElement root, string alias, int column, SqlType columnType, bool rowTagOmitted)
     {
+        // PATH rejects a name RAW / AUTO would escape (Msg 6850), along with the
+        // path-shape and namespace-prefix rules on it.
+        ForXmlName.ValidatePathColumn(alias);
+
         var segments = alias.Length == 0 ? [] : alias.Split('/');
         var atomic = false;
         var attributeName = (string?)null;

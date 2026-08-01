@@ -1,8 +1,8 @@
-# Collations — per-column declaration, coercibility, Msg 468 / 457
+# Collations — per-column declaration, coercibility, Msg 468 / 457 / 451
 
 Every string-categorized `SqlType` instance carries a `(Collation, Coercibility)` pair.
 CREATE TABLE / ALTER COLUMN pin the declared collation at `Implicit` rank onto the column's `SqlType`; values decoded from the column inherit that type instance through row decode, so `SqlValue.CompareTo` / `Equals` / `GetHashCode` honor the declared rules.
-Cross-collation operand pairs that can't be resolved by coercibility raise Msg 468 (comparison / set ops / LIKE) or Msg 457 (concat / UNION ALL / DISTINCT over unresolved).
+Cross-collation operand pairs that can't be resolved by coercibility raise Msg 468 (comparison / set ops / LIKE), Msg 457 (`+` / `||` / CASE / UNION ALL / DISTINCT over unresolved) or Msg 451 (`CONCAT` / `CONCAT_WS`, which name the output slot they couldn't settle).
 
 ## Type-side wiring
 
@@ -64,6 +64,8 @@ The parallel `SqlValue.FromString(type, value)` similarly preserves the target t
 - **ANSI concat (`||`)** — `Concatenate.ResolveResultType` (shared by `Run` and `GetSqlType`) raises the same Msg 457 naming the **`concat`** operator where `+` names `add` (probe-confirmed both ways).
 - **Value-arm unification (`CASE` / `COALESCE` / `IIF`)** — `Expression.PromoteValueArms` folds the arms pairwise and raises **Msg 457** naming the **`CASE`** operator, which is what real says for `COALESCE` too (it desugars to a CASE).
   `ISNULL` is the exception that never conflicts: it takes its first argument's collation outright rather than unifying (probe-confirmed — `ISNULL(<CI col>, <CS col>)` returns the rowset).
+- **`CONCAT` / `CONCAT_WS`** — `StringConcat.CollationAccumulator` left-folds the string arguments (`CONCAT_WS`'s separator participates like any other; non-string arguments stringify into the accumulated collation and contribute nothing), so the result carries a column's collation instead of the database default.
+  See [Msg 451 — the output-column message](#msg-451--the-output-column-message) for the conflict wording.
 
 ## Compile-time binding
 
@@ -447,6 +449,29 @@ With `_KS_WS` they distinguish.
 `CultureCollation` takes optional `kanaTypeSensitive` / `widthSensitive` parameters (default `false`); the `Latin1_General_CI_AS_KS_WS` instance passes `true` for both.
 Probe-confirmed against SQL Server 2025: `nchar(0x30A2) = nchar(0x3042)` is FALSE under `_KS_WS` and TRUE under plain `_CI_AS`.
 
+## Msg 451 — the output-column message
+
+`CONCAT` / `CONCAT_WS` name an unresolvable pair with **Msg 451 State 1** rather than the Msg 457 the `+` / `||` operators use:
+
+```
+Cannot resolve collation conflict between "R" and "L" in concat operator occurring in SELECT statement column 1.
+```
+
+Note there's no leading *the* (Msg 468's wording has one), the collation names follow the same right-then-left order every other site uses, and the tail names the **clause and the 1-based ordinal of the slot being settled**.
+Two explicit `COLLATE` postfixes take Msg 468 instead (`… in the concat operation.`), the same rank split every other operator makes.
+
+The slot is `ParserContext.CollationOutputSlot`, set by `Selection.BuildSqlProjection` around each term it binds:
+
+| Clause | Ordinal (probe-confirmed) |
+|---|---|
+| `SELECT` | the projection's 1-based position |
+| `ORDER BY` | the ORDER BY item's 1-based position, independent of the select list |
+| `GROUP BY` | the grouping term's position **plus one** — the grouped projection real builds carries one column ahead of the keys |
+
+The slot stays **unset** where an assignment target supplies the collation — an `INSERT … SELECT` source, a `SELECT @v = …` list, an `UPDATE`'s `SET` values — because real settles the conflict against the target silently there and returns rows.
+`SELECT … INTO` is not an assignment in that sense: it has to materialize a column of its own, so it raises.
+Like every other site the check binds at compile time, so an empty rowset and a `CREATE VIEW` whose body carries the conflict both raise.
+
 ## Set-operation collation resolution
 
 Cross-collation branches of a set operation must resolve to a single output collation, and the check binds at **compile time** — probe-confirmed against SQL Server 2025 that it fires on empty tables.
@@ -466,10 +491,13 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
 
 ## Known gaps
 
-- **`CONCAT(a, b)` doesn't resolve its operands' collations.**
-  Real raises **Msg 451** there — a message of its own, distinct from `+`'s Msg 457: `Cannot resolve collation conflict between "R" and "L" in concat operator occurring in SELECT statement column 1.` (no leading *the*, and it names the projection ordinal, which the expression node doesn't know).
-  The variadic form silently picks a collation instead.
-  `+` and `||` both bind correctly (above).
+- **A conflict a *consuming* operation reports.**
+  Real lets an unresolved collation propagate and reports it from whoever demands a definite one, so `WHERE LEN(concat(a, b)) > 0` and `WHERE concat(a, b) = 'x'` are **Msg 4191** (`Cannot resolve collation conflict for <len|equal to> operation.`) rather than the producing operator's own message.
+  The simulator raises at the producing site, so a predicate-embedded conflict reports Msg 451 / 468 instead.
+- **`EXISTS (SELECT concat(a, b) …)`** — real discards the projection and doesn't raise; the simulator binds the select list either way and reports Msg 451.
+- **`+` / `||` / `CASE` / `UNION ALL` over `nvarchar` report Msg 457 where real reports Msg 451.**
+  The 457-vs-451 split is the *result type*, not the operator: real names the implicit-conversion message only when the result is `varchar` (the family that carries a code page), and the output-column message for `nvarchar` (probe-confirmed against SQL Server 2025 — `varchar + varchar` → 457, `nvarchar + nvarchar` → 451, and the same for `||` / `CASE` / `UNION ALL`).
+  `CONCAT` / `CONCAT_WS` take Msg 451 for both families and ship that way; the other operators raise 457 for both.
 - **A bind error is catchable here and isn't on real.**
   Real compiles a batch as a unit, so Msg 468 / 457 / 8116 / 207 from a predicate are uncatchable bind-time failures — probe-confirmed that a `TRY` / `CATCH` around one never reaches the CATCH and the batch dies.
   The simulator's dispatch loop compiles each statement as it reaches it, so the error is an ordinary catchable one.

@@ -120,12 +120,30 @@ public sealed class ConnectionStringAuthTests
     }
 
     [TestMethod]
-    public void RestrictedPrincipal_ChangeDatabase_Raises916()
+    public void RestrictedPrincipal_ChangeDatabase_ToUnreachableDatabase_Raises916()
     {
+        // A login's rights are per database: it may switch to one it maps into
+        // and is refused by one it doesn't. `other` has no user for the login
+        // and guest is inaccessible in a user database.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create login app with password = 'P@ss1word'; create user mapped for login app; create database other");
+        using var connection = Authenticate(simulation, "User ID=app;Password=P@ss1word");
+        var ex = Throws<SimulatedSqlException>(() => connection.ChangeDatabase("other"));
+        AreEqual(916, ex.Number);
+        AreEqual("simulated", connection.CreateCommand("select db_name()").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void RestrictedPrincipal_ChangeDatabase_ToGuestAccessibleDatabase_RebindsPrincipal()
+    {
+        // guest is accessible in master, so the switch stands and the session's
+        // database user follows it (probe-confirmed) — the login and
+        // ORIGINAL_LOGIN() stay put.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create login app with password = 'P@ss1word'; create user mapped for login app");
         using var connection = Authenticate(simulation, "User ID=app;Password=P@ss1word");
-        var ex = Throws<SimulatedSqlException>(() => connection.ChangeDatabase("master"));
-        AreEqual(916, ex.Number);
+        AreEqual("mapped|app|app", Identity(connection));
+        connection.ChangeDatabase("master");
+        AreEqual("guest|app|app", Identity(connection));
     }
 }

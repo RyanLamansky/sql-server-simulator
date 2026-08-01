@@ -41,10 +41,11 @@ internal static partial class BuiltInResources
 
         // sys.trigger_events: one row per (DML trigger, event) pair. Real SQL
         // Server types are 1 = INSERT, 2 = UPDATE, 3 = DELETE (distinct from
-        // the internal action-flag bit values); is_first / is_last default 0
-        // (no sp_settriggerorder modeled), event_group_type is NULL, and
-        // is_trigger_event is 1. SMO's CREATE-scripting trigger query LEFT JOINs
-        // it three times (one per DML event) to build the FOR clause.
+        // the internal action-flag bit values); is_first / is_last read the
+        // per-action sp_settriggerorder slots (Trigger.FirstForActions /
+        // LastForActions), event_group_type is NULL, and is_trigger_event
+        // is 1. SMO's CREATE-scripting trigger query LEFT JOINs it three
+        // times (one per DML event) to build the FOR clause.
         Sys("trigger_events",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -386,7 +387,6 @@ internal static partial class BuiltInResources
         {
             foreach (var trigger in schema.Triggers.Values.OrderBy(t => t.ObjectId))
             {
-                var createDate = SqlValue.FromDateTime(trigger.CreateDate);
                 yield return [
                     SqlValue.FromSystemName(trigger.Name),
                     SqlValue.FromInt32(trigger.ObjectId),
@@ -395,8 +395,8 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt32(trigger.Parent.ObjectId),
                     triggerType,
                     triggerTypeDesc,
-                    createDate,
-                    createDate,
+                    SqlValue.FromDateTime(trigger.CreateDate),
+                    SqlValue.FromDateTime(trigger.ModifyDate),
                     falseBit,
                     trigger.IsDisabled ? trueBit : falseBit,
                     trigger.Timing == TriggerTiming.InsteadOf ? trueBit : falseBit,
@@ -410,7 +410,6 @@ internal static partial class BuiltInResources
         // [ddlDatabaseTriggerLog].
         foreach (var ddl in database.DdlTriggers.Values.OrderBy(t => t.ObjectId))
         {
-            var createDate = SqlValue.FromDateTime(ddl.CreateDate);
             yield return [
                 SqlValue.FromSystemName(ddl.Name),
                 SqlValue.FromInt32(ddl.ObjectId),
@@ -419,8 +418,8 @@ internal static partial class BuiltInResources
                 parentIdZero,
                 triggerType,
                 triggerTypeDesc,
-                createDate,
-                createDate,
+                SqlValue.FromDateTime(ddl.CreateDate),
+                SqlValue.FromDateTime(ddl.ModifyDate),
                 falseBit,
                 ddl.IsDisabled ? trueBit : falseBit,
                 falseBit,
@@ -439,8 +438,12 @@ internal static partial class BuiltInResources
     /// (<c>DDL_DATABASE_LEVEL_EVENTS</c>) yields one row per <em>leaf</em> event
     /// in the group's transitive closure — each carrying the group's id/desc in
     /// <c>event_group_type(_desc)</c> — while an individual event name yields a
-    /// single row with a NULL group. <c>is_first</c> / <c>is_last</c> default 0
-    /// (no <c>sp_settriggerorder</c> modeled); <c>is_trigger_event</c> is 1.
+    /// single row with a NULL group. A DML row's <c>is_first</c> /
+    /// <c>is_last</c> read that action's <c>sp_settriggerorder</c> slot
+    /// (<see cref="Trigger.FirstForActions"/> / <see cref="Trigger.LastForActions"/>),
+    /// so ordering a multi-action trigger first for INSERT leaves its UPDATE
+    /// row at 0; DDL triggers take no ordering and stay 0.
+    /// <c>is_trigger_event</c> is 1.
     /// DacFx's SqlDatabaseDdlTrigger reverse-engineering builds the element's
     /// EventType relationship from these rows.
     /// </summary>
@@ -472,8 +475,8 @@ internal static partial class BuiltInResources
                         objectId,
                         SqlValue.FromInt32(events[i].Type),
                         SqlValue.FromString(eventTypeName, events[i].Desc),
-                        falseBit,
-                        falseBit,
+                        (trigger.FirstForActions & flags[i]) != 0 ? trueBit : falseBit,
+                        (trigger.LastForActions & flags[i]) != 0 ? trueBit : falseBit,
                         nullInt,
                         nullDesc,
                         trueBit,
@@ -565,11 +568,6 @@ internal static partial class BuiltInResources
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
         var fkType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit), "F ");
         var fkTypeDesc = SqlValue.FromNVarchar("FOREIGN_KEY_CONSTRAINT");
-        // key_index_id is the index id on the referenced table that satisfies
-        // the FK — the simulator doesn't model indexes so report 1 (the
-        // referenced PK / UQ ordinal in real SQL Server typically lands at 1
-        // because PK gets a clustered index id of 1).
-        var keyIndexId = SqlValue.FromInt32(1);
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
@@ -577,7 +575,6 @@ internal static partial class BuiltInResources
             {
                 foreach (var fk in table.OutgoingForeignKeys.OrderBy(f => f.ObjectId))
                 {
-                    var createDate = SqlValue.FromDateTime(table.CreateDate);
                     yield return [
                         SqlValue.FromSystemName(fk.Name),
                         SqlValue.FromInt32(fk.ObjectId),
@@ -586,13 +583,13 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(table.ObjectId),
                         fkType,
                         fkTypeDesc,
-                        createDate,
-                        createDate,
+                        SqlValue.FromDateTime(fk.CreateDate),
+                        SqlValue.FromDateTime(fk.ModifyDate),
                         falseBit,
                         falseBit,
                         falseBit,
                         SqlValue.FromInt32(fk.ReferencedTable.ObjectId),
-                        keyIndexId,
+                        SqlValue.FromInt32(ResolveForeignKeyIndexId(fk)),
                         fk.IsDisabled ? trueBit : falseBit,
                         falseBit,
                         fk.IsNotTrusted ? trueBit : falseBit,
@@ -608,9 +605,61 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
+    /// The <c>sys.foreign_keys.key_index_id</c> of <paramref name="fk"/>: the
+    /// index id on the referenced table whose key columns are exactly the
+    /// columns the FK targets, resolved through the same
+    /// <see cref="HeapTable.IndexIdentities"/> allocation authority
+    /// <c>sys.key_constraints.unique_index_id</c> reads. A NONCLUSTERED
+    /// referenced PK reports whatever id it landed on (2 when a clustered
+    /// index holds 1), and an FK pointing at a UNIQUE constraint reports that
+    /// constraint's own id — probe-confirmed against SQL Server 2025. Falls
+    /// back to 1 when nothing matches.
+    /// </summary>
+    private static int ResolveForeignKeyIndexId(ForeignKey fk)
+    {
+        var referenced = fk.ReferencedTable;
+        var wanted = fk.ReferencedColumnOrdinals;
+        foreach (var identity in referenced.IndexIdentities())
+        {
+            if (identity.Constraint is { } key)
+            {
+                if (key.StorageOrdinals.Length != wanted.Length)
+                    continue;
+                var matched = true;
+                foreach (var storageOrdinal in key.StorageOrdinals)
+                {
+                    if (Array.IndexOf(wanted, Parser.Expressions.IndexLookup.StorageOrdinalToFullOrdinal(referenced, storageOrdinal)) < 0)
+                    {
+                        matched = false;
+                        break;
+                    }
+                }
+                if (matched)
+                    return identity.IndexId;
+            }
+            else if (identity.Index is { IsUnique: true } index && index.KeyColumns.Length == wanted.Length)
+            {
+                var matched = true;
+                foreach (var keyColumn in index.KeyColumns)
+                {
+                    if (Array.IndexOf(wanted, keyColumn.ColumnOrdinal) < 0)
+                    {
+                        matched = false;
+                        break;
+                    }
+                }
+                if (matched)
+                    return identity.IndexId;
+            }
+        }
+        return 1;
+    }
+
+    /// <summary>
     /// Rows for <c>sys.foreign_key_columns</c>: one per (FK, column-pair).
-    /// <c>parent_column_id</c> and <c>referenced_column_id</c> are 1-based
-    /// (probe-confirmed) — matches the <c>sys.columns.column_id</c> convention.
+    /// <c>parent_column_id</c> and <c>referenced_column_id</c> are the stable
+    /// <c>sys.columns.column_id</c>s of the participating columns, not their
+    /// positions — <c>DROP COLUMN</c> parts the two (probe-confirmed).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysForeignKeyColumns(Parser.BatchContext batch, Database database)
     {
@@ -626,9 +675,9 @@ internal static partial class BuiltInResources
                             SqlValue.FromInt32(fk.ObjectId),
                             SqlValue.FromInt32(i + 1),
                             SqlValue.FromInt32(fk.ChildTable.ObjectId),
-                            SqlValue.FromInt32(fk.ChildColumnOrdinals[i] + 1),
+                            SqlValue.FromInt32(fk.ChildTable.Columns[fk.ChildColumnOrdinals[i]].ColumnId),
                             SqlValue.FromInt32(fk.ReferencedTable.ObjectId),
-                            SqlValue.FromInt32(fk.ReferencedColumnOrdinals[i] + 1),
+                            SqlValue.FromInt32(fk.ReferencedTable.Columns[fk.ReferencedColumnOrdinals[i]].ColumnId),
                         ];
                     }
                 }
@@ -648,9 +697,10 @@ internal static partial class BuiltInResources
     /// <summary>
     /// Rows for <c>sys.check_constraints</c>: one row per CHECK constraint
     /// across every table in every schema. <c>parent_column_id</c> is the
-    /// 1-based column id when the CHECK is column-attached (inline); 0 for
-    /// table-level. <c>definition</c> is currently null — the simulator
-    /// stores the parsed predicate tree, not source text (documented quirk).
+    /// attached column's stable <c>sys.columns.column_id</c> when the CHECK is
+    /// column-attached (inline); 0 for table-level.
+    /// <c>uses_database_collation</c> is 1 — real reports 1 for every CHECK it
+    /// creates, numeric-only predicates included (probe-confirmed).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysCheckConstraints(Parser.BatchContext batch, Database database)
     {
@@ -659,7 +709,6 @@ internal static partial class BuiltInResources
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
         var ckType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit), "C ");
         var ckTypeDesc = SqlValue.FromNVarchar("CHECK_CONSTRAINT");
-        var falseDbCollation = SqlValue.FromBoolean(false);
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
@@ -674,12 +723,13 @@ internal static partial class BuiltInResources
                         {
                             if (database.Collation.Equals(table.Columns[i].Name, inlineCol))
                             {
-                                parentColumnId = i + 1;
+                                // The stable column_id, not the loop position:
+                                // DROP COLUMN parts the two.
+                                parentColumnId = table.Columns[i].ColumnId;
                                 break;
                             }
                         }
                     }
-                    var createDate = SqlValue.FromDateTime(table.CreateDate);
                     yield return [
                         SqlValue.FromSystemName(ck.Name),
                         SqlValue.FromInt32(ck.ObjectId),
@@ -688,8 +738,8 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(table.ObjectId),
                         ckType,
                         ckTypeDesc,
-                        createDate,
-                        createDate,
+                        SqlValue.FromDateTime(ck.CreateDate),
+                        SqlValue.FromDateTime(ck.ModifyDate),
                         falseBit,
                         falseBit,
                         falseBit,
@@ -698,7 +748,7 @@ internal static partial class BuiltInResources
                         ck.IsNotTrusted ? trueBit : falseBit,
                         SqlValue.FromInt32(parentColumnId),
                         ck.Definition is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(ck.Definition),
-                        falseDbCollation,
+                        trueBit, // uses_database_collation
                         ck.IsSystemNamed ? trueBit : falseBit,
                     ];
                 }
@@ -734,7 +784,6 @@ internal static partial class BuiltInResources
                 foreach (var key in table.KeyConstraints.OrderBy(k => k.ObjectId))
                 {
                     var isPk = key.Kind == KeyConstraintKind.PrimaryKey;
-                    var createDate = SqlValue.FromDateTime(table.CreateDate);
                     var uniqueIndexId = 1;
                     foreach (var identity in identities)
                     {
@@ -758,8 +807,8 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(table.ObjectId),
                         isPk ? pkType : uqType,
                         isPk ? pkTypeDesc : uqTypeDesc,
-                        createDate,
-                        createDate,
+                        SqlValue.FromDateTime(key.CreateDate),
+                        SqlValue.FromDateTime(key.ModifyDate),
                         falseBit,
                         falseBit,
                         falseBit,
@@ -777,6 +826,8 @@ internal static partial class BuiltInResources
     /// binding. Inline DEFAULT at CREATE TABLE and ALTER TABLE ADD DEFAULT
     /// both populate; inline-without-CONSTRAINT-name auto-generates with
     /// <see cref="DefaultConstraint.IsSystemNamed"/> = true.
+    /// <c>parent_column_id</c> is the bound column's stable
+    /// <c>sys.columns.column_id</c>, not its position.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDefaultConstraints(Parser.BatchContext batch, Database database)
     {
@@ -790,12 +841,10 @@ internal static partial class BuiltInResources
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var table in schema.HeapTables.Values)
             {
-                for (var i = 0; i < table.Columns.Length; i++)
+                foreach (var col in table.Columns)
                 {
-                    var col = table.Columns[i];
                     if (col.DefaultConstraint is not { } df)
                         continue;
-                    var createDate = SqlValue.FromDateTime(table.CreateDate);
                     yield return [
                         SqlValue.FromSystemName(df.Name),
                         SqlValue.FromInt32(df.ObjectId),
@@ -804,12 +853,12 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(table.ObjectId),
                         dfType,
                         dfTypeDesc,
-                        createDate,
-                        createDate,
+                        SqlValue.FromDateTime(df.CreateDate),
+                        SqlValue.FromDateTime(df.ModifyDate),
                         falseBit,
                         falseBit,
                         falseBit,
-                        SqlValue.FromInt32(i + 1),
+                        SqlValue.FromInt32(col.ColumnId),
                         df.Definition is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(df.Definition),
                         df.IsSystemNamed ? trueBit : falseBit,
                     ];

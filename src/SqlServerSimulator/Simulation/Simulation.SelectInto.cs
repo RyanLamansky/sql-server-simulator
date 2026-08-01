@@ -63,6 +63,7 @@ partial class Simulation
         var destTable = new HeapTable(leaf, destColumns, (owningDatabase ?? batch.CurrentDatabase).AllocateObjectId())
         {
             OwningDatabase = owningDatabase,
+            UsesAnsiNulls = batch.Connection.AnsiNulls,
         };
         if (isGlobalTemp)
             destTable.OwnerConnection = batch.Connection;

@@ -418,6 +418,62 @@ public sealed class TriggerTests
         AreEqual(0, connection.CreateCommand("select objectproperty(object_id('tr_a'), 'ExecIsLastInsertTrigger')").ExecuteScalar());
     }
 
+    /// <summary>
+    /// <c>sys.trigger_events.is_first</c> / <c>is_last</c> report the same
+    /// per-action slots OBJECTPROPERTY does — pinning INSERT leaves the same
+    /// trigger's UPDATE row at 0 (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void SysTriggerEvents_IsFirstIsLast_FollowSetTriggerOrder()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t_target (id int primary key, v int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("create trigger tr_1 on t_target after insert, update as set nocount on").ExecuteNonQuery();
+        _ = connection.CreateCommand("create trigger tr_2 on t_target after insert as set nocount on").ExecuteNonQuery();
+        _ = connection.CreateCommand("exec sp_settriggerorder @triggername='tr_1', @order='First', @stmttype='INSERT'").ExecuteNonQuery();
+        _ = connection.CreateCommand("exec sp_settriggerorder @triggername='tr_2', @order='Last', @stmttype='INSERT'").ExecuteNonQuery();
+
+        using var reader = connection.CreateCommand("""
+            select object_name(object_id), type_desc, cast(is_first as int), cast(is_last as int)
+            from sys.trigger_events
+            order by object_name(object_id), type
+            """).ExecuteReader();
+        var rows = new List<(string, string, int, int)>();
+        while (reader.Read())
+            rows.Add((reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetInt32(3)));
+        CollectionAssert.AreEqual(
+            new[] { ("tr_1", "INSERT", 1, 0), ("tr_1", "UPDATE", 0, 0), ("tr_2", "INSERT", 0, 1) },
+            rows);
+    }
+
+    /// <summary>
+    /// <c>sys.triggers.modify_date</c> advances on ALTER TRIGGER while
+    /// create_date stands still.
+    /// </summary>
+    [TestMethod]
+    public void SysTriggers_ModifyDate_AdvancesOnAlter()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t_target (id int primary key, v int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("create trigger tr on t_target after insert as set nocount on").ExecuteNonQuery();
+        AreEqual(1, connection.CreateCommand(
+            "select count(*) from sys.triggers where name = 'tr' and modify_date = create_date").ExecuteScalar());
+        var created = (DateTime)connection.CreateCommand("select create_date from sys.triggers where name = 'tr'").ExecuteScalar()!;
+        // datetime rounds to 1/300 s, so put the ALTER in a later tick.
+        _ = connection.CreateCommand("waitfor delay '00:00:00.020'").ExecuteNonQuery();
+        _ = connection.CreateCommand("alter trigger tr on t_target after insert as select 1 as x").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("""
+            select t.create_date, t.modify_date, o.modify_date
+            from sys.triggers t join sys.objects o on o.object_id = t.object_id
+            where t.name = 'tr'
+            """).ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(created, reader.GetDateTime(0));
+        IsGreaterThan(created, reader.GetDateTime(1));
+        // sys.objects already projected the advanced date; the two agree.
+        AreEqual(reader.GetDateTime(2), reader.GetDateTime(1));
+    }
+
     // === AFTER INSERT ===
 
     [TestMethod]

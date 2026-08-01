@@ -197,6 +197,7 @@ partial class Simulation
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
+            UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };
         if (replaced is not null)
         {

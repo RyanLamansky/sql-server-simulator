@@ -69,9 +69,8 @@ partial class Simulation
 
         // TRUNCATE requires ALTER on the object; denial surfaces as Msg 1088
         // (its own double-quoted shape), not Msg 229.
-        if (!isLocalTempTable && !isGlobalTempTable && PermissionEnforcement.Applies(batch)
-            && !PermissionChecker.IsGranted(batch.CurrentDatabase, batch.Connection.Security.Effective.DatabasePrincipalId,
-                Permission.Alter, PermissionChecker.ClassObject, table.ObjectId, table.SchemaId))
+        if (!isLocalTempTable && !isGlobalTempTable
+            && !PermissionEnforcement.HasObjectAlter(batch, batch.DatabaseFor(table), table.ObjectId, table.SchemaId))
         {
             throw SimulatedSqlException.CannotFindObjectForAlter(name.Leaf);
         }

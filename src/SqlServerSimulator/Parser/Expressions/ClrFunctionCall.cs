@@ -80,7 +80,7 @@ internal sealed class ClrFunctionCall(ClrScalarFunction function, Expression?[] 
     /// </summary>
     public static ClrFunctionCall ParseCall(ClrScalarFunction function, ParserContext context)
     {
-        context.SecurableSink?.Add(new ReferencedSecurable(function.ObjectId, function.SchemaId, function.Name, function.Schema.Name, "EXECUTE"));
+        context.SecurableSink?.Add(new ReferencedSecurable(function.Schema.Database, function.ObjectId, function.SchemaId, function.Name, function.Schema.Name, "EXECUTE"));
         return new(function, UserFunctionCall.ParseFunctionArguments(function, context));
     }
 }

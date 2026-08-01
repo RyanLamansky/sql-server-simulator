@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace SqlServerSimulator;
 
 partial class SimulatedSqlException
@@ -23,21 +25,39 @@ partial class SimulatedSqlException
         new("Property cannot be found on the specified JSON path.", 13608, 16, state);
 
     /// <summary>
+    /// Msg 13623: a <c>strict</c>-mode JSON path under JSON_VALUE resolved to
+    /// an object or an array, which JSON_VALUE has no scalar to return for.
+    /// Lax mode returns NULL instead. Probe-confirmed State 2 against
+    /// SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException JsonScalarNotFound() =>
+        new("Scalar value cannot be found in the specified JSON path.", 13623, 16, 2);
+
+    /// <summary>
     /// Msg 13624: a <c>strict</c>-mode JSON path under JSON_QUERY (or an
     /// <c>OPENJSON … WITH (col … AS JSON)</c> column) resolved to a value
     /// that is present but is neither an object nor an array. Lax mode
     /// returns NULL instead; a JSON <c>null</c> value returns NULL in
-    /// both modes.
+    /// both modes. JSON_QUERY reports State 2, an OPENJSON column State 1.
     /// </summary>
-    internal static SimulatedSqlException JsonObjectOrArrayNotFound() =>
-        new("Object or array cannot be found in the specified JSON path.", 13624, 16, 1);
+    internal static SimulatedSqlException JsonObjectOrArrayNotFound(byte state) =>
+        new("Object or array cannot be found in the specified JSON path.", 13624, 16, state);
 
     /// <summary>
-    /// Msg 13609: invalid JSON text passed to JSON_VALUE / JSON_QUERY /
-    /// JSON_MODIFY in strict mode. Lax mode silently returns NULL.
+    /// Msg 13609: the document argument of JSON_VALUE / JSON_QUERY /
+    /// JSON_MODIFY / OPENJSON isn't JSON text, whatever the path's lax or
+    /// strict prefix says. <paramref name="character"/> is the character the
+    /// reader stopped on (<c>.</c> when it ran off the end) and
+    /// <paramref name="position"/> its zero-based index. The State byte names
+    /// the caller: JSON_VALUE / JSON_QUERY report 1, OPENJSON 3 with a
+    /// document path and 4 without, JSON_MODIFY 7.
     /// </summary>
-    internal static SimulatedSqlException JsonInvalidText() =>
-        new("JSON text is not properly formatted. Unexpected character is found.", 13609, 16, 1);
+    internal static SimulatedSqlException JsonInvalidText(char character, int position, byte state = 1) =>
+        new(
+            $"JSON text is not properly formatted. Unexpected character '{character}' is found at position {position.ToString(CultureInfo.InvariantCulture)}.",
+            13609,
+            16,
+            state);
 
     /// <summary>
     /// Msg 13638: <c>JSON_OBJECT</c> rejects a NULL key at runtime
@@ -79,4 +99,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ForJsonRootWithoutWrapperConflict() =>
         new("ROOT option and WITHOUT_ARRAY_WRAPPER option cannot be used together in FOR JSON. Remove one of these options.", 13620, 16, 1);
+
+    /// <summary>
+    /// Msg 13602: a <c>FOR JSON</c> clause sits on the SELECT an
+    /// <c>INSERT … SELECT</c> or <c>SELECT … INTO</c> writes from
+    /// (<paramref name="statementKind"/> is real's own word for the statement).
+    /// The FOR XML counterpart is Msg 6819, which a variable-assigning SELECT
+    /// raises for both clauses. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForJsonNotAllowedIn(string statementKind) =>
+        new($"The FOR JSON clause is not allowed in a {statementKind} statement.", 13602, 16, 1);
 }

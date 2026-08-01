@@ -179,21 +179,24 @@ internal sealed partial class Selection
     internal readonly ViewUpdatabilityRejection UpdatabilityRejection;
 
     /// <summary>
-    /// The FROM shape an updatable cursor navigates — every source a direct
-    /// base-table scan, joined by kinds the cursor fold handles. Non-null makes
-    /// the cursor KEYSET / DYNAMIC-eligible and positioned <c>WHERE CURRENT
-    /// OF</c> DML legal against any participating table; null forces STATIC.
-    /// Set post-construction by <see cref="BuildSqlProjection"/>.
+    /// The FROM shape an updatable cursor may navigate — every source either a
+    /// direct base-table scan or a deferred body the cursor can follow down to
+    /// base tables (derived table, CTE, APPLY right side, view), joined by
+    /// kinds the cursor fold handles. Null forces STATIC outright; non-null is
+    /// the input <see cref="TryBuildCursorPlan"/> resolves into a
+    /// <see cref="CursorSourcePlan"/> at DECLARE CURSOR time, which is where a
+    /// view body is parsed. Set post-construction by
+    /// <see cref="BuildSqlProjection"/>.
     /// </summary>
-    internal CursorSourcePlan? CursorPlan;
+    internal CursorShape? CursorShape;
 
     /// <summary>
     /// The SELECT's ORDER BY items, captured for the updatable-cursor
-    /// enumeration path (<see cref="EnumerateForCursor"/>) so KEYSET / DYNAMIC
+    /// enumeration path (<c>EnumerateForCursor</c>) so KEYSET / DYNAMIC
     /// cursors and positioned DML can order rows the same way a read would.
-    /// Non-null only when <see cref="CursorPlan"/> is set (base-table sources,
-    /// no set-op chain); empty when the cursor's SELECT has no ORDER BY. Set
-    /// post-construction by <see cref="BuildSqlProjection"/>.
+    /// Non-null only when <see cref="CursorShape"/> is set; empty when the
+    /// cursor's SELECT has no ORDER BY. Set post-construction by
+    /// <see cref="BuildSqlProjection"/>.
     /// </summary>
     internal List<OrderBySpec>? CursorOrderBy;
 
@@ -433,6 +436,10 @@ internal sealed partial class Selection
         {
             context.SecurableSink = [];
             context.ReadColumnSink = [];
+            // Statement-scoped slot: a value left over from a statement that
+            // failed for another reason (continue-on-error, TRY/CATCH) never
+            // reaches this statement's flush below.
+            context.PendingGroupByBindError = null;
         }
 
         var combined = ParseUnionExceptChain(context, depth, outerTypeResolver);
@@ -457,12 +464,12 @@ internal sealed partial class Selection
         // result in a single-column JSON-string serializer. Sits where FOR XML
         // / FOR BROWSE do (after ORDER BY / OFFSET-FETCH, before OPTION); a
         // non-JSON FOR clause is left in place for the downstream Msg 102.
-        combined = ParseOptionalForJson(context, combined);
+        combined = ParseOptionalForJson(context, combined, depth);
 
         // Trailing FOR XML { RAW | AUTO | PATH } [, ELEMENTS …] [, ROOT …]:
         // wraps the result in a single-column xml serializer. Sits in the same
         // slot; a non-XML FOR clause is left in place for the downstream Msg 102.
-        combined = ParseOptionalForXml(context, combined);
+        combined = ParseOptionalForXml(context, combined, depth);
 
         // OPTION (hint [, …]) — statement-level hint clause. Parsed as a
         // closed-list per Selection.Hints.cs; MAXRECURSION applies to in-
@@ -479,6 +486,19 @@ internal sealed partial class Selection
                 combined.ReadColumnsByObject = readColumns;
             context.SecurableSink = null;
             context.ReadColumnSink = null;
+
+            // The statement has parsed, so the GROUP BY clause's held binding
+            // error is due — unless the cursor stopped on a value literal,
+            // which a well-formed query never leaves behind. That is the
+            // trailing-token syntax error the dispatcher raises next, and real
+            // reports it ahead of any binding error in the same batch.
+            if (context.PendingGroupByBindError is { } pending)
+            {
+                context.PendingGroupByBindError = null;
+                throw context.Token is Numeric or Literal
+                    ? SimulatedSqlException.SyntaxErrorNear(context)
+                    : pending;
+            }
         }
 
         return combined;
@@ -521,7 +541,7 @@ internal sealed partial class Selection
             }
 
             var right = ParseIntersectChain(context, depth, outerTypeResolver, isFirstBranch: false);
-            RecordSetOperationForIndexedViewShape(context);
+            RecordSetOperationShape(context);
             left = CombineSetOps(left, right, kind);
         }
         return left;
@@ -529,13 +549,16 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Notes a UNION / INTERSECT / EXCEPT for the indexed-view battery
-    /// (Msg 10116). Recorded at the two chain sites rather than inside
-    /// <c>CombineSetOps</c>, which has no parser context.
+    /// (Msg 10116) and for a function body's Msg 444 state, which real reports
+    /// as 2 for a set-op chain even when no branch reads a table. Recorded at
+    /// the two chain sites rather than inside <c>CombineSetOps</c>, which has no
+    /// parser context.
     /// </summary>
-    private static void RecordSetOperationForIndexedViewShape(ParserContext context)
+    private static void RecordSetOperationShape(ParserContext context)
     {
         if (context.IndexedViewShapeCollector is { } shape)
             shape.HasSetOperation = true;
+        FunctionBodyShape.NoteRowsetRead(context);
     }
 
     /// <summary>
@@ -549,7 +572,7 @@ internal sealed partial class Selection
         {
             context.MoveNextRequired();
             var right = ParseSetOpBranch(context, depth, outerTypeResolver, allowOrderBy: false);
-            RecordSetOperationForIndexedViewShape(context);
+            RecordSetOperationShape(context);
             left = CombineSetOps(left, right, SetOpKind.Intersect);
         }
         return left;
@@ -1492,6 +1515,9 @@ internal sealed partial class Selection
         List<JoinSpec> joins,
         Func<MultiPartName, SqlType>? outerTypeResolver)
     {
+        // A FROM clause at any nesting depth is what makes a function body's
+        // rejected SELECT real's Msg 444 state 2 rather than state 3.
+        FunctionBodyShape.NoteRowsetRead(context);
         ParseExplicitJoinChain(context, depth, sources, joins, outerTypeResolver);
 
         // Comma-separated FROM (ANSI-89 syntax) binds at lower precedence than
@@ -1831,7 +1857,8 @@ internal sealed partial class Selection
             storageOrdinals: null,
             lobStore: null,
             rows: [],
-            lateralPlan: lateralPlan);
+            lateralPlan: lateralPlan,
+            lateralIsQueryBody: true);
     }
 
     /// <summary>
@@ -1861,7 +1888,7 @@ internal sealed partial class Selection
         if (context.SecurableSink is { } sink && !name.Leaf.StartsWith('#'))
         {
             var securable = (Schemas.SchemaObject?)synonym ?? obj;
-            sink.Add(new ReferencedSecurable(securable.ObjectId, securable.SchemaId, securable.Name, name.ImmediateQualifier ?? Database.DefaultSchemaName));
+            sink.Add(new ReferencedSecurable(context.Batch.DatabaseFor(securable), securable.ObjectId, securable.SchemaId, securable.Name, name.ImmediateQualifier ?? Database.DefaultSchemaName));
         }
         return synonym;
     }
@@ -2022,7 +2049,8 @@ internal sealed partial class Selection
                         storageOrdinals: null,
                         lobStore: null,
                         rows: [],
-                        lateralPlan: cteBinding.Plan);
+                        lateralPlan: cteBinding.Plan,
+                        lateralIsQueryBody: true);
                 }
 
                 // Catalog views (sys.tables / sys.objects / sys.schemas)
@@ -2092,7 +2120,23 @@ internal sealed partial class Selection
                     for (var ci = 0; ci < viewColumnNames.Length; ci++)
                         viewColumnNames[ci] = resolvedView.OutputColumns[ci].Name;
                     var viewAlias = ConsumeOptionalAlias(context);
-                    _ = ParseOptionalTableHints(context);
+                    var viewHints = ParseOptionalTableHints(context);
+                    // NOEXPAND reads an indexed view's materialized index
+                    // rather than expanding its body, which is one of the
+                    // operations real's SET-option gate covers — Msg 1934
+                    // under the enclosing statement's verb (probe-confirmed
+                    // for both a QUOTED_IDENTIFIER OFF and an ANSI_WARNINGS
+                    // OFF session). A plain reference to the same view is
+                    // never gated, and create-time body binding is exempt the
+                    // way the write and XML-method gates are. The simulator
+                    // always expands, so the hint has no other effect.
+                    if (viewHints.NoExpand
+                        && resolvedView.Indexes.Count > 0
+                        && !context.Batch.CreateTimeBinding
+                        && Simulation.IncorrectSetOptionNames(context) is { } noExpandSetOptions)
+                    {
+                        throw SimulatedSqlException.IncorrectSetOptions(context.Batch.CurrentStatement.StatementVerb, noExpandSetOptions);
+                    }
                     var viewSynonym = RecordSecurableRead(context, resolvedView, objectName);
                     return new FromSource(
                         qualifier: viewAlias ?? resolvedView.Name,
@@ -2319,7 +2363,8 @@ internal sealed partial class Selection
                     storageOrdinals: null,
                     lobStore: null,
                     rows: [],
-                    lateralPlan: derivedSelection);
+                    lateralPlan: derivedSelection,
+                    lateralIsQueryBody: true);
 
             case ReservedKeyword { Keyword: Keyword.OpenQuery }:
                 // OPENQUERY dispatch: an ad-hoc pass-through rowset over a
@@ -3021,8 +3066,13 @@ internal sealed partial class Selection
             var contribution = ParseGroupByItem(context);
             itemContributions.Add(contribution);
 
+            // Both messages are held rather than thrown: real parses the whole
+            // statement before binding it, so a stray token after the clause
+            // outranks them (see ParserContext.PendingGroupByBindError). The
+            // ??= keeps the first offending item's message, which is what an
+            // immediate throw produced.
             if (context.AggregatesParsed > aggregatesBefore || context.SubqueriesParsed > subqueriesBefore)
-                throw SimulatedSqlException.AggregateOrSubqueryInGroupBy();
+                context.PendingGroupByBindError ??= SimulatedSqlException.AggregateOrSubqueryInGroupBy();
 
             // The empty grouping set contributes no expression at all, so there
             // is nothing for Msg 164 to require a column of. Probe-confirmed
@@ -3033,7 +3083,7 @@ internal sealed partial class Selection
                 contributesAnExpression |= fragment.Length > 0;
 
             if (contributesAnExpression && context.ColumnReferencesParsed == columnsBefore)
-                throw SimulatedSqlException.GroupByExpressionHasNoLocalColumn();
+                context.PendingGroupByBindError ??= SimulatedSqlException.GroupByExpressionHasNoLocalColumn();
         } while (context.Token is Operator { Character: ',' });
 
         // Cartesian product of per-item contributions: each combination of
