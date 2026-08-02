@@ -157,5 +157,10 @@ internal sealed class StringAggAggregator : Aggregator
         return 0;
     }
 
-    private readonly record struct OrderedRow(string Value, string Separator, SqlValue[] OrderKeys);
+    private readonly struct OrderedRow(string value, string separator, SqlValue[] orderKeys)
+    {
+        public readonly string Value = value;
+        public readonly string Separator = separator;
+        public readonly SqlValue[] OrderKeys = orderKeys;
+    }
 }

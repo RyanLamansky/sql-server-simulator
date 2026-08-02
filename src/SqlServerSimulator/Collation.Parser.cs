@@ -95,7 +95,14 @@ internal abstract partial class Collation
     /// <c>SQL_Latin1_General_CP1_CI_AS</c> → (1252, 1033, 196609, 0),
     /// <c>Latin1_General_100_CI_AS</c> → (1252, 1033, 196609, 2).
     /// </summary>
-    internal readonly record struct CollationMetrics(int CodePage, int Lcid, int ComparisonStyle, int Version, string Name);
+    internal readonly struct CollationMetrics(int codePage, int lcid, int comparisonStyle, int version, string name)
+    {
+        public readonly int CodePage = codePage;
+        public readonly int Lcid = lcid;
+        public readonly int ComparisonStyle = comparisonStyle;
+        public readonly int Version = version;
+        public readonly string Name = name;
+    }
 
     /// <summary>
     /// Computes the <c>COLLATIONPROPERTY</c> metrics for <paramref name="name"/>,

@@ -177,6 +177,8 @@ Field rosters live in the source XML docs; this captures only identity + load-be
 - **SSS001**: non-public types may not have auto-properties or trivial wrappers over same-type fields.
   Expose the field directly: `public readonly T Foo = expr;` (`static readonly` for static-singleton).
   Overrides, abstracts, interface impls exempt.
+  A **positional record**'s parameter list reaches the same auto-properties indirectly and is reported too — once on the record's identifier, since the fix rewrites the whole list rather than any one parameter.
+  A derived record forwarding every parameter to a base (`record D(int A) : B(A)`) declares none of its own and is exempt.
 - **SSS002**: a `readonly` field in a non-public type whose declared type is a strict supertype of its initializer should use the concrete type.
   Public types, value-typed initializers (boxing), const, and uninitialized fields exempt.
 - **SSS003**: `string.ToUpperInvariant()`/`ToLowerInvariant()` as a `switch`'s *governing expression* allocates a temp string.
@@ -195,6 +197,12 @@ Field rosters live in the source XML docs; this captures only identity + load-be
 - **SSS008**: a `static readonly` field typed as a general-purpose collection from `System.Collections{,.Generic,.Immutable}` must be an array or a `Frozen` type — a static's contents are fixed for the process, so they should be laid out once for reading.
   Throughput, not immutability, is the motive: arrays are permitted, `Immutable*` dictionary / set / list are flagged too (a per-lookup tree walk buys nothing here), `ImmutableArray<T>` is exempt.
   `Lazy<T>` unwraps first; `Concurrent*` and `PriorityQueue` are exempt; anything genuinely mutated after init takes `#pragma warning disable SSS008` + rationale.
+- **SSS009**: a non-public type may not be declared as a `record`.
+  The compiler emits `Equals` / `GetHashCode` / the equality operators / `ToString` / `PrintMembers` / a copy constructor / `Deconstruct` whether or not anything calls them, so on a type with no API surface each uncalled member is shipped metadata and an uncovered member in every coverage report.
+  Declare a plain class or struct with readonly fields; the primary-constructor + field-initializer shape is what the repo uses (`internal sealed class Foo(int a) { public readonly int A = a; }` — `FrameSpec`, `PlanCacheEntry` are the precedent).
+  **Value equality alone is not a justification**: a dictionary key or hash-set member implements `IEquatable<T>` directly, which emits the two members the lookup calls and keeps a struct off `ValueType.Equals`'s boxing-and-reflection fallback — `Simulation.PlanCacheKey` is the reference shape.
+  A record kept for a genuinely-used `with`, deconstruction or printed `ToString` takes `#pragma warning disable SSS009` + rationale; `with` needs init properties, so such a record takes an SSS001 suppression alongside it.
+  Public types are exempt — there the synthesized members are deliberate API surface.
 - **MSTEST0049**: async tests must thread `TestContext.CancellationToken`.
   Pattern: `public TestContext TestContext { get; set; } = null!;`.
 - **MSTEST0037**: prefer `Assert.IsEmpty(values)` over `Assert.AreEqual(0, values.Count)`; typed asserts over generic.

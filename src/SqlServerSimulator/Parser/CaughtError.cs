@@ -10,10 +10,28 @@ namespace SqlServerSimulator.Parser;
 /// re-raise (which reconstructs a <c>SimulatedSqlException</c> from these
 /// fields).
 /// </summary>
-/// <param name="Number">SQL error number (e.g. 8134 for divide by zero, 50000 for RAISERROR).</param>
-/// <param name="Message">The error message text as it'd appear in <c>ERROR_MESSAGE()</c>.</param>
-/// <param name="Severity">Severity class (1-25). Most simulator-emitted errors are class 16.</param>
-/// <param name="State">Per-condition state code distinguishing factory call sites.</param>
-/// <param name="Line">1-based line within the batch where the failing statement started.</param>
-/// <param name="Procedure">Stored procedure name or NULL — always NULL since the dispatch wrapper that populates this struct doesn't carry the current procedure name through. Procs themselves ship; <c>ERROR_PROCEDURE()</c> inside a CATCH that caught a body-fired error surfaces NULL.</param>
-internal readonly record struct CaughtError(int Number, string Message, byte Severity, byte State, int Line, string? Procedure);
+internal readonly struct CaughtError(int number, string message, byte severity, byte state, int line, string? procedure)
+{
+    /// <summary>SQL error number (e.g. 8134 for divide by zero, 50000 for RAISERROR).</summary>
+    public readonly int Number = number;
+
+    /// <summary>The error message text as it'd appear in <c>ERROR_MESSAGE()</c>.</summary>
+    public readonly string Message = message;
+
+    /// <summary>Severity class (1-25). Most simulator-emitted errors are class 16.</summary>
+    public readonly byte Severity = severity;
+
+    /// <summary>Per-condition state code distinguishing factory call sites.</summary>
+    public readonly byte State = state;
+
+    /// <summary>1-based line within the batch where the failing statement started.</summary>
+    public readonly int Line = line;
+
+    /// <summary>
+    /// Stored procedure name or NULL — always NULL since the dispatch wrapper
+    /// that populates this struct doesn't carry the current procedure name
+    /// through. Procs themselves ship; <c>ERROR_PROCEDURE()</c> inside a CATCH
+    /// that caught a body-fired error surfaces NULL.
+    /// </summary>
+    public readonly string? Procedure = procedure;
+}

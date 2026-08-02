@@ -304,7 +304,13 @@ internal static class RowDecoder
     private static bool IsNullColumn(ReadOnlySpan<byte> bytes, int bitmapStart, int ordinal) =>
         (bytes[bitmapStart + (ordinal / 8)] & (1 << (ordinal % 8))) != 0;
 
-    private readonly record struct RowHeader(int BitmapStart, int VarOffsetArrayStart, int VarDataStart, int VarOffsetEntrySize);
+    private readonly struct RowHeader(int bitmapStart, int varOffsetArrayStart, int varDataStart, int varOffsetEntrySize)
+    {
+        public readonly int BitmapStart = bitmapStart;
+        public readonly int VarOffsetArrayStart = varOffsetArrayStart;
+        public readonly int VarDataStart = varDataStart;
+        public readonly int VarOffsetEntrySize = varOffsetEntrySize;
+    }
 
     private static RowHeader ValidateHeader(ReadOnlySpan<HeapColumn> schema, ReadOnlySpan<byte> bytes)
     {

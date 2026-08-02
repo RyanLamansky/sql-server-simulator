@@ -105,7 +105,15 @@ internal sealed class SqlVariantProperty : Expression
             };
     }
 
-    private readonly record struct VariantInfo(string BaseType, int Precision, int Scale, int MaxLength, int TotalBytes, string? CollationName);
+    private readonly struct VariantInfo(string baseType, int precision, int scale, int maxLength, int totalBytes, string? collationName)
+    {
+        public readonly string BaseType = baseType;
+        public readonly int Precision = precision;
+        public readonly int Scale = scale;
+        public readonly int MaxLength = maxLength;
+        public readonly int TotalBytes = totalBytes;
+        public readonly string? CollationName = collationName;
+    }
 
     /// <summary>
     /// Derives the six facets from a value's type, or <see langword="null"/>

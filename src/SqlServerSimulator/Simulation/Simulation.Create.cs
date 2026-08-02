@@ -2166,12 +2166,12 @@ partial class Simulation
         var (delAction, updAction) = ParseOnDeleteOnUpdateActions(context);
         pendingForeignKeys.Add(new PendingForeignKey(
             inlineFkName,
-            ChildColumnNames: [columnName],
-            ChildFullOrdinals: [childFullOrdinal],
-            ReferencedTable: referencedTable,
-            ReferencedColumnNames: [.. referencedColumns],
-            DeleteAction: delAction,
-            UpdateAction: updAction));
+            childColumnNames: [columnName],
+            childFullOrdinals: [childFullOrdinal],
+            referencedTable: referencedTable,
+            referencedColumnNames: [.. referencedColumns],
+            deleteAction: delAction,
+            updateAction: updAction));
     }
 
     /// <summary>
@@ -2279,12 +2279,12 @@ partial class Simulation
         var (delAction, updAction) = ParseOnDeleteOnUpdateActions(context);
         pendingForeignKeys.Add(new PendingForeignKey(
             constraintName,
-            ChildColumnNames: [.. childColumnNames],
-            ChildFullOrdinals: [.. childOrdinals],
-            ReferencedTable: referencedTable,
-            ReferencedColumnNames: [.. referencedColumns],
-            DeleteAction: delAction,
-            UpdateAction: updAction));
+            childColumnNames: [.. childColumnNames],
+            childFullOrdinals: [.. childOrdinals],
+            referencedTable: referencedTable,
+            referencedColumnNames: [.. referencedColumns],
+            deleteAction: delAction,
+            updateAction: updAction));
     }
 
     /// <summary>
@@ -2370,14 +2370,33 @@ partial class Simulation
     /// the referenced column list matches a PRIMARY KEY / UNIQUE constraint
     /// (Msg 1776).
     /// </summary>
-    internal sealed record PendingForeignKey(
-        string? ConstraintName,
-        string[] ChildColumnNames,
-        int[] ChildFullOrdinals,
-        MultiPartName ReferencedTable,
-        string[] ReferencedColumnNames,
-        ReferentialAction DeleteAction,
-        ReferentialAction UpdateAction);
+    internal sealed class PendingForeignKey(
+        string? constraintName,
+        string[] childColumnNames,
+        int[] childFullOrdinals,
+        MultiPartName referencedTable,
+        string[] referencedColumnNames,
+        ReferentialAction deleteAction,
+        ReferentialAction updateAction)
+    {
+        public readonly string? ConstraintName = constraintName;
+        public readonly string[] ChildColumnNames = childColumnNames;
+        public readonly int[] ChildFullOrdinals = childFullOrdinals;
+        public readonly MultiPartName ReferencedTable = referencedTable;
+        public readonly string[] ReferencedColumnNames = referencedColumnNames;
+        public readonly ReferentialAction DeleteAction = deleteAction;
+        public readonly ReferentialAction UpdateAction = updateAction;
+
+        /// <summary>
+        /// A copy carrying <paramref name="ordinals"/> in place of
+        /// <see cref="ChildFullOrdinals"/> — the shift <c>ALTER TABLE … ADD
+        /// COLUMN</c> applies when the columns already on the table move a
+        /// pending key's ordinals along.
+        /// </summary>
+        public PendingForeignKey WithChildFullOrdinals(int[] ordinals) =>
+            new(this.ConstraintName, this.ChildColumnNames, ordinals, this.ReferencedTable,
+                this.ReferencedColumnNames, this.DeleteAction, this.UpdateAction);
+    }
 
     /// <summary>
     /// One inline index declared in a CREATE TABLE — the table-level
@@ -2385,10 +2404,15 @@ partial class Simulation
     /// form. Columns are captured by name and resolved to the built table
     /// after the column list is complete (see <c>AddInlineIndexes</c>).
     /// </summary>
-    internal sealed record PendingInlineIndex(
-        string Name,
-        bool IsClustered,
-        (string ColumnName, bool IsDescending)[] Columns);
+    internal sealed class PendingInlineIndex(
+        string name,
+        bool isClustered,
+        (string ColumnName, bool IsDescending)[] columns)
+    {
+        public readonly string Name = name;
+        public readonly bool IsClustered = isClustered;
+        public readonly (string ColumnName, bool IsDescending)[] Columns = columns;
+    }
 
     /// <summary>
     /// Parses a table-level inline index element <c>INDEX name [CLUSTERED |

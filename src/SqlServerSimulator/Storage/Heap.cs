@@ -86,7 +86,15 @@ internal sealed class Heap
     /// before/after images are. <see cref="OldImage"/> is null for an Insert;
     /// <see cref="NewImage"/> is null for a Delete.
     /// </summary>
-    internal readonly record struct SeekJournalEvent(long Generation, SeekJournalKind Kind, int Page, int Slot, byte[]? OldImage, byte[]? NewImage);
+    internal readonly struct SeekJournalEvent(long generation, SeekJournalKind kind, int page, int slot, byte[]? oldImage, byte[]? newImage)
+    {
+        public readonly long Generation = generation;
+        public readonly SeekJournalKind Kind = kind;
+        public readonly int Page = page;
+        public readonly int Slot = slot;
+        public readonly byte[]? OldImage = oldImage;
+        public readonly byte[]? NewImage = newImage;
+    }
 
     private readonly Lock seekJournalGate = new();
 

@@ -193,7 +193,7 @@ partial class Simulation
                     var shifted = new int[pf.ChildFullOrdinals.Length];
                     for (var i = 0; i < shifted.Length; i++)
                         shifted[i] = pf.ChildFullOrdinals[i] + existingCount;
-                    shiftedForeignKeys.Add(pf with { ChildFullOrdinals = shifted });
+                    shiftedForeignKeys.Add(pf.WithChildFullOrdinals(shifted));
                 }
                 ResolveForeignKeys(table, shiftedForeignKeys, context);
             }

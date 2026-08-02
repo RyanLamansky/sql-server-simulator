@@ -8,9 +8,20 @@ public sealed class WrapperPropertyAnalyzerTests
 {
     public TestContext TestContext { get; set; } = null!;
 
+    // Records need a reference set carrying IsExternalInit, which the testing
+    // library's default (a pre-.NET 5 framework) doesn't have.
+    //
+    // The property and positional-record diagnostics share the SSS001 id across
+    // two descriptors, so `{|SSS001:x|}` markup is ambiguous to the testing
+    // library. UseFirstDescriptor picks one to build the expected diagnostic
+    // from; matching is by id, severity and location, which the two agree on.
     private Task RunAsync(string source) =>
         new CSharpAnalyzerTest<WrapperPropertyAnalyzer, DefaultVerifier>
-        { TestCode = source }.RunAsync(this.TestContext.CancellationToken);
+        {
+            TestCode = source,
+            ReferenceAssemblies = ReferenceAssemblies.Net.Net80,
+            MarkupOptions = MarkupOptions.UseFirstDescriptor,
+        }.RunAsync(this.TestContext.CancellationToken);
 
     [TestMethod]
     public Task AutoProperty_OnInternalType_Reports() =>
@@ -197,6 +208,90 @@ public sealed class WrapperPropertyAnalyzerTests
             {
                 public int {|SSS001:Value|} { get; }
                 public S(int value) => this.Value = value;
+            }
+            """);
+
+    // A positional parameter list declares one auto-property per parameter with
+    // no property syntax to bind to, so the diagnostic lands on the record name
+    // and the whole list is the fix.
+    [TestMethod]
+    public Task PositionalRecordStruct_OnInternalType_Reports() =>
+        RunAsync("""
+            internal readonly record struct {|SSS001:S|}(int Value, string Name);
+            """);
+
+    [TestMethod]
+    public Task PositionalRecordClass_OnInternalType_Reports() =>
+        RunAsync("""
+            internal sealed record {|SSS001:C|}(int Value);
+            """);
+
+    [TestMethod]
+    public Task PositionalRecord_OnPublicType_DoesNotReport() =>
+        RunAsync("""
+            public sealed record C(int Value);
+            """);
+
+    [TestMethod]
+    public Task PositionalRecordStruct_OnPublicType_DoesNotReport() =>
+        RunAsync("""
+            public readonly record struct S(int Value);
+            """);
+
+    // No parameter list means no positional properties. What the body declares
+    // is ordinary property syntax, which the property path already covers.
+    [TestMethod]
+    public Task ParameterlessRecord_DoesNotReport() =>
+        RunAsync("""
+            internal sealed record C
+            {
+                public readonly int Value;
+                public C(int value) => this.Value = value;
+            }
+            """);
+
+    [TestMethod]
+    public Task ParameterlessRecord_WithBodyAutoProperty_ReportsOnProperty() =>
+        RunAsync("""
+            internal sealed record C
+            {
+                public int {|SSS001:Value|} { get; init; }
+            }
+            """);
+
+    // The derived record's parameter feeds the base constructor; `Value` stays
+    // the base's property, so the derived record adds no metadata of its own.
+    [TestMethod]
+    public Task DerivedRecord_ForwardingAllParametersToBase_DoesNotReport() =>
+        RunAsync("""
+            internal record {|SSS001:B|}(int Value);
+            internal sealed record D(int Value) : B(Value);
+            """);
+
+    // A derived record that adds a parameter of its own does declare a property
+    // for it, so it is flagged alongside the base.
+    [TestMethod]
+    public Task DerivedRecord_AddingParameter_Reports() =>
+        RunAsync("""
+            internal record {|SSS001:B|}(int Value);
+            internal sealed record {|SSS001:D|}(int Value, string Name) : B(Value);
+            """);
+
+    // The shape the rule asks for: plain readonly fields and an explicit
+    // constructor, on a record that is otherwise left alone (SSS009's business,
+    // not this rule's).
+    [TestMethod]
+    public Task RecordWithPlainFields_DoesNotReport() =>
+        RunAsync("""
+            internal sealed record C
+            {
+                public readonly int Value;
+                public readonly string Name;
+                public C(int value, string name)
+                {
+                    this.Value = value;
+                    this.Name = name;
+                }
             }
             """);
 }

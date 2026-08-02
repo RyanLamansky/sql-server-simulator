@@ -27,7 +27,14 @@ internal static class ConstraintLookup
     /// schema — the table is the metadata-visibility governor, since a
     /// constraint has no permissions of its own.
     /// </summary>
-    internal readonly record struct ConstraintReference(int ObjectId, string Name, string TypeCode, HeapTable Table, Schema Schema);
+    internal readonly struct ConstraintReference(int objectId, string name, string typeCode, HeapTable table, Schema schema)
+    {
+        public readonly int ObjectId = objectId;
+        public readonly string Name = name;
+        public readonly string TypeCode = typeCode;
+        public readonly HeapTable Table = table;
+        public readonly Schema Schema = schema;
+    }
 
     /// <summary>
     /// Resolves a 1- to 3-part constraint name against the schema it names

@@ -10,7 +10,12 @@ namespace SqlServerSimulator;
 /// 10016). <see cref="ParentType"/> is null only for the two roots
 /// (<c>DDL_EVENTS</c> = 10001, <c>ALTER_SERVER_CONFIGURATION</c> = 296).
 /// </summary>
-internal readonly record struct TriggerEventType(int Type, string TypeName, int? ParentType);
+internal readonly struct TriggerEventType(int type, string typeName, int? parentType)
+{
+    public readonly int Type = type;
+    public readonly string TypeName = typeName;
+    public readonly int? ParentType = parentType;
+}
 
 /// <summary>
 /// SQL Server's version-stable <c>sys.trigger_event_types</c> catalog, hard-coded

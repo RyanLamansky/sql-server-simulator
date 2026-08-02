@@ -29,6 +29,22 @@ namespace SqlServerSimulator.Analyzers;
 /// backing-field + getter-method overhead as instance ones with no compensating
 /// API-stability benefit on a non-public type.
 /// </para>
+/// <para>
+/// A positional record's parameter list is the same rule reached indirectly:
+/// <c>internal readonly record struct Foo(int A)</c> declares an auto-property
+/// <c>A</c> with no <c>PropertyDeclarationSyntax</c> for the property path
+/// above to see. That form is reported once on the record's identifier, since
+/// the fix is to the parameter list as a whole rather than to any one
+/// parameter. A derived record whose parameters all forward to a base record's
+/// properties declares none of its own and isn't flagged.
+/// </para>
+/// <para>
+/// The record shape itself is <see cref="NonPublicRecordAnalyzer"/>'s business
+/// (SSS009), not this rule's. The two overlap only on a record kept for a
+/// <c>with</c> expression: <c>with</c> needs settable or <c>init</c> members,
+/// so such a record necessarily holds auto-properties and takes suppressions
+/// for both rules.
+/// </para>
 /// </remarks>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class WrapperPropertyAnalyzer : DiagnosticAnalyzer
@@ -42,8 +58,24 @@ public sealed class WrapperPropertyAnalyzer : DiagnosticAnalyzer
         isEnabledByDefault: true,
         description: "In non-public types, both auto-properties and trivial wrapper properties carry property metadata (a getter method and a vtable slot) without an API-stability benefit. Expose the underlying field directly instead.");
 
+    /// <summary>
+    /// The same rule reached through a positional record's parameter list,
+    /// which declares auto-properties without any property syntax for
+    /// <see cref="Rule"/> to bind to. Shares the SSS001 id — it is one
+    /// convention — but reports once per record rather than once per member,
+    /// because the fix rewrites the parameter list as a whole.
+    /// </summary>
+    private static readonly DiagnosticDescriptor PositionalRecordRule = new(
+        id: "SSS001",
+        title: "Positional record parameters in a non-public type declare auto-properties",
+        messageFormat: "Positional parameters of non-public record '{0}' declare auto-properties; declare plain fields instead",
+        category: "Design",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true,
+        description: "A positional record declares one auto-property per parameter, so a non-public positional record reaches the same property metadata SSS001 flags directly, without any property syntax to bind the diagnostic to. Declare the members as plain fields with an explicit constructor instead. A derived record whose parameters all forward to a base record's properties declares none of its own and is not flagged.");
+
     /// <inheritdoc/>
-    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Rule];
+    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Rule, PositionalRecordRule];
 
     /// <inheritdoc/>
     public override void Initialize(AnalysisContext context)
@@ -51,6 +83,53 @@ public sealed class WrapperPropertyAnalyzer : DiagnosticAnalyzer
         context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
         context.EnableConcurrentExecution();
         context.RegisterSyntaxNodeAction(AnalyzePropertyDeclaration, SyntaxKind.PropertyDeclaration);
+        context.RegisterSyntaxNodeAction(AnalyzePositionalRecord, SyntaxKind.RecordDeclaration, SyntaxKind.RecordStructDeclaration);
+    }
+
+    private static void AnalyzePositionalRecord(SyntaxNodeAnalysisContext context)
+    {
+        var recordDecl = (RecordDeclarationSyntax)context.Node;
+
+        // A parameterless record — `record Foo;` or `record Foo { … }` — has no
+        // positional properties. Anything it declares in its body is ordinary
+        // property syntax, which the property path already covers.
+        if (recordDecl.ParameterList is not { Parameters.Count: > 0 } parameterList)
+            return;
+
+        if (context.SemanticModel.GetDeclaredSymbol(recordDecl, context.CancellationToken) is not INamedTypeSymbol type)
+            return;
+
+        if (IsEffectivelyPublic(type))
+            return;
+
+        if (!DeclaresPositionalProperty(type, parameterList))
+            return;
+
+        context.ReportDiagnostic(Diagnostic.Create(
+            PositionalRecordRule,
+            recordDecl.Identifier.GetLocation(),
+            type.Name));
+    }
+
+    /// <summary>
+    /// True when at least one positional parameter contributes a property to
+    /// <paramref name="type"/> itself. In <c>record Derived(int A) : Base(A)</c>
+    /// the parameter feeds the base constructor and <c>A</c> stays the base's
+    /// property, so the derived record adds no metadata of its own and has
+    /// nothing for this rule to flag.
+    /// </summary>
+    private static bool DeclaresPositionalProperty(INamedTypeSymbol type, ParameterListSyntax parameterList)
+    {
+        foreach (var parameter in parameterList.Parameters)
+        {
+            foreach (var member in type.GetMembers(parameter.Identifier.ValueText))
+            {
+                if (member is IPropertySymbol)
+                    return true;
+            }
+        }
+
+        return false;
     }
 
     private static void AnalyzePropertyDeclaration(SyntaxNodeAnalysisContext context)

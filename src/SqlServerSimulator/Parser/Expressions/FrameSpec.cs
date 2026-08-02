@@ -20,8 +20,11 @@ internal enum FrameBoundKind
 /// Server requires a non-negative integer literal here — non-literal
 /// expressions raise Msg 102 at parse, negative ones Msg 1014).
 /// </summary>
-internal readonly record struct FrameBound(FrameBoundKind Kind, long Offset)
+internal readonly struct FrameBound(FrameBoundKind kind, long offset)
 {
+    public readonly FrameBoundKind Kind = kind;
+    public readonly long Offset = offset;
+
     public static readonly FrameBound UnboundedPreceding = new(FrameBoundKind.UnboundedPreceding, 0);
     public static readonly FrameBound CurrentRow = new(FrameBoundKind.CurrentRow, 0);
     public static readonly FrameBound UnboundedFollowing = new(FrameBoundKind.UnboundedFollowing, 0);

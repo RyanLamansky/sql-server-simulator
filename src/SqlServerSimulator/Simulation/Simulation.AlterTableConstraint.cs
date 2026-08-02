@@ -808,7 +808,14 @@ partial class Simulation
 
     private enum DropConstraintFamily { None, Key, Check, ForeignKey, Default }
 
-    private sealed record DropConstraintAction(DropConstraintFamily Family, KeyConstraint? Key, CheckConstraint? Check, ForeignKey? ForeignKey, HeapColumn? DefaultColumn);
+    private sealed class DropConstraintAction(DropConstraintFamily family, KeyConstraint? key, CheckConstraint? check, ForeignKey? foreignKey, HeapColumn? defaultColumn)
+    {
+        public readonly DropConstraintFamily Family = family;
+        public readonly KeyConstraint? Key = key;
+        public readonly CheckConstraint? Check = check;
+        public readonly ForeignKey? ForeignKey = foreignKey;
+        public readonly HeapColumn? DefaultColumn = defaultColumn;
+    }
 
     private static DropConstraintAction FindConstraintByName(Collation collation, HeapTable table, string name)
     {

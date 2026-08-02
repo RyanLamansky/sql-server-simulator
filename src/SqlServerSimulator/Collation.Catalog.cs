@@ -20,14 +20,22 @@ internal abstract partial class Collation
     /// form that opens the <c>sys.fn_helpcollations()</c> description column
     /// (without the version-suffix and without trailing flags).
     /// </summary>
-    internal readonly record struct PrefixInfo(string CultureName, string HumanPrefix);
+    internal readonly struct PrefixInfo(string cultureName, string humanPrefix)
+    {
+        public readonly string CultureName = cultureName;
+        public readonly string HumanPrefix = humanPrefix;
+    }
 
     /// <summary>
     /// Catalog entry for a SQL_* family member: the Sort Order number and
     /// human prefix carried by <c>sys.fn_helpcollations()</c>'s description
     /// column. Code page is derived from the name's <c>CP*</c> token.
     /// </summary>
-    internal readonly record struct SqlSortOrder(int OrderNumber, string HumanPrefix);
+    internal readonly struct SqlSortOrder(int orderNumber, string humanPrefix)
+    {
+        public readonly int OrderNumber = orderNumber;
+        public readonly string HumanPrefix = humanPrefix;
+    }
 
     /// <summary>
     /// 124 distinct prefixes from <c>sys.fn_helpcollations()</c> on

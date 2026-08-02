@@ -702,7 +702,29 @@ public sealed partial class Simulation
     /// fence most visibly. Anything but the default READ COMMITTED therefore
     /// skips both the lookup and the promotion and re-parses per execution.
     /// </para></summary>
-    private readonly record struct PlanCacheKey(string CommandText, string DatabaseName, string ParameterSignature, bool QuotedIdentifiers);
+    private readonly struct PlanCacheKey(string commandText, string databaseName, string parameterSignature, bool quotedIdentifiers)
+        : IEquatable<PlanCacheKey>
+    {
+        public readonly string CommandText = commandText;
+        public readonly string DatabaseName = databaseName;
+        public readonly string ParameterSignature = parameterSignature;
+        public readonly bool QuotedIdentifiers = quotedIdentifiers;
+
+        // Implemented rather than inherited: this is a dictionary key, and
+        // ValueType.Equals would box both sides and compare them by reflection.
+        // Ordinal string comparison is what EqualityComparer<string>.Default
+        // does, so the key keeps the exact identity it had before.
+        public bool Equals(PlanCacheKey other) =>
+            this.QuotedIdentifiers == other.QuotedIdentifiers
+            && string.Equals(this.CommandText, other.CommandText, StringComparison.Ordinal)
+            && string.Equals(this.DatabaseName, other.DatabaseName, StringComparison.Ordinal)
+            && string.Equals(this.ParameterSignature, other.ParameterSignature, StringComparison.Ordinal);
+
+        public override bool Equals(object? obj) => obj is PlanCacheKey other && this.Equals(other);
+
+        public override int GetHashCode() =>
+            HashCode.Combine(this.CommandText, this.DatabaseName, this.ParameterSignature, this.QuotedIdentifiers);
+    }
 
     /// <summary>Cache entry: the parsed <see cref="Selection"/> plus the
     /// <see cref="SchemaVersion"/> active when it was parsed.</summary>

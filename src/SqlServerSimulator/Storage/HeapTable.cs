@@ -584,8 +584,14 @@ internal sealed class HeapTable : SchemaObject
 /// index row; both are null for the synthetic HEAP row. <c>type</c> is 0
 /// (HEAP), 1 (CLUSTERED), or 2 (NONCLUSTERED).
 /// </summary>
-internal readonly record struct IndexIdentity(int IndexId, byte Type, string? Name, KeyConstraint? Constraint, Index? Index)
+internal readonly struct IndexIdentity(int indexId, byte type, string? name, KeyConstraint? constraint, Index? index)
 {
+    public readonly int IndexId = indexId;
+    public readonly byte Type = type;
+    public readonly string? Name = name;
+    public readonly KeyConstraint? Constraint = constraint;
+    public readonly Index? Index = index;
+
     /// <summary>True for the synthetic HEAP row (index_id 0, no backing object).</summary>
     public bool IsHeap => this.Type == 0;
 }

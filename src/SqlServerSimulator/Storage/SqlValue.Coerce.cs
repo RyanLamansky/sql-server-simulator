@@ -652,15 +652,25 @@ internal readonly partial struct SqlValue
     /// "without century" / "with century" halves of SQL Server's style table;
     /// a style admits exactly one except style 0, which takes either.
     /// </summary>
-    private readonly record struct StyleDateGrammar(
-        DatePartOrder Order,
-        bool TwoDigitYear,
-        bool FourDigitYear,
-        bool AllowsYearFirstAlternative,
-        bool AllowsIsoT,
-        bool RequiresIsoDash,
-        bool AllowsSharedForms,
-        bool AllowsMonthNames);
+    private readonly struct StyleDateGrammar(
+        DatePartOrder order,
+        bool twoDigitYear,
+        bool fourDigitYear,
+        bool allowsYearFirstAlternative,
+        bool allowsIsoT,
+        bool requiresIsoDash,
+        bool allowsSharedForms,
+        bool allowsMonthNames)
+    {
+        public readonly DatePartOrder Order = order;
+        public readonly bool TwoDigitYear = twoDigitYear;
+        public readonly bool FourDigitYear = fourDigitYear;
+        public readonly bool AllowsYearFirstAlternative = allowsYearFirstAlternative;
+        public readonly bool AllowsIsoT = allowsIsoT;
+        public readonly bool RequiresIsoDash = requiresIsoDash;
+        public readonly bool AllowsSharedForms = allowsSharedForms;
+        public readonly bool AllowsMonthNames = allowsMonthNames;
+    }
 
     private static StyleDateGrammar GrammarForStyle(int style, bool legacyFamily) =>
         legacyFamily ? LegacyGrammar(style) : ModernGrammar(style);
@@ -669,8 +679,8 @@ internal readonly partial struct SqlValue
     {
         // The default style is the permissive one: either year width, and the
         // only style outside 126 / 127 taking a `T` separator.
-        0 => new(DatePartOrder.Mdy, TwoDigitYear: true, FourDigitYear: true, AllowsYearFirstAlternative: true,
-                 AllowsIsoT: true, RequiresIsoDash: false, AllowsSharedForms: true, AllowsMonthNames: true),
+        0 => new(DatePartOrder.Mdy, twoDigitYear: true, fourDigitYear: true, allowsYearFirstAlternative: true,
+                 allowsIsoT: true, requiresIsoDash: false, allowsSharedForms: true, allowsMonthNames: true),
         1 or 10 => new(DatePartOrder.Mdy, true, false, false, false, false, true, true),
         3 or 4 or 5 => new(DatePartOrder.Dmy, true, false, false, false, false, true, true),
         2 or 11 => new(DatePartOrder.Ymd, true, false, false, false, false, true, true),

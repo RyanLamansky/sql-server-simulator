@@ -64,7 +64,13 @@ internal sealed class SpatialMethodCall : Expression
         Required,
     }
 
-    private readonly record struct Member(MemberForm Form, MemberScope Scope, ResultKind Result, ValidityGate Gate = ValidityGate.Tolerant);
+    private readonly struct Member(MemberForm form, MemberScope scope, ResultKind result, ValidityGate gate = ValidityGate.Tolerant)
+    {
+        public readonly MemberForm Form = form;
+        public readonly MemberScope Scope = scope;
+        public readonly ResultKind Result = result;
+        public readonly ValidityGate Gate = gate;
+    }
 
     /// <summary>
     /// Every member the spatial types expose, with the form and owning type

@@ -61,7 +61,13 @@ internal sealed class TypeProperty : Expression
                 : SqlValue.Null(SqlType.Int32);
     }
 
-    private readonly record struct TypeMetadata(int Precision, int Scale, bool AllowsNull, bool UsesAnsiTrim);
+    private readonly struct TypeMetadata(int precision, int scale, bool allowsNull, bool usesAnsiTrim)
+    {
+        public readonly int Precision = precision;
+        public readonly int Scale = scale;
+        public readonly bool AllowsNull = allowsNull;
+        public readonly bool UsesAnsiTrim = usesAnsiTrim;
+    }
 
     private static TypeMetadata? LookupType(string typeName)
     {

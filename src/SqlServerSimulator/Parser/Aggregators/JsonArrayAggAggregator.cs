@@ -130,5 +130,9 @@ internal sealed class JsonArrayAggAggregator : Aggregator
         return 0;
     }
 
-    private readonly record struct OrderedRow(SqlValue Value, SqlValue[] OrderKeys);
+    private readonly struct OrderedRow(SqlValue value, SqlValue[] orderKeys)
+    {
+        public readonly SqlValue Value = value;
+        public readonly SqlValue[] OrderKeys = orderKeys;
+    }
 }
