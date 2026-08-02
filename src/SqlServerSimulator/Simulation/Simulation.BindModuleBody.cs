@@ -11,10 +11,18 @@ partial class Simulation
     /// re-tokenized on a throwaway child <see cref="BatchContext"/> that runs
     /// in skip mode (<see cref="BatchContext.SkipModeFlag"/>) with
     /// <see cref="BatchContext.CreateTimeBinding"/> set, so every statement
-    /// parses and resolves its names but nothing executes. A binder error the
-    /// pass raises propagates out of the <c>CREATE</c>, which leaves the module
+    /// parses and resolves its names but nothing executes. The binder errors
+    /// the pass raises abort the <c>CREATE</c>, which leaves the module
     /// uncreated (and an <c>ALTER</c>'s previous body in place, since every
     /// caller binds before it touches the schema dict).
+    /// <para>Real reports <em>every</em> binder error a body contains, so a
+    /// severity-16 error is gathered on
+    /// <see cref="BatchContext.CreateTimeBindErrors"/> and the walk resumes at
+    /// the next statement; the whole run leaves as one exception carrying an
+    /// entry each, in source order, which is how a client sees a multi-error
+    /// response (probe-confirmed: SqlClient's own
+    /// <c>SqlException.Errors</c> holds both Msg 207s of a two-bad-column
+    /// body).</para>
     /// </summary>
     /// <remarks>
     /// <para>
@@ -70,8 +78,8 @@ partial class Simulation
     /// <param name="shape">
     /// Non-null for a scalar UDF / multi-statement TVF, whose body real also
     /// checks for shape (Msg 455 / 444 / 443) — the walk gathers violations and
-    /// the first is raised once the whole body has bound, which is the order
-    /// real reports them in.
+    /// they are appended behind the binder's own errors once the whole body has
+    /// bound, which is the order real reports them in.
     /// </param>
     private void BindModuleBodyAtCreate(
         ParserContext outerContext,
@@ -90,9 +98,11 @@ partial class Simulation
         bodyCommand.CommandText = bodyText;
 #pragma warning restore CA2100
 
+        var bindErrors = new List<SimulatedSqlException>();
         var bindBatch = buildBindBatch(bodyCommand);
         bindBatch.SkipModeFlag = true;
         bindBatch.CreateTimeBinding = true;
+        bindBatch.CreateTimeBindErrors = bindErrors;
         bindBatch.FunctionBodyShape = shape;
         bindBatch.LineOffset = bodyLineOffset;
         bindBatch.ErrorProcedureName = moduleName;
@@ -125,19 +135,37 @@ partial class Simulation
             // An unmodeled feature in the body is a simulator gap, not real's
             // binder speaking. Keep the module; the gap surfaces at invocation.
         }
+        catch (SimulatedSqlException) when (bindErrors.Count > 0 && !bindBatch.BindResumedCleanly)
+        {
+            // A severity-15 error raised after a binder error was gathered,
+            // from a position the recovery scan guessed at — it may be a
+            // diagnostic against a fragment rather than against the body, so
+            // report what bound instead. Raised from a clean resume it
+            // propagates, which is real's parse phase preempting the binder's
+            // whole report.
+        }
         finally
         {
             connection.NestingLevel--;
         }
 
-        // Shape violations are raised only after the binder had its say, so a
-        // body carrying both reports the binder error — real's own ordering.
-        // The diagnostics are stamped here rather than by an enclosing dispatch
-        // frame: the violation belongs to a body statement, not to the CREATE.
-        if (shape?.FirstViolation() is not { } violation)
-            return;
-        violation.Error.ResolveDiagnostics(violation.Line, bodyLineOffset, moduleName);
-        throw violation.Error;
+        // Shape violations queue behind the binder's own errors, so a body
+        // carrying both reports every binder error first — real's own ordering.
+        // Their diagnostics are stamped here rather than by an enclosing
+        // dispatch frame: a violation belongs to a body statement, not to the
+        // CREATE (the gathered binder errors were stamped at the bind frame as
+        // they were caught).
+        if (shape is { } walkedShape)
+        {
+            foreach (var (line, error) in walkedShape.AllViolations())
+            {
+                error.ResolveDiagnostics(line, bodyLineOffset, moduleName);
+                bindErrors.Add(error);
+            }
+        }
+
+        if (bindErrors.Count > 0)
+            throw SimulatedSqlException.Aggregate(bindErrors);
     }
 
     /// <summary>

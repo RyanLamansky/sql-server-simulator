@@ -647,6 +647,81 @@ partial class SimulatedSqlException
         new($"Cannot resolve collation conflict between \"{rightCollation}\" and \"{leftCollation}\" in {operatorName} operator occurring in {clause} statement column {ordinal}.", 451, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 456: an <em>already unresolved</em> collation
+    /// reached an implicit conversion that has to name one — a <c>varchar</c>
+    /// result can't be materialized without a code page. Probe-confirmed
+    /// against SQL Server 2025: Class 16 State 1. Distinct from
+    /// <see cref="UnresolvedCollationInImplicitConversion"/> (Msg 457, the
+    /// operator's <em>own</em> operands conflicting) both in number and in
+    /// wording — "the <b>resulting</b> collation is unresolved due to collation
+    /// conflict" where Msg 457 says "the collation of the value is unresolved
+    /// due to <b>a</b> collation conflict" — and the operator it names is the
+    /// one that produced the conflict, not the one consuming it.
+    /// <para>Which family raises is the <em>source</em>'s, not the
+    /// destination's (probe-confirmed against SQL Server 2025): an unresolved
+    /// <c>nvarchar</c> assigns into a <c>varchar</c> column silently, where an
+    /// unresolved <c>varchar</c> raises even assigning into
+    /// <c>nvarchar</c>.</para>
+    /// </summary>
+    internal static SimulatedSqlException UnresolvedCollationReachedImplicitConversion(
+        SqlType sourceType,
+        SqlType destinationType,
+        string rightCollation,
+        string leftCollation,
+        string operatorName) =>
+        new($"Implicit conversion of {sourceType.SqlServerName} value to {destinationType.SqlServerName} cannot be performed because the resulting collation is unresolved due to collation conflict between \"{rightCollation}\" and \"{leftCollation}\" in {operatorName} operator.", 456, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 446: an unresolved collation reached an
+    /// operation that names both the producing operator and itself. Real uses
+    /// one message with a per-operation State (probe-confirmed against SQL
+    /// Server 2025): <c>DISTINCT</c> is State 11, <c>CONVERT</c> — which
+    /// <c>CAST</c> reports as too — is State 20, and <c>COLLATE</c> is State 6.
+    /// </summary>
+    /// <remarks>
+    /// Only the <c>varchar</c> family reaches the CONVERT / COLLATE forms: an
+    /// <c>nvarchar</c> conversion propagates the conflict instead (a
+    /// <c>CAST</c> inherits the source's collation, so the marker rides along)
+    /// and an <c>nvarchar</c> <c>COLLATE</c> settles it outright. DISTINCT
+    /// raises for both families.
+    /// </remarks>
+    internal static SimulatedSqlException UnresolvedCollationInOperation(
+        string rightCollation,
+        string leftCollation,
+        string producingOperator,
+        string operation,
+        byte state) =>
+        new($"Cannot resolve collation conflict between \"{rightCollation}\" and \"{leftCollation}\" in {producingOperator} operator for {operation} operation.", 446, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 4191: an operation that needs a definite
+    /// collation to do its work met a value whose collation is unresolved.
+    /// Probe-confirmed against SQL Server 2025: Class 16 State 9, and the
+    /// message names only the consuming operation — not the conflicting pair,
+    /// and not the operator that produced the conflict.
+    /// </summary>
+    /// <remarks>
+    /// The operation name is the built-in's own name lower-cased
+    /// (<c>len</c> / <c>upper</c> / <c>substring</c> / <c>charindex</c> /
+    /// <c>max</c> / <c>string_agg</c> / <c>like</c> …) or a comparison's
+    /// spelled-out name (<c>equal to</c>, <c>less than</c>, …), matching the
+    /// vocabulary Msg 468 uses. <c>TRIM</c> is real's own odd one out: it
+    /// reports <c>Trim</c> capitalized where every sibling is lower-case.
+    /// </remarks>
+    internal static SimulatedSqlException UnresolvedCollationForOperation(string operationName) =>
+        new($"Cannot resolve collation conflict for {operationName} operation.", 4191, 16, 9);
+
+    /// <summary>
+    /// Mimics SQL Server error 5335: a <c>UNION</c> / <c>INTERSECT</c> /
+    /// <c>EXCEPT</c> branch is a type those operators can't compare. Real
+    /// reaches it for a string whose collation is unresolved — those operators
+    /// dedup, and a value with no collation has no comparison to dedup by
+    /// (probe-confirmed against SQL Server 2025: Class 16 State 1).
+    /// </summary>
+    internal static SimulatedSqlException SetOpOperandNotComparable(SqlType type) =>
+        new($"The data type {type.SqlServerName} cannot be used as an operand to the UNION, INTERSECT or EXCEPT operators because it is not comparable.", 5335, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 8116 — the bit-manipulation family
     /// (<c>BIT_COUNT</c> / <c>GET_BIT</c> / <c>SET_BIT</c> / <c>LEFT_SHIFT</c> /
     /// <c>RIGHT_SHIFT</c>) raises this when argument 1 isn't an integer

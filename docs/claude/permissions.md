@@ -1,7 +1,7 @@
 # Permissions: identity, enforcement, and the writer surface
 
 `GRANT` / `REVOKE` / `DENY` plus the principal DDL surface (`CREATE USER` / `CREATE ROLE` / `ALTER ROLE` / `DROP USER` / `DROP ROLE`, and the server-scope `CREATE LOGIN` / `ALTER LOGIN` / `DROP LOGIN`) + catalog views.
-**Permissions are enforced**: a non-dbo session's SELECT / INSERT / UPDATE / DELETE / EXECUTE / TRUNCATE(=ALTER) / CREATE TABLE is checked at execution time against its effective principal, with role closure, fixed roles, DENY-beats-GRANT, covering permissions, and ownership chaining.
+**Permissions are enforced**: a non-dbo session's SELECT / INSERT / UPDATE / DELETE / EXECUTE and every modeled CREATE / ALTER / DROP statement are checked at execution time against its effective principal, with role closure, fixed roles, DENY-beats-GRANT, covering permissions, and ownership chaining.
 **Session identity is real**: a per-connection principal (original login + database user + impersonation stack) drives the identity scalars, `EXECUTE AS` / `REVERT`, module `WITH EXECUTE AS`, connection-string / TDS authentication, and the per-database identity a cross-database reference or a `USE` resolves through.
 A session that never authenticates and never runs `EXECUTE AS` is `dbo`, and **dbo bypasses every check** — the enforcement layer short-circuits on `SessionSecurityContext.EffectiveIsDbo` before any allocation, so existing (dbo) consumers see byte-identical behavior.
 Logins are enforced as connection credentials at both front doors (TDS endpoint — see [`tds-endpoint.md`](tds-endpoint.md) — and in-process `User ID=` connection strings).
@@ -138,15 +138,66 @@ Wiring:
   On a **single target** (the no-FROM UPDATE / DELETE path) both the read-implies-SELECT and the UPDATE are **column-grain**, against a base table or a view alike (SELECT per WHERE / SET-RHS column, UPDATE per assigned column); the joined form, and any target reached through a synonym, stay object-grain. See [Column-level grants](#column-level-grants).
 - **EXEC proc** / **scalar UDF invocation** — EXECUTE on the module at the call site (the Msg 229 for EXEC carries the proc's schema-qualified name as its Procedure attribution; a call through a synonym checks the synonym and carries none). The scalar-UDF check fires at the invocation seam (`PermissionEnforcement.CheckScalarFunctionExecute`, memoized once-per-statement) so SET / IF operand invocations are covered too.
 - **TRUNCATE** — ALTER on the object → Msg 1088 (state 7).
-- **DDL gates** (all non-dbo only; `db_owner` / `db_ddladmin` pass everything):
-  - **CREATE TABLE** — db-scope CREATE TABLE (else Msg 262 state 1) **and** ALTER on the target schema (else Msg 2760); temp tables exempt.
-  - **CREATE VIEW / PROCEDURE / FUNCTION** — the same-named db-scope permission (else Msg 262 **state 18**, the object carried as `Procedure` attribution) **and** schema ALTER (else Msg 2760).
-  - **CREATE SEQUENCE / ROLE / USER / SCHEMA** — not modeled as a named permission → Msg 15247 (real's CREATE SCHEMA also raises a trailing Msg 2759, omitted).
-  - **ALTER TABLE** — object-scope ALTER (object-ALTER suffices) → Msg 1088 **state 13** (leaf-named).
-  - **DROP TABLE** — schema-scope ALTER (object-ALTER is insufficient) → Msg 3701 **sev 14 state 20** (leaf-named).
-  - **DROP USER** — `db_owner` only (no ALTER ANY USER model) → Msg 15151. DROP ROLE isn't gated (its distinct wording is unprobed).
+- **DDL gates** — see [DDL statement gates](#ddl-statement-gates) for the per-statement matrix.
 - **Ownership chaining** — inside a proc / view / TVF / scalar-UDF / trigger body (`BatchContext.EnforcesPermissions` is false there) all checks are suppressed; dynamic SQL (`EXEC('…')` / `sp_executesql`, whose `ProcFrame.IsDynamicSql` is set) re-enables them.
   Everything is dbo-owned, so all static chains are unbroken — only the outermost referenced object of the user's statement is checked.
+  A module body's DDL is chained the same way: `DROP TABLE` inside a procedure runs unchecked for a caller who only holds EXECUTE on it.
+
+### DDL statement gates
+
+Every modeled CREATE / ALTER / DROP statement is gated for a non-dbo principal.
+All rows probe-confirmed against SQL Server 2025 for the permission that admits the statement and for the exact number / severity / state / wording of the refusal.
+`dbo` short-circuits before any allocation, and a create-time bind (`BatchContext.CreateTimeBinding`) checks nothing.
+
+Two shapes recur, and the difference between them is load-bearing:
+
+- an **ALTER-shaped** gate asks for `ALTER` on the object, which the covering walk also satisfies from schema-scope ALTER, object CONTROL, database-scope ALTER / CONTROL, and `db_ddladmin` / `db_owner`;
+- a **DROP-shaped** gate (`PermissionEnforcement.HasDropAuthority`) asks for schema ALTER **or** object CONTROL — a plain object-scope ALTER is *not* enough, which is exactly what separates `DROP TABLE` from `ALTER TABLE`.
+
+| Statement | Gate | Denial |
+|---|---|---|
+| `CREATE TABLE` | db-scope CREATE TABLE, then ALTER on the target schema; temp tables exempt | **Msg 262** state 1, then **Msg 2760** |
+| `CREATE VIEW` / `PROCEDURE` / `FUNCTION` | the same-named db-scope permission, then schema ALTER | **Msg 262** **state 18** (object as `Procedure` attribution), then **Msg 2760** |
+| `CREATE SYNONYM` / `CREATE TYPE` (alias + table) | db-scope `CREATE SYNONYM` / `CREATE TYPE`, then schema ALTER | **Msg 262** state 1, then **Msg 2760** |
+| `CREATE XML SCHEMA COLLECTION` | schema ALTER **first**, then db-scope `CREATE XML SCHEMA COLLECTION` — the halves run in the opposite order from every other dual gate | **Msg 15151** `Cannot alter the schema '<s>'…`, then **Msg 262** state 1 |
+| `CREATE ASSEMBLY` | db-scope `CREATE ASSEMBLY` | **Msg 262** state 1 |
+| `CREATE FULLTEXT CATALOG` | db-scope `CREATE FULLTEXT CATALOG` | **Msg 7666** sev 16 state 2 |
+| `CREATE SEQUENCE` / `ROLE` / `USER` / `SCHEMA` / `APPLICATION ROLE` | `db_ddladmin` / `db_owner` (not modeled as a named permission) | **Msg 15247** (real's CREATE SCHEMA also raises a trailing Msg 2759, omitted) |
+| `ALTER` / `CREATE OR ALTER` of an existing view / procedure / function | ALTER-shaped, on the module | **Msg 3701** sev 14 state 20, `Cannot alter the <kind> '<leaf>'…` |
+| `CREATE OR ALTER` over a free name | the plain-CREATE gate for that kind | **Msg 262** state 18 |
+| `CREATE` / `ALTER` / `DROP TRIGGER` (DML) | ALTER-shaped, on the **parent table / view** — a DML trigger is not its own securable | **Msg 2104** sev 14 state 1 on create (name echoed *as written*); **Msg 3701** state 20 on alter / drop (leaf) |
+| `CREATE` / `ALTER` / `DROP TRIGGER … ON DATABASE` | db-scope `ALTER ANY DATABASE DDL TRIGGER` | same 2104 / 3701 pair |
+| `CREATE INDEX` | ALTER-shaped, on the table (or the view, for an indexed view) | **Msg 1088** sev 16 **state 12**, double-quoted table name *as written* |
+| `ALTER INDEX` | ALTER-shaped, on the table | **Msg 1088** **state 9**, table name as written |
+| `DROP INDEX` | ALTER-shaped, on the table | **Msg 1088** **state 9**, `"<table as written>.<index>"` |
+| `ALTER TABLE` | ALTER-shaped, on the table | **Msg 1088** **state 13**, leaf-named |
+| `TRUNCATE TABLE` | ALTER-shaped, on the table | **Msg 1088** **state 7**, leaf-named |
+| `ALTER SEQUENCE` | ALTER-shaped, on the sequence | **Msg 15151** state 1, `Cannot alter the sequence '<leaf>'…` |
+| `DROP TABLE` / `VIEW` / `PROCEDURE` / `FUNCTION` / `SEQUENCE` / `SYNONYM` | DROP-shaped | **Msg 3701** sev 14 state 20, `Cannot drop the <kind> '<leaf>'…` |
+| `DROP TYPE` (alias + table) | schema ALTER | **Msg 218** sev 16 state 1, naming the type **as written** |
+| `DROP XML SCHEMA COLLECTION` | schema ALTER | **Msg 15151** state 1, `Cannot drop the xml schema collection '<leaf>'…` |
+| `DROP FULLTEXT CATALOG` | db-scope `ALTER ANY FULLTEXT CATALOG` | **Msg 7641** sev 16 state 5 |
+| `DROP SCHEMA` | CONTROL on the schema, or db-scope `ALTER ANY SCHEMA` — schema **ALTER is not enough** here | **Msg 15151** state 1 |
+| `ALTER SCHEMA … TRANSFER` | ALTER on the **destination** schema, then CONTROL on the moved object — ALTER on the *source* schema is not enough | **Msg 15151** `Cannot alter the schema '<dest>'…`, then **Msg 15151** `Cannot transfer the object '<leaf>'…` |
+| `ALTER ROLE … ADD / DROP MEMBER` | db-scope `ALTER ANY ROLE` (ALTER / CONTROL on the role cover it) | **Msg 15151** **state 2**, `Cannot alter the role '<n>'…` |
+| `DROP ROLE` | db-scope `ALTER ANY ROLE` | **Msg 15151** **state 1**, `Cannot drop the role '<n>'…` |
+| `DROP USER` | `db_owner` only (no ALTER ANY USER model) | **Msg 15151** |
+| `ALTER DATABASE … SET` / `COLLATE` | db-scope `ALTER` (or CONTROL) on the target | **Msg 5011** sev 14 **state 9** — same wording as the state-5 unknown-database record, so nothing leaks |
+| `sp_rename` | ALTER-shaped, on the object | **Msg 15225** sev 11 state 1 — the same not-found record a missing object earns |
+| `CREATE DATABASE` | **server** scope: `CREATE ANY DATABASE` (covered by `ALTER ANY DATABASE`), or `dbcreator` membership | **Msg 262** state 1, naming **`master`** whatever the current database is |
+| `DROP DATABASE` | **server** scope: `ALTER ANY DATABASE`, or `dbcreator` membership | **Msg 3701** **sev 11 state 2** — a different shape from every object drop |
+
+**Fixed-role coverage.**
+`db_owner` passes everything.
+`db_ddladmin` passes every object / schema / type DDL above (probe-confirmed across DROP TABLE, module ALTER, ALTER SEQUENCE, CREATE SYNONYM / TYPE / XML SCHEMA COLLECTION, DROP SCHEMA, the DDL-trigger statements and both full-text ones) but **not** role DDL and **not** `ALTER DATABASE`.
+That split is encoded twice: `ALTER ANY ROLE` sits outside `PermissionCategory.Ddl`, and `PermissionChecker.IsBlanketDatabaseAlter` withholds the role's virtual DDL grant from an `ALTER` request whose securable is the *database* — the granular database-scope DDL permissions (CREATE TABLE, ALTER ANY SCHEMA, …) are unaffected.
+
+**Ownership.**
+Real also admits every ALTER / DROP above to the object's (or schema's) owner without an explicit grant — probe-confirmed against a `CREATE SCHEMA … AUTHORIZATION <user>` schema.
+Every simulated object is dbo-owned and the `dbo` bypass covers that case, so no separate owner path exists.
+
+**Cross-database.**
+The gates route through the same `PermissionEnforcement` seam as the DML checks, so a three-part DDL target resolves the login's principal in the *target* database (Msg 916 when it has none).
 
 ### Column-level grants
 
@@ -203,15 +254,29 @@ All probe-confirmed against SQL Server 2025.
 The `dbo` bypass stays a single bool read on the session's effective principal, so nothing but a genuinely restricted principal ever pays a lookup, and the lookup only runs when the touched database differs from the session's.
 That bypass is exact in the simulator's principal model: an effective `dbo` can only have come from a sysadmin login or the empty-registry dev mode, both of which are `dbo` in every database.
 
-**A database-scoped identity can't cross at all.**
-An `EXECUTE AS USER` frame, a module's `WITH EXECUTE AS <user>` frame, and an activated application role carry no server principal, so *every* cross-database reference raises Msg 916 whatever the target's grants say — probe-confirmed, and unchanged by turning the source database's `TRUSTWORTHY` on.
+A **catalog-view** read of another database asks the same question — see [Cross-database metadata visibility](#cross-database-metadata-visibility).
+
+**A database-scoped identity crosses only out of a `TRUSTWORTHY` database.**
+An `EXECUTE AS USER` frame, a module's `WITH EXECUTE AS <user>` frame, and an activated application role carry no server principal, so out of an ordinary database *every* cross-database reference raises Msg 916 whatever the target's grants say.
 The name in the message is the frame's reported login identity: the login for a `FOR LOGIN` user or an application role (the session's login survives the activation), and the `S-1-9-3-…` SID for a `WITHOUT LOGIN` user.
 `SecurityPrincipalFrame.IsDatabaseScoped` is the marker.
 
-**Ownership chaining breaks at the database boundary.**
-With `DB_CHAINING` off (the default, and the only state modeled), a dbo-owned module does not lend its owner's rights to an object in another database — the caller needs its own grant there, and the denial names the base object.
-Probe-confirmed for a view; the same holds for the statement-dispatching bodies.
+Turning the **source** database's `TRUSTWORTHY` on (the database the token was made in — the target's flag is irrelevant) accepts the token, after which the frame's own login answers in the target like any ordinary session's: an object it holds nothing on is Msg 229 naming the target, and a login with no user there is still Msg 916.
+So a `WITHOUT LOGIN` user, whose reported identity is a SID rather than a login, is refused however trustworthy the source is.
+All probe-confirmed against SQL Server 2025.
+
+Real gates the crossing on an **authenticator** as well: the source database's owner must hold `AUTHENTICATE` in the target — probed as the exact line between allowed and refused, with a `sa`-owned source qualifying through `dbo`, an owner with no user in the target refused, and an owner whose user there lacks `AUTHENTICATE` refused too.
+Every simulated database is dbo-owned (there is no `ALTER AUTHORIZATION ON DATABASE` surface), so the authenticator always qualifies and the flag alone decides.
+
+**Ownership chaining crosses the database boundary only with `DB_CHAINING` on in both databases.**
+With either side off — the default for a user database — a dbo-owned module does not lend its owner's rights to an object in another database: the caller needs its own grant there and the denial names the base object.
+With both on the chain re-links and the module's reference is unchecked, through a view and through a statement-dispatching body alike.
+Chaining lends **rights, not access**: the caller still needs a user in the target, so a login with none is Msg 916 either way (probe-confirmed — a `guest` grant in the target is enough to satisfy it).
+Real additionally requires the two objects to share an owner (probed: a view owned by a schema's own user over a dbo-owned base still breaks, chaining on or not); every simulated object is dbo-owned, so that half is always satisfied.
+A reference the *user* wrote is never chained, whatever the flags say.
+
 Mechanically, `PermissionEnforcement.Applies(batch, target)` keeps the module-body suppression only for a same-database securable, which covers procedure / trigger / scalar-UDF bodies through the ordinary per-statement check sites; a **view or inline-TVF body is inlined** into the referencing statement and reaches none of those, so its plan's cross-database reads are checked once at invocation via `PermissionEnforcement.CheckCrossDatabaseReads`.
+The chaining exemption sits one step *after* the principal resolution in both (`TryResolveScope` and `CheckCrossDatabaseReads`), which is what keeps the Msg 916 in play when the chain links.
 A create-time bind suppresses everything either way — it reads no row.
 
 **`USE` / `ChangeDatabase` ask the same question.**
@@ -219,9 +284,13 @@ A restricted principal may switch to a database its login maps into, and the ses
 A login with no user there gets Msg 916 and the session stays put; a missing database is Msg 911 first (probe-confirmed — existence is reported even to a principal that could not have opened it); an active application role is Msg 505 ahead of both.
 `Simulation.SwitchDatabase` is the shared implementation.
 
-**Not modeled yet.**
-`TRUSTWORTHY` and `DB_CHAINING` aren't on the `ALTER DATABASE` accept-list at all ([`database-options.md`](database-options.md)), so the configurations that would *widen* cross-database access — a trustworthy database plus a matching authenticator, or chaining on in both — can't be reached and everything behaves as the default-configuration refusals above.
-Cross-database **catalog-view** reads also still pass the metadata filter unchanged — see [Metadata visibility](#metadata-visibility).
+`USE` runs the same gate, so a `TRUSTWORTHY` source lets an impersonating session switch where a non-trustworthy one gets Msg 916 (probe-confirmed).
+
+**Divergences.**
+The `dbo` bypass short-circuits ahead of the database-scoped-frame test, so a module's `WITH EXECUTE AS OWNER` / `SELF` frame (which resolves to `dbo`) crosses a database boundary the simulator never questions.
+Real refuses it out of a non-trustworthy database like any other database-scoped token — probe-confirmed, and it refuses even when the session's own login is `sa`.
+
+The `TRUSTWORTHY` flag is read off the **session's** current database, which is the token's home for a direct `EXECUTE AS USER` and for every same-database module; a module invoked through a three-part name carries a frame made in *its* database, and real would read the flag there.
 
 ### Reference provenance: synonyms
 
@@ -256,16 +325,30 @@ Otherwise the object is revealed by any `G`/`W` row (any permission, including a
 Visibility is **object-grain**: one permission on the object reveals *all* its column / index / parameter / constraint rows, and a trigger's visibility follows its parent table / view.
 DENY does not hide metadata (grant-only scan — an assumption; DENY-hides-metadata was not probed).
 
-The filter is a per-enumeration seam on the catalog-view row generators (`BuiltInResources.ApplyMetadataFilter`, wired into both `Selection.ForCatalogView` overloads), gated by `PermissionEnforcement.MetadataVisibilityApplies(batch)` — a restricted-**session**-principal check that (unlike `Applies`) is NOT suppressed inside a module body, since metadata visibility is a property of the session principal, not the execution frame.
+The filter is a per-enumeration seam on the catalog-view row generators (`BuiltInResources.ApplyMetadataFilter`, wired into both `Selection.ForCatalogView` overloads), gated by `PermissionEnforcement.MetadataVisibilityPrincipal(batch, targetDatabase)` — which returns the principal to filter by, or null for full visibility. It is a **session**-principal check that (unlike `Applies`) is NOT suppressed inside a module body, since metadata visibility is a property of the session principal, not the execution frame.
+(`MetadataVisibilityApplies(batch)` is the same question in bool form for the session's own database — what the `OBJECT_ID` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` scalars read.)
 The dbo / full-visibility fast path short-circuits on the session principal before any allocation, so existing (dbo) and SMO-as-sysadmin consumers pay one bool read and are unaffected.
 Each filtered view carries a `CatalogView.MetadataVisibilityKey` (set once at registration in `BuiltInResources.MetadataVisibility.cs`) naming the row column that governs visibility: the object-id-keyed `sys.*` views key on the row's `object_id` (or `parent_object_id`), the name-keyed `INFORMATION_SCHEMA.*` object views on the owning schema + object name.
 Filtered views: `sys.objects` / `all_objects` / `tables` / `views` / `all_views` / `procedures` / `columns` / `all_columns` / `parameters` / `all_parameters` / `sql_modules` / `all_sql_modules` / `indexes` / `index_columns` / `foreign_keys` / `foreign_key_columns` / `check_constraints` / `default_constraints` / `key_constraints` / `triggers` / `identity_columns` / `computed_columns` / `sequences` / `synonyms`, and `INFORMATION_SCHEMA.TABLES` / `COLUMNS` / `VIEWS` / `ROUTINES` / `PARAMETERS`.
 Deliberately unfiltered (probe-confirmed broadly visible to a restricted principal): `sys.database_principals` / `sys.schemas` / `sys.database_permissions` / `sys.database_role_members` / `sys.types` / `sys.databases` and the DMVs.
 `sys.server_principals` / `sys.sql_logins` carry their own server-scope filter — see [Server-principal metadata visibility](#server-principal-metadata-visibility).
 `sys.databases` stays unfiltered because real grants `VIEW ANY DATABASE` to `public` by default, so a plain login does see every database (probe-confirmed); the seeded `public` grant row itself isn't modeled.
-Scope limits (noted): filtering engages only for a same-database read — a cross-database catalog read (`other.sys.tables`) passes through unfiltered, where real resolves the login's user in the target and filters by *its* visibility (and raises Msg 916 when the login has no user there, exactly as it does for a data read).
-The data-side surfaces resolve that principal — see [Cross-database references](#cross-database-references) — the catalog-view filter is the piece left.
 `db_datareader` slightly over-reveals procedure metadata; a column-scope grant (`minor_id > 0`) reveals its object object-grain — `sys.columns` shows every column of a column-granted object, including the ungranted / denied ones (probe Q2).
+
+#### Cross-database metadata visibility
+
+A catalog-view read of another database (`other.sys.tables`) resolves the login's user *there* and filters by **that** principal's visibility — the same resolution a data reference runs, so the whole rule above (its own full-visibility bypass included) re-answers in the target.
+So a login restricted at home and `db_ddladmin` away sees the away catalog whole, and a grant held at home reveals nothing away.
+All probe-confirmed against SQL Server 2025.
+
+A login with **no user** in the target gets **Msg 916**, and real raises it for *every* cross-database catalog view — including the ones it would never have filtered (`sys.databases`, `sys.schemas`, `sys.types`, `sys.database_principals` all refuse alongside `sys.tables`), since the refusal is about reaching the database rather than about the view.
+`ApplyMetadataFilter` therefore resolves ahead of the `MetadataKey` test; only an unfiltered view of the session's *own* database short-circuits before the closure build, so a restricted session keeps paying nothing for a local `sys.databases` read.
+`DB_ID` / `DB_NAME` still answer for a database the login can't reach (probe-confirmed — they read no metadata of it).
+
+The guest rule follows the data path exactly: `master` / `tempdb` / `msdb` resolve to `guest` and filter by it, while `model` refuses like any user database.
+A database-scoped frame reaches another database's catalog only out of a `TRUSTWORTHY` source, as it reaches its data — see [Cross-database references](#cross-database-references).
+
+Not carried across the boundary yet: the `OBJECT_ID` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` scalars gate a three-part name against the *session's* database rather than the named one, so a restricted principal reads an id real would hide (and no Msg 916 where the login has no user in the target).
 
 ### Principal DDL
 
@@ -483,19 +566,25 @@ Registered in `BuiltInResources.Security.cs` via the shared `EmptyCatalogRows`.
 
 | Msg | When |
 |---|---|
-| 15151 | Unknown principal in GRANT/REVOKE/DENY/ALTER ROLE / ALTER APPLICATION ROLE; unknown securable object / missing grant authority (object-variant `CannotFindObject`); DROP USER by a non-`db_owner`; ALTER/DROP SERVER ROLE / server-scope grant / `ON LOGIN::` securable naming a missing role / member / login; `ALTER` / `DROP LOGIN` without `ALTER ANY LOGIN` (same wording as a missing login). |
+| 15151 | Unknown principal in GRANT/REVOKE/DENY/ALTER ROLE / ALTER APPLICATION ROLE; unknown securable object / missing grant authority (object-variant `CannotFindObject`); DROP USER by a non-`db_owner`; ALTER/DROP SERVER ROLE / server-scope grant / `ON LOGIN::` securable naming a missing role / member / login; `ALTER` / `DROP LOGIN` without `ALTER ANY LOGIN` (same wording as a missing login); and the DDL gates that reuse a not-found wording — ALTER SEQUENCE, DROP XML SCHEMA COLLECTION, DROP SCHEMA, DROP ROLE (state 1) / ALTER ROLE (**state 2**), and the `ALTER SCHEMA … TRANSFER` pair (`Cannot alter the schema` then `Cannot transfer the object`). |
 | 15150 | DROP SERVER ROLE on a fixed server role. |
 | 15023 | Duplicate `CREATE USER` / `CREATE ROLE` name. |
 | 15247 | CREATE SEQUENCE / ROLE / USER / SCHEMA / APPLICATION ROLE by a principal lacking `db_ddladmin` / `db_owner`; `CREATE LOGIN` by a principal lacking server-scope `ALTER ANY LOGIN`. |
+| 218 | DROP TYPE without schema ALTER — the same record a missing type earns, naming the type as written. |
+| 2104 | CREATE TRIGGER without ALTER on the parent object (DML) or `ALTER ANY DATABASE DDL TRIGGER` (database-scope), sev 14 state 1. |
+| 5011 | ALTER DATABASE without database ALTER — **state 9**, the permission sibling of the state-5 unknown-database record. |
+| 7641 | DROP FULLTEXT CATALOG without `ALTER ANY FULLTEXT CATALOG` (sev 16 state 5). |
+| 7666 | CREATE FULLTEXT CATALOG without `CREATE FULLTEXT CATALOG` (sev 16 state 2). |
+| 15225 | `sp_rename` without ALTER on the object — the same not-found record a missing object earns. |
 | 229 | SELECT / INSERT / UPDATE / DELETE / EXECUTE denied (sev 14 state 5; Procedure attribution on EXEC; UPDATE/DELETE read-implies-SELECT; the object-level fallback when a column-grain check has no access at all). |
 | 230 | SELECT / UPDATE denied on a specific **column** (sev 14 state 1) — the column-level grant model's denial, naming the first inaccessible column. |
 | 4615 | GRANT / DENY / REVOKE column list naming a column the object lacks (`Invalid column name '<col>'.`). |
 | 1020 | Column list on an entity-level *permission* (class 15 state 1, compile-time) or on a **synonym** securable (sev 16 state 3, post-resolution). |
-| 262 | CREATE TABLE (state 1, no attribution) / CREATE VIEW / PROCEDURE / FUNCTION (state 18, object as Procedure attribution) db-scope-permission gate; database-scope DMV read without `VIEW DATABASE PERFORMANCE STATE` (state 1). |
+| 262 | The database-scope CREATE gates at state 1 (CREATE TABLE / SYNONYM / TYPE / XML SCHEMA COLLECTION / ASSEMBLY, and the server-scope CREATE DATABASE naming `master`) or **state 18** with the object as Procedure attribution (CREATE VIEW / PROCEDURE / FUNCTION, and a `CREATE OR ALTER` over a free name); database-scope DMV read without `VIEW DATABASE PERFORMANCE STATE` (state 1). |
 | 300 | Server-scope DMV read without `VIEW SERVER PERFORMANCE STATE` (sev 14 state 1). |
 | 2760 | CREATE TABLE / VIEW / PROCEDURE / FUNCTION with the db-scope permission but no ALTER on the target schema (double-quoted schema name). |
-| 1088 | TRUNCATE denied (state 7) / ALTER TABLE denied (state 13) — double-quoted object name. |
-| 3701 | DROP TABLE denied — schema ALTER missing (sev 14 state 20, leaf-named). |
+| 1088 | TRUNCATE (state 7) / ALTER TABLE (state 13) — double-quoted leaf; CREATE INDEX (state 12) and ALTER / DROP INDEX (state 9) — double-quoted table name *as written*, the DROP form suffixed with the index leaf. |
+| 3701 | An object DROP or a module ALTER denied — sev 14 state 20, leaf-named, with the kind noun real spells (`table` / `view` / `procedure` / `function` / `trigger` / `sequence` / `synonym`). DROP DATABASE has its own shape: **sev 11 state 2**. |
 | 4606 | Permission incompatible with the object kind (SELECT on a proc, EXECUTE on a table / view / TVF). |
 | 4611 | Plain REVOKE of a grantable permission with live delegations, without CASCADE. |
 | 4621 | Server-scope GRANT / DENY / REVOKE (incl. `ON SERVER::` / `ON LOGIN::`) outside the `master` database — severity 16 **state 10**, no trailing period. |
@@ -554,7 +643,9 @@ The current-principal / id scalars read the session's effective principal; `HAS_
   The observable behavior still matches, since `sys.databases` is unfiltered either way.
 - **Application-role edges** — DDL is gated on the `db_owner` / `db_ddladmin` capability rather than `ALTER ANY APPLICATION ROLE`; a pooled TDS reset clears the role instead of killing the session (real's Msg 596).
   See [Application roles](#application-roles).
-- **DDL statement permissions beyond the gated set** — CREATE TABLE / VIEW / PROCEDURE / FUNCTION / SEQUENCE / ROLE / USER / SCHEMA, ALTER TABLE, DROP TABLE, and DROP USER are gated; other CREATE / ALTER / DROP statements (indexes, triggers, types, sequences-alter, …) aren't. `ALTER` / `CREATE OR ALTER` of an existing module isn't gated (only pure CREATE is).
+- **DDL statement gates** cover every modeled CREATE / ALTER / DROP — see [DDL statement gates](#ddl-statement-gates). Residue: three securable classes real accepts a grant on have no GRANT surface here, so the alternative each offers isn't honored — `CONTROL ON TYPE::t` (DROP TYPE takes schema ALTER only), `CONTROL ON XML SCHEMA COLLECTION::c` (same), and `CONTROL` on a full-text catalog (DROP FULLTEXT CATALOG takes `ALTER ANY FULLTEXT CATALOG` only). The simulator is the stricter side in all three.
+  `CREATE ASSEMBLY` covers through `CONTROL` rather than real's `ALTER ANY ASSEMBLY`, which isn't in the catalog.
+  Real pairs the ALTER DATABASE refusal with a terminating Msg 5069 and the CREATE INDEX / TRUNCATE family with no second record; the simulator raises the single leading error, matching how the DMV 300 / 262 pair is modeled.
 - **`db_accessadmin` / `db_securityadmin` / `db_backupoperator`** — membership is tracked and projected, but carries no enforced effect (the DDL gates treat `db_owner` / `db_ddladmin` as the "may run any DDL" pair per probe).
 - **Msg 229 multi-error round trip** — when both SELECT and the write permission are missing, a single SELECT-first denial is raised, not real's paired SELECT-then-write error records.
 - **`ALTER TABLE ADD`-column SET-reads detection** on the joined form isn't distinguished — a joined UPDATE / DELETE SELECT-checks all backing-table sources unconditionally.

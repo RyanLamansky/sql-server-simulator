@@ -1,7 +1,6 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 
 namespace SqlServerSimulator.Parser;
 
@@ -28,10 +27,19 @@ internal readonly struct JsonPath
     public readonly JsonPathMode Mode;
     public readonly Segment[] Segments;
 
-    private JsonPath(JsonPathMode mode, Segment[] segments)
+    /// <summary>
+    /// Whether the path carried the <c>append</c> prefix, which turns
+    /// <c>JSON_MODIFY</c>'s write into an append onto the array the path
+    /// names. Only <c>JSON_MODIFY</c> takes the prefix; everywhere else it is
+    /// Msg 13607, so <see cref="Parse"/> reads it only when asked to.
+    /// </summary>
+    public readonly bool Append;
+
+    private JsonPath(JsonPathMode mode, Segment[] segments, bool append)
     {
         this.Mode = mode;
         this.Segments = segments;
+        this.Append = append;
     }
 
     /// <summary>
@@ -44,12 +52,23 @@ internal readonly struct JsonPath
     /// Parses the path text. Throws <see cref="SimulatedSqlException"/>
     /// (Msg 13607) on a syntactically invalid path. The empty segment list
     /// (just <c>$</c>) is valid — it self-references the current element.
+    /// <paramref name="acceptAppend"/> admits the <c>append</c> prefix, which
+    /// only <c>JSON_MODIFY</c> takes and which precedes the
+    /// <c>lax</c> / <c>strict</c> keyword rather than following it.
     /// </summary>
-    public static JsonPath Parse(string text)
+    public static JsonPath Parse(string text, bool acceptAppend = false)
     {
         var i = 0;
         var mode = JsonPathMode.Lax;
+        var append = false;
         SkipWhitespace(text, ref i);
+        if (acceptAppend && i + 7 <= text.Length && text.AsSpan(i, 7).Equals("append ", StringComparison.OrdinalIgnoreCase))
+        {
+            append = true;
+            i += 7;
+            SkipWhitespace(text, ref i);
+        }
+
         if (i + 4 <= text.Length && text.AsSpan(i, 4).Equals("lax ", StringComparison.OrdinalIgnoreCase))
         {
             i += 4;
@@ -122,7 +141,7 @@ internal readonly struct JsonPath
             }
         }
 
-        return new JsonPath(mode, [.. segments]);
+        return new JsonPath(mode, [.. segments], append);
     }
 
     private static void SkipWhitespace(string text, ref int i)
@@ -215,7 +234,8 @@ internal readonly struct JsonPath
     /// <summary>
     /// Whether <paramref name="segment"/> selects the last member of
     /// <paramref name="current"/> — the direction a truncated document's
-    /// unclosed containers always run in.
+    /// unclosed containers always run in. A repeated property name counts
+    /// only where the reader would have stopped, at its first occurrence.
     /// </summary>
     private static bool SelectsLastChild(JsonElement current, Segment segment)
     {
@@ -223,48 +243,39 @@ internal readonly struct JsonPath
             return current.ValueKind == JsonValueKind.Array && segment.Index == current.GetArrayLength() - 1;
         if (current.ValueKind != JsonValueKind.Object)
             return false;
-        var last = default(string);
+        var index = 0;
+        var firstMatch = -1;
         foreach (var property in current.EnumerateObject())
-            last = property.Name;
-        return last is not null && string.Equals(last, segment.Property, StringComparison.Ordinal);
+        {
+            if (firstMatch < 0 && string.Equals(property.Name, segment.Property, StringComparison.Ordinal))
+                firstMatch = index;
+            index++;
+        }
+        return firstMatch >= 0 && firstMatch == index - 1;
     }
 
     private static JsonElement? TryStep(JsonElement current, Segment segment) => segment.IsIndex
         ? (current.ValueKind == JsonValueKind.Array && segment.Index < current.GetArrayLength()
             ? current[segment.Index]
             : null)
-        : (current.ValueKind == JsonValueKind.Object && current.TryGetProperty(segment.Property!, out var found)
-            ? found
-            : null);
+        : (current.ValueKind == JsonValueKind.Object ? FirstProperty(current, segment.Property!) : null);
 
     /// <summary>
-    /// Locates the parent node and leaf segment for <c>JSON_MODIFY</c>. The
-    /// parent is the container that holds the slot named by the last
-    /// segment; the leaf carries the slot's name (property) or index
-    /// (array). Lax mode: returns <c>(null, default)</c> when an
-    /// intermediate is missing — JSON_MODIFY treats this as a no-op and
-    /// returns the input document unchanged. Strict mode: raises
-    /// Msg 13608 instead.
+    /// The first member of <paramref name="current"/> named
+    /// <paramref name="name"/>. SQL Server's reader stops at the first match,
+    /// so <c>JSON_VALUE('{"a":1,"a":2}', '$.a')</c> is <c>1</c>;
+    /// <see cref="JsonElement.TryGetProperty(string, out JsonElement)"/>
+    /// hands back the last instead.
     /// </summary>
-    public (JsonNode? Parent, Segment Leaf) WalkForModify(JsonNode root)
+    private static JsonElement? FirstProperty(JsonElement current, string name)
     {
-        if (this.Segments.Length == 0)
-            return (null, default);
-
-        var current = root;
-        for (var i = 0; i < this.Segments.Length - 1; i++)
+        foreach (var property in current.EnumerateObject())
         {
-            var next = TryStepNode(current, this.Segments[i]);
-            if (next is null)
-                return this.Mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonStrictPathNotFound() : (null, default);
-            current = next;
+            if (string.Equals(property.Name, name, StringComparison.Ordinal))
+                return property.Value;
         }
-        return (current, this.Segments[^1]);
+        return null;
     }
-
-    private static JsonNode? TryStepNode(JsonNode current, Segment segment) => segment.IsIndex
-        ? (current is JsonArray array && segment.Index < array.Count ? array[segment.Index] : null)
-        : (current is JsonObject obj && obj.TryGetPropertyValue(segment.Property!, out var found) ? found : null);
 
     /// <summary>One segment of a <see cref="JsonPath"/>: either a property
     /// access (named) or an array index access. <see cref="IsIndex"/>

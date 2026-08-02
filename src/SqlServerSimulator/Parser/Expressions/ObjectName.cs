@@ -8,7 +8,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// name of the object with the given <c>object_id</c>, or NULL when not
 /// found. Walks <see cref="Database.Schemas"/> → <see cref="Schema.SchemaObjects"/>
 /// (the shared object-name namespace: tables / views / functions /
-/// procedures / sequences / triggers) plus <see cref="Schema.TableTypes"/>.
+/// procedures / sequences / triggers) plus <see cref="Schema.TableTypes"/>,
+/// then the constraint objects hanging off a table (see
+/// <see cref="ConstraintLookup"/>).
 /// Probe-confirmed against SQL Server 2025 (2026-05-23): the
 /// <c>database_id</c> argument is load-bearing — without it the lookup is
 /// scoped to the connection's current database; with it the lookup is
@@ -85,7 +87,13 @@ internal sealed class ObjectName : Expression
                     return SqlValue.FromString(SqlType.SystemName, tableType.Name);
             }
         }
-        return SqlValue.Null(SqlType.SystemName);
+        // A constraint id reads back its own name, visibility following the
+        // table it hangs off (constraints aren't SchemaObjects, so the walk
+        // above can't reach one).
+        return ConstraintLookup.TryResolveById(targetDb, id, out var constraint)
+            && (!restrict || PermissionChecker.CanViewMetadata(targetDb, principalId, constraint.Table.ObjectId, constraint.Table.SchemaId))
+            ? SqlValue.FromString(SqlType.SystemName, constraint.Name)
+            : SqlValue.Null(SqlType.SystemName);
     }
 
     private static Database? LookupDatabaseById(Simulation simulation, int requested)

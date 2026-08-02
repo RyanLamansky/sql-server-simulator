@@ -6,11 +6,12 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Parses a <c>WITH cte_name [(col, …)] AS (SELECT …) [, …]</c> prefix
-    /// and registers each binding on <paramref name="context"/>'s
-    /// <see cref="ParserContext.CteBindings"/>. The bindings live for the
+    /// Parses a <c>WITH [XMLNAMESPACES (…),] cte_name [(col, …)] AS
+    /// (SELECT …) [, …]</c> prefix and registers each binding on
+    /// <paramref name="context"/>'s <see cref="ParserContext.CteBindings"/> /
+    /// <see cref="ParserContext.XmlNamespaces"/>. The bindings live for the
     /// immediately-following statement only — the statement loop clears
-    /// the slot on its next iteration.
+    /// the slots on its next iteration.
     /// </summary>
     /// <remarks>
     /// On entry <see cref="ParserContext.Token"/> is the <c>WITH</c>
@@ -57,10 +58,32 @@ partial class Simulation
         var bindings = new Dictionary<string, CteBinding>(StringComparer.OrdinalIgnoreCase);
         context.CteBindings = bindings;
 
+        context.MoveNextRequired();
+
+        // XMLNAMESPACES leads the WITH prefix — alone, or ahead of a
+        // comma-separated CTE list. Real accepts it only in first position (one
+        // written after a CTE is Msg 102 near 'XMLNAMESPACES'), and treats the
+        // word as a keyword there: `WITH XMLNAMESPACES AS (…)` is a syntax
+        // error while the delimited `WITH [XMLNAMESPACES] AS (…)` is an
+        // ordinary CTE, so only the unquoted spelling enters the clause.
+        if (context.Token is UnquotedString word && Collation.Baseline.Equals(word.Value, "XMLNAMESPACES"))
+        {
+            context.XmlNamespaces = ForXmlNamespaces.Parse(context);
+            if (context.Token is not Operator { Character: ',' })
+                return;
+            context.MoveNextRequired();
+        }
+
         while (true)
         {
-            if (context.GetNextRequired() is not Name cteName)
+            // Past first position the word is still a keyword, so it can't
+            // become a CTE name: real reports Msg 102 on it rather than on
+            // whatever follows.
+            if (context.Token is not Name cteName
+                || (context.Token is UnquotedString late && Collation.Baseline.Equals(late.Value, "XMLNAMESPACES")))
+            {
                 throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
 
             if (bindings.ContainsKey(cteName.Value))
                 throw SimulatedSqlException.DuplicateCteName(cteName.Value);
@@ -129,6 +152,7 @@ partial class Simulation
             context.MoveNextRequired();
             if (context.Token is not Operator { Character: ',' })
                 break;
+            context.MoveNextRequired();
         }
     }
 
@@ -147,7 +171,7 @@ partial class Simulation
     /// </remarks>
     private static Selection ParseCteBody(ParserContext context, CteBinding binding)
     {
-        var firstBranch = Selection.ParseIntersectChain(context, depth: 1, outerTypeResolver: null, isFirstBranch: true);
+        var firstBranch = Selection.ParseIntersectChain(context, depth: 1, outerTypeResolver: null, isFirstBranch: true, namesOwnCollation: false);
 
         var branches = new List<(Selection plan, bool selfRef, SetOpKind op)>
         {
@@ -184,7 +208,7 @@ partial class Simulation
 
                 binding.SelfReferenceCountInCurrentBranch = 0;
                 context.RecursiveBranchConstructs = default;
-                var branch = Selection.ParseIntersectChain(context, depth: 1, outerTypeResolver: null, isFirstBranch: false);
+                var branch = Selection.ParseIntersectChain(context, depth: 1, outerTypeResolver: null, isFirstBranch: false, namesOwnCollation: false);
                 var selfRefCount = binding.SelfReferenceCountInCurrentBranch;
                 if (selfRefCount > 1)
                     throw SimulatedSqlException.RecursiveCteMultipleReferences(binding.Name);
@@ -212,7 +236,7 @@ partial class Simulation
             // combiner so type promotion matches a regular UNION ALL chain.
             var combined = branches[0].plan;
             for (var i = 1; i < branches.Count; i++)
-                combined = Selection.CombineSetOps(combined, branches[i].plan, branches[i].op);
+                combined = Selection.CombineSetOps(combined, branches[i].plan, branches[i].op, namesOwnCollation: false);
             return combined;
         }
 

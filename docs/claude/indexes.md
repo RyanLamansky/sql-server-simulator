@@ -400,7 +400,11 @@ It returns the table's canonical `IndexIdentity` rows — `(index_id, type, name
   The clustered index is always id 1 regardless of creation order (a `CREATE CLUSTERED INDEX` added after nonclustered indexes still lands at 1; those keep their ids).
 - With no clustered entry the table is a **heap**: one synthetic row at `index_id = 0`, `type = 0`, no backing object.
   Nonclustered ids on a heap still start at 2 — index_id 1 (the clustered slot) is never reused.
-- Every remaining (nonclustered) constraint / index — including a NONCLUSTERED PK — takes `index_id = 2..N`, `type = 2`, in object-id (declaration) order (the simulator's `AllocateObjectId` is monotonic, so this matches SQL Server's declaration-order behavior).
+- Every remaining (nonclustered) constraint / index — including a NONCLUSTERED PK — takes `index_id = 2..N`, `type = 2`, in **object-id order**.
+
+Object-id order is not declaration order for the key constraints of a single declaration: real allocates the clustered one's id first and the rest in **reverse** declaration order (probe-confirmed for `CREATE TABLE` — inline and table-level alike — and for an `ALTER TABLE ADD` of several constrained columns), which `Simulation.ResolveKeyConstraints` mirrors.
+So `create table t (id int primary key nonclustered, u int unique)` answers UNIQUE 2 / PRIMARY KEY 3, and `create table t (a int unique, b int primary key clustered, c int unique)` answers the clustered PK 1, `c`'s UNIQUE 2, `a`'s 3.
+A later `ALTER TABLE ADD CONSTRAINT` takes the next id up, since its own id is allocated after everything already there.
 
 A PK defaults **clustered** (unless declared `NONCLUSTERED`); a UNIQUE constraint defaults **nonclustered** (unless declared `CLUSTERED`) — captured at parse time (`ParseInlineKeyKindAndModifiers` → `KeyConstraint.IsClustered`) across inline column constraints, table-level constraints, and `ALTER TABLE ADD CONSTRAINT` (the shape the bacpac loader emits).
 At most one clustered index exists per table, enforced on every path: `CREATE INDEX` and `ALTER TABLE ADD CONSTRAINT … CLUSTERED` raise **Msg 1902 State 3** naming the existing clustered index, and two CLUSTERED constraints in one CREATE TABLE raise **Msg 8112** instead (real's distinct message for the case where neither entry exists yet to name). Two PRIMARY KEYs — both clustered by default — report Msg 8110 ahead of either, probe-confirmed.
@@ -412,9 +416,14 @@ SMO's index-scripting query reads it as `CAST(i.compression_delay AS int)` with 
 
 One row per (index, column):
 
-- **KEY columns**: `key_ordinal = 1..N`, `index_column_id = 1..N`, `is_included_column = 0`.
+- **KEY columns**: `key_ordinal = 1..N`, `is_included_column = 0`, and `index_column_id = 1..N` in an order that splits by index kind —
+  a **nonclustered** index numbers them in key order (so `index_column_id = key_ordinal`), while a **clustered** one numbers them in **table column order**, ascending `column_id`.
+  `create clustered index ix on t(b, a)` therefore reports `a` at `index_column_id` 1 / `key_ordinal` 2 (probe-confirmed, and the same for a clustered PRIMARY KEY and an indexed view's clustered index); `key_ordinal` carries the key order either way.
 - **INCLUDE columns**: `key_ordinal = 0`, `index_column_id = N+1..`, `is_included_column = 1`.
+  Only a nonclustered index has any — real refuses INCLUDE on a clustered index (Msg 10601, unraised here).
 - HEAP entries (index_id = 0) don't appear — real SQL Server's catalog omits them.
+
+`sys.stats_columns.stats_column_id` tracks the sibling `index_column_id` through the same rule (`KeyIndexColumnIds`), so DacFx's join of the two views on `(stats_column_id, column_id)` pairs up for a clustered index too.
 
 `is_descending_key` reflects the per-column DESC flag from CREATE INDEX.
 `column_id` is the 1-based full-column ordinal from `sys.columns` (mapped back from the storage ordinal stored on the index).

@@ -20,10 +20,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// means it appeared in scalar position, which is unsupported.
 /// </para>
 /// <para>
-/// <c>query</c> / <c>exist</c> / <c>modify</c> parse cleanly (so CREATE VIEW /
-/// CREATE PROCEDURE bodies referencing them store verbatim) but raise
-/// <see cref="NotSupportedException"/> at <see cref="Run"/> time, the
-/// skip-with-diagnostic stance documented in <c>docs/claude/xml.md</c>.
+/// <c>modify</c> is the mutator, legal only as the whole right-hand side of
+/// <c>SET @x.modify(…)</c> or an UPDATE's <c>SET col.modify(…)</c>; those two
+/// sites parse it through <see cref="XmlModify"/>, so seeing it here means it
+/// was written in a value position and the answer is Msg 8137.
 /// </para>
 /// </remarks>
 internal sealed class XmlMethodCall : Expression
@@ -72,6 +72,12 @@ internal sealed class XmlMethodCall : Expression
     /// </summary>
     public static XmlMethodCall Parse(Expression target, string methodName, ParserContext context)
     {
+        // Reaching the expression parser at all means `.modify()` was written
+        // somewhere a value is expected; real refuses the mutator there before
+        // anything else, the SET-option gate included (probe-confirmed).
+        if (methodName.Equals("modify", StringComparison.Ordinal))
+            throw SimulatedSqlException.XmlMutatorInValuePosition();
+
         // Evaluating an XQuery expression is one of the operations real gates
         // on the SET-option set, so a session holding any of them the wrong way
         // can't call one at all — not even against an xml variable with no
@@ -117,8 +123,8 @@ internal sealed class XmlMethodCall : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         // .nodes() is rowset-producing (handled in FROM/APPLY parse, never
-        // here) and .modify() is XML-DML, neither is reachable as a scalar.
-        if (this.methodName.Equals("nodes", StringComparison.Ordinal) || this.methodName.Equals("modify", StringComparison.Ordinal))
+        // here), so reaching Run means it appeared in scalar position.
+        if (this.methodName.Equals("nodes", StringComparison.Ordinal))
             throw new NotSupportedException($"XML instance method '.{this.methodName}()' is not modeled.");
 
         var input = this.Target.Run(runtime);
@@ -141,7 +147,7 @@ internal sealed class XmlMethodCall : Expression
     /// <summary>
     /// Static result type, used by projection schema inference: <c>value</c>
     /// returns its requested target type; <c>exist</c> returns <c>bit</c>;
-    /// <c>nodes</c> / <c>query</c> / <c>modify</c> surface as <c>xml</c>.
+    /// <c>nodes</c> / <c>query</c> surface as <c>xml</c>.
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
         this.methodName.Equals("value", StringComparison.Ordinal)
@@ -157,7 +163,7 @@ internal sealed class XmlMethodCall : Expression
     /// out its compile-time string value; a column / variable / runtime
     /// reference surfaces as <see cref="NotSupportedException"/>.
     /// </summary>
-    private static string ConstantString(Expression argument, ParserContext context, string role)
+    internal static string ConstantString(Expression argument, ParserContext context, string role)
     {
         try
         {

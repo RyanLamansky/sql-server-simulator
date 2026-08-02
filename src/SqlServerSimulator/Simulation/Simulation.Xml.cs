@@ -165,6 +165,16 @@ partial class Simulation
         if (!context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var ownerSchema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schemaName);
 
+        // Dual DDL gate — and this one runs the two halves in the opposite order
+        // from CREATE TABLE / SYNONYM / TYPE: real checks ALTER on the target
+        // schema first (Msg 15151 "Cannot alter the schema"), then the
+        // database-scope CREATE XML SCHEMA COLLECTION (Msg 262 state 1).
+        // Probe-confirmed against SQL Server 2025.
+        if (!PermissionEnforcement.HasSchemaAlter(context.Batch, ownerSchema))
+            throw SimulatedSqlException.CannotAlterSchemaDoesNotExist(schemaName);
+        if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.CreateXmlSchemaCollection))
+            throw SimulatedSqlException.DatabasePermissionDenied("CREATE XML SCHEMA COLLECTION", context.CurrentDatabase.Name);
+
         // Type-namespace collision with existing alias type / table type /
         // xml collection raises Msg 219 — same surface as the existing
         // alias-vs-table-type rule.
@@ -333,10 +343,17 @@ partial class Simulation
             return true;
 
         var schemaName = name.ImmediateQualifier ?? Database.DefaultSchemaName;
-        return context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var ownerSchema)
-            && ownerSchema.XmlSchemaCollections.TryRemove(name.Leaf, out _)
-            ? true
-            : throw SimulatedSqlException.InvalidObjectName(name);
+        if (!context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var ownerSchema))
+            throw SimulatedSqlException.InvalidObjectName(name);
+        // Real gates the drop on ALTER of the owning schema (or CONTROL on the
+        // collection, a securable class the simulator's GRANT surface doesn't
+        // carry) and reports Msg 15151 naming the collection's leaf.
+        if (!ownerSchema.XmlSchemaCollections.ContainsKey(name.Leaf))
+            throw SimulatedSqlException.InvalidObjectName(name);
+        if (!PermissionEnforcement.HasSchemaAlter(context.Batch, ownerSchema))
+            throw SimulatedSqlException.CannotDropXmlSchemaCollection(name.Leaf);
+        _ = ownerSchema.XmlSchemaCollections.TryRemove(name.Leaf, out _);
+        return true;
     }
 }
 

@@ -38,10 +38,6 @@ internal static class JsonText
     /// <summary>Parses text a <see cref="Scan"/> already validated.</summary>
     public static JsonDocument Parse(string scanned) => JsonDocument.Parse(scanned, DocumentOptions);
 
-    /// <summary>Parses text a <see cref="Scan"/> already validated into the mutable node model.</summary>
-    public static System.Text.Json.Nodes.JsonNode ParseNode(string scanned) =>
-        System.Text.Json.Nodes.JsonNode.Parse(scanned, nodeOptions: null, DocumentOptions)!;
-
     /// <summary>
     /// Raises what a read-only JSON scalar owes for a path that didn't
     /// resolve: the document's pending Msg 13609 when the reader had to get as

@@ -5,8 +5,10 @@ using System.Xml.XPath;
 namespace SqlServerSimulator.Storage;
 
 /// <summary>
-/// Minimal XQuery evaluator backing the <c>xml</c> type's <c>.value()</c> and
-/// <c>.nodes()</c> methods. Covers the subset SQL Server's bundled sample
+/// Minimal XQuery evaluator backing the <c>xml</c> type's <c>.value()</c> /
+/// <c>.nodes()</c> / <c>.query()</c> / <c>.exist()</c> methods, and supplying
+/// the prolog parsing and XPath translation <c>.modify()</c>'s target paths run
+/// through (<see cref="Parser.XmlDml"/>). Covers the subset SQL Server's sample
 /// databases (AdventureWorks / WideWorldImporters) exercise: an optional
 /// prolog of <c>declare default element namespace "uri";</c> and
 /// <c>declare namespace prefix="uri";</c> declarations followed by a path
@@ -108,7 +110,7 @@ internal static class XmlQueryEngine
     /// returns the default element namespace (null when none declared) plus
     /// the prefix→URI map.
     /// </summary>
-    private static (string? DefaultNamespace, Dictionary<string, string> Prefixes, string Body) ParsePrologAndBody(string xquery)
+    internal static (string? DefaultNamespace, Dictionary<string, string> Prefixes, string Body) ParsePrologAndBody(string xquery)
     {
         string? defaultNamespace = null;
         var prefixes = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -151,7 +153,7 @@ internal static class XmlQueryEngine
     /// <c>name(</c> (<c>text()</c>, <c>string(</c>), and predicate contents
     /// pass through unchanged.
     /// </summary>
-    private static string TranslateToXPath(string body, string? defaultNamespace, Dictionary<string, string> prefixes)
+    internal static string TranslateToXPath(string body, string? defaultNamespace, Dictionary<string, string> prefixes)
     {
         var output = new StringBuilder(body.Length * 4);
         var index = 0;

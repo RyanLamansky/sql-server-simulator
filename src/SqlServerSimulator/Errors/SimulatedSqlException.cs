@@ -188,10 +188,40 @@ public sealed partial class SimulatedSqlException : DbException
     /// statement-terminating error of a batch through one
     /// <c>SqlException.Errors</c> collection (in batch order). The first
     /// entry supplies the top-level <see cref="Number"/> / <see cref="Class"/>
-    /// / <see cref="State"/> / <c>Message</c>, matching SqlClient.
+    /// / <see cref="State"/> / <c>Message</c> — where SqlClient, which sees the
+    /// entries as separate tokens, builds its message by newline-joining all of
+    /// them (probe-confirmed), so an in-process caller reading
+    /// <c>Message</c> alone sees less than a wire caller does.
     /// </summary>
     internal static SimulatedSqlException FromErrors(List<SimulatedError> errors)
         => new(errors[0].Message, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(errors));
+
+    /// <summary>
+    /// Collapses several exceptions into one carrying all their entries in
+    /// order. A lone exception is handed back as-is (its own
+    /// <see cref="Errors"/> already carries its entries); several flatten
+    /// through <see cref="FromErrors"/>. The aggregate inherits its inputs'
+    /// diagnostics state, so entries already stamped with a line / procedure
+    /// (a module body's, say) aren't re-stamped by an enclosing frame.
+    /// </summary>
+    internal static SimulatedSqlException Aggregate(List<SimulatedSqlException> errors)
+    {
+        if (errors.Count == 1)
+            return errors[0];
+
+        var entries = new List<SimulatedError>(errors.Count);
+        var resolved = true;
+        foreach (var error in errors)
+        {
+            resolved &= error.diagnosticsResolved;
+            foreach (var entry in error.Errors)
+                entries.Add(entry);
+        }
+
+        var aggregate = FromErrors(entries);
+        aggregate.diagnosticsResolved = resolved;
+        return aggregate;
+    }
 
     /// <summary>1-based line number of the first error. Shortcut for <c>Errors[0].LineNumber</c>; mirrors <c>SqlException.LineNumber</c>.</summary>
     public int LineNumber => this.Errors[0].LineNumber;

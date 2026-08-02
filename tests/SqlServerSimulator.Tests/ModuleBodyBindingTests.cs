@@ -296,6 +296,132 @@ public sealed class ModuleBodyBindingTests
         AreEqual(1, ex.State);
     }
 
+    // === Every binder error, not just the first ===
+
+    /// <summary>
+    /// Real reports every binder error the body contains, in source order, and
+    /// a client sees them as one exception carrying an entry each — probed
+    /// through SqlClient, whose <c>SqlException.Errors</c> holds both Msg 207s
+    /// with their own lines and the module name on each.
+    /// </summary>
+    [TestMethod]
+    public void ProcedureBody_TwoBinderErrors_ReportsBoth()
+    {
+        var sim = WithFixture();
+        var ex = sim.AssertSqlError("""
+            create procedure dbo.pboth
+            as
+            begin
+                select nosuchone from dbo.bt;
+                select nosuchtwo from dbo.bt;
+            end
+            """, 207);
+        AreEqual(2, ex.Errors.Count);
+        AreEqual("Invalid column name 'nosuchone'.", ex.Errors[0].Message);
+        AreEqual(4, ex.Errors[0].LineNumber);
+        AreEqual("Invalid column name 'nosuchtwo'.", ex.Errors[1].Message);
+        AreEqual(5, ex.Errors[1].LineNumber);
+        AreEqual("pboth", ex.Errors[1].Procedure);
+        AreEqual(0, ObjectCount(sim, "pboth"));
+    }
+
+    /// <summary>The run isn't capped at two, and it keeps source order.</summary>
+    [TestMethod]
+    public void ProcedureBody_ThreeBinderErrors_ReportsAllInSourceOrder()
+    {
+        var sim = WithFixture();
+        var ex = sim.AssertSqlError("""
+            create procedure dbo.pthree as
+            select nosuchone from dbo.bt;
+            select nosuchtwo from dbo.bt;
+            select nosuchthree from dbo.bt;
+            """, 207);
+        AreEqual(3, ex.Errors.Count);
+        CollectionAssert.AreEqual(
+            new[] { 2, 3, 4 },
+            ex.Errors.Select(e => e.LineNumber).ToArray());
+    }
+
+    /// <summary>
+    /// A <c>TRY</c> / <c>CATCH</c> in the body shields neither: binding happens
+    /// before any of it would run, so real reports the errors from both blocks.
+    /// </summary>
+    [TestMethod]
+    public void ProcedureBody_BinderErrorsInsideTryCatch_AreStillReported()
+    {
+        var sim = WithFixture();
+        var ex = sim.AssertSqlError("""
+            create procedure dbo.ptry as
+            begin try
+                select nosuchone from dbo.bt;
+            end try
+            begin catch
+                select nosuchtwo from dbo.bt;
+            end catch
+            """, 207);
+        AreEqual(2, ex.Errors.Count);
+        AreEqual(0, ObjectCount(sim, "ptry"));
+    }
+
+    /// <summary>
+    /// The other module kinds report their whole run the same way, and an
+    /// <c>ALTER</c> reports it while leaving the previous body standing.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create function dbo.mbind() returns @r table (a int) as begin insert @r select nosuchone from dbo.bt; insert @r select nosuchtwo from dbo.bt; return; end")]
+    [DataRow("create trigger dbo.mbind on dbo.tg after insert as begin select nosuchone from dbo.tg; select nosuchtwo from dbo.tg; end")]
+    public void OtherModuleKinds_ReportEveryBinderError(string create)
+    {
+        var sim = WithFixture();
+        var ex = sim.AssertSqlError(create, 207);
+        AreEqual(2, ex.Errors.Count);
+        AreEqual(0, ObjectCount(sim, "mbind"));
+    }
+
+    [TestMethod]
+    [DataRow("alter")]
+    [DataRow("create or alter")]
+    public void FailedRebind_ReportsEveryBinderError(string verb)
+    {
+        var sim = WithFixture();
+        sim.ExecuteBatches("create procedure dbo.psurvive as select 'original' as v");
+        var ex = sim.AssertSqlError(
+            $"{verb} procedure dbo.psurvive as select nosuchone from dbo.bt; select nosuchtwo from dbo.bt", 207);
+        AreEqual(2, ex.Errors.Count);
+        AreEqual("original", sim.ExecuteScalar("exec dbo.psurvive"));
+    }
+
+    /// <summary>
+    /// A statement that defers ends the bind, so what was gathered before it is
+    /// what the CREATE reports. Real, which knows where the deferred statement
+    /// ended, keeps binding and would report the later error too.
+    /// </summary>
+    [TestMethod]
+    public void BinderErrorBeforeADeferral_ReportsWhatBound()
+    {
+        var sim = WithFixture();
+        var ex = sim.AssertSqlError(
+            "create procedure dbo.pdefer as select nosuchone from dbo.bt; insert into dbo.missing_xyz values (1); select nosuchtwo from dbo.bt", 207);
+        AreEqual(1, ex.Errors.Count);
+        AreEqual("Invalid column name 'nosuchone'.", ex.Message);
+    }
+
+    /// <summary>
+    /// Real's parse phase preempts its binder's whole report: a severity-15
+    /// error anywhere in the body is the only thing reported, even with a bad
+    /// column on an earlier line (probe-confirmed for Msg 137 and Msg 195).
+    /// </summary>
+    [TestMethod]
+    [DataRow("set @novar = 1", 137)]
+    [DataRow("select nosuchfn(1)", 195)]
+    public void ParsePhaseErrorAfterABinderError_ReportsOnlyItself(string body, int expectedNumber)
+    {
+        var sim = WithFixture();
+        var ex = sim.AssertSqlError($"create procedure dbo.pparse as select nosuchone from dbo.bt; {body}", expectedNumber);
+        AreEqual(1, ex.Errors.Count);
+        AreEqual(0, ObjectCount(sim, "pparse"));
+    }
+
     /// <summary>
     /// The error is an ordinary catchable one, so a CREATE issued through
     /// dynamic SQL inside TRY / CATCH lands in the CATCH with the module name

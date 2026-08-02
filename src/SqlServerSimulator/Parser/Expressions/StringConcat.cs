@@ -84,7 +84,7 @@ internal sealed class StringConcat : Expression
             var type = this.arguments[i].GetSqlType(batch, resolveColumnType);
             anyNational |= IsNationalString(type);
             anyMax |= IsMaxForm(type);
-            collation.Fold(type, this.kind, batch);
+            collation.Fold(type, this.kind);
             var argumentWidth = IsBareNullLiteral(this.arguments[i]) ? 0 : ArgumentWidth(type);
             if (this.kind == StringConcatKind.ConcatWs && i == 0)
                 separatorWidth = argumentWidth;
@@ -121,7 +121,7 @@ internal sealed class StringConcat : Expression
             values[i] = this.arguments[i].Run(runtime);
             anyNational |= IsNationalString(values[i].Type);
             anyMax |= IsMaxForm(values[i].Type);
-            collation.Fold(values[i].Type, this.kind, runtime.Batch);
+            collation.Fold(values[i].Type, this.kind);
             var argumentWidth = IsBareNullLiteral(this.arguments[i]) ? 0 : ArgumentWidth(values[i].Type);
             if (this.kind == StringConcatKind.ConcatWs && i == 0)
                 separatorWidth = argumentWidth;
@@ -217,21 +217,25 @@ internal sealed class StringConcat : Expression
     /// A conflict between two equally-ranked operands raises differently by
     /// rank (probe-confirmed against SQL Server 2025): two explicit
     /// <c>COLLATE</c> postfixes take the operator's own <b>Msg 468</b>, while
-    /// two columns take <b>Msg 451</b> — but only when an output slot demands
-    /// a definite collation. Where a target supplies one (INSERT … SELECT,
-    /// <c>SELECT @v = …</c>, UPDATE SET) real settles the conflict against the
-    /// target silently, so the fold keeps the accumulated collation and lets
-    /// the assignment coerce.
-    /// <para>The <c>+</c> / <c>||</c> operators name the same conflict with
-    /// Msg 457 for a <c>varchar</c> result; CONCAT / CONCAT_WS take Msg 451
-    /// for both families.</para>
+    /// anything else leaves the result carrying an
+    /// <see cref="UnresolvedCollation"/> that travels outward until something
+    /// demands a definite collation — an output column (Msg 451), a string
+    /// scalar or comparison (Msg 4191), a <c>varchar</c> conversion (Msg 456 /
+    /// 446). Where a target supplies the collation (INSERT … SELECT,
+    /// <c>SELECT @v = …</c>, UPDATE SET) nothing ever demands one and real
+    /// settles the conflict against the target silently.
+    /// <para>CONCAT / CONCAT_WS propagate for both string families, where the
+    /// <c>+</c> / <c>||</c> operators report a <c>varchar</c> result's conflict
+    /// on the spot with Msg 457 — a <c>varchar</c> can't be materialized
+    /// without a code page, and those operators materialize where CONCAT
+    /// doesn't.</para>
     /// </remarks>
     private struct CollationAccumulator
     {
         public Collation? Value;
         public Coercibility Rank;
 
-        public void Fold(SqlType type, StringConcatKind kind, BatchContext batch)
+        public void Fold(SqlType type, StringConcatKind kind)
         {
             if (type.Category != SqlTypeCategory.String)
                 return;
@@ -249,11 +253,8 @@ internal sealed class StringConcat : Expression
             var operatorName = LowercaseName(kind);
             if (this.Rank == Coercibility.Explicit)
                 throw SimulatedSqlException.CollationConflict(type.Collation!.Name, this.Value.Name, operatorName);
-            if (batch.Parser.CollationOutputSlot is { } slot)
-            {
-                throw SimulatedSqlException.UnresolvedCollationInOutputColumn(
-                    type.Collation!.Name, this.Value.Name, operatorName, slot.Clause, slot.Ordinal);
-            }
+            this.Value = UnresolvedCollation.For(type.Collation!, this.Value, operatorName);
+            this.Rank = Coercibility.NoCollation;
         }
     }
 

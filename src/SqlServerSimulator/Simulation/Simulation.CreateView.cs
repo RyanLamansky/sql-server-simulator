@@ -159,12 +159,13 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        // DDL gate on a plain create: db-scope CREATE VIEW + ALTER on the
-        // target schema (Msg 262 state 18 with the view as Procedure
-        // attribution, else Msg 2760). Replacing an existing view isn't gated
-        // here (outside the probed scope), matching the procedure parser.
-        if (!isAlter && !createOrAlter)
-            PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE VIEW", viewName.Leaf, schema);
+        // DDL gate: db-scope CREATE VIEW + schema ALTER when the statement
+        // creates (Msg 262 state 18 with the view as Procedure attribution, else
+        // Msg 2760), object ALTER when it replaces an existing view (Msg 3701
+        // state 20).
+        CheckModuleDdlPermission(
+            context, "CREATE VIEW", viewName, schema, isAlter, createOrAlter,
+            schema.Views.GetValueOrDefault(viewName.Leaf));
 
         // Cross-kind collisions (Msg 2714 on create, Msg 2010 on either ALTER
         // leg) and the ALTER-on-missing Msg 208 all live in the shared helper.
@@ -177,7 +178,7 @@ partial class Simulation
 
         var outputColumns = ComputeViewOutputColumns(context.CurrentDatabase.Collation, bodySelection, renameList, viewName.Leaf);
 
-        var (baseTable, baseColumnOrdinals, rejectionReason, visibilityCheck, checkOptionCheck) =
+        var (baseTable, baseColumnOrdinals, rejectionReason, visibilityCheck, checkOptionCheck, isJoinUpdatable) =
             AnalyzeViewUpdatability(context.CurrentDatabase.Collation, bodySelection, withCheckOption);
 
         var view = new View(
@@ -193,7 +194,8 @@ partial class Simulation
             baseColumnOrdinals: baseColumnOrdinals,
             rejectionReason: rejectionReason,
             visibilityCheck: visibilityCheck,
-            checkOptionCheck: checkOptionCheck)
+            checkOptionCheck: checkOptionCheck,
+            isJoinUpdatable: isJoinUpdatable)
         {
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
             UsesQuotedIdentifier = context.QuotedIdentifiers,

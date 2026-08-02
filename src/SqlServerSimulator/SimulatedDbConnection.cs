@@ -415,6 +415,27 @@ public sealed class SimulatedDbConnection : DbConnection
     internal readonly ConcurrentDictionary<string, HeapTable> TempTables = new(BuiltInToken.Comparer);
 
     /// <summary>
+    /// Documents <c>sp_xml_preparedocument</c> has prepared on this session,
+    /// keyed by the handle it handed back — the store <c>OPENXML</c> reads and
+    /// <c>sp_xml_removedocument</c> releases. Session-scoped like
+    /// <see cref="TempTables"/>: probe-confirmed against SQL Server 2025 that a
+    /// handle survives batch boundaries and a transaction rollback but is
+    /// invisible to every other session (Msg 8179), and dropped at close.
+    /// </summary>
+    internal readonly ConcurrentDictionary<int, PreparedXmlDocument> PreparedXmlDocuments = new();
+
+    /// <summary>
+    /// Backs the next <c>sp_xml_preparedocument</c> handle. Real hands out
+    /// <c>1, 3, 5, …</c> per session and never reuses a released value
+    /// (probe-confirmed); the counter is read pre-increment by two, so it
+    /// starts one below the first handle.
+    /// </summary>
+    private int lastPreparedXmlHandle = -1;
+
+    /// <summary>Allocates the next document handle for this session.</summary>
+    internal int NextPreparedXmlHandle() => Interlocked.Add(ref this.lastPreparedXmlHandle, 2);
+
+    /// <summary>
     /// The single active explicit transaction on this connection, or null if
     /// none. SqlClient rejects parallel transactions on the same connection
     /// (probe-confirmed: <c>InvalidOperationException: SqlConnection does
@@ -817,6 +838,10 @@ public sealed class SimulatedDbConnection : DbConnection
             // releases each table's Heap and LOB pages for GC; nothing else
             // holds long-lived references to them after the connection ends.
             this.TempTables.Clear();
+            // Prepared XML documents are session-scoped too; releasing them
+            // here is what makes a session that forgot sp_xml_removedocument
+            // stop holding its DOMs.
+            this.PreparedXmlDocuments.Clear();
             // Cursors are session-scoped and auto-deallocate at close. Release
             // any SCROLL_LOCKS locks the open GLOBAL cursors still hold before
             // dropping them.

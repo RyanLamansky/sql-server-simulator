@@ -240,7 +240,7 @@ partial class Simulation
         // Temp tables are exempt (anyone may create #temp).
         var createTargetDatabase = context.Batch.DatabaseForName(tableName);
         if (!isTempTable && !PermissionEnforcement.HasDatabasePermission(context.Batch, createTargetDatabase, "CREATE TABLE"))
-            throw SimulatedSqlException.CreateTablePermissionDenied(createTargetDatabase.Name);
+            throw SimulatedSqlException.DatabasePermissionDenied("CREATE TABLE", createTargetDatabase.Name);
         Schema? schema = null;
         var schemaId = Database.DboSchemaId;
         ConcurrentDictionary<string, HeapTable> destination;
@@ -2023,6 +2023,16 @@ partial class Simulation
     /// computed → <see cref="NotSupportedException"/>, deferred). Generates a
     /// SQL-Server-shaped auto name for any unnamed constraint
     /// (<c>PK__&lt;table&gt;__&lt;hex&gt;</c> / <c>UQ__&lt;table&gt;__&lt;hex&gt;</c>).
+    /// <para>
+    /// Object ids go out in real's own order for one declaration: the
+    /// clustered constraint first, then the rest in <b>reverse</b> declaration
+    /// order (probe-confirmed for <c>CREATE TABLE</c> — inline and table-level
+    /// alike — and for <c>ALTER TABLE ADD</c> of several constrained columns).
+    /// Index ids follow, since <see cref="HeapTable.IndexIdentities"/> hands
+    /// out <c>index_id</c> in object-id order, so
+    /// <c>create table t (id int primary key nonclustered, u int unique)</c>
+    /// answers UNIQUE 2 / PRIMARY KEY 3.
+    /// </para>
     /// </summary>
     internal static KeyConstraint[] ResolveKeyConstraints(
         string tableName,
@@ -2036,7 +2046,8 @@ partial class Simulation
 
         var primaryKeyCount = 0;
         var clusteredCount = 0;
-        var resolved = new KeyConstraint[pendingKeys.Count];
+        var clusteredAt = -1;
+        var prepared = new (string Name, int[] StorageOrdinals, bool IsClustered)[pendingKeys.Count];
         for (var c = 0; c < pendingKeys.Count; c++)
         {
             var pending = pendingKeys[c];
@@ -2079,10 +2090,32 @@ partial class Simulation
             }
 
             var isClustered = pending.Clustered ?? (pending.Kind == KeyConstraintKind.PrimaryKey);
-            resolved[c] = new KeyConstraint(pending.Kind, pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns), storageOrdinals, database.AllocateObjectId(), isClustered, pending.IgnoreDupKey, createDate, pending.Descending);
+            if (isClustered)
+                clusteredAt = c;
+            prepared[c] = (pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns), storageOrdinals, isClustered);
+        }
+
+        // The clustered constraint takes the first object id, then the rest go
+        // out in reverse declaration order — real's allocation order, which
+        // index-id assignment reads back through IndexIdentities.
+        var resolved = new KeyConstraint[pendingKeys.Count];
+        if (clusteredAt >= 0)
+            resolved[clusteredAt] = Materialize(clusteredAt);
+        for (var c = pendingKeys.Count - 1; c >= 0; c--)
+        {
+            if (c != clusteredAt)
+                resolved[c] = Materialize(c);
         }
 
         return resolved;
+
+        KeyConstraint Materialize(int c)
+        {
+            var (name, storageOrdinals, isClustered) = prepared[c];
+            return new KeyConstraint(
+                pendingKeys[c].Kind, name, storageOrdinals, database.AllocateObjectId(),
+                isClustered, pendingKeys[c].IgnoreDupKey, createDate, pendingKeys[c].Descending);
+        }
     }
 
     /// <summary>

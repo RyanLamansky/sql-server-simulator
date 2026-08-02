@@ -10,12 +10,13 @@ namespace SqlServerSimulator;
 /// peers raise <c>Msg 468</c> / <c>Msg 457</c>.
 /// </summary>
 /// <remarks>
-/// Real SQL Server defines additional ranks (<c>Coercible-default</c>,
-/// <c>Implicit X</c>, <c>Explicit X</c>, <c>No-collation</c>); the simulator
-/// collapses them to the three that drive observable behavior. Hierarchy:
-/// <see cref="Explicit"/> beats <see cref="Implicit"/> beats
+/// Real SQL Server's per-collation ranks (<c>Implicit X</c> vs
+/// <c>Implicit Y</c>) collapse here to one rank apiece, since the collation
+/// itself rides alongside. Hierarchy: <see cref="NoCollation"/> absorbs
+/// everything, then <see cref="Explicit"/> beats <see cref="Implicit"/> beats
 /// <see cref="CoercibleDefault"/>; peers with the same rank but different
-/// collations raise the conflict error.
+/// collations raise the conflict error or produce
+/// <see cref="NoCollation"/>.
 /// </remarks>
 internal enum Coercibility : byte
 {
@@ -27,6 +28,19 @@ internal enum Coercibility : byte
 
     /// <summary>Explicit <c>COLLATE</c> postfix. Beats both lower ranks; two explicits with different collations raise Msg 468 / 457.</summary>
     Explicit = 2,
+
+    /// <summary>
+    /// SQL Server's fourth coercibility label: the expression carries
+    /// <em>no</em> collation because a producing operator couldn't settle one.
+    /// Ranks above every other label so it wins every
+    /// <c>Collation.Resolve</c> pairing and propagates outward, which is
+    /// exactly real's rule — the conflict travels until an operation demands a
+    /// definite collation and reports it (Msg 4191 / 451 / 446 / 456). The
+    /// collation instance riding alongside it is an
+    /// <see cref="UnresolvedCollation"/> carrying the conflicting pair and the
+    /// operator that produced it.
+    /// </summary>
+    NoCollation = 3,
 }
 
 /// <summary>
@@ -200,6 +214,14 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     internal static (Collation Collation, Coercibility Coercibility)? Resolve(Collation collation, Coercibility coercibility, SqlType b)
     {
         var cb = b.Coercibility;
+        // An unresolved collation absorbs whatever it meets, including a second
+        // unresolved one — real keeps the conflict alive until an operation
+        // demands a definite collation, and the first-seen pair is what that
+        // operation ends up naming.
+        if (coercibility == Coercibility.NoCollation)
+            return (collation, Coercibility.NoCollation);
+        if (cb == Coercibility.NoCollation)
+            return (b.Collation!, Coercibility.NoCollation);
         if (coercibility > cb)
             return (collation, coercibility);
         if (cb > coercibility)

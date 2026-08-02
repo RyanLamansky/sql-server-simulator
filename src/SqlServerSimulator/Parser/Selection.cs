@@ -72,6 +72,16 @@ internal sealed partial class Selection
     internal int[]? AutoColumnSource;
 
     /// <summary>
+    /// Per projection column, the index of the source column it reads within
+    /// its <see cref="AutoColumnSource"/> entry's <see cref="FromSource"/>, or
+    /// -1 for an expression. Paired with <see cref="AutoColumnSource"/> and
+    /// null exactly when it is; read by <c>FOR XML AUTO</c>'s binary
+    /// <c>dbobject</c> addressing, which writes base column names rather than
+    /// select-list aliases.
+    /// </summary>
+    internal int[]? AutoColumnOrdinal;
+
+    /// <summary>
     /// True when this plan internally bakes an ORDER BY clause into its
     /// row pipeline. Set-op chaining inspects this on the first branch:
     /// per SQL Server, a per-branch ORDER BY is illegal when a set
@@ -156,14 +166,15 @@ internal sealed partial class Selection
     public readonly HeapColumn[]? DestColumnSchema;
 
     /// <summary>
-    /// Non-null when this Selection is shape-eligible to back an updatable
-    /// view: exactly one FROM source, no JOINs, no DISTINCT, no aggregates,
-    /// no windows, no GROUP BY, no HAVING, no set-op chain. The
-    /// <see cref="ViewUpdatabilityProfile"/> exposes the single source, the
-    /// projection expressions, and the WHERE excluders — enough for
-    /// <see cref="View"/> to derive its base-column map and re-evaluate
-    /// the body's WHERE against a base-table row at DML time. Null for any
-    /// other shape; the DML-through-view path inspects the null+
+    /// Non-null when this Selection is shape-eligible to back DML through a
+    /// view: no DISTINCT, no aggregates, no windows, no GROUP BY, no HAVING,
+    /// no set-op chain. The <see cref="ViewUpdatabilityProfile"/> exposes the
+    /// FROM sources and their joins, the projection expressions, and the
+    /// WHERE excluders — enough for <see cref="View"/> to derive its
+    /// base-column map from a single-source body and re-evaluate that body's
+    /// WHERE against a base-table row at DML time, and enough for the
+    /// join-view UPDATE path to fold a multi-source one per statement. Null
+    /// for any other shape; the DML-through-view path inspects the null+
     /// <see cref="ViewUpdatabilityRejection"/> to surface
     /// <strong>Msg 4403</strong> / <strong>Msg 4406</strong> / <strong>Msg
     /// 4405</strong>.
@@ -442,7 +453,12 @@ internal sealed partial class Selection
             context.PendingGroupByBindError = null;
         }
 
-        var combined = ParseUnionExceptChain(context, depth, outerTypeResolver);
+        // A set-op result column is an output column of the query expression,
+        // so a branch pair that can't settle one collation reports Msg 451
+        // there — unless the whole result feeds an assignment target (which
+        // supplies the collation) or an EXISTS (whose projection is discarded).
+        var combined = ParseUnionExceptChain(
+            context, depth, outerTypeResolver, !context.ProjectionDiscarded && !context.InInsertSourceSelect);
 
         // Top-level ORDER BY: applies to the combined result (post-set-op).
         // ORDER BY references within set-op chains use the first branch's
@@ -515,9 +531,9 @@ internal sealed partial class Selection
     /// <c>allowOrderBy=false</c> and any post-chain ORDER BY is applied
     /// at the top level.
     /// </summary>
-    private static Selection ParseUnionExceptChain(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver)
+    private static Selection ParseUnionExceptChain(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool namesOwnCollation)
     {
-        var left = ParseIntersectChain(context, depth, outerTypeResolver, isFirstBranch: true);
+        var left = ParseIntersectChain(context, depth, outerTypeResolver, isFirstBranch: true, namesOwnCollation);
         while (context.Token is ReservedKeyword { Keyword: Keyword.Union or Keyword.Except } op)
         {
             SetOpKind kind;
@@ -540,9 +556,9 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
             }
 
-            var right = ParseIntersectChain(context, depth, outerTypeResolver, isFirstBranch: false);
+            var right = ParseIntersectChain(context, depth, outerTypeResolver, isFirstBranch: false, namesOwnCollation);
             RecordSetOperationShape(context);
-            left = CombineSetOps(left, right, kind);
+            left = CombineSetOps(left, right, kind, namesOwnCollation);
         }
         return left;
     }
@@ -565,15 +581,15 @@ internal sealed partial class Selection
     /// Higher-precedence set-op level: parses a chain of INTERSECT
     /// operators left-to-right.
     /// </summary>
-    internal static Selection ParseIntersectChain(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool isFirstBranch)
+    internal static Selection ParseIntersectChain(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool isFirstBranch, bool namesOwnCollation)
     {
-        var left = ParseSetOpBranch(context, depth, outerTypeResolver, allowOrderBy: isFirstBranch);
+        var left = ParseSetOpBranch(context, depth, outerTypeResolver, allowOrderBy: isFirstBranch, namesOwnCollation);
         while (context.Token is ReservedKeyword { Keyword: Keyword.Intersect })
         {
             context.MoveNextRequired();
-            var right = ParseSetOpBranch(context, depth, outerTypeResolver, allowOrderBy: false);
+            var right = ParseSetOpBranch(context, depth, outerTypeResolver, allowOrderBy: false, namesOwnCollation);
             RecordSetOperationShape(context);
-            left = CombineSetOps(left, right, SetOpKind.Intersect);
+            left = CombineSetOps(left, right, SetOpKind.Intersect, namesOwnCollation);
         }
         return left;
     }
@@ -588,13 +604,13 @@ internal sealed partial class Selection
     /// looked like a one-column select list and the chain failed the
     /// equal-expression-count check instead.
     /// </summary>
-    private static Selection ParseSetOpBranch(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy)
+    private static Selection ParseSetOpBranch(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy, bool namesOwnCollation)
     {
         if (context.Token is not Operator { Character: '(' })
             return ParseSingleSelectStatement(context, depth, outerTypeResolver, allowOrderBy);
 
         context.MoveNextRequired();
-        var inner = ParseUnionExceptChain(context, depth, outerTypeResolver);
+        var inner = ParseUnionExceptChain(context, depth, outerTypeResolver, namesOwnCollation);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
@@ -619,6 +635,12 @@ internal sealed partial class Selection
         // parsed inside the projection / HAVING register into the
         // respective lists; the executor uses the populated lists to
         // switch into aggregate or windowed-projection mode.
+        // An EXISTS body's projection is never materialized, so it doesn't have
+        // to name an output collation. Claim the flag here — the SELECT that
+        // consumes it is the one EXISTS wrapped — and leave it cleared so a
+        // derived table or subquery nested inside the body names its own.
+        var projectionDiscarded = context.ProjectionDiscarded;
+        context.ProjectionDiscarded = false;
         var savedAggregateCollector = context.AggregateCollector;
         var savedWindowCollector = context.WindowCollector;
         // ParseInner installs this scope's FROM sources as the outer resolver
@@ -633,7 +655,7 @@ internal sealed partial class Selection
         context.WindowCollector = windows;
         try
         {
-            return ParseInner(context, depth, aggregates, windows, outerTypeResolver, allowOrderBy);
+            return ParseInner(context, depth, aggregates, windows, outerTypeResolver, allowOrderBy, projectionDiscarded);
         }
         finally
         {
@@ -877,7 +899,7 @@ internal sealed partial class Selection
             : count < candidateCount ? (int)count : candidateCount;
     }
 
-    private static Selection ParseInner(ParserContext context, uint depth, List<AggregateExpression> aggregates, List<WindowExpression> windows, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy)
+    private static Selection ParseInner(ParserContext context, uint depth, List<AggregateExpression> aggregates, List<WindowExpression> windows, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy, bool projectionDiscarded)
     {
         var distinct = false;
         Expression? topExpression = null;
@@ -1262,7 +1284,7 @@ internal sealed partial class Selection
                     if (topExpression is not null && fromClause.OffsetExpression is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, sources);
-                    return BuildSqlProjection(context.Batch, [.. sources], [.. joins], expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink);
+                    return BuildSqlProjection(context.Batch, [.. sources], [.. joins], expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink, projectionDiscarded);
 
                 // SELECT projection INTO target [FROM ...] — captures the
                 // destination table name. Real SQL Server requires every
@@ -1743,12 +1765,13 @@ internal sealed partial class Selection
         var checkpoint = context.SaveCheckpoint();
         var next = context.GetNextRequired();
 
-        // OPENQUERY is a reserved keyword (not a Name), so it can't ride the
-        // name-string dispatch below. It never correlates to the left APPLY
-        // sources — its arguments are a server identifier and a constant
-        // pass-through string — so route it straight back through
+        // OPENQUERY and OPENXML are reserved keywords (not Names), so neither
+        // can ride the name-string dispatch below. Neither correlates to the
+        // left APPLY sources — OPENQUERY's arguments are a server identifier
+        // and a constant pass-through string, OPENXML's a session document
+        // handle and its patterns — so route them straight back through
         // ParseSingleFromSource.
-        if (next is ReservedKeyword { Keyword: Keyword.OpenQuery })
+        if (next is ReservedKeyword { Keyword: Keyword.OpenQuery or Keyword.OpenXml })
         {
             context.RestoreCheckpoint(checkpoint);
             return ParseSingleFromSource(context, depth, surroundingOuter);
@@ -1974,6 +1997,16 @@ internal sealed partial class Selection
                         || (objectName.Count == 2 && BuiltInToken.Equals(objectName.ImmediateQualifier, "sys"))))
                 {
                     return BuiltInRowsetSource(context, ParseVirtualFileStats(context, objectName.ToString()));
+                }
+
+                // The two dependency DMVs are 2-arg system TVFs, `sys.`-qualified
+                // like fn_virtualfilestats and dispatched on the same terms.
+                if (objectName.Count == 2 && BuiltInToken.Equals(objectName.ImmediateQualifier, "sys"))
+                {
+                    if (BuiltInToken.Equals(objectName.Leaf, "dm_sql_referencing_entities"))
+                        return BuiltInRowsetSource(context, ParseSqlReferencingEntities(context, objectName.ToString()));
+                    if (BuiltInToken.Equals(objectName.Leaf, "dm_sql_referenced_entities"))
+                        return BuiltInRowsetSource(context, ParseSqlReferencedEntities(context, objectName.ToString()));
                 }
 
                 // Linked-server fork: four-part `server.db.schema.t` routes
@@ -2365,6 +2398,15 @@ internal sealed partial class Selection
                     rows: [],
                     lateralPlan: derivedSelection,
                     lateralIsQueryBody: true);
+
+            case ReservedKeyword { Keyword: Keyword.OpenXml }:
+                // OPENXML dispatch: the pre-OPENJSON XML rowset, read over a
+                // document sp_xml_preparedocument put in the session's store.
+                // OPENXML is a reserved keyword, so it arrives here rather than
+                // in the Name case that carries OPENJSON. ParseOpenXml consumes
+                // the argument list and the optional WITH clause, leaving the
+                // cursor one past the source (BuiltInRowsetSource's contract).
+                return BuiltInRowsetSource(context, ParseOpenXml(context));
 
             case ReservedKeyword { Keyword: Keyword.OpenQuery }:
                 // OPENQUERY dispatch: an ad-hoc pass-through rowset over a
@@ -3570,7 +3612,8 @@ internal sealed partial class Selection
             // No FROM clause: the AUTO serializers have no table to name a
             // level after, which is their Msg 6800 / 13600 case.
             AutoSourceNames = [],
-            AutoColumnSource = AutoColumnSourceOf(expressions, []),
+            AutoColumnSource = NoSourceColumnBinding(expressions.Count),
+            AutoColumnOrdinal = NoSourceColumnBinding(expressions.Count),
             ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions),
             ColumnReportsNumeric = ColumnReportsNumericOf(expressions, schema),
             // A FROM-less projection has no sources, so column nullability is

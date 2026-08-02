@@ -427,19 +427,46 @@ public sealed class CursorDeferredSourceTests
     /// <summary>
     /// A view over a JOIN reads as a DYNAMIC cursor, and a positioned DELETE
     /// through it is Msg 4405 — matching real, which refuses any modification
-    /// spanning several base tables. A positioned UPDATE touching one base
-    /// table is what real accepts and the simulator's view DML doesn't yet;
-    /// see docs/claude/cursors.md.
+    /// spanning several base tables. So is a positioned UPDATE whose SET list
+    /// spans both, while one touching a single base table writes through.
     /// </summary>
     [TestMethod]
-    public void PositionedDeleteThroughAJoinViewIsRejected()
+    public void PositionedDmlThroughAJoinViewFollowsTheSingleBaseTableRule()
+    {
+        const string Declare = """
+            declare c cursor for select aid, v, w from vjoin order by aid;
+            open c;
+            declare @aid int, @v int, @w int;
+            fetch next from c into @aid, @v, @w;
+            """;
+
+        _ = Seeded().AssertSqlError($"{Declare} delete from vjoin where current of c;", 4405);
+        _ = Seeded().AssertSqlError($"{Declare} update vjoin set v = 1, w = 2 where current of c;", 4405);
+
+        var updatedLeft = Seeded();
+        _ = updatedLeft.ExecuteNonQuery($"{Declare} update vjoin set v = 77 where current of c;");
+        AreEqual(77, updatedLeft.ExecuteScalar<int>("select v from a where id = 1"));
+        AreEqual(20, updatedLeft.ExecuteScalar<int>("select v from a where id = 2"));
+
+        var updatedRight = Seeded();
+        _ = updatedRight.ExecuteNonQuery($"{Declare} update vjoin set w = 88 where current of c;");
+        AreEqual(88, updatedRight.ExecuteScalar<int>("select w from b where id = 100"));
+        AreEqual(2, updatedRight.ExecuteScalar<int>("select w from b where id = 200"));
+    }
+
+    /// <summary>
+    /// Naming the base table under a join view is Msg 16933 like any other
+    /// view — the cursor addresses the reference as written.
+    /// </summary>
+    [TestMethod]
+    public void PositionedUpdateNamingTheBaseTableUnderAJoinViewIsMsg16933()
         => _ = Seeded().AssertSqlError("""
             declare c cursor for select aid, v, w from vjoin order by aid;
             open c;
             declare @aid int, @v int, @w int;
             fetch next from c into @aid, @v, @w;
-            delete from vjoin where current of c;
-            """, 4405);
+            update a set v = 1 where current of c;
+            """, 16933);
 
     /// <summary>
     /// A cursor reading the same view through two slots is a self-join: real

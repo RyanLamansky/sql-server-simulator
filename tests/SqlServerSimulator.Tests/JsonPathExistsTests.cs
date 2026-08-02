@@ -13,23 +13,23 @@ public sealed class JsonPathExistsTests
 {
     [TestMethod]
     public void PathExists_Returns1()
-        => IsTrue((bool)new Simulation().ExecuteScalar("select json_path_exists('{\"a\":1}', '$.a')")!);
+        => AreEqual(1, new Simulation().ExecuteScalar("select json_path_exists('{\"a\":1}', '$.a')"));
 
     [TestMethod]
     public void PathMissing_Returns0()
-        => IsFalse((bool)new Simulation().ExecuteScalar("select json_path_exists('{\"a\":1}', '$.b')")!);
+        => AreEqual(0, new Simulation().ExecuteScalar("select json_path_exists('{\"a\":1}', '$.b')"));
 
     [TestMethod]
     public void NestedPathExists_Returns1()
-        => IsTrue((bool)new Simulation().ExecuteScalar("select json_path_exists('{\"a\":{\"b\":2}}', '$.a.b')")!);
+        => AreEqual(1, new Simulation().ExecuteScalar("select json_path_exists('{\"a\":{\"b\":2}}', '$.a.b')"));
 
     [TestMethod]
     public void ArrayIndexExists_Returns1()
-        => IsTrue((bool)new Simulation().ExecuteScalar("select json_path_exists('[10, 20, 30]', '$[1]')")!);
+        => AreEqual(1, new Simulation().ExecuteScalar("select json_path_exists('[10, 20, 30]', '$[1]')"));
 
     [TestMethod]
     public void ArrayIndexOutOfRange_Returns0()
-        => IsFalse((bool)new Simulation().ExecuteScalar("select json_path_exists('[10, 20, 30]', '$[5]')")!);
+        => AreEqual(0, new Simulation().ExecuteScalar("select json_path_exists('[10, 20, 30]', '$[5]')"));
 
     [TestMethod]
     public void NullJson_ReturnsNull()
@@ -41,9 +41,22 @@ public sealed class JsonPathExistsTests
 
     [TestMethod]
     public void InvalidJsonLax_Returns0()
-        => IsFalse((bool)new Simulation().ExecuteScalar("select json_path_exists('not json', '$.a')")!);
+        => AreEqual(0, new Simulation().ExecuteScalar("select json_path_exists('not json', '$.a')"));
 
     [TestMethod]
     public void RootPath_Returns1()
-        => IsTrue((bool)new Simulation().ExecuteScalar("select json_path_exists('{}', '$')")!);
+        => AreEqual(1, new Simulation().ExecuteScalar("select json_path_exists('{}', '$')"));
+
+    /// <summary>
+    /// Real types the answer <c>int</c>, not <c>bit</c> — wire-visible, since a
+    /// client reads <c>1</c> / <c>0</c> rather than <c>True</c> / <c>False</c>.
+    /// </summary>
+    [TestMethod]
+    public void ResultType_IsInt()
+    {
+        using var reader = new Simulation().ExecuteReader("select json_path_exists('{\"a\":1}', '$.a') as e");
+        IsTrue(reader.Read());
+        AreEqual(typeof(int), reader.GetFieldType(0));
+        AreEqual(1, reader.GetInt32(0));
+    }
 }

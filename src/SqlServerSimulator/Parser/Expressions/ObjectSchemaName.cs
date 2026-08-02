@@ -10,7 +10,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// and ignored (single-database simulator). Companion to
 /// <see cref="ObjectName"/> — same lookup walk over
 /// <see cref="Database.Schemas"/> → <see cref="Schema.SchemaObjects"/>
-/// plus <see cref="Schema.TableTypes"/>; this variant returns the owning
+/// plus <see cref="Schema.TableTypes"/> plus the constraint objects
+/// (<see cref="ConstraintLookup"/>); this variant returns the owning
 /// schema's <see cref="Schema.Name"/> instead of the object's leaf.
 /// Probe-confirmed against SQL Server 2025 (2026-05-13).
 /// </summary>
@@ -62,7 +63,12 @@ internal sealed class ObjectSchemaName : Expression
                     return SqlValue.FromString(SqlType.SystemName, schema.Name);
             }
         }
-        return SqlValue.Null(SqlType.SystemName);
+        // A constraint id answers the schema of the table that owns it, whose
+        // visibility it also follows.
+        return ConstraintLookup.TryResolveById(database, id, out var constraint)
+            && (!restrict || PermissionChecker.CanViewMetadata(database, principalId, constraint.Table.ObjectId, constraint.Table.SchemaId))
+            ? SqlValue.FromString(SqlType.SystemName, constraint.Schema.Name)
+            : SqlValue.Null(SqlType.SystemName);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;

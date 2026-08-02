@@ -8,7 +8,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// NULL on either input returns NULL. It never raises: a document that isn't
 /// JSON text is 0 rather than the Msg 13609 its siblings raise, and a
 /// <c>strict</c> path that misses is 0 rather than Msg 13608. Result type is
-/// <see cref="SqlType.Bit"/>.
+/// <see cref="SqlType.Int32"/> — real types the answer <c>int</c>, not
+/// <c>bit</c>, so a client reads <c>1</c> / <c>0</c> the way it does from the
+/// sibling <c>ISJSON</c>.
 /// </summary>
 internal sealed class JsonPathExists : Expression
 {
@@ -30,7 +32,7 @@ internal sealed class JsonPathExists : Expression
         var jv = this.jsonInput.Run(runtime);
         var pv = this.pathInput.Run(runtime);
         if (jv.IsNull || pv.IsNull)
-            return SqlValue.Null(SqlType.Bit);
+            return SqlValue.Null(SqlType.Int32);
         var path = JsonPath.Parse(pv.AsString);
 
         // JSON_PATH_EXISTS is the one member of the family that never raises:
@@ -40,13 +42,13 @@ internal sealed class JsonPathExists : Expression
         // the path itself would have resolved.
         var scan = JsonText.Scan(jv.AsString);
         if (scan.HasError)
-            return SqlValue.FromBoolean(false);
+            return SqlValue.FromInt32(0);
 
         using var doc = JsonText.Parse(scan.Text!);
-        return SqlValue.FromBoolean(path.Walk(doc.RootElement, scan, out _) == JsonWalkResult.Resolved);
+        return SqlValue.FromInt32(path.Walk(doc.RootElement, scan, out _) == JsonWalkResult.Resolved ? 1 : 0);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Bit;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"JSON_PATH_EXISTS({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()})";
 }

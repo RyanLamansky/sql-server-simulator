@@ -22,13 +22,15 @@ internal readonly struct SecurityPrincipalFrame(int databasePrincipalId, string 
     /// Whether this identity exists only inside one database — an
     /// <c>EXECUTE AS USER</c> frame, a module's <c>WITH EXECUTE AS &lt;user&gt;</c>
     /// frame, or an activated application role. Such an identity carries no
-    /// server principal, so it cannot reach another database at all: every
-    /// cross-database reference raises Msg 916 naming <see cref="LoginName"/>
-    /// (probe-confirmed against SQL Server 2025 — the refusal stands even when
-    /// the session's own login is <c>sa</c>, and even with the database's
-    /// <c>TRUSTWORTHY</c> option on). A login-based frame
-    /// (connect-time or <c>EXECUTE AS LOGIN</c>) is false and maps into the
-    /// target database normally.
+    /// server principal, so out of an ordinary database it cannot reach another
+    /// one at all: every cross-database reference raises Msg 916 naming
+    /// <see cref="LoginName"/> (probe-confirmed against SQL Server 2025 — the
+    /// refusal stands even when the session's own login is <c>sa</c>). Out of a
+    /// <see cref="Database.Trustworthy"/> database the token is accepted and the
+    /// frame's own login answers in the target, so a <c>WITHOUT LOGIN</c> user
+    /// (whose <see cref="LoginName"/> is a SID) is still refused. A login-based
+    /// frame (connect-time or <c>EXECUTE AS LOGIN</c>) is false and maps into
+    /// the target database normally.
     /// </summary>
     public readonly bool IsDatabaseScoped = isDatabaseScoped;
 }

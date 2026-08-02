@@ -350,6 +350,18 @@ partial class SimulatedSqlException
         new("A RETURN statement with a return value cannot be used in this context.", 178, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 1075: a bare <c>RETURN</c> inside a scalar
+    /// function, whose every <c>RETURN</c> must carry the value it returns.
+    /// Probe-confirmed against SQL Server 2025 (2026-08-02): Class 15, State 1,
+    /// exact wording verbatim, wherever in the body the statement sits — a
+    /// mid-body <c>IF … RETURN</c> and a trailing bare <c>RETURN</c> report it
+    /// alike. The counterpart of Msg 178: a multi-statement TVF's <c>RETURN</c>
+    /// takes the bare form and a procedure's takes either.
+    /// </summary>
+    internal static SimulatedSqlException ScalarFunctionReturnNeedsArgument() =>
+        new("RETURN statements in scalar valued functions must include an argument.", 1075, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 455: a function body whose last statement isn't
     /// a <c>RETURN</c>. Probe-confirmed against SQL Server 2025 (2026-08-01):
     /// Class 16, State 2, exact wording verbatim, for a scalar UDF and a

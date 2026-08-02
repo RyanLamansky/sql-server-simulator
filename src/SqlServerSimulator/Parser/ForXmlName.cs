@@ -69,7 +69,8 @@ internal static class ForXmlName
     /// row tag or a <c>ROOT('name')</c> argument, which are single names rather
     /// than paths (a <c>/</c> in one is simply an invalid character).
     /// </summary>
-    internal static void ValidateSimpleName(string name, ForXmlNameKind kind) => ValidateStep(name, name, kind);
+    internal static void ValidateSimpleName(string name, ForXmlNameKind kind, ForXmlNamespaces? namespaces) =>
+        ValidateStep(name, name, kind, namespaces);
 
     /// <summary>
     /// Validates a <c>FOR XML PATH</c> column alias, which is a path of
@@ -80,7 +81,7 @@ internal static class ForXmlName
     /// name the whole alias, not the offending step. An unnamed column (empty
     /// alias) maps to text content and carries no name to check.
     /// </summary>
-    internal static void ValidatePathColumn(string alias)
+    internal static void ValidatePathColumn(string alias, ForXmlNamespaces? namespaces)
     {
         if (alias.Length == 0)
             return;
@@ -93,7 +94,7 @@ internal static class ForXmlName
                 throw SimulatedSqlException.ForXmlPathSlashPlacement(alias);
             if (s < segments.Length - 1)
             {
-                ValidateStep(alias, step, ForXmlNameKind.Column);
+                ValidateStep(alias, step, ForXmlNameKind.Column, namespaces);
                 continue;
             }
 
@@ -108,26 +109,28 @@ internal static class ForXmlName
             {
                 continue;
             }
-            ValidateStep(alias, step, ForXmlNameKind.Column);
+            ValidateStep(alias, step, ForXmlNameKind.Column, namespaces);
         }
     }
 
     /// <summary>
     /// Validates one step of a name: the reserved <c>xmlns</c> (Msg 6867) comes
     /// first, then a namespace prefix, which must be the predefined <c>xml</c>
-    /// — every other prefix needs a declaration the unmodeled
-    /// <c>WITH XMLNAMESPACES</c> clause would carry (Msg 6846) — and finally
-    /// the character rules on what's left (Msg 6850, naming the first character
-    /// at fault). <paramref name="fullName"/> is what the messages quote.
+    /// or one <paramref name="namespaces"/> declares — every other prefix is
+    /// Msg 6846 — and finally the character rules on what's left (Msg 6850,
+    /// naming the first character at fault). <paramref name="fullName"/> is
+    /// what the messages quote.
     /// </summary>
-    private static void ValidateStep(string fullName, string step, ForXmlNameKind kind)
+    private static void ValidateStep(string fullName, string step, ForXmlNameKind kind, ForXmlNamespaces? namespaces)
     {
         var colon = step.IndexOf(':', StringComparison.Ordinal);
         var prefix = colon > 0 ? step[..colon] : null;
         if ((prefix ?? step) == "xmlns")
             throw SimulatedSqlException.ForXmlXmlnsName();
-        // The prefix comparison is ordinal: real accepts 'xml:' and rejects 'XML:'.
-        if (prefix is not (null or "xml"))
+        // The prefix comparison is ordinal in both directions: real accepts
+        // 'xml:' and rejects 'XML:', and a clause declaring 'p' still refuses
+        // 'P:a'.
+        if (prefix is not (null or "xml") && namespaces?.IsDeclared(prefix) != true)
             throw SimulatedSqlException.ForXmlUndeclaredPrefix(prefix, fullName, kind);
 
         var local = prefix is null ? step : step[(colon + 1)..];

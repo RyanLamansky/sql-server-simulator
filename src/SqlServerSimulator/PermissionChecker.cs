@@ -115,12 +115,14 @@ internal static class PermissionEnforcement
     /// <paramref name="target"/>: a genuinely restricted principal, and — for
     /// the session's own database — not inside an ownership-chained module
     /// body. For another database the module-body suppression does
-    /// <em>not</em> hold: an ownership chain breaks at the
-    /// database boundary with <c>DB_CHAINING</c> off (the default), so real
+    /// <em>not</em> hold here: an ownership chain breaks at the database
+    /// boundary unless <c>DB_CHAINING</c> is on in both databases, so real
     /// checks the caller's rights on the object the module reached across
     /// (probe-confirmed: a dbo-owned view selecting from another database
-    /// raises Msg 229 naming the base table there). A create-time bind still
-    /// suppresses everything — it reads no row.
+    /// raises Msg 229 naming the base table there). The chaining exemption is
+    /// applied one step later, in <see cref="TryResolveScope"/>, so that the
+    /// Msg 916 a missing user in the target earns still fires. A create-time
+    /// bind suppresses everything — it reads no row.
     /// </summary>
     internal static bool Applies(BatchContext batch, Database target) =>
         !batch.Connection.Security.EffectiveIsDbo
@@ -149,9 +151,25 @@ internal static class PermissionEnforcement
             principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
             return true;
         }
+        // The principal resolves either way — chaining lends the module owner's
+        // rights, not access to the database, so a login with no user there is
+        // still Msg 916 (probe-confirmed).
         principalId = ResolveCrossDatabasePrincipal(batch.Connection, target).PrincipalId;
-        return principalId != Database.DboPrincipalId;
+        var chained = !batch.EnforcesPermissions && ChainsAcross(batch.CurrentDatabase, target);
+        return principalId != Database.DboPrincipalId && !chained;
     }
+
+    /// <summary>
+    /// Whether an ownership chain re-links across the boundary between two
+    /// databases: <c>DB_CHAINING</c> on in <em>both</em>. Real additionally
+    /// requires the two objects to share an owner, which every simulated object
+    /// does (all dbo-owned). Probe-confirmed against SQL Server 2025: on/on
+    /// carries the chain through a view and through a procedure body, while
+    /// on/off, off/on and off/off all break it and the caller needs its own
+    /// grant on the object the module reached.
+    /// </summary>
+    private static bool ChainsAcross(Database from, Database to) =>
+        from.CrossDatabaseChaining && to.CrossDatabaseChaining;
 
     /// <summary>
     /// The database user <paramref name="connection"/>'s login runs as in
@@ -159,14 +177,18 @@ internal static class PermissionEnforcement
     /// at all. Shared by the cross-database permission checks and by
     /// <c>USE</c> / <c>ChangeDatabase</c>, which ask the same question.
     /// A <see cref="SecurityPrincipalFrame.IsDatabaseScoped"/> identity — an
-    /// <c>EXECUTE AS USER</c> frame or an activated application role — never
-    /// resolves: it carries no server principal, so real refuses the crossing
-    /// outright (probe-confirmed, <c>TRUSTWORTHY</c> on or off).
+    /// <c>EXECUTE AS USER</c> frame, a module's <c>WITH EXECUTE AS &lt;user&gt;</c>
+    /// frame, or an activated application role — carries no server principal, so
+    /// it resolves only out of a <see cref="Database.Trustworthy"/> database;
+    /// elsewhere real refuses the crossing outright. Under <c>TRUSTWORTHY</c> the
+    /// frame's own login answers in the target like any ordinary session's, so a
+    /// <c>WITHOUT LOGIN</c> user — whose reported identity is a SID, not a login —
+    /// still can't reach a database it has no user in (probe-confirmed).
     /// </summary>
     internal static DatabasePrincipal ResolveCrossDatabasePrincipal(SimulatedDbConnection connection, Database target)
     {
         var effective = connection.Security.Effective;
-        return effective.IsDatabaseScoped
+        return (effective.IsDatabaseScoped && !connection.CurrentDatabase.Trustworthy)
             || !Simulation.TryMapLoginToDatabaseUser(connection.Simulation, target, effective.LoginName, out var principal)
             ? throw SimulatedSqlException.CannotAccessDatabaseUnderSecurityContext(effective.LoginName, target.Name)
             : principal;
@@ -186,6 +208,30 @@ internal static class PermissionEnforcement
         var security = batch.Connection.Security;
         return !security.EffectiveIsDbo
             && !PermissionChecker.HasFullMetadataVisibility(batch.CurrentDatabase, security.Effective.DatabasePrincipalId);
+    }
+
+    /// <summary>
+    /// The principal a catalog-view read of <paramref name="target"/> filters
+    /// by, or <see langword="null"/> when it sees everything. A read of another
+    /// database asks exactly what a data reference asks — the login's user
+    /// <em>there</em>, Msg 916 when it has none — and then applies that
+    /// principal's own visibility, so a login restricted at home and
+    /// <c>db_owner</c> away sees the away catalog whole (probe-confirmed
+    /// against SQL Server 2025, where the same Msg 916 answers every cross-database
+    /// catalog view, filtered and unfiltered alike).
+    /// </summary>
+    internal static int? MetadataVisibilityPrincipal(BatchContext batch, Database target)
+    {
+        var security = batch.Connection.Security;
+        if (security.EffectiveIsDbo)
+            return null;
+        var principalId = ReferenceEquals(target, batch.CurrentDatabase)
+            ? security.Effective.DatabasePrincipalId
+            : ResolveCrossDatabasePrincipal(batch.Connection, target).PrincipalId;
+        return principalId == Database.DboPrincipalId
+            || PermissionChecker.HasFullMetadataVisibility(target, principalId)
+            ? null
+            : principalId;
     }
 
     /// <summary>
@@ -242,8 +288,11 @@ internal static class PermissionEnforcement
         {
             if (ReferenceEquals(s.Database, moduleDatabase))
                 continue;
+            // Resolving first is what keeps Msg 916 in play even when the chain
+            // re-links — the caller needs a user in the target either way.
             var principalId = ResolveCrossDatabasePrincipal(batch.Connection, s.Database).PrincipalId;
             if (principalId != Database.DboPrincipalId
+                && !ChainsAcross(moduleDatabase, s.Database)
                 && !PermissionChecker.IsGranted(s.Database, principalId, Permission.Resolve(s.Permission), PermissionChecker.ClassObject, s.ObjectId, s.SchemaId))
             {
                 throw SimulatedSqlException.PermissionDenied(s.Permission.ToUpperInvariant(), s.ObjectName, s.Database.Name, s.SchemaName);
@@ -372,9 +421,58 @@ internal static class PermissionEnforcement
 
     /// <summary>Whether the effective principal holds a database-scope permission in <paramref name="database"/> (CREATE TABLE gate, CONNECT, etc.). Always true for dbo / module bodies.</summary>
     internal static bool HasDatabasePermission(BatchContext batch, Database database, string permission) =>
+        HasDatabasePermission(batch, database, Permission.Resolve(permission));
+
+    /// <summary>Typed form of <see cref="HasDatabasePermission(BatchContext, Database, string)"/> — the DDL gates that name a catalog permission directly.</summary>
+    internal static bool HasDatabasePermission(BatchContext batch, Database database, Permission permission) =>
         !TryResolveScope(batch, database, out var principalId)
-        || PermissionChecker.IsGranted(database, principalId,
-            Permission.Resolve(permission), PermissionChecker.ClassDatabase, 0, 0);
+        || PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassDatabase, 0, 0);
+
+    /// <summary>
+    /// Whether the effective principal holds CONTROL on <paramref name="schema"/>
+    /// — schema-scope CONTROL, or database-scope CONTROL. The <c>DROP SCHEMA</c>
+    /// gate's other half (probe-confirmed: schema ALTER is <em>not</em> enough
+    /// there, unlike every object drop).
+    /// </summary>
+    internal static bool HasSchemaControl(BatchContext batch, Schema schema) =>
+        !TryResolveScope(batch, schema.Database, out var principalId)
+        || PermissionChecker.IsGranted(schema.Database, principalId,
+            Permission.Control, PermissionChecker.ClassSchema, schema.SchemaId, 0);
+
+    /// <summary>
+    /// Whether the effective principal may <c>DROP</c> an object in
+    /// <paramref name="schema"/>: ALTER on the schema <strong>or</strong> CONTROL
+    /// on the object itself — probe-confirmed as the pair real accepts for every
+    /// object kind (a plain object-scope ALTER is not enough, which is what
+    /// separates a DROP from an ALTER TABLE). True for dbo / module bodies.
+    /// </summary>
+    internal static bool HasDropAuthority(BatchContext batch, Schema schema, int objectId) =>
+        HasSchemaAlter(batch, schema)
+        || HasObjectControl(batch, schema.Database, objectId, schema.SchemaId);
+
+    /// <summary>Whether the effective principal holds CONTROL on the given object (the DROP alternative and the <c>ALTER SCHEMA … TRANSFER</c> source gate). True for dbo / module bodies.</summary>
+    internal static bool HasObjectControl(BatchContext batch, Database database, int objectId, int schemaId) =>
+        !TryResolveScope(batch, database, out var principalId)
+        || PermissionChecker.IsGranted(database, principalId, Permission.Control, PermissionChecker.ClassObject, objectId, schemaId);
+
+    /// <summary>
+    /// Whether the effective principal may create or drop a database — the one
+    /// gate that answers at <em>server</em> scope. Satisfied by the server
+    /// permission (<c>CREATE ANY DATABASE</c> / <c>ALTER ANY DATABASE</c>, which
+    /// covers it) or by <c>dbcreator</c> membership; probe-confirmed that a plain
+    /// login holds neither and that <c>dbcreator</c> carries both statements.
+    /// True for dbo / module bodies.
+    /// </summary>
+    internal static bool HasDatabaseDdlAuthority(BatchContext batch, Permission permission)
+    {
+        var security = batch.Connection.Security;
+        if (security.EffectiveIsDbo || batch.CreateTimeBinding || !batch.EnforcesPermissions)
+            return true;
+        var simulation = batch.Connection.Simulation;
+        var login = security.Effective.LoginName;
+        return simulation.HoldsServerPermission(login, permission)
+            || simulation.IsLoginInServerRole(login, Simulation.DbCreatorRoleId);
+    }
 
     /// <summary>
     /// Whether the effective principal holds ALTER on <paramref name="schema"/>
@@ -491,8 +589,22 @@ internal static class PermissionChecker
             || closure.Contains(DbOwner)
             || (permission.Category == PermissionCategory.Read && closure.Contains(DbDataReader))
             || (permission.Category == PermissionCategory.Write && closure.Contains(DbDataWriter))
-            || (permission.Category == PermissionCategory.Ddl && closure.Contains(DbDdlAdmin));
+            || (permission.Category == PermissionCategory.Ddl
+                && closure.Contains(DbDdlAdmin)
+                && !IsBlanketDatabaseAlter(permission, securableClass));
     }
+
+    /// <summary>
+    /// Whether a request is for blanket <c>ALTER</c> on the <em>database</em>
+    /// securable — the one DDL-category request <c>db_ddladmin</c> does not
+    /// answer. Probe-confirmed: a <c>db_ddladmin</c> member runs every object /
+    /// schema / type DDL but still gets Msg 5011 from <c>ALTER DATABASE</c>, so
+    /// the fixed role's virtual DDL grant stops short of reconfiguring the
+    /// database itself. The granular database-scope DDL permissions (CREATE
+    /// TABLE, ALTER ANY SCHEMA, …) are unaffected.
+    /// </summary>
+    private static bool IsBlanketDatabaseAlter(Permission permission, byte securableClass) =>
+        securableClass == ClassDatabase && permission == Permission.Alter;
 
     /// <summary>
     /// Whether the effective principal may read / write column

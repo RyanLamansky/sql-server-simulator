@@ -265,7 +265,10 @@ public sealed class DacFxExportCatalogTests
     /// Warehouse.StockItemStockGroups case: DacFx's UQ query INNER JOINs
     /// sys.key_constraints kc ON i.index_id = kc.unique_index_id, and both UQs
     /// reporting the PK's id 1 bound them to the PK index → the UQ elements were
-    /// lost. Probe-confirmed against SQL Server 2025 WWI (PK → 1, UQs → 2, 3).
+    /// lost. The clustered PK takes index 1 and the two UNIQUE constraints take
+    /// 2 and 3 in reverse declaration order — real's allocation order for one
+    /// declaration (probe-confirmed against SQL Server 2025 for this exact
+    /// CREATE TABLE).
     /// </summary>
     [TestMethod]
     public void KeyConstraints_UniqueIndexId_BindsEachConstraintToItsOwnIndex()
@@ -287,8 +290,8 @@ public sealed class DacFxExportCatalogTests
             where kc.parent_object_id = object_id('dbo.StockItemStockGroups') and i.name = kc.name
             """));
         AreEqual(1, sim.ExecuteScalar("select unique_index_id from sys.key_constraints where name = 'PK_StockItemStockGroups'"));
-        AreEqual(2, sim.ExecuteScalar("select unique_index_id from sys.key_constraints where name = 'UQ_StockItemStockGroups_StockItemID'"));
-        AreEqual(3, sim.ExecuteScalar("select unique_index_id from sys.key_constraints where name = 'UQ_StockItemStockGroups_StockGroupID'"));
+        AreEqual(3, sim.ExecuteScalar("select unique_index_id from sys.key_constraints where name = 'UQ_StockItemStockGroups_StockItemID'"));
+        AreEqual(2, sim.ExecuteScalar("select unique_index_id from sys.key_constraints where name = 'UQ_StockItemStockGroups_StockGroupID'"));
         // The UQ backing indexes report is_unique_constraint = 1 (not the PK).
         IsTrue((bool)sim.ExecuteScalar("select is_unique_constraint from sys.indexes where object_id = object_id('dbo.StockItemStockGroups') and index_id = 2")!);
         IsTrue((bool)sim.ExecuteScalar("select is_unique_constraint from sys.indexes where object_id = object_id('dbo.StockItemStockGroups') and index_id = 3")!);

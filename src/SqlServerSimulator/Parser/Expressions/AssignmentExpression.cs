@@ -33,7 +33,15 @@ internal sealed class AssignmentExpression(VariableSlot slot, Expression source)
         return coerced;
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Slot.DeclaredType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        // The slot's type is the projection's, but the source still has to bind
+        // — that is what surfaces the assigned expression's own compile-time
+        // errors, including a varchar whose collation never resolved (Msg 456;
+        // an nvarchar one settles against the slot silently).
+        UnresolvedCollation.RequireAssignable(this.Source.GetSqlType(batch, resolveColumnType));
+        return this.Slot.DeclaredType;
+    }
 
     internal override string DebugDisplay() => $"@{this.Slot.DeclaredType} = {this.Source.DebugDisplay()}";
 }

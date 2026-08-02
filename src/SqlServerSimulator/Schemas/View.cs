@@ -43,7 +43,8 @@ internal sealed class View(
     int[] baseColumnOrdinals,
     ViewUpdatabilityRejection rejectionReason,
     Func<SqlValue[], BatchContext, bool>? visibilityCheck,
-    Func<SqlValue[], BatchContext, bool>? checkOptionCheck)
+    Func<SqlValue[], BatchContext, bool>? checkOptionCheck,
+    bool isJoinUpdatable)
     : SchemaObject(name, objectId, schema.SchemaId, createDate)
 {
     public Schema Schema = schema;
@@ -175,6 +176,19 @@ internal sealed class View(
     /// → Msg 4403 (closest available message).
     /// </summary>
     public readonly ViewUpdatabilityRejection RejectionReason = rejectionReason;
+
+    /// <summary>
+    /// True when the body reads several FROM sources but is otherwise
+    /// DML-eligible (no DISTINCT / aggregate / GROUP BY / HAVING / window /
+    /// set op). <see cref="BaseTable"/> is null and
+    /// <see cref="RejectionReason"/> is
+    /// <see cref="ViewUpdatabilityRejection.MultipleSources"/> either way —
+    /// real refuses INSERT and DELETE through such a view whatever they
+    /// touch — but an UPDATE whose SET list lands entirely in one of the
+    /// sources is accepted, and this flag is what routes it to the
+    /// join-view path instead of Msg 4405.
+    /// </summary>
+    public readonly bool IsJoinUpdatable = isJoinUpdatable;
 
     /// <summary>
     /// Pre-bound closure that evaluates the AND of every WHERE clause up

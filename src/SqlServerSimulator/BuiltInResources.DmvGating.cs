@@ -65,7 +65,7 @@ internal static partial class BuiltInResources
                 return rows;
             case DmvGateKind.DatabaseState:
                 if (!HoldsDatabaseState(batch, simulation, login))
-                    throw SimulatedSqlException.DatabaseStatePermissionDenied("VIEW DATABASE PERFORMANCE STATE", databaseName);
+                    throw SimulatedSqlException.DatabasePermissionDenied("VIEW DATABASE PERFORMANCE STATE", databaseName);
                 return rows;
             default: // SessionSelfFilter
                 return simulation.HoldsServerPermission(login, Permission.ViewServerState)

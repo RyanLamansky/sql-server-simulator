@@ -56,8 +56,8 @@ Views:
   `is_replicated bit` (nullable in real SQL Server; constant 0 — replication isn't modeled) rounds out the set the SMO **Table property-bag** reads (projected `AS [Replicated]`); a single missing column fails the whole bag query Msg 207 and every Table property errors.
   `lock_on_bulk_load bit` (constant 0 — BULK INSERT / bcp table-lock behavior isn't modeled; the fresh-table default) is read by DacFx's bacpac-export reverse-engineering as `CAST([st].[lock_on_bulk_load] AS bit)`.
   `history_retention_period int` / `history_retention_period_unit int` / `history_retention_period_unit_desc nvarchar(60)` carry a system-versioned table's `HISTORY_RETENTION_PERIOD` — -1 / -1 / `INFINITE` until one is set, NULL on history and non-temporal tables (unit codes DAY 3, WEEK 4, MONTH 5, YEAR 6, all probe-confirmed) — see [`temporal-tables.md`](temporal-tables.md).
-- **`sys.objects`** is the superset: one row per `HeapTable` plus one row per `KeyConstraint` (type `PK` / `UQ`) and `CheckConstraint` (type `C `) with `parent_object_id` linking to the owning table.
-  Constraint object_ids allocate from the same `Database.AllocateObjectId` counter as tables, so PK / UQ / CHECK constraints get globally-unique ids that `sys.objects.object_id` surfaces.
+- **`sys.objects`** is the superset: one row per `HeapTable` plus one row per constraint of every family — `KeyConstraint` (type `PK` / `UQ`), `DefaultConstraint` (`D `), `CheckConstraint` (`C `) and `ForeignKey` (`F `) — with `parent_object_id` linking to the owning table, so a tool enumerating a table's constraints through this view alone sees all five.
+  Constraint object_ids allocate from the same `Database.AllocateObjectId` counter as tables, so every constraint gets a globally-unique id that `sys.objects.object_id` surfaces and `OBJECT_ID('<constraint name>')` resolves (see [`schemas.md`](schemas.md#object-identifiers--object_id)).
   Carries `principal_id int` (always NULL — no explicit object owner modeled, ownership follows the schema); SMO's Object-Explorer function / procedure enumeration reads `ISNULL(o.principal_id, OBJECTPROPERTY(o.object_id, 'OwnerId'))` off `sys.all_objects` to resolve the owner.
 - **`sys.columns`** projects per-column metadata: `object_id`, `name sysname`, `column_id` (1-based), `system_type_id tinyint`, `user_type_id int`, `max_length smallint` (byte-length — `nvarchar(50)→100`, `char(5)→5`, `-1` for the MAX form, `16` for text/ntext/image LOB pointers, `256` for sysname), `precision` / `scale tinyint` (decimal/numeric carry their declared (p,s); date/time fractional types follow `(time(N): 8+N, N)` / `(datetime2(N): 19+N, N)` / `(datetimeoffset(N): 26+N, N)`; 0 for everything else), `is_nullable` / `is_identity` / `is_computed bit`, `collation_name sysname` (set only for string types), `is_sparse bit` (constant 0 — sparse-column storage isn't modeled), and the SMO column-node filter columns `is_xml_document` / `is_column_set` / `is_dropped_ledger_column bit` (all 0), `xml_collection_id int` (the bound collection's `xml_collection_id` for an `xml(collection)` column, 0 for untyped `xml` and every non-xml column), `vector_dimensions int` / `vector_base_type_desc nvarchar(20)` (both NULL — no vector columns modeled).
   The **"Script Table as → CREATE To"** column query reads a further batch: `is_ansi_padded bit` (1 for char/varchar/nchar/nvarchar/binary/varbinary — every table is ANSI_PADDING ON — 0 for all other types including the LOB text/ntext/image), `default_object_id int` (the column's DEFAULT constraint object_id, 0 when none), `generated_always_type tinyint` (0/1/2 for none/ROW-START/ROW-END, from the temporal period marker), `is_hidden bit` (a HIDDEN period column), and the always-NULL/0/constant `column_encryption_key_id` / `encryption_type int` / `encryption_algorithm_name sysname` (Always Encrypted unmodeled), `graph_type int` (NULL), `is_filestream` / `is_masked bit` (0), `is_rowguidcol bit` (1 for a column declared `ROWGUIDCOL` at CREATE TABLE, else 0 — `HeapColumn.IsRowGuidCol`; DacFx reads it to re-emit `IsRowGuidColumn=True`), `rule_object_id int` (0), and `ledger_view_column_type int` / `ledger_view_column_type_desc nvarchar(60)` (NULL — ledger unmodeled).
@@ -315,6 +315,7 @@ Probed *inlineable* despite looking otherwise, so deliberately not disqualifying
   **`database_id` is `int`** (SMO/consumers expect int) — distinct from the `DB_ID()` scalar, which still returns `smallint`.
   Columns backed by live `Database` state: `name`, `database_id`, `compatibility_level` (`CompatibilityLevel`), `collation_name` (`CollationName`), `snapshot_isolation_state`(+`_desc` ON/OFF, from `AllowSnapshotIsolation`), `is_read_committed_snapshot_on` (`ReadCommittedSnapshot`), `is_recursive_triggers_on` (`RecursiveTriggers` — see [`triggers.md`](triggers.md#nesting-and-recursion-options)), `physical_database_name` (= name); `state`/`state_desc` are always `0`/`ONLINE`.
   `recovery_model` is `3`/`SIMPLE` for `master` / `tempdb` / `msdb` and `1`/`FULL` for `model` and every user database, which inherits the template's (probe-confirmed against a fresh `CREATE DATABASE`).
+  `is_broker_enabled` is `1` everywhere but `master` and `model`, which report `0` (probe-confirmed; Service Broker itself is unmodeled, so this is the flag alone).
   All remaining option-flag columns carry the stock defaults a **freshly created user database** reports on SQL Server 2025 (probe-confirmed): `user_access` `0`/`MULTI_USER`, `page_verify_option` `2`/`CHECKSUM`, `containment` `0`/`NONE`, `log_reuse_wait` `0`/`NOTHING`, `delayed_durability` `0`/`DISABLED`, `catalog_collation_type` `0`/`DATABASE_DEFAULT`, `data_compaction` / `data_lake_log_publishing` `0`/`UNSUPPORTED`, the whole ANSI family (`is_ansi_null_default_on` / `is_ansi_nulls_on` / `is_ansi_padding_on` / `is_ansi_warnings_on` / `is_arithabort_on` / `is_concat_null_yields_null_on` / `is_numeric_roundabort_on`), `is_quoted_identifier_on` and `is_local_cursor_default` all 0 while `is_fulltext_enabled` and `is_temporal_history_retention_enabled` are 1, `owner_sid` a fixed `0x01` (sa-style) sid, `create_date` a fixed seed (`2025-01-01` — no per-database creation timestamp is tracked), `service_broker_guid` a fixed constant (Service Broker unmodeled), and the contained-DB-only columns (`default_language_*`, `default_fulltext_language_*`, `is_nested_triggers_on`, `is_transform_noise_words_on`, `two_digit_year_cutoff`) plus `source_database_id` / `replica_id` / `group_database_id` / `resource_pool_id` all NULL.
   Code↔`_desc` pairs are always internally consistent.
   **`is_query_store_on` is the one flag deliberately left at real's opposite value (0 where a fresh 2025 database reports 1)**: it is read together with `sys.database_query_store_options`, whose single OFF row is itself a deliberate choice (see that view below), and a 1 here beside an OFF row there would be a self-contradiction a tool reading both would trip on.
@@ -569,6 +570,7 @@ Probed *inlineable* despite looking otherwise, so deliberately not disqualifying
   Substitution follows the same preceding-character rules, with one difference: a bare `?` expands to `[<database>]`, because real's worker `QUOTENAME`s a name that isn't already bracketed.
   - **Divergences.** The database list is materialized up front instead of driven by a global `hCForEachDatabase` cursor, so that cursor isn't observable and `sp_MSforeach_worker` isn't separately dispatchable.
     Real's cursor also drops a database whose `sysdatabases.status` carries an inaccessible bit or whose `UserAccess` is `SINGLE_USER`; no simulator database is either, so only the `HAS_DBACCESS` filter carries.
+- **`sp_xml_preparedocument` / `sp_xml_removedocument`** (`Simulation.OpenXml.cs`, dispatched like `sp_tables`): the session-scoped document store `OPENXML` reads, with an `@hdoc OUTPUT` handle bound the way `sp_setapprole`'s `@cookie` is — see [`xml.md`](xml.md#openxml).
 - **`SCHEMA_ID([name])`** scalar: no-arg returns `Database.DboSchemaId` (=1) — the simulator's "caller default schema" (no user model means dbo is universal).
   With an arg, returns the schema's id or NULL.
 - **Legacy SQL-Server-2000 compatibility views** (`BuiltInResources.LegacyCompat.cs`): `sysobjects` / `sysusers` and `sys.system_objects`, the surface SSMS's Database-Properties dialog reaches.
@@ -596,6 +598,99 @@ Probed *inlineable* despite looking otherwise, so deliberately not disqualifying
     `sp_configure` writes show through here too, on the `value` column — the narrower legacy shape has nowhere to carry the installed value.
     **Not `MasterScoped`** (unlike `spt_values`): probe-confirmed against SQL Server 2025 it resolves from **every** database under the bare leaf (`sysconfigures`), the `sys.` qualifier, and the `dbo.` qualifier — so it's registered under all three keys (`sysconfigures`, `sys.sysconfigures`, `dbo.sysconfigures`); the 3-part `master.dbo.sysconfigures` DacFx uses routes through the `dbo.sysconfigures` key.
     Built once per simulation; only the `value` overlay varies.
+
+## Expression dependencies
+
+Four surfaces answer "what depends on this", all off one analysis in `Schemas/ModuleDependencies.cs`:
+
+- **`sys.sql_expression_dependencies`** — the catalog view (`BuiltInResources.Dependencies.cs`).
+- **`sys.dm_sql_referencing_entities(name, class)`** / **`sys.dm_sql_referenced_entities(name, class)`** — two-argument system TVFs (`Parser/Selection.SqlDependencies.cs`), dispatched from the FROM-source parser on the same `sys.`-qualified terms as `fn_virtualfilestats`.
+- **`sp_depends`** — the deprecated report (`Simulation/Simulation.Depends.cs`).
+
+### Computed on read, never stored
+
+The graph is derived from each entity's own saved definition text every time a surface asks for it, the way [`SchemaBinding`](programmable.md#schema-binding-with-schemabinding) derives its gate.
+That isn't only cheaper than a registry — it *is* real's semantic, and each of these was probed:
+
+| event | what real reports |
+| --- | --- |
+| `ALTER` of the referencing module | rows refresh to the new body |
+| `DROP` of the referenced object | the row survives, name intact, `referenced_id` NULL |
+| recreating an object of that name | `referenced_id` comes back |
+| `sp_rename` of the referenced table | the row keeps naming the **old** name, `referenced_id` NULL |
+
+Every one of those falls out of recomputing from definition text, which is what makes the store name-based rather than id-based.
+
+### What contributes a row
+
+Extraction is a token walk over the stored definition — the same shape `SchemaBinding` and `ModuleDeterminism` use, and for the same reason (scalar-function, procedure and trigger bodies are stored as source, so there is no expression tree at CREATE).
+The walk splits a definition into statement frames, classifies each dotted name chain by the keyword introducing it, and resolves the result against the live schema.
+
+Referencing kinds, all probe-confirmed to record:
+
+- the four module kinds (view, procedure, scalar UDF, inline TVF, multi-statement TVF) and DML triggers — `referencing_class` 1, `referencing_minor_id` 0;
+- database-scoped DDL triggers — `referencing_class` **12** / `DATABASE_DDL_TRIGGER`;
+- a **computed column** — under its *table's* object id with the column's own `column_id` as `referencing_minor_id`;
+- a **CHECK** or **DEFAULT** constraint — under the constraint's own object id.
+
+Referenced kinds: tables, views, synonyms (recorded as the synonym, never the base behind it), sequences reached through `NEXT VALUE FOR`, functions, procedures reached through `EXEC`, and a procedure's **table-valued parameter** — the one `referenced_class` **6** / `TYPE` row, carrying the type's `user_type_id` and taken off the parameter declaration rather than the body.
+
+Recording **nothing**, all probe-confirmed: dynamic SQL (`EXEC('…')` is invisible to real too), `#temp` tables, table variables, a trigger's `INSERTED` / `DELETED`, and system objects (`sys.*` / `INFORMATION_SCHEMA.*`, in this database or another).
+
+### The flag rules
+
+- **`is_schema_bound_reference`** — 1 for a `WITH SCHEMABINDING` module body and for every computed-column / CHECK / DEFAULT expression.
+- **`is_caller_dependent`** — 1 for a one-part `EXEC` name, whose row carries a NULL schema *and* a NULL id even when a procedure of that name exists.
+  An unqualified name in a **FROM** clause is the opposite: NULL schema, resolved id.
+- **`is_ambiguous`** — 1 for a two-part call whose qualifier names no schema, since the binder can't tell `schema.function()` from an XML or UDT method on a column.
+  Probe-confirmed in both directions: an unresolvable `mystery.value('…')` and a genuine `doc.value('…')` over a real `xml` column both report it, with the qualifier as `referenced_schema_name`.
+- **Cross-database / cross-server** — the leading segments are kept and `referenced_id` is NULL (ids are database-local).
+
+### Column rows
+
+The two surfaces split on who gets them:
+
+- **`sys.sql_expression_dependencies`** emits a `referenced_minor_id = 0` row for every reference, and column rows **only for a schema-bound reference**.
+  So a plain view over `dbo.t` is one row; the same view `WITH SCHEMABINDING` is that row plus one per bound column.
+  A computed column / CHECK / DEFAULT is column rows *only* — it reaches its own table's columns without naming the table, so there is no minor-0 companion.
+- **`sys.dm_sql_referenced_entities`** emits the object row plus column rows for **every** referencing kind, plain views and procedures included.
+
+**Object-row flags follow the reference position, not the columns** (probe-confirmed): a body whose only mention of a table is `UPDATE t SET a = 5 WHERE b = 'q'` reports the object as `is_updated` and *not* `is_selected`, even though column `b` is read; the same body plus a `SELECT … FROM t` reports both.
+Per-column, `a` is `is_updated` and `b` is `is_selected`.
+
+Two shapes real folds:
+
+- `SELECT *` sets `is_select_all` on the object row and on every column, and clears `is_selected` — even for a column the WHERE names separately.
+- `INSERT t VALUES (…)` with no column list sets `is_insert_all` with **no** column rows; a column list instead marks those columns `is_updated`.
+
+`is_all_columns_found` is 1 when the referenced object resolves.
+A reference that doesn't resolve marks its rows `is_incomplete` and makes the DMV raise **Msg 2020** — real hands back the rows it found and *then* raises.
+
+### `sp_depends`
+
+Up to two result sets, each preceded by its own severity-10 header, matching real's `raiserror` calls:
+
+| set | header | shape |
+| --- | --- | --- |
+| what the object references | **Msg 15459** | `name` / `type` / `updated` / `selected` / `column` |
+| what references the object | **Msg 15460** | `name` / `type` |
+
+An object on neither side gets **Msg 15461** and no result set; a three-part name naming another database is **Msg 15250**; a name that resolves to nothing is **Msg 15009**.
+The `type` cell is real's `spt_values` type-`'O9T'` label (`user table`, `view`, `scalar function`, `inline function`, `table function`, `stored procedure`, `trigger`, `synonym`, `sequence object`, …).
+A reference carrying no column detail — a function call, an `EXEC`, a synonym — reports a NULL `column` cell with both flags `no`.
+The `selected` cell is real's `readobj | selall`, so a column reached through a `*` reads `yes` here even though the catalog view keeps `is_selected` and `is_select_all` apart.
+A trigger is listed against what its **body reads**, never against the table it is attached to.
+
+### Divergences
+
+- **Column granularity is name-based**, inheriting `SchemaBinding`'s model: a statement frame counts as touching column `C` of referenced object `T` when it names `T` and mentions the identifier `C`, and `T` has a column by that name.
+  A **qualified** mention narrows to the source its qualifier names, so a join, an `APPLY` and a `MERGE` between two objects sharing a column name each report exactly what real reports.
+  What is left over-broad is an **unqualified** mention in a multi-source frame: `WHERE id IN (SELECT aid FROM dbo.b)` over `dbo.a` reports `id` against both, where real binds it to `a` alone.
+  Closing that wants parse-time (source, ordinal) capture, which the per-row name-keyed resolver doesn't do.
+- **A MERGE's target key column carries an extra `is_updated`** when the same column appears in both the `ON` clause and a `WHEN NOT MATCHED THEN INSERT` column list; real reports it selected only.
+- **Msg 2020 arrives before the rows rather than after them.** Real yields `sys.dm_sql_referenced_entities`'s rows and then raises; the simulator's reader surfaces the error at `ExecuteReader`.
+- **`sp_depends` row order is by object id.** Real's procedure carries no `ORDER BY`, so its order is unspecified; the simulator's is deterministic.
+- **`sys.sysdepends` / `sys.sql_dependencies` aren't projected.** Real backs `sp_depends` with them; the simulator reads the shared analysis directly.
 
 ## `sys.time_zone_info`
 
@@ -664,11 +759,11 @@ A table's `IsQuotedIdentOn` is 1 regardless of the creating session, while its `
 A sequence, synonym or key constraint answers NULL to all four.
 Capture semantics — including that a module's *body* runs under the captured `QUOTED_IDENTIFIER` — are in [`grammar.md`](grammar.md#per-object-creation-time-capture).
 
-**Constraint object ids resolve too**, through `ObjectProperty.TryFindConstraint` — a `CheckConstraint` / `DefaultConstraint` / `KeyConstraint` / `ForeignKey` is not a `SchemaObject`, so the object walk above can't reach one.
+**Constraint object ids resolve too**, through `ObjectProperty.TryFindConstraint` → the shared `ConstraintLookup` — a `CheckConstraint` / `DefaultConstraint` / `KeyConstraint` / `ForeignKey` is not a `SchemaObject`, so the object walk above can't reach one.
 A CHECK or DEFAULT constraint answers `IsQuotedIdentOn` = **0** (a constant, not the creating session's setting — probe-confirmed under ON as well as OFF, and uniformly 0 across msdb's shipped constraints) while the key and foreign-key families answer NULL; `IsAnsiNullsOn` is NULL for all five.
 Every object-kind discriminator plus `IsEncrypted` / `IsMSShipped` / `IsSystemTable` answers 0, and the module- and table-scoped names answer NULL.
 `OBJECTPROPERTYEX` gives the same answers.
-`OBJECT_ID` doesn't resolve a constraint *name*, so the id comes from a catalog view — `sys.objects` for CHECK / key / foreign-key constraints, `sys.default_constraints` for a DEFAULT (which `sys.objects` has no row for).
+`OBJECT_ID('<constraint name>')` reaches the same ids through the same lookup, so the property read composes the way it does for a table.
 
 **`OBJECTPROPERTYEX(object_id, property)`** (`Parser/Expressions/ObjectPropertyEx.cs`): extension of `OBJECTPROPERTY` with non-integer-valued properties.
 Like real SQL Server the result is always **`sql_variant`** (`GetSqlType` returns `SqlType.SqlVariant`), each property carrying its probed inner base type — `BaseType` as `char(2)`, `Cardinality` as `bigint`, and every other shipped property (`SchemaId`, the `Is*` booleans, the `TableHas*` flags) as `int`; SqlClient's `GetValue` surfaces the inner object.

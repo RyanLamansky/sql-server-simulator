@@ -266,10 +266,13 @@ public sealed class JsonMalformedTextTests
         AreEqual($"{Prefix}'{character}' is found at position {position}.", ex.Message);
     }
 
-    /// <summary>Whitespace around the document is not trailing text.</summary>
+    /// <summary>
+    /// Whitespace around the document is not trailing text — and the edit
+    /// splices the input rather than rewriting it, so the padding survives.
+    /// </summary>
     [TestMethod]
     public void JsonModify_TrailingWhitespace_Modifies()
-        => AreEqual("{\"a\":2}", new Simulation().ExecuteScalar("select json_modify('{\"a\":1} ', '$.a', 2)"));
+        => AreEqual("{\"a\":2} ", new Simulation().ExecuteScalar("select json_modify('{\"a\":1} ', '$.a', 2)"));
 
     /// <summary>
     /// A path that can't apply to what JSON_MODIFY finds is a no-op the reader
@@ -298,12 +301,12 @@ public sealed class JsonMalformedTextTests
     [DataRow("json_path_exists('{\"a\":1}x', '$.a')")]
     [DataRow("json_path_exists('{\"a\":1}', 'strict $.b')")]
     public void JsonPathExists_NeverRaises(string expression)
-        => IsFalse((bool)new Simulation().ExecuteScalar($"select {expression}")!);
+        => AreEqual(0, new Simulation().ExecuteScalar($"select {expression}"));
 
     /// <summary>Trailing whitespace leaves JSON_PATH_EXISTS's answer alone.</summary>
     [TestMethod]
     public void JsonPathExists_TrailingWhitespace_Returns1()
-        => IsTrue((bool)new Simulation().ExecuteScalar("select json_path_exists('{\"a\":1} ', '$.a')")!);
+        => AreEqual(1, new Simulation().ExecuteScalar("select json_path_exists('{\"a\":1} ', '$.a')"));
 
     /// <summary>ISJSON applies the same two rules, reporting them as 0 rather than raising.</summary>
     [TestMethod]

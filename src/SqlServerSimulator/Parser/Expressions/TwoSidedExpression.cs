@@ -141,13 +141,12 @@ internal abstract class TwoSidedExpression : Expression
             && rightType.Category == SqlTypeCategory.String)
         {
             // Propagate collation through string concat (+) so the projection
-            // schema type matches the runtime SqlType produced in Add.Run.
-            // Other arithmetic operators on string operands reject in
+            // schema type matches the runtime SqlType produced in Add.Run —
+            // the same UnresolvedCollation.Settle body, so the two phases agree
+            // on which conflicts propagate and which report here. Other
+            // arithmetic operators on string operands reject in
             // PromoteForArithmetic before this point.
-            var resolved = Collation.Resolve(leftType, rightType)
-                ?? throw SimulatedSqlException.UnresolvedCollationInImplicitConversion(
-                    result, rightType.Collation!.Name, leftType.Collation!.Name, "add");
-            result = result.WithCollation(resolved.Collation, resolved.Coercibility);
+            result = UnresolvedCollation.Settle(result, leftType, rightType, "add");
         }
         return result;
     }

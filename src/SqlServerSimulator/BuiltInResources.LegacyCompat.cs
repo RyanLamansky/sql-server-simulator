@@ -112,6 +112,10 @@ internal static partial class BuiltInResources
         // or indexed view's statistics.
         "sp_helprotect",
         "sp_helpstats",
+        // sp_depends: the deprecated dependency report, over the same analysis
+        // sys.sql_expression_dependencies and the dm_sql_referen*_entities pair
+        // project. See docs/claude/catalog-views.md.
+        "sp_depends",
         // sp_spaceused: the size report for one object or the whole database,
         // computed from the same page counts sys.dm_db_partition_stats projects.
         "sp_spaceused",
@@ -124,6 +128,10 @@ internal static partial class BuiltInResources
         // each '?'.
         "sp_MSforeachdb",
         "sp_MSforeachtable",
+        // sp_xml_preparedocument / sp_xml_removedocument: the session-scoped
+        // document store OPENXML reads. See docs/claude/xml.md.
+        "sp_xml_preparedocument",
+        "sp_xml_removedocument",
     ];
 
     /// <summary>

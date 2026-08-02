@@ -20,9 +20,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// Type codes today: <c>'U'</c> (user table), <c>'V'</c> (view, including the
 /// registered <c>sys.*</c> / <c>INFORMATION_SCHEMA.*</c> catalog views),
 /// <c>'P'</c> (stored procedure), <c>'FN'</c> / <c>'IF'</c> (scalar / inline-TVF
-/// functions), <c>'TR'</c> (DML trigger), <c>'SN'</c> (synonym). Other
-/// documented codes (<c>'TF'</c>, FK / DEFAULT constraint codes, …) return NULL
-/// pending those features.
+/// functions), <c>'TR'</c> (DML trigger), <c>'SN'</c> (synonym), and the five
+/// constraint families <c>'PK'</c> / <c>'UQ'</c> / <c>'C'</c> / <c>'D'</c> /
+/// <c>'F'</c> (see <see cref="ConstraintLookup"/>). Other documented codes
+/// (<c>'TF'</c>, …) return NULL pending those features.
 /// </para>
 /// <para>
 /// Divergence from real SQL Server on temp tables: <c>OBJECT_ID('#foo')</c>
@@ -69,9 +70,10 @@ internal sealed class ObjectId : Expression
             // type filter (' U ' returns NULL) but case-insensitive ('u' works).
             // Modeled codes today: 'U' (user table), 'FN' (scalar UDF),
             // 'IF' (inline table-valued function), 'V' (view), 'P' (stored
-            // procedure), 'TR' (DML trigger). Other documented codes (TF /
-            // ...) return NULL pending those features.
-            if (!BuiltInToken.EqualsAny(typeFilter, "U", "FN", "IF", "V", "P", "TR", "SN"))
+            // procedure), 'TR' (DML trigger), 'SN' (synonym), and the five
+            // constraint families. Other documented codes (TF / ...) return
+            // NULL pending those features.
+            if (!BuiltInToken.EqualsAny(typeFilter, "U", "FN", "IF", "V", "P", "TR", "SN", "PK", "UQ", "C", "D", "F"))
                 return SqlValue.Null(SqlType.Int32);
         }
 
@@ -174,9 +176,25 @@ internal sealed class ObjectId : Expression
         }
 
         // 'U' filter or no filter: try table resolution.
-        return runtime.Batch.TryResolveTable(parsed, out var table)
-            ? Gate(table.ObjectId, table.SchemaId)
-            : SqlValue.Null(SqlType.Int32);
+        if ((typeFilter is null || BuiltInToken.Equals(typeFilter, "U"))
+            && runtime.Batch.TryResolveTable(parsed, out var table))
+        {
+            return Gate(table.ObjectId, table.SchemaId);
+        }
+
+        // A constraint name resolves like any other schema-scoped object
+        // (probe-confirmed for a DEFAULT, a CHECK and a PRIMARY KEY, qualified
+        // or not), scoped to the schema of the table that owns it. Visibility
+        // follows that table, the way a trigger's follows its parent.
+        if (typeFilter is null || BuiltInToken.EqualsAny(typeFilter, "PK", "UQ", "C", "D", "F"))
+        {
+            if (ConstraintLookup.TryResolveByName(runtime.Batch, parsed, out var constraint)
+                && (typeFilter is null || BuiltInToken.Equals(typeFilter, constraint.TypeCode)))
+            {
+                return GateAs(constraint.ObjectId, constraint.Table.ObjectId, constraint.Table.SchemaId);
+            }
+        }
+        return SqlValue.Null(SqlType.Int32);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;

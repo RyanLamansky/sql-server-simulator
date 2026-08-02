@@ -102,9 +102,11 @@ internal static partial class BuiltInResources
         });
 
         // sys.index_columns: probe-confirmed 10-column shape. One row per
-        // (index, column) pair — KEY columns get key_ordinal = 1..N and
-        // index_column_id = 1..N; INCLUDE columns get key_ordinal = 0 and
-        // index_column_id continuing past the key column count.
+        // (index, column) pair — KEY columns get key_ordinal = 1..N, and
+        // index_column_id = 1..N in key order for a nonclustered index but in
+        // table column order for a clustered one; INCLUDE columns (which only
+        // a nonclustered index has) get key_ordinal = 0 and index_column_id
+        // continuing past the key column count.
         SysP("index_columns",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -1102,7 +1104,9 @@ internal static partial class BuiltInResources
     /// index-backed statistic (stats_id = index_id), mirroring
     /// <see cref="EnumerateSysIndexColumns"/>'s index-id assignment and
     /// key-column ordering but omitting INCLUDE columns (a statistic covers
-    /// only the index key). stats_column_id = the 1-based key ordinal;
+    /// only the index key). stats_column_id tracks the sibling
+    /// index_column_id — the 1-based key ordinal for a nonclustered index and
+    /// the table-column-order rank for a clustered one (probe-confirmed);
     /// column_id = the <c>sys.columns</c> id via
     /// <see cref="StorageOrdinalToColumnId"/>. HEAP rows (index_id = 0) carry
     /// no statistic and are skipped, matching <see cref="EnumerateSysStats"/>.
@@ -1122,7 +1126,7 @@ internal static partial class BuiltInResources
                     var columnIds = identity.Constraint is { } key
                         ? ResolveConstraintColumnIds(key, table)
                         : IndexKeyColumnIds(identity.Index!, table);
-                    foreach (var row in EmitStatsColumns(tableObjectId, SqlValue.FromInt32(identity.IndexId), columnIds))
+                    foreach (var row in EmitStatsColumns(tableObjectId, SqlValue.FromInt32(identity.IndexId), columnIds, identity.Type == 1))
                         yield return row;
                 }
             }
@@ -1135,7 +1139,7 @@ internal static partial class BuiltInResources
                 var viewObjectId = SqlValue.FromInt32(view.ObjectId);
                 foreach (var identity in view.IndexIdentities())
                 {
-                    foreach (var row in EmitStatsColumns(viewObjectId, SqlValue.FromInt32(identity.IndexId), IndexKeyColumnIds(identity.Index!, table: null)))
+                    foreach (var row in EmitStatsColumns(viewObjectId, SqlValue.FromInt32(identity.IndexId), IndexKeyColumnIds(identity.Index!, table: null), identity.Type == 1))
                         yield return row;
                 }
             }
@@ -1150,18 +1154,20 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Materializes one <c>sys.stats_columns</c> row per key column of an
-    /// index-backed statistic: stats_column_id = the 1-based key ordinal,
+    /// index-backed statistic: stats_column_id = the sibling
+    /// <c>index_column_id</c> from <see cref="KeyIndexColumnIds"/>,
     /// column_id = the resolved <c>sys.columns</c> id.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EmitStatsColumns(SqlValue tableObjectId, SqlValue statsIdValue, int[] columnIds)
+    private static IEnumerable<SqlValue[]> EmitStatsColumns(SqlValue tableObjectId, SqlValue statsIdValue, int[] columnIds, bool isClustered)
     {
+        var statsColumnIds = KeyIndexColumnIds(columnIds, isClustered);
         for (var i = 0; i < columnIds.Length; i++)
         {
             yield return
             [
                 tableObjectId,
                 statsIdValue,
-                SqlValue.FromInt32(i + 1),
+                SqlValue.FromInt32(statsColumnIds[i]),
                 SqlValue.FromInt32(columnIds[i]),
             ];
         }
@@ -1170,10 +1176,15 @@ internal static partial class BuiltInResources
     /// <summary>
     /// Rows for <c>sys.index_columns</c>: one row per (index, column) for
     /// every index reported by <see cref="EnumerateSysIndexes"/>. KEY
-    /// columns get key_ordinal = 1..N and index_column_id = 1..N; INCLUDE
-    /// columns get key_ordinal = 0 and index_column_id continuing past
-    /// the key column count. HEAP rows (index_id = 0) don't appear here —
-    /// real SQL Server's catalog omits them and the simulator matches.
+    /// columns get key_ordinal = 1..N; index_column_id is 1..N in key order
+    /// for a nonclustered index and 1..N in <b>table column order</b> for a
+    /// clustered one (probe-confirmed for a clustered index, a clustered
+    /// PRIMARY KEY and an indexed view's clustered index alike), so
+    /// <c>create clustered index ix on t(b, a)</c> reports <c>a</c> at
+    /// index_column_id 1 with key_ordinal 2. INCLUDE columns get
+    /// key_ordinal = 0 and index_column_id continuing past the key column
+    /// count. HEAP rows (index_id = 0) don't appear here — real SQL Server's
+    /// catalog omits them and the simulator matches.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysIndexColumns(Parser.BatchContext batch, Database database, CatalogFilter filter)
     {
@@ -1198,12 +1209,12 @@ internal static partial class BuiltInResources
                     var indexIdValue = SqlValue.FromInt32(identity.IndexId);
                     if (identity.Constraint is { } key)
                     {
-                        foreach (var row in EmitKeyConstraintColumns(tableObjectId, indexIdValue, key, table, falseBit, trueBit, zeroByte, nullByte))
+                        foreach (var row in EmitKeyConstraintColumns(tableObjectId, indexIdValue, key, table, identity.Type == 1, falseBit, trueBit, zeroByte, nullByte))
                             yield return row;
                     }
                     else
                     {
-                        foreach (var row in IndexColumnRows(tableObjectId, indexIdValue, identity.Index!, table))
+                        foreach (var row in IndexColumnRows(tableObjectId, indexIdValue, identity.Index!, table, identity.Type == 1))
                             yield return row;
                     }
                 }
@@ -1238,22 +1249,26 @@ internal static partial class BuiltInResources
                 var viewObjectId = SqlValue.FromInt32(view.ObjectId);
                 foreach (var identity in view.IndexIdentities())
                 {
-                    foreach (var row in IndexColumnRows(viewObjectId, SqlValue.FromInt32(identity.IndexId), identity.Index!, table: null))
+                    foreach (var row in IndexColumnRows(viewObjectId, SqlValue.FromInt32(identity.IndexId), identity.Index!, table: null, identity.Type == 1))
                         yield return row;
                 }
             }
         }
 
-        IEnumerable<SqlValue[]> IndexColumnRows(SqlValue objectId, SqlValue indexIdValue, Storage.Index index, HeapTable? table)
+        IEnumerable<SqlValue[]> IndexColumnRows(SqlValue objectId, SqlValue indexIdValue, Storage.Index index, HeapTable? table, bool isClustered)
         {
+            var columnIds = new int[index.KeyColumns.Length];
+            for (var i = 0; i < columnIds.Length; i++)
+                columnIds[i] = FullOrdinalToColumnId(table, index.KeyColumns[i].ColumnOrdinal);
+            var indexColumnIds = KeyIndexColumnIds(columnIds, isClustered);
             for (var i = 0; i < index.KeyColumns.Length; i++)
             {
                 var keyCol = index.KeyColumns[i];
                 yield return [
                     objectId,
                     indexIdValue,
-                    SqlValue.FromInt32(i + 1),
-                    SqlValue.FromInt32(FullOrdinalToColumnId(table, keyCol.ColumnOrdinal)),
+                    SqlValue.FromInt32(indexColumnIds[i]),
+                    SqlValue.FromInt32(columnIds[i]),
                     SqlValue.FromByte((byte)(i + 1)),
                     zeroByte,
                     keyCol.IsDescending ? trueBit : falseBit,
@@ -1286,16 +1301,20 @@ internal static partial class BuiltInResources
     /// index_id the shared allocation authority assigned the constraint.
     /// </summary>
     private static IEnumerable<SqlValue[]> EmitKeyConstraintColumns(
-        SqlValue tableObjectId, SqlValue indexIdValue, KeyConstraint constraint, HeapTable table,
+        SqlValue tableObjectId, SqlValue indexIdValue, KeyConstraint constraint, HeapTable table, bool isClustered,
         SqlValue falseBit, SqlValue trueBit, SqlValue zeroByte, SqlValue nullByte)
     {
+        var columnIds = new int[constraint.StorageOrdinals.Length];
+        for (var i = 0; i < columnIds.Length; i++)
+            columnIds[i] = StorageOrdinalToColumnId(table, constraint.StorageOrdinals[i]);
+        var indexColumnIds = KeyIndexColumnIds(columnIds, isClustered);
         for (var i = 0; i < constraint.StorageOrdinals.Length; i++)
         {
             yield return [
                 tableObjectId,
                 indexIdValue,
-                SqlValue.FromInt32(i + 1),
-                SqlValue.FromInt32(StorageOrdinalToColumnId(table, constraint.StorageOrdinals[i])),
+                SqlValue.FromInt32(indexColumnIds[i]),
+                SqlValue.FromInt32(columnIds[i]),
                 SqlValue.FromByte((byte)(i + 1)),
                 zeroByte,
                 constraint.IsDescending(i) ? trueBit : falseBit,
@@ -1304,6 +1323,36 @@ internal static partial class BuiltInResources
                 nullByte,
             ];
         }
+    }
+
+    /// <summary>
+    /// The <c>index_column_id</c> each key column of an index reports, given
+    /// the <c>column_id</c>s its key columns carry in key order. A
+    /// nonclustered index numbers them 1..N in key order; a clustered index
+    /// numbers them 1..N in ascending column_id — table column order —
+    /// leaving <c>key_ordinal</c> to carry the key order (probe-confirmed
+    /// against SQL Server 2025).
+    /// </summary>
+    private static int[] KeyIndexColumnIds(int[] columnIds, bool isClustered)
+    {
+        var result = new int[columnIds.Length];
+        for (var i = 0; i < columnIds.Length; i++)
+        {
+            if (!isClustered)
+            {
+                result[i] = i + 1;
+                continue;
+            }
+            // Rank among the index's own key columns by column_id.
+            var rank = 1;
+            foreach (var other in columnIds)
+            {
+                if (other < columnIds[i])
+                    rank++;
+            }
+            result[i] = rank;
+        }
+        return result;
     }
 
     /// <summary>

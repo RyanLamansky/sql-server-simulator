@@ -125,6 +125,10 @@ partial class Simulation
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterIndex(tableName.ToString());
+        // ALTER INDEX is gated on ALTER of the parent table — the same Msg 1088
+        // state 9 a missing table earns (probe-confirmed).
+        if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(table), table.ObjectId, table.SchemaId))
+            throw SimulatedSqlException.CannotFindObjectForAlterIndex(tableName.ToString());
 
         // A named index has to resolve against the table's own indexes or its
         // key constraints — a constraint name is a legal ALTER INDEX target,

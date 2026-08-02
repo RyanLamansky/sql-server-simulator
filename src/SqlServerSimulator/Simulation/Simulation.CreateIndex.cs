@@ -154,6 +154,8 @@ partial class Simulation
             // unique-clustered gates and records the index on the View.
             if (context.Batch.TryResolveView(targetTableName, out var view))
             {
+                if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(view), view.ObjectId, view.SchemaId))
+                    throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
                 if (ignoreDupKey)
                     throw SimulatedSqlException.IgnoreDupKeyOnViewIndex();
                 context.Batch.Connection.Simulation.CreateIndexOnView(context, view, indexName, isUnique, isClustered, keyColumns, includeColumnNames, filter, filterDefinition);
@@ -162,6 +164,12 @@ partial class Simulation
             }
             throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
         }
+
+        // CREATE INDEX is gated on ALTER of the table it lands on — Msg 1088
+        // state 12, naming the table as written (probe-confirmed; the DROP /
+        // ALTER INDEX forms use state 9).
+        if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(table), table.ObjectId, table.SchemaId))
+            throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
 
         var qualifiedTableName = FormatQualifiedTableName(targetTableName, table);
 

@@ -248,6 +248,32 @@ internal sealed class BatchContext
     public bool CreateTimeBinding;
 
     /// <summary>
+    /// Binder errors gathered while a module body binds, non-null only on the
+    /// bind batch (<see cref="CreateTimeBinding"/>). Real reports <em>every</em>
+    /// binder error a body contains rather than stopping at the first
+    /// (probe-confirmed: two statements with a bad column each report two
+    /// Msg 207s, and a body <c>TRY</c> / <c>CATCH</c> shields neither — binding
+    /// happens before any of it runs), so a statement's error is recorded here
+    /// and the walk resumes at the next statement boundary. What lands in the
+    /// list is severity 16: real's parse-phase errors (severity 15) preempt the
+    /// whole report, so they keep propagating on sight.
+    /// </summary>
+    public List<SimulatedSqlException>? CreateTimeBindErrors;
+
+    /// <summary>
+    /// Whether the last resume after a gathered binder error left the parse
+    /// cursor on solid ground — a statement separator or the end of the body,
+    /// rather than a keyword the recovery scan guessed at from inside the
+    /// failed statement. Real's parse phase preempts its binder's report
+    /// entirely (probe-confirmed: a bad column on one line and an undeclared
+    /// variable on the next report only Msg 137), which a severity-15 error is
+    /// free to reproduce from solid ground; raised from a guessed position it
+    /// could just as well be a diagnostic against a fragment, so the bind keeps
+    /// what it gathered instead.
+    /// </summary>
+    public bool BindResumedCleanly = true;
+
+    /// <summary>
     /// Collector for real's function body-shape rules (Msg 455 / 444 / 443),
     /// non-null only while <c>Simulation.BindModuleBodyAtCreate</c> walks a
     /// scalar-UDF or multi-statement-TVF body — the two module kinds real

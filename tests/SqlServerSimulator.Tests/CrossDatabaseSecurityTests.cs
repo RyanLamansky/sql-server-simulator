@@ -264,6 +264,175 @@ public sealed class CrossDatabasePermissionTests
         AreEqual(42, connection.CreateCommand("select id from dbo.v_local").ExecuteScalar());
     }
 
+    // ---- TRUSTWORTHY lets a database-scoped identity cross ----
+
+    [TestMethod]
+    public void ExecuteAsUser_TrustworthySource_ResolvesTheImpersonatedLoginInTheTarget()
+    {
+        // The token is accepted out of a trustworthy database and the frame's
+        // own login answers away, so awayuser's grant is what admits the read.
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim, "grant select on dbo.remote to awayuser");
+        _ = sim.ExecuteNonQuery("alter database home set trustworthy on");
+        AreEqual(7, sim.ExecuteScalar("use home; execute as user = 'homeuser'; select id from away.dbo.remote"));
+    }
+
+    [TestMethod]
+    public void ExecuteAsUser_TrustworthySource_WithoutTargetGrant_Raises229()
+    {
+        // Trustworthy admits the crossing; it does not hand out permissions.
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim);
+        _ = sim.ExecuteNonQuery("alter database home set trustworthy on");
+        var ex = sim.AssertSqlError("use home; execute as user = 'homeuser'; select id from away.dbo.remote", 229);
+        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Message);
+    }
+
+    [TestMethod]
+    public void ExecuteAsUser_TrustworthySource_NoUserInTarget_StillRaises916()
+    {
+        var sim = TwoDatabaseFixture();
+        _ = sim.ExecuteNonQuery("alter database home set trustworthy on");
+        var ex = sim.AssertSqlError("use home; execute as user = 'homeuser'; select id from away.dbo.remote", 916);
+        AreEqual("The server principal \"app\" is not able to access the database \"away\" under the current security context.", ex.Message);
+    }
+
+    [TestMethod]
+    public void ExecuteAsUser_WithoutLogin_TrustworthySource_StillRaises916()
+    {
+        // A WITHOUT LOGIN user reports a SID, not a login, so there is nothing
+        // to resolve in the target however trustworthy the source is.
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim, "grant select on dbo.remote to awayuser");
+        sim.ExecuteBatches("use home; create user loner without login", "alter database home set trustworthy on");
+        var ex = sim.AssertSqlError("use home; execute as user = 'loner'; select id from away.dbo.remote", 916);
+        Contains("\"S-1-9-3-", ex.Message);
+    }
+
+    [TestMethod]
+    public void ExecuteAsUser_TrustworthyTargetInsteadOfSource_StillRaises916()
+    {
+        // The flag that counts is the database the token was made in.
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim, "grant select on dbo.remote to awayuser");
+        _ = sim.ExecuteNonQuery("alter database away set trustworthy on");
+        _ = sim.AssertSqlError("use home; execute as user = 'homeuser'; select id from away.dbo.remote", 916);
+    }
+
+    [TestMethod]
+    public void ModuleExecuteAsUser_TrustworthySource_Crosses()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim, "grant select on dbo.remote to awayuser");
+        sim.ExecuteBatches(
+            "use home",
+            "create procedure dbo.p_read with execute as 'homeuser' as select id from away.dbo.remote",
+            "grant execute on dbo.p_read to homeuser");
+        using var connection = ConnectAsApp(sim);
+        _ = sim.AssertSqlError("use home; exec dbo.p_read", 916);
+        _ = sim.ExecuteNonQuery("alter database home set trustworthy on");
+        AreEqual(7, connection.CreateCommand("exec dbo.p_read").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ApplicationRole_TrustworthySource_Crosses()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim, "grant select on dbo.remote to awayuser");
+        sim.ExecuteBatches(
+            "use home; create application role appr with password = 'S3cret!Pass'",
+            "alter database home set trustworthy on");
+        using var connection = ConnectAsApp(sim);
+        _ = connection.CreateCommand("exec sp_setapprole 'appr', 'S3cret!Pass'").ExecuteNonQuery();
+        // The activation keeps the login, which is what answers in `away`.
+        AreEqual(7, connection.CreateCommand("select id from away.dbo.remote").ExecuteScalar());
+    }
+
+    // ---- DB_CHAINING re-links the ownership chain ----
+
+    /// <summary>
+    /// A dbo-owned view in <c>home</c> over <c>away.dbo.remote</c>, readable by
+    /// <c>homeuser</c>, with <c>awayuser</c> holding nothing there — the shape
+    /// the chain either carries or breaks.
+    /// </summary>
+    private static Simulation ChainFixture(string chaining)
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim);
+        sim.ExecuteBatches(
+            "use home",
+            "create view dbo.v_remote as select id from away.dbo.remote",
+            "create procedure dbo.p_remote as select id from away.dbo.remote",
+            "grant select on dbo.v_remote to homeuser; grant execute on dbo.p_remote to homeuser",
+            $"alter database home set db_chaining {chaining.Split(' ')[0]}",
+            $"alter database away set db_chaining {chaining.Split(' ')[1]}");
+        return sim;
+    }
+
+    [TestMethod]
+    public void ViewOverAnotherDatabase_ChainingOnBothSides_CarriesTheChain()
+    {
+        using var connection = ConnectAsApp(ChainFixture("on on"));
+        AreEqual(7, connection.CreateCommand("select id from dbo.v_remote").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ProcedureOverAnotherDatabase_ChainingOnBothSides_CarriesTheChain()
+    {
+        using var connection = ConnectAsApp(ChainFixture("on on"));
+        AreEqual(7, connection.CreateCommand("exec dbo.p_remote").ExecuteScalar());
+    }
+
+    [TestMethod]
+    [DataRow("on off")]
+    [DataRow("off on")]
+    [DataRow("off off")]
+    public void ViewOverAnotherDatabase_ChainingNotOnBothSides_BreaksTheChain(string chaining)
+    {
+        using var connection = ConnectAsApp(ChainFixture(chaining));
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select id from dbo.v_remote").ExecuteScalar());
+        AreEqual(229, ex.Number);
+        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Message);
+    }
+
+    [TestMethod]
+    [DataRow("on off")]
+    [DataRow("off on")]
+    public void ProcedureOverAnotherDatabase_ChainingNotOnBothSides_BreaksTheChain(string chaining)
+    {
+        using var connection = ConnectAsApp(ChainFixture(chaining));
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("exec dbo.p_remote").ExecuteScalar());
+        AreEqual(229, ex.Number);
+    }
+
+    [TestMethod]
+    public void ChainingOnBothSides_NoUserInTarget_StillRaises916()
+    {
+        // Chaining lends the owner's rights, not access to the database, so a
+        // login with no user in `away` is refused before any grant is consulted.
+        var sim = TwoDatabaseFixture();
+        sim.ExecuteBatches(
+            "use home",
+            "create view dbo.v_remote as select id from away.dbo.remote",
+            "grant select on dbo.v_remote to homeuser",
+            "alter database home set db_chaining on; alter database away set db_chaining on");
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select id from dbo.v_remote").ExecuteScalar());
+        AreEqual(916, ex.Number);
+    }
+
+    [TestMethod]
+    public void ChainingOnBothSides_DirectReference_IsStillChecked()
+    {
+        // There is no chain to lend anything to a statement the user wrote.
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim);
+        _ = sim.ExecuteNonQuery("alter database home set db_chaining on; alter database away set db_chaining on");
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select id from away.dbo.remote").ExecuteScalar());
+        AreEqual(229, ex.Number);
+    }
+
     // ---- USE / ChangeDatabase ----
 
     [TestMethod]

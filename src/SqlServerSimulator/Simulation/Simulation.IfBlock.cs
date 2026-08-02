@@ -346,6 +346,15 @@ partial class Simulation
             return;
         }
 
+        // The bare form is the one a scalar function may never use: every
+        // RETURN in one carries the value it returns, so real raises Msg 1075
+        // (probe-confirmed against SQL Server 2025, mid-body and trailing
+        // alike). A multi-statement TVF (no frame) and a procedure (ProcFrame)
+        // both accept it. Parse-time like the Msg 178 check above, so an
+        // un-taken branch reports it too.
+        if (batch.UdfFrame is not null)
+            throw SimulatedSqlException.ScalarFunctionReturnNeedsArgument();
+
         if (!batch.IsSkipping)
             batch.ReturnSignaled = true;
     }

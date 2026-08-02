@@ -99,12 +99,36 @@ internal static class StringScalars
     /// a predicate — and applies <see cref="RejectLegacyLobType"/> to it.
     /// Returns the resolved type so the caller can derive its result from it.
     /// </summary>
-    public static SqlType BindArgument(Expression argument, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionLowerName, int argumentIndex = 1, bool allowAnsiText = false)
+    public static SqlType BindArgument(Expression argument, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionLowerName, int argumentIndex = 1, bool allowAnsiText = false, bool propagatesUnresolvedCollation = false)
     {
         var type = argument.GetSqlType(batch, resolveColumnType);
         RejectLegacyLobType(type, functionLowerName, argumentIndex, allowAnsiText);
+        if (!propagatesUnresolvedCollation)
+            RequireSettledCollation(type, functionLowerName);
         return type;
     }
+
+    /// <summary>
+    /// Raises Msg 4191 when a string scalar's argument arrived carrying an
+    /// unresolved collation — the gate for a function that has to know which
+    /// collation it is operating under. Probe-confirmed against SQL Server 2025
+    /// across LEN / UPPER / LOWER / LTRIM / RTRIM / TRIM / SUBSTRING /
+    /// CHARINDEX / PATINDEX / REPLACE / REVERSE / STUFF / LEFT / RIGHT /
+    /// SOUNDEX / DIFFERENCE / TRANSLATE / UNICODE / STRING_AGG, each naming
+    /// itself and nothing else.
+    /// <para>Its complement is the set that only moves characters around and
+    /// so propagates the conflict outward instead — <c>REPLICATE</c>,
+    /// <c>STRING_ESCAPE</c>, <c>QUOTENAME</c>, <c>SPACE</c>, plus the ones that
+    /// never look at collation at all (<c>DATALENGTH</c>, <c>ASCII</c>,
+    /// <c>HASHBYTES</c>, <c>FORMAT</c>) — where the conflict travels on to
+    /// whatever consumes the result (probe-confirmed the same way).</para>
+    /// <para>The name is the function's own, which is already how the Msg 8116
+    /// gate spells it — including real's one against-the-grain case, where
+    /// <c>TRIM</c> reports <c>Trim</c> capitalized and every sibling is
+    /// lower-case.</para>
+    /// </summary>
+    public static void RequireSettledCollation(SqlType type, string operationName) =>
+        UnresolvedCollation.Require(type, operationName);
 
     /// <summary>
     /// <see cref="BindArgument"/> for the two-argument <c>LTRIM</c> /
@@ -125,10 +149,12 @@ internal static class StringScalars
     /// through <see cref="CoerceToVarchar"/> rather than
     /// <see cref="RejectLegacyLob"/>, so it applies that site's narrower gate.
     /// </summary>
-    public static SqlType BindCoercedArgument(Expression argument, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionLowerName, int argumentIndex = 1)
+    public static SqlType BindCoercedArgument(Expression argument, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionLowerName, int argumentIndex = 1, bool propagatesUnresolvedCollation = false)
     {
         var type = argument.GetSqlType(batch, resolveColumnType);
         RejectLegacyLobInCoercion(type, functionLowerName, argumentIndex);
+        if (!propagatesUnresolvedCollation)
+            RequireSettledCollation(type, functionLowerName);
         return type;
     }
 

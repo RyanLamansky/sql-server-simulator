@@ -225,11 +225,13 @@ partial class Simulation
         if (context.Batch.IsSkipping || !hasResolvedColumns)
             return true;
 
-        // DDL gate on a plain create: db-scope CREATE FUNCTION + ALTER on the
-        // target schema (Msg 262 state 18 with the function as Procedure
-        // attribution, else Msg 2760).
-        if (!isAlter && !createOrAlter)
-            PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
+        // DDL gate: db-scope CREATE FUNCTION + schema ALTER when the statement
+        // creates (Msg 262 state 18 with the function as Procedure attribution,
+        // else Msg 2760), object ALTER when it replaces an existing function
+        // (Msg 3701 state 20).
+        CheckModuleDdlPermission(
+            context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
+            schema.Functions.GetValueOrDefault(functionName.Leaf));
 
         // Bind the body before the schema dict is touched — see
         // BindModuleBodyAtCreate. Value-form RETURN raises Msg 178 from here,
@@ -401,11 +403,13 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        // DDL gate on a plain create: db-scope CREATE FUNCTION + ALTER on the
-        // target schema (Msg 262 state 18 with the function as Procedure
-        // attribution, else Msg 2760).
-        if (!isAlter && !createOrAlter)
-            PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
+        // DDL gate: db-scope CREATE FUNCTION + schema ALTER when the statement
+        // creates (Msg 262 state 18 with the function as Procedure attribution,
+        // else Msg 2760), object ALTER when it replaces an existing function
+        // (Msg 3701 state 20).
+        CheckModuleDdlPermission(
+            context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
+            schema.Functions.GetValueOrDefault(functionName.Leaf));
 
         // Bind the body before the schema dict is touched — see
         // BindModuleBodyAtCreate.
@@ -495,11 +499,13 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        // DDL gate on a plain create: db-scope CREATE FUNCTION + ALTER on the
-        // target schema (Msg 262 state 18 with the function as Procedure
-        // attribution, else Msg 2760).
-        if (!isAlter && !createOrAlter)
-            PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
+        // DDL gate: db-scope CREATE FUNCTION + schema ALTER when the statement
+        // creates (Msg 262 state 18 with the function as Procedure attribution,
+        // else Msg 2760), object ALTER when it replaces an existing function
+        // (Msg 3701 state 20).
+        CheckModuleDdlPermission(
+            context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
+            schema.Functions.GetValueOrDefault(functionName.Leaf));
 
         var replaced = ResolveFunctionAlterTarget<InlineTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
 

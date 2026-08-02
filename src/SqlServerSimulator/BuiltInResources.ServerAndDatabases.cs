@@ -1038,8 +1038,10 @@ internal static partial class BuiltInResources
     /// CHECKSUM, containment NONE, log_reuse_wait NOTHING, delayed_durability
     /// DISABLED, catalog_collation DATABASE_DEFAULT). recovery_model is
     /// SIMPLE for <c>master</c> / <c>tempdb</c> / <c>msdb</c> and FULL for
-    /// <c>model</c> and every user database, which inherits the template's
-    /// (probe-confirmed). Code↔desc pairs are always internally consistent.
+    /// <c>model</c> and every user database, which inherits the template's,
+    /// and <c>is_broker_enabled</c> is 1 everywhere but <c>master</c> and
+    /// <c>model</c> (both probe-confirmed). Code↔desc pairs are always
+    /// internally consistent.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDatabases(Parser.BatchContext batch, Database database)
     {
@@ -1076,6 +1078,12 @@ internal static partial class BuiltInResources
             // CREATE DATABASE).
             var isSimpleRecovery = !Collation.Baseline.Equals(db.Name, "model")
                 && Simulation.SystemDatabaseNames.Contains(db.Name);
+            // Service Broker is enabled everywhere but master and model
+            // (probe-confirmed: tempdb, msdb and a freshly created user
+            // database all read 1). Broker itself isn't modeled — this is the
+            // flag alone.
+            var isBrokerEnabled = !Collation.Baseline.Equals(db.Name, "master")
+                && !Collation.Baseline.Equals(db.Name, "model");
             yield return [
                 SqlValue.FromSystemName(db.Name),
                 SqlValue.FromInt32(id),
@@ -1117,8 +1125,8 @@ internal static partial class BuiltInResources
                 falseBit, // is_cursor_close_on_commit_on
                 falseBit, // is_local_cursor_default
                 trueBit,  // is_fulltext_enabled
-                falseBit, // is_trustworthy_on
-                falseBit, // is_db_chaining_on
+                SqlValue.FromBoolean(db.Trustworthy),
+                SqlValue.FromBoolean(db.CrossDatabaseChaining),
                 falseBit, // is_parameterization_forced
                 falseBit, // is_master_key_encrypted_by_server
                 // is_query_store_on stays 0 so it agrees with the OFF row
@@ -1131,7 +1139,7 @@ internal static partial class BuiltInResources
                 falseBit, // is_distributor
                 falseBit, // is_sync_with_backup
                 brokerGuid,
-                falseBit,
+                SqlValue.FromBoolean(isBrokerEnabled),
                 zeroByte,
                 nothing,
                 falseBit,

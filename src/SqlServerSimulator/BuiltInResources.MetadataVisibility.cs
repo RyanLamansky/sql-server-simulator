@@ -96,29 +96,39 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Wraps a catalog view's row sequence with metadata-visibility filtering when
-    /// the session principal is restricted. Returns <paramref name="rows"/>
-    /// untouched — zero added cost — for a <c>dbo</c> / full-visibility session
-    /// (the overwhelming common case), a view that isn't object-scoped, or a
-    /// cross-database read (the session principal is scoped to the connection's
-    /// current database, so filtering only engages when the view is scoped to it).
+    /// the principal answering for <paramref name="targetDatabase"/> is
+    /// restricted. Returns <paramref name="rows"/> untouched — zero added cost —
+    /// for a <c>dbo</c> / full-visibility session (the overwhelming common case)
+    /// or a view that isn't object-scoped.
     /// </summary>
+    /// <remarks>
+    /// A read of <em>another</em> database resolves the login's user there and
+    /// filters by that principal's visibility, exactly as a data reference
+    /// resolves it — including the Msg 916 a login with no user there earns,
+    /// which real raises for every cross-database catalog view whether or not
+    /// the view is one it would have filtered (probe-confirmed against SQL
+    /// Server 2025: <c>other.sys.databases</c> and <c>other.sys.types</c> refuse
+    /// alongside <c>other.sys.tables</c>). So the resolution runs ahead of the
+    /// <see cref="CatalogView.MetadataKey"/> test, and the guest-served system
+    /// databases pass it the same way they pass a data read.
+    /// </remarks>
     internal static IEnumerable<SqlValue[]> ApplyMetadataFilter(
         CatalogView view,
         BatchContext batch,
         Database targetDatabase,
-        IEnumerable<SqlValue[]> rows)
-    {
-        if (view.MetadataKey is not { } key
-            || !ReferenceEquals(targetDatabase, batch.CurrentDatabase)
-            || !PermissionEnforcement.MetadataVisibilityApplies(batch))
-        {
-            return rows;
-        }
-        var principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
-        return key.IsNameKeyed
-            ? FilterByName(rows, key, targetDatabase, principalId)
+        IEnumerable<SqlValue[]> rows) =>
+        FilteringPrincipal(view, batch, targetDatabase) is not { } principalId || view.MetadataKey is not { } key ? rows
+            : key.IsNameKeyed ? FilterByName(rows, key, targetDatabase, principalId)
             : FilterByObjectId(rows, key, targetDatabase, principalId);
-    }
+
+    // An unfiltered view of the session's own database asks nothing of the
+    // principal, so it short-circuits ahead of the closure build; the
+    // cross-database form still resolves it, because that resolution is what
+    // raises Msg 916 for a login with no user in the target.
+    private static int? FilteringPrincipal(CatalogView view, BatchContext batch, Database targetDatabase) =>
+        view.MetadataKey is null && ReferenceEquals(targetDatabase, batch.CurrentDatabase)
+            ? null
+            : PermissionEnforcement.MetadataVisibilityPrincipal(batch, targetDatabase);
 
     private static IEnumerable<SqlValue[]> FilterByObjectId(
         IEnumerable<SqlValue[]> rows,

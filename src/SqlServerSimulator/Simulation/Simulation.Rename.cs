@@ -144,6 +144,13 @@ partial class Simulation
             throw SimulatedSqlException.RenameItemNotFound(objName, database.Name, "(null)");
         }
 
+        // sp_rename is gated on ALTER of the object (schema ALTER / object
+        // CONTROL cover it) and reports the same Msg 15225 not-found record a
+        // missing object earns — probe-confirmed, so nothing about the object's
+        // existence leaks.
+        if (!PermissionEnforcement.HasObjectAlter(batch, database, table.ObjectId, table.SchemaId))
+            throw SimulatedSqlException.RenameItemNotFound(objName, database.Name, "(null)");
+
         // Collision is against the whole shared object namespace (probe-confirmed:
         // renaming a table onto a view name also raises Msg 15335 "as a object").
         if (schema.HasNameInSharedNamespace(newName))

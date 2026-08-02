@@ -80,16 +80,13 @@ internal sealed class Add : TwoSidedExpression
         var resultType = ResolveResultType(left.Type, right.Type);
 
         // Collation resolution for both-string pairs: pick the higher-rank
-        // operand's collation, raise Msg 457 on same-rank conflict. The
-        // string + typed-NULL fall-through doesn't reach this branch
-        // because the NULL-side type is non-string per IsStringConcatPair.
+        // operand's collation, and on same-rank conflict either carry the
+        // conflict outward or report it here — UnresolvedCollation.Settle holds
+        // the whole rule. The string + typed-NULL fall-through doesn't reach
+        // this branch because the NULL-side type is non-string per
+        // IsStringConcatPair.
         if (left.Type.Category == SqlTypeCategory.String && right.Type.Category == SqlTypeCategory.String)
-        {
-            var resolved = Collation.Resolve(left.Type, right.Type)
-                ?? throw SimulatedSqlException.UnresolvedCollationInImplicitConversion(
-                    resultType, right.Type.Collation!.Name, left.Type.Collation!.Name, "add");
-            resultType = resultType.WithCollation(resolved.Collation, resolved.Coercibility);
-        }
+            resultType = UnresolvedCollation.Settle(resultType, left.Type, right.Type, "add");
 
         return left.IsNull || right.IsNull
             ? SqlValue.Null(resultType)

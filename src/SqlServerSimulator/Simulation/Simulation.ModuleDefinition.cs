@@ -67,6 +67,50 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// The DDL permission gate every programmable-module parser owes, on both
+    /// legs of its verb. A statement that <em>creates</em> — a plain
+    /// <c>CREATE</c>, or a <c>CREATE OR ALTER</c> over a free name — needs the
+    /// database-scope CREATE-of-that-kind permission plus schema ALTER
+    /// (<see cref="PermissionEnforcement.CheckCreateModule"/>). A statement that
+    /// <em>replaces</em> — <c>ALTER</c>, or <c>CREATE OR ALTER</c> over an
+    /// existing module — needs ALTER on the module instead, and reports
+    /// <strong>Msg 3701</strong> sev 14 state 20 naming its kind and leaf when it
+    /// is missing; the create permission alone does not admit it (probe-confirmed
+    /// against SQL Server 2025). A bare <c>ALTER</c> of a name nothing holds is
+    /// left to the Msg 208 the resolver raises.
+    /// </summary>
+    private static void CheckModuleDdlPermission(
+        ParserContext context,
+        string createPermission,
+        MultiPartName name,
+        Schema schema,
+        bool isAlter,
+        bool createOrAlter,
+        SchemaObject? existing)
+    {
+        if (existing is null)
+        {
+            if (!isAlter)
+                PermissionEnforcement.CheckCreateModule(context.Batch, createPermission, name.Leaf, schema);
+            return;
+        }
+        if ((isAlter || createOrAlter)
+            && !PermissionEnforcement.HasObjectAlter(context.Batch, schema.Database, existing.ObjectId, existing.SchemaId))
+        {
+            throw SimulatedSqlException.AlterObjectPermissionDenied(ModuleKindNoun(existing), name.Leaf);
+        }
+    }
+
+    /// <summary>The noun real spells inside <c>Cannot alter the &lt;kind&gt; '…'</c> for a module being replaced.</summary>
+    private static string ModuleKindNoun(SchemaObject module) => module switch
+    {
+        View => "view",
+        Procedure => "procedure",
+        Trigger => "trigger",
+        _ => "function",
+    };
+
+    /// <summary>
     /// Enforces the name shape a programmable module's <c>CREATE</c> /
     /// <c>ALTER</c> / <c>CREATE OR ALTER</c> accepts: at most
     /// <c>schema.object</c>. A database prefix is <strong>Msg 166</strong> even

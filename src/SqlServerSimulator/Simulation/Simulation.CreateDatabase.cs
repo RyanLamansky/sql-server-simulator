@@ -69,6 +69,13 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        // CREATE DATABASE answers at server scope: the CREATE ANY DATABASE
+        // permission (or the ALTER ANY DATABASE that covers it), or dbcreator
+        // membership. Real reports Msg 262 naming 'master' whatever the current
+        // database is (probe-confirmed).
+        if (!PermissionEnforcement.HasDatabaseDdlAuthority(context.Batch, Permission.CreateAnyDatabase))
+            throw SimulatedSqlException.DatabasePermissionDenied("CREATE DATABASE", "master");
+
         var collation = collationName is null
             ? this.ServerCollation
             : Collation.TryGet(collationName)

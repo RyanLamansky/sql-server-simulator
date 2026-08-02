@@ -19,9 +19,9 @@ partial class Simulation
     /// A view is updatable iff every level in its chain satisfies:
     /// </para>
     /// <list type="bullet">
-    /// <item>Exactly one FROM source, no JOINs, no DISTINCT / aggregates /
-    /// GROUP BY / HAVING / set ops / window functions
-    /// (<see cref="Selection.UpdatabilityProfile"/> is non-null).</item>
+    /// <item>No DISTINCT / aggregates / GROUP BY / HAVING / set ops /
+    /// window functions (<see cref="Selection.UpdatabilityProfile"/> is
+    /// non-null), and exactly one FROM source.</item>
     /// <item>The single source is either a heap table or another updatable
     /// view (<see cref="View.BaseTable"/> non-null).</item>
     /// <item>Every column referenced inside any WHERE clause up the chain
@@ -29,19 +29,26 @@ partial class Simulation
     /// derived projection above it).</item>
     /// </list>
     /// <para>
-    /// The simulator's v1 of updatable views rejects JOIN-bodied views
-    /// uniformly via the <see cref="ViewUpdatabilityRejection.MultipleSources"/>
-    /// → Msg 4405 path (real SQL Server allows single-base-table UPDATEs
-    /// through JOIN views; deferred to a follow-up bundle).
+    /// A body reading several sources collapses to none of the four — its
+    /// WHERE and join predicates read columns of more than one table, so
+    /// there is no single base row to evaluate them against. Such a view
+    /// records <see cref="ViewUpdatabilityRejection.MultipleSources"/>
+    /// (Msg 4405, what INSERT and DELETE raise) plus
+    /// <c>IsJoinUpdatable</c>, which routes UPDATE to the join-view path in
+    /// <c>Simulation.Update.JoinView.cs</c> — that one re-parses the body
+    /// and works off the live profile.
     /// </para>
     /// </remarks>
-    private static (HeapTable? BaseTable, int[] BaseColumnOrdinals, ViewUpdatabilityRejection Rejection, Func<SqlValue[], BatchContext, bool>? VisibilityCheck, Func<SqlValue[], BatchContext, bool>? CheckOptionCheck)
+    private static (HeapTable? BaseTable, int[] BaseColumnOrdinals, ViewUpdatabilityRejection Rejection, Func<SqlValue[], BatchContext, bool>? VisibilityCheck, Func<SqlValue[], BatchContext, bool>? CheckOptionCheck, bool IsJoinUpdatable)
         AnalyzeViewUpdatability(Collation collation, Selection bodySelection, bool withCheckOption)
     {
         if (bodySelection.UpdatabilityProfile is not { } profile)
-            return (null, [], bodySelection.UpdatabilityRejection, null, null);
+            return (null, [], bodySelection.UpdatabilityRejection, null, null, false);
 
-        var source = profile.Source;
+        if (profile.Sources.Length > 1)
+            return (null, [], ViewUpdatabilityRejection.MultipleSources, null, null, true);
+
+        var source = profile.Sources[0];
         HeapTable baseTable;
         int[] sourceColumnToBaseOrdinal;
         Func<SqlValue[], BatchContext, bool>? upstreamVisibility = null;
@@ -66,7 +73,7 @@ partial class Simulation
             // Source is a derived table, CTE, OPENJSON, TVF, catalog view,
             // or a non-updatable view — none of which support DML
             // pass-through.
-            return (null, [], ViewUpdatabilityRejection.UnsupportedShape, null, null);
+            return (null, [], ViewUpdatabilityRejection.UnsupportedShape, null, null, false);
         }
 
         var baseColumnOrdinals = new int[profile.Projections.Length];
@@ -114,7 +121,7 @@ partial class Simulation
                     unmappable = true;
             }));
             if (unmappable)
-                return (null, [], ViewUpdatabilityRejection.UnsupportedShape, null, null);
+                return (null, [], ViewUpdatabilityRejection.UnsupportedShape, null, null, false);
         }
 
         var thisLevelCheck = MakeWhereCheck(profile.Excluders, nameToBaseOrdinal);
@@ -128,7 +135,7 @@ partial class Simulation
         var thisLevelCheckOption = withCheckOption ? combinedVisibility : null;
         var combinedCheckOption = ComposeAnd(thisLevelCheckOption, upstreamCheckOption);
 
-        return (baseTable, baseColumnOrdinals, ViewUpdatabilityRejection.None, combinedVisibility, combinedCheckOption);
+        return (baseTable, baseColumnOrdinals, ViewUpdatabilityRejection.None, combinedVisibility, combinedCheckOption, false);
     }
 
     /// <summary>

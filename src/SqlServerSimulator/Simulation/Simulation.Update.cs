@@ -70,14 +70,18 @@ partial class Simulation
             {
                 throw new NotSupportedException($"INSTEAD OF UPDATE through a non-updatable view ('{resolvedView.Schema.Name}.{resolvedView.Name}') isn't modeled. Updatable single-base views work; join / aggregate / DISTINCT views are deferred.");
             }
-            if (resolvedView.BaseTable is not { } baseTable)
+            // A multi-source body has no single base table to route to up
+            // front — which base the statement writes is the SET list's to
+            // say — so it leaves `leadingTable` null and the join-view path
+            // below picks up once the SET list has parsed.
+            if (resolvedView.BaseTable is null && !resolvedView.IsJoinUpdatable)
             {
                 throw resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
                     ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{resolvedView.Schema.Name}.{resolvedView.Name}")
                     : SimulatedSqlException.CannotUpdateNonUpdatableView($"{resolvedView.Schema.Name}.{resolvedView.Name}");
             }
             leadingView = resolvedView;
-            leadingTable = baseTable;
+            leadingTable = resolvedView.BaseTable;
         }
         else
         {
@@ -146,6 +150,19 @@ partial class Simulation
                 columnName = col.Value;
                 lhsForCompound = new Reference(first.Value, col.Value);
                 context.MoveNextRequired();
+
+                // `col.modify('…')` is the mutator form of a SET clause — the
+                // whole clause, with no assignment operator. Only a one-part
+                // column name carries it: real answers Msg 102 for
+                // `t.col.modify(…)`, which falls out of the assignment-operator
+                // check below since the three-part shape lands here instead.
+                if (XmlMethodCall.IsKnownMethodName(columnName) && context.Token is Operator { Character: '(' })
+                {
+                    rawAssignments.Add(ParseXmlMutatorSetClause(context, first.Value, columnName));
+                    if (context.Token is Operator { Character: ',' })
+                        continue;
+                    break;
+                }
             }
             else
             {
@@ -197,6 +214,11 @@ partial class Simulation
                 : ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output, top);
         }
 
+        // Through a multi-source view the SET list is what names the base
+        // table, so the write routes only once it has parsed.
+        if (leadingView is { BaseTable: null } joinView)
+            return ExecuteJoinViewUpdate(context, leadingIdent, joinView, rawAssignments, top);
+
         var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
             ? SimulatedSqlException.MustDeclareTableVariable(leadingIdent.Leaf)
             : context.Batch.UnresolvableObjectName(leadingIdent));
@@ -204,6 +226,27 @@ partial class Simulation
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf);
         FunctionBodyShape.NoteTableWrite(context.Batch, "UPDATE", table);
         return ExecuteUpdateAgainstTable(context, leadingIdent, table, rawAssignments, output, top, leadingView);
+    }
+
+    /// <summary>
+    /// Parses an UPDATE SET clause of the mutator shape
+    /// <c>col.modify('&lt;xml-dml&gt;')</c> into the ordinary
+    /// <c>(column, expression)</c> pair the rest of the pipeline consumes —
+    /// the expression re-reads the column's pre-update value and answers the
+    /// edited instance, so OUTPUT, triggers and constraint enforcement all see
+    /// a plain new value. <c>sql:column()</c> references inside the XQuery
+    /// bind through the target-table scope the SET list already parses under.
+    /// </summary>
+    private static (string ColumnName, Expression Expr) ParseXmlMutatorSetClause(ParserContext context, string columnName, string methodName)
+    {
+        var resolver = context.OuterTypeResolver;
+        var expression = XmlModify.Parse(
+            new Reference(columnName),
+            columnName,
+            methodName,
+            context,
+            resolver is null ? null : name => resolver(new MultiPartName(name)));
+        return (columnName, expression);
     }
 
     /// <summary>
@@ -229,7 +272,7 @@ partial class Simulation
         // table and a module body at CREATE report them too).
         var targetTypeResolver = Selection.TargetColumnTypeResolver(context.Batch, table, sourceView);
         foreach (var (_, expr) in rawAssignments)
-            _ = expr.GetSqlType(context.Batch, targetTypeResolver);
+            UnresolvedCollation.RequireAssignable(expr.GetSqlType(context.Batch, targetTypeResolver));
 
         BooleanExpression? where = null;
         PositionedCursorTarget? positionedCursor = null;
@@ -242,46 +285,7 @@ partial class Simulation
                 where = Selection.ParseAndBindPredicate(context, targetTypeResolver);
         }
 
-        var updateSecurable = context.Batch.IsSkipping
-            ? null
-            : PermissionEnforcement.SecurableFor(context.Batch, targetName, (SchemaObject?)sourceView ?? table);
-        if (updateSecurable is not null && PermissionEnforcement.Applies(context.Batch, context.Batch.DatabaseFor(updateSecurable)))
-        {
-            // UPDATE reads the target when it has a WHERE clause or a SET
-            // expression that references a target column — real then also
-            // requires SELECT, checked first so that when both SELECT and
-            // UPDATE are missing the SELECT denial surfaces (probe M1). A
-            // constant-SET UPDATE with no WHERE reads nothing and needs only
-            // UPDATE (M1b).
-            if (updateSecurable is Synonym synonym)
-            {
-                // A synonym takes no column grants at all, so a reference
-                // through one is checked object-grain against the synonym.
-                if (where is not null || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch))
-                    PermissionEnforcement.CheckSchemaObject(context.Batch, "SELECT", synonym);
-                PermissionEnforcement.CheckSchemaObject(context.Batch, "UPDATE", synonym);
-            }
-            else
-            {
-                // Column-grain on a base table and a view alike: the WHERE +
-                // SET-RHS columns require SELECT (checked first, per probe M1
-                // ordering), each SET-target column requires UPDATE — first
-                // inaccessible column → Msg 230 (or Msg 229 when the object is
-                // wholly inaccessible for that permission). Through a view the
-                // ordinals are the view's own, matching what
-                // `GRANT UPDATE (col) ON <view>` stored.
-                var read = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
-                where?.VisitOperandExpressions(op => op.VisitColumnReferences(read.Add));
-                foreach (var (_, expr) in rawAssignments)
-                    expr.VisitColumnReferences(read.Add);
-                PermissionEnforcement.CheckColumns(context.Batch, Permission.Select, read);
-
-                var assigned = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
-                foreach (var (columnName, _) in rawAssignments)
-                    assigned.Add(columnName);
-                PermissionEnforcement.CheckColumns(context.Batch, Permission.Update, assigned);
-            }
-        }
+        CheckUpdatePermissions(context, targetName, table, sourceView, rawAssignments, where);
 
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
         var storedColumns = table.StoredColumns;
@@ -382,6 +386,58 @@ partial class Simulation
             CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
 
         return CommitUpdate(context, table, affected, output, [.. assignments.Select(a => a.Ordinal)], sourceView);
+    }
+
+    /// <summary>
+    /// The permission gate every single-target UPDATE passes through — the
+    /// no-FROM form against a table or a view, and the join-view form once
+    /// its SET list has named the base table. A read (a WHERE clause, or a
+    /// SET expression that reads a column) additionally requires SELECT,
+    /// checked first so that when both SELECT and UPDATE are missing the
+    /// SELECT denial surfaces (probe M1); a constant-SET UPDATE with no
+    /// WHERE reads nothing and needs only UPDATE (M1b).
+    /// </summary>
+    private static void CheckUpdatePermissions(
+        ParserContext context,
+        MultiPartName targetName,
+        HeapTable table,
+        View? sourceView,
+        List<(string ColumnName, Expression Expr)> rawAssignments,
+        BooleanExpression? where)
+    {
+        var updateSecurable = context.Batch.IsSkipping
+            ? null
+            : PermissionEnforcement.SecurableFor(context.Batch, targetName, (SchemaObject?)sourceView ?? table);
+        if (updateSecurable is null || !PermissionEnforcement.Applies(context.Batch, context.Batch.DatabaseFor(updateSecurable)))
+            return;
+
+        if (updateSecurable is Synonym synonym)
+        {
+            // A synonym takes no column grants at all, so a reference
+            // through one is checked object-grain against the synonym.
+            if (where is not null || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch))
+                PermissionEnforcement.CheckSchemaObject(context.Batch, "SELECT", synonym);
+            PermissionEnforcement.CheckSchemaObject(context.Batch, "UPDATE", synonym);
+            return;
+        }
+
+        // Column-grain on a base table and a view alike: the WHERE +
+        // SET-RHS columns require SELECT (checked first, per probe M1
+        // ordering), each SET-target column requires UPDATE — first
+        // inaccessible column → Msg 230 (or Msg 229 when the object is
+        // wholly inaccessible for that permission). Through a view the
+        // ordinals are the view's own, matching what
+        // `GRANT UPDATE (col) ON <view>` stored.
+        var read = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
+        where?.VisitOperandExpressions(op => op.VisitColumnReferences(read.Add));
+        foreach (var (_, expr) in rawAssignments)
+            expr.VisitColumnReferences(read.Add);
+        PermissionEnforcement.CheckColumns(context.Batch, Permission.Select, read);
+
+        var assigned = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
+        foreach (var (columnName, _) in rawAssignments)
+            assigned.Add(columnName);
+        PermissionEnforcement.CheckColumns(context.Batch, Permission.Update, assigned);
     }
 
     /// <summary>
@@ -503,7 +559,7 @@ partial class Simulation
         // ExecuteUpdateAgainstTable for why.
         var tupleTypeResolver = Selection.ColumnTypeResolverFor(sources);
         foreach (var (_, expr) in rawAssignments)
-            _ = expr.GetSqlType(context.Batch, tupleTypeResolver);
+            UnresolvedCollation.RequireAssignable(expr.GetSqlType(context.Batch, tupleTypeResolver));
 
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -938,19 +994,29 @@ partial class Simulation
                     throw SimulatedSqlException.InvalidColumnName(colName);
             }
 
-            var column = table.Columns[columnOrdinal];
-            if (column.Identity is not null)
-                throw SimulatedSqlException.CannotUpdateIdentityColumn(column.Name);
-            if (column.Computed is not null)
-                throw SimulatedSqlException.ColumnCannotBeModified(column.Name);
-            if (column.Type == SqlType.RowVersion)
-                throw SimulatedSqlException.CannotUpdateTimestampColumn();
-            if (column.GeneratedAs != GeneratedAlwaysAsRow.None)
-                throw SimulatedSqlException.CannotUpdateGeneratedAlways(QualifyTableName(table, database));
-
+            RejectUnmodifiableSetTarget(table, columnOrdinal, database);
             assignments.Add((columnOrdinal, expr));
         }
         return assignments;
+    }
+
+    /// <summary>
+    /// Refuses a SET target the storage engine owns: an IDENTITY column, a
+    /// computed column, a <c>rowversion</c>, or a GENERATED ALWAYS period
+    /// column. Shared by the plain and join-view SET-list resolvers so both
+    /// report the same error for the same column.
+    /// </summary>
+    private static void RejectUnmodifiableSetTarget(HeapTable table, int columnOrdinal, Database database)
+    {
+        var column = table.Columns[columnOrdinal];
+        if (column.Identity is not null)
+            throw SimulatedSqlException.CannotUpdateIdentityColumn(column.Name);
+        if (column.Computed is not null)
+            throw SimulatedSqlException.ColumnCannotBeModified(column.Name);
+        if (column.Type == SqlType.RowVersion)
+            throw SimulatedSqlException.CannotUpdateTimestampColumn();
+        if (column.GeneratedAs != GeneratedAlwaysAsRow.None)
+            throw SimulatedSqlException.CannotUpdateGeneratedAlways(QualifyTableName(table, database));
     }
 
     /// <summary>

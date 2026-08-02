@@ -3,6 +3,7 @@
 ## CREATE-time body binding
 
 A module's body is **bound when the module is created**, and a binder error aborts the `CREATE` — the module isn't created, and an `ALTER` / `CREATE OR ALTER` leaves the previous body standing.
+Every binder error the body carries is reported, not just the first — see [The whole report](#the-whole-report).
 Only *missing-object* resolution defers, which is real's deferred name resolution.
 Probe-confirmed end to end against SQL Server 2025 (2026-08-01) for procedures, scalar UDFs, multi-statement TVFs and DML / DDL triggers; views and inline TVFs never deferred anything (real binds them fully, Msg 208 included) and already did so here through their output-column inference.
 
@@ -52,7 +53,7 @@ A never-taken `IF` or `WHILE` branch binds too, on both sides.
 An aggregate whose only column reference resolves in **no** scope is part of that set: `HAVING MAX(nosuchcol) = 1` is Msg 207 here as it is on real, at CREATE and in a plain statement alike.
 The outer scope chain is what separates it from the genuinely-outer `(SELECT MAX(t.a) FROM u)`, which real binds to the enclosing query and creates without complaint (see [`query.md`](query.md#outer-scope-correlation-in-the-select-list)); a FROM-clause placeholder suspends the question entirely, since the name could belong to the missing object.
 
-### Body-shape rules — Msg 455 / 444 / 443
+### Body-shape rules — Msg 455 / 444 / 443 / 1075
 
 A **scalar UDF** and a **multi-statement TVF** carry three rules beyond name binding, all reported at `CREATE` / `ALTER`.
 Procedures, triggers and inline TVFs are exempt (probe-confirmed: a procedure body may `SELECT`, `PRINT`, `INSERT` and `SET NOCOUNT ON` freely).
@@ -69,16 +70,35 @@ The walk that binds the body gathers them into `FunctionBodyShape` (`Parser/Func
   A DML write whose target is a **table variable** is legal, in a scalar UDF's own `DECLARE @t TABLE` and a TVF's return table alike, so only a write reaching a persistent table is recorded.
   `EXEC <proc>` and `EXEC sp_executesql` stay creatable (the runtime Msg 557 is a separate story), as do the current-time readers.
 
-**Ordering**: real reports *every* binder error in the body before *any* shape error — probed with a `PRINT` on line 3 and a bad column on line 4, which reports Msg 207 first.
-That is why violations are gathered through the walk and the first is raised only once the body has bound: a binder error thrown during the walk propagates and wins, matching which error a one-exception client sees.
+A fourth rule sits in real's **parse** phase rather than beside these, and behaves accordingly:
+
+- **Msg 1075** class 15 state 1, *"RETURN statements in scalar valued functions must include an argument."*
+  Every `RETURN` in a **scalar UDF** carries the value it returns, wherever the statement sits — a mid-body `IF @x = 1 RETURN` and a trailing bare `RETURN` report it alike, and so does one inside a `WHILE`.
+  The bare form is the *required* one in a multi-statement TVF (mid-body as well as trailing) and legal in a procedure, so the check hangs off `BatchContext.UdfFrame`, the frame only a scalar UDF's body carries.
+  Being parse-phase, it preempts the whole report: a body carrying a bad column, a `PRINT` and a bare `RETURN` reports only the 1075 (probe-confirmed for each pairing).
+
+**Ordering**: real reports *every* binder error in the body before *any* shape error — probed with a `PRINT` on line 3 and a bad column on line 4, which reports Msg 207 first, and with a body carrying both plus a missing trailing `RETURN`, which reports 207, 443, 455 in that order.
+That is why violations are gathered through the walk and appended behind the binder's own errors once the body has bound.
 Among shape violations, source order decides, and Msg 455 comes last because its statement is the body's last.
+
+### The whole report
+
+Real reports every binder error a body contains, so the bind gathers them instead of stopping at the first: a severity-16 error is recorded on `BatchContext.CreateTimeBindErrors` and the walk resumes at the next statement boundary, and the whole run leaves the `CREATE` as **one exception carrying an entry each**, in source order.
+That is what a client sees from real — probe-confirmed through SqlClient, whose `SqlException.Errors` holds both Msg 207s of a two-bad-column body with their own lines and the module name on each — and the wire path writes one ERROR token per entry, so both front doors match.
+A body's own `TRY` / `CATCH` shields none of them (probe-confirmed): binding precedes any of it running, so the gather is checked ahead of the TRY-frame path in the dispatch loop.
+Procedures, triggers, scalar UDFs and multi-statement TVFs all report their run this way, and an `ALTER` reports it while leaving the previous body standing.
+
+**Severity 15 is real's parse phase and preempts the whole report**: a body with a bad column on one line and an undeclared variable on the next reports only Msg 137, and Msg 195 / 156 / 1075 behave the same.
+The simulator reproduces that by letting a severity-15 error propagate on sight rather than gathering it — with one guard.
+The walk resumes from a recovery scan, and a scan that stopped on a keyword rather than a separator can be pointing inside the statement that failed; a severity-15 error raised from such a position is more likely a diagnostic against a fragment than against the body, so it is dropped and the gathered errors are reported instead (`BatchContext.BindResumedCleanly`).
 
 ### Divergences
 
-- **One error per CREATE.**
-  Real reports every binder error it finds in the body (probed: two Msg 207s from two statements), and every shape violation after them; the simulator throws on the first.
-- **`NEWSEQUENTIALID()` in a function body** is the simulator's own Msg 302 (real's outside-a-`DEFAULT` gate, which real raises everywhere else) rather than real's Msg 443 — the call's parse rejects it before the shape walk has a say.
-- **A bind abandoned at a deferral leaves Msg 455 unrun.**
+- **One error per statement.**
+  Real reports a bad column per *reference*, so `SELECT nosuchone, nosuchtwo FROM t` is two Msg 207s from the one statement; the simulator's parser throws at the first, so a statement contributes at most one entry to the run.
+- **Errors report in source order, where real's binder makes two passes.**
+  Probed with a bad column, a GROUP BY containment error and another bad column on three consecutive lines: real reports the two Msg 207s and *then* the Msg 8120, while the simulator reports all three in the order they are written.
+- **A bind abandoned at a deferral reports only what it gathered, and leaves Msg 455 unrun.**
   The stop-at-first-deferral divergence above means the walk never saw the body's real last statement, so the rule is skipped rather than guessed at; real, which knows where the deferred statement ended, keeps checking.
 - **A `NotSupportedException` never blocks a CREATE.** An unmodeled feature in the body is a simulator gap rather than real's binder speaking; refusing the module would be strictly worse than the status quo, so the bind swallows it and the gap resurfaces at invocation.
 
@@ -141,7 +161,7 @@ Probed against SQL Server 2025.
 - **Msg 111 batch-first rule** is enforced: `CREATE FUNCTION` must open its batch, and since there is no `GO`, a batch is one `CommandText` — so `IF OBJECT_ID(…) IS NOT NULL DROP FUNCTION …; CREATE FUNCTION …` raises where two commands succeed (`ExecuteBatches` in the tests is the split).
   Real's state byte identifies the kind: 4 for CREATE FUNCTION, 5 for ALTER FUNCTION, 6 / 7 for CREATE / ALTER TRIGGER, 9 / 10 for CREATE / ALTER VIEW, 12 for CREATE RULE, 13 for CREATE DEFAULT, 14 for CREATE SCHEMA, and 1 for the merged `'CREATE/ALTER PROCEDURE'` label (probe-confirmed 2026-07-31; the simulator carries the ones it parses).
 
-- **The body-shape rules apply**: Msg 455 (last statement must be `RETURN`), Msg 444 (a body `SELECT` returning to the client) and Msg 443 (a side-effecting operator) all refuse the `CREATE` — see [Body-shape rules](#body-shape-rules--msg-455--444--443).
+- **The body-shape rules apply**: Msg 455 (last statement must be `RETURN`), Msg 444 (a body `SELECT` returning to the client), Msg 443 (a side-effecting operator) and Msg 1075 (a bare `RETURN`) all refuse the `CREATE` — see [Body-shape rules](#body-shape-rules--msg-455--444--443--1075).
 
 **Fidelity gaps**:
 - **`@@ROWCOUNT` inside a UDF body** isn't isolated — body statements overwrite the caller's `LastStatementRowCount`.
@@ -205,7 +225,7 @@ Probed against SQL Server 2025.
 - **EF Core integration**: `HasDbFunction` mapped to an `IQueryable<T>`-returning DbContext method emits `SELECT ... FROM dbo.fn(@p)` through the SqlServer provider; the simulator dispatches the body and yields rows back through the same FROM-source pipeline.
   LINQ composition (`Where` / `OrderBy` / `Select`) applies to the function's result rows post-dispatch — no pushdown into the body.
 
-- **The body-shape rules apply**: Msg 455 (last statement must be `RETURN`, which for this kind means the bare form), Msg 444 and Msg 443 all refuse the `CREATE` — see [Body-shape rules](#body-shape-rules--msg-455--444--443).
+- **The body-shape rules apply**: Msg 455 (last statement must be `RETURN`, which for this kind means the bare form), Msg 444 and Msg 443 all refuse the `CREATE` — see [Body-shape rules](#body-shape-rules--msg-455--444--443--1075).
   `INSERT` / `UPDATE` / `DELETE` against the `@r` return table is legal; a write reaching a persistent table is Msg 443.
   **Msg 178** (value-form RETURN) fires at CREATE too — the body bind carries no frame, which is the same absence the invocation relies on ([CREATE-time body binding](#create-time-body-binding)).
 
@@ -294,16 +314,17 @@ Both checks run at CREATE / ALTER of the schema-bound module, off the same extra
 - **Msg 5074's blocker lines merge into one exception** rather than real's line-per-blocker Msg 5074 stream followed by a Msg 4922 — the pre-existing shape the constraint and index blockers already use.
 - **Real's blocker ordering isn't reproduced**: real interleaves by its own dependency-graph order (probed CHECK → view → PK on one column), where the simulator keeps its fixed walker order.
   The view-before-index relationship *is* matched.
-- **`sys.sql_expression_dependencies` isn't projected.** Real records dependency rows for every module, schema-bound or not, down to `referenced_minor_id` per column; this extraction is schema-bound-only and name-approximate for columns, so a faithful projection is its own build — see [`backlog.md`](backlog.md).
+- **The dependency surfaces run a wider walk of their own.** `sys.sql_expression_dependencies`, the two `sys.dm_sql_referen*_entities` DMVs and `sp_depends` need dependency rows for *every* referencing kind, not just the schema-bound ones this gate walks, so `Schemas/ModuleDependencies.cs` carries its own statement-frame-aware walk over the same stored definition text and this gate keeps its narrower one — see [`catalog-views.md`](catalog-views.md#expression-dependencies).
+  Both share the name-based column-granularity model above.
 
 ## Updatable views (DML through views)
 INSERT / UPDATE / DELETE through a view route to the view's eventual base `HeapTable` with view-aware column-name translation, visibility filtering, and (optional) WITH CHECK OPTION enforcement.
-Captured at CREATE VIEW time via `AnalyzeViewUpdatability` (in `Simulation.CreateView.Updatability.cs`) onto five `View` fields: `BaseTable` / `BaseColumnOrdinals` / `RejectionReason` / `VisibilityCheck` / `CheckOptionCheck`.
+Captured at CREATE VIEW time via `AnalyzeViewUpdatability` (in `Simulation.CreateView.Updatability.cs`) onto six `View` fields: `BaseTable` / `BaseColumnOrdinals` / `RejectionReason` / `IsJoinUpdatable` / `VisibilityCheck` / `CheckOptionCheck`.
 Probed against SQL Server 2025.
 
 **Eligible shape** (each level in a view-on-view chain must satisfy all):
-- Exactly one FROM source (a heap table OR another updatable view).
-- No JOINs, no DISTINCT, no aggregates, no GROUP BY, no HAVING, no window functions, no set-op chain.
+- Exactly one FROM source (a heap table OR another updatable view) — a multi-source body takes the [join-view UPDATE](#update-through-a-join-view) path instead.
+- No DISTINCT, no aggregates, no GROUP BY, no HAVING, no window functions, no set-op chain.
   TOP / OFFSET / FETCH / ORDER BY are allowed (they only affect reads).
 - Every column referenced in any WHERE clause up the chain maps to a real base-table column (no WHERE that references an upstream derived projection).
 
@@ -320,6 +341,7 @@ The map composes through view-on-view chains so a renamed column at level 1 refe
 - **UPDATE**: `ParseUpdate` resolves the leading identifier as a view, threads `leadingView` into `ResolveSetAssignments` (view-name → base-ordinal translation, same Msg 4406 path) and `ExecuteUpdateAgainstTable`.
   The heap scan gates `VisibilityCheck` before the user's WHERE — UPDATE through a filtered view only affects rows visible through the view.
   WHERE column references resolve against view's output columns first (so an UPDATE against a renamed view uses the rename, not the base name).
+  A `BaseTable`-less but `IsJoinUpdatable` view branches instead to [UPDATE through a join view](#update-through-a-join-view), which the SET list can't route until it has parsed.
 - **DELETE**: `ParseDelete` mirrors the same shape.
   Same visibility filter + column-name remap.
 
@@ -331,10 +353,11 @@ DELETE never fires Msg 550 (a row leaving the view is fine).
 **Errors** (all probe-confirmed verbatim against SQL Server 2025):
 - **Msg 4403**: INSERT / UPDATE / DELETE through a view with aggregate / DISTINCT / GROUP BY.
   Body of the message names the view (`"Cannot update the view or function 'dbo.v' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator."`).
-- **Msg 4405**: INSERT / UPDATE / DELETE through a JOIN view.
-  **Simulator divergence**: real SQL Server allows single-base-table UPDATEs through JOIN views; the simulator rejects uniformly here (deferred to a follow-up bundle).
+- **Msg 4405**: DELETE or INSERT through a multi-source view, and an UPDATE whose SET list spans two of its base tables.
+  Real raises the same for all three (state 1, `"View or function 'dbo.v' is not updatable because the modification affects multiple base tables."`) — a DELETE removes a whole row and so touches every base table whatever the view projects, and an INSERT is refused unless its column list names one base table's columns.
 - **Msg 4406**: INSERT or UPDATE touched a derived projection column.
   Per-column gate — a view with mixed direct + derived columns accepts INSERT/UPDATE on the direct columns and DELETE through it works fine.
+  It beats Msg 4405 when a SET list carries both faults, in either written order (probe-confirmed).
 - **Msg 550**: WITH CHECK OPTION violation (covers chain spans).
 
 **Catalog surface**: unchanged — `INFORMATION_SCHEMA.VIEWS.IS_UPDATABLE` stays hardcoded `'NO'` (probe-confirmed real SQL Server always reports `'NO'` here regardless of actual updatability, so the existing surface is correct).
@@ -344,8 +367,10 @@ The row lands in the base; the view's WHERE only filters reads.
 The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row selection* (which rows to mutate), not INSERT acceptance.
 
 **Fidelity gaps**:
-- **JOIN-view single-base UPDATE/DELETE** rejected with Msg 4405 — real SQL Server permits these when the modification affects exactly one base table.
-  EF Core doesn't emit this shape; apps that hand-write it surface Msg 4405 prematurely.
+- **A view over a join view** is Msg 4403 where real passes the write through both levels.
+  The chain analysis composes through each level's base-table map and a join view has none; flattening the levels into one source set (or chaining the output-column resolvers through them) is the work.
+- **INSERT through a join view** is Msg 4405 whatever the column list, where real accepts one whose explicit list names a single base table's columns (probe-confirmed: it writes that table, the untargeted columns taking their defaults; an implicit list or one spanning two tables is Msg 4405 on real too).
+  The INSERT path picks its base table and per-column ordinals from `View.BaseTable` / `View.BaseColumnOrdinals` before the column list parses, so routing it wants the list read first — a checkpoint / re-scan the UPDATE path doesn't need because its SET list is already parsed by then.
 - **OUTPUT through a view** raises `NotSupportedException` for INSERT / UPDATE / DELETE.
   Would need view-output-column rebinding for INSERTED.* / DELETED.* projection.
 - **Multi-source UPDATE / DELETE** (alias-form `UPDATE alias SET ... FROM ...` where the alias resolves to a view) raises `NotSupportedException` — the alias-form FROM clause can't compose with the view's visibility predicate in the existing joined-update infrastructure.
@@ -354,6 +379,37 @@ The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row sele
 - **A CTE-bodied view is not updatable** — `INSERT` / `UPDATE` / `DELETE` through `CREATE VIEW v AS WITH c AS (SELECT … FROM t) SELECT … FROM c` reports Msg 4403 where real (probe-confirmed) passes all three through to the base table.
   The analysis reads the body's FROM source, which is the CTE rather than a base table; seeing through the CTE's own plan is what's missing.
   Reading such a view ships in full — see [`ctes.md`](ctes.md#where-a-prefix-may-appear).
+
+## UPDATE through a join view
+
+A view whose body reads several sources is `BaseTable`-less and carries `ViewUpdatabilityRejection.MultipleSources`, but real accepts an UPDATE through it as long as the **SET list lands entirely in one base table** — the restriction is on the SET targets, not on what the WHERE reads.
+`View.IsJoinUpdatable` marks such a body (multi-source and otherwise DML-eligible) and routes `ParseUpdate` to `ExecuteJoinViewUpdate` in `Simulation.Update.JoinView.cs`; INSERT and DELETE keep raising Msg 4405 off `RejectionReason`, which is what real does.
+Probed against SQL Server 2025 (17.0.4065.4).
+
+The body is **re-parsed at the statement** (`Simulation.ParseViewBodyPlan`, the propagating twin of the cursor-planning `TryParseViewBodyPlan`) rather than captured at CREATE, because the profile carries live `FromSource` row enumerators — the same reason the read path re-parses per reference.
+`ViewUpdatabilityProfile` therefore holds `Sources` / `Joins` alongside the projections and excluders.
+
+**Binding the SET list.** Each SET column resolves to its view output ordinal, then through that ordinal's projection to the `(source, column)` it reads.
+A projection that isn't a direct column reference is Msg 4406 as it is met; targets landing in more than one source are Msg 4405; the winning source is the target, and its `FromSource.BackingTable` is the heap the statement writes (a target source that is itself a view or a derived table stays Msg 4405).
+Identity / computed / rowversion / GENERATED ALWAYS targets report exactly as they do on a direct UPDATE (`RejectUnmodifiableSetTarget`).
+
+**Execution** mirrors the alias-form joined UPDATE — join tuples, a `byte[]`→address side-channel on the target source, dedupe by `(page, slot)` — with two view-shaped differences:
+
+- The statement's WHERE and SET expressions name the view's **output** columns, so each resolves by evaluating that column's projection against the current tuple.
+  That makes a **derived output column readable in the WHERE** even though writing one is Msg 4406, matching real.
+- The body's own WHERE gates which tuples are candidates, the way `VisibilityCheck` does on the single-base path.
+
+Dedupe is what makes a base row appearing in several join tuples take the SET **once**: a 1-side row joined to three rows advances by one increment and reports `@@ROWCOUNT` 1 (probe-confirmed).
+When the SET reads the many side, the tuple it lands on is undefined in real and the first one here — heap order, the same rule the alias-form joined UPDATE follows.
+Through an outer-join view the preserved side is writable on a NULL-extended row while the nullable side has nothing to write and the statement affects zero rows rather than raising (probe-confirmed).
+
+**WITH CHECK OPTION** on a join view covers the body's WHERE *and* the join: the post-update row must both find a partner and pass the WHERE.
+`JoinViewRowRemainsVisible` re-runs the join with the target source narrowed to the one post-update row, so a row that changed which partner it matches is judged on its new partner — real accepts exactly that, and refuses a value that leaves the WHERE or a join key that matches nothing (all three probe-confirmed).
+The probe row is encoded with no LOB store, which keeps every value inline and allocates no off-row chain for a row that may never be written; its ceiling is the encoder's 65535-byte var-offset cap.
+
+**Positioned DML follows for free.** `WHERE CURRENT OF` through a join-view cursor binds via the identity slot the cursor stamped with that view, so a single-base positioned UPDATE writes through, a SET list spanning both base tables is Msg 4405, a positioned DELETE is Msg 4405, and naming the base table under the view is Msg 16933 — see [`cursors.md`](cursors.md#where-current-of).
+
+**Gap**: only the join view's own `WITH CHECK OPTION` is enforced on this path — a chained shape that would carry another level's is unreachable while a view over a join view stays Msg 4403.
 
 ## Stored procedures
 `CREATE [OR ALTER] PROCEDURE schema.name [(@p type [= default] [OUTPUT], ...)] [WITH options] AS body` lives in `Schema.Procedures`.
@@ -531,9 +587,10 @@ Real always names the statement in that combined `CREATE/ALTER` form whichever v
 A server prefix (four-part name) is **Msg 117** instead (`"contains more than the maximum number of prefixes. The maximum is 2."`).
 Both live in `RejectQualifiedModuleName` (`Simulation.ModuleDefinition.cs`), called by each module parser right after it reads its name.
 
-**Not modeled yet**:
-- **The permission gate on the ALTER legs**: only a plain `CREATE` runs `PermissionEnforcement.CheckCreateModule`.
-  Replacing an existing module is ungated, matching the procedure parser's pre-existing stance.
+**Both legs are permission-gated**, through the shared `CheckModuleDdlPermission` in `Simulation.ModuleDefinition.cs`.
+A statement that *creates* — a plain `CREATE`, or a `CREATE OR ALTER` over a free name — takes the database-scope CREATE-of-that-kind permission plus schema ALTER (Msg 262 state 18 / Msg 2760).
+A statement that *replaces* takes ALTER on the module instead, reporting **Msg 3701** sev 14 state 20 (`Cannot alter the <kind> '<leaf>'…`) when it's missing; the create permission alone does not admit it, probe-confirmed.
+See [`permissions.md`](permissions.md#ddl-statement-gates).
 
 ## Dynamic SQL (`EXEC (@sql)` / `sp_executesql`)
 Two re-tokenizing paths in `Simulation.ExecDynamicSql.cs`.

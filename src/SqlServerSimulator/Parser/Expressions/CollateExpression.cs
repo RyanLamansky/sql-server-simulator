@@ -38,12 +38,30 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
     public readonly Collation ResolvedCollation = collation;
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        this.Inner.GetSqlType(batch, resolveColumnType).WithCollation(this.ResolvedCollation, Coercibility.Explicit);
+        Rewrap(this.Inner.GetSqlType(batch, resolveColumnType), this.ResolvedCollation);
+
+    /// <summary>
+    /// Stamps the postfix collation onto <paramref name="type"/> at
+    /// <see cref="Coercibility.Explicit"/> rank. A postfix settles an
+    /// unresolved collation outright for the Unicode string family, but a
+    /// <c>varchar</c> whose collation never resolved has bytes in no known
+    /// code page and can't be re-collated at all — real reports that as
+    /// <b>Msg 446 State 6</b> (probe-confirmed against SQL Server 2025:
+    /// <c>concat(&lt;nvarchar pair&gt;) COLLATE X</c> returns rows where the
+    /// <c>varchar</c> spelling of the same expression raises).
+    /// </summary>
+    private static SqlType Rewrap(SqlType type, Collation collation)
+    {
+        return !SqlType.IsNationalStringCategory(type) && UnresolvedCollation.On(type) is { } conflict
+            ? throw SimulatedSqlException.UnresolvedCollationInOperation(
+                conflict.RightName, conflict.LeftName, conflict.OperatorName, "COLLATE", 6)
+            : type.WithCollation(collation, Coercibility.Explicit);
+    }
 
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = this.Inner.Run(runtime);
-        var rewrapped = value.Type.WithCollation(this.ResolvedCollation, Coercibility.Explicit);
+        var rewrapped = Rewrap(value.Type, this.ResolvedCollation);
         if (value.IsNull)
             return SqlValue.Null(rewrapped);
         if (value.Type.Category != SqlTypeCategory.String)

@@ -14,14 +14,25 @@ internal enum Permission : byte
 {
     Other = 0,
     Alter,
+    AlterAnyDatabase,
+    AlterAnyDatabaseDdlTrigger,
+    AlterAnyFullTextCatalog,
     AlterAnyLogin,
+    AlterAnyRole,
+    AlterAnySchema,
     Connect,
     Control,
+    CreateAnyDatabase,
+    CreateAssembly,
+    CreateFullTextCatalog,
     CreateFunction,
     CreateProcedure,
     CreateSequence,
+    CreateSynonym,
     CreateTable,
+    CreateType,
     CreateView,
+    CreateXmlSchemaCollection,
     Delete,
     Execute,
     Impersonate,
@@ -100,14 +111,27 @@ internal static class PermissionCatalog
     [
         new("", "    ", PermissionCategory.None),                    // Other (name/code come from the row's raw text)
         new("ALTER", "AL  ", PermissionCategory.Ddl),               // Alter
+        new("ALTER ANY DATABASE", "ALDB", PermissionCategory.None), // AlterAnyDatabase (server scope)
+        new("ALTER ANY DATABASE DDL TRIGGER", "ALTG", PermissionCategory.Ddl), // AlterAnyDatabaseDdlTrigger
+        new("ALTER ANY FULLTEXT CATALOG", "ALFT", PermissionCategory.Ddl), // AlterAnyFullTextCatalog
         new("ALTER ANY LOGIN", "ALLG", PermissionCategory.None),    // AlterAnyLogin (server scope)
+        // ALTER ANY ROLE is deliberately not Ddl: db_ddladmin does NOT confer
+        // role DDL (probe-confirmed — DROP ROLE stays Msg 15151 for a member).
+        new("ALTER ANY ROLE", "ALRL", PermissionCategory.None),     // AlterAnyRole
+        new("ALTER ANY SCHEMA", "ALSM", PermissionCategory.Ddl),    // AlterAnySchema
         new("CONNECT", "CO  ", PermissionCategory.None),            // Connect
         new("CONTROL", "CL  ", PermissionCategory.None),            // Control
+        new("CREATE ANY DATABASE", "CRDB", PermissionCategory.None), // CreateAnyDatabase (server scope)
+        new("CREATE ASSEMBLY", "CRAS", PermissionCategory.Ddl),     // CreateAssembly
+        new("CREATE FULLTEXT CATALOG", "CRFT", PermissionCategory.Ddl), // CreateFullTextCatalog
         new("CREATE FUNCTION", "CRFN", PermissionCategory.Ddl),     // CreateFunction
         new("CREATE PROCEDURE", "CRPR", PermissionCategory.Ddl),    // CreateProcedure
         new("CREATE SEQUENCE", "CRSO", PermissionCategory.Ddl),     // CreateSequence
+        new("CREATE SYNONYM", "CRSN", PermissionCategory.Ddl),      // CreateSynonym
         new("CREATE TABLE", "CRTB", PermissionCategory.Ddl),        // CreateTable
+        new("CREATE TYPE", "CRTY", PermissionCategory.Ddl),         // CreateType
         new("CREATE VIEW", "CRVW", PermissionCategory.Ddl),         // CreateView
+        new("CREATE XML SCHEMA COLLECTION", "CRXS", PermissionCategory.Ddl), // CreateXmlSchemaCollection
         new("DELETE", "DL  ", PermissionCategory.Write),            // Delete
         new("EXECUTE", "EX  ", PermissionCategory.None),            // Execute
         new("IMPERSONATE", "IM  ", PermissionCategory.None),        // Impersonate
@@ -140,14 +164,25 @@ internal static class PermissionCatalog
             return upper switch
             {
                 "ALTER" => Permission.Alter,
+                "ALTER ANY DATABASE" => Permission.AlterAnyDatabase,
+                "ALTER ANY DATABASE DDL TRIGGER" => Permission.AlterAnyDatabaseDdlTrigger,
+                "ALTER ANY FULLTEXT CATALOG" => Permission.AlterAnyFullTextCatalog,
                 "ALTER ANY LOGIN" => Permission.AlterAnyLogin,
+                "ALTER ANY ROLE" => Permission.AlterAnyRole,
+                "ALTER ANY SCHEMA" => Permission.AlterAnySchema,
                 "CONNECT" => Permission.Connect,
                 "CONTROL" => Permission.Control,
+                "CREATE ANY DATABASE" => Permission.CreateAnyDatabase,
+                "CREATE ASSEMBLY" => Permission.CreateAssembly,
+                "CREATE FULLTEXT CATALOG" => Permission.CreateFullTextCatalog,
                 "CREATE FUNCTION" => Permission.CreateFunction,
                 "CREATE PROCEDURE" => Permission.CreateProcedure,
                 "CREATE SEQUENCE" => Permission.CreateSequence,
+                "CREATE SYNONYM" => Permission.CreateSynonym,
                 "CREATE TABLE" => Permission.CreateTable,
+                "CREATE TYPE" => Permission.CreateType,
                 "CREATE VIEW" => Permission.CreateView,
+                "CREATE XML SCHEMA COLLECTION" => Permission.CreateXmlSchemaCollection,
                 "DELETE" => Permission.Delete,
                 "EXECUTE" => Permission.Execute,
                 "IMPERSONATE" => Permission.Impersonate,
@@ -198,7 +233,25 @@ internal static class PermissionCatalog
             (_, Permission.Control) => null,
             (PermissionChecker.ClassObject, Permission.Select) => Permission.Receive,
             (PermissionChecker.ClassObject, Permission.Receive) => Permission.Control,
+            // Database-scope ALTER covers the granular DDL permissions that
+            // gate the statement kinds (imported from sys.fn_builtin_permissions:
+            // covering_permission_name = ALTER for each). CREATE ASSEMBLY covers
+            // through ALTER ANY ASSEMBLY on real, which isn't modeled, so it
+            // falls to CONTROL.
+            (PermissionChecker.ClassDatabase, Permission.AlterAnyDatabaseDdlTrigger) => Permission.Alter,
+            (PermissionChecker.ClassDatabase, Permission.AlterAnyFullTextCatalog) => Permission.Alter,
+            (PermissionChecker.ClassDatabase, Permission.AlterAnyRole) => Permission.Alter,
+            (PermissionChecker.ClassDatabase, Permission.AlterAnySchema) => Permission.Alter,
+            (PermissionChecker.ClassDatabase, Permission.CreateFullTextCatalog) => Permission.AlterAnyFullTextCatalog,
+            (PermissionChecker.ClassDatabase, Permission.CreateSynonym) => Permission.Alter,
             (PermissionChecker.ClassDatabase, Permission.CreateTable) => Permission.Alter,
+            (PermissionChecker.ClassDatabase, Permission.CreateType) => Permission.Alter,
+            (PermissionChecker.ClassDatabase, Permission.CreateXmlSchemaCollection) => Permission.Alter,
+            // Server scope: CREATE ANY DATABASE ← ALTER ANY DATABASE ← CONTROL
+            // SERVER, the last unmodeled (sysadmin-only in practice), so ALTER
+            // ANY DATABASE is the top.
+            (PermissionChecker.ClassServer, Permission.AlterAnyDatabase) => null,
+            (PermissionChecker.ClassServer, Permission.CreateAnyDatabase) => Permission.AlterAnyDatabase,
             // VIEW SERVER STATE covers the granular server-state permissions; it
             // is the top of the server-state graph (CONTROL SERVER coverage is
             // out of scope — sysadmin-only in practice, handled by the bypass).

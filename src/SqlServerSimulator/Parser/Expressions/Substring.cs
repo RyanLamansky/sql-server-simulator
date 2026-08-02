@@ -96,6 +96,7 @@ internal sealed class Substring : Expression
     /// </summary>
     private SqlType ResolveResultType(SqlType sourceType, BatchContext batch)
     {
+        StringScalars.RequireSettledCollation(sourceType, "substring");
         if (StringScalars.IsMaxForm(sourceType) || !SqlType.IsStringCategory(sourceType))
             return sourceType;
         var inputWidth = StringScalars.DeclaredWidth(sourceType);

@@ -116,6 +116,41 @@ public sealed class ErrorSurfaceTests
         AreEqual(2, ex.Errors[0].LineNumber);
     }
 
+    /// <summary>
+    /// A module body reports every binder error it contains, and each becomes
+    /// its own ERROR token — so SqlClient hands the client one exception whose
+    /// <c>Errors</c> carries both, with their own lines and the module name.
+    /// That is the shape a real SQL Server 2025 CREATE with two bad columns
+    /// produces (probe-confirmed through SqlClient).
+    /// </summary>
+    [TestMethod]
+    public async Task ModuleBindErrors_EachSurfaceAsTheirOwnErrorToken()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table dbo.bt (id int not null)");
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        var ex = await Assert.ThrowsAsync<SqlException>(async () =>
+        {
+            await using var command = new SqlCommand(
+                "create procedure dbo.pboth as\nselect nosuchone from dbo.bt;\nselect nosuchtwo from dbo.bt;",
+                connection);
+            _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        });
+
+        AreEqual(2, ex.Errors.Count);
+        AreEqual(207, ex.Errors[0].Number);
+        AreEqual(2, ex.Errors[0].LineNumber);
+        AreEqual(207, ex.Errors[1].Number);
+        AreEqual(3, ex.Errors[1].LineNumber);
+        AreEqual("pboth", ex.Errors[1].Procedure);
+        // SqlClient builds the exception message by joining every entry's, so
+        // both bad columns are named in the one message the client sees.
+        Contains("nosuchtwo", ex.Message);
+    }
+
     [TestMethod]
     public async Task MissingTable_Number208()
     {

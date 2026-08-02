@@ -17,12 +17,29 @@ partial class SimulatedSqlException
     /// Msg 13608: SQL Server raises this when a <c>strict</c>-mode JSON
     /// path resolves through a missing property / out-of-bounds index /
     /// non-object-or-array intermediate. Lax mode silently returns NULL
-    /// instead. The State byte is context-dependent: JSON_VALUE reports
+    /// instead. The State byte is context-dependent: JSON_MODIFY reports
     /// state 2, an OPENJSON … WITH column reports state 6, and the
-    /// JSON_QUERY / JSON_MODIFY default is state 1.
+    /// JSON_VALUE / JSON_QUERY default is state 1.
     /// </summary>
     internal static SimulatedSqlException JsonStrictPathNotFound(byte state = 1) =>
         new("Property cannot be found on the specified JSON path.", 13608, 16, state);
+
+    /// <summary>
+    /// Msg 13619: <c>JSON_MODIFY</c> refuses a path with no segments.
+    /// <c>$</c> on its own names the whole document, which the function has
+    /// no edit to make against; <c>append $</c> is the one segment-less form
+    /// it takes.
+    /// </summary>
+    internal static SimulatedSqlException JsonUnsupportedModifyPath() =>
+        new("Unsupported JSON path found in argument 2 of JSON_MODIFY.", 13619, 16, 1);
+
+    /// <summary>
+    /// Msg 13621: a <c>strict</c>-mode <c>append</c> path named a value that
+    /// is present but isn't an array, so there is nothing to append onto.
+    /// Lax mode leaves the document unchanged instead.
+    /// </summary>
+    internal static SimulatedSqlException JsonArrayNotFound() =>
+        new("Array cannot be found in the specified JSON path.", 13621, 16, 1);
 
     /// <summary>
     /// Msg 13623: a <c>strict</c>-mode JSON path under JSON_VALUE resolved to

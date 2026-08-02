@@ -290,6 +290,17 @@ internal abstract partial class SqlType
     /// <summary>True for SQL string-family types (varchar, nvarchar, sysname).</summary>
     public static bool IsStringCategory(SqlType type) => type.Category == SqlTypeCategory.String;
 
+    /// <summary>
+    /// True for the Unicode half of the string family (<c>nvarchar</c> /
+    /// <c>nchar</c> / <c>ntext</c> / <c>sysname</c>) — the types whose storage
+    /// is UTF-16 and so carries no code page. Its complement is the
+    /// <c>varchar</c> / <c>char</c> / <c>text</c> family, which can't be
+    /// materialized without one; that split decides whether an unresolved
+    /// collation may propagate or has to be reported where it arises.
+    /// </summary>
+    public static bool IsNationalStringCategory(SqlType type) =>
+        type is NVarcharSqlType or NCharSqlType or SystemNameSqlType || type == NText;
+
     public static readonly Int32SqlType Int32 = new();
 
     public static readonly BigIntSqlType BigInt = new();
@@ -508,10 +519,10 @@ internal abstract partial class SqlType
     /// <remarks>
     /// SQL Server's <c>xml</c>: variable-length Unicode text with XPath /
     /// XQuery method dispatch layered on top. The simulator stores payload
-    /// identically to <c>nvarchar(MAX)</c>; XML methods (<c>.value()</c> /
-    /// <c>.nodes()</c> / <c>.query()</c> / <c>.exist()</c> / <c>.modify()</c>)
-    /// raise <see cref="NotSupportedException"/> at execute time. See
-    /// <c>docs/claude/xml.md</c> for the skip-with-diagnostic rationale.
+    /// identically to <c>nvarchar(MAX)</c> and executes the method surface
+    /// (<c>.value()</c> / <c>.nodes()</c> / <c>.query()</c> / <c>.exist()</c> /
+    /// <c>.modify()</c>) over a bundled XQuery-subset evaluator. See
+    /// <c>docs/claude/xml.md</c> for the modeled subset.
     /// </remarks>
     public static readonly XmlSqlType Xml = new();
 

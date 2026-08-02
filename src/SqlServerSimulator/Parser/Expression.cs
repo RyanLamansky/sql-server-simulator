@@ -843,10 +843,7 @@ internal abstract class Expression
                 {
                     // Right-then-left naming, matching every other collation
                     // conflict message: the arm being folded in is named first.
-                    stringSoFar = Collation.Resolve(accumulated, armType) is null
-                        ? throw SimulatedSqlException.UnresolvedCollationInImplicitConversion(
-                            SqlType.Promote(accumulated, armType), armType.Collation!.Name, accumulated.Collation!.Name, "CASE")
-                        : SqlType.Promote(accumulated, armType);
+                    stringSoFar = UnresolvedCollation.Settle(SqlType.Promote(accumulated, armType), accumulated, armType, "CASE");
                 }
                 else
                 {
@@ -855,7 +852,13 @@ internal abstract class Expression
             }
             branches[count++] = (armType, IntegerLiteralDigits(arm));
         }
-        return SqlType.PromoteBranches(branches.AsSpan(0, count));
+        var promoted = SqlType.PromoteBranches(branches.AsSpan(0, count));
+        // The width / family promotion above resolves collation pairwise on its
+        // own and settles on one when it can't; re-stamp the unresolved marker
+        // the arm fold produced so the conflict survives into the result type.
+        return stringSoFar is not null && UnresolvedCollation.On(stringSoFar) is { } unresolved && promoted.Category == SqlTypeCategory.String
+            ? unresolved.Mark(promoted)
+            : promoted;
     }
 
     /// <summary>

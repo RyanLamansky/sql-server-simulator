@@ -329,6 +329,25 @@ internal sealed partial class Selection
         name => ResolveColumnTypeAcrossSources(sources, name, null);
 
     /// <summary>
+    /// The compile-time resolver for DML written against a view whose body
+    /// reads several sources: with no single base table to translate to, the
+    /// name binds on its leaf against the view's own output columns and takes
+    /// the type declared there. Qualifiers are ignored, matching the per-row
+    /// resolver the join-view UPDATE path builds; anything else is Msg 207.
+    /// </summary>
+    internal static Func<MultiPartName, SqlType> ViewOutputColumnTypeResolver(BatchContext batch, Schemas.View view) =>
+        name =>
+        {
+            var collation = batch.CurrentDatabase.Collation;
+            foreach (var column in view.OutputColumns)
+            {
+                if (collation.Equals(column.Name, name.Leaf))
+                    return ColumnTypeWithMaxLength(column);
+            }
+            throw SimulatedSqlException.InvalidColumnName(name);
+        };
+
+    /// <summary>
     /// The single-table DML counterpart: a compile-time resolver mirroring the
     /// per-row resolver an UPDATE / DELETE with no FROM clause builds — the
     /// name binds on its leaf against the target's columns, through the view's
@@ -575,6 +594,23 @@ internal sealed partial class Selection
     private static ColumnReadTarget NewReadTarget(FromSource source) =>
         source.BackingTable is { } table ? new ColumnReadTarget(table) : new ColumnReadTarget(source.BackingView!);
 
+    /// <summary>
+    /// Raises <b>Msg 451</b> when <paramref name="type"/> reached an output
+    /// slot still carrying an unresolved collation. The tail names the clause
+    /// and the slot's 1-based ordinal — <c>SELECT</c> and <c>ORDER BY</c> count
+    /// from their own first term, <c>GROUP BY</c> from 2 because the grouped
+    /// projection real builds carries one column ahead of the keys (all
+    /// probe-confirmed against SQL Server 2025).
+    /// </summary>
+    private static void RequireSettledOutputCollation(SqlType type, string clause, int ordinal)
+    {
+        if (UnresolvedCollation.On(type) is { } conflict)
+        {
+            throw SimulatedSqlException.UnresolvedCollationInOutputColumn(
+                conflict.RightName, conflict.LeftName, conflict.OperatorName, clause, ordinal);
+        }
+    }
+
     private static Selection BuildSqlProjection(
         BatchContext parseBatch,
         FromSource[] sources,
@@ -590,7 +626,8 @@ internal sealed partial class Selection
         Func<MultiPartName, SqlType>? outerTypeResolver,
         bool isAssignmentOnly,
         MultiPartName? intoTarget,
-        Dictionary<int, ColumnReadTarget>? readColumnSink)
+        Dictionary<int, ColumnReadTarget>? readColumnSink,
+        bool projectionDiscarded = false)
     {
         RecordIndexedViewShape(parseBatch, sources, joins, fromClause, distinct, topExpression, aggregates);
 
@@ -700,18 +737,39 @@ internal sealed partial class Selection
 
         // A projection that reaches the client, or that materializes a column
         // (SELECT … INTO, a view's output), has to name one collation itself
-        // and reports Msg 451 when its operands can't agree on one. An
-        // assignment target supplies the collation instead — real settles the
-        // same conflict against it silently — so an INSERT … SELECT source or
-        // a `SELECT @v = …` list leaves the slot unset.
-        var projectionNamesOwnCollation = !isAssignmentOnly && !parseBatch.Parser.InInsertSourceSelect;
+        // and reports Msg 451 when the term it built carries an unresolved one.
+        // An assignment target supplies the collation instead — real settles
+        // the same conflict against it silently — so an INSERT … SELECT source,
+        // a `SELECT @v = …` list, and an EXISTS body (whose projection is never
+        // materialized) never demand one.
+        var projectionFeedsAnAssignment = isAssignmentOnly || parseBatch.Parser.InInsertSourceSelect;
+        var projectionNamesOwnCollation = !projectionFeedsAnAssignment && !projectionDiscarded;
         for (var i = 0; i < expressions.Count; i++)
         {
-            parseBatch.Parser.CollationOutputSlot = projectionNamesOwnCollation ? ("SELECT", i + 1) : null;
             outputSchema[i] = expressions[i].GetSqlType(parseBatch, readColumnSink is null ? ResolveColumnType : RecordingResolver);
             outputColumnNames[i] = expressions[i].Name;
         }
-        parseBatch.Parser.CollationOutputSlot = null;
+
+        // The select list is the *last* slot real settles: a WHERE / JOIN
+        // predicate's Msg 4191, a GROUP BY term's Msg 451 and an ORDER BY
+        // term's all report ahead of it, and an ORDER BY naming the conflicted
+        // projection — by ordinal or by alias — reports as `ORDER BY statement
+        // column <n>` rather than the select list's own slot (all
+        // probe-confirmed against SQL Server 2025). So the select-list slot is
+        // recorded here and raised only once every other clause has bound.
+        var unsettledProjection = -1;
+        for (var i = 0; i < outputSchema.Length && unsettledProjection < 0; i++)
+        {
+            if (UnresolvedCollation.On(outputSchema[i]) is null)
+                continue;
+            if (projectionNamesOwnCollation)
+                unsettledProjection = i;
+            else if (projectionFeedsAnAssignment)
+                // A discarded projection converts nothing, so it settles
+                // whatever the family; an assignment target settles only the
+                // Unicode one.
+                UnresolvedCollation.RequireAssignable(outputSchema[i]);
+        }
 
         // Compile-time bind of the predicates and grouping terms. Real SQL
         // Server binds these while compiling — probe-confirmed that a
@@ -734,10 +792,8 @@ internal sealed partial class Selection
         var groupingOrdinal = 2;
         foreach (var grouping in fromClause.AllGroupingExpressions)
         {
-            parseBatch.Parser.CollationOutputSlot = ("GROUP BY", groupingOrdinal++);
-            _ = grouping.GetSqlType(parseBatch, ResolveColumnType);
+            RequireSettledOutputCollation(grouping.GetSqlType(parseBatch, ResolveColumnType), "GROUP BY", groupingOrdinal++);
         }
-        parseBatch.Parser.CollationOutputSlot = null;
         fromClause.Having?.Bind(parseBatch, ResolveColumnType);
 
         if (readColumnSink is not null)
@@ -767,12 +823,21 @@ internal sealed partial class Selection
         }
 
         // Msg 306: text/ntext/image can't appear in a sort or distinct slot.
+        // DISTINCT also has to compare the values it dedups, so an unresolved
+        // collation reports here — as Msg 446 State 11, which names the
+        // producing operator and DISTINCT together rather than taking either
+        // the output-column or the consuming-operation wording.
         if (distinct)
         {
             for (var i = 0; i < outputSchema.Length; i++)
             {
                 if (outputSchema[i].IsLob)
                     throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
+                if (UnresolvedCollation.On(outputSchema[i]) is { } conflict)
+                {
+                    throw SimulatedSqlException.UnresolvedCollationInOperation(
+                        conflict.RightName, conflict.LeftName, conflict.OperatorName, "DISTINCT", 11);
+                }
             }
         }
         // ORDER BY items resolve output-column aliases first (then fall back to
@@ -792,14 +857,18 @@ internal sealed partial class Selection
 
         for (var i = 0; i < orderBy.Count; i++)
         {
-            parseBatch.Parser.CollationOutputSlot = ("ORDER BY", i + 1);
             var keyType = orderBy[i].IsOrdinal
                 ? outputSchema[orderBy[i].Ordinal - 1]
                 : orderBy[i].Expr!.GetSqlType(parseBatch, ResolveOrderByType);
             if (keyType.IsLob)
                 throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
+            RequireSettledOutputCollation(keyType, "ORDER BY", i + 1);
         }
-        parseBatch.Parser.CollationOutputSlot = null;
+
+        // Every other clause has bound, so a select-list slot that couldn't
+        // settle its collation reports now.
+        if (unsettledProjection >= 0)
+            RequireSettledOutputCollation(outputSchema[unsettledProjection], "SELECT", unsettledProjection + 1);
 
         // Msg 8120 / 8121 / 8127: in an aggregate query (any aggregate, GROUP
         // BY, or HAVING present) every column referenced outside an aggregate
@@ -898,7 +967,7 @@ internal sealed partial class Selection
         selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
         selection.BranchFromSources = sources;
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
-        selection.AutoColumnSource = AutoColumnSourceOf(expressions, sources);
+        (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
         return selection;
     }
 
@@ -951,21 +1020,40 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Binds each projection column to the FROM source it reads, for the AUTO
-    /// serializers' nesting levels. Only a bare column reference (through any
-    /// number of <c>AS alias</c> wrappers) binds; every other expression —
-    /// including a CAST or function call over a column — is SQL Server's
-    /// "computed column" and reports -1.
+    /// Binds each projection column to the FROM source and source column it
+    /// reads, for the AUTO serializers' nesting levels (and FOR XML AUTO's
+    /// binary <c>dbobject</c> addressing, which needs the base column). Only a
+    /// bare column reference (through any number of <c>AS alias</c> wrappers)
+    /// binds; every other expression — including a CAST or function call over a
+    /// column — is SQL Server's "computed column" and reports -1 in both slots.
     /// </summary>
-    private static int[] AutoColumnSourceOf(List<Expression> expressions, FromSource[] sources)
+    private static (int[] Source, int[] Ordinal) AutoColumnBindingOf(List<Expression> expressions, FromSource[] sources)
     {
-        var map = new int[expressions.Count];
+        var source = new int[expressions.Count];
+        var ordinal = new int[expressions.Count];
         for (var i = 0; i < expressions.Count; i++)
         {
-            map[i] = UnwrapDirectRef(expressions[i]) is Reference reference
-                ? FindSourceColumn(sources, reference.ReferencedName).SourceIndex
-                : -1;
+            if (UnwrapDirectRef(expressions[i]) is Reference reference)
+            {
+                (source[i], ordinal[i]) = FindSourceColumn(sources, reference.ReferencedName);
+            }
+            else
+            {
+                source[i] = -1;
+                ordinal[i] = -1;
+            }
         }
+        return (source, ordinal);
+    }
+
+    /// <summary>
+    /// The AUTO column binding of a projection with no FROM sources to bind to:
+    /// every column reports SQL Server's "computed column" sentinel.
+    /// </summary>
+    internal static int[] NoSourceColumnBinding(int columnCount)
+    {
+        var map = new int[columnCount];
+        Array.Fill(map, -1);
         return map;
     }
 
@@ -991,10 +1079,12 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Decides whether the FROM-bearing SELECT's shape is eligible to back
-    /// view DML and, if so, captures the projection / WHERE state. Eligible
-    /// shapes — see <see cref="ViewUpdatabilityProfile"/> — also accept
-    /// <c>TOP</c> / <c>OFFSET</c> / <c>FETCH</c> / <c>ORDER BY</c> (these
-    /// only affect reads). Set-op chains are caught one level up in
+    /// view DML and, if so, captures the source / projection / WHERE state.
+    /// Eligible shapes — see <see cref="ViewUpdatabilityProfile"/> — also
+    /// accept <c>TOP</c> / <c>OFFSET</c> / <c>FETCH</c> / <c>ORDER BY</c>
+    /// (these only affect reads) and a multi-source FROM, which
+    /// <see cref="Simulation.AnalyzeViewUpdatability"/> then splits off as
+    /// the join-updatable shape. Set-op chains are caught one level up in
     /// <see cref="CombineSetOps"/> which discards the profile by
     /// constructing a fresh Selection without one.
     /// </summary>
@@ -1013,13 +1103,12 @@ internal sealed partial class Selection
             return (null, ViewUpdatabilityRejection.Aggregate);
         if (fromClause.GroupingSets.Count > 0 || fromClause.Having is not null)
             return (null, ViewUpdatabilityRejection.GroupBy);
-        if (sources.Length != 1 || joins.Length > 0)
-            return (null, ViewUpdatabilityRejection.MultipleSources);
         if (windows.Count > 0)
             return (null, ViewUpdatabilityRejection.UnsupportedShape);
 
         var profile = new ViewUpdatabilityProfile(
-            source: sources[0],
+            sources: sources,
+            joins: joins,
             projections: [.. expressions],
             excluders: [.. fromClause.Excluders]);
         return (profile, ViewUpdatabilityRejection.None);

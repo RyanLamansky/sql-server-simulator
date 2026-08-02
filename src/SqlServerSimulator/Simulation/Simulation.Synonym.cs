@@ -34,6 +34,14 @@ partial class Simulation
         if (!context.Batch.TryResolveSchema(synonymName, out var schema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(synonymName.Count >= 2 ? synonymName.ImmediateQualifier! : Database.DefaultSchemaName);
 
+        // Dual DDL gate, in real's probed order: the database-scope CREATE
+        // SYNONYM permission (Msg 262 state 1), then ALTER on the target schema
+        // (Msg 2760).
+        if (!PermissionEnforcement.HasDatabasePermission(context.Batch, schema.Database, Permission.CreateSynonym))
+            throw SimulatedSqlException.DatabasePermissionDenied("CREATE SYNONYM", schema.Database.Name);
+        if (!PermissionEnforcement.HasSchemaAlter(context.Batch, schema))
+            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
+
         var leaf = synonymName.Leaf;
         var synonym = new Synonym(schema, leaf, context.CurrentDatabase.AllocateObjectId(), context.Batch.CurrentStatement.UtcNow, baseObject);
         if (schema.HasNameInSharedNamespace(leaf) || !schema.Synonyms.TryAdd(leaf, synonym))
@@ -72,6 +80,11 @@ partial class Simulation
         if (!context.Batch.TryResolveSchema(synonymName, out var schema))
             return ifExists ? true : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(leaf);
         RejectDropOfOtherKind(schema, synonymName, "SYNONYM");
+        if (schema.Synonyms.TryGetValue(leaf, out var target)
+            && !PermissionEnforcement.HasDropAuthority(context.Batch, schema, target.ObjectId))
+        {
+            throw SimulatedSqlException.DropObjectPermissionDenied("synonym", leaf);
+        }
         if (!schema.Synonyms.TryRemove(leaf, out var dropped))
             return ifExists ? true : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(leaf);
         RecordDdlEvent(context, "DROP_SYNONYM", schema.Name, leaf, "SYNONYM", dropped.BaseObject.Leaf);

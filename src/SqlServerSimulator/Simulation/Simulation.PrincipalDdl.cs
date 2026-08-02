@@ -179,6 +179,13 @@ partial class Simulation
 
             if (context.Batch.IsSkipping)
                 return true;
+            // Membership changes need ALTER ANY ROLE (or ALTER / CONTROL on the
+            // role, which the covering walk folds in). db_ddladmin does NOT
+            // carry it — probe-confirmed, which is why ALTER ANY ROLE isn't in
+            // the DDL category. Msg 15151 at state 2, distinct from DROP ROLE's
+            // state 1.
+            if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyRole))
+                throw SimulatedSqlException.CannotAlterRole(roleName);
             if (!context.CurrentDatabase.Principals.TryGetValue(roleName, out var role))
                 throw SimulatedSqlException.CannotFindPrincipal(roleName);
             if (!context.CurrentDatabase.Principals.TryGetValue(memberName, out var member))
@@ -228,10 +235,18 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
         // DROP USER needs db_owner (no ALTER ANY USER model) — a non-privileged
-        // principal gets Msg 15151 (probe B). DROP ROLE isn't gated here (its
-        // distinct 15151 wording is out of the probed scope).
-        if (!isRole && !PermissionEnforcement.IsOwner(context.Batch, context.CurrentDatabase))
+        // principal gets Msg 15151 (probe B). DROP ROLE takes ALTER ANY ROLE
+        // (or ALTER / CONTROL on the role) and its own 15151 wording, at
+        // state 1 rather than ALTER ROLE's state 2.
+        if (isRole)
+        {
+            if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyRole))
+                throw SimulatedSqlException.CannotDropRole(name);
+        }
+        else if (!PermissionEnforcement.IsOwner(context.Batch, context.CurrentDatabase))
+        {
             throw SimulatedSqlException.DropUserPermissionDenied(name);
+        }
         if (!context.CurrentDatabase.Principals.TryRemove(name, out var removed))
         {
             return ifExists ? true : throw SimulatedSqlException.CannotFindPrincipal(name);

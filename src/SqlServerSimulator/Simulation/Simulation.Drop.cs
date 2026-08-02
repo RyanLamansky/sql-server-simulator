@@ -184,6 +184,12 @@ partial class Simulation
             return;
         if (Simulation.SystemDatabaseNames.Contains(name))
             throw SimulatedSqlException.CannotDropSystemDatabase(name);
+        // DROP DATABASE answers at server scope like its CREATE sibling: ALTER
+        // ANY DATABASE, or dbcreator membership. The denial is Msg 3701 at
+        // severity 11 state 2 — a different shape from every object drop's
+        // severity 14 state 20 (probe-confirmed).
+        if (!PermissionEnforcement.HasDatabaseDdlAuthority(context.Batch, Permission.AlterAnyDatabase))
+            throw SimulatedSqlException.DropDatabasePermissionDenied(name);
         // Msg 3702 for a self-drop: the executing session sitting in the target
         // database (USE foo; DROP DATABASE foo). Real also blocks *other* active
         // sessions, but the teardown idiom every app runs first —
@@ -225,6 +231,15 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropSchemaDoesNotExist(schemaName);
         }
+        // DROP SCHEMA needs CONTROL on the schema or the database-scope ALTER
+        // ANY SCHEMA — probe-confirmed that schema ALTER alone is NOT enough,
+        // unlike every object drop. The denial is the same 15151 a missing
+        // schema earns.
+        if (!PermissionEnforcement.HasSchemaControl(context.Batch, schema)
+            && !PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnySchema))
+        {
+            throw SimulatedSqlException.CannotDropSchemaDoesNotExist(schemaName);
+        }
         var blocker = FirstSchemaResident(schema);
         if (blocker is not null)
             throw SimulatedSqlException.CannotDropSchemaBecauseNotEmpty(schemaName, blocker);
@@ -241,6 +256,18 @@ partial class Simulation
     /// which occupies the parallel type namespace. Returns <c>null</c> when
     /// the schema is completely empty.
     /// </summary>
+    /// <summary>
+    /// The <c>DROP TYPE</c> gate — schema ALTER (or the CONTROL that covers it).
+    /// Real also accepts <c>CONTROL</c> on the type itself, a securable class the
+    /// simulator's GRANT surface doesn't carry. Denial is Msg 218, the same
+    /// record a missing type earns, naming the type as written.
+    /// </summary>
+    private static void RejectUnauthorizedTypeDrop(ParserContext context, Schema schema, MultiPartName name)
+    {
+        if (!PermissionEnforcement.HasSchemaAlter(context.Batch, schema))
+            throw SimulatedSqlException.TypeDoesNotExist(name.ToString());
+    }
+
     private static string? FirstSchemaResident(Schema schema)
     {
         foreach (var obj in schema.SchemaObjects())
@@ -301,6 +328,8 @@ partial class Simulation
                     return;
                 throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
             }
+            if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyDatabaseDdlTrigger))
+                throw SimulatedSqlException.DropObjectPermissionDenied("trigger", name.Leaf);
             context.Batch.AcquireStatementLock(existingDdl.SchemaLock, LockMode.SchemaModification);
             if (!context.CurrentDatabase.DdlTriggers.TryRemove(name.Leaf, out _) && !ifExists)
                 throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
@@ -314,6 +343,13 @@ partial class Simulation
             if (ifExists)
                 return;
             throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
+        }
+        // A DML trigger isn't a grantable securable of its own: real gates its
+        // DROP on ALTER of the parent table / view (probe-confirmed).
+        if (!PermissionEnforcement.HasObjectAlter(
+                context.Batch, schema.Database, existing.Parent.ObjectId, existing.Parent.SchemaId))
+        {
+            throw SimulatedSqlException.DropObjectPermissionDenied("trigger", name.Leaf);
         }
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
         if (!schema.Triggers.TryRemove(name.Leaf, out _) && !ifExists)
@@ -340,6 +376,8 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropSequenceDoesNotExist(name.ToString());
         }
+        if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, existing.ObjectId))
+            throw SimulatedSqlException.DropObjectPermissionDenied("sequence", name.Leaf);
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
         if (!schema.Sequences.TryRemove(name.Leaf, out _) && !ifExists)
             throw SimulatedSqlException.CannotDropSequenceDoesNotExist(name.ToString());
@@ -373,6 +411,7 @@ partial class Simulation
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
         if (schema is not null && schema.AliasTypes.TryGetValue(name.Leaf, out _))
         {
+            RejectUnauthorizedTypeDrop(context, schema, name);
             _ = schema.AliasTypes.TryRemove(name.Leaf, out _);
             RecordDdlEvent(context, "DROP_TYPE", schema.Name, name.Leaf, "TYPE");
             return;
@@ -383,6 +422,7 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.TypeDoesNotExist(name.ToString());
         }
+        RejectUnauthorizedTypeDrop(context, schema, name);
         context.Batch.AcquireStatementLock(tableType.SchemaLock, LockMode.SchemaModification);
         // Scan every procedure in every schema of the current database for
         // a parameter that references this table type. Procedures are the
@@ -421,6 +461,8 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropProcedureDoesNotExist(name.ToString());
         }
+        if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, existing.ObjectId))
+            throw SimulatedSqlException.DropObjectPermissionDenied("procedure", name.Leaf);
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
         if (!schema.Procedures.TryRemove(name.Leaf, out _) && !ifExists)
             throw SimulatedSqlException.CannotDropProcedureDoesNotExist(name.ToString());
@@ -443,6 +485,8 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropViewDoesNotExist(name.ToString());
         }
+        if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, droppedView.ObjectId))
+            throw SimulatedSqlException.DropObjectPermissionDenied("view", name.Leaf);
         context.Batch.AcquireStatementLock(droppedView.SchemaLock, LockMode.SchemaModification);
         RejectDropOfSchemaBoundReferent(context.CurrentDatabase, droppedView, "DROP VIEW", name);
         if (!schema.Views.TryRemove(name.Leaf, out _))
@@ -475,6 +519,8 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
         }
+        if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, existing.ObjectId))
+            throw SimulatedSqlException.DropObjectPermissionDenied("function", name.Leaf);
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
         RejectDropOfSchemaBoundReferent(context.CurrentDatabase, existing, "DROP FUNCTION", name);
         if (!schema.Functions.TryRemove(name.Leaf, out _) && !ifExists)
@@ -517,11 +563,12 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropTableDoesNotExist(name.ToString());
         }
-        // DROP TABLE needs ALTER on the schema (object-scope ALTER is
-        // insufficient — probe M5b); a non-privileged principal gets Msg 3701
-        // sev 14 state 20. Temp tables are session-owned and exempt.
-        if (!isTempTable && schema is not null && !PermissionEnforcement.HasSchemaAlter(context.Batch, schema))
-            throw SimulatedSqlException.DropTablePermissionDenied(name.Leaf);
+        // DROP TABLE needs ALTER on the schema or CONTROL on the table itself
+        // (a plain object-scope ALTER is insufficient — probe M5b); a
+        // non-privileged principal gets Msg 3701 sev 14 state 20. Temp tables
+        // are session-owned and exempt.
+        if (!isTempTable && schema is not null && !PermissionEnforcement.HasDropAuthority(context.Batch, schema, removedTable.ObjectId))
+            throw SimulatedSqlException.DropObjectPermissionDenied("table", name.Leaf);
         // Sch-M on the target table for the duration of the statement.
         // Waits for any concurrent Sch-S holders (readers / writers) to drain
         // before we proceed; honors the connection's @@LOCK_TIMEOUT so a
@@ -672,6 +719,11 @@ partial class Simulation
                 : $"{Database.DefaultSchemaName}.{tableName.Leaf}";
             throw SimulatedSqlException.CannotDropIndexDoesNotExist(qualifiedTableName, indexName, state: 6);
         }
+
+        // DROP INDEX is gated on ALTER of the parent table; real reports the
+        // written table name plus the index leaf, at Msg 1088 state 9.
+        if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(table), table.ObjectId, table.SchemaId))
+            throw SimulatedSqlException.CannotFindObjectForAlterIndex($"{tableName}.{indexName}");
 
         qualifiedTableName = FormatQualifiedTableName(tableName, table);
         foreach (var kc in table.KeyConstraints)

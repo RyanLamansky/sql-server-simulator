@@ -49,6 +49,8 @@ A **statement** may carry one, and so may a **stored body** — but a *parenthes
 The statement side is the dispatch loop: it clears `ParserContext.CteBindings` per statement and repopulates from a leading WITH before the switch dispatches.
 That covers every module whose body is a statement sequence — stored procedures, triggers, multi-statement TVFs, scalar UDF bodies, dynamic SQL.
 
+`WITH XMLNAMESPACES (…)` shares the prefix and so shares this seam, registering on `ParserContext.XmlNamespaces` beside the bindings; it may lead the list (`WITH XMLNAMESPACES (…), c AS (…) SELECT …`) but not follow a CTE → [`xml.md`](xml.md#with-xmlnamespaces).
+
 A stored body is its own parse unit and never reaches that loop, so the prefix is recognized at the body-parse seam instead: `Simulation.ParseBodyQuery` (an optional WITH prefix + `Selection.Parse` at depth 0), shared by every site that parses a body's query.
 Those sites are `CREATE` / `ALTER VIEW` and each later re-parse of a view's stored text (invocation, indexed-view materialization, shape analysis, base-table collection), the inline TVF's `RETURN` body at both create and invoke, and `DECLARE … CURSOR FOR`.
 The view forms compose with everything else the header carries: the column-rename list, `WITH SCHEMABINDING`, a trailing `WITH CHECK OPTION`, `ALTER VIEW` / `CREATE OR ALTER VIEW`, and the body's own Msg 1033 ORDER BY rule.

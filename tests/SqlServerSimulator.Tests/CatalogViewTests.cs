@@ -219,6 +219,31 @@ public sealed class CatalogViewTests
             """));
 
     [TestMethod]
+    public void SysObjects_DefaultConstraintGetsDRow()
+        => AreEqual("DEFAULT_CONSTRAINT", new Simulation().ExecuteScalar("""
+            create table foo (id int, code int default 0);
+            select type_desc from sys.objects where type = 'D '
+            """));
+
+    /// <summary>
+    /// A tool enumerating a table's constraints through sys.objects alone sees
+    /// all five families under the table's parent_object_id.
+    /// </summary>
+    [TestMethod]
+    public void SysObjects_AllConstraintFamiliesHangOffTheTable()
+        => AreEqual("C |D |F |PK|UQ", new Simulation().ExecuteScalar("""
+            create table parent (id int not null primary key);
+            create table foo (
+                id int not null primary key,
+                u int not null unique,
+                a int default 0,
+                p int not null references parent (id),
+                check (a >= 0));
+            select string_agg(cast(type as varchar(2)), '|') within group (order by type)
+            from sys.objects where parent_object_id = object_id('foo')
+            """));
+
+    [TestMethod]
     public void SysObjects_PkParentLinksBackToTable()
     {
         using var reader = new Simulation().ExecuteReader("""
@@ -521,6 +546,26 @@ public sealed class CatalogViewTests
         AreEqual(3, sim.ExecuteScalar("""
             select count(*) from sys.databases
             where name in ('master', 'tempdb', 'msdb') and recovery_model = 3 and recovery_model_desc = 'SIMPLE'
+            """));
+    }
+
+    // Service Broker reads enabled everywhere but master and model
+    // (probe-confirmed; tempdb, msdb and a created user database are all 1).
+    [TestMethod]
+    public void SysDatabases_IsBrokerEnabled_OffForMasterAndModelOnly()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create database extra");
+        AreEqual(2, sim.ExecuteScalar("""
+            select count(*) from sys.databases where is_broker_enabled = 0
+            """));
+        AreEqual(2, sim.ExecuteScalar("""
+            select count(*) from sys.databases
+            where name in ('master', 'model') and is_broker_enabled = 0
+            """));
+        AreEqual(4, sim.ExecuteScalar("""
+            select count(*) from sys.databases
+            where name in ('tempdb', 'msdb', 'simulated', 'extra') and is_broker_enabled = 1
             """));
     }
 

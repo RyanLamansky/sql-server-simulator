@@ -327,7 +327,11 @@ internal abstract class BooleanExpression
             extraParens++;
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Select })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        // EXISTS counts rows and throws the projection away, so its select list
+        // never has to settle an output collation (probe-confirmed).
+        context.ProjectionDiscarded = true;
         var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+        context.ProjectionDiscarded = false;
         for (var i = 0; i <= extraParens; i++)
         {
             if (context.Token is not Operator { Character: ')' })
@@ -658,11 +662,15 @@ internal abstract class BooleanExpression
     /// </summary>
     internal static void RequireResolvableCollation(SqlType left, SqlType right, string operatorName)
     {
-        if (left != right && left.Category == SqlTypeCategory.String && right.Category == SqlTypeCategory.String
-            && Collation.Resolve(left, right) is null)
-        {
+        if (left.Category != SqlTypeCategory.String || right.Category != SqlTypeCategory.String)
+            return;
+        // A comparison needs a definite collation to compare under, so an
+        // operand that arrived carrying an unresolved one reports Msg 4191
+        // naming this comparison — the producing operator that couldn't settle
+        // it isn't named at all (probe-confirmed against SQL Server 2025).
+        UnresolvedCollation.Require(left, right, operatorName);
+        if (left != right && Collation.Resolve(left, right) is null)
             throw SimulatedSqlException.CollationConflict(right.Collation!.Name, left.Collation!.Name, operatorName);
-        }
     }
 
     /// <summary>
@@ -1546,6 +1554,7 @@ internal abstract class BooleanExpression
             // postfix yields Explicit). Same-rank conflict raises Msg 468
             // (probe-confirmed verbatim wording, "like" as the operator
             // name); higher rank wins otherwise.
+            UnresolvedCollation.Require(l.Type, r.Type, this.OperatorName);
             var resolved = Collation.Resolve(l.Type, r.Type)
                 ?? throw SimulatedSqlException.CollationConflict(
                     r.Type.Collation!.Name,

@@ -294,17 +294,16 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool InInsertSourceSelect;
 
     /// <summary>
-    /// The output slot whose collation the expression being bound has to
-    /// settle on its own — the clause name and 1-based ordinal real names in
-    /// Msg 451's <c>occurring in &lt;clause&gt; statement column &lt;n&gt;</c>
-    /// tail. Set by the plan build around each select-list / GROUP BY /
-    /// ORDER BY term and cleared once the clause is bound.
-    /// <para>Null means nothing demands a definite collation at this point:
-    /// an assignment target (INSERT … SELECT, SELECT @v = …, UPDATE SET)
-    /// supplies one, and real settles the conflict against it silently rather
-    /// than raising.</para>
+    /// Set on the <c>SELECT</c> that sits immediately inside an <c>EXISTS</c>,
+    /// whose projection real never materializes — an unresolved collation in
+    /// that select list settles into nothing rather than reporting Msg 451
+    /// (probe-confirmed: <c>EXISTS (SELECT concat(a, b) …)</c> returns rows
+    /// where the same projection at statement level raises).
+    /// <para>Claimed and cleared by the single-SELECT parse that consumes it,
+    /// so a derived table or subquery nested inside the <c>EXISTS</c> body
+    /// still names its own output collation.</para>
     /// </summary>
-    public (string Clause, int Ordinal)? CollationOutputSlot;
+    public bool ProjectionDiscarded;
 
     /// <summary>
     /// Parse-time chain of outer-scope column-type resolvers, used to plan
@@ -329,6 +328,16 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// prefix is in scope.
     /// </summary>
     public Dictionary<string, CteBinding>? CteBindings;
+
+    /// <summary>
+    /// The namespace bindings a <c>WITH XMLNAMESPACES (…)</c> prefix declares,
+    /// scoped — like <see cref="CteBindings"/> — to the immediately-following
+    /// statement and cleared at the top of the next iteration. Read by every
+    /// <c>FOR XML</c> clause the statement contains, nested subqueries
+    /// included, since real re-declares the bindings on each serialized
+    /// fragment's outermost element. Null when no such prefix is in scope.
+    /// </summary>
+    public ForXmlNamespaces? XmlNamespaces;
 
     /// <summary>
     /// Accumulates the real tables / views / TVFs a query reads, so the

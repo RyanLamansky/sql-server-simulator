@@ -88,6 +88,11 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        // Database-scope CREATE ASSEMBLY gate (Msg 262 state 1) — probe-confirmed
+        // ahead of the assembly-content checks.
+        if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.CreateAssembly))
+            throw SimulatedSqlException.DatabasePermissionDenied("CREATE ASSEMBLY", context.CurrentDatabase.Name);
+
         RegisterAssembly(context, assemblyName, content.AsBytes, permissionSet);
         return true;
     }
@@ -170,8 +175,9 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (!isAlter && !createOrAlter)
-            PermissionEnforcement.CheckCreateModule(context.Batch, "CREATE FUNCTION", functionName.Leaf, schema);
+        CheckModuleDdlPermission(
+            context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
+            schema.Functions.GetValueOrDefault(functionName.Leaf));
 
         var replaced = ResolveFunctionAlterTarget<ClrScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
 

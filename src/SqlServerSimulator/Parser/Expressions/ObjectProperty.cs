@@ -67,32 +67,24 @@ internal sealed class ObjectProperty : Expression
     }
 
     /// <summary>
-    /// Resolves a constraint's object id — the ids <c>sys.objects</c> projects
-    /// as its <c>C</c> / <c>D</c> / <c>PK</c> / <c>UQ</c> / <c>F</c> rows, none
-    /// of which is a <see cref="SchemaObject"/> so
-    /// <see cref="FindObject(Database, int)"/> can't reach them.
+    /// Resolves a constraint's object id through <see cref="ConstraintLookup"/>
+    /// — the ids <c>sys.objects</c> projects as its <c>C</c> / <c>D</c> /
+    /// <c>PK</c> / <c>UQ</c> / <c>F</c> rows, none of which is a
+    /// <see cref="SchemaObject"/> so <see cref="FindObject(Database, int)"/>
+    /// can't reach them.
     /// <paramref name="parsesAnExpression"/> is set for the two families whose
     /// declaration carries an expression (CHECK and DEFAULT), which is the one
     /// property answer that splits the five apart.
     /// </summary>
     internal static bool TryFindConstraint(Database database, int id, out bool parsesAnExpression)
     {
-        foreach (var schema in database.Schemas.Values)
+        if (!ConstraintLookup.TryResolveById(database, id, out var constraint))
         {
-            foreach (var table in schema.HeapTables.Values)
-            {
-                foreach (var check in table.CheckConstraints)
-                    if (check.ObjectId == id) { parsesAnExpression = true; return true; }
-                foreach (var column in table.Columns)
-                    if (column.DefaultConstraint is { ObjectId: var defaultId } && defaultId == id) { parsesAnExpression = true; return true; }
-                foreach (var key in table.KeyConstraints)
-                    if (key.ObjectId == id) { parsesAnExpression = false; return true; }
-                foreach (var foreignKey in table.OutgoingForeignKeys)
-                    if (foreignKey.ObjectId == id) { parsesAnExpression = false; return true; }
-            }
+            parsesAnExpression = false;
+            return false;
         }
-        parsesAnExpression = false;
-        return false;
+        parsesAnExpression = constraint.TypeCode is "C" or "D";
+        return true;
     }
 
     /// <summary>

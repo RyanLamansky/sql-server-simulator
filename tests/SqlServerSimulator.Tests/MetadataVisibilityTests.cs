@@ -190,3 +190,190 @@ public sealed class MetadataVisibilityTests
             "execute as user = 'u'; select count(*) from sys.tables where name like 'tab[_]%'"));
     }
 }
+
+/// <summary>
+/// Metadata visibility across a database boundary: a catalog-view read of
+/// <c>other.sys.*</c> asks exactly what a data reference asks — the login's
+/// user <em>there</em> — and filters by that principal's visibility, with the
+/// same Msg 916 for a login that has no user in the target. Real refuses every
+/// cross-database catalog view that way, filtered and unfiltered alike
+/// (<c>sys.databases</c> included), while the guest-served system databases
+/// pass. Probe-confirmed against SQL Server 2025.
+/// </summary>
+[TestClass]
+public sealed class CrossDatabaseMetadataVisibilityTests
+{
+    /// <summary>
+    /// <c>home</c> holds the session's user; <c>away</c> holds three tables, of
+    /// which the away user sees one by SELECT and one by VIEW DEFINITION.
+    /// </summary>
+    private static Simulation TwoDatabaseFixture(bool createAwayUser = true)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login app with password = 'S3cret!Pass'; create database home; create database away");
+        _ = sim.ExecuteNonQuery("use home; create user homeuser for login app");
+        _ = sim.ExecuteNonQuery("""
+            use away;
+            create table dbo.rem_sel (id int not null);
+            create table dbo.rem_vd (id int not null);
+            create table dbo.rem_none (id int not null)
+            """);
+        if (createAwayUser)
+        {
+            _ = sim.ExecuteNonQuery("""
+                use away;
+                create user awayuser for login app;
+                grant select on dbo.rem_sel to awayuser;
+                grant view definition on dbo.rem_vd to awayuser
+                """);
+        }
+        return sim;
+    }
+
+    private static SimulatedDbConnection ConnectAsApp(Simulation sim)
+    {
+        var connection = sim.CreateDbConnection();
+        connection.ConnectionString = "User ID=app;Password=S3cret!Pass;Initial Catalog=home";
+        connection.Open();
+        return connection;
+    }
+
+    private static List<string> Names(SimulatedDbConnection connection, string commandText)
+    {
+        var names = new List<string>();
+        using var command = connection.CreateCommand(commandText);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+            names.Add(reader.GetString(0));
+        return names;
+    }
+
+    [TestMethod]
+    public void SysTables_CrossDatabase_FiltersByTheTargetUsersVisibility()
+    {
+        using var connection = ConnectAsApp(TwoDatabaseFixture());
+        CollectionAssert.AreEqual(
+            new[] { "rem_sel", "rem_vd" },
+            Names(connection, "select name from away.sys.tables where name like 'rem[_]%' order by name"));
+    }
+
+    [TestMethod]
+    public void InformationSchemaTables_CrossDatabase_FiltersByTheTargetUsersVisibility()
+    {
+        using var connection = ConnectAsApp(TwoDatabaseFixture());
+        CollectionAssert.AreEqual(
+            new[] { "rem_sel", "rem_vd" },
+            Names(connection, "select table_name from away.information_schema.tables where table_name like 'rem[_]%' order by table_name"));
+    }
+
+    [TestMethod]
+    public void SysColumns_CrossDatabase_FollowsTheSameObjectSet()
+    {
+        using var connection = ConnectAsApp(TwoDatabaseFixture());
+        using var command = connection.CreateCommand(
+            "select count(*) from away.sys.columns c join away.sys.tables t on t.object_id = c.object_id where t.name like 'rem[_]%'");
+        AreEqual(2, command.ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void SysTables_CrossDatabase_SessionGrantsDoNotTravel()
+    {
+        // A grant held in `home` reveals nothing in `away` — the target user's
+        // own visibility is the only input.
+        var sim = TwoDatabaseFixture();
+        _ = sim.ExecuteNonQuery("use home; create table dbo.local_only (id int); grant control on dbo.local_only to homeuser");
+        using var connection = ConnectAsApp(sim);
+        HasCount(2, Names(connection, "select name from away.sys.tables where name like 'rem[_]%'"));
+    }
+
+    [TestMethod]
+    public void SysTables_CrossDatabase_TargetUserWithFullVisibility_SeesEverything()
+    {
+        var sim = TwoDatabaseFixture();
+        _ = sim.ExecuteNonQuery("use away; alter role db_ddladmin add member awayuser");
+        using var connection = ConnectAsApp(sim);
+        HasCount(3, Names(connection, "select name from away.sys.tables where name like 'rem[_]%'"));
+    }
+
+    [TestMethod]
+    public void SysTables_CrossDatabase_NoUserInTarget_Raises916()
+    {
+        using var connection = ConnectAsApp(TwoDatabaseFixture(createAwayUser: false));
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand("select name from away.sys.tables").ExecuteScalar());
+        AreEqual(916, ex.Number);
+        AreEqual(14, ex.Class);
+        AreEqual(2, ex.State);
+        AreEqual("The server principal \"app\" is not able to access the database \"away\" under the current security context.", ex.Message);
+    }
+
+    [TestMethod]
+    public void UnfilteredCatalogView_CrossDatabase_NoUserInTarget_Raises916()
+    {
+        // sys.databases carries no metadata filter of its own, yet real refuses
+        // the cross-database read the same way — the refusal is about reaching
+        // the database, not about the view.
+        using var connection = ConnectAsApp(TwoDatabaseFixture(createAwayUser: false));
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand("select count(*) from away.sys.databases").ExecuteScalar());
+        AreEqual(916, ex.Number);
+    }
+
+    [TestMethod]
+    public void DataRead_AndCatalogRead_DivergeForAnUnrevealedObject()
+    {
+        // The contrast the filter draws: an object the target user can't see is
+        // absent from the catalog, while naming it in a query is Msg 229.
+        using var connection = ConnectAsApp(TwoDatabaseFixture());
+        AreEqual(0, connection.CreateCommand("select count(*) from away.sys.tables where name = 'rem_none'").ExecuteScalar());
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand("select id from away.dbo.rem_none").ExecuteScalar());
+        AreEqual(229, ex.Number);
+    }
+
+    [TestMethod]
+    public void GuestServedSystemDatabase_CrossDatabaseCatalogRead_Passes()
+    {
+        // guest is accessible in master / tempdb / msdb, so the catalog read
+        // resolves there and filters by guest instead of refusing.
+        using var connection = ConnectAsApp(TwoDatabaseFixture(createAwayUser: false));
+        AreEqual(0, connection.CreateCommand("select count(*) from master.sys.tables").ExecuteScalar());
+        AreEqual(0, connection.CreateCommand("select count(*) from msdb.sys.tables where name = 'nope'").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void RestrictedTemplateDatabase_CrossDatabaseCatalogRead_Raises916()
+    {
+        // `model` allows no guest access, so it refuses like any user database.
+        using var connection = ConnectAsApp(TwoDatabaseFixture(createAwayUser: false));
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand("select count(*) from model.sys.tables").ExecuteScalar());
+        AreEqual(916, ex.Number);
+    }
+
+    [TestMethod]
+    public void SysadminLogin_CrossDatabaseCatalogRead_Unfiltered()
+    {
+        var sim = TwoDatabaseFixture(createAwayUser: false);
+        _ = sim.ExecuteNonQuery("alter server role sysadmin add member app");
+        using var connection = ConnectAsApp(sim);
+        HasCount(3, Names(connection, "select name from away.sys.tables where name like 'rem[_]%'"));
+    }
+
+    [TestMethod]
+    public void DboSession_CrossDatabaseCatalogRead_Unfiltered()
+        => AreEqual(3, TwoDatabaseFixture().ExecuteScalar(
+            "use home; select count(*) from away.sys.tables where name like 'rem[_]%'"));
+
+    [TestMethod]
+    public void ExecuteAsUser_CrossDatabaseCatalogRead_Raises916()
+    {
+        // A database-scoped identity can't reach the away catalog any more than
+        // it can reach away data — unless the source database is trustworthy.
+        var sim = TwoDatabaseFixture();
+        _ = sim.AssertSqlError("use home; execute as user = 'homeuser'; select name from away.sys.tables", 916);
+        _ = sim.ExecuteNonQuery("alter database home set trustworthy on");
+        AreEqual(2, sim.ExecuteScalar(
+            "use home; execute as user = 'homeuser'; select count(*) from away.sys.tables where name like 'rem[_]%'"));
+    }
+}

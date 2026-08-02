@@ -6,8 +6,9 @@ namespace SqlServerSimulator;
 /// Behavioral tests for <c>GRANT</c> / <c>REVOKE</c> / <c>DENY</c> + the
 /// principal DDL (<c>CREATE USER</c>, <c>CREATE ROLE</c>,
 /// <c>ALTER ROLE … ADD MEMBER</c>, <c>DROP USER</c>, <c>DROP ROLE</c>).
-/// The simulator stores parsed permissions and principals for catalog-view
-/// round-trip; no enforcement is performed.
+/// Writer-side only — that the parsed permissions and principals land in the
+/// catalog views correctly. Enforcement lives in <c>PermissionEnforcementTests</c>
+/// and <c>StatementPermissionGateTests</c>.
 /// </summary>
 [TestClass]
 public sealed class PermissionStatementTests

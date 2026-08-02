@@ -172,8 +172,14 @@ Backs `OBJECT_ID()` plus `sys.tables` / `sys.objects` / `sys.columns.object_id`.
 
 **`OBJECT_ID(name [, type])`** scalar (`Parser/Expressions/ObjectId.cs`): returns the `int` ObjectId of the named object, or NULL when not found / wrong type / malformed name.
 The name is a runtime string parsed as a 1–3-part dotted identifier with bracket-quoting (`'[dbo].[foo]'`, `'dbo.foo'`, `'simulated.dbo.foo'` all resolve identically); 4-segment names return NULL (linked-server form unmodeled).
-The type filter is case-insensitive but whitespace-sensitive — `'U'` and `'u'` match user tables; `' U '`, `'XX'`, `''` all → NULL; other documented codes (`V`/`P`/`F`/`FN`/...) → NULL until those features land.
+The type filter is case-insensitive but whitespace-sensitive — `'U'` and `'u'` match user tables; `' U '`, `'XX'`, `''` all → NULL.
+Modeled codes: `U` (table), `V` (view, catalog views included), `P` (procedure), `FN` / `IF` (scalar UDF / inline TVF), `TR` (DML trigger), `SN` (synonym), and the five constraint families `PK` / `UQ` / `C` / `D` / `F`; the rest → NULL until those features land.
 A NULL on any argument propagates NULL.
+
+- **Constraint names resolve like any other schema-scoped object** (probe-confirmed for a DEFAULT, a CHECK and a PRIMARY KEY, qualified or not, with the type filter honored and `OBJECT_NAME` reading back).
+  A constraint isn't a `SchemaObject` — its identity hangs off the owning `HeapTable` — so the name → constraint and id → constraint walks live in the shared `ConstraintLookup`, which `OBJECT_ID` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` / `OBJECTPROPERTY` all read.
+  A constraint's name is scoped to the schema of the table that owns it, so one on a table in schema `s` answers only through `OBJECT_ID('s.<name>')` and never unqualified from `dbo` (probe-confirmed), and its metadata visibility follows that table the way a trigger's follows its parent.
+  Resolution is attempted last, after tables, so a name a table also holds still answers the table's id.
 
 - **Runtime-evaluated arguments**: `DECLARE @n nvarchar(100) = 'foo'; SELECT OBJECT_ID(@n)` works — both args are full `Expression`s.
 - **Unqualified function names resolve against the default schema.** `BatchContext.TryResolveFunction` takes 2-/3-part names only, because a bare `f()` at a *call* site is Msg 195 on real; `OBJECT_ID` is a name lookup rather than a call, and real returns the id for `OBJECT_ID('f')`, so the 1-part form is qualified with `dbo` before the resolver is asked.

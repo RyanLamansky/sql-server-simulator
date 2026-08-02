@@ -12,6 +12,7 @@
   When the same target matches multiple join tuples, SQL Server uses the *first* matching tuple's RHS for SET.
   The simulator dedupes by `(page, slot)` via a side-channel byte[]→address map.
   LEFT JOIN with no right-side match still surfaces the target (RHS sees NULL).
+  The same dedupe carries **UPDATE through a view over a join** — real accepts one whose SET list lands entirely in a single base table, and the join-multiplied target updates once there too — see [`programmable.md`](programmable.md#update-through-a-join-view).
 - **OUTPUT** supported only when the leading identifier resolves to a real table name; OUTPUT + alias-form multi-source → `NotSupportedException` (EF doesn't combine those).
 - **Multi-column SET evaluates RHS against pre-update snapshot** — `UPDATE t SET a = 100, b = a + 1` over `(a=10, b=20)` → `(a=100, b=11)`.
   Scalar subquery RHS sees pre-update state.

@@ -74,8 +74,12 @@ internal sealed class PatIndex : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         _ = StringScalars.BindArgument(this.pattern, batch, resolveColumnType, "patindex");
-        SqlType resultType = IsBigResult(this.subject.GetSqlType(batch, resolveColumnType)) ? SqlType.BigInt : SqlType.Int32;
-        return resultType;
+        var subjectType = this.subject.GetSqlType(batch, resolveColumnType);
+        // The subject is matched rather than transformed, so it takes no
+        // legacy-LOB rejection — but the match still needs a definite
+        // collation, so an unresolved one reports from either operand.
+        StringScalars.RequireSettledCollation(subjectType, "patindex");
+        return IsBigResult(subjectType) ? SqlType.BigInt : SqlType.Int32;
     }
 
     /// <summary>

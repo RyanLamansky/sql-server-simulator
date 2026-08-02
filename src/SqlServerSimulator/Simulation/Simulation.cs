@@ -40,7 +40,15 @@ public sealed partial class Simulation
         // collation.
         foreach (var (name, id) in SystemDatabaseIds)
             this.Databases.Add(name, new Database(name, this.ServerCollation) { Id = id });
+        // Real ships master / tempdb / msdb with cross-database chaining on and
+        // msdb trustworthy; model and every user database start with both off
+        // (probe-confirmed against SQL Server 2025). A new database never
+        // inherits either flag from model — real resets both at CREATE.
+        this.Databases[MasterDatabaseName].CrossDatabaseChaining = true;
+        this.Databases[TempdbDatabaseName].CrossDatabaseChaining = true;
         var msdb = this.Databases[MsdbDatabaseName];
+        msdb.CrossDatabaseChaining = true;
+        msdb.Trustworthy = true;
         SeedMsdbPolicyHealthView(msdb);
         SeedMsdbPolicyConfigurationView(msdb);
         SeedMsdbPolicyAutomationFunction(msdb);
@@ -115,7 +123,8 @@ public sealed partial class Simulation
             baseColumnOrdinals: [],
             rejectionReason: ViewUpdatabilityRejection.UnsupportedShape,
             visibilityCheck: null,
-            checkOptionCheck: null)
+            checkOptionCheck: null,
+            isJoinUpdatable: false)
         {
             DefinitionText = $"CREATE VIEW dbo.syspolicy_system_health_state AS {bodyText}",
         };
@@ -169,7 +178,8 @@ public sealed partial class Simulation
             baseColumnOrdinals: [],
             rejectionReason: ViewUpdatabilityRejection.UnsupportedShape,
             visibilityCheck: null,
-            checkOptionCheck: null)
+            checkOptionCheck: null,
+            isJoinUpdatable: false)
         {
             DefinitionText = $"CREATE VIEW dbo.syspolicy_configuration AS {bodyText}",
         };
@@ -1417,6 +1427,7 @@ public sealed partial class Simulation
         SimulatedSqlException? caught = null;
         SimulatedSqlException? continuedError = null;
         var deferredNameError = false;
+        var gatheredBindError = false;
         try
         {
             try
@@ -1484,6 +1495,19 @@ public sealed partial class Simulation
                     if (batch.CreateTimeBinding)
                         batch.BatchAborted = true;
                 }
+                else if (batch.CreateTimeBindErrors is { } bindErrors && ex.Class == 16)
+                {
+                    // A module body reports every binder error it contains, so
+                    // this one is gathered and the bind resumes at the next
+                    // statement boundary. Checked ahead of the TRY-frame path
+                    // because a body's own TRY / CATCH doesn't shield a binder
+                    // error — binding precedes any of it running
+                    // (probe-confirmed). Severity 15 is real's parse phase,
+                    // which preempts the whole report rather than joining it,
+                    // so those keep propagating from the arm below.
+                    bindErrors.Add(ex);
+                    gatheredBindError = true;
+                }
                 else if (batch.TryFrameDepth > 0)
                 {
                     caught = ex;
@@ -1522,16 +1546,23 @@ public sealed partial class Simulation
                 shape!.ConditionalDepth--;
         }
 
-        if (deferredNameError)
+        if (deferredNameError || gatheredBindError)
         {
             // The parser threw mid-statement; advance to the next statement
             // boundary so the outer dispatch loop resumes cleanly (same
             // cursor-recovery scan the TRY-caught path uses below). No
-            // @@ERROR / InFlightError mutation — the skipped statement is
-            // conceptually never compiled, not run-and-failed.
+            // @@ERROR / InFlightError mutation — a skipped statement is
+            // conceptually never compiled, not run-and-failed, and a gathered
+            // bind error belongs to the CREATE the bind serves.
             var parser = batch.Parser;
             while (parser.Token is not null && !IsStatementBoundary(parser.Token))
                 parser.MoveNextOptional();
+            // A scan that stopped on a separator (or ran out of body) resumed
+            // where a statement really begins; one that stopped on a keyword
+            // guessed, and the bind reads a later severity-15 error from a
+            // guessed position as recovery noise.
+            if (gatheredBindError)
+                batch.BindResumedCleanly = parser.Token is null or Operator { Character: ';' };
             yield break;
         }
 
@@ -1728,9 +1759,11 @@ public sealed partial class Simulation
         var context = batch.Parser;
         var connection = context.Connection;
 
-        // CTE bindings live for exactly one statement. Clear at the top of
-        // every iteration; a WITH prefix below repopulates.
+        // CTE bindings and XMLNAMESPACES declarations live for exactly one
+        // statement. Clear at the top of every iteration; a WITH prefix below
+        // repopulates.
         context.CteBindings = null;
+        context.XmlNamespaces = null;
         batch.CurrentStatement.UtcNow = DateTime.UtcNow;
         batch.CurrentStatement.StatementScopedValues = null;
 

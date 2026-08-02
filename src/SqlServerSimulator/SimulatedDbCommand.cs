@@ -162,7 +162,7 @@ public sealed class SimulatedDbCommand : DbCommand
 
         ThrowIfExecutionCancelled();
         return errors is not null
-            ? throw AggregateErrors(errors)
+            ? throw SimulatedSqlException.Aggregate(errors)
             : counted ? affected : -1;
     }
 
@@ -209,29 +209,7 @@ public sealed class SimulatedDbCommand : DbCommand
         }
 
         ThrowIfExecutionCancelled();
-        return errors is not null ? throw AggregateErrors(errors) : scalar;
-    }
-
-    /// <summary>
-    /// Collapses the statement-terminating errors gathered while draining a
-    /// batch into a single exception. A lone error is rethrown as-is (its
-    /// <see cref="SimulatedSqlException.Errors"/> already carries its own
-    /// entries); multiple errors flatten into one exception whose
-    /// <c>Errors</c> collection holds every entry in batch order.
-    /// </summary>
-    private static SimulatedSqlException AggregateErrors(List<SimulatedSqlException> errors)
-    {
-        if (errors.Count == 1)
-            return errors[0];
-
-        var entries = new List<SimulatedError>(errors.Count);
-        foreach (var error in errors)
-        {
-            foreach (var entry in error.Errors)
-                entries.Add(entry);
-        }
-
-        return SimulatedSqlException.FromErrors(entries);
+        return errors is not null ? throw SimulatedSqlException.Aggregate(errors) : scalar;
     }
 
     /// <summary>

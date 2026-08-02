@@ -3,14 +3,16 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Real SQL Server's three function body-shape rules, all reported at
+/// Real SQL Server's function body-shape rules, all reported at
 /// <c>CREATE</c> / <c>ALTER</c> alongside the body bind
 /// (<c>ModuleBodyBindingTests</c>): <strong>Msg 455</strong> (the last
 /// statement must be <c>RETURN</c>), <strong>Msg 444</strong> (a <c>SELECT</c>
-/// returning rows to the client) and <strong>Msg 443</strong> (a side-effecting
-/// operator). They apply to a scalar UDF and a multi-statement TVF; procedures,
-/// triggers and inline TVFs are exempt.
-/// Every case is probe-confirmed against SQL Server 2025 (2026-08-01).
+/// returning rows to the client), <strong>Msg 443</strong> (a side-effecting
+/// operator) and parse-phase <strong>Msg 1075</strong> (a bare <c>RETURN</c> in
+/// a scalar UDF, which preempts the rest of the report). They apply to a scalar
+/// UDF and a multi-statement TVF; procedures, triggers and inline TVFs are
+/// exempt.
+/// Every case is probe-confirmed against SQL Server 2025 (2026-08-01 / 08-02).
 /// </summary>
 [TestClass]
 public sealed class FunctionBodyShapeTests
@@ -200,19 +202,38 @@ public sealed class FunctionBodyShapeTests
     /// <summary>
     /// The side-effecting built-ins, named the way real names them (state 1) —
     /// the date / time readers stay legal even though the indexed-view
-    /// determinism battery rejects them. <c>NEWSEQUENTIALID</c> is real's Msg
-    /// 443 too, but the simulator's own Msg 302 (the outside-a-DEFAULT gate,
-    /// which real raises everywhere else) fires from the call's parse first.
+    /// determinism battery rejects them. A function body is the one place
+    /// <c>NEWSEQUENTIALID</c> answers with this rather than its own
+    /// outside-a-<c>DEFAULT</c> gate, including from a body table variable's
+    /// <c>DEFAULT</c> clause (probe-confirmed).
     /// </summary>
     [TestMethod]
     [DataRow("return newid()", "newid")]
     [DataRow("return rand()", "rand")]
     [DataRow("declare @g uniqueidentifier = newid() return 1", "newid")]
+    [DataRow("return newsequentialid()", "newsequentialid")]
+    [DataRow("declare @g uniqueidentifier set @g = newsequentialid() return 1", "newsequentialid")]
+    [DataRow("declare @tv table (g uniqueidentifier default newsequentialid()) return 1", "newsequentialid")]
     public void SideEffectingBuiltIn_IsMsg443(string body, string operatorName)
     {
         var ex = AssertScalarBodyError(body, 443);
         AreEqual($"Invalid use of a side-effecting operator '{operatorName}' within a function.", ex.Message);
         AreEqual(1, ex.State);
+    }
+
+    /// <summary>
+    /// A multi-statement TVF takes the same answer, while every context real
+    /// isn't checking a function body in keeps its Msg 302 — a plain statement
+    /// and a procedure body alike.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create function dbo.f() returns @r table (g uniqueidentifier) as begin insert @r values (newsequentialid()) return end", 443)]
+    [DataRow("create procedure dbo.f as select newsequentialid()", 302)]
+    public void NewSequentialIdOutsideAScalarFunction(string create, int number)
+    {
+        var sim = WithFixture();
+        _ = sim.AssertSqlError(create, number);
+        AreEqual(0, ObjectCount(sim, "f"));
     }
 
     /// <summary>
@@ -249,11 +270,64 @@ public sealed class FunctionBodyShapeTests
         AreEqual(0, ObjectCount(sim, "f"));
     }
 
+    // === Msg 1075: a scalar function's RETURN carries a value ===
+
+    /// <summary>
+    /// Every <c>RETURN</c> in a scalar UDF must carry the value it returns, so
+    /// a bare one is Msg 1075 wherever it sits — mid-body or trailing.
+    /// </summary>
+    [TestMethod]
+    [DataRow("if @x = 1 return return 1")]
+    [DataRow("set @x = 1 return")]
+    [DataRow("while @x < 10 begin return end return 1")]
+    public void BareReturnInScalarFunction_IsMsg1075(string body)
+    {
+        var sim = WithFixture();
+        var ex = sim.AssertSqlError($"create function dbo.f(@x int) returns int as begin {body} end", 1075);
+        AreEqual("RETURN statements in scalar valued functions must include an argument.", ex.Message);
+        AreEqual(15, ex.Class);
+        AreEqual(1, ex.State);
+        AreEqual("f", ex.Procedure);
+        AreEqual(0, ObjectCount(sim, "f"));
+    }
+
+    /// <summary>
+    /// The bare form is the <em>required</em> one in a multi-statement TVF —
+    /// mid-body as well as trailing — and legal in a procedure.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create function dbo.f(@x int) returns @r table (a int) as begin if @x = 1 return insert @r values (1) return end")]
+    [DataRow("create procedure dbo.f as begin return end")]
+    public void BareReturnWhereItIsLegal_Creates(string create)
+    {
+        var sim = WithFixture();
+        sim.ExecuteBatches(create);
+        AreEqual(1, ObjectCount(sim, "f"));
+    }
+
+    /// <summary>
+    /// Msg 1075 is real's parse phase, which preempts the shape report and the
+    /// binder's alike: a body carrying a side-effecting operator, a missing
+    /// trailing <c>RETURN</c> or a bad column beside the bare <c>RETURN</c>
+    /// reports only the 1075 (probe-confirmed for each).
+    /// </summary>
+    [TestMethod]
+    [DataRow("print 'x' if @x = 1 return return 1")]
+    [DataRow("if @x = 1 return set @x = 3")]
+    [DataRow("if @x = 1 return declare @a int = (select nosuchcol from dbo.t) return 1")]
+    [DataRow("declare @a int = (select nosuchcol from dbo.t); if @x = 1 return; return 1")]
+    public void BareReturn_PreemptsEveryOtherReport(string body)
+    {
+        var ex = AssertScalarBodyError(body, 1075);
+        AreEqual(1, ex.Errors.Count);
+    }
+
     // === Ordering and the exempt module kinds ===
 
     /// <summary>
     /// Real reports every binder error in the body before any shape error, so
-    /// a body with both reports the binder's — whichever statement each is on.
+    /// a body with both leads with the binder's — whichever statement each is
+    /// on.
     /// </summary>
     [TestMethod]
     [DataRow("select nosuchcol from dbo.t print 'hi' return 1")]
@@ -262,14 +336,51 @@ public sealed class FunctionBodyShapeTests
         => _ = AssertScalarBodyError(body, 207);
 
     /// <summary>
-    /// Among shape errors, source order decides — and Msg 455 comes last
-    /// because its statement is the body's last.
+    /// The whole report in one exception: every binder error first, then the
+    /// shape violations in source order with Msg 455 last — even though its
+    /// line is past the others'.
     /// </summary>
     [TestMethod]
-    public void FirstShapeViolationInSourceOrderWins()
+    public void EveryBinderErrorThenEveryShapeViolation()
+    {
+        var sim = WithFixture();
+        var ex = sim.AssertSqlError("""
+            create function dbo.f(@x int) returns int as
+            begin
+                print 'x';
+                declare @a int = (select nosuchcol from dbo.t);
+                set @x = 1;
+            end
+            """, 207);
+        CollectionAssert.AreEqual(
+            new[] { 207, 443, 455 },
+            ex.Errors.Select(e => e.Number).ToArray());
+        CollectionAssert.AreEqual(
+            new[] { 4, 3, 5 },
+            ex.Errors.Select(e => e.LineNumber).ToArray());
+        AreEqual(0, ObjectCount(sim, "f"));
+    }
+
+    /// <summary>
+    /// Shape violations report in source order, each as its own entry, and the
+    /// first supplies the exception's own number and state.
+    /// </summary>
+    [TestMethod]
+    public void EveryShapeViolationInSourceOrder()
+    {
+        var ex = AssertScalarBodyError("print 'x' return newsequentialid()", 443);
+        AreEqual(2, ex.Errors.Count);
+        AreEqual(14, ex.Errors[0].State);
+        AreEqual(1, ex.Errors[1].State);
+    }
+
+    /// <summary>Msg 455 rides at the end of a run the body earns one on.</summary>
+    [TestMethod]
+    public void Msg455ComesLastInTheShapeRun()
     {
         var ex = AssertScalarBodyError("select 1 set @x = 2", 444);
         AreEqual(3, ex.State);
+        CollectionAssert.AreEqual(new[] { 444, 455 }, ex.Errors.Select(e => e.Number).ToArray());
     }
 
     /// <summary>

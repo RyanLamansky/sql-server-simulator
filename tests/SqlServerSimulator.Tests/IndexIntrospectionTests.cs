@@ -326,4 +326,129 @@ public sealed class IndexIntrospectionTests
         IsTrue(reader.GetBoolean(1));
         IsFalse(reader.Read());
     }
+
+    /// <summary>
+    /// A clustered index numbers <c>index_column_id</c> in table column order
+    /// while <c>key_ordinal</c> carries the key order, so
+    /// <c>create clustered index ix on t(b, a)</c> reports column <c>a</c> at
+    /// index_column_id 1 / key_ordinal 2 (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void IndexColumns_Clustered_NumbersInTableColumnOrder()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int not null, b int not null, c int not null, d int not null);
+            create clustered index ix on t (c, a)
+            """);
+        using var reader = sim.ExecuteReader("""
+            select col_name(ic.object_id, ic.column_id), ic.index_column_id, ic.key_ordinal
+            from sys.index_columns ic
+            join sys.indexes i on i.object_id = ic.object_id and i.index_id = ic.index_id
+            where i.name = 'ix'
+            order by ic.index_column_id
+            """);
+        IsTrue(reader.Read());
+        AreEqual("a", reader.GetString(0));
+        AreEqual(1, reader.GetInt32(1));
+        AreEqual((byte)2, reader.GetByte(2));
+        IsTrue(reader.Read());
+        AreEqual("c", reader.GetString(0));
+        AreEqual(2, reader.GetInt32(1));
+        AreEqual((byte)1, reader.GetByte(2));
+        IsFalse(reader.Read());
+    }
+
+    /// <summary>A clustered PRIMARY KEY numbers its columns the same way.</summary>
+    [TestMethod]
+    public void IndexColumns_ClusteredPrimaryKey_NumbersInTableColumnOrder()
+        => AreEqual("a=1/2 c=2/1", new Simulation().ExecuteScalar("""
+            create table t (a int not null, b int not null, c int not null,
+                            constraint pk primary key clustered (c, a));
+            select string_agg(
+                       concat(col_name(ic.object_id, ic.column_id), '=',
+                              ic.index_column_id, '/', ic.key_ordinal), ' ')
+                       within group (order by ic.index_column_id)
+            from sys.index_columns ic where ic.object_id = object_id('t')
+            """));
+
+    /// <summary>
+    /// A nonclustered index keeps key order, its INCLUDE columns continuing
+    /// past the key count.
+    /// </summary>
+    [TestMethod]
+    public void IndexColumns_Nonclustered_NumbersInKeyOrder()
+        => AreEqual("c=1/1 a=2/2 b=3/0", new Simulation().ExecuteScalar("""
+            create table t (a int not null, b int not null, c int not null);
+            create index ix on t (c, a) include (b);
+            select string_agg(
+                       concat(col_name(ic.object_id, ic.column_id), '=',
+                              ic.index_column_id, '/', ic.key_ordinal), ' ')
+                       within group (order by ic.index_column_id)
+            from sys.index_columns ic where ic.object_id = object_id('t')
+            """));
+
+    /// <summary>
+    /// <c>sys.stats_columns.stats_column_id</c> tracks the sibling
+    /// index_column_id, so DacFx's join of the two on (stats_column_id,
+    /// column_id) still pairs up for a clustered index.
+    /// </summary>
+    [TestMethod]
+    public void StatsColumns_Clustered_TrackIndexColumnId()
+        => AreEqual(2, new Simulation().ExecuteScalar("""
+            create table t (a int not null, b int not null, c int not null);
+            create clustered index ix on t (c, a);
+            select count(*) from sys.index_columns ic
+            join sys.stats_columns sc on sc.object_id = ic.object_id and sc.stats_id = ic.index_id
+                 and sc.stats_column_id = ic.index_column_id and sc.column_id = ic.column_id
+            where ic.object_id = object_id('t')
+            """));
+
+    /// <summary>
+    /// One declaration's key constraints take their index ids in reverse
+    /// declaration order — real's own allocation order (probe-confirmed), so
+    /// an inline nonclustered PRIMARY KEY declared before a UNIQUE lands at
+    /// index_id 3 with the UNIQUE at 2.
+    /// </summary>
+    [TestMethod]
+    public void IndexIds_InlineKeyConstraints_AllocateInReverseDeclarationOrder()
+        => AreEqual("uq2=2 uq1=3 pk=4", new Simulation().ExecuteScalar("""
+            create table t (id int not null constraint pk primary key nonclustered,
+                            u int not null constraint uq1 unique,
+                            v int not null constraint uq2 unique);
+            select string_agg(concat(name, '=', index_id), ' ') within group (order by index_id)
+            from sys.indexes where object_id = object_id('t') and index_id > 0
+            """));
+
+    /// <summary>
+    /// The clustered constraint takes index_id 1 wherever it's declared, and
+    /// the rest still reverse (probe-confirmed with the clustered PK in the
+    /// middle of the declaration).
+    /// </summary>
+    [TestMethod]
+    public void IndexIds_ClusteredConstraintFirst_ThenReverseDeclarationOrder()
+        => AreEqual("pk=1 uq2=2 uq1=3", new Simulation().ExecuteScalar("""
+            create table t (a int not null constraint uq1 unique,
+                            b int not null constraint pk primary key clustered,
+                            c int not null constraint uq2 unique);
+            select string_agg(concat(name, '=', index_id), ' ') within group (order by index_id)
+            from sys.indexes where object_id = object_id('t') and index_id > 0
+            """));
+
+    /// <summary>
+    /// A table-level UNIQUE participates in the same reverse ordering as an
+    /// inline one, and <c>ALTER TABLE ADD CONSTRAINT</c> afterwards takes the
+    /// next id up.
+    /// </summary>
+    [TestMethod]
+    public void IndexIds_TableLevelAndLaterAlter_FollowTheSameOrder()
+        => AreEqual("pk=1 uq2=2 uq1=3 uq3=4", new Simulation().ExecuteScalar("""
+            create table t (a int not null, b int not null, c int not null,
+                            constraint pk primary key (a),
+                            constraint uq1 unique (b),
+                            constraint uq2 unique (c));
+            alter table t add constraint uq3 unique (b, c);
+            select string_agg(concat(name, '=', index_id), ' ') within group (order by index_id)
+            from sys.indexes where object_id = object_id('t') and index_id > 0
+            """));
 }

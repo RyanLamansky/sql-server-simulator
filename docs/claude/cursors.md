@@ -161,6 +161,7 @@ Probe-confirmed:
 
 A view is opaque and a query body is transparent, so the two compose: `(SELECT … FROM v) d` is addressed by `v`, and a view whose body reads a derived table is addressed by the view.
 Everything the view's own DML path enforces then applies to the positioned write — a `WITH CHECK OPTION` view raises **Msg 550** when the new value would leave the view (probe-confirmed), a DELETE through the same view is unaffected, and a view with a plain WHERE accepts a write that pushes the row out of range.
+A view over a JOIN carries its own rule with it: a positioned UPDATE whose SET list lands in one base table writes through, one spanning both is **Msg 4405**, and a positioned DELETE is **Msg 4405** — see [`programmable.md`](programmable.md#update-through-a-join-view).
 
 `ParseWhereCurrentOf` validates, in this order:
 
@@ -250,9 +251,6 @@ A deferred body the cursor *can* follow warns about nothing, matching real: `DEC
 
 ## Divergences from SQL Server (documented, not byte-identical)
 
-- **A positioned UPDATE through a view over a JOIN is Msg 4405** where real accepts one touching a single base table.
-  The cursor reaches the row; the block is the view-DML rewrite, whose `ViewUpdatabilityProfile` accepts a single FROM source only, so `UPDATE <join view> SET …` raises before the positioned binding is consulted.
-  A positioned DELETE through such a view is Msg 4405 on both, and naming the base table under it is Msg 16933 on both.
 - **A cursor over a generator source is forced STATIC** — a TVF, a catalog view, `VALUES`, `OPENJSON`, PIVOT, `.nodes()`, a linked server.
   Real reports these as read-only snapshots too (probe-confirmed for `STRING_SPLIT`), so the sensitivity matches; what diverges is only that the simulator arrives there by refusing to plan the slot rather than by the source having no key.
   A `FOR SYSTEM_TIME` source resolves the same way and likewise matches — real reports all five forms as `Snapshot | Read Only`, so positioned DML through one is Msg 16929 on both.

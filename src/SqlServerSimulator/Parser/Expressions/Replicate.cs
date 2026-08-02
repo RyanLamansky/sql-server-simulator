@@ -70,7 +70,9 @@ internal sealed class Replicate : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(StringScalars.BindCoercedArgument(this.input, batch, resolveColumnType, "replicate"), batch);
+        // REPLICATE copies its input without comparing it, so an unresolved
+        // collation propagates into the result (probe-confirmed).
+        ResolveResultType(StringScalars.BindCoercedArgument(this.input, batch, resolveColumnType, "replicate", propagatesUnresolvedCollation: true), batch);
 
     /// <summary>
     /// Result width mirrors SQL Server's probed rule: a <c>varchar(MAX)</c> /

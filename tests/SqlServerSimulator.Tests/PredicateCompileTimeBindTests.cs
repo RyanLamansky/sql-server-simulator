@@ -25,8 +25,8 @@ public sealed class PredicateCompileTimeBindTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery($"""
-            create table c1 (x varchar(20) collate {Ci} null, y int null);
-            create table c2 (x varchar(20) collate {Cs} null, y int null);
+            create table c1 (x varchar(20) collate {Ci} null, nx nvarchar(20) collate {Ci} null, y int null);
+            create table c2 (x varchar(20) collate {Cs} null, nx nvarchar(20) collate {Cs} null, y int null);
             create table lob (nt ntext null, t text null, im image null, v varchar(20) null)
             """);
         return sim;
@@ -149,16 +149,36 @@ public sealed class PredicateCompileTimeBindTests
     }
 
     /// <summary>
-    /// A target collation settles the conflict without an error: real coerces
-    /// the concat result into the column or variable being assigned rather
-    /// than making the expression name a collation of its own.
+    /// A target collation settles the conflict for the Unicode family without
+    /// an error: real coerces the concat result into the column or variable
+    /// being assigned rather than making the expression name a collation of its
+    /// own.
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert c1 (nx) select concat(c1.nx, c2.nx) from c1, c2")]
+    [DataRow("declare @v nvarchar(40); select @v = concat(c1.nx, c2.nx) from c1, c2")]
+    [DataRow("update c1 set nx = concat(c1.nx, c2.nx) from c1, c2")]
+    public void CrossCollationConcat_IntoAssignmentTarget_Succeeds(string sql)
+        => AreEqual(0, EmptyFixture().ExecuteNonQuery(sql));
+
+    /// <summary>
+    /// A <c>varchar</c> whose collation never resolved has bytes in no known
+    /// code page, so no target settles it — real refuses the implicit
+    /// conversion with <b>Msg 456</b>, which names the operator that produced
+    /// the conflict rather than the assignment consuming it.
     /// </summary>
     [TestMethod]
     [DataRow("insert c1 (x) select concat(c1.x, c2.x) from c1, c2")]
     [DataRow("declare @v varchar(40); select @v = concat(c1.x, c2.x) from c1, c2")]
     [DataRow("update c1 set x = concat(c1.x, c2.x) from c1, c2")]
-    public void CrossCollationConcat_IntoAssignmentTarget_Succeeds(string sql)
-        => AreEqual(0, EmptyFixture().ExecuteNonQuery(sql));
+    public void CrossCollationConcat_VarcharIntoAssignmentTarget_Raises456(string sql)
+    {
+        var ex = EmptyFixture().AssertSqlError(sql, 456);
+        AreEqual((byte)1, ex.State);
+        AreEqual(
+            $"Implicit conversion of varchar value to varchar cannot be performed because the resulting collation is unresolved due to collation conflict between \"{Cs}\" and \"{Ci}\" in concat operator.",
+            ex.Message);
+    }
 
     /// <summary>
     /// <c>ISNULL</c> takes its first argument's collation outright rather than
@@ -280,7 +300,7 @@ public sealed class PredicateCompileTimeBindTests
     public void PopulatedRowset_StillRaisesTheSameError(string sql, int expectedNumber)
     {
         var sim = EmptyFixture();
-        _ = sim.ExecuteNonQuery("insert c1 values ('a', 1); insert c2 values ('a', 1); insert lob (nt) values (N'a')");
+        _ = sim.ExecuteNonQuery("insert c1 (x, y) values ('a', 1); insert c2 (x, y) values ('a', 1); insert lob (nt) values (N'a')");
         _ = sim.AssertSqlError(sql, expectedNumber);
     }
 

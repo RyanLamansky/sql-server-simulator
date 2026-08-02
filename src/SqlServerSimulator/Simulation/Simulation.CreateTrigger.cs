@@ -255,6 +255,16 @@ partial class Simulation
             throw SimulatedSqlException.InvalidObjectName(triggerName);
         if (existed && (isAlter || createOrAlter) && !ReferenceEquals(existing!.Parent, parent))
             throw SimulatedSqlException.CannotAlterTriggerOnDifferentObject(triggerName, parentName);
+        // A DML trigger is not a grantable securable of its own — real gates
+        // both verbs on ALTER of the parent table / view (probe-confirmed).
+        // Creating reports Msg 2104 naming the trigger as written; replacing an
+        // existing one reports the Msg 3701 state 20 every module ALTER uses.
+        if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(parent), parent.ObjectId, parent.SchemaId))
+        {
+            throw existed
+                ? SimulatedSqlException.AlterObjectPermissionDenied("trigger", triggerName.Leaf)
+                : SimulatedSqlException.CreateTriggerPermissionDenied(triggerName.ToString());
+        }
         // Sch-M on the existing trigger instance's SchemaLock before
         // replacement — same pattern as ALTER PROCEDURE.
         if (existed)
@@ -493,6 +503,14 @@ partial class Simulation
             throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf);
         if (isAlter && !existed)
             throw SimulatedSqlException.InvalidObjectName(triggerName);
+        // A database-scope DDL trigger is gated on ALTER ANY DATABASE DDL
+        // TRIGGER instead of a parent object's ALTER (probe-confirmed).
+        if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyDatabaseDdlTrigger))
+        {
+            throw existed
+                ? SimulatedSqlException.AlterObjectPermissionDenied("trigger", triggerName.Leaf)
+                : SimulatedSqlException.CreateTriggerPermissionDenied(triggerName.ToString());
+        }
 
         var objectId = existed ? existing!.ObjectId : context.CurrentDatabase.AllocateObjectId();
         var trigger = new DdlTrigger(

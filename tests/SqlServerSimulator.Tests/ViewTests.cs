@@ -461,6 +461,14 @@ public sealed class ViewTests
         Assert.AreEqual(0, simulation.ExecuteScalar("select count(*) from dbo.t1 where id = 1"));
     }
 
+    /// <summary>
+    /// INSERT through a JOIN view is Msg 4405 whichever base tables the
+    /// column list names. Real raises it for a list spanning two of them (and
+    /// for the implicit list, which spans all) but accepts one naming a
+    /// single base table's columns — pinned here as a divergence; see
+    /// docs/claude/programmable.md. UPDATE follows real's rule, in
+    /// <see cref="JoinViewUpdateTests"/>.
+    /// </summary>
     [TestMethod]
     public void Insert_Through_Join_View_Raises_Msg4405()
     {
@@ -468,9 +476,10 @@ public sealed class ViewTests
         simulation.ExecuteBatches(
             "create table dbo.t2 (id int, owner varchar(10))",
             "create view dbo.v as select a.id, a.label, b.owner from dbo.t1 a inner join dbo.t2 b on a.id = b.id");
-        var ex = simulation.AssertSqlError("insert dbo.v(id, label) values (99, 'x')", 4405);
+        var ex = simulation.AssertSqlError("insert dbo.v(label, owner) values ('x', 'y')", 4405);
         Assert.Contains("'dbo.v'", ex.Message);
         Assert.Contains("multiple base tables", ex.Message);
+        _ = simulation.AssertSqlError("insert dbo.v(owner) values ('y')", 4405);
     }
 
     [TestMethod]

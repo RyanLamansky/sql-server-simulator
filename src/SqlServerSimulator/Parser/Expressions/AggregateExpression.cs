@@ -223,13 +223,28 @@ internal sealed class AggregateExpression : Expression
             ? result
             : throw new InvalidOperationException("AggregateExpression.Run was called before its result was bound; this indicates the Selection executor didn't recognize it as an aggregate.");
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        // An aggregate's own DISTINCT dedups its operand, which needs a
+        // definite collation — real reports that as the same Msg 446 State 11
+        // the projection-level DISTINCT takes, naming the producing operator
+        // and DISTINCT together.
+        return this.Distinct && this.Operand is { } distinctOperand
+            && UnresolvedCollation.On(distinctOperand.GetSqlType(batch, resolveColumnType)) is { } conflict
+            ? throw SimulatedSqlException.UnresolvedCollationInOperation(
+                conflict.RightName, conflict.LeftName, conflict.OperatorName, "DISTINCT", 11)
+            : this.ResultType(batch, resolveColumnType);
+    }
+
+    private SqlType ResultType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
     {
         AggregateKind.Count => SqlType.Int32,
         AggregateKind.CountBig or AggregateKind.ApproxCountDistinct => SqlType.BigInt,
         AggregateKind.ChecksumAgg => SqlType.Int32,
         AggregateKind.Stdev or AggregateKind.StdevP or AggregateKind.Var or AggregateKind.VarP => SqlType.Float,
-        AggregateKind.Max or AggregateKind.Min => this.Operand!.GetSqlType(batch, resolveColumnType),
+        // MAX / MIN order their input, so an unresolved collation reports here
+        // (Msg 4191 naming `max` / `min`) rather than travelling on.
+        AggregateKind.Max or AggregateKind.Min => BindOrderedOperand(batch, resolveColumnType),
         // STRING_AGG refuses a legacy LOB in either slot, and real binds that
         // while compiling — so the gate runs here as well as per value.
         AggregateKind.StringAgg => BindStringAggArguments(batch, resolveColumnType),
@@ -245,6 +260,13 @@ internal sealed class AggregateExpression : Expression
     /// separator in the aggregate executor. Returns the operand's type, which
     /// is the aggregate's result type.
     /// </summary>
+    private SqlType BindOrderedOperand(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var operandType = this.Operand!.GetSqlType(batch, resolveColumnType);
+        StringScalars.RequireSettledCollation(operandType, this.Kind == AggregateKind.Max ? "max" : "min");
+        return operandType;
+    }
+
     private SqlType BindStringAggArguments(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var operandType = StringScalars.BindArgument(this.Operand!, batch, resolveColumnType, "string_agg");

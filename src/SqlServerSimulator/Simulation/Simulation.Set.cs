@@ -524,7 +524,7 @@ partial class Simulation
 
         context.MoveNextRequired();
         if (context.Token is Operator { Character: '.' })
-            return TryParseSetSpatialProperty(context, slot);
+            return TryParseSetInstanceMember(context, variableToken, slot);
         if (TryConsumeAssignmentOperator(context) is not char assignOp)
             return false;
 
@@ -550,6 +550,33 @@ partial class Simulation
     /// right-hand side surfaces as the bare .NET argument failure real emits
     /// with no 24xxx code, and an SRID outside 0..999999 as Msg 24100.
     /// </remarks>
+    /// <summary>
+    /// Routes <c>SET @v.&lt;member&gt; …</c> to the one instance-member form
+    /// that has a mutator: an XML method call (only <c>.modify()</c> is one —
+    /// anything else is Msg 8113) or the spatial <c>STSrid</c> property
+    /// assignment. A non-xml variable carrying a method call is Msg 258,
+    /// naming its type the way real does.
+    /// </summary>
+    private static bool TryParseSetInstanceMember(ParserContext context, AtPrefixedString variableToken, VariableSlot slot)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        if (context.GetNextRequired() is Name method
+            && XmlMethodCall.IsKnownMethodName(method.Value)
+            && context.GetNextOptional() is Operator { Character: '(' })
+        {
+            if (slot.DeclaredType is not XmlSqlType)
+                throw SimulatedSqlException.CannotCallMethodsOn(slot.DeclaredType.SqlServerName);
+            var mutator = XmlModify.Parse(new VariableReference(variableToken, context), $"@{variableToken.Value}", method.Value, context, resolveColumnType: null);
+            if (context.Batch.IsSkipping)
+                return true;
+            slot.Value = mutator.Run(new RuntimeContext(NoColumnResolver, context.Batch));
+            context.Connection.LastStatementRowCount = 1;
+            return true;
+        }
+        context.RestoreCheckpoint(checkpoint);
+        return TryParseSetSpatialProperty(context, slot);
+    }
+
     private static bool TryParseSetSpatialProperty(ParserContext context, VariableSlot slot)
     {
         if (context.GetNextRequired() is not Name member)

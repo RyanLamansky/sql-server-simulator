@@ -1,7 +1,7 @@
 # `ALTER DATABASE` SET-option surface
 
 Closed accept-list parser (`RecognizedDatabaseOptions` in `Simulation.Alter.cs`) covering every database-scope toggle SqlPackage emits from a bacpac's `SqlDatabaseOptions` element.
-Most options parse-and-discard; only the four "load-bearing" toggles (`COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`) drive actual behavior.
+Most options parse-and-discard; only the six "load-bearing" toggles (`COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `TRUSTWORTHY`, `DB_CHAINING`) drive actual behavior.
 
 ## Target database
 
@@ -49,6 +49,23 @@ These dispatch to dedicated helpers rather than falling into the parse-and-disca
   See [`locking.md`](locking.md).
 - **`RECURSIVE_TRIGGERS`** — toggles `Database.RecursiveTriggers`; lets an AFTER trigger's own DML re-fire that trigger, and surfaces as `sys.databases.is_recursive_triggers_on`.
   See [`triggers.md`](triggers.md#nesting-and-recursion-options).
+- **`TRUSTWORTHY`** — toggles `Database.Trustworthy`; lets a database-scoped identity established here (an `EXECUTE AS USER` frame, a module's `WITH EXECUTE AS <user>` frame, an activated application role) reach another database, where its own login then answers.
+  Surfaces as `sys.databases.is_trustworthy_on`.
+  See [`permissions.md`](permissions.md#cross-database-references).
+- **`DB_CHAINING`** — toggles `Database.CrossDatabaseChaining`; an ownership chain crosses the database boundary only when *both* databases have it on.
+  Surfaces as `sys.databases.is_db_chaining_on`.
+  See [`permissions.md`](permissions.md#cross-database-references).
+
+Both cross-database toggles take the bare `ON` / `OFF` shape (`SET TRUSTWORTHY = ON` is Msg 102, probe-confirmed), and each refuses a set of system databases whatever the value asked for:
+
+| Statement | Refused on | Error |
+|---|---|---|
+| `SET TRUSTWORTHY` | `model` / `tempdb` | **Msg 15309** class 16 state 1 — `Cannot alter the trustworthy state of the model or tempdb databases.` |
+| `SET DB_CHAINING` | `master` / `model` / `tempdb` | **Msg 5600** class 16 state 2 — `The Cross Database Chaining option cannot be set to the specified value on the specified database.` |
+
+`msdb` is the one system database real lets either flag move on.
+The **shipped defaults** match real (probe-confirmed): `master` / `tempdb` chained, `msdb` chained *and* trustworthy, `model` and every user database neither.
+Neither flag is inherited from `model` — a new database starts with both off, which real enforces structurally by refusing to set them on `model` at all.
 
 ## `COLLATE` clause
 

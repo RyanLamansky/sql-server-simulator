@@ -41,6 +41,9 @@ partial class Simulation
     /// <summary><c>principal_id</c> of the <c>sysadmin</c> fixed server role.</summary>
     internal const int SysadminRoleId = 3;
 
+    /// <summary><c>principal_id</c> of the <c>dbcreator</c> fixed server role — the membership that carries <c>CREATE DATABASE</c> / <c>DROP DATABASE</c> (probe-confirmed).</summary>
+    internal const int DbCreatorRoleId = 9;
+
     /// <summary>Fixed-server-role name → id, for role-name resolution. Keyed by <see cref="BuiltInToken.Comparer"/>.</summary>
     private static readonly FrozenDictionary<string, int> FixedServerRoleIds =
         FixedServerRoles.ToFrozenDictionary(r => r.Name, r => r.Id, BuiltInToken.Comparer);
@@ -209,6 +212,10 @@ partial class Simulation
         }
         return closure;
     }
+
+    /// <summary>Whether the login is a (transitive) member of the fixed server role with <paramref name="roleId"/> — the <c>dbcreator</c> gate for database DDL.</summary>
+    internal bool IsLoginInServerRole(string loginName, int roleId) =>
+        this.TryResolveServerPrincipalId(loginName, out var id) && this.IsServerPrincipalInRole(id, roleId);
 
     /// <summary>Whether the login runs as a <c>sysadmin</c> member — <c>sa</c> always, else transitive <c>sysadmin</c> membership. Maps the login to <c>dbo</c> everywhere.</summary>
     internal bool IsLoginSysadmin(string loginName) =>

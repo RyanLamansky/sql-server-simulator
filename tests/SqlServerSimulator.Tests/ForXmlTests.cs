@@ -98,9 +98,49 @@ public sealed class ForXmlTests
         Contains("requires at least one table", ex.Message);
     }
 
+    // ---- AUTO over a set-operation result ----
+
     [TestMethod]
-    public void Auto_SetOperation_NotModeled()
-        => Throws<NotSupportedException>(() => Xml("select id from t union all select id from u for xml auto"));
+    public void Auto_SetOperation_NamesFirstBranchSource()
+        => AreEqual("""<t id="1" a="10"/><t id="2" a="30"/><t id="3" a="50"/><t id="1" a="10"/><t id="2" a="20"/>""",
+            Xml("select id, a from t union all select id, a from u for xml auto"));
+
+    [TestMethod]
+    public void Auto_SetOperation_NamesFirstBranchAlias()
+        => AreEqual("""<t1 id="1" a="10"/><t1 id="2" a="30"/><t1 id="3" a="50"/><t1 id="1" a="10"/><t1 id="2" a="20"/>""",
+            Xml("select id, a from t t1 union all select id, a from u u1 for xml auto"));
+
+    [TestMethod]
+    public void Auto_SetOperation_TakesFirstBranchColumnAliases()
+        => AreEqual("""<t x="1" y="10"/><t x="2" y="30"/><t x="3" y="50"/><t x="1" y="10"/><t x="2" y="20"/>""",
+            Xml("select id as x, a as y from t union all select id, a from u for xml auto"));
+
+    /// <summary>
+    /// A set operator flattens AUTO's nesting: the first branch's join
+    /// contributes only its <em>first</em> source's name, and every column
+    /// lands on that one element.
+    /// </summary>
+    [TestMethod]
+    public void Auto_SetOperation_FlattensJoinNesting()
+        => AreEqual("""<t id="1" a="10"/><t id="2" a="20"/><t id="1" a="10"/><t id="2" a="20"/>""",
+            Xml("select t.id, u.a from t join u on t.id=u.id union all select id, a from u for xml auto"));
+
+    [TestMethod]
+    public void Auto_SetOperation_SurvivesOrderBy()
+        => AreEqual("""<t id="3" a="50"/><t id="2" a="30"/><t id="2" a="20"/><t id="1" a="10"/><t id="1" a="10"/>""",
+            Xml("select id, a from t union all select id, a from u order by id desc for xml auto"));
+
+    [TestMethod]
+    public void Auto_SetOperation_WithElementsAndRoot()
+        => AreEqual("<r><t><id>1</id><a>10</a></t><t><id>2</id><a>30</a></t><t><id>3</id><a>50</a></t><t><id>1</id><a>10</a></t><t><id>2</id><a>20</a></t></r>",
+            Xml("select id, a from t union all select id, a from u for xml auto, elements, root('r')"));
+
+    [TestMethod]
+    public void Auto_SetOperation_FromLessFirstBranch_Msg6800()
+    {
+        var ex = Seeded().AssertSqlError("select 9 as id union all select id from t for xml auto", 6800);
+        Contains("requires at least one table", ex.Message);
+    }
 
     // ---- AUTO join nesting ----
 
@@ -686,6 +726,401 @@ public sealed class ForXmlTests
     public void RawName_EmptyWithElements_OmitsRowTag()
         => AreEqual("<id>1</id><id>2</id><id>3</id>",
             Xml("select id from t for xml raw(''), elements"));
+
+    // ---- WITH XMLNAMESPACES ----
+
+    [TestMethod]
+    public void Namespaces_Raw_DeclaresOnEveryRowElement()
+        => AreEqual("""<row xmlns:p="urn:x" id="1" a="10"/><row xmlns:p="urn:x" id="2" a="30"/><row xmlns:p="urn:x" id="3" a="50"/>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id, a from t for xml raw"));
+
+    [TestMethod]
+    public void Namespaces_Auto_DeclaresOnEveryRowElement()
+        => AreEqual("""<t xmlns:p="urn:x" id="1" a="10"/><t xmlns:p="urn:x" id="2" a="30"/><t xmlns:p="urn:x" id="3" a="50"/>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id, a from t for xml auto"));
+
+    [TestMethod]
+    public void Namespaces_Path_DeclaresOnEveryRowElement()
+        => AreEqual("""<row xmlns:p="urn:x"><id>1</id><a>10</a></row><row xmlns:p="urn:x"><id>2</id><a>30</a></row><row xmlns:p="urn:x"><id>3</id><a>50</a></row>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id, a from t for xml path"));
+
+    /// <summary>With a ROOT wrapper the declarations move to it — the row elements carry none.</summary>
+    [TestMethod]
+    public void Namespaces_Root_DeclaresOnRootOnly()
+        => AreEqual("""<r xmlns:p="urn:x"><row id="1" a="10"/><row id="2" a="30"/><row id="3" a="50"/></r>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id, a from t for xml raw, root('r')"));
+
+    [TestMethod]
+    public void Namespaces_AutoRoot_DeclaresOnRootOnly()
+        => AreEqual("""<r xmlns:p="urn:x"><t id="1" a="10"/><t id="2" a="30"/><t id="3" a="50"/></r>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id, a from t for xml auto, root('r')"));
+
+    /// <summary>
+    /// Row-tag omission has no row element, so every top-level element the row
+    /// content produces carries the declarations instead.
+    /// </summary>
+    [TestMethod]
+    public void Namespaces_PathRowTagOmitted_DeclaresOnEachTopLevelElement()
+        => AreEqual("""<id xmlns:p="urn:x">1</id><a xmlns:p="urn:x">10</a><id xmlns:p="urn:x">2</id><a xmlns:p="urn:x">30</a><id xmlns:p="urn:x">3</id><a xmlns:p="urn:x">50</a>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id, a from t for xml path('')"));
+
+    [TestMethod]
+    public void Namespaces_PathRowTagOmitted_BareTextCarriesNone()
+        => AreEqual("""1<a xmlns:p="urn:x">10</a>2<a xmlns:p="urn:x">30</a>3<a xmlns:p="urn:x">50</a>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id as [text()], a from t for xml path('')"));
+
+    [TestMethod]
+    public void Namespaces_RawRowTagOmitted_DeclaresOnEachTopLevelElement()
+        => AreEqual("""<id xmlns:p="urn:x">1</id><a xmlns:p="urn:x">10</a><id xmlns:p="urn:x">2</id><a xmlns:p="urn:x">30</a><id xmlns:p="urn:x">3</id><a xmlns:p="urn:x">50</a>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id, a from t for xml raw(''), elements"));
+
+    /// <summary>DEFAULT emits an unprefixed xmlns, which the element names then inherit by XML scoping.</summary>
+    [TestMethod]
+    public void Namespaces_Default_EmitsUnprefixedDeclaration()
+        => AreEqual("""<t xmlns="urn:d" id="1"/><t xmlns="urn:d" id="2"/><t xmlns="urn:d" id="3"/>""",
+            Xml("with xmlnamespaces (default 'urn:d') select id from t for xml auto"));
+
+    /// <summary>Declarations emit in reverse declaration order, DEFAULT taking its written position.</summary>
+    [TestMethod]
+    public void Namespaces_EmitInReverseDeclarationOrder()
+        => AreEqual("""<row xmlns:r="urn:z" xmlns:q="urn:y" xmlns:p="urn:x" id="1"/><row xmlns:r="urn:z" xmlns:q="urn:y" xmlns:p="urn:x" id="2"/><row xmlns:r="urn:z" xmlns:q="urn:y" xmlns:p="urn:x" id="3"/>""",
+            Xml("with xmlnamespaces ('urn:x' as p, 'urn:y' as q, 'urn:z' as r) select id from t for xml raw"));
+
+    [TestMethod]
+    public void Namespaces_DefaultKeepsItsWrittenPositionInReverseOrder()
+        => AreEqual("""<row xmlns:q="urn:y" xmlns="urn:d" xmlns:p="urn:x" id="1"/><row xmlns:q="urn:y" xmlns="urn:d" xmlns:p="urn:x" id="2"/><row xmlns:q="urn:y" xmlns="urn:d" xmlns:p="urn:x" id="3"/>""",
+            Xml("with xmlnamespaces ('urn:x' as p, default 'urn:d', 'urn:y' as q) select id from t for xml raw"));
+
+    [TestMethod]
+    public void Namespaces_Xsinil_DeclaresXsiFirst()
+        => AreEqual("""<row xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="urn:d" xmlns:p="urn:x"><id>1</id><z xsi:nil="true"/></row><row xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="urn:d" xmlns:p="urn:x"><id>2</id><z xsi:nil="true"/></row><row xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="urn:d" xmlns:p="urn:x"><id>3</id><z xsi:nil="true"/></row>""",
+            Xml("with xmlnamespaces ('urn:x' as p, default 'urn:d') select id, cast(null as int) as z from t for xml path, elements xsinil"));
+
+    [TestMethod]
+    public void Namespaces_XsinilWithRoot_BothLandOnRoot()
+        => AreEqual("""<r xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:p="urn:x"><row><id>1</id><z xsi:nil="true"/></row><row><id>2</id><z xsi:nil="true"/></row><row><id>3</id><z xsi:nil="true"/></row></r>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id, cast(null as int) as z from t for xml raw, elements xsinil, root('r')"));
+
+    // ---- WITH XMLNAMESPACES: prefixed names ----
+
+    [TestMethod]
+    public void Namespaces_PathElementAndAttributeAliases()
+        => AreEqual("""<row xmlns:p="urn:x" p:b="10"><p:a>1</p:a></row><row xmlns:p="urn:x" p:b="30"><p:a>2</p:a></row><row xmlns:p="urn:x" p:b="50"><p:a>3</p:a></row>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select a as [@p:b], id as [p:a] from t for xml path"));
+
+    [TestMethod]
+    public void Namespaces_PathNestedPrefixedSteps()
+        => AreEqual("""<row xmlns:p="urn:x"><p:a><p:b>1</p:b></p:a></row><row xmlns:p="urn:x"><p:a><p:b>2</p:b></p:a></row><row xmlns:p="urn:x"><p:a><p:b>3</p:b></p:a></row>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id as [p:a/p:b] from t for xml path"));
+
+    [TestMethod]
+    public void Namespaces_PrefixedRowTag()
+        => AreEqual("""<p:row xmlns:q="urn:y" xmlns:p="urn:x"><p:a><q:b>1</q:b></p:a></p:row><p:row xmlns:q="urn:y" xmlns:p="urn:x"><p:a><q:b>2</q:b></p:a></p:row><p:row xmlns:q="urn:y" xmlns:p="urn:x"><p:a><q:b>3</q:b></p:a></p:row>""",
+            Xml("with xmlnamespaces ('urn:x' as p, 'urn:y' as q) select id as [p:a/q:b] from t for xml path('p:row')"));
+
+    [TestMethod]
+    public void Namespaces_PrefixedRootName()
+        => AreEqual("""<p:r xmlns:p="urn:x"><row><p:a>1</p:a></row><row><p:a>2</p:a></row><row><p:a>3</p:a></row></p:r>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id as [p:a] from t for xml path, root('p:r')"));
+
+    [TestMethod]
+    public void Namespaces_PrefixedRawElementName()
+        => AreEqual("""<p:e xmlns:p="urn:x" p:a="1"/><p:e xmlns:p="urn:x" p:a="2"/><p:e xmlns:p="urn:x" p:a="3"/>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id as [p:a] from t for xml raw('p:e')"));
+
+    /// <summary>The prefix match is ordinal: a clause declaring <c>p</c> still refuses <c>P:a</c>.</summary>
+    [TestMethod]
+    public void Namespaces_PrefixMatchIsOrdinal_Msg6846()
+        => Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as p) select id as [P:a] from t for xml path", 6846,
+            "XML name space prefix 'P' declaration is missing for FOR XML column name 'P:a'.");
+
+    [TestMethod]
+    public void Namespaces_UndeclaredPrefixStillRejected_Msg6846()
+        => Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as p) select id as [q:a] from t for xml path", 6846,
+            "XML name space prefix 'q' declaration is missing for FOR XML column name 'q:a'.");
+
+    [TestMethod]
+    public void Namespaces_XmlnsNameStillRejected_Msg6867()
+        => Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as p) select id as [xmlns:a] from t for xml path", 6867,
+            "'xmlns' is invalid in XML tag name in FOR XML PATH, or when WITH XMLNAMESPACES is used with FOR XML.");
+
+    // ---- WITH XMLNAMESPACES: scope and grammar ----
+
+    /// <summary>The clause scopes the whole statement, so a nested FOR XML re-declares on its own element.</summary>
+    [TestMethod]
+    public void Namespaces_NestedForXml_RedeclaresOnInnerElement()
+        => AreEqual("""<outer xmlns:p="urn:x"><id>1</id><inner xmlns:p="urn:x"><a>10</a></inner></outer><outer xmlns:p="urn:x"><id>2</id><inner xmlns:p="urn:x"><a>20</a></inner></outer><outer xmlns:p="urn:x"><id>3</id></outer>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id, (select a from u where u.id=t.id for xml path('inner'), type) from t for xml path('outer')"));
+
+    [TestMethod]
+    public void Namespaces_ScalarSubqueryForXml_Declares()
+        => AreEqual("""<row xmlns:p="urn:x"><id>1</id></row><row xmlns:p="urn:x"><id>2</id></row><row xmlns:p="urn:x"><id>3</id></row>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select (select id from t for xml path, type) as q"));
+
+    [TestMethod]
+    public void Namespaces_ComposeWithCteList()
+        => AreEqual("""<row xmlns:p="urn:x" id="1"/><row xmlns:p="urn:x" id="2"/><row xmlns:p="urn:x" id="3"/>""",
+            Xml("with xmlnamespaces ('urn:x' as p), c as (select id from t) select id from c for xml raw"));
+
+    [TestMethod]
+    public void Namespaces_SetOperationAuto_Declares()
+        => AreEqual("""<t xmlns:p="urn:x" id="1"/><t xmlns:p="urn:x" id="2"/><t xmlns:p="urn:x" id="3"/><t xmlns:p="urn:x" id="1"/><t xmlns:p="urn:x" id="2"/>""",
+            Xml("with xmlnamespaces ('urn:x' as p) select id from t union all select id from u for xml auto"));
+
+    /// <summary>The predefined xml prefix binds only to its own URI, and emits no declaration.</summary>
+    [TestMethod]
+    public void Namespaces_PredefinedXmlPrefix_EmitsNothing()
+        => AreEqual("""<row id="1"/><row id="2"/><row id="3"/>""",
+            Xml("with xmlnamespaces ('http://www.w3.org/XML/1998/namespace' as xml) select id from t for xml raw"));
+
+    /// <summary>The prefix scopes one statement, so the next one in the batch declares nothing.</summary>
+    [TestMethod]
+    public void Namespaces_ScopeEndsWithTheStatement()
+    {
+        using var connection = Seeded().CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "with xmlnamespaces ('urn:x' as p) select id from t where id=1 for xml raw; select id from t where id=1 for xml raw";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("""<row xmlns:p="urn:x" id="1"/>""", reader.GetString(0));
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read());
+        AreEqual("""<row id="1"/>""", reader.GetString(0));
+    }
+
+    [TestMethod]
+    public void Namespaces_ViewBody_Accepted()
+    {
+        var sim = Seeded();
+        sim.ExecuteBatches("create view vv as with xmlnamespaces ('urn:x' as p) select id, a from t");
+        AreEqual(1, sim.ExecuteScalar("select id from vv where id=1"));
+    }
+
+    [TestMethod]
+    public void Namespaces_DynamicSql_Declares()
+        => AreEqual("""<row xmlns:p="urn:x" id="1"/>""",
+            Xml("exec('with xmlnamespaces (''urn:x'' as p) select id from t where id=1 for xml raw')"));
+
+    [TestMethod]
+    public void Namespaces_AfterCte_Msg102()
+        => Seeded().AssertSqlError("with c as (select id from t), xmlnamespaces ('urn:x' as p) select id from c for xml raw", 102,
+            "Incorrect syntax near 'xmlnamespaces'.");
+
+    [TestMethod]
+    public void Namespaces_EmptyList_Msg102()
+        => Seeded().AssertSqlError("with xmlnamespaces () select id from t for xml raw", 102,
+            "Incorrect syntax near ')'.");
+
+    // ---- WITH XMLNAMESPACES: rejections ----
+
+    [TestMethod]
+    public void Namespaces_XmlPrefixWrongUri_Msg6872State1()
+    {
+        var ex = Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as xml) select id from t for xml raw", 6872);
+        AreEqual("XML namespace prefix 'xml' can only be associated with the URI http://www.w3.org/XML/1998/namespace. This URI cannot be used with other prefixes.", ex.Message);
+        AreEqual(1, ex.State);
+    }
+
+    [TestMethod]
+    public void Namespaces_XmlUriWrongPrefix_Msg6872State2()
+    {
+        var ex = Seeded().AssertSqlError("with xmlnamespaces ('http://www.w3.org/XML/1998/namespace' as p) select id from t for xml raw", 6872);
+        AreEqual(2, ex.State);
+    }
+
+    [TestMethod]
+    public void Namespaces_XmlnsPrefix_Msg6871()
+        => Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as xmlns) select id from t for xml raw", 6871,
+            "Prefix 'xmlns' used in WITH XMLNAMESPACES is reserved and cannot be used as a user-defined prefix.");
+
+    [TestMethod]
+    public void Namespaces_DelimitedXmlnsPrefix_Msg6871()
+        => Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as [xmlns]) select id from t for xml raw", 6871);
+
+    [TestMethod]
+    public void Namespaces_DuplicatePrefix_Msg6869()
+        => Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as p, 'urn:y' as p) select id from t for xml raw", 6869,
+            "Attempt to redefine namespace prefix 'p'");
+
+    [TestMethod]
+    public void Namespaces_DuplicateDefault_Msg6869NamesDefault()
+        => Seeded().AssertSqlError("with xmlnamespaces (default 'urn:d', default 'urn:e') select id from t for xml raw", 6869,
+            "Attempt to redefine namespace prefix 'default'");
+
+    [TestMethod]
+    public void Namespaces_PrefixNotAnXmlName_Msg6870()
+        => Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as [p q]) select id from t for xml raw", 6870,
+            "Prefix 'p q' used in WITH XMLNAMESPACES clause contains an invalid XML identifier. ' '(0x0020) is the first character at fault.");
+
+    [TestMethod]
+    public void Namespaces_PrefixStartsWithDigit_Msg6870()
+        => Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as [1p]) select id from t for xml raw", 6870,
+            "Prefix '1p' used in WITH XMLNAMESPACES clause contains an invalid XML identifier. '1'(0x0031) is the first character at fault.");
+
+    [TestMethod]
+    public void Namespaces_EmptyUri_Msg6874()
+        => Seeded().AssertSqlError("with xmlnamespaces ('' as p) select id from t for xml raw", 6874,
+            "Empty URI is not allowed in WITH XMLNAMESPACES clause.");
+
+    [TestMethod]
+    public void Namespaces_EmptyDefaultUri_Msg6874()
+        => Seeded().AssertSqlError("with xmlnamespaces (default '') select id from t for xml raw", 6874);
+
+    /// <summary>The prefix rules outrank the URI rule: an empty URI on a reserved prefix still reports the prefix.</summary>
+    [TestMethod]
+    public void Namespaces_PrefixRulesPrecedeEmptyUri()
+        => Seeded().AssertSqlError("with xmlnamespaces ('' as xml) select id from t", 6872);
+
+    /// <summary>The clause is validated even on a statement carrying no FOR XML at all.</summary>
+    [TestMethod]
+    public void Namespaces_ValidatedWithoutForXml()
+        => Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as p, 'urn:y' as p) select id from t", 6869);
+
+    [TestMethod]
+    public void Namespaces_RedefiningXsiUnderXsinil_Msg6873()
+        => Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as xsi) select id, cast(null as int) as z from t for xml raw, elements xsinil", 6873,
+            "Redefinition of 'xsi' XML namespace prefix is not supported with ELEMENTS XSINIL option of FOR XML.");
+
+    [TestMethod]
+    public void Namespaces_WithExplicitMode_Msg6868()
+        => Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as p) select id from t for xml explicit", 6868,
+            "The following FOR XML features are not supported with WITH XMLNAMESPACES list: EXPLICIT mode, XMLSCHEMA and XMLDATA directives.");
+
+    [TestMethod]
+    public void Namespaces_WithXmlschema_Msg6868()
+        => Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as p) select id from t for xml raw, xmlschema", 6868);
+
+    [TestMethod]
+    public void Namespaces_OnWriteStatementSelect_StillMsg6819()
+        => Seeded().AssertSqlError("with xmlnamespaces ('urn:x' as p) select id into zz from t for xml raw", 6819,
+            "The FOR XML clause is not allowed in a SELECT INTO statement.");
+
+    // ---- BINARY BASE64 ----
+
+    /// <summary>
+    /// Binary fixture: <c>bt</c> carries a single-column primary key and a NULL
+    /// binary row, <c>bn</c> has no key at all, and <c>bc</c> has a composite
+    /// key whose value needs escaping.
+    /// </summary>
+    private const string BinaryFixture = """
+        create table bt (id int primary key, bin varbinary(10), s nvarchar(10));
+        insert bt values (1,0x0102,'p'),(2,null,'q');
+        create table bn (id int, bin varbinary(10));
+        insert bn values (1,0x0102);
+        create table bc (k1 int not null, k2 nvarchar(5) not null, bin varbinary(10), constraint pk_bc primary key (k1,k2));
+        insert bc values (1,'a&b',0x0A0B);
+        """;
+
+    private static Simulation Binary()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(BinaryFixture);
+        return sim;
+    }
+
+    private static string BinaryXml(string query) => (string)Binary().ExecuteScalar(query)!;
+
+    [TestMethod]
+    public void BinaryBase64_Raw()
+        => AreEqual("""<row id="1" bin="AQI="/><row id="2"/>""",
+            BinaryXml("select id, bin from bt for xml raw, binary base64"));
+
+    [TestMethod]
+    public void BinaryBase64_Auto()
+        => AreEqual("""<bt id="1" bin="AQI="/><bt id="2"/>""",
+            BinaryXml("select id, bin from bt for xml auto, binary base64"));
+
+    [TestMethod]
+    public void BinaryBase64_ComposesWithOtherOptions()
+        => AreEqual("<r><row><id>1</id><bin>AQI=</bin></row><row><id>2</id></row></r>",
+            BinaryXml("select id, bin from bt for xml raw, elements, binary base64, root('r')"));
+
+    /// <summary>PATH base64-encodes binary whether or not the option is written.</summary>
+    [TestMethod]
+    public void BinaryBase64_PathIsUnaffected()
+    {
+        const string Expected = "<row><id>1</id><bin>AQI=</bin></row><row><id>2</id></row>";
+        AreEqual(Expected, BinaryXml("select id, bin from bt for xml path"));
+        AreEqual(Expected, BinaryXml("select id, bin from bt for xml path, binary base64"));
+    }
+
+    [TestMethod]
+    public void BinaryBase64_LegacyImageColumn()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table im (id int, b image); insert im values (1,0x0102)");
+        AreEqual("""<row id="1" b="AQI="/>""", sim.ExecuteScalar("select id, b from im for xml raw, binary base64"));
+    }
+
+    [TestMethod]
+    public void Binary_HexIsNotAValidEncoding_Msg102()
+        => Binary().AssertSqlError("select id, bin from bt for xml raw, binary hex", 102,
+            "Incorrect syntax near 'hex'.");
+
+    [TestMethod]
+    public void Binary_RawWithoutOption_Msg6829()
+        => Binary().AssertSqlError("select id, bin from bt for xml raw", 6829,
+            "FOR XML EXPLICIT and RAW modes currently do not support addressing binary data as URLs in column 'bin'. Remove the column, or use the BINARY BASE64 mode, or create the URL directly using the 'dbobject/TABLE[@PK1=\"V1\"]/@COLUMN' syntax.");
+
+    // ---- AUTO binary dbobject addressing (no BINARY BASE64) ----
+
+    [TestMethod]
+    public void AutoBinary_AddressesDbobjectUrl()
+        => AreEqual("""<bt id="1" bin="dbobject/bt[@id='1']/@bin"/><bt id="2"/>""",
+            BinaryXml("select id, bin from bt for xml auto"));
+
+    /// <summary>The reference is written from base names — the element takes the alias, the URL doesn't.</summary>
+    [TestMethod]
+    public void AutoBinary_UrlUsesBaseNamesNotAliases()
+    {
+        AreEqual("""<b id="1" bin="dbobject/bt[@id='1']/@bin"/><b id="2"/>""",
+            BinaryXml("select id, bin from bt b for xml auto"));
+        AreEqual("""<bt zz="1" bin="dbobject/bt[@id='1']/@bin"/><bt zz="2"/>""",
+            BinaryXml("select id as zz, bin from bt for xml auto"));
+    }
+
+    [TestMethod]
+    public void AutoBinary_UnderElements()
+        => AreEqual("<bt><id>1</id><bin>dbobject/bt[@id='1']/@bin</bin></bt><bt><id>2</id></bt>",
+            BinaryXml("select id, bin from bt for xml auto, elements"));
+
+    /// <summary>A composite key joins its terms with real's URL-escaped separator; the value keeps ordinary XML escaping.</summary>
+    [TestMethod]
+    public void AutoBinary_CompositeKeyAndEscaping()
+        => AreEqual("""<bc k1="1" k2="a&amp;b" bin="dbobject/bc[@k1='1'%20and%20@k2='a&amp;b']/@bin"/>""",
+            BinaryXml("select k1, k2, bin from bc for xml auto"));
+
+    [TestMethod]
+    public void AutoBinary_TwoAliasesOfOneColumnShareTheUrl()
+        => AreEqual("""<bt id="1" bin="dbobject/bt[@id='1']/@bin" b2="dbobject/bt[@id='1']/@bin"/><bt id="2"/>""",
+            BinaryXml("select id, bin, bin as b2 from bt for xml auto"));
+
+    [TestMethod]
+    public void AutoBinary_NoPrimaryKey_Msg6831()
+        => Binary().AssertSqlError("select id, bin from bn for xml auto", 6831,
+            "FOR XML AUTO requires primary keys to create references for 'bin'. Select primary keys, or use BINARY BASE64 to obtain binary data in encoded form if no primary keys exist.");
+
+    [TestMethod]
+    public void AutoBinary_KeyNotProjected_Msg6831()
+        => Binary().AssertSqlError("select bin from bt for xml auto", 6831);
+
+    [TestMethod]
+    public void AutoBinary_PartialCompositeKeyProjected_Msg6831()
+        => Binary().AssertSqlError("select k1, bin from bc for xml auto", 6831);
+
+    [TestMethod]
+    public void AutoBinary_ComputedColumn_Msg6830()
+        => Binary().AssertSqlError("select id, cast(0x01 as varbinary(4)) as c from bt for xml auto", 6830,
+            "FOR XML AUTO could not find the table owning the following column 'c' to create a URL address for it. Remove the column, or use the BINARY BASE64 mode, or create the URL directly using the 'dbobject/TABLE[@PK1=\"V1\"]/@COLUMN' syntax.");
+
+    [TestMethod]
+    public void AutoBinary_DerivedTable_Msg6830()
+        => Binary().AssertSqlError("select id, bin from (select * from bt) d for xml auto", 6830);
+
+    [TestMethod]
+    public void AutoBinary_SetOperation_Msg6830()
+        => Binary().AssertSqlError("select id, bin from bt union all select id, bin from bn for xml auto", 6830);
 
     // ---- FOR XML on a SELECT that doesn't return to the client ----
 

@@ -116,7 +116,17 @@ public sealed class JsonScalarTests
 
     [TestMethod]
     public void JsonModify_AppendToArray()
-        => AreEqual("[1,2,3,4]", ExecuteScalar("select json_modify('[1,2,3]', '$[3]', 4)"));
+        => AreEqual("[1,2,3,4]", ExecuteScalar("select json_modify('[1,2,3]', 'append $', 4)"));
+
+    /// <summary>
+    /// An index at or past the array's end names no slot, so the document
+    /// comes back untouched — appending is <c>append</c>'s job.
+    /// </summary>
+    [TestMethod]
+    [DataRow("$[3]")]
+    [DataRow("$[9]")]
+    public void JsonModify_IndexPastEnd_IsANoOp(string path)
+        => AreEqual("[1,2,3]", ExecuteScalar($"select json_modify('[1,2,3]', '{path}', 4)"));
 
     [TestMethod]
     public void JsonModify_ReplaceArrayElement()

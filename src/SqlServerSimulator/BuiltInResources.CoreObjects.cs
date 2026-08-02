@@ -246,14 +246,15 @@ internal static partial class BuiltInResources
                 }));
 
         // sys.objects: every <see cref="SchemaObject"/> emits one row, plus
-        // one extra row per HeapTable PK / UQ / CHECK constraint linked via
-        // parent_object_id. type / type_desc come from the SchemaObject's
-        // own ObjectTypeCode / ObjectTypeDescription (probe-confirmed
-        // values: 'U ' / USER_TABLE, 'V ' / VIEW, 'P ' / SQL_STORED_PROCEDURE,
-        // 'FN' / SQL_SCALAR_FUNCTION, 'IF' / SQL_INLINE_TABLE_VALUED_FUNCTION,
-        // 'TR' / SQL_TRIGGER). Constraint codes ('PK', 'UQ', 'C ') live
-        // outside the SchemaObject contract since constraints aren't first-
-        // class schema objects.
+        // one extra row per HeapTable PK / UQ / DEFAULT / CHECK / FOREIGN KEY
+        // constraint linked via parent_object_id. type / type_desc come from
+        // the SchemaObject's own ObjectTypeCode / ObjectTypeDescription
+        // (probe-confirmed values: 'U ' / USER_TABLE, 'V ' / VIEW,
+        // 'P ' / SQL_STORED_PROCEDURE, 'FN' / SQL_SCALAR_FUNCTION,
+        // 'IF' / SQL_INLINE_TABLE_VALUED_FUNCTION, 'TR' / SQL_TRIGGER).
+        // Constraint codes ('PK', 'UQ', 'D ', 'C ', 'F ') live outside the
+        // SchemaObject contract since constraints aren't first-class schema
+        // objects.
         var pkType = SqlValue.FromChar(charTwo, "PK");
         var pkTypeDesc = SqlValue.FromNVarchar("PRIMARY_KEY_CONSTRAINT");
         var uqType = SqlValue.FromChar(charTwo, "UQ");
@@ -886,6 +887,8 @@ internal static partial class BuiltInResources
         var notPublished = SqlValue.FromBoolean(false);
         var sysSchemaIdValue = SqlValue.FromInt32(Database.SysSchemaId);
         var msShipped = SqlValue.FromBoolean(true);
+        var defaultType = SqlValue.FromChar(charTwo, "D ");
+        var defaultTypeDesc = SqlValue.FromNVarchar("DEFAULT_CONSTRAINT");
         foreach (var schema in database.Schemas.Values)
         {
             // Table types' internal type tables: one TYPE_TABLE ('TT') row per
@@ -962,6 +965,28 @@ internal static partial class BuiltInResources
                         key.Kind == KeyConstraintKind.PrimaryKey ? pkTypeDesc : uqTypeDesc,
                         SqlValue.FromDateTime(key.CreateDate),
                         SqlValue.FromDateTime(key.ModifyDate),
+                        notMsShipped,
+                        notPublished,
+                        notPublished,
+                    ];
+                }
+                // DEFAULT constraints sit between the key constraints and the
+                // CHECK constraints in real's own object-id order for one
+                // CREATE TABLE (probe-confirmed).
+                foreach (var column in t.Columns)
+                {
+                    if (column.DefaultConstraint is not { } df)
+                        continue;
+                    yield return [
+                        SqlValue.FromInt32(df.ObjectId),
+                        SqlValue.FromSystemName(df.Name),
+                        schemaIdValue,
+                        tableObjectId,
+                        nullPrincipal,
+                        defaultType,
+                        defaultTypeDesc,
+                        SqlValue.FromDateTime(df.CreateDate),
+                        SqlValue.FromDateTime(df.ModifyDate),
                         notMsShipped,
                         notPublished,
                         notPublished,

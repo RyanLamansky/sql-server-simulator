@@ -47,21 +47,12 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
         var national = IsNationalString(leftType) || IsNationalString(rightType);
         SqlType baseType = national ? SqlType.NVarchar : SqlType.Varchar;
 
-        (Collation Collation, Coercibility Coercibility) collation;
+        // Real names this operator `concat`, where the `+` form's identical
+        // Msg 457 / 456 / 468 say `add` (probe-confirmed both ways).
         if (leftIsString && rightIsString)
-        {
-            // Real names this operator `concat`, where the `+` form's identical
-            // Msg 457 says `add` (probe-confirmed both ways).
-            collation = Collation.Resolve(leftType, rightType)
-                ?? throw SimulatedSqlException.UnresolvedCollationInImplicitConversion(
-                    baseType, rightType.Collation!.Name, leftType.Collation!.Name, "concat");
-        }
-        else
-        {
-            var stringType = leftIsString ? leftType : rightType;
-            collation = (stringType.Collation!, stringType.Coercibility);
-        }
-        return baseType.WithCollation(collation.Collation, collation.Coercibility);
+            return UnresolvedCollation.Settle(baseType, leftType, rightType, "concat");
+        var stringType = leftIsString ? leftType : rightType;
+        return baseType.WithCollation(stringType.Collation!, stringType.Coercibility);
     }
 
     private static string Stringify(SqlValue value, SqlType resultType) =>

@@ -238,4 +238,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ViewCheckOptionViolation() =>
         new("The attempted insert or update failed because the target view either specifies WITH CHECK OPTION or spans a view that specifies WITH CHECK OPTION and one or more rows resulting from the operation did not qualify under the CHECK OPTION constraint.", 550, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 2020 — <c>sys.dm_sql_referenced_entities</c>
+    /// reached a reference it couldn't resolve, so the column detail it reported
+    /// may be short. Probe-confirmed verbatim (including the double space before
+    /// "Before rerunning"), and probe-confirmed to follow the rows rather than
+    /// replace them: the DMV hands back what it found and then raises.
+    /// </summary>
+    internal static SimulatedSqlException DependencyReportMayBeIncomplete(string entityName) =>
+        new($"The dependencies reported for entity \"{entityName}\" might not include references to all columns. This is either because the entity references an object that does not exist or because of an error in one or more statements in the entity.  Before rerunning the query, ensure that there are no errors in the entity and that all objects referenced by the entity exist.", 2020, 16, 1);
 }

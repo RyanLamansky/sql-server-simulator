@@ -81,15 +81,23 @@ partial class Simulation
     /// <summary>
     /// The database an <c>ALTER DATABASE</c> statement targets: the session's
     /// for <c>CURRENT</c>, else the named one. A name this
-    /// <see cref="Simulation"/> doesn't host raises Msg 5011. Resolution is
-    /// suppressed in skip mode, where the statement parses but doesn't run.
+    /// <see cref="Simulation"/> doesn't host raises Msg 5011 (state 5), and a
+    /// principal without ALTER on the database it did find raises the same
+    /// number at state 9 — probe-confirmed, so a restricted caller can't tell
+    /// the two apart. Real follows the refusal with a terminating Msg 5069
+    /// (<c>ALTER DATABASE statement failed.</c>); the simulator surfaces the
+    /// single 5011. Resolution is suppressed in skip mode, where the statement
+    /// parses but doesn't run.
     /// </summary>
     private static Database ResolveAlterDatabaseTarget(ParserContext context, Token afterDatabase)
     {
-        return afterDatabase is not Name named ? context.CurrentDatabase
-            : context.Connection.Simulation.Databases.TryGetValue(named.Value, out var target) ? target
+        var target = afterDatabase is not Name named ? context.CurrentDatabase
+            : context.Connection.Simulation.Databases.TryGetValue(named.Value, out var named_) ? named_
             : context.Batch.IsSkipping ? context.CurrentDatabase
             : throw SimulatedSqlException.CannotAlterDatabase(named.Value);
+        return context.Batch.IsSkipping || PermissionEnforcement.HasDatabasePermission(context.Batch, target, Permission.Alter)
+            ? target
+            : throw SimulatedSqlException.AlterDatabasePermissionDenied(target.Name);
     }
 
     /// <summary>
@@ -114,6 +122,8 @@ partial class Simulation
             UnquotedString { ContextualKeyword: ContextualKeyword.Allow_Snapshot_Isolation } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.AllowSnapshotIsolation),
             UnquotedString { ContextualKeyword: ContextualKeyword.Read_Committed_Snapshot } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.ReadCommittedSnapshot),
             UnquotedString { ContextualKeyword: ContextualKeyword.Recursive_Triggers } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.RecursiveTriggers),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Trustworthy } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.Trustworthy),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Db_Chaining } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.CrossDatabaseChaining),
             UnquotedString unquoted when RecognizedDatabaseOptions.TryGetValue(unquoted.Value, out var kind) => ConsumeDatabaseOptionTail(context, kind),
             _ => false,
         };
@@ -143,10 +153,12 @@ partial class Simulation
         AllowSnapshotIsolation,
         ReadCommittedSnapshot,
         RecursiveTriggers,
+        Trustworthy,
+        CrossDatabaseChaining,
     }
 
     /// <summary>
-    /// Parses <c>ALTER DATABASE name SET (ALLOW_SNAPSHOT_ISOLATION | READ_COMMITTED_SNAPSHOT | RECURSIVE_TRIGGERS) { ON | OFF }</c>.
+    /// Parses <c>ALTER DATABASE name SET (ALLOW_SNAPSHOT_ISOLATION | READ_COMMITTED_SNAPSHOT | RECURSIVE_TRIGGERS | TRUSTWORTHY | DB_CHAINING) { ON | OFF }</c>.
     /// The probed real-server gates ALLOW_SNAPSHOT_ISOLATION ON behind a
     /// brief stabilization wait and READ_COMMITTED_SNAPSHOT ON behind a
     /// single-connection requirement; the simulator skips both — the flip
@@ -154,6 +166,8 @@ partial class Simulation
     /// termination options are rejected by real SQL Server on versioning
     /// state changes (Msg 5083); the simulator falls through and raises
     /// <see cref="NotSupportedException"/> on the unexpected trailer.
+    /// TRUSTWORTHY and DB_CHAINING each refuse a set of system databases —
+    /// see <see cref="RejectSystemDatabaseFlag"/>.
     /// </summary>
     private static bool TryParseAlterDatabaseSetBooleanOption(ParserContext context, Database target, DatabaseBooleanOption option)
     {
@@ -161,15 +175,41 @@ partial class Simulation
             return false;
         if (context.Batch.IsSkipping)
             return true;
+        RejectSystemDatabaseFlag(target, option);
         var value = on == Keyword.On;
         var database = target;
         switch (option)
         {
             case DatabaseBooleanOption.AllowSnapshotIsolation: database.AllowSnapshotIsolation = value; break;
             case DatabaseBooleanOption.ReadCommittedSnapshot: database.ReadCommittedSnapshot = value; break;
+            case DatabaseBooleanOption.Trustworthy: database.Trustworthy = value; break;
+            case DatabaseBooleanOption.CrossDatabaseChaining: database.CrossDatabaseChaining = value; break;
             default: database.RecursiveTriggers = value; break;
         }
         return true;
+    }
+
+    /// <summary>
+    /// The two cross-database-widening flags real refuses to move on some system
+    /// databases, whatever the value asked for (probe-confirmed against SQL
+    /// Server 2025): <c>TRUSTWORTHY</c> on <c>model</c> / <c>tempdb</c> raises
+    /// Msg 15309, and <c>DB_CHAINING</c> on <c>master</c> / <c>model</c> /
+    /// <c>tempdb</c> raises Msg 5600. <c>msdb</c> accepts both — it ships
+    /// trustworthy and chained.
+    /// </summary>
+    private static void RejectSystemDatabaseFlag(Database target, DatabaseBooleanOption option)
+    {
+        switch (option)
+        {
+            case DatabaseBooleanOption.Trustworthy
+                when BuiltInToken.EqualsAny(target.Name, ModelDatabaseName, TempdbDatabaseName):
+                throw SimulatedSqlException.CannotAlterTrustworthyState();
+            case DatabaseBooleanOption.CrossDatabaseChaining
+                when BuiltInToken.EqualsAny(target.Name, MasterDatabaseName, ModelDatabaseName, TempdbDatabaseName):
+                throw SimulatedSqlException.CannotSetCrossDatabaseChaining();
+            default:
+                break;
+        }
     }
 
     /// <summary>
@@ -545,6 +585,14 @@ partial class Simulation
 
         if (!context.Batch.TryResolveSequence(sequenceName, out var sequence))
             throw SimulatedSqlException.InvalidObjectName(sequenceName);
+        // ALTER SEQUENCE needs ALTER on the sequence (schema ALTER / object
+        // CONTROL cover it) — Msg 15151, the same record a missing sequence
+        // earns, naming the leaf (probe-confirmed).
+        if (!PermissionEnforcement.HasObjectAlter(
+                context.Batch, context.Batch.DatabaseFor(sequence), sequence.ObjectId, sequence.SchemaId))
+        {
+            throw SimulatedSqlException.CannotAlterSequence(sequenceName.Leaf);
+        }
         // TryResolveSequence took Sch-S; upgrade to Sch-M before mutating
         // the sequence's option fields. Other connections reading the
         // sequence (NEXT VALUE FOR) will wait on the Sch-M acquire.
@@ -712,6 +760,10 @@ partial class Simulation
 
         if (!context.CurrentDatabase.Schemas.TryGetValue(destSchemaName, out var destSchema))
             throw SimulatedSqlException.CannotAlterSchemaDoesNotExist(destSchemaName);
+        // ALTER on the destination schema is the first half of real's gate, and
+        // reports the same Msg 15151 a missing destination earns.
+        if (!PermissionEnforcement.HasSchemaAlter(context.Batch, destSchema))
+            throw SimulatedSqlException.CannotAlterSchemaDoesNotExist(destSchemaName);
 
         if (!context.Batch.TryResolveSchema(sourceName, out var sourceSchema))
         {
@@ -719,6 +771,10 @@ partial class Simulation
                 ? SimulatedSqlException.CannotFindType(sourceName.Leaf)
                 : SimulatedSqlException.CannotFindObject(sourceName.Leaf);
         }
+        // The second half is CONTROL on the object being moved — probe-confirmed
+        // that ALTER on the *source* schema is not enough, and that the refusal
+        // is its own Msg 15151 wording.
+        RejectUnauthorizedSchemaTransfer(context, sourceSchema, sourceName, classIsType);
 
         if (classIsType)
             TransferTableType(sourceSchema, destSchema, sourceName.Leaf, context.Batch);
@@ -738,6 +794,34 @@ partial class Simulation
     /// <see cref="SchemaObject.SchemaId"/>; <see cref="TableType.Schema"/>
     /// reference updates in lockstep.
     /// </summary>
+    /// <summary>
+    /// The moved-object half of the <c>ALTER SCHEMA … TRANSFER</c> gate: CONTROL
+    /// on the object (or the type's owning schema, since the simulator's GRANT
+    /// surface carries no <c>TYPE::</c> securable class). Denial is Msg 15151
+    /// <c>Cannot transfer the object '…'</c>. No-op when the name resolves to
+    /// nothing — the caller's own not-found record still runs.
+    /// </summary>
+    private static void RejectUnauthorizedSchemaTransfer(ParserContext context, Schema sourceSchema, MultiPartName sourceName, bool classIsType)
+    {
+        if (classIsType)
+        {
+            if (sourceSchema.TableTypes.ContainsKey(sourceName.Leaf)
+                && !PermissionEnforcement.HasSchemaControl(context.Batch, sourceSchema))
+            {
+                throw SimulatedSqlException.CannotTransferObject(sourceName.Leaf);
+            }
+            return;
+        }
+        foreach (var candidate in sourceSchema.SchemaObjects())
+        {
+            if (!sourceSchema.Database.Collation.Equals(candidate.Name, sourceName.Leaf))
+                continue;
+            if (!PermissionEnforcement.HasObjectControl(context.Batch, sourceSchema.Database, candidate.ObjectId, candidate.SchemaId))
+                throw SimulatedSqlException.CannotTransferObject(sourceName.Leaf);
+            return;
+        }
+    }
+
     private static void TransferTableType(Schema sourceSchema, Schema destSchema, string leafName, BatchContext batch)
     {
         if (!sourceSchema.TableTypes.TryGetValue(leafName, out var tableType))

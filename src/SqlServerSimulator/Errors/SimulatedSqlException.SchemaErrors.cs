@@ -93,6 +93,26 @@ partial class SimulatedSqlException
         new($"User does not have permission to alter database '{databaseName}', the database does not exist, or the database is not in a state that allows access checks.", 5011, 14, 5);
 
     /// <summary>
+    /// Mimics SQL Server error 15309: <c>ALTER DATABASE … SET TRUSTWORTHY</c>
+    /// names <c>model</c> or <c>tempdb</c>, whose trustworthy state real pins
+    /// (<c>master</c> and <c>msdb</c> both accept the option). Probe-confirmed
+    /// against SQL Server 2025 — class 16 state 1, with a trailing Msg 5069 the
+    /// simulator omits like every other ALTER DATABASE failure.
+    /// </summary>
+    internal static SimulatedSqlException CannotAlterTrustworthyState() =>
+        new("Cannot alter the trustworthy state of the model or tempdb databases.", 15309, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5600: <c>ALTER DATABASE … SET DB_CHAINING</c>
+    /// names <c>master</c>, <c>model</c> or <c>tempdb</c>, whose chaining state
+    /// real pins on (<c>msdb</c>, also chained by default, accepts the option).
+    /// Probe-confirmed against SQL Server 2025 — class 16 state 2, raised for
+    /// either value asked for, with a trailing Msg 5069 the simulator omits.
+    /// </summary>
+    internal static SimulatedSqlException CannotSetCrossDatabaseChaining() =>
+        new("The Cross Database Chaining option cannot be set to the specified value on the specified database.", 5600, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 15664: a <c>sp_set_session_context</c> call
     /// targeted a key previously set with <c>@read_only = 1</c> in this
     /// session. Wording probe-confirmed against SQL Server 2025. Class 16 State 1.

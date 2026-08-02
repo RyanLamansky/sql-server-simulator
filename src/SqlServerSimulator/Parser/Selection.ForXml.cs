@@ -14,7 +14,7 @@ partial class Selection
     private const string ForXmlColumnName = "XML_F52E2B61-18A1-11d1-B105-00805F49916B";
 
     /// <summary>The xsi namespace declared when <c>ELEMENTS XSINIL</c> emits nil elements.</summary>
-    private const string XsiNamespace = "http://www.w3.org/2001/XMLSchema-instance";
+    internal const string XsiNamespace = "http://www.w3.org/2001/XMLSchema-instance";
 
     /// <summary>
     /// Parses the trailing <c>FOR XML { RAW[('elem')] | AUTO | PATH[('row')] }
@@ -45,6 +45,10 @@ partial class Selection
         if (context.GetNextRequired() is not Name modeName)
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
+        // The statement's WITH XMLNAMESPACES declarations, if any: they scope
+        // to every FOR XML clause in the statement, nested subqueries included.
+        var namespaces = context.XmlNamespaces;
+
         ForXmlMode mode;
         string? rowElement;
         Span<char> upper = stackalloc char[modeName.Value.Length];
@@ -57,6 +61,8 @@ partial class Selection
                 context.MoveNextOptional();
                 break;
             case "EXPLICIT":
+                if (namespaces is not null)
+                    throw SimulatedSqlException.ForXmlNamespacesUnsupportedFeature();
                 throw new NotSupportedException("FOR XML EXPLICIT (the universal-table format) isn't modeled; use FOR XML PATH.");
             case "PATH":
                 mode = ForXmlMode.Path;
@@ -73,6 +79,7 @@ partial class Selection
         var elements = false;
         var xsinil = false;
         var typed = false;
+        var binaryBase64 = false;
         var rootSpecified = false;
         var rootName = "root";
 
@@ -107,7 +114,13 @@ partial class Selection
             }
             else if (Collation.Baseline.Equals(optionName.Value, "BINARY"))
             {
-                throw new NotSupportedException("FOR XML BINARY BASE64/HEX isn't modeled; FOR XML PATH base64-encodes binary directly.");
+                // BASE64 is the only spelling the grammar admits here — real
+                // reports Msg 102 near the offending word for BINARY HEX and
+                // near BINARY itself when nothing follows.
+                if (context.GetNextRequired() is not Name encoding || !Collation.Baseline.Equals(encoding.Value, "BASE64"))
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                binaryBase64 = true;
+                context.MoveNextOptional();
             }
             else if (Collation.Baseline.Equals(optionName.Value, "TYPE"))
             {
@@ -116,6 +129,8 @@ partial class Selection
             }
             else if (Collation.Baseline.Equals(optionName.Value, "XMLSCHEMA"))
             {
+                if (namespaces is not null)
+                    throw SimulatedSqlException.ForXmlNamespacesUnsupportedFeature();
                 throw new NotSupportedException("FOR XML XMLSCHEMA (inline XSD emission) isn't modeled.");
             }
             else
@@ -129,18 +144,23 @@ partial class Selection
         // unusable name (probe-confirmed), while a syntax error still wins.
         RejectSerializationInWriteStatement(context, inner, depth, forJson: false);
 
+        // XSINIL owns the xsi prefix for its nil markers, so a clause that
+        // rebinds the prefix can't be honored (real's Msg 6873).
+        if (xsinil && namespaces?.IsDeclared("xsi") == true)
+            throw SimulatedSqlException.XmlNamespaceXsiRedefinedWithXsinil();
+
         // The names written into the clause are validated rather than escaped —
         // the row tag first, then ROOT (real's order).
         if (rowElement is { Length: > 0 })
-            ForXmlName.ValidateSimpleName(rowElement, ForXmlNameKind.Row);
+            ForXmlName.ValidateSimpleName(rowElement, ForXmlNameKind.Row, namespaces);
         if (rootSpecified)
         {
             if (rootName.Length == 0)
                 throw SimulatedSqlException.ForXmlEmptyRootTag();
-            ForXmlName.ValidateSimpleName(rootName, ForXmlNameKind.Root);
+            ForXmlName.ValidateSimpleName(rootName, ForXmlNameKind.Root, namespaces);
         }
 
-        return WrapForXml(inner, new ForXmlOptions(mode, rowElement, elements, xsinil, typed, rootSpecified ? rootName : null));
+        return WrapForXml(inner, new ForXmlOptions(mode, rowElement, elements, xsinil, typed, binaryBase64, rootSpecified ? rootName : null, namespaces));
     }
 
     /// <summary>
@@ -201,19 +221,26 @@ partial class Selection
         if (options.Mode == ForXmlMode.Auto)
         {
             var levels = BuildAutoLevels(inner, forJson: false);
+            // Without BINARY BASE64, an AUTO binary column addresses a
+            // dbobject URL instead of carrying its bytes; the builder fills a
+            // slot per such column (and raises where no URL can be addressed).
+            var binaryUrls = options.BinaryBase64 ? null : new ForXmlBinaryUrl?[inner.ColumnNames.Length];
             var levelElements = new ForXmlElement[levels.Length];
             for (var i = 0; i < levels.Length; i++)
             {
                 // A level is named after a table or alias as written, so it
                 // takes the same escaping a column name does: FROM #tmp emits
                 // <_x0023_tmp>.
-                levelElements[i] = BuildForXmlFlatElement(ForXmlName.Encode(levels[i].Name), levels[i].Columns, inner, options);
+                levelElements[i] = BuildForXmlFlatElement(ForXmlName.Encode(levels[i].Name), levels[i].Columns, inner, options, binaryUrls);
             }
 
+            var autoOptions = binaryUrls is not null && Array.Exists(binaryUrls, static url => url is not null)
+                ? options.WithBinaryUrls(binaryUrls)
+                : options;
             return new Selection(schema, columnNames,
                 hasOrderBy: false,
                 hasTopOrOffsetOrFetch: false,
-                (batch, outerResolver) => SerializeForXmlAuto(inner, innerSchema, levels, levelElements, options, batch, outerResolver));
+                (batch, outerResolver) => SerializeForXmlAuto(inner, innerSchema, levels, levelElements, autoOptions, batch, outerResolver));
         }
 
         var rowElement = BuildForXmlRowElement(inner, options);
@@ -238,7 +265,7 @@ partial class Selection
         {
             var pathRoot = new ForXmlElement(options.RowElement!);
             for (var i = 0; i < inner.ColumnNames.Length; i++)
-                InsertForXmlPath(pathRoot, inner.ColumnNames[i], i, inner.Schema[i], options.RowElement!.Length == 0);
+                InsertForXmlPath(pathRoot, inner.ColumnNames[i], i, inner.Schema[i], options.RowElement!.Length == 0, options.Namespaces);
             return pathRoot;
         }
 
@@ -251,17 +278,20 @@ partial class Selection
         var columns = new int[inner.ColumnNames.Length];
         for (var i = 0; i < columns.Length; i++)
             columns[i] = i;
-        return BuildForXmlFlatElement(options.RowElement!, columns, inner, options);
+        return BuildForXmlFlatElement(options.RowElement!, columns, inner, options, binaryUrls: null);
     }
 
     /// <summary>
     /// Builds one RAW row wrapper / AUTO nesting level: every column must be
-    /// named (Msg 6809), binary needs the unmodeled BINARY BASE64 option
-    /// (Msg 6829 / 6830), and an <c>xml</c>-typed column becomes a child
+    /// named (Msg 6809), a binary column without <c>BINARY BASE64</c> is
+    /// refused by RAW (Msg 6829) and addressed as a <c>dbobject</c> URL by AUTO
+    /// (filling <paramref name="binaryUrls"/>, or Msg 6830 / 6831 when no URL
+    /// can be addressed), and an <c>xml</c>-typed column becomes a child
     /// element holding its nodes even in the default attribute-centric shape
     /// (probe-confirmed — an attribute can't hold nodes).
     /// </summary>
-    private static ForXmlElement BuildForXmlFlatElement(string name, IReadOnlyList<int> columns, Selection inner, ForXmlOptions options)
+    private static ForXmlElement BuildForXmlFlatElement(
+        string name, IReadOnlyList<int> columns, Selection inner, ForXmlOptions options, ForXmlBinaryUrl?[]? binaryUrls)
     {
         var wrapper = new ForXmlElement(name);
         foreach (var i in columns)
@@ -269,8 +299,12 @@ partial class Selection
             var columnName = inner.ColumnNames[i];
             if (columnName.Length == 0)
                 throw SimulatedSqlException.ForXmlUnnamedColumn();
-            if (inner.Schema[i] is BinarySqlType or VarbinarySqlType)
-                throw options.Mode == ForXmlMode.Auto ? SimulatedSqlException.ForXmlBinaryAuto(columnName) : SimulatedSqlException.ForXmlBinaryRaw(columnName);
+            if (!options.BinaryBase64 && inner.Schema[i] is BinarySqlType or VarbinarySqlType or ImageSqlType)
+            {
+                if (binaryUrls is null)
+                    throw SimulatedSqlException.ForXmlBinaryRaw(columnName);
+                binaryUrls[i] = BuildForXmlBinaryUrl(inner, i, columnName);
+            }
 
             // RAW / AUTO escape a name XML can't carry instead of rejecting it,
             // so [a b] becomes a_x0020_b (the errors above still quote the name
@@ -291,6 +325,84 @@ partial class Selection
     }
 
     /// <summary>
+    /// Assembles the <c>dbobject</c> reference <c>FOR XML AUTO</c> addresses a
+    /// binary column with when <c>BINARY BASE64</c> is absent. Real needs both
+    /// halves of the addressing: an owning base table (else Msg 6830 — an
+    /// expression, a derived table's column, a set-operation result) and that
+    /// table's whole primary key present in the projection (else Msg 6831).
+    /// The reference is written from base names, so a select-list alias on
+    /// either the binary column or a key column doesn't show through.
+    /// </summary>
+    private static ForXmlBinaryUrl BuildForXmlBinaryUrl(Selection inner, int column, string columnName)
+    {
+        if (inner.AutoColumnSource is not { } columnSource || inner.AutoColumnOrdinal is not { } columnOrdinal
+            || inner.BranchFromSources is not { } sources || columnSource[column] < 0)
+        {
+            throw SimulatedSqlException.ForXmlBinaryAuto(columnName);
+        }
+
+        var source = sources[columnSource[column]];
+        if (source.BackingTable is not { } table)
+            throw SimulatedSqlException.ForXmlBinaryAuto(columnName);
+
+        var key = table.KeyConstraints.Find(static k => k.Kind == KeyConstraintKind.PrimaryKey)
+            ?? throw SimulatedSqlException.ForXmlBinaryAutoNeedsPrimaryKey(columnName);
+
+        // Each key column has to be readable off a projected result column of
+        // the same source; the storage-ordinal indirection is what a source
+        // whose exposed columns are reordered / projected needs.
+        var keys = new ForXmlUrlKey[key.StorageOrdinals.Length];
+        for (var k = 0; k < keys.Length; k++)
+        {
+            var keyColumn = -1;
+            for (var i = 0; i < columnSource.Length && keyColumn < 0; i++)
+            {
+                if (columnSource[i] == columnSource[column] && columnOrdinal[i] >= 0
+                    && SourceStorageOrdinal(source, columnOrdinal[i]) == key.StorageOrdinals[k])
+                {
+                    keyColumn = i;
+                }
+            }
+            if (keyColumn < 0)
+                throw SimulatedSqlException.ForXmlBinaryAutoNeedsPrimaryKey(columnName);
+            keys[k] = new ForXmlUrlKey(ForXmlName.Encode(source.ColumnNames[columnOrdinal[keyColumn]]), keyColumn);
+        }
+
+        return new ForXmlBinaryUrl(
+            $"dbobject/{ForXmlName.Encode(table.Name)}[",
+            keys,
+            $"]/@{ForXmlName.Encode(source.ColumnNames[columnOrdinal[column]])}");
+    }
+
+    /// <summary>
+    /// The storage ordinal one of <paramref name="source"/>'s exposed columns
+    /// occupies in its base table's rows — the identity mapping unless the
+    /// source projects a subset or a different order.
+    /// </summary>
+    private static int SourceStorageOrdinal(FromSource source, int columnIndex) =>
+        source.StorageOrdinals is { } ordinals ? ordinals[columnIndex] : columnIndex;
+
+    /// <summary>
+    /// Renders one <c>dbobject</c> reference for a row: the key predicate's
+    /// terms joined by real's URL-escaped <c>%20and%20</c>, each value in its
+    /// plain text form (the reference as a whole then takes the position's
+    /// ordinary XML escaping).
+    /// </summary>
+    private static string FormatForXmlBinaryUrl(ForXmlBinaryUrl url, byte[] rowBytes, SqlType[] innerSchema)
+    {
+        var sb = new StringBuilder(url.Prefix);
+        for (var k = 0; k < url.Keys.Length; k++)
+        {
+            if (k > 0)
+                _ = sb.Append("%20and%20");
+            _ = sb.Append('@').Append(url.Keys[k].Name).Append("='")
+                .Append(ScalarForXmlText(RowDecoder.DecodeColumn(innerSchema, rowBytes, url.Keys[k].Column)))
+                .Append('\'');
+        }
+        return sb.Append(url.Suffix).ToString();
+    }
+
+    /// <summary>
     /// Places one PATH column into the row-element template by its alias:
     /// <c>@a</c> → attribute, <c>a/b</c> → nested elements, <c>text()</c> /
     /// <c>data()</c> / an unnamed column → text content, a plain name → a leaf
@@ -300,11 +412,12 @@ partial class Selection
     /// (attribute under a suppressed row tag), and Msg 6851 (an xml-typed
     /// column mapped to an attribute — an attribute can't hold nodes).
     /// </summary>
-    private static void InsertForXmlPath(ForXmlElement root, string alias, int column, SqlType columnType, bool rowTagOmitted)
+    private static void InsertForXmlPath(
+        ForXmlElement root, string alias, int column, SqlType columnType, bool rowTagOmitted, ForXmlNamespaces? namespaces)
     {
         // PATH rejects a name RAW / AUTO would escape (Msg 6850), along with the
         // path-shape and namespace-prefix rules on it.
-        ForXmlName.ValidatePathColumn(alias);
+        ForXmlName.ValidatePathColumn(alias, namespaces);
 
         var segments = alias.Length == 0 ? [] : alias.Split('/');
         var atomic = false;
@@ -371,16 +484,14 @@ partial class Selection
         ForXmlOptions options, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         var sb = new StringBuilder();
-        var xsiOnRoot = options.Xsinil && options.RootName is not null;
-        var xsiOnTopLevel = options.Xsinil && options.RootName is null;
+        // The xsi and WITH XMLNAMESPACES declarations land on whatever element
+        // is outermost: the ROOT wrapper when there is one, else every
+        // top-level element the rows produce (probe-confirmed, PATH('')'s
+        // per-column elements included — its bare text carries none).
+        var topLevelDeclarations = options.RootName is null ? options.Declarations : "";
 
         if (options.RootName is { } rootName)
-        {
-            _ = sb.Append('<').Append(rootName);
-            if (options.Xsinil)
-                _ = sb.Append(" xmlns:xsi=\"").Append(XsiNamespace).Append('"');
-            _ = sb.Append('>');
-        }
+            _ = sb.Append('<').Append(rootName).Append(options.Declarations).Append('>');
 
         var any = false;
         var prevAtomic = false;
@@ -390,11 +501,11 @@ partial class Selection
             if (rowElement.Name.Length == 0)
             {
                 // PATH('') — no row wrapper; emit the row's content directly.
-                prevAtomic = SerializeForXmlContent(sb, rowElement.Content, rowBytes, innerSchema, options, xsiOnTopLevel, prevAtomic);
+                prevAtomic = SerializeForXmlContent(sb, rowElement.Content, rowBytes, innerSchema, options, topLevelDeclarations, prevAtomic);
             }
             else
             {
-                SerializeForXmlElement(sb, rowElement, rowBytes, innerSchema, options, xsiOnTopLevel);
+                SerializeForXmlElement(sb, rowElement, rowBytes, innerSchema, options, topLevelDeclarations);
                 prevAtomic = false;
             }
         }
@@ -427,15 +538,10 @@ partial class Selection
         ForXmlOptions options, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         var sb = new StringBuilder();
-        var xsiOnTopLevel = options.Xsinil && options.RootName is null;
+        var topLevelDeclarations = options.RootName is null ? options.Declarations : "";
 
         if (options.RootName is { } rootName)
-        {
-            _ = sb.Append('<').Append(rootName);
-            if (options.Xsinil)
-                _ = sb.Append(" xmlns:xsi=\"").Append(XsiNamespace).Append('"');
-            _ = sb.Append('>');
-        }
+            _ = sb.Append('<').Append(rootName).Append(options.Declarations).Append('>');
 
         // The names of the elements left open, outermost first; the innermost
         // level is absent whenever it self-closed.
@@ -454,12 +560,12 @@ partial class Selection
             {
                 var element = levelElements[i];
                 _ = sb.Append('<').Append(element.Name);
-                if (i == 0 && xsiOnTopLevel)
-                    _ = sb.Append(" xmlns:xsi=\"").Append(XsiNamespace).Append('"');
-                AppendForXmlAttributes(sb, element, rowBytes, innerSchema);
+                if (i == 0)
+                    _ = sb.Append(topLevelDeclarations);
+                AppendForXmlAttributes(sb, element, rowBytes, innerSchema, options);
 
                 var body = new StringBuilder();
-                _ = SerializeForXmlContent(body, element.Content, rowBytes, innerSchema, options, declareXsiOnElements: false, prevAtomic: false);
+                _ = SerializeForXmlContent(body, element.Content, rowBytes, innerSchema, options, declarationsOnElements: "", prevAtomic: false);
                 // Only the innermost level can self-close: every outer level
                 // has the next level's element as content.
                 if (body.Length == 0 && i == levels.Length - 1)
@@ -507,7 +613,7 @@ partial class Selection
     /// Appends an element's attributes for one row, skipping the NULL ones
     /// (attributes are always absent for NULL, whatever the ELEMENTS setting).
     /// </summary>
-    private static void AppendForXmlAttributes(StringBuilder sb, ForXmlElement element, byte[] rowBytes, SqlType[] innerSchema)
+    private static void AppendForXmlAttributes(StringBuilder sb, ForXmlElement element, byte[] rowBytes, SqlType[] innerSchema, ForXmlOptions options)
     {
         foreach (var attribute in element.Attributes)
         {
@@ -515,10 +621,21 @@ partial class Selection
             if (value.IsNull)
                 continue;
             _ = sb.Append(' ').Append(attribute.Name).Append("=\"");
-            AppendForXmlText(sb, ScalarForXmlText(value), isAttribute: true);
+            AppendForXmlText(sb, ForXmlColumnText(value, attribute.Column, rowBytes, innerSchema, options), isAttribute: true);
             _ = sb.Append('"');
         }
     }
+
+    /// <summary>
+    /// The text one non-NULL result column serializes as: its own value, or —
+    /// for an AUTO binary column without <c>BINARY BASE64</c> — the
+    /// <c>dbobject</c> reference standing in for it. The caller applies the
+    /// position's escaping.
+    /// </summary>
+    private static string ForXmlColumnText(SqlValue value, int column, byte[] rowBytes, SqlType[] innerSchema, ForXmlOptions options) =>
+        options.BinaryUrls?[column] is { } url
+            ? FormatForXmlBinaryUrl(url, rowBytes, innerSchema)
+            : ScalarForXmlText(value);
 
     /// <summary>
     /// Serializes one element (open tag, attributes, content, close/self-close)
@@ -527,27 +644,22 @@ partial class Selection
     /// <c>&lt;name xsi:nil="true"/&gt;</c> under XSINIL.
     /// </summary>
     private static void SerializeForXmlElement(
-        StringBuilder sb, ForXmlElement element, byte[] rowBytes, SqlType[] innerSchema, ForXmlOptions options, bool declareXsi)
+        StringBuilder sb, ForXmlElement element, byte[] rowBytes, SqlType[] innerSchema, ForXmlOptions options, string declarations)
     {
         if (element.Content.Count == 1 && element.Content[0] is ForXmlLeaf onlyLeaf
             && RowDecoder.DecodeColumn(innerSchema, rowBytes, onlyLeaf.Column).IsNull)
         {
             if (!options.Xsinil)
                 return;
-            _ = sb.Append('<').Append(element.Name);
-            if (declareXsi)
-                _ = sb.Append(" xmlns:xsi=\"").Append(XsiNamespace).Append('"');
-            _ = sb.Append(" xsi:nil=\"true\"/>");
+            _ = sb.Append('<').Append(element.Name).Append(declarations).Append(" xsi:nil=\"true\"/>");
             return;
         }
 
-        _ = sb.Append('<').Append(element.Name);
-        if (declareXsi)
-            _ = sb.Append(" xmlns:xsi=\"").Append(XsiNamespace).Append('"');
-        AppendForXmlAttributes(sb, element, rowBytes, innerSchema);
+        _ = sb.Append('<').Append(element.Name).Append(declarations);
+        AppendForXmlAttributes(sb, element, rowBytes, innerSchema, options);
 
         var body = new StringBuilder();
-        _ = SerializeForXmlContent(body, element.Content, rowBytes, innerSchema, options, declareXsiOnElements: false, prevAtomic: false);
+        _ = SerializeForXmlContent(body, element.Content, rowBytes, innerSchema, options, declarationsOnElements: "", prevAtomic: false);
         if (body.Length == 0)
             _ = sb.Append("/>");
         else
@@ -561,14 +673,14 @@ partial class Selection
     /// values concatenate. Returns the trailing atomic state.
     /// </summary>
     private static bool SerializeForXmlContent(
-        StringBuilder sb, List<object> content, byte[] rowBytes, SqlType[] innerSchema, ForXmlOptions options, bool declareXsiOnElements, bool prevAtomic)
+        StringBuilder sb, List<object> content, byte[] rowBytes, SqlType[] innerSchema, ForXmlOptions options, string declarationsOnElements, bool prevAtomic)
     {
         foreach (var item in content)
         {
             switch (item)
             {
                 case ForXmlElement element:
-                    SerializeForXmlElement(sb, element, rowBytes, innerSchema, options, declareXsiOnElements);
+                    SerializeForXmlElement(sb, element, rowBytes, innerSchema, options, declarationsOnElements);
                     prevAtomic = false;
                     break;
                 case ForXmlLeaf leaf:
@@ -584,7 +696,7 @@ partial class Selection
                     if (innerSchema[leaf.Column] is XmlSqlType)
                         _ = sb.Append(ScalarForXmlText(value));
                     else
-                        AppendForXmlText(sb, ScalarForXmlText(value), isAttribute: false);
+                        AppendForXmlText(sb, ForXmlColumnText(value, leaf.Column, rowBytes, innerSchema, options), isAttribute: false);
                     prevAtomic = leaf.Atomic;
                     break;
             }
@@ -598,8 +710,10 @@ partial class Selection
     /// carriage return (preserved through parsing); an attribute value also
     /// escapes the double quote, tab, and line feed (attribute-value
     /// normalization). Probe-confirmed against SQL Server 2025.
+    /// Shared with <see cref="XmlDml"/>, which re-serializes a
+    /// <c>.modify()</c>-edited instance under the same rules.
     /// </summary>
-    private static void AppendForXmlText(StringBuilder sb, string text, bool isAttribute)
+    internal static void AppendForXmlText(StringBuilder sb, string text, bool isAttribute)
     {
         foreach (var c in text)
         {
@@ -622,9 +736,10 @@ partial class Selection
     /// formatting matches FOR JSON (scientific float, fraction-drop dates)
     /// except <c>bit</c> renders <c>1</c>/<c>0</c>; binary base64-encodes and
     /// <c>uniqueidentifier</c> uppercases. Callers apply the position-dependent
-    /// escaping.
+    /// escaping. Shared with <see cref="XmlDml"/>, which atomizes a
+    /// <c>.modify()</c> value term through it.
     /// </summary>
-    private static string ScalarForXmlText(SqlValue value)
+    internal static string ScalarForXmlText(SqlValue value)
     {
         var type = value.Type;
         switch (type)
@@ -639,7 +754,7 @@ partial class Selection
                 return value.AsSingle.ToString("0.0000000e+000", CultureInfo.InvariantCulture);
             case var _ when type == SqlType.Money || type == SqlType.SmallMoney:
                 return value.AsMoney.ToString("0.0000", CultureInfo.InvariantCulture);
-            case BinarySqlType or VarbinarySqlType:
+            case BinarySqlType or VarbinarySqlType or ImageSqlType:
                 return Convert.ToBase64String(value.AsBytes);
             case DateTime2SqlType dt2:
                 return ForXmlDateTime(value.AsDateTime2, dt2.precision);
@@ -691,7 +806,9 @@ internal enum ForXmlMode
 }
 
 /// <summary>Parsed FOR XML clause options. Immutable, so it rides the cached plan.</summary>
-internal sealed class ForXmlOptions(ForXmlMode mode, string? rowElement, bool elements, bool xsinil, bool typed, string? rootName)
+internal sealed class ForXmlOptions(
+    ForXmlMode mode, string? rowElement, bool elements, bool xsinil, bool typed, bool binaryBase64,
+    string? rootName, ForXmlNamespaces? namespaces, ForXmlBinaryUrl?[]? binaryUrls = null)
 {
     public readonly ForXmlMode Mode = mode;
 
@@ -711,8 +828,67 @@ internal sealed class ForXmlOptions(ForXmlMode mode, string? rowElement, bool el
     /// </summary>
     public readonly bool Typed = typed;
 
+    /// <summary>
+    /// The <c>BINARY BASE64</c> option: RAW and AUTO base64-encode a binary
+    /// column instead of raising / addressing it as a <c>dbobject</c> URL.
+    /// PATH base64-encodes either way.
+    /// </summary>
+    public readonly bool BinaryBase64 = binaryBase64;
+
     /// <summary>The ROOT wrapper name, or null when no ROOT option was given.</summary>
     public readonly string? RootName = rootName;
+
+    /// <summary>The statement's <c>WITH XMLNAMESPACES</c> bindings, or null.</summary>
+    public readonly ForXmlNamespaces? Namespaces = namespaces;
+
+    /// <summary>
+    /// Per result column, the <c>dbobject</c> URL an AUTO binary column
+    /// serializes as without <c>BINARY BASE64</c>; null entries (and a null
+    /// array) mean the column serializes as its own value.
+    /// </summary>
+    public readonly ForXmlBinaryUrl?[]? BinaryUrls = binaryUrls;
+
+    /// <summary>
+    /// The declaration text the outermost element carries: the <c>xsi</c>
+    /// binding XSINIL needs, then the statement's own, in real's reverse
+    /// declaration order. Empty when neither applies.
+    /// </summary>
+    public readonly string Declarations = ForXmlNamespaces.TopLevelDeclarations(xsinil, namespaces);
+
+    /// <summary>This clause's options with <paramref name="urls"/> attached.</summary>
+    public ForXmlOptions WithBinaryUrls(ForXmlBinaryUrl?[] urls) =>
+        new(this.Mode, this.RowElement, this.Elements, this.Xsinil, this.Typed, this.BinaryBase64, this.RootName, this.Namespaces, urls);
+}
+
+/// <summary>
+/// The <c>dbobject/TABLE[@PK='V']/@COLUMN</c> reference <c>FOR XML AUTO</c>
+/// writes for a binary column when <c>BINARY BASE64</c> is absent — SQL Server's
+/// legacy SQLXML addressing form. Assembled once per plan: the fixed text either
+/// side of the key predicate, plus the result columns each key value reads from.
+/// </summary>
+/// <remarks>
+/// Real builds the reference from the <em>base</em> names — the owning table's
+/// object name and the base column names, not the select-list aliases — and
+/// joins a composite key's terms with the URL-escaped <c>%20and%20</c>. The
+/// finished reference then takes ordinary attribute / element escaping, so a key
+/// value containing <c>&amp;</c> comes back escaped (probe-confirmed).
+/// </remarks>
+internal sealed class ForXmlBinaryUrl(string prefix, ForXmlUrlKey[] keys, string suffix)
+{
+    /// <summary><c>dbobject/&lt;table&gt;[</c>.</summary>
+    public readonly string Prefix = prefix;
+
+    public readonly ForXmlUrlKey[] Keys = keys;
+
+    /// <summary><c>]/@&lt;column&gt;</c>.</summary>
+    public readonly string Suffix = suffix;
+}
+
+/// <summary>One key term of a <see cref="ForXmlBinaryUrl"/>: the base column's name and where its value lives.</summary>
+internal sealed class ForXmlUrlKey(string name, int column)
+{
+    public readonly string Name = name;
+    public readonly int Column = column;
 }
 
 /// <summary>An attribute placement on a FOR XML element, bound to a result column.</summary>

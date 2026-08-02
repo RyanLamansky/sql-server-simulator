@@ -28,9 +28,11 @@ internal static class JsonValueRender
     /// is true, the value's string form is appended verbatim (used for
     /// JSON-producing inputs such as nested <c>JSON_OBJECT</c> /
     /// <c>JSON_ARRAY</c> / <c>JSON_QUERY</c> — matches SQL Server's
-    /// auto-detection of JSON-typed input).
+    /// auto-detection of JSON-typed input). <paramref name="escapeSolidus"/>
+    /// writes <c>/</c> as <c>\/</c>, which <c>JSON_MODIFY</c>'s substituted
+    /// value does.
     /// </summary>
-    public static void Append(StringBuilder sb, SqlValue value, bool embedRaw)
+    public static void Append(StringBuilder sb, SqlValue value, bool embedRaw, bool escapeSolidus = false)
     {
         if (value.IsNull)
         {
@@ -101,7 +103,7 @@ internal static class JsonValueRender
         // everything else: coerce to nvarchar (SQL Server's default ISO
         // shape for the temporal types and uppercase-hex form for guid),
         // then JSON-escape.
-        AppendJsonString(sb, value.CoerceTo(SqlType.NVarchar).AsString);
+        AppendJsonString(sb, value.CoerceTo(SqlType.NVarchar).AsString, escapeSolidus);
     }
 
     /// <summary>
@@ -135,19 +137,22 @@ internal static class JsonValueRender
     /// <summary>
     /// Appends <paramref name="s"/> as a quoted JSON string. Shared with the
     /// <c>REGEXP_MATCHES</c> rowset member, whose <c>substring_matches</c>
-    /// column is JSON built the same way.
+    /// column is JSON built the same way, and with <c>JSON_MODIFY</c>'s
+    /// substituted value, which sets <paramref name="escapeSolidus"/>.
     /// </summary>
-    public static void AppendJsonString(StringBuilder sb, string s)
+    public static void AppendJsonString(StringBuilder sb, string s, bool escapeSolidus = false)
     {
         // Minimal JSON-string escape: only the chars JSON syntax requires
-        // (probe-confirmed against SQL Server 2025 — non-ASCII / `/` /
-        // `<` / `>` are left literal, matching real JSON_OBJECT output).
+        // (probe-confirmed against SQL Server 2025 — non-ASCII / `<` / `>`
+        // are left literal). `/` is a per-caller choice: JSON_MODIFY writes
+        // `\/` where REGEXP_MATCHES' substring_matches leaves it literal.
         _ = sb.Append('"');
         foreach (var c in s)
         {
             _ = c switch
             {
                 '"' => sb.Append("\\\""),
+                '/' when escapeSolidus => sb.Append("\\/"),
                 '\\' => sb.Append("\\\\"),
                 '\b' => sb.Append("\\b"),
                 '\f' => sb.Append("\\f"),
@@ -164,7 +169,8 @@ internal static class JsonValueRender
     /// <summary>
     /// Returns true when an Expression produces a JSON document whose
     /// string form should be embedded verbatim (not re-escaped) when used
-    /// as a value inside <c>JSON_OBJECT</c> / <c>JSON_ARRAY</c>.
+    /// as a value inside <c>JSON_OBJECT</c> / <c>JSON_ARRAY</c> or as
+    /// <c>JSON_MODIFY</c>'s substituted value.
     /// Compile-time check on the Expression's runtime shape — matches SQL
     /// Server's "input is JSON-typed" detection without needing an
     /// SqlValue-level marker bit. Parenthesized wrappers unwrap so
@@ -172,7 +178,7 @@ internal static class JsonValueRender
     /// </summary>
     public static bool ProducesJson(Expression expression) => expression switch
     {
-        JsonObject or JsonArray or JsonQuery => true,
+        JsonObject or JsonArray or JsonQuery or JsonModify => true,
         Parenthesized p => ProducesJson(p.Wrapped),
         _ => false,
     };

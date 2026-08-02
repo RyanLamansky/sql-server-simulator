@@ -39,9 +39,35 @@ partial class Simulation
     /// </remarks>
     internal Selection? TryParseViewBodyPlan(BatchContext outerBatch, View view)
     {
+        try
+        {
+            return ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: true);
+        }
+        catch (SimulatedSqlException)
+        {
+            return null;
+        }
+        catch (NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The propagating form of <see cref="TryParseViewBodyPlan"/>, used by
+    /// UPDATE through a join view: the statement is about to write through
+    /// the body, so a body that won't parse or bind is the statement's own
+    /// error rather than something to fall back from. Statement schema locks
+    /// stay held for the rest of the statement.
+    /// </summary>
+    internal Selection ParseViewBodyPlan(BatchContext outerBatch, View view) =>
+        ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: false);
+
+    private Selection ParseViewBodyPlan(BatchContext outerBatch, View view, bool releaseStatementSchemaLocks)
+    {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
-            return null;
+            throw SimulatedSqlException.MaximumNestingLevelExceeded();
 
         using var bodyCommand = new SimulatedDbCommand(this, connection);
 #pragma warning disable CA2100 // view.BodyText is the view's pre-validated stored body, not external input
@@ -62,19 +88,12 @@ partial class Simulation
             parser.MoveNextRequired();
             return ParseBodyQuery(parser);
         }
-        catch (SimulatedSqlException)
-        {
-            return null;
-        }
-        catch (NotSupportedException)
-        {
-            return null;
-        }
         finally
         {
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
-            innerBatch.ReleaseStatementSchemaLocks();
+            if (releaseStatementSchemaLocks)
+                innerBatch.ReleaseStatementSchemaLocks();
         }
     }
 

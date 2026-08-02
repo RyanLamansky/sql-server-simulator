@@ -215,10 +215,25 @@ public class ForJsonTests
         Contains("requires at least one table", ex.Message);
     }
 
+    /// <summary>
+    /// A set operator flattens AUTO to one level: the objects are named after
+    /// the first branch's first source (invisible in JSON, where a flat level
+    /// carries no name) and every column lands on it, the first branch's join
+    /// topology included.
+    /// </summary>
     [TestMethod]
-    public void Auto_SetOperation_NotModeled()
-        => _ = Throws<NotSupportedException>(
-            () => new Simulation().ExecuteScalar(Fixture + "select id from t union all select id from u for json auto"));
+    public void Auto_SetOperation_FlatObjectPerRow()
+        => AreEqual("""[{"id":1,"a":10},{"id":2,"a":30},{"id":3,"a":50},{"id":1,"a":10},{"id":2,"a":20}]""",
+            Json("select id, a from t union all select id, a from u for json auto"));
+
+    [TestMethod]
+    public void Auto_SetOperation_FlattensJoinNesting()
+        => AreEqual("""[{"id":1,"a":10},{"id":2,"a":20},{"id":1,"a":10},{"id":2,"a":20}]""",
+            Json("select t.id, u.a from t join u on t.id=u.id union all select id, a from u for json auto"));
+
+    [TestMethod]
+    public void Auto_SetOperation_FromLessFirstBranch_Raises13600()
+        => _ = new Simulation().AssertSqlError(Fixture + "select 9 as id union all select id from t for json auto", 13600);
 
     // ---- AUTO join nesting ----
 

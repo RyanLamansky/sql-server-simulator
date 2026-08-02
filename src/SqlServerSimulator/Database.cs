@@ -244,6 +244,45 @@ internal sealed class Database
     /// </summary>
     public bool RecursiveTriggers;
 
+    /// <summary>
+    /// <c>TRUSTWORTHY</c> per-database setting. Default <c>false</c> for every
+    /// database except <c>msdb</c> (which real ships trustworthy); flipped by
+    /// <c>ALTER DATABASE … SET TRUSTWORTHY { ON | OFF }</c> and surfaced as
+    /// <c>sys.databases.is_trustworthy_on</c>. When <c>true</c>, a
+    /// database-scoped identity established here — an <c>EXECUTE AS USER</c>
+    /// frame, a module's <c>WITH EXECUTE AS &lt;user&gt;</c> frame, an activated
+    /// application role — may reach another database, resolving the frame's own
+    /// login there like any ordinary session; when <c>false</c> every such
+    /// reference is Msg 916.
+    /// </summary>
+    /// <remarks>
+    /// Real gates the crossing on an <em>authenticator</em> as well: this
+    /// database's owner must hold <c>AUTHENTICATE</c> in the target, which a
+    /// sysadmin-owned database satisfies through <c>dbo</c>. Every simulated
+    /// database is dbo-owned, so the authenticator always qualifies and the flag
+    /// alone decides.
+    /// </remarks>
+    public bool Trustworthy;
+
+    /// <summary>
+    /// <c>DB_CHAINING</c> per-database setting. Default <c>false</c> for a user
+    /// database (real ships <c>master</c> / <c>tempdb</c> / <c>msdb</c> on);
+    /// flipped by <c>ALTER DATABASE … SET DB_CHAINING { ON | OFF }</c> and
+    /// surfaced as <c>sys.databases.is_db_chaining_on</c>. An ownership chain
+    /// crosses the database boundary only when <em>both</em> databases have it
+    /// on — the module's and the referenced object's — and the two objects share
+    /// an owner; otherwise the chain breaks and the caller needs its own grant on
+    /// what the module reached.
+    /// </summary>
+    /// <remarks>
+    /// Every simulated object is dbo-owned (there is no schema / database
+    /// <c>AUTHORIZATION</c> surface), so the owner-match half of real's rule is
+    /// always satisfied and the pair of flags decides. The caller still needs a
+    /// user in the target database — chaining lends rights, not access, so a
+    /// login with no user there is Msg 916 either way.
+    /// </remarks>
+    public bool CrossDatabaseChaining;
+
     private int nextObjectId = 100;
 
     /// <summary>

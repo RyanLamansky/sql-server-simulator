@@ -7,9 +7,9 @@ namespace SqlServerSimulator;
 /// (<c>xml</c> as a column type, <c>xml(schema_collection)</c> binding,
 /// <c>CREATE/DROP XML SCHEMA COLLECTION</c>, <c>CREATE [PRIMARY] XML
 /// INDEX</c>, plus <c>sys.xml_schema_collections</c> / <c>sys.xml_indexes</c>).
-/// XPath / XQuery methods (<c>.value()</c> / <c>.nodes()</c> / <c>.query()</c>
-/// / <c>.exist()</c> / <c>.modify()</c>) raise <see cref="NotSupportedException"/>
-/// at execute time.
+/// The XML method surface has its own homes: the path-evaluating methods are
+/// exercised here alongside the DDL, and <c>.modify()</c> in
+/// <see cref="XmlModifyTests"/>.
 /// </summary>
 [TestClass]
 public sealed class XmlTests
@@ -335,14 +335,15 @@ public sealed class XmlTests
     }
 
     [TestMethod]
-    public void XmlModify_Method_RaisesNotSupportedAtExecute()
+    public void XmlModify_InSelectList_Raises8137()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml)");
         _ = sim.ExecuteNonQuery("insert into dbo.doc values (1, N'<r/>')");
-        var ex = ThrowsExactly<NotSupportedException>(() =>
-            sim.ExecuteScalar("select body.modify('insert <c/> into (/r)[1]') from dbo.doc"));
-        Contains(".modify()", ex.Message);
+        sim.AssertSqlError(
+            "select body.modify('insert <c/> into (/r)[1]') from dbo.doc",
+            8137,
+            "Incorrect use of the XML data type method 'modify'. A non-mutator method is expected in this context.");
     }
 
     [TestMethod]

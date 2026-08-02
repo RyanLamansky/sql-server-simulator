@@ -22,11 +22,12 @@ A root-level JSON scalar isn't JSON text at all, so it raises Msg 13609 rather t
 DACFx-emitted computed columns (WWI's `Application.People.OtherLanguages`, `Warehouse.StockItems.Tags`) always supply explicit paths.
 Pipes cleanly into `OPENJSON` for round-trip on extracted arrays.
 
-`JSON_MODIFY(json, path, newValue)` returns `nvarchar(max)`.
-EF emits `'strict $.City'`-shape paths from owned-as-JSON partial updates (missing leaf → Msg 13608).
-Bare `'$'` replaces the entire document.
+`JSON_MODIFY(json, path, newValue)` returns `nvarchar(max)`, and the result is **the input's own text with one span spliced** — see [Editing the source text](#json_modify-edits-the-source-text).
+EF emits `'strict $.City'`-shape paths from owned-as-JSON partial updates (missing leaf → Msg 13608, State 2).
 Lax existing-key + NULL value removes the key; lax missing key + non-NULL value adds it.
 Numeric/boolean `newValue` stays JSON-typed (`{"n":42}` not `{"n":"42"}`).
+Bare `'$'` — with or without a mode keyword — names the whole document, which leaves no slot to write into: **Msg 13619**, `Unsupported JSON path found in argument 2 of JSON_MODIFY.`
+The `append` prefix (`'append $.arr'`, ahead of any `lax` / `strict` keyword, and the one segment-less form the function takes) adds an element to the array the path names; every other function reports Msg 13607 for it.
 
 `JSON_OBJECT([key : value [, ...]] [null_clause])` / `JSON_ARRAY([value [, ...]] [null_clause])` return `nvarchar(max)`.
 Probe-confirmed against SQL Server 2025.
@@ -62,8 +63,8 @@ Specific mappings:
 - `varbinary` / `binary` → base64-quoted (`"QUI="` for `0x4142`)
 - `datetime` / `datetime2` / `smalldatetime` → quoted ISO with **T** separator (`"2025-01-15T12:34:56"`)
 - `date` / `time` / `uniqueidentifier` → quoted default ISO / uppercase-hex
-- other strings → JSON-escaped (`\"` `\\` `\b` `\f` `\n` `\r` `\t` `\uHHHH` for control chars; non-ASCII / `/` / `<` / `>` left literal)
-- nested `JSON_OBJECT` / `JSON_ARRAY` / `JSON_QUERY` results — embedded **raw** (not re-quoted), via compile-time `JsonValueRender.ProducesJson(Expression)` detection that unwraps `Parenthesized`.
+- other strings → JSON-escaped (`\"` `\\` `\b` `\f` `\n` `\r` `\t` `\uHHHH` for control chars; non-ASCII / `<` / `>` left literal, and `/` too — real escapes it as `\/` here, tracked in [`backlog.md`](backlog.md#fidelity-gaps-in-shipped-behavior); `JSON_MODIFY`'s substituted value does escape it, via `AppendJsonString`'s `escapeSolidus`)
+- nested `JSON_OBJECT` / `JSON_ARRAY` / `JSON_QUERY` / `JSON_MODIFY` results — embedded **raw** (not re-quoted), via compile-time `JsonValueRender.ProducesJson(Expression)` detection that unwraps `Parenthesized`.
   Other strings — including `'{"x":1}'` literals — go through the quote-and-escape path, matching SQL Server's JSON-typed-input detection without needing an `SqlValue`-level marker bit.
 
 `OPENJSON(json [, doc_path]) [WITH (col TYPE [path] [AS JSON], …)]` — rowset-returning, structurally a new FromSource kind.
@@ -73,7 +74,7 @@ Each column extracts via `$.<col-name>` (default) or explicit `'$path'`; primiti
 A NULL document → zero rows; one that isn't JSON text → Msg 13609, State 4 or 3 — see [Msg 13609](#msg-13609--the-document-isnt-json-text).
 
 `AS JSON` column modifier — accepted only on `nvarchar(max)` (any other declared type raises **Msg 13618** at parse).
-Extracts the matched subtree via the shared `JsonSubtree.Extract` (the same rule backing `JSON_QUERY`): object/array → verbatim source text (whitespace and key order preserved, via `JsonElement.GetRawText`); JSON `null` → SQL NULL in both modes; any other (non-null) scalar → SQL NULL in lax, **Msg 13624** in strict; a missing path → SQL NULL in lax, **Msg 13608 State 6** in strict (the OPENJSON-context state, threaded through `JsonPath.Walk`'s `strictNotFoundState`; JSON_VALUE / JSON_QUERY / JSON_MODIFY all report State 1).
+Extracts the matched subtree via the shared `JsonSubtree.Extract` (the same rule backing `JSON_QUERY`): object/array → verbatim source text (whitespace and key order preserved, via `JsonElement.GetRawText`); JSON `null` → SQL NULL in both modes; any other (non-null) scalar → SQL NULL in lax, **Msg 13624** in strict; a missing path → SQL NULL in lax, **Msg 13608 State 6** in strict (the OPENJSON-context state, threaded through `JsonPath.Walk`'s `strictNotFoundState`; JSON_VALUE / JSON_QUERY report State 1 and JSON_MODIFY State 2).
 
 OPENJSON WITH-clause types: `int`/`bigint`/`decimal(p,s)`/`float`/`bit`/`nvarchar(N|max)`/`varchar(N)`/`date`/`datetime2(N)`/`datetimeoffset(N)`/`uniqueidentifier`.
 Coercion via `SqlValue.CoerceTo`.
@@ -89,6 +90,39 @@ It is the one member of the family that never raises — see [Msg 13609](#msg-13
 NULL input → NULL; non-string input → 0 (real SQL Server raises Msg 8116 — the simulator's lax disposition is harmless for the CHECK-constraint use case); a well-formed JSON object or array with nothing but whitespace around it → 1; anything else → 0, root-level scalars (`'1'`, `'"abc"'`, `'true'`) and trailing text (`'{"a":1}extra'`) included.
 It shares [the document scan](#msg-13609--the-document-isnt-json-text) with the rest of the family and reports what that scan objects to as 0 rather than raising.
 The 2-arg shape (`VALUE | ARRAY | OBJECT | SCALAR` modifier) isn't modeled — DACFx-emitted CHECK constraints (`isjson([col])<>0`) only use the 1-arg form.
+
+## `JSON_MODIFY` edits the source text
+
+The result is the document argument as written with one span replaced, not a re-serialization of a parsed tree, so everything the edit didn't touch survives byte for byte: `JSON_MODIFY('  {"a" : 1}  ', '$.a', 2)` is `  {"a" : 2}  `, and writing a value back over itself is byte-identical.
+`Parser/JsonEdit.cs` finds the span — a second walk over the raw text, distinct from the [Msg 13609 scan](#msg-13609--the-document-isnt-json-text) that validated it — reporting the leaf's value span plus the container coordinates an insert or a delete needs.
+Four edits, each with its own splice point:
+
+| edit | when | splice |
+|---|---|---|
+| replace | the path names a value | the value's own span |
+| insert | the leaf's object lacks the key, value non-NULL | immediately before the object's `}`, `,"key":value` (no comma into an empty object) |
+| delete | lax path, object member, NULL value | the member plus the comma **before** it, or — for the container's first member — the comma **after** it |
+| append | an `append` path over an array | immediately before the array's `]`, `,value` (no comma into an empty array); onto a key the object lacks, the member is created holding `[value]`, a NULL value included |
+
+Everything else leaves the document alone and hands the input straight back: a step that misses before the leaf (`'$.x.y'` over `{}`), a property path over an array or an index path over an object, an **array index at or past the end** (`'$[3]'` over `[1,2,3]` — appending is `append`'s job, not an out-of-range write's), a plain NULL value for a key the object lacks, and an `append` onto anything that isn't an array.
+Under `strict` each of those is Msg 13608 State 2 instead — except the `append` onto a present-but-not-an-array value, which is **Msg 13621**, `Array cannot be found in the specified JSON path.`
+`strict` also reads a NULL value as a value: it writes JSON `null` where lax would delete the key, which is also what an array element takes in either mode (`'$[1]'` over `[1,2,3]` leaves `[1,null,3]`).
+
+The inserted text is canonical whatever spacing the document itself uses — SQL Server writes `,"b":2` into `{ "a" : 1 }`.
+Values render through the shared `JsonValueRender`, with one difference from the JSON_* builders: a substituted string escapes `/` as `\/`.
+A JSON-producing third argument (`JSON_QUERY` / `JSON_OBJECT` / `JSON_ARRAY` / a nested `JSON_MODIFY`, detected by the builders' compile-time `JsonValueRender.ProducesJson`) embeds **raw**, keeping its own spacing; every other string is quoted and escaped.
+An inserted key comes from the path's own text, escaped the same way minus the solidus rule (`'$."café"'` → `"café"`).
+
+## Duplicate property names — the reader stops at the first
+
+A JSON object may name the same property twice, and SQL Server's reader takes the first one it meets: `JSON_VALUE('{"a":1,"a":2}', '$.a')` is `1`.
+That first match binds even when it can't answer — `JSON_VALUE('{"a":{"z":1},"a":2}', '$.a')` is NULL rather than `2`, because the reader has already stopped.
+`JSON_QUERY`, `JSON_PATH_EXISTS`, an `OPENJSON … WITH` column path and `JSON_MODIFY` all resolve the same way; `JSON_MODIFY` edits the leading namesake and leaves the trailing one standing (`'{"a":1,"a":2}'` + `'$.a'` = 9 → `{"a":9,"a":2}`), and an insert still lands at the closing brace past both.
+`ISJSON` reports 1 — a repeated name is well-formed JSON text.
+
+`OPENJSON`'s **default schema** is the exception, because it unfolds rather than resolving: every occurrence arrives as its own row, so `OPENJSON('{"a":1,"a":2,"b":3}')` yields three.
+
+`JsonPath.TryStep` reads the first match by enumerating rather than through `JsonElement.TryGetProperty`, which hands back the *last*; `JSON_MODIFY` gets it for free from `JsonEdit`'s left-to-right text walk.
 
 ## Msg 13609 — the document isn't JSON text
 
@@ -133,7 +167,7 @@ The related strict-mode errors carry State bytes of their own: `JSON_VALUE`'s **
 ### Divergences
 
 A statement that fails partway surfaces as the error alone: real streams the rows a truncated `OPENJSON` got through ahead of the error token, while the simulator's failed statement carries no rows (see [`data-reader.md`](data-reader.md)).
-Two divergences of the document model itself sit outside the scan and are tracked in [`backlog.md`](backlog.md#fidelity-gaps-in-shipped-behavior): `JSON_MODIFY` reserializes rather than editing the source text, so it drops the input's own whitespace (`'  {"a" : 1}  '` → `{"a":2}`, where real answers `  {"a" : 2}  `), and duplicate property names read the last rather than the first, which additionally escapes an `ArgumentException` from `JSON_MODIFY`.
+Msg 13607's wording is the simulator's own (`Unexpected character at position 0 in path '<path>'`) rather than real's, which names the offending character and its index and carries State 14.
 
 ## `FOR JSON` result serialization
 
@@ -168,7 +202,7 @@ select p.id, p.nm, c.cnm from pp p join cc c on c.pid = p.id for json auto
 
 The level model — which sources become levels, in what order, where a computed column lands, and how consecutive rows collapse — is shared with `FOR XML AUTO` and tabulated in [`xml.md`](xml.md#auto-nesting-shared-with-for-json-auto); `Parser/Selection.AutoNesting.cs` builds it for both.
 JSON-specific corners: a NULL-filled outer-join side is `"c":[{}]` (an array holding one empty object), `INCLUDE_NULL_VALUES` reaches every level, `WITHOUT_ARRAY_WRAPPER` drops only the outermost array, and a SELECT with no FROM clause raises **Msg 13600**.
-A set-operation result raises `NotSupportedException` (the same gap FOR XML AUTO has).
+A set-operation result flattens to a single level named after the first branch's first source — the same rule FOR XML AUTO follows, described in [`xml.md`](xml.md#auto-nesting-shared-with-for-json-auto) — which in JSON means a flat object per row, since a lone level contributes no property name.
 
 ### Options
 

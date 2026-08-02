@@ -75,21 +75,18 @@ public sealed partial class SimulatedSqlException
         new("Sub-entity lists (such as column or security expressions) cannot be specified for entity-level permissions.", 1020, 16, 3);
 
     /// <summary>
-    /// Mimics SQL Server error 262: <c>CREATE TABLE</c> attempted by a principal
-    /// lacking <c>db_ddladmin</c> / <c>db_owner</c> membership (or an explicit
-    /// CREATE TABLE grant). Severity 14, state 1, probe-confirmed wording.
+    /// Mimics SQL Server error 262: a database-scope permission the statement
+    /// needs is missing. Severity 14, state 1, probe-confirmed wording, shared by
+    /// the <c>CREATE TABLE</c> / <c>CREATE SYNONYM</c> / <c>CREATE TYPE</c> /
+    /// <c>CREATE XML SCHEMA COLLECTION</c> / <c>CREATE ASSEMBLY</c> gates, the
+    /// server-scope <c>CREATE DATABASE</c> gate (which names <c>master</c>), and
+    /// the database-scope DMV read denied by a missing <c>VIEW DATABASE
+    /// PERFORMANCE STATE</c>. The <c>CREATE VIEW</c> / <c>PROCEDURE</c> /
+    /// <c>FUNCTION</c> family takes the state-18 variant instead — see
+    /// <see cref="CreateModulePermissionDenied"/>. Real also raises a trailing
+    /// Msg 297 on the DMV path; the simulator surfaces the single Msg 262.
     /// </summary>
-    internal static SimulatedSqlException CreateTablePermissionDenied(string databaseName) =>
-        new($"CREATE TABLE permission denied in database '{databaseName}'.", 262, 14, 1);
-
-    /// <summary>
-    /// Mimics SQL Server error 262 for a database-scope DMV read denied by a
-    /// missing <c>VIEW DATABASE PERFORMANCE STATE</c> (or covering) permission.
-    /// Same shape as the CREATE TABLE 262 (severity 14, state 1), with the
-    /// permission name parameterized — probe-confirmed wording. Real also raises a
-    /// trailing Msg 297; the simulator surfaces the single Msg 262.
-    /// </summary>
-    internal static SimulatedSqlException DatabaseStatePermissionDenied(string permission, string databaseName) =>
+    internal static SimulatedSqlException DatabasePermissionDenied(string permission, string databaseName) =>
         new($"{permission} permission denied in database '{databaseName}'.", 262, 14, 1);
 
     /// <summary>
@@ -133,13 +130,113 @@ public sealed partial class SimulatedSqlException
         new($"Cannot find the object \"{qualifiedName}\" because it does not exist or you do not have permissions.", 1088, 16, 13);
 
     /// <summary>
-    /// Mimics SQL Server error 3701 for a <c>DROP TABLE</c> denied by a missing
-    /// ALTER permission on the schema. Same wording as the not-found 3701 but
+    /// Mimics SQL Server error 3701 for a <c>DROP</c> denied by the missing
+    /// schema-ALTER / object-CONTROL pair. Same wording as the not-found 3701 but
     /// <strong>severity 14, state 20</strong> (the not-found form is sev 11 state
-    /// 5) — probe-confirmed.
+    /// 5) — probe-confirmed for every object kind, each naming its own noun
+    /// (<c>table</c> / <c>view</c> / <c>procedure</c> / <c>function</c> /
+    /// <c>trigger</c> / <c>sequence</c> / <c>synonym</c>) and the object's leaf.
     /// </summary>
-    internal static SimulatedSqlException DropTablePermissionDenied(string name) =>
-        new($"Cannot drop the table '{name}', because it does not exist or you do not have permission.", 3701, 14, 20);
+    internal static SimulatedSqlException DropObjectPermissionDenied(string objectKind, string name) =>
+        new($"Cannot drop the {objectKind} '{name}', because it does not exist or you do not have permission.", 3701, 14, 20);
+
+    /// <summary>
+    /// Mimics SQL Server error 3701 for an <c>ALTER</c> / <c>CREATE OR ALTER</c>
+    /// of an existing module denied by a missing ALTER permission on it. The
+    /// <c>Cannot alter the …</c> sibling of <see cref="DropObjectPermissionDenied"/>,
+    /// same severity 14 / state 20, probe-confirmed for <c>procedure</c> /
+    /// <c>view</c> / <c>function</c> / <c>trigger</c>.
+    /// </summary>
+    internal static SimulatedSqlException AlterObjectPermissionDenied(string objectKind, string name) =>
+        new($"Cannot alter the {objectKind} '{name}', because it does not exist or you do not have permission.", 3701, 14, 20);
+
+    /// <summary>
+    /// Mimics SQL Server error 3701 for a <c>DROP DATABASE</c> denied by a
+    /// missing server-scope authority. Distinct from every object drop:
+    /// <strong>severity 11, state 2</strong> (probe-confirmed).
+    /// </summary>
+    internal static SimulatedSqlException DropDatabasePermissionDenied(string name) =>
+        new($"Cannot drop the database '{name}', because it does not exist or you do not have permission.", 3701, 11, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 2104: <c>CREATE TRIGGER</c> denied by a missing
+    /// ALTER permission on the parent object (a DML trigger) or the missing
+    /// <c>ALTER ANY DATABASE DDL TRIGGER</c> (a database-scope one). Severity 14,
+    /// state 1, probe-confirmed wording — the name is echoed as written, so a
+    /// two-part <c>dbo.tr</c> reports both parts.
+    /// </summary>
+    internal static SimulatedSqlException CreateTriggerPermissionDenied(string name) =>
+        new($"Cannot create the trigger '{name}', because you do not have permission.", 2104, 14, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151 for an <c>ALTER SEQUENCE</c> denied by a
+    /// missing ALTER permission on the sequence. Severity 16, state 1,
+    /// probe-confirmed wording (the same record a missing sequence earns).
+    /// </summary>
+    internal static SimulatedSqlException CannotAlterSequence(string name) =>
+        new($"Cannot alter the sequence '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151 for a <c>DROP XML SCHEMA COLLECTION</c>
+    /// denied by the missing schema-ALTER / collection-CONTROL pair. Severity 16,
+    /// state 1, probe-confirmed wording (lowercase object noun).
+    /// </summary>
+    internal static SimulatedSqlException CannotDropXmlSchemaCollection(string name) =>
+        new($"Cannot drop the xml schema collection '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151 for a <c>DROP ROLE</c> denied by a missing
+    /// <c>ALTER ANY ROLE</c>. Severity 16, state 1, probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropRole(string name) =>
+        new($"Cannot drop the role '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151 for an <c>ALTER ROLE</c> denied by a missing
+    /// <c>ALTER ANY ROLE</c>. Severity 16, <strong>state 2</strong> — probe-confirmed
+    /// distinct from the DROP ROLE state 1.
+    /// </summary>
+    internal static SimulatedSqlException CannotAlterRole(string name) =>
+        new($"Cannot alter the role '{name}', because it does not exist or you do not have permission.", 15151, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151 for the <c>ALTER SCHEMA … TRANSFER</c> half
+    /// that checks the moved object: real requires CONTROL on it, over and above
+    /// ALTER on the destination schema (which is checked first and reports
+    /// <see cref="CannotAlterSchemaDoesNotExist"/>). Severity 16, state 1,
+    /// probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException CannotTransferObject(string name) =>
+        new($"Cannot transfer the object '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5011 for an <c>ALTER DATABASE</c> denied by a
+    /// missing ALTER permission on the database. Same wording as the
+    /// unknown-database <see cref="CannotAlterDatabase"/> but
+    /// <strong>state 9</strong> — probe-confirmed. Real follows it with a
+    /// terminating Msg 5069 (<c>ALTER DATABASE statement failed.</c>); the
+    /// simulator surfaces the single 5011, matching how the other paired
+    /// diagnostics are modeled.
+    /// </summary>
+    internal static SimulatedSqlException AlterDatabasePermissionDenied(string databaseName) =>
+        new($"User does not have permission to alter database '{databaseName}', the database does not exist, or the database is not in a state that allows access checks.", 5011, 14, 9);
+
+    /// <summary>
+    /// Mimics SQL Server error 7666: <c>CREATE FULLTEXT CATALOG</c> denied by a
+    /// missing <c>CREATE FULLTEXT CATALOG</c> permission. Severity 16, state 2,
+    /// probe-confirmed wording (the same sentence Msg 15247 carries, at a
+    /// different number).
+    /// </summary>
+    internal static SimulatedSqlException FullTextUserDoesNotHavePermission() =>
+        new("User does not have permission to perform this action.", 7666, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 7641 for a <c>DROP FULLTEXT CATALOG</c> denied by
+    /// a missing database-scope ALTER. Severity 16, state 5, probe-confirmed
+    /// wording.
+    /// </summary>
+    internal static SimulatedSqlException FullTextCatalogNotFoundOrDenied(string catalogName, string databaseName) =>
+        new($"Full-Text catalog '{catalogName}' does not exist in database '{databaseName}' or user does not have permission to perform this action.", 7641, 16, 5);
 
     /// <summary>
     /// Mimics SQL Server error 15151 for a <c>DROP USER</c> denied to a principal

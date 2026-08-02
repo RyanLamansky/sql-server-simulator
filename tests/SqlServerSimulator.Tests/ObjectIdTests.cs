@@ -328,6 +328,84 @@ public sealed class ObjectIdTests
         IsFalseDbNull(sim.ExecuteReader("select object_id('dbo.trg1', 'TR') as id"));
     }
 
+    /// <summary>
+    /// A constraint name resolves like any other schema-scoped object —
+    /// probe-confirmed for a DEFAULT, a CHECK and a PRIMARY KEY, qualified or
+    /// not, with the type filter honored and OBJECT_NAME reading back.
+    /// </summary>
+    [TestMethod]
+    [DataRow("object_id('df1')")]
+    [DataRow("object_id('dbo.df1')")]
+    [DataRow("object_id('[dbo].[df1]')")]
+    [DataRow("object_id('df1', 'D')")]
+    [DataRow("object_id('ck1')")]
+    [DataRow("object_id('ck1', 'C')")]
+    [DataRow("object_id('pk1')")]
+    [DataRow("object_id('pk1', 'PK')")]
+    [DataRow("object_id('uq1', 'UQ')")]
+    [DataRow("object_id('fk1', 'F')")]
+    public void ObjectId_ConstraintName_Resolves(string expression)
+        => IsFalseDbNull(new Simulation().ExecuteReader($"""
+            create table parent (id int not null constraint pkp primary key);
+            create table t (
+                id int not null constraint pk1 primary key,
+                u int not null constraint uq1 unique,
+                a int constraint df1 default 0,
+                p int not null constraint fk1 references parent (id),
+                constraint ck1 check (a >= 0));
+            select {expression} as id
+            """));
+
+    /// <summary>The type filter rejects a constraint of another family.</summary>
+    [TestMethod]
+    [DataRow("object_id('df1', 'C')")]
+    [DataRow("object_id('ck1', 'D')")]
+    [DataRow("object_id('pk1', 'UQ')")]
+    [DataRow("object_id('uq1', 'PK')")]
+    [DataRow("object_id('df1', 'U')")]
+    public void ObjectId_ConstraintName_WrongTypeFilter_ReturnsNull(string expression)
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar($"""
+            create table t (
+                id int not null constraint pk1 primary key,
+                u int not null constraint uq1 unique,
+                a int constraint df1 default 0,
+                constraint ck1 check (a >= 0));
+            select {expression}
+            """));
+
+    /// <summary>
+    /// A constraint's name is scoped to the schema of the table that owns it,
+    /// so one on a table in another schema needs qualification (probe-confirmed
+    /// against a constraint on a table in a non-default schema).
+    /// </summary>
+    [TestMethod]
+    public void ObjectId_ConstraintInOtherSchema_NeedsQualification()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create schema s",
+            "create table s.t (id int not null constraint ck_s check (id > 0))");
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select object_id('ck_s')"));
+        IsFalseDbNull(sim.ExecuteReader("select object_id('s.ck_s') as id"));
+    }
+
+    /// <summary>
+    /// OBJECT_NAME / OBJECT_SCHEMA_NAME read a constraint id back, and
+    /// sys.objects carries the matching row.
+    /// </summary>
+    [TestMethod]
+    public void ObjectName_ConstraintId_ReadsBack()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int, a int constraint df1 default 0)");
+        AreEqual("df1", sim.ExecuteScalar("select object_name(object_id('df1'))"));
+        AreEqual("dbo", sim.ExecuteScalar("select object_schema_name(object_id('df1'))"));
+        AreEqual("DEFAULT_CONSTRAINT", sim.ExecuteScalar(
+            "select type_desc from sys.objects where object_id = object_id('df1')"));
+        AreEqual("t", sim.ExecuteScalar(
+            "select object_name(parent_object_id) from sys.objects where object_id = object_id('df1')"));
+    }
+
     private static void IsFalseDbNull(DbDataReader reader)
     {
         using (reader)

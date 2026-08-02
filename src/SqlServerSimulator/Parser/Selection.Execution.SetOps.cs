@@ -55,7 +55,16 @@ internal sealed partial class Selection
         _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
     };
 
-    internal static Selection CombineSetOps(Selection left, Selection right, SetOpKind kind)
+    /// <param name="left">The plan on the left of the set operator.</param>
+    /// <param name="right">The plan on the right of the set operator.</param>
+    /// <param name="kind">Which set operator joins them.</param>
+    /// <param name="namesOwnCollation">
+    /// Whether the combined result is an output column that has to settle its
+    /// own collation. False where a target supplies one (an INSERT … SELECT
+    /// source) or where the projection is discarded (an EXISTS body, a CTE
+    /// definition whose consumer names the slot instead).
+    /// </param>
+    internal static Selection CombineSetOps(Selection left, Selection right, SetOpKind kind, bool namesOwnCollation)
     {
         if (left.HasOrderBy)
         {
@@ -108,24 +117,37 @@ internal sealed partial class Selection
             // Real binds this at compile time — probe-confirmed that it fires
             // on empty tables — and this loop runs at parse, so the check lands
             // in the right phase for free. UNION / INTERSECT / EXCEPT compare
-            // values and raise Msg 468; UNION ALL only concatenates but still
-            // has to name one collation for the output column, so it raises
-            // Msg 457 instead (both probe-confirmed against SQL Server 2025).
+            // values, so an unresolved collation is fatal to them: a
+            // freshly-conflicting pair raises Msg 468 and a branch that arrived
+            // already unresolved raises Msg 5335 (real's not-comparable
+            // message). UNION ALL only concatenates, so it settles like the
+            // string operators do — UnresolvedCollation.Settle carries the
+            // Msg 468 / 457 / 456 split and the marker it propagates otherwise.
             // A branch carrying an explicit COLLATE, or a literal (which is
-            // coercible-default), outranks its partner and resolves cleanly —
-            // Collation.Resolve encodes that precedence.
-            if (effectiveLeft.Category == SqlTypeCategory.String && effectiveRight.Category == SqlTypeCategory.String
-                && effectiveLeft != effectiveRight && Collation.Resolve(effectiveLeft, effectiveRight) is null)
-            {
-                var rightName = effectiveRight.Collation!.Name;
-                var leftName = effectiveLeft.Collation!.Name;
-                throw kind == SetOpKind.UnionAll
-                    ? SimulatedSqlException.UnresolvedCollationInImplicitConversion(
-                        SqlType.Promote(effectiveLeft, effectiveRight), rightName, leftName, "UNION ALL")
-                    : SimulatedSqlException.CollationConflict(rightName, leftName, SetOpName(kind));
-            }
-
+            // coercible-default), outranks its partner and resolves cleanly.
             combinedSchema[i] = SqlType.Promote(effectiveLeft, effectiveRight);
+            if (effectiveLeft.Category == SqlTypeCategory.String && effectiveRight.Category == SqlTypeCategory.String)
+            {
+                if (kind == SetOpKind.UnionAll)
+                {
+                    combinedSchema[i] = UnresolvedCollation.Settle(combinedSchema[i], effectiveLeft, effectiveRight, "UNION ALL");
+                    // The combined column is an output column of the set-op
+                    // result, so a conflict that survived the fold reports here
+                    // rather than travelling on — unless the whole result feeds
+                    // an assignment target, which supplies the collation.
+                    if (namesOwnCollation)
+                        RequireSettledOutputCollation(combinedSchema[i], "SELECT", i + 1);
+                }
+                else if ((UnresolvedCollation.On(effectiveLeft) ?? UnresolvedCollation.On(effectiveRight)) is not null)
+                {
+                    throw SimulatedSqlException.SetOpOperandNotComparable(combinedSchema[i]);
+                }
+                else if (effectiveLeft != effectiveRight && Collation.Resolve(effectiveLeft, effectiveRight) is null)
+                {
+                    throw SimulatedSqlException.CollationConflict(
+                        effectiveRight.Collation!.Name, effectiveLeft.Collation!.Name, SetOpName(kind));
+                }
+            }
             if (leftDigit > 0 && rightDigit > 0)
                 (combinedDigits ??= new int[combinedSchema.Length])[i] = Math.Max(leftDigit, rightDigit);
             // A set-op result column is numeric-named when either branch's
@@ -175,10 +197,33 @@ internal sealed partial class Selection
             ProjectionExpressions = left.ProjectionExpressions,
             BranchFromSources = left.BranchFromSources,
             IsSetOperationResult = true,
+            // AUTO over a set-op result flattens to a single level named after
+            // the first branch's first FROM source — its alias when it has one
+            // — whatever either branch's join topology is, and every column
+            // becomes a "computed column" of that level (probe-confirmed: the
+            // binary dbobject addressing reports Msg 6830 for want of an owning
+            // table). A first branch with no FROM leaves the empty array, which
+            // is AUTO's Msg 6800 / 13600 case.
+            AutoSourceNames = SetOpAutoSourceNames(left),
+            AutoColumnSource = left.AutoSourceNames is null ? null : NoSourceColumnBinding(combinedSchema.Length),
+            AutoColumnOrdinal = left.AutoSourceNames is null ? null : NoSourceColumnBinding(combinedSchema.Length),
             ColumnIntegerLiteralDigits = combinedDigits,
             ColumnReportsNumeric = combinedReportsNumeric,
         };
     }
+
+    /// <summary>
+    /// The single AUTO level name a set-op result exposes: the first branch's
+    /// first source. A left branch that is itself a set-op result already
+    /// carries the folded one-element array, so a longer chain keeps naming its
+    /// leftmost source.
+    /// </summary>
+    private static string?[]? SetOpAutoSourceNames(Selection left) => left.AutoSourceNames switch
+    {
+        null => null,
+        [] => [],
+        var names => [names[0]],
+    };
 
     /// <summary>
     /// Per-column integer-literal significant-digit counts for a projection
@@ -441,7 +486,14 @@ internal sealed partial class Selection
             }
 
             return ApplyOffsetTake(ordered, offsetCount, fetchCount);
-        }, intoTarget: inner.IntoTarget, destColumnSchema: inner.DestColumnSchema);
+        }, intoTarget: inner.IntoTarget, destColumnSchema: inner.DestColumnSchema)
+        {
+            // The sort reorders rows without touching the projection, so the
+            // AUTO serializers keep reading the same level binding.
+            AutoSourceNames = inner.AutoSourceNames,
+            AutoColumnSource = inner.AutoColumnSource,
+            AutoColumnOrdinal = inner.AutoColumnOrdinal,
+        };
     }
 }
 

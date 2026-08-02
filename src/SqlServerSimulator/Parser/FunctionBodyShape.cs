@@ -16,9 +16,10 @@ namespace SqlServerSimulator.Parser;
 /// <para>Violations are gathered rather than raised on sight because real
 /// reports every binder error in the body <em>before</em> any shape error
 /// (probe-confirmed: a <c>PRINT</c> on line 3 and a bad column on line 4 report
-/// Msg 207 first). Letting the binder throw through the walk and raising the
-/// first gathered violation only at the end reproduces which error a
-/// one-exception client sees.</para>
+/// Msg 207 first, and a body carrying both plus a missing trailing
+/// <c>RETURN</c> reports 207, 443, 455 in that order). Gathering through the
+/// walk and appending them behind the binder's own errors at the end
+/// reproduces that sequence.</para>
 /// </summary>
 internal sealed class FunctionBodyShape
 {
@@ -41,8 +42,8 @@ internal sealed class FunctionBodyShape
     public const byte BuiltInOperatorState = 1;
 
     /// <summary>
-    /// Violations in source order. The first is what the <c>CREATE</c> reports;
-    /// real reports them all, the simulator throws one exception.
+    /// Violations in source order — every one of them reaches the <c>CREATE</c>,
+    /// as one exception carrying an entry each.
     /// </summary>
     public readonly List<(int Line, SimulatedSqlException Error)> Violations = [];
 
@@ -133,13 +134,16 @@ internal sealed class FunctionBodyShape
     }
 
     /// <summary>
-    /// The error the <c>CREATE</c> should report, or null when the body's shape
-    /// is legal: the first gathered violation, else Msg 455 when the walk
-    /// finished on a statement that wasn't a <c>RETURN</c>.
+    /// Every violation the <c>CREATE</c> should report, in the order real
+    /// reports them: the gathered ones in source order, then Msg 455 when the
+    /// walk finished on a statement that wasn't a <c>RETURN</c> — last because
+    /// its statement is the body's last.
     /// </summary>
-    public (int Line, SimulatedSqlException Error)? FirstViolation()
-        => this.Violations.Count > 0 ? this.Violations[0]
-            : this.WalkCompleted && !this.LastStatementIsReturn
-                ? (this.LastStatementLine, SimulatedSqlException.FunctionMustEndWithReturn())
-                : null;
+    public IEnumerable<(int Line, SimulatedSqlException Error)> AllViolations()
+    {
+        foreach (var violation in this.Violations)
+            yield return violation;
+        if (this.WalkCompleted && !this.LastStatementIsReturn)
+            yield return (this.LastStatementLine, SimulatedSqlException.FunctionMustEndWithReturn());
+    }
 }

@@ -45,6 +45,16 @@ partial class Simulation
         var typeName = BatchContext.ParseObjectName(context);
         if (!context.Batch.TryResolveSchema(typeName, out var schema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(typeName.ImmediateQualifier ?? Database.DefaultSchemaName);
+        // Dual DDL gate for both type forms, in real's probed order: the
+        // database-scope CREATE TYPE permission (Msg 262 state 1), then ALTER on
+        // the target schema (Msg 2760).
+        if (!context.Batch.IsSkipping)
+        {
+            if (!PermissionEnforcement.HasDatabasePermission(context.Batch, schema.Database, Permission.CreateType))
+                throw SimulatedSqlException.DatabasePermissionDenied("CREATE TYPE", schema.Database.Name);
+            if (!PermissionEnforcement.HasSchemaAlter(context.Batch, schema))
+                throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
+        }
 
         switch (context.GetNextRequired())
         {

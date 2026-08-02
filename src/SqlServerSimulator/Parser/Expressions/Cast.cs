@@ -97,12 +97,22 @@ internal sealed class Cast : Expression
     /// / 468). Returns <see langword="null"/> for non-string targets (nothing to
     /// re-collate). Shared by <see cref="Cast"/> and <c>ConvertExpression</c>.
     /// </summary>
-    internal static SqlType? ResultStringType(SqlType targetType, SqlType sourceType, Collation dbCollation) =>
-        targetType.Collation is null
-            ? null
-            : sourceType.Collation is { } sourceCollation
-                ? targetType.WithCollation(sourceCollation, sourceType.Coercibility)
-                : targetType.WithCollation(dbCollation, Coercibility.CoercibleDefault);
+    internal static SqlType? ResultStringType(SqlType targetType, SqlType sourceType, Collation dbCollation)
+    {
+        if (targetType.Collation is null)
+            return null;
+        if (sourceType.Collation is not { } sourceCollation)
+            return targetType.WithCollation(dbCollation, Coercibility.CoercibleDefault);
+        // Carrying the source collation through means a conversion never
+        // resolves a collation conflict — it inherits one. A Unicode target
+        // carries the unresolved marker onward; a varchar target has to name a
+        // code page and can't, which real reports as Msg 446 State 20 (spelled
+        // CONVERT for a CAST too, probe-confirmed against SQL Server 2025).
+        return !SqlType.IsNationalStringCategory(targetType) && UnresolvedCollation.On(sourceType) is { } conflict
+            ? throw SimulatedSqlException.UnresolvedCollationInOperation(
+                conflict.RightName, conflict.LeftName, conflict.OperatorName, "CONVERT", 20)
+            : targetType.WithCollation(sourceCollation, sourceType.Coercibility);
+    }
 
     /// <summary>
     /// The collation half of <see cref="ResultStringType"/>, without interning

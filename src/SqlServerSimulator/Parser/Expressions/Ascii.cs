@@ -42,7 +42,9 @@ internal sealed class Ascii(ParserContext context) : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        _ = StringScalars.BindArgument(this.source, batch, resolveColumnType, "ascii");
+        // ASCII reads a code point rather than comparing, so an unresolved
+        // collation travels through it untouched (probe-confirmed).
+        _ = StringScalars.BindArgument(this.source, batch, resolveColumnType, "ascii", propagatesUnresolvedCollation: true);
         return SqlType.Int32;
     }
 
