@@ -2,7 +2,8 @@
 
 Spatial values are parsed instances, stored in SQL Server's own UDT serialization.
 WKT parsing (with real's validation failures), canonical WKT rendering, per-value SRID, Z / M ordinates, EMPTY instances, the OGC binary encodings, the constructor family and the whole structural member surface all ship.
-What doesn't yet is *evaluation*: the measures (`STArea` / `STLength` / `STDistance`), the topological predicates (`STIntersects` / `STContains` / …) and the constructive operations (`STUnion` / `STBuffer` / …) parse cleanly and raise `NotSupportedException` at execute — see [Not modeled yet](#not-modeled-yet).
+So do all three measures for both spatial types — area, length and distance, planar and round-earth — and, for `geometry`, the whole topological surface: the eight predicates, `STRelate`, `STIsValid`, and the Msg 24144 gate an invalid instance puts on most instance methods.
+What doesn't yet is the round-earth topology and the constructive operations (`STUnion` / `STBuffer` / …), which parse cleanly and raise `NotSupportedException` at execute — see [Not modeled yet](#not-modeled-yet).
 
 The sole AW spatial column (`Person.Address.SpatialLocation`, geography) loads as a first-class spatial-typed column rather than degrading to `varbinary(MAX)`.
 
@@ -118,7 +119,10 @@ Real enforces all three, and so does the simulator:
 
 **Properties** (no argument list): `STSrid`, `STX` / `STY` (geometry), `Lat` / `Long` (geography), `Z`, `M`, `HasZ`, `HasM`.
 
-**Methods that evaluate**: `ToString`, `STAsText`, `AsTextZM`, `STAsBinary`, `AsBinaryZM`, `STGeometryType`, `STDimension`, `STNumPoints`, `STPointN`, `STStartPoint`, `STEndPoint`, `STIsClosed`, `STIsEmpty`, `STIsRing`, `STNumGeometries`, `STGeometryN`, `STExteriorRing`, `STNumInteriorRing`, `STInteriorRingN`, `NumRings` / `RingN` (geography), `InstanceOf`, `MinDbCompatibilityLevel`, `ReorientObject`.
+**Methods that evaluate**: `ToString`, `STAsText`, `AsTextZM`, `STAsBinary`, `AsBinaryZM`, `STGeometryType`, `STDimension`, `STNumPoints`, `STPointN`, `STStartPoint`, `STEndPoint`, `STIsClosed`, `STIsEmpty`, `STIsRing`, `STNumGeometries`, `STGeometryN`, `STExteriorRing`, `STNumInteriorRing`, `STInteriorRingN`, `NumRings` / `RingN` (geography), `InstanceOf`, `MinDbCompatibilityLevel`, `ReorientObject`, plus the measures and — on `geometry` — the [topological predicates](#topological-predicates-the-de-9im-engine) and `STIsValid`.
+
+The catalog carries a fourth column beside form / scope / result: whether the member refuses a stored-but-invalid instance, which is the [Msg 24144 gate](#validity--stisvalid-and-msg-24144).
+`STIsValid` itself is a member of **both** spatial types, unlike `STIsSimple` / `STTouches` / `STCrosses` / `STRelate`, which are `geometry`-only.
 
 Semantics worth pinning, all probe-confirmed:
 
@@ -218,7 +222,7 @@ Matching it would mean reproducing real's internal summation order; the same noi
 
 ## Round-earth measures: the great elliptic arc
 
-`geography`'s `STLength()` and point-to-point `STDistance()` measure along the **great elliptic arc** — the curve cut from the ellipsoid by the plane through the two points and the ellipsoid's centre.
+`geography`'s `STLength()`, `STArea()` and `STDistance()` all measure along the **great elliptic arc** — the curve cut from the ellipsoid by the plane through the two points and the ellipsoid's centre.
 Real does **not** use the geodesic, which is the assumption any stock implementation starts from, and the difference is measurable.
 
 Measured 2026-07-31 against a Vincenty geodesic (accurate to well under a millimetre at these distances):
@@ -236,40 +240,210 @@ On an oblique intercontinental path they genuinely part, and the great elliptic 
 Recomputing Seattle → Paris as a great elliptic arc closes the 3.3 m gap to **3.2 mm**.
 
 **Implementation** (`Storage/Spatial/SpatialGreatElliptic.cs`): convert both endpoints to geocentric Cartesian on the ellipsoid; take the central plane through them; restrict the ellipsoid's quadratic form `diag(1/a², 1/a², 1/b²)` to that plane, giving a 2×2 symmetric matrix whose principal axes are the section ellipse's semi-axes; find each endpoint's parameter angle on that ellipse; integrate `√(a₁²sin²t + a₂²cos²t)` between them — an incomplete elliptic integral of the second kind — by composite 20-node Gauss-Legendre.
+The arc is held in that ellipse's own principal frame (`GreatEllipticArc`), which is what lets the area and closest-approach work below ask for a point partway along it.
 
 **Accuracy**: the arc is computed exactly, so the residual against real is *real's own* approximation.
-Across the probed set the worst relative error is **5.9e-9** (59 mm over a quarter meridian); Seattle → Paris lands within 3.2 mm, Tokyo → New York within 0.1 mm, and the equator is exact because that section is a circle.
-Tests assert a 1e-8 relative tolerance rather than equality.
+Across the probed set the worst relative error is around **1e-8**: 59 mm over a quarter meridian, 11 mm over 10° of equator (where the section is a circle and the simulator's own quadrature is exact), 3.2 mm over Seattle → Paris and 0.1 mm over Tokyo → New York.
+Real's drift there doesn't grow monotonically with the distance — one degree of equator is short by 5.2e-10 where ten degrees is long by 1.0e-8.
+Tests assert a relative tolerance rather than equality, per case.
 
-`STDistance` is modeled **between two points**; other shape pairs need closest-approach geometry and raise.
+Two endpoints that **coincide or are exactly antipodal** define no plane.
+A coincident pair measures 0; an antipodal one measures **half the meridian ellipse's perimeter** — `POINT(0 0)` to `POINT(180 0)` is 20003931.458 m on real, the smallest central section's half-perimeter and not the equator's, which is 33 km longer.
+Detecting the case needs a relative test rather than a zero one, because `sin(π)` is 1.2e-16 rather than 0, so an exactly antipodal pair still crosses to a normal at the noise floor.
+
 Operands with different SRIDs, and an empty operand, both read NULL rather than raising — matching real.
+A **non-spatial argument is read as well-known text**, which is what real does with `.STDistance('POINT(3 4)')`.
 
+### Ellipsoidal polygon area
+
+`geography`'s `STArea()` integrates the ellipsoid's own surface element over the region its great elliptic edges bound (`Storage/Spatial/SpatialEllipsoidArea.cs`).
+The element depends on latitude alone, so its antiderivative
+
+```
+AreaBelow(φ) = a²(1-e²) · [ sinφ / (2(1-e²sin²φ)) + atanh(e·sinφ) / 2e ]
+```
+
+— the area between the equator and a parallel, per radian of longitude — turns the double integral into a line integral by Green's theorem: a ring encloses `-∮ AreaBelow(φ) dλ`.
+Each edge contributes that integral over its own great elliptic track, taken by Gauss-Legendre in the section's parameter with the panel count following the longitude span.
+
+**How the model was identified** (2026-08-02), following the method the length work used — hypothesis, high-precision probe, residual analysis.
+A 0.01° square at the equator measures `1230907.2048772429` on real, while the exact **parallel-bounded quadrangle** — the closed-form ellipsoidal answer — is `1230907.2018475635`.
+The 3.03e-3 m² gap is not noise and not an ellipsoid constant: it is exactly the poleward bulge of a great elliptic top edge, whose midpoint sits `(Δλ²/8)·sinφ·cosφ` above the parallel.
+Reproducing the bulge closes it.
+
+One simplification makes the edge model unambiguous: the ground track of a central plane section satisfies `tanφ = K·cos(λ - λ₀)`, and so does a great circle drawn on *any* latitude that is a fixed monotone rescaling of the geodetic one.
+So the great elliptic arc, a great circle over geocentric latitude, and a great circle over reduced latitude all trace the **same** curve through the same two points — there is nothing to choose between them, and only a genuine geodesic (whose track carries an O(f) longitude correction) would differ.
+
+**Residuals against real**, over a probed matrix of squares, country quads, equator-crossing and southern polygons, holes, multipolygons, slivers, bands and polar caps:
+
+| Case class | Agreement |
+| --- | --- |
+| 0.01° squares (equator, 60°N, southern, longitude-rotated) | 8e-11 |
+| a 20°-wide band at 40–50°N | 2.5e-13 |
+| country-sized quad, equator-crossing square, thin sliver, hole, multipolygon | 6e-12 … 1e-10 |
+| a 1°×0.5° polygon at 89°N | 5e-12 |
+| a 360-vertex cap around the pole | 9e-10 |
+| pole-to-pole strip, 90°-wide band at the equator, octant, hemisphere | 1.5e-8 … 2.2e-8 |
+| 90°-wide band at 80–85°N | 5.4e-6 |
+| four-vertex cap around the pole, 90°-wide band at 89°N | 1.1e-4 |
+
+The pattern is real's, not the model's: accuracy degrades with an edge's **longitude span**, and worse the nearer the pole that edge runs — the same cap that differs by 1.1e-4 with four vertices comes back to 9e-10 with 360.
+Real is not self-consistent there either: its `FULLGLOBE` constant is within 2.6e-11 of the exact surface area, while the hemisphere it computes from an equatorial ring is 1.7e-8 short of half of it.
+The simulator computes its model exactly and lets the difference stand; tests carry a per-case tolerance for that reason.
+
+**Ring orientation is read**, unlike the planar measure: a `geography` ring's interior lies to the **left** of the direction it is written, so the clockwise spelling of a square names everything else and measures the surface area less its own (probe-confirmed).
+A polygon's rings are summed signed, so a hole wound against its shell subtracts, and a negative total folds into the complement.
+A ring that **encircles a pole** never closes in longitude — its edges sweep a full turn — and the boundary is completed along the pole itself, whose contribution is the whole polar zone; a ring with a **pole as a vertex** traverses from the meridian it arrived on to the one it leaves by.
+Multipolygon and GeometryCollection members sum, and a shape of the wrong dimension measures 0.
+
+### Closest approach
+
+`STDistance` measures between instances of any shape for both spatial types.
+The answer has the same shape in both: **zero** where the two meet or one contains the other, and otherwise the least distance over their component pairs — isolated points, edges, and each operand's rings for the containment test.
+A point inside a polygon's **hole** is outside the polygon and measures to the hole's ring, matching real.
+
+- **`geometry`** reuses the predicate engine's flattening (`SpatialRelateOperand`) and adds the straight-edge primitives to `SpatialTopology`: point-to-segment through the clamped perpendicular foot, segment-to-segment as zero-if-they-meet else the nearest of four endpoint approaches, and even-odd point-in-rings for containment.
+  Every probed value is reproduced exactly, `√2` and all.
+- **`geography`** minimizes along the arcs.
+  Point-to-arc is a golden-section search over the arc parameter; arc-to-arc tests for a crossing first — the two section planes meet in a line through the centre, whose two surface points are the only places the arcs can meet — and otherwise alternates one-dimensional searches from the best endpoint seed.
+  Containment is the **winding** of the rings seen from the point: in the frame that puts the point at a pole, a ring that encircles it turns through a full revolution, and summing over every ring handles holes without a separate rule.
+  Probed agreement is 1e-11 or better on most of the matrix; the cases that sit at real's own ~1e-8 arc-length residual are the ones whose answer runs a long way along one great ellipse.
+
+An instance the other **runs through** answers exactly 0, not the residual a search leaves behind.
+The minimum of a distance that reaches zero has a kink rather than a curve, so a golden section converges on it linearly and stops a few microns short; the zero is recognized structurally instead — a point in an arc's plane and between its endpoints is *on* it — which also settles two arcs sharing a great ellipse, since an endpoint of one then lies on the other.
+Arcs that share a plane are deliberately excluded from the crossing test for the same reason the recognition is needed: they cross to a direction that is pure roundoff, and normalizing that noise would name an arbitrary surface point that could fall inside both spans and report a meeting that isn't there.
+
+Two numerical choices are worth naming.
+The search runs on the **chord** rather than the arc length and only the winner is measured properly: a chord and the surface distance it stands for are related by a factor depending on the chord alone as long as the section's curvature holds still, so the two share a minimizer to within the flattening — worth ~1e-12 relative on the value, three orders below real's own error, for a search step costing two trigonometric evaluations instead of a whole elliptic integral.
+And the pairs worth searching are picked out by a **chord pre-pass**: a chord runs through the ellipsoid, so it never exceeds the surface distance and `c·(1 + c²/6b²)` never falls short of it; one cheap pass takes the shortest chord over every pair and the exact pass measures only those clearing that threshold.
+Without it a scan starting from an infinite bound measures the whole first row exactly — for two 2,000-vertex borders that is thousands of searches a chord rules out in a few flops each, and it was the difference between 13 s and 0.6 s.
+
+## Topological predicates: the DE-9IM engine
+
+`geometry`'s eight predicates — `STIntersects`, `STContains`, `STWithin`, `STTouches`, `STCrosses`, `STOverlaps`, `STDisjoint`, `STEquals` — plus `STRelate` evaluate over a hand-rolled planar engine in `Storage/Spatial/SpatialTopology.cs` + `SpatialRelate.cs`.
+There is no external dependency: the engine is straight-edge computational geometry over the existing parsed value model.
+
+Each predicate is a **mask over the DE-9IM matrix**, which is exactly how real exposes them — `STRelate(other, pattern)` is the raw matcher, and probing it one cell at a time is how the reference matrices below were harvested.
+
+### Building the matrix
+
+`SpatialRelate.Matrix` computes the nine intersection dimensions directly rather than through a labelled overlay.
+Each operand flattens into three OGC component classes — isolated points, line segments, polygon rings — and then:
+
+1. Every segment from both operands is **noded** against every other (an x-sweep with an active list keeps the pairwise scan near-linear), giving a set of nodes and non-crossing edge pieces.
+   Isolated points join the node set so no piece has one in its interior.
+2. Each **node** is classified against both operands and contributes dimension **0** to its cell.
+3. Each **edge piece**'s midpoint is classified the same way and contributes dimension **1**.
+4. Each edge piece's two **faces** contribute dimension **2**. A face is interior or exterior, never boundary; where the piece runs along one of the operand's ring edges the covering ring's orientation names which side is which, and otherwise both sides read the same as the midpoint.
+5. The exterior/exterior cell is **2** unconditionally, the plane being unbounded — real reports it as 2 even for two empty instances.
+
+Operands whose extents don't meet skip the arrangement entirely: each one's interior and boundary sit whole in the other's exterior, so the four outer cells are the operands' own dimensions and the rest are empty.
+That is the shape of a spatial filter that misses, and it keeps a many-vertex border from paying for an arrangement it can't need — a 2,000-vertex polygon answers a miss in single-digit milliseconds against a couple of hundred for a hit.
+
+Semantics worth pinning, all probe-confirmed against SQL Server 2025:
+
+- **Interior and boundary are the per-class unions**, not a normalized point set.
+  In `GEOMETRYCOLLECTION(POINT(0 0), LINESTRING(0 0, 2 2))` the origin is reported by real as *both* interior (the point member) and boundary (the line's endpoint), and the matrix carries both.
+- A line's boundary follows the **mod-2 rule** across every line figure in the instance: a vertex two figures share is not a boundary point, one three figures share is.
+  A point in that boundary set is not in the line interior even where another figure runs through it.
+- **Z and M take no part** in any predicate.
+- An **empty** operand puts everything in its exterior — it is disjoint from every instance including another empty one, and intersects, contains and touches nothing.
+
+### The predicate masks
+
+| Predicate | Rule |
+| --- | --- |
+| `STDisjoint` | `FF*FF****` |
+| `STIntersects` | the negation of `STDisjoint` |
+| `STContains` | `T*****FF*` |
+| `STWithin` | `T*F**F***` |
+| `STEquals` | `T*F**FFF*`, or **both operands empty** — real answers true for `POINT EMPTY` against `POLYGON EMPTY` although no mask matches |
+| `STTouches` | interior/interior empty **and** any of interior/boundary, boundary/interior, boundary/boundary non-empty; always false when both operands are zero-dimensional |
+| `STCrosses` | `T*T***T**`, gated to **dim(receiver) < dim(argument)**, plus interior/interior = 0 for a line-on-line pair. Real does **not** symmetrize it: a line crossing a polygon answers true, the polygon answers false |
+| `STOverlaps` | same dimension only — `1*T***T**` for a one-dimensional pair (two lines meeting at a point overlap nothing), `T*T***T**` otherwise |
+
+The dimension the gates read is `STDimension`'s: 0 / 1 / 2, or -1 for an empty instance, and the largest among a collection's non-empty members.
+
+### Result shape
+
+A predicate yields `bit`.
+NULL propagates from either side, and — as with `STDistance` — operands in **different spatial reference systems** read NULL rather than raising.
+A non-spatial argument is read as well-known text, which is what real does with `.STContains('POINT(2 2)')`.
+`STRelate` validates its pattern before it looks at the operands: nine characters (**Msg 24109**, counting a NULL as zero) drawn from `0 1 2 T F *` (**Msg 24110**, case-sensitive, reporting the zero-based position).
+
+### Arithmetic and tolerance
+
+Every test runs in `double`, and the orientation determinant carries a **relative error filter**: a determinant no larger than the roundoff bound of its own two products (Shewchuk's `(3 + 16ε)ε` static filter) reads as *collinear*.
+That is what real does, and it is neither exact arithmetic nor a fixed epsilon:
+
+- `POINT(1.1666666666666665 0.5)` against `LINESTRING(0 0, 7 3)` has a naive cross product of 4.4e-16 — exact arithmetic says off the line, real says **on** it.
+- `POINT(1 1e-18)` against `LINESTRING(0 0, 2 0)`, where the determinant is computed with no roundoff at all, is **off** the line — and so is every offset down to the denormal floor.
+
+Coordinates otherwise compare exactly.
+
+## Validity — `STIsValid` and Msg 24144
+
+Real stores a malformed-but-parseable instance happily and then refuses to *operate* on it.
+`Storage/Spatial/SpatialValidator.cs` implements the rules, probe-derived and diffed 64-for-64 against the reference:
+
+- A **Point** or **MultiPoint** is always valid, repeated coordinates included.
+- A **LineString** is invalid when its last two vertices coincide, or when any two of its segments share a one-dimensional stretch.
+  Crossing itself at a point costs simplicity, not validity, and a repeated vertex anywhere but the end is fine — so `LINESTRING(0 0, 2 0, 2 0, 4 0)` is valid while `LINESTRING(0 0, 2 0, 2 0)` is not.
+- A **MultiLineString** adds: no two members may share a one-dimensional stretch. Meeting at a point is fine.
+- A **Polygon**'s rings must each enclose area and be simple, must not cross or share a one-dimensional stretch with each other, must hold every interior ring inside the exterior one without nesting interior rings, and must leave the interior **connected**.
+  Connectivity is the ring-touch graph: rings are nodes, each distinct point where two of them meet is an edge, and a cycle is exactly a chain of touches that pinches the interior in two — a hole meeting the shell twice is invalid, a hole meeting it once is not.
+  Consecutive repeated vertices collapse before the ring checks, so `POLYGON((0 0, 4 0, 4 4, 0 4, 0 0, 0 0))` is valid and `POLYGON((0 0, 2 0, 2 0, 0 0, 0 0))` is not.
+- A **MultiPolygon**'s members may touch at points but may not overlap, share a one-dimensional stretch, or contain one another.
+- A **GeometryCollection** is valid exactly when every member is; members may overlap each other freely.
+
+**Msg 24144** (`This operation cannot be completed because the instance is not valid…`, wrapped in the usual [Msg 6522 envelope](#the-msg-6522-wrapper)) is what most of the instance surface reports against an invalid instance — and the split is sharp.
+Real *tolerates* invalidity in `STAsText` / `ToString` / `AsTextZM` / `STAsBinary` / `AsBinaryZM`, the ordinate reads (`STX` / `STY` / `Z` / `M` / `HasZ` / `HasM`), `STSrid`, `STIsEmpty`, `STIsRing`, `STLength`, `MinDbCompatibilityLevel`, `MakeValid` and `STIsValid` itself.
+Everything else — `STArea`, `STDimension`, `STGeometryType`, `STNumPoints`, `STPointN`, `STStartPoint` / `STEndPoint`, `STIsClosed`, `STNumGeometries`, `STGeometryN`, `STExteriorRing`, `STNumInteriorRing` / `STInteriorRingN`, `InstanceOf`, `STDistance`, every predicate, `STRelate`, and every constructive operation — raises.
+The gate is a `ValidityGate` flag on the member catalog in `Parser/Expressions/SpatialMethodCall.cs`, and validity is computed once per instance and cached, because a stored value is decoded once and read many times.
+An invalid **argument** raises the same way an invalid receiver does.
 
 ## Not modeled yet
 
-- **Ellipsoidal polygon area** — `geography`'s `STArea`. The round-earth *length* and point-to-point *distance* ship (see [Round-earth measures](#round-earth-measures-the-great-elliptic-arc)); area is the companion problem and needs the spherical-excess-plus-ellipsoidal-correction treatment rather than the arc integral.
-- **`STDistance` between shapes that aren't both points**, which needs closest-approach geometry.
+- **`geography`'s topological predicates** — `STIntersects` / `STContains` / `STWithin` / `STDisjoint` / `STEquals` / `STOverlaps`, and `STIsValid`; those seven are the whole surface real exposes there, since `STTouches` / `STCrosses` / `STRelate` / `STIsSimple` are `geometry`-only members that report Msg 6506 on a `geography` receiver.
+  The planar engine doesn't transfer: a round-earth edge is a great elliptic arc, so segment intersection, point-in-ring and ring orientation all become spherical problems, and real's own answers differ — `LINESTRING(0 0, 2 2)` and `LINESTRING(0 0, 1 1, 2 2)` are equal as `geometry` and **not** equal as `geography`, because the arc from (0,0) to (2,2) doesn't pass through (1,1).
+  A planar approximation would answer the second case wrongly, so the seven raise `NotSupportedException` naming `geography` instead.
+  The Msg 24144 gate follows the same line: it fires for `geometry`, where the validator exists, and not for `geography`.
 - **`STCentroid` / `STPointOnSurface` / `EnvelopeAngle` / `EnvelopeCenter`.**
-- **Topological predicates** — `STIntersects` / `STContains` / `STWithin` / `STDisjoint` / `STTouches` / `STCrosses` / `STOverlaps` / `STEquals` / `STRelate`, and the validity pair `STIsValid` / `STIsSimple`.
-  Real raises **24144** from most methods on a stored-but-invalid instance, which is part of the same DE-9IM machinery.
+- **`STIsSimple`** — validity stops short of the self-intersection classification simplicity asks for (a self-crossing LineString is valid and not simple).
 - **Constructive operations** — `STUnion` / `STIntersection` / `STDifference` / `STSymDifference` / `STBuffer` / `STConvexHull` / `STBoundary` / `STEnvelope` / `MakeValid` / `Reduce` / `Filter` / `ShortestLineTo` / `BufferWithTolerance` / `BufferWithCurves` / `CurveToLineWithTolerance`.
 - **A spatial column's property form** — `Location.Lat` reads as a two-part *column* name, because nothing in the syntax distinguishes the two and `t.Lat` is far more likely to be a column.
   Dispatch is limited to receivers that can't be a table qualifier (a constructor call, a variable, a parenthesized expression); telling the two apart for a column needs binder support.
   The method form (`Location.STAsText()`) works everywhere, since the argument list disambiguates.
 - **Curved shapes and FULLGLOBE** — `CIRCULARSTRING` / `COMPOUNDCURVE` / `CURVEPOLYGON` / `FULLGLOBE` are recognized labels (real accepts them, so reporting them as unknown would be the wrong error) that raise `NotSupportedException` naming the kind.
 - **GML** — `AsGml` / `STAsGML`, and the `GeomFromGml` constructors.
-- **SRID-aware operations** — the SRID is tracked per value and reported, but nothing transforms between reference systems, and no operation yet compares two operands' SRIDs (real returns NULL from `STDistance` across a mismatch).
+- **SRID-aware operations** — the SRID is tracked per value, reported, and compared between two operands (a mismatch reads NULL, as on real), but nothing transforms between reference systems and every `geography` SRID measures on WGS 84.
+  Real carries a per-SRID ellipsoid, so the same polygon under SRID 104001 (the unit sphere) measures in radians squared there and in metres squared here.
 - **Spatial-index query-planner integration** — the index parses cleanly but never accelerates anything.
 - **`sys.spatial_reference_systems` seed data** (~390 EPSG/ESRI rows).
 - **`ALTER SPATIAL INDEX`** (REORGANIZE / REBUILD).
 
 ## Divergences
 
-- **The `isValid` property bit is always set.**
-  Real sets it for a valid instance and clears it for a stored-but-invalid one; the simulator has no topological validator to clear it with.
-  Quantified end-to-end by importing a simulator-exported WWI-Standard bacpac into the live reference and byte-comparing against the original database: **189 of 190 `Countries.Border` values byte-identical**, the single divergent row being WWI's one stored-invalid Border (`STIsValid() = 0` on the original; spatial methods on it raise 24144).
-  On the imported copy that row reports `STIsValid() = 1` and methods evaluate instead of throwing — the divergence's full observable consequence is that one row, one bit, and error-vs-answer method behavior on it.
+- **A `geography` measure answers where real reports Msg 24144.**
+  Real validates a round-earth instance before measuring it — `POLYGON((0 0,1 0,1 1,0 1,0 0),(0.2 0.2, 0.8 0.2, 0.8 0.8, 0.2 0.8, 0.2 0.2))`, whose hole is wound the same way as its shell, raises 24144 from `STArea()` — while the simulator's validator is the planar one and the [24144 gate](#validity--stisvalid-and-msg-24144) fires for `geometry` only, so the same instance measures the region its ring orientations describe.
+  Round-earth validity arrives with the round-earth topology.
+- **A `GEOMETRYCOLLECTION`'s round-earth area carries real's float noise.**
+  Real sums a collection's members with visible drift — a square that measures `12308776255.868843` on its own measures `12308776246.986383` as a collection member, 8.9 m² lower — the same noise the [planar measures](#planar-measures) show.
+  The simulator's answer is the same either way.
+- **Three residual classes in the predicate matrix.**
+  A 71-shape square — 5,041 ordered pairs, each compared cell-by-cell and predicate-by-predicate against SQL Server 2025 (2026-08-02) — agrees on 99.4% of the pairs that avoid the three classes below, and every remaining disagreement is real answering something its own definitions don't support:
+  1. **A `GEOMETRYCOLLECTION` containing a `POLYGON`.** Real's `STRelate` loses the polygon's boundary there and reports boundary points as interior or exterior — `POINT(2 0)` reads as exterior of `GEOMETRYCOLLECTION(POINT(9 9), POLYGON((0 0,4 0,4 4,0 4,0 0)))` while `STIntersects` on the same pair answers true, so real contradicts itself.
+     The simulator reports the OGC answer, which also keeps its matrix and its predicates consistent.
+  2. **Coordinate snapping below about 1e-14 of the extent.** Real folds a point that close to a segment endpoint onto it (`POINT(1 1e-15)` reads as *on* a polygon's boundary rather than inside it) and folds a denormal coordinate to zero (`POINT(0 5e-324)` equals `POINT(0 0)`); the simulator compares coordinates exactly.
+     The [orientation filter](#arithmetic-and-tolerance) covers the near-collinearity half of real's tolerance and is matched; this end-of-segment half is not.
+  3. **Endpoint touches on a diagonal segment.** Real's segment intersection misses some and invents others — `LINESTRING(0 0, 2 2)` and `LINESTRING(1 -1, 1 1)` read as *disjoint* although they share (1,1), while `LINESTRING(0 0, 4 4)` and `LINESTRING(2 0, 2 2)` correctly touch; conversely `LINESTRING(1 1, 3 3)` and `LINESTRING(2 0, 2 2)` read as *crossing* where they touch.
+     Real is inconsistent with itself across these, so there is no rule to reproduce.
+- **The serialized `isValid` property bit is always set.**
+  Real clears it for a stored-but-invalid instance — a bowtie polygon serializes with properties `0x00` where a square gets `0x04` — and the encoder doesn't, so an invalid instance's bytes differ from real's in that one bit.
+  `STIsValid()` and the Msg 24144 gate read the shape tree rather than the bit, so behavior on such an instance is right; only the byte form isn't.
+  Quantified end-to-end by importing a simulator-exported WWI-Standard bacpac into the live reference and byte-comparing against the original database: **189 of 190 `Countries.Border` values byte-identical**, the single divergent row being WWI's one stored-invalid Border.
   All 5,000 sampled `Cities.Location` points byte-identical.
+  Real also *validates on deserialize*: handing it a payload whose `isValid` bit claims validity for a shape that isn't raises a bare `System.FormatException` inside Msg 6522, which the decoder doesn't reproduce either.
 - **Msg 6522 omits the .NET stack-frame block** — see [The Msg 6522 wrapper](#the-msg-6522-wrapper).
 - **The in-process reader surfaces a spatial column as its WKT** (`SqlType.ClrType` is `string`), where real SqlClient hands back the UDT bytes (or a `SqlGeography` when `Microsoft.SqlServer.Types` is loaded).
   The TDS path is faithful — it writes the serialization.

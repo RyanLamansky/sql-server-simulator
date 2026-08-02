@@ -67,6 +67,7 @@ internal sealed class JsonModify : Expression
         var jsonInputValue = this.jsonInput.Run(runtime);
         var pathValue = this.pathInput.Run(runtime);
         var newSqlValue = this.newValueInput.Run(runtime);
+        RequireWritableValueType(newSqlValue.Type);
         if (jsonInputValue.IsNull || pathValue.IsNull)
             return SqlValue.Null(SqlType.NVarcharMax);
 
@@ -188,17 +189,51 @@ internal sealed class JsonModify : Expression
     /// Renders the third argument as the JSON text that goes into the slot.
     /// Numbers stay JSON numbers, booleans stay JSON booleans, a JSON-typed
     /// argument (a nested JSON_QUERY / JSON_OBJECT / JSON_ARRAY /
-    /// JSON_MODIFY) embeds raw, and everything else becomes a JSON string —
-    /// with <c>/</c> escaped, which real does here.
+    /// JSON_MODIFY) embeds raw, and everything else becomes a JSON string.
     /// </summary>
     private string Render(SqlValue value)
     {
         var sb = new StringBuilder();
-        JsonValueRender.Append(sb, value, this.newValueIsJson, escapeSolidus: true);
+        JsonValueRender.Append(sb, value, this.newValueIsJson);
         return sb.ToString();
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;
+    /// <summary>
+    /// The types the written value may carry: the string family bar the
+    /// legacy LOBs, the integer family, decimal / numeric, float, real and
+    /// bit. Everything else — money, every date/time type,
+    /// <c>uniqueidentifier</c>, binary / varbinary / image, text / ntext,
+    /// xml, sql_variant, hierarchyid and the spatial types — is Msg 8116,
+    /// even as a typed NULL (all probe-confirmed against SQL Server 2025).
+    /// An untyped <c>NULL</c> literal types as <c>int</c> and so passes,
+    /// which is what leaves the delete-a-member form open.
+    /// </summary>
+    private static void RequireWritableValueType(SqlType type)
+    {
+        if (SqlType.IsIntegerCategory(type)
+            || type is DecimalSqlType
+            || type == SqlType.Float
+            || type == SqlType.Real
+            || type == SqlType.Bit
+            // xml and the spatial types share the string category but are
+            // refused like the legacy LOBs.
+            || (SqlType.IsStringCategory(type) && type is not TextSqlType and not NTextSqlType and not XmlSqlType and not SpatialSqlType))
+        {
+            return;
+        }
+        throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex: 3, "json_modify");
+    }
+
+    /// <summary>
+    /// Real binds the third argument's type while compiling — probe-confirmed
+    /// that a <c>date</c> third argument reports Msg 8116 over an empty
+    /// rowset — so the gate runs here as well as per value.
+    /// </summary>
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        RequireWritableValueType(this.newValueInput.GetSqlType(batch, resolveColumnType));
+        return SqlType.NVarcharMax;
+    }
 
     internal override string DebugDisplay() => $"JSON_MODIFY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()}, {this.newValueInput.DebugDisplay()})";
 }

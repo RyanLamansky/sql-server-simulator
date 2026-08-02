@@ -89,8 +89,11 @@ internal sealed class Negate(Expression operand) : Expression
         : operandType == SqlType.Bit ? throw SimulatedSqlException.OperandDataTypeInvalid(SqlType.Bit, "minus")
         : null;
 
-    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) =>
-        this.Operand.ResultIsNullable(resolveColumnNullable);
+    // Unary minus is arithmetic, so real projects it nullable even over a NOT
+    // NULL operand (`-col` is nullable where `+col` is not) — the exception is
+    // the constant real folds away first, which makes `-1` and `-(1)` NOT NULL.
+    internal override bool ResultIsNullable(NullabilityContext context) =>
+        !context.TryFold(this, out var folded) || folded.IsNull;
 
     internal override bool ResultReportsNumeric => this.Operand.ResultReportsNumeric;
 

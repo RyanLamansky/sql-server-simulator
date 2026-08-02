@@ -156,6 +156,186 @@ partial class SimulatedSqlException
         new($"FOR XML AUTO requires primary keys to create references for '{column}'. Select primary keys, or use BINARY BASE64 to obtain binary data in encoded form if no primary keys exist.", 6831, 16, 1);
 
     /// <summary>
+    /// Msg 102 reported against the <c>XML</c> keyword: a <c>FOR XML</c> clause
+    /// writes the same option twice. Real re-parses the option list with a
+    /// grammar that admits each option once, so the position it names is the
+    /// clause's own keyword rather than the repeated word (probe-confirmed
+    /// against SQL Server 2025 for <c>TYPE</c>, <c>ROOT</c>, <c>ELEMENTS</c>
+    /// and <c>BINARY BASE64</c> alike).
+    /// </summary>
+    internal static SimulatedSqlException ForXmlDuplicateOption() =>
+        new("Incorrect syntax near 'XML'.", 102, 15, 1);
+
+    /// <summary>
+    /// Msg 6859 (severity 15): a row tag argument — <c>AUTO('x')</c> /
+    /// <c>EXPLICIT('x')</c> — on a mode that names its elements itself.
+    /// Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlRowTagNotAllowedInMode() =>
+        new("Row tag name is only allowed with RAW or PATH mode of FOR XML.", 6859, 15, 1);
+
+    /// <summary>
+    /// Msg 6825: the <c>ELEMENTS</c> option on <c>FOR XML EXPLICIT</c>, whose
+    /// element-versus-attribute placement comes from the column names instead.
+    /// Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlElementsNotAllowedInMode() =>
+        new("ELEMENTS option is only allowed in RAW, AUTO, and PATH modes of FOR XML.", 6825, 16, 1);
+
+    /// <summary>
+    /// Msg 3625 state 17: <c>FOR XML EXPLICIT, XMLSCHEMA</c> — real's own
+    /// "not yet implemented" rejection of inline XSD for the universal-table
+    /// format. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitInlineSchemaNotImplemented() =>
+        new("'Inline XSD for FOR XML EXPLICIT' is not yet implemented.", 3625, 16, 17);
+
+    /// <summary>
+    /// Msg 6801: a <c>FOR XML EXPLICIT</c> projection is shorter than the
+    /// universal table's minimum — <c>Tag</c>, <c>Parent</c> and one data
+    /// column. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitNeedsThreeColumns() =>
+        new("FOR XML EXPLICIT requires at least three columns, including the tag column, the parent column, and at least one data column.", 6801, 16, 1);
+
+    /// <summary>
+    /// Msg 6802: a <c>FOR XML EXPLICIT</c> data column's name doesn't follow
+    /// the <c>ElementName!TagNumber[!AttributeName[!Directive…]]</c> convention
+    /// — no <c>!</c> at all, an unnamed column, an empty element name, or a tag
+    /// number that isn't a positive integer. Probe-confirmed wording against
+    /// SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitInvalidColumnName(string name) =>
+        new($"FOR XML EXPLICIT query contains the invalid column name '{name}'. Use the TAGNAME!TAGID!ATTRIBUTENAME[!..] format where TAGID is a positive integer.", 6802, 16, 1);
+
+    /// <summary>
+    /// Msg 6803: the <c>Tag</c> column isn't usable. State 1 is the compile-time
+    /// type check (it must be <c>int</c>, so <c>bigint</c> / <c>smallint</c> /
+    /// a string all fail), state 2 the per-row value check (NULL or not
+    /// positive). Probe-confirmed wording and state split against SQL Server
+    /// 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitTagColumn(byte state) =>
+        new("FOR XML EXPLICIT requires the first column to hold positive integers that represent XML tag IDs.", 6803, 16, state);
+
+    /// <summary>
+    /// Msg 6804: the <c>Parent</c> column isn't usable — state 1 for the
+    /// compile-time <c>int</c> type check, state 2 for a negative value in a
+    /// row. Probe-confirmed wording and state split against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitParentColumn(byte state) =>
+        new("FOR XML EXPLICIT requires the second column to hold NULL or nonnegative integers that represent XML parent tag IDs.", 6804, 16, state);
+
+    /// <summary>
+    /// Msg 6805 state 2: a row would open a tag that is already an ancestor of
+    /// itself. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitCircularTags() =>
+        new("FOR XML EXPLICIT stack overflow occurred. Circular parent tag relationships are not allowed.", 6805, 16, 2);
+
+    /// <summary>
+    /// Msg 6806 state 2: a row's <c>Tag</c> value names a tag number no column
+    /// declared. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitUndeclaredTag(int tagId) =>
+        new($"Undeclared tag ID {tagId.ToString(CultureInfo.InvariantCulture)} is used in a FOR XML EXPLICIT query.", 6806, 16, 2);
+
+    /// <summary>
+    /// Msg 6807 state 2: a row's <c>Parent</c> value names a tag number no
+    /// column declared. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitUndeclaredParentTag(int tagId) =>
+        new($"Undeclared parent tag ID {tagId.ToString(CultureInfo.InvariantCulture)} is used in a FOR XML EXPLICIT query.", 6807, 16, 2);
+
+    /// <summary>
+    /// Msg 6812: two columns give one tag number different element names. The
+    /// comparison is ordinal, so a case difference collides too (probe-confirmed
+    /// against SQL Server 2025, wording included).
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitTagRedeclared(int tagId, string declared, string redeclared) =>
+        new($"XML tag ID {tagId.ToString(CultureInfo.InvariantCulture)} that was originally declared as '{declared}' is being redeclared as '{redeclared}'.", 6812, 16, 1);
+
+    /// <summary>
+    /// Msg 6813: a column carries two of the identity directives. Probe-confirmed
+    /// wording — the stray "and/or" included — against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitConflictingIdDirectives(string column) =>
+        new($"FOR XML EXPLICIT cannot combine multiple occurrences of ID, IDREF, IDREFS, NMTOKEN, and/or NMTOKENS in column name '{column}'.", 6813, 16, 1);
+
+    /// <summary>
+    /// Msg 6835: a column writes <c>hide</c> twice. Real checks this ahead of
+    /// every other directive-combination rule (probe-confirmed), and words it
+    /// as a "field" where its siblings say "column name".
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitDuplicateHide(string column) =>
+        new($"FOR XML EXPLICIT field '{column}' can specify the directive HIDE only once.", 6835, 16, 1);
+
+    /// <summary>
+    /// Msg 6815: a column carries both <c>hide</c> and one of the identity
+    /// directives. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitIdCannotHide(string column) =>
+        new($"In the FOR XML EXPLICIT clause, ID, IDREF, IDREFS, NMTOKEN, and NMTOKENS attributes cannot be hidden in '{column}'.", 6815, 16, 1);
+
+    /// <summary>
+    /// Msg 6817: a column carries two of the mutually exclusive content
+    /// directives. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitConflictingDirectives(string column) =>
+        new($"FOR XML EXPLICIT cannot combine multiple occurrences of ELEMENT, XML, XMLTEXT, and CDATA in column name '{column}'.", 6817, 16, 1);
+
+    /// <summary>
+    /// Msg 6820: the universal table's first two columns must be named
+    /// <c>Tag</c> and <c>Parent</c> (the comparison is case-insensitive; the
+    /// message spells the expected name in upper case).
+    /// Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitColumnMisnamed(int position, string expected, string actual) =>
+        new($"FOR XML EXPLICIT requires column {position.ToString(CultureInfo.InvariantCulture)} to be named '{expected}' instead of '{actual}'.", 6820, 16, 1);
+
+    /// <summary>
+    /// Msg 6824: a column name's fourth-or-later segment isn't a directive the
+    /// mode knows (the empty string included). Probe-confirmed wording against
+    /// SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitInvalidDirective(string directive) =>
+        new($"In the FOR XML EXPLICIT clause, mode '{directive}' in a column name is invalid.", 6824, 16, 1);
+
+    /// <summary>
+    /// Msg 6826: an <c>idrefs</c> / <c>nmtokens</c> column. Real admits one
+    /// only where its expression is statically nullable — the shape that feeds
+    /// the values in from a separate <c>SELECT</c> of the union — and reports
+    /// this otherwise. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitIdrefsNeedsSeparateSelect() =>
+        new("Every IDREFS or NMTOKENS column in a FOR XML EXPLICIT query must appear in a separate SELECT clause, and the instances must be ordered directly after the element to which they belong.", 6826, 16, 1);
+
+    /// <summary>
+    /// Msg 6827: a second <c>xmltext</c> column on one tag. Probe-confirmed
+    /// wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitDuplicateXmlText(string column) =>
+        new($"FOR XML EXPLICIT queries allow only one XMLTEXT column per tag. Column '{column}' declares another XMLTEXT column that is not permitted.", 6827, 16, 1);
+
+    /// <summary>
+    /// Msg 6833: a row's <c>Parent</c> names a declared tag that isn't among
+    /// the elements the preceding rows left open — the universal table is out
+    /// of tree order. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitParentNotOpen(int tagId) =>
+        new($"Parent tag ID {tagId.ToString(CultureInfo.InvariantCulture)} is not among the open tags. FOR XML EXPLICIT requires parent tags to be opened first. Check the ordering of the result set.", 6833, 16, 1);
+
+    /// <summary>
+    /// Msg 6834: an <c>xmltext</c> column's value isn't a document with a root
+    /// element. State 1 is text that parses but has no element, state 2 markup
+    /// that doesn't parse; <paramref name="field"/> is the column's attribute
+    /// name (empty for the unnamed overflow form). Probe-confirmed wording and
+    /// state split against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitXmlTextInvalid(string field, byte state) =>
+        new($"XMLTEXT field '{field}' contains an invalid XML document. Check the root tag and its attributes.", 6834, 16, state);
+
+    /// <summary>
     /// Msg 6868: a <c>WITH XMLNAMESPACES</c> prefix scopes a <c>FOR XML</c>
     /// clause using one of the features the declarations can't reach — EXPLICIT
     /// mode, or the XMLSCHEMA / XMLDATA directives. Probe-confirmed wording
@@ -261,7 +441,87 @@ partial class SimulatedSqlException
     /// against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException XmlDmlSyntaxError(string token) =>
-        new($"XQuery [modify()]: Syntax error near '{token}'", 2209, 16, 1);
+        XQuerySyntaxError("modify", token);
+
+    /// <summary>
+    /// Msg 2209: an XQuery expression fails to parse. Every XML method's
+    /// diagnostics name the method that carried the expression
+    /// (<c>XQuery [value()]:</c> …), probe-confirmed across all five.
+    /// </summary>
+    internal static SimulatedSqlException XQuerySyntaxError(string method, string token) =>
+        new($"XQuery [{method}()]: Syntax error near '{token}'", 2209, 16, 1);
+
+    /// <summary>
+    /// Msg 2203: a predicate's static type is neither numeric (positional),
+    /// boolean (a filter) nor a node sequence (an existence test).
+    /// Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryPredicateNotBooleanOrNumeric(string method, string staticType) =>
+        new(
+            $"XQuery [{method}()]: Only 'http://www.w3.org/2001/XMLSchema#decimal?', "
+            + $"'http://www.w3.org/2001/XMLSchema#boolean?' or 'node()*' expressions allowed as predicates, found '{staticType}'",
+            2203,
+            16,
+            1);
+
+    /// <summary>
+    /// Msg 2234: a comparison's two operands have known, incompatible static
+    /// types (<c>"a" = 1</c>). Untyped operands take their type from the other
+    /// side, so only a typed pair can mismatch. Probe-confirmed wording against
+    /// SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryOperatorTypeMismatch(string method, string op, string leftType, string rightType) =>
+        new($"XQuery [{method}()]: The operator \"{op}\" cannot be applied to \"{leftType}\" and \"{rightType}\" operands.", 2234, 16, 1);
+
+    /// <summary>
+    /// Msg 2229: a name test or function name carries a prefix the prolog never
+    /// declared. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryUndeclaredNamespace(string method, string prefix) =>
+        new($"XQuery [{method}()]: The name \"{prefix}\" does not denote a namespace.", 2229, 16, 1);
+
+    /// <summary>
+    /// Msg 2389: a construct that admits at most one item — a value comparison,
+    /// a singleton-parameter function, or <c>value()</c> itself — got an
+    /// operand real types as a sequence. Real settles this from the path's
+    /// shape, so it fires whatever the instance holds. Probe-confirmed wording
+    /// against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryNotSingleton(string method, string construct, string staticType) =>
+        new($"XQuery [{method}()]: '{construct}' requires a singleton (or empty sequence), found operand of type '{staticType}'", 2389, 16, 1);
+
+    /// <summary>
+    /// Msg 2236: a function call short of its declared arity. Probe-confirmed
+    /// wording — double-quoted name, sentence-final period — against SQL Server
+    /// 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryTooFewArguments(string method, string localName) =>
+        new($"XQuery [{method}()]: There are not enough actual arguments in the call to function \"{localName}()\".", 2236, 16, 1);
+
+    /// <summary>
+    /// Msg 2238: a function call past its declared arity. Real writes this one
+    /// with a single-quoted name and no period. Probe-confirmed wording against
+    /// SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryTooManyArguments(string method, string localName) =>
+        new($"XQuery [{method}()]: Too many arguments in call to function '{localName}()'", 2238, 16, 1);
+
+    /// <summary>
+    /// Msg 2395: a function name the XQuery library doesn't carry. The message
+    /// spells the resolved namespace before the local name. Probe-confirmed
+    /// wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryNoSuchFunction(string method, string namespaceUri, string localName) =>
+        new($"XQuery [{method}()]: There is no function '{{{namespaceUri}}}:{localName}()'", 2395, 16, 1);
+
+    /// <summary>
+    /// Msg 9335: an XQuery operator real parses but refuses to evaluate
+    /// (<c>to</c>, <c>union</c>, <c>intersect</c>, <c>except</c>,
+    /// <c>treat as</c>, <c>castable as</c>). Probe-confirmed wording against
+    /// SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQuerySyntaxNotSupported(string method, string construct) =>
+        new($"XQuery [{method}()]: The XQuery syntax '{construct}' is not supported.", 9335, 16, 1);
 
     /// <summary>
     /// Msg 2205: a <c>replace value of</c> has no <c>with</c> clause.

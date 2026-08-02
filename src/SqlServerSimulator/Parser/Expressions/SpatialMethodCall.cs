@@ -16,10 +16,12 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// other spatial type owns reports Msg 6592 for a property and Msg 6506 for a
 /// method. <see cref="Members"/> is the catalog those checks read.</para>
 /// <para>Structural members — the accessors, counts, component extractors and
-/// text/binary renderings — evaluate here. The measures, predicates and
-/// constructive operations parse cleanly (so CREATE VIEW / CREATE PROCEDURE
-/// bodies referencing them store verbatim) and raise
-/// <see cref="NotSupportedException"/> at <see cref="Run"/>.</para>
+/// text/binary renderings — evaluate here, as do all three measures for both
+/// spatial types and, on <c>geometry</c>, the topological predicates and
+/// <c>STIsValid</c>. The round-earth topology and the constructive operations
+/// parse cleanly (so CREATE VIEW / CREATE PROCEDURE bodies referencing them
+/// store verbatim) and raise <see cref="NotSupportedException"/> at
+/// <see cref="Run"/>.</para>
 /// </remarks>
 internal sealed class SpatialMethodCall : Expression
 {
@@ -49,7 +51,20 @@ internal sealed class SpatialMethodCall : Expression
         Spatial,
     }
 
-    private readonly record struct Member(MemberForm Form, MemberScope Scope, ResultKind Result);
+    /// <summary>
+    /// Whether a member refuses to run against a stored-but-invalid instance.
+    /// Real splits its surface sharply: the renderings, the ordinate reads,
+    /// <c>STLength</c>, <c>STIsEmpty</c>, <c>STIsRing</c>, <c>STSrid</c>,
+    /// <c>MakeValid</c> and <c>STIsValid</c> itself answer regardless, while
+    /// everything structural or topological reports Msg 24144.
+    /// </summary>
+    private enum ValidityGate
+    {
+        Tolerant,
+        Required,
+    }
+
+    private readonly record struct Member(MemberForm Form, MemberScope Scope, ResultKind Result, ValidityGate Gate = ValidityGate.Tolerant);
 
     /// <summary>
     /// Every member the spatial types expose, with the form and owning type
@@ -73,65 +88,67 @@ internal sealed class SpatialMethodCall : Expression
         // Methods — structural.
         ["AsBinaryZM"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Binary),
         ["AsTextZM"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text),
-        ["InstanceOf"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
+        ["InstanceOf"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
         ["MinDbCompatibilityLevel"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer),
         ["NumRings"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Integer),
         ["ReorientObject"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Spatial),
         ["RingN"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Spatial),
         ["STAsBinary"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Binary),
         ["STAsText"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text),
-        ["STDimension"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer),
-        ["STDistance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Float),
-        ["STEndPoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["STExteriorRing"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial),
-        ["STGeometryN"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["STGeometryType"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text),
-        ["STInteriorRingN"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial),
-        ["STIsClosed"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
+        ["STDimension"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer, ValidityGate.Required),
+        ["STDistance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Float, ValidityGate.Required),
+        ["STEndPoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["STExteriorRing"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, ValidityGate.Required),
+        ["STGeometryN"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["STGeometryType"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text, ValidityGate.Required),
+        ["STInteriorRingN"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, ValidityGate.Required),
+        ["STIsClosed"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
         ["STIsEmpty"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
         ["STIsRing"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean),
-        ["STNumGeometries"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer),
-        ["STNumInteriorRing"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Integer),
-        ["STNumPoints"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer),
-        ["STPointN"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["STStartPoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
+        ["STNumGeometries"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer, ValidityGate.Required),
+        ["STNumInteriorRing"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Integer, ValidityGate.Required),
+        ["STNumPoints"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer, ValidityGate.Required),
+        ["STPointN"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["STStartPoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
         ["ToString"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text),
 
-        // Methods — parse-only; measures, predicates and constructive operations.
+        // Methods — topological predicates and validity.
+        ["STContains"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
+        ["STCrosses"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, ValidityGate.Required),
+        ["STDisjoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
+        ["STEquals"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
+        ["STIntersects"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
+        ["STIsValid"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
+        ["STOverlaps"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
+        ["STRelate"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, ValidityGate.Required),
+        ["STTouches"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, ValidityGate.Required),
+        ["STWithin"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
+
+        // Methods — parse-only; the remaining measures and the constructive operations.
         ["AsGml"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text),
-        ["BufferWithCurves"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["BufferWithTolerance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["CurveToLineWithTolerance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
+        ["BufferWithCurves"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["BufferWithTolerance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["CurveToLineWithTolerance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
         ["EnvelopeAngle"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Float),
         ["EnvelopeCenter"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Spatial),
-        ["Filter"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
+        ["Filter"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
         ["MakeValid"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["Reduce"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["STArea"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Float),
+        ["Reduce"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["STArea"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Float, ValidityGate.Required),
         ["STAsGML"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text),
-        ["STBoundary"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial),
-        ["STBuffer"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["STCentroid"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial),
-        ["STContains"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
-        ["STConvexHull"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["STCrosses"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean),
-        ["STDifference"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["STDisjoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
-        ["STEnvelope"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial),
-        ["STEquals"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
-        ["STIntersection"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["STIntersects"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
-        ["STIsSimple"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean),
-        ["STIsValid"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean),
+        ["STBoundary"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, ValidityGate.Required),
+        ["STBuffer"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["STCentroid"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, ValidityGate.Required),
+        ["STConvexHull"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["STDifference"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["STEnvelope"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, ValidityGate.Required),
+        ["STIntersection"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["STIsSimple"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, ValidityGate.Required),
         ["STLength"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Float),
-        ["STOverlaps"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
-        ["STPointOnSurface"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["STRelate"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean),
-        ["STSymDifference"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["STTouches"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean),
-        ["STUnion"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["STWithin"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
-        ["ShortestLineTo"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
+        ["STPointOnSurface"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["STSymDifference"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["STUnion"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["ShortestLineTo"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
     }.ToFrozenDictionary(StringComparer.Ordinal);
 
     private readonly Expression target;
@@ -229,6 +246,7 @@ internal sealed class SpatialMethodCall : Expression
     {
         var root = value.Root;
         var geography = type.IsGeography;
+        RequireValidInstance(member, value, geography);
         return this.memberName switch
         {
             "AsBinaryZM" => SqlValue.FromVarbinary(SpatialWkb.Write(value, includeZM: true)),
@@ -245,32 +263,42 @@ internal sealed class SpatialMethodCall : Expression
             "NumRings" => root.Type == SpatialShapeType.Polygon ? SqlValue.FromInt32(root.Figures.Length) : SqlValue.Null(SqlType.Int32),
             "ReorientObject" => SqlValue.FromSpatial(new SpatialGeometry(value.Srid, Reorient(root)), geography),
             "RingN" => Component(value, type, RingAt(root, Index(runtime, geography, IndexKind.Ring), interiorOnly: false)),
-            "STArea" => geography
-                ? throw GeographyMeasureNotModeled("STArea")
-                : SqlValue.FromDouble(SpatialMeasures.Area(root)),
+            "STArea" => SqlValue.FromDouble(geography ? SpatialMeasures.GeographyArea(root) : SpatialMeasures.Area(root)),
             "STAsBinary" => SqlValue.FromVarbinary(SpatialWkb.Write(value, includeZM: false)),
             "STAsText" => Text(runtime, SpatialWktWriter.Write(value, includeZM: false)),
+            "STContains" => Predicate(runtime, value, geography, SpatialPredicateKind.Contains),
+            "STCrosses" => Predicate(runtime, value, geography, SpatialPredicateKind.Crosses),
             "STDimension" => SqlValue.FromInt32(root.Dimension),
+            "STDisjoint" => Predicate(runtime, value, geography, SpatialPredicateKind.Disjoint),
             "STDistance" => EvaluateDistance(runtime, value, geography),
             "STEndPoint" => Component(value, type, EndpointOf(root, first: false)),
+            "STEquals" => Predicate(runtime, value, geography, SpatialPredicateKind.Equals),
             "STExteriorRing" => Component(value, type, RingAt(root, 1, interiorOnly: false)),
             "STGeometryN" => Component(value, type, GeometryAt(root, Index(runtime, geography, IndexKind.Geometry))),
             "STGeometryType" => Text(runtime, GeometryTypeName(root.Type)),
             "STInteriorRingN" => Component(value, type, RingAt(root, Index(runtime, geography, IndexKind.Ring) + 1, interiorOnly: true)),
+            "STIntersects" => Predicate(runtime, value, geography, SpatialPredicateKind.Intersects),
             "STIsClosed" => SqlValue.FromBoolean(IsClosed(root)),
             "STIsEmpty" => SqlValue.FromBoolean(root.IsEmpty),
             "STIsRing" => root.Type == SpatialShapeType.LineString
                 ? SqlValue.FromBoolean(IsClosed(root) && IsSimpleRing(root))
                 : SqlValue.Null(SqlType.Bit),
+            "STIsValid" => geography
+                ? throw GeographyTopologyNotModeled("STIsValid")
+                : SqlValue.FromBoolean(value.IsPlanarValid),
             "STLength" => SqlValue.FromDouble(geography
                 ? SpatialMeasures.GeographyLength(root)
                 : SpatialMeasures.Length(root)),
             "STNumGeometries" => SqlValue.FromInt32(GeometryCount(root)),
             "STNumInteriorRing" => SqlValue.FromInt32(root.Type == SpatialShapeType.Polygon ? Math.Max(0, root.Figures.Length - 1) : 0),
             "STNumPoints" => SqlValue.FromInt32(root.PointCount),
+            "STOverlaps" => Predicate(runtime, value, geography, SpatialPredicateKind.Overlaps),
             "STPointN" => Component(value, type, PointAt(root, Index(runtime, geography, IndexKind.Point))),
+            "STRelate" => EvaluateRelate(runtime, value, geography),
             "STSrid" => SqlValue.FromInt32(value.Srid),
             "STStartPoint" => Component(value, type, EndpointOf(root, first: true)),
+            "STTouches" => Predicate(runtime, value, geography, SpatialPredicateKind.Touches),
+            "STWithin" => Predicate(runtime, value, geography, SpatialPredicateKind.Within),
             "STX" => Ordinate(root, static p => p.X),
             "STY" => Ordinate(root, static p => p.Y),
             "ToString" => Text(runtime, SpatialWktWriter.Write(value, includeZM: true)),
@@ -281,38 +309,103 @@ internal sealed class SpatialMethodCall : Expression
     }
 
     /// <summary>
-    /// <c>STDistance</c> between two points — round-earth along the great
-    /// elliptic arc, planar as straight-line. A NULL or empty operand yields
-    /// NULL, matching real. Distance between shapes that aren't both points
-    /// needs closest-approach geometry and stays unmodeled.
+    /// One of the eight topological predicates. NULL propagates from either
+    /// operand and a spatial-reference mismatch reads NULL as well, matching
+    /// real; an invalid <i>argument</i> raises 24144 the same way an invalid
+    /// receiver does.
+    /// </summary>
+    private SqlValue Predicate(RuntimeContext runtime, SpatialGeometry value, bool isGeography, SpatialPredicateKind kind)
+    {
+        return isGeography
+            ? throw GeographyTopologyNotModeled(this.memberName)
+            : Operand(runtime, 0, value, isGeography) is { } other
+                ? SqlValue.FromBoolean(SpatialRelate.Evaluate(kind, value.Root, other.Root))
+                : SqlValue.Null(SqlType.Bit);
+    }
+
+    /// <summary>
+    /// Real refuses most of its instance surface on a stored-but-invalid value.
+    /// The check is planar, so it gates <c>geometry</c> only; <c>geography</c>
+    /// validity is a round-earth question the simulator doesn't answer.
+    /// </summary>
+    private static void RequireValidInstance(Member member, SpatialGeometry value, bool isGeography)
+    {
+        if (member.Gate == ValidityGate.Required && !isGeography && !value.IsPlanarValid)
+            throw SimulatedSqlException.SpatialInstanceNotValid(isGeography);
+    }
+
+    /// <summary>
+    /// <c>STRelate</c> — the raw DE-9IM pattern match the eight named
+    /// predicates are masks over. Real validates the pattern before anything
+    /// else: nine characters (Msg 24109, counting a NULL as zero) drawn from
+    /// <c>0 1 2 T F *</c> (Msg 24110, case-sensitive and zero-based).
+    /// </summary>
+    private SqlValue EvaluateRelate(RuntimeContext runtime, SpatialGeometry value, bool isGeography)
+    {
+        var pattern = this.arguments.Length > 1 ? this.arguments[1].Run(runtime) : SqlValue.Null(SqlType.Bit);
+        var mask = pattern.IsNull ? string.Empty : pattern.AsString;
+        if (mask.Length != 9)
+            throw SimulatedSqlException.SpatialRelateMaskLength(isGeography, mask.Length);
+        for (var i = 0; i < mask.Length; i++)
+        {
+            if (mask[i] is not ('0' or '1' or '2' or 'F' or 'T' or '*'))
+                throw SimulatedSqlException.SpatialRelateMaskCharacter(isGeography, i, mask[i]);
+        }
+        return Operand(runtime, 0, value, isGeography) is { } other
+            ? SqlValue.FromBoolean(SpatialRelate.Matches(SpatialRelate.Matrix(value.Root, other.Root), mask))
+            : SqlValue.Null(SqlType.Bit);
+    }
+
+    /// <summary>
+    /// Reads a comparison operand: NULL, a spatial reference that doesn't match
+    /// the receiver's, or a non-spatial argument that won't parse as one all
+    /// read as "no answer" and leave the caller returning NULL. An invalid
+    /// argument raises 24144 the way an invalid receiver does, on the same
+    /// planar-only terms.
+    /// </summary>
+    private SpatialGeometry? Operand(RuntimeContext runtime, int position, SpatialGeometry receiver, bool isGeography)
+    {
+        if (this.arguments.Length <= position)
+            return null;
+        var argument = this.arguments[position].Run(runtime);
+        if (argument.IsNull)
+            return null;
+        // Real accepts a string here and reads it as well-known text.
+        var spatial = argument.Type is SpatialSqlType
+            ? argument.AsSpatial
+            : SpatialWktReader.Read(argument.AsString, SpatialGeometry.DefaultSridFor(isGeography), isGeography);
+        return spatial.Srid != receiver.Srid
+            ? null
+            : isGeography || spatial.IsPlanarValid ? spatial : throw SimulatedSqlException.SpatialInstanceNotValid(isGeography);
+    }
+
+    /// <summary>
+    /// The topological surface is planar-only: the round-earth predicates need
+    /// intersection geometry over great elliptic edges, which is a different
+    /// problem from the straight-edge arrangement the planar engine builds.
+    /// See <c>docs/claude/spatial.md</c>.
+    /// </summary>
+    private static NotSupportedException GeographyTopologyNotModeled(string member) =>
+        new($"Spatial instance method '.{member}()' is not modeled for geography (it needs round-earth topology).");
+
+    /// <summary>
+    /// <c>STDistance</c> — the closest approach between two instances of any
+    /// shape, straight-line for <c>geometry</c> and along the great elliptic arc
+    /// for <c>geography</c>. Instances that meet, and one containing the other,
+    /// measure zero; a NULL, empty or differently-referenced operand yields
+    /// NULL, matching real.
     /// </summary>
     private SqlValue EvaluateDistance(RuntimeContext runtime, SpatialGeometry value, bool isGeography)
     {
-        if (this.arguments.Length == 0)
-            return SqlValue.Null(SqlType.Float);
-        var other = this.arguments[0].Run(runtime);
-        if (other.IsNull || other.Type is not SpatialSqlType)
-            return SqlValue.Null(SqlType.Float);
-        var otherValue = other.AsSpatial;
-        // Operands in different spatial reference systems aren't comparable;
-        // real answers NULL rather than raising (probe-confirmed).
-        if (otherValue.Srid != value.Srid)
+        if (Operand(runtime, 0, value, isGeography) is not { } other)
             return SqlValue.Null(SqlType.Float);
         var root = value.Root;
-        var otherRoot = otherValue.Root;
-        if (root.IsEmpty || otherRoot.IsEmpty)
-            return SqlValue.Null(SqlType.Float);
-        if (root.SinglePoint is not { } from || otherRoot.SinglePoint is not { } to)
-        {
-            throw new NotSupportedException(
-                "Spatial instance method '.STDistance()' is modeled only between two points; other shapes need closest-approach geometry.");
-        }
-
-        if (isGeography)
-            return SqlValue.FromDouble(SpatialGreatElliptic.Distance(from, to));
-        var dx = to.X - from.X;
-        var dy = to.Y - from.Y;
-        return SqlValue.FromDouble(Math.Sqrt((dx * dx) + (dy * dy)));
+        var otherRoot = other.Root;
+        return root.IsEmpty || otherRoot.IsEmpty
+            ? SqlValue.Null(SqlType.Float)
+            : SqlValue.FromDouble(isGeography
+                ? SpatialMeasures.GeographyDistance(root, otherRoot)
+                : SpatialMeasures.PlanarDistance(root, otherRoot));
     }
 
     private static SqlValue Text(RuntimeContext runtime, string value) =>
@@ -386,15 +479,6 @@ internal sealed class SpatialMethodCall : Expression
     /// kind plus every supertype. The root is <c>Geometry</c> for both spatial
     /// types; <c>Geography</c> is not a name real recognizes here.
     /// </summary>
-    /// <summary>
-    /// The round-earth measures need the great elliptic arc real measures
-    /// along — not the geodesic, and not a coordinate swap over the planar
-    /// code — so they stay unmodeled while the planar ones ship. See
-    /// <c>docs/claude/spatial.md</c>.
-    /// </summary>
-    private static NotSupportedException GeographyMeasureNotModeled(string member) =>
-        new($"Spatial instance method '.{member}()' is not modeled for geography (it needs ellipsoidal polygon area).");
-
     private static string[] OgcAncestry(SpatialShapeType type) => type switch
     {
         SpatialShapeType.Point => ["Point", "Geometry"],

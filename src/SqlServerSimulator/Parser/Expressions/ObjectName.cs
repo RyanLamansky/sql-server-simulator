@@ -56,18 +56,20 @@ internal sealed class ObjectName : Expression
             if (dbIdValue.IsNull)
                 return SqlValue.Null(SqlType.SystemName);
             var dbIdInt = ScalarArguments.CoerceToInt(dbIdValue);
-            targetDb = LookupDatabaseById(runtime.Batch.Connection.Simulation, dbIdInt);
+            targetDb = DbId.DatabaseWithId(runtime.Batch.Connection.Simulation, dbIdInt);
             if (targetDb is null)
                 return SqlValue.Null(SqlType.SystemName);
         }
 
         // A restricted principal gets NULL for an id it can't view metadata for
-        // (probe-confirmed), matching sys.objects hiding. Scoped to the current
-        // database — the session principal is a current-DB user, so a cross-DB
-        // lookup passes through unfiltered.
-        var restrict = PermissionEnforcement.MetadataVisibilityApplies(runtime.Batch)
-            && ReferenceEquals(targetDb, runtime.Batch.CurrentDatabase);
-        var principalId = runtime.Batch.Connection.Security.Effective.DatabasePrincipalId;
+        // (probe-confirmed), matching sys.objects hiding. The question is asked
+        // in the database the id belongs to — the explicit database_id
+        // argument's, when one was given — so a login restricted there sees only
+        // what that database reveals to it. Unlike OBJECT_ID's three-part name,
+        // the id form never raises: a database the login has no user in simply
+        // reveals nothing and the answer is NULL (probe-confirmed).
+        if (!PermissionEnforcement.TryMetadataVisibilityPrincipal(runtime.Batch, targetDb, out var principalId))
+            return SqlValue.Null(SqlType.SystemName);
         foreach (var schema in targetDb.Schemas.Values)
         {
             foreach (var obj in schema.SchemaObjects())
@@ -77,7 +79,7 @@ internal sealed class ObjectName : Expression
                 var (governObjectId, governSchemaId) = obj is Trigger trigger
                     ? (trigger.Parent.ObjectId, trigger.Parent.SchemaId)
                     : (obj.ObjectId, obj.SchemaId);
-                return restrict && !PermissionChecker.CanViewMetadata(targetDb, principalId, governObjectId, governSchemaId)
+                return principalId is { } filter && !PermissionChecker.CanViewMetadata(targetDb, filter, governObjectId, governSchemaId)
                     ? SqlValue.Null(SqlType.SystemName)
                     : SqlValue.FromString(SqlType.SystemName, obj.Name);
             }
@@ -91,19 +93,10 @@ internal sealed class ObjectName : Expression
         // table it hangs off (constraints aren't SchemaObjects, so the walk
         // above can't reach one).
         return ConstraintLookup.TryResolveById(targetDb, id, out var constraint)
-            && (!restrict || PermissionChecker.CanViewMetadata(targetDb, principalId, constraint.Table.ObjectId, constraint.Table.SchemaId))
+            && (principalId is not { } constraintFilter
+                || PermissionChecker.CanViewMetadata(targetDb, constraintFilter, constraint.Table.ObjectId, constraint.Table.SchemaId))
             ? SqlValue.FromString(SqlType.SystemName, constraint.Name)
             : SqlValue.Null(SqlType.SystemName);
-    }
-
-    private static Database? LookupDatabaseById(Simulation simulation, int requested)
-    {
-        foreach (var (db, id) in DbId.DatabasesWithIds(simulation))
-        {
-            if (id == requested)
-                return db;
-        }
-        return null;
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;

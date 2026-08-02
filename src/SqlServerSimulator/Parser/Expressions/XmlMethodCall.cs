@@ -32,11 +32,11 @@ internal sealed class XmlMethodCall : Expression
     public readonly Expression Target;
 
     private readonly string methodName;
-    private readonly string? xquery;
+    private readonly XmlQueryExpr? xquery;
     private readonly SqlType valueType;
     private readonly int? valueMaxLength;
 
-    private XmlMethodCall(Expression target, string methodName, string? xquery, SqlType valueType, int? valueMaxLength)
+    private XmlMethodCall(Expression target, string methodName, XmlQueryExpr? xquery, SqlType valueType, int? valueMaxLength)
     {
         this.Target = target;
         this.methodName = methodName;
@@ -48,8 +48,8 @@ internal sealed class XmlMethodCall : Expression
     /// <summary>True when this is a <c>.nodes()</c> call (rowset-producing).</summary>
     public bool IsNodes => this.methodName.Equals("nodes", StringComparison.Ordinal);
 
-    /// <summary>The XQuery path argument (prolog + body), captured at parse time.</summary>
-    public string XQuery => this.xquery ?? throw new InvalidOperationException("XML method has no captured XQuery argument.");
+    /// <summary>The compiled XQuery argument, built at parse time.</summary>
+    public XmlQueryExpr XQuery => this.xquery ?? throw new InvalidOperationException("XML method has no captured XQuery argument.");
 
     /// <summary>
     /// Returns true if <paramref name="name"/> matches one of the five XML
@@ -98,14 +98,14 @@ internal sealed class XmlMethodCall : Expression
             || methodName.Equals("exist", StringComparison.Ordinal);
 
         context.MoveNextRequired();
-        string? xquery = null;
+        string? xqueryText = null;
         SqlType valueType = SqlType.Xml;
         int? valueMaxLength = null;
         if (context.Token is not Operator { Character: ')' })
         {
             var firstArg = Expression.Parse(context);
             if (isNodesOrValueOrQueryOrExist)
-                xquery = ConstantString(firstArg, context, "XML method path");
+                xqueryText = ConstantString(firstArg, context, "XML method path");
 
             while (context.Token is Operator { Character: ',' })
             {
@@ -117,6 +117,11 @@ internal sealed class XmlMethodCall : Expression
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
+
+        // The argument is a compile-time literal, so the expression compiles
+        // once here — which is where real settles its static XQuery
+        // diagnostics too.
+        var xquery = xqueryText is null ? null : XmlQueryEngine.Compile(xqueryText, methodName);
         return new XmlMethodCall(target, methodName, xquery, valueType, valueMaxLength);
     }
 

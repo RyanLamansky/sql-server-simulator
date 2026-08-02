@@ -11,7 +11,7 @@ Behavior probed against SQL Server 2025.
   Plus `LastFetchStatus` (`@@FETCH_STATUS`) and `LastCursorRows` (`@@CURSOR_ROWS`).
   Cleared on `Dispose` (cursors auto-deallocate at session close).
 - **`Simulation.Cursor.cs`** — the `DECLARE CURSOR` grammar (SQL-92 + T-SQL extended), `OPEN` / `FETCH` / `CLOSE` / `DEALLOCATE` dispatch, the `FETCH` direction parser, and the `WHERE CURRENT OF` helpers (`ParseWhereCurrentOf` / `CursorRowMatches`) shared by UPDATE / DELETE.
-- **`Selection.Cursor.cs`** — `CursorShape` (the parse-time capture of a SELECT's cursor-navigability), `CursorSourcePlan` / `CursorSlot` (the resolved plan and its per-slot backing), `TryBuildCursorPlan` (the DECLARE-time resolution that follows deferred slots down to base tables), `EnumerateForCursor` (live enumeration over the base heaps, folding the JOIN chain and reusing `ResolveAcrossTuple` + `ComputeOrderKeys`), and the `CursorRow` / identity-comparison helpers, kept inside `Selection` where the private projection / ORDER BY machinery lives.
+- **`Selection.Cursor.cs`** — `CursorShape` (the parse-time capture of a SELECT's cursor-navigability), `CursorSourcePlan` / `CursorSlot` (the resolved plan and its per-slot backing), `TryBuildCursorPlan` (the DECLARE-time resolution that follows deferred slots down to base tables), the ORDER BY index-coverage rule `CursorSourcePlan.OrderBySuppliedByIndex` resolves at construction, `EnumerateForCursor` (live enumeration over the base heaps, folding the JOIN chain and reusing `ResolveAcrossTuple` + `ComputeOrderKeys`), and the `CursorRow` / identity-comparison helpers, kept inside `Selection` where the private projection / ORDER BY machinery lives.
 - **`Simulation.InvokeView.cs`'s `TryParseViewBodyPlan`** — the parse-only view-body seam cursor planning looks through a view with; mirrors `InvokeViewCore`'s child-batch setup but stops at parse and returns null rather than propagating a body error.
 - **`Parser/Expressions/CursorScalars.cs`** — `@@FETCH_STATUS`, `@@CURSOR_ROWS`, `CURSOR_STATUS(scope, name)`.
 - **`Errors/SimulatedSqlException.CursorErrors.cs`** — Msg 16905 / 16911 / 16915 / 16916 / 16917 / 16924 / 16925 / 16929 / 16931 / 16932 (FOR UPDATE OF) / 16933 (target not one of the cursor's tables) / 16947+3621 (nothing to mutate) / 16947+16934+3621 (OPTIMISTIC conflict chain) / 16950 (unallocated cursor variable) — all probe-confirmed verbatim.
@@ -28,10 +28,10 @@ Handle→cursor mapping, the scrollopt/ccopt option translation, and the probed 
 
 The effective type is resolved at DECLARE from the requested keywords **and** whether the SELECT is navigable — a query whose FROM doesn't reach base tables the cursor can re-fold is forced to STATIC, matching SQL Server's silent conversion.
 With a navigable query: explicit `STATIC` / `INSENSITIVE` / `FAST_FORWARD` → STATIC; `KEYSET` → KEYSET; `DYNAMIC` → DYNAMIC; unspecified → KEYSET when `SCROLL` was asked for, DYNAMIC for the forward-only default.
-A **row limit** anywhere in the shape caps the result at KEYSET — see [Row-limited cursors](#row-limited-cursors).
+Two shapes cap the result at KEYSET: a **row limit** anywhere in the shape (see [Row-limited cursors](#row-limited-cursors)) and an **ORDER BY no index delivers** (see [Index-delivered ORDER BY](#index-delivered-order-by)).
 Sensitivity and scrollability are separate: naming any of the three implies `SCROLL`, while a cursor that names none stays forward-only *whatever it resolved to* — probe-confirmed that a bare cursor converted to a snapshot (DISTINCT) and one converted to KEYSET (`TOP`) both report Msg 16911 for a scrolling direction, so the test is on the requested keyword, never the effective sensitivity.
 A base table is **not** required to have a unique key — the row's stable heap address (delivered by `Heap.UpdateAt`'s in-place / forwarding-pointer machinery) is the fallback identity.
-Probe-confirmed: real SQL Server's KEYSET on a no-unique-key heap also opens with a positive `@@CURSOR_ROWS`, so this matches rather than diverges.
+Real SQL Server's keyset needs one and converts the cursor to a read-only snapshot without it, so this is the one place the simulator's KEYSET reaches further than real's — see [Divergences](#divergences-from-sql-server-documented-not-byte-identical).
 
 | Type | Membership | Column values | `@@CURSOR_ROWS` | Updatable |
 |------|-----------|---------------|-----------------|-----------|
@@ -75,10 +75,9 @@ Probed against SQL Server 2025 with `sys.dm_exec_cursors(@@SPID).properties`, wh
 | TVF (`STRING_SPLIT`), `OPENJSON`, `VALUES` constructor | Snapshot / Read Only | STATIC |
 | `FOR SYSTEM_TIME` (`AS OF` / `ALL` / `BETWEEN` / `FROM…TO` / `CONTAINED IN`, with or without `SCROLL`) | Snapshot / Read Only | STATIC |
 | `TOP n` / `TOP n PERCENT` / `TOP n WITH TIES` / `OFFSET…FETCH` (also inside a derived table, CTE or view body) | Keyset | KEYSET |
-| ORDER BY a non-indexed column | Keyset | *DYNAMIC* |
+| ORDER BY a column no index delivers | Keyset | KEYSET |
 | DISTINCT, GROUP BY, set op (also inside a derived table or view body) | Snapshot / Read Only | STATIC |
 
-The italicised row is the residual — see [Divergences](#divergences-from-sql-server-documented-not-byte-identical).
 The conversion boundary follows the deferred body's own constructs: a view whose body carries DISTINCT or GROUP BY is a read-only snapshot on both, a view whose body carries TOP is Keyset on both, and `DECLARE … DYNAMIC TYPE_WARNING` fires Msg 16956 for exactly those and stays silent for a plain view (probe-confirmed).
 
 ### Row-limited cursors
@@ -97,6 +96,38 @@ A derived table's or CTE's limit doesn't (real inlines those, landing the limit 
 
 Everything else about a row-limited cursor is ordinary KEYSET: values re-read live, positioned `WHERE CURRENT OF` UPDATE / DELETE reach the base row, and `SCROLL` makes `ABSOLUTE` position within the limited membership.
 Covered by `CursorRowLimitTests`.
+
+### Index-delivered ORDER BY
+
+An ORDER BY an index delivers leaves the cursor DYNAMIC; one the plan would have to sort for **caps sensitivity at KEYSET**, since a sorted result is a materialized one.
+Probe-confirmed against `sys.dm_exec_cursors`: `ORDER BY` an indexed column reports `Dynamic` with `@@CURSOR_ROWS = -1`, an unindexed one `Keyset` with the row count, and the converted cursor then behaves as an ordinary KEYSET — membership frozen at OPEN, values re-read live, a deleted member `@@FETCH_STATUS = -2`, positioned DML reaching the base row.
+`CursorSourcePlan.OrderBySuppliedByIndex` performs the cap alongside `HasRowLimit`, so `DYNAMIC` → KEYSET and the bare default → KEYSET, and neither makes the cursor scrollable.
+
+Each ORDER BY item resolves down to the base-table column it reads — through a positional ordinal, an output alias, a view's or derived table's projection, however deep — and the items are then grouped into maximal consecutive runs per base table.
+A run is delivered when some key on its table matches it as a **leading prefix in a consistent direction** (all forward, or all reversed — the backward scan real does for `ORDER BY … DESC`); a run that items from another table follow must additionally be **unique**, since only a key that fixes one row leaves the next source free to decide the rest.
+Items past a unique prefix of the same table are redundant and drop out, and an item reading no column at all (`ORDER BY (SELECT NULL)`) constrains no order — real drops it too.
+The candidate keys are the table's PRIMARY KEY / UNIQUE constraints and its enabled unfiltered indexes; a non-unique index over a table with a clustered key carries that key's columns after its own (real appends the clustering key as the row locator) and becomes unique with them.
+
+Probe-confirmed row by row, all covered by `CursorOrderCoverageTests`:
+
+| ORDER BY | Real | Simulator |
+|----------|------|-----------|
+| the clustered PK, ASC or DESC; a nonclustered index's column; a `DESC` index's column either way | Dynamic | DYNAMIC |
+| a unique prefix followed by anything of the same table (`id, v`) | Dynamic | DYNAMIC |
+| a nonclustered index's column then the clustering key (`v, id`) | Dynamic | DYNAMIC |
+| a composite index's prefix (`a` / `a, b`), uniformly reversed (`a DESC, b DESC`) | Dynamic | DYNAMIC |
+| a positional ordinal, an output alias, or a view's renamed column resolving to any of the above | Dynamic | DYNAMIC |
+| across a join, one indexed run per source, each but the last unique (`a.id, b.id`) | Dynamic | DYNAMIC |
+| an unindexed column, on the statement or through a view / derived table / CTE | Keyset | KEYSET |
+| a composite out of order (`b, a`), past its length (`a, b, c`), or with mixed directions (`a ASC, b DESC`) | Keyset | KEYSET |
+| a filtered index's column (with no matching WHERE), a disabled index's column | Keyset | KEYSET |
+| a heap's unindexed column | Snapshot / Read Only | *KEYSET* |
+| an order-preserving expression over an indexed column (`v + 1`, `v * 2`, `CAST(v AS bigint)`) | Dynamic | *KEYSET* |
+| a filtered index's column with the WHERE the filter matches | Dynamic | *KEYSET* |
+| a unique run whose following run is decided by the join rather than an index (1:1 `a.id, b.c`) | Dynamic | *KEYSET* |
+
+The italicised rows are the residuals — see [Divergences](#divergences-from-sql-server-documented-not-byte-identical).
+Real decides this on the finished plan (it converts exactly when the plan carries a Sort), so its reasoning reaches order-preserving expressions and functional dependencies the prefix rule doesn't; every residual but the heap one converts where real wouldn't, which is the direction the conversion already runs in.
 
 ### Multi-source navigation
 
@@ -245,7 +276,9 @@ A slot a view stamps is matched against the **view's** output columns rather tha
 
 ## TYPE_WARNING
 
-`TYPE_WARNING` emits **Msg 16956** (`"The created cursor is not of the requested type."`, info severity via `BatchContext.AppendInfoError`) at **DECLARE** time (probe-confirmed, not OPEN) when an explicitly-requested DYNAMIC or KEYSET sensitivity was silently converted to a lesser one — e.g. DYNAMIC / KEYSET over a non-navigable shape (DISTINCT, GROUP BY, aggregate, set op, a generator source, or a deferred body carrying any of those) forced to STATIC.
+`TYPE_WARNING` emits **Msg 16956** (`"The created cursor is not of the requested type."`, info severity via `BatchContext.AppendInfoError`) at **DECLARE** time (probe-confirmed, not OPEN) when the requested sensitivity was silently converted to a lesser one — DYNAMIC / KEYSET over a non-navigable shape (DISTINCT, GROUP BY, aggregate, set op, a generator source, or a deferred body carrying any of those) forced to STATIC, or DYNAMIC over a row limit or an unindexed ORDER BY forced to KEYSET.
+The request the keywords **imply** counts as much as one spelled out, probe-confirmed in both directions: a cursor naming no sensitivity (or only `FORWARD_ONLY`) implies DYNAMIC and warns when that converts, and a plain `SCROLL` implies KEYSET and warns when *that* converts to a snapshot.
+`STATIC` / `INSENSITIVE` / `FAST_FORWARD` never warn — a snapshot is what they asked for.
 It surfaces through the standard `InfoMessage` pipeline.
 A deferred body the cursor *can* follow warns about nothing, matching real: `DECLARE … DYNAMIC TYPE_WARNING` over a plain view is silent on both, and over a DISTINCT or TOP view fires on both (probe-confirmed).
 
@@ -254,8 +287,12 @@ A deferred body the cursor *can* follow warns about nothing, matching real: `DEC
 - **A cursor over a generator source is forced STATIC** — a TVF, a catalog view, `VALUES`, `OPENJSON`, PIVOT, `.nodes()`, a linked server.
   Real reports these as read-only snapshots too (probe-confirmed for `STRING_SPLIT`), so the sensitivity matches; what diverges is only that the simulator arrives there by refusing to plan the slot rather than by the source having no key.
   A `FOR SYSTEM_TIME` source resolves the same way and likewise matches — real reports all five forms as `Snapshot | Read Only`, so positioned DML through one is Msg 16929 on both.
-- **ORDER BY on a non-indexed column stays DYNAMIC** where real downgrades to KEYSET (and, with `TYPE_WARNING`, says so via Msg 16956).
-  The simulator has no index-coverage notion in cursor planning, so no downgrade occurs and no warning is emitted.
+- **Which ORDER BYs an index delivers is decided from the declared keys**, not from a finished plan the way real decides it — see the residual rows of [Index-delivered ORDER BY](#index-delivered-order-by).
+  Real keeps an order-preserving expression over an indexed column (`ORDER BY v + 1`) and a filtered index matching the statement's own WHERE dynamic, and its functional-dependency reasoning carries a unique run across a 1:1 join into a run no index delivers; the simulator converts all three to KEYSET.
+  In the other direction, a **heap's** unindexed ORDER BY converts to KEYSET here where real goes all the way to a read-only snapshot — real's KEYSET needs a unique index and a heap without one has none, which is the same gap explicit `DECLARE … KEYSET` over such a table carries (next bullet).
+- **KEYSET over a table with no unique index stays KEYSET**, where real converts it to `Snapshot | Read Only` (probe-confirmed: `DECLARE … KEYSET` over a heap with no unique index reports a snapshot, and its positive `@@CURSOR_ROWS` is the snapshot's count rather than a keyset's).
+  The simulator's keyset identity falls back to the row's stable `(page, slot)` address, so it needs no unique key and stays updatable; real refuses positioned DML there with Msg 16929.
+  Applies wherever KEYSET is reached — explicitly, through `SCROLL`, or through either conversion.
 - **Position is tracked by the flattened tuple of stable heap addresses**, one per base table the plan reads, made possible by `Heap.UpdateAt`'s in-place / forwarding-pointer design (the simulator's UPDATE doesn't relocate rows).
   KEYSET membership additionally tracks the unique-key tuple per base table that has a PK/UNIQUE, so an UPDATE to those columns produces `@@FETCH_STATUS = -2` (matches real SQL Server's keyset-tracks-the-unique-index behavior, probe-confirmed).
 - **A view body is re-parsed at DECLARE and the resulting plan is what the cursor re-folds**, so a `CREATE OR ALTER VIEW` between DECLARE and FETCH doesn't reach an open cursor; the ordinary read path re-parses the body per execution and would.
@@ -274,5 +311,4 @@ A deferred body the cursor *can* follow warns about nothing, matching real: `DEC
   A fits-in-place rewrite returns the new bytes (conflict detected); an oversize rewrite that installs a forwarding pointer isn't followed by `ReadSlotBytes`, so such a change may go undetected.
   The common small-value case is exact.
 - **TYPE_WARNING coalescing**: the Msg 16956 info text merges with any other info messages in the same batch into one coalesced `InfoMessage` event (the simulator's standard info-message behavior), rather than a distinct message.
-- **TYPE_WARNING for the DYNAMIC→KEYSET "ORDER BY on a non-index" downgrade** is not emitted — no downgrade occurs to warn about (see the ORDER BY bullet above).
 - **DECLARE CURSOR inside an un-taken `IF` branch** still parses (and resolves names in) its SELECT — the same eager-resolution quirk all statements share.

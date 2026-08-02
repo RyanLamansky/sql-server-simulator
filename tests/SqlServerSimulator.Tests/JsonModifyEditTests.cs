@@ -231,4 +231,65 @@ public sealed class JsonModifyEditTests
     public void SubstitutedValue_JsonValue_IsQuoted()
         => AreEqual("{ \"a\" : \"s\" }",
             ExecuteScalar("select json_modify('{ \"a\" : 1 }', '$.a', json_value('{\"q\":\"s\"}', '$.q'))"));
+
+    /// <summary>The key an insert takes from the path leaves <c>/</c> literal.</summary>
+    [TestMethod]
+    public void InsertedKey_LeavesSolidusLiteral()
+        => AreEqual("""{"a/b":"v"}""", ExecuteScalar("""select json_modify('{}', '$."a/b"', 'v')"""));
+
+    // --- The written value's type (Msg 8116) ---
+
+    /// <summary>
+    /// The third argument takes the string family bar the legacy LOBs, the
+    /// integer family, decimal / numeric, float, real and bit — and nothing
+    /// else, a typed NULL of a refused type included (probe-confirmed against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(1 as money)", "money")]
+    [DataRow("cast(1 as smallmoney)", "smallmoney")]
+    [DataRow("cast('2020-01-01' as date)", "date")]
+    [DataRow("cast('2020-01-01' as datetime)", "datetime")]
+    [DataRow("cast('2020-01-01' as datetime2(3))", "datetime2")]
+    [DataRow("cast('2020-01-01' as smalldatetime)", "smalldatetime")]
+    [DataRow("cast('12:00' as time)", "time")]
+    [DataRow("cast('2020-01-01' as datetimeoffset)", "datetimeoffset")]
+    [DataRow("cast('00000000-0000-0000-0000-000000000000' as uniqueidentifier)", "uniqueidentifier")]
+    [DataRow("cast(0x41 as varbinary(10))", "varbinary")]
+    [DataRow("cast(0x41 as binary(1))", "binary")]
+    [DataRow("cast('x' as text)", "text")]
+    [DataRow("cast('x' as ntext)", "ntext")]
+    [DataRow("cast('<a/>' as xml)", "xml")]
+    [DataRow("cast(1 as sql_variant)", "sql_variant")]
+    [DataRow("hierarchyid::Parse('/1/')", "hierarchyid")]
+    [DataRow("geography::Point(1, 2, 4326)", "geography")]
+    [DataRow("cast(null as date)", "date")]
+    public void SubstitutedValue_RefusedType_RaisesMsg8116(string value, string typeName)
+        => AssertSqlError($"select json_modify('{{\"a\":1}}', '$.a', {value})", 8116,
+            $"Argument data type {typeName} is invalid for argument 3 of json_modify function.");
+
+    /// <summary>Real binds the rule while compiling, so an empty rowset reports it too.</summary>
+    [TestMethod]
+    public void SubstitutedValue_RefusedType_ReportsOnAnEmptyRowset()
+        => AssertSqlError("select json_modify('{\"a\":1}', '$.a', cast(null as date)) where 1 = 0", 8116,
+            "Argument data type date is invalid for argument 3 of json_modify function.");
+
+    /// <summary>The accepted set, each rendering its own JSON shape.</summary>
+    [TestMethod]
+    [DataRow("cast('x' as char(3))", "\"x  \"")]
+    [DataRow("cast('x' as nchar(3))", "\"x  \"")]
+    [DataRow("cast('x' as varchar(max))", "\"x\"")]
+    [DataRow("cast(1.50 as numeric(10, 2))", "1.50")]
+    [DataRow("cast(1 as tinyint)", "1")]
+    [DataRow("cast(1 as bit)", "true")]
+    public void SubstitutedValue_AcceptedType_Writes(string value, string expected)
+        => AreEqual($"{{\"a\":{expected}}}", ExecuteScalar($"select json_modify('{{\"a\":1}}', '$.a', {value})"));
+
+    /// <summary>
+    /// An untyped <c>NULL</c> passes the gate, which is what leaves the
+    /// delete-a-member form open.
+    /// </summary>
+    [TestMethod]
+    public void SubstitutedValue_UntypedNull_Deletes()
+        => AreEqual("{}", ExecuteScalar("select json_modify('{\"a\":1}', '$.a', null)"));
 }

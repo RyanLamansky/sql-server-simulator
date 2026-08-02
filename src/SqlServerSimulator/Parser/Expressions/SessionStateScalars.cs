@@ -155,5 +155,7 @@ internal sealed class CurrentRequestId : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
+
     internal override string DebugDisplay() => "CURRENT_REQUEST_ID()";
 }

@@ -23,6 +23,9 @@ A missing index still raises **Msg 3701** through the same path as the `name ON 
 
 **One clustered index per table**: `CREATE CLUSTERED INDEX` on a table that already carries a clustered index — a clustered PRIMARY KEY / UNIQUE constraint (a default PK is clustered) or a prior clustered index — raises **Msg 1902** (`Cannot create more than one clustered index on table 't'. Drop the existing clustered index '…' before creating another.`), naming the existing clustered index.
 
+**No INCLUDE on a clustered index**: a clustered index's leaf *is* the table row, so real refuses the list with **Msg 10601** class 16 state 1, `Cannot specify included columns for a clustered index.` — naming neither the index nor the table, because it is a statement-shape check.
+It fires ahead of every name-resolution error (a missing table and a missing INCLUDE column alike) and ahead of Msg 1916, all probe-confirmed, so it sits beside the `IGNORE_DUP_KEY` shape check in `TryParseCreateIndex` and covers the indexed-view path with it.
+
 The simulator has no B-tree storage, so an index never constrains inserts (UNIQUE aside) and isn't a stored ordered structure.
 UNIQUE indexes participate in INSERT / UPDATE / MERGE enforcement alongside `KeyConstraint`.
 The `WITH (...)` clause is scanned for `IGNORE_DUP_KEY` — the one option with a semantic, see [`constraints.md`](constraints.md#ignore_dup_key) — and otherwise parsed parens-balanced and discarded: none of `FILLFACTOR` / `PAD_INDEX` / `ONLINE` / `SORT_IN_TEMPDB` / etc. alter behavior.
@@ -420,7 +423,7 @@ One row per (index, column):
   a **nonclustered** index numbers them in key order (so `index_column_id = key_ordinal`), while a **clustered** one numbers them in **table column order**, ascending `column_id`.
   `create clustered index ix on t(b, a)` therefore reports `a` at `index_column_id` 1 / `key_ordinal` 2 (probe-confirmed, and the same for a clustered PRIMARY KEY and an indexed view's clustered index); `key_ordinal` carries the key order either way.
 - **INCLUDE columns**: `key_ordinal = 0`, `index_column_id = N+1..`, `is_included_column = 1`.
-  Only a nonclustered index has any — real refuses INCLUDE on a clustered index (Msg 10601, unraised here).
+  Only a nonclustered index has any, since a clustered one can't declare an INCLUDE list at all (Msg 10601).
 - HEAP entries (index_id = 0) don't appear — real SQL Server's catalog omits them.
 
 `sys.stats_columns.stats_column_id` tracks the sibling `index_column_id` through the same rule (`KeyIndexColumnIds`), so DacFx's join of the two views on `(stats_column_id, column_id)` pairs up for a clustered index too.

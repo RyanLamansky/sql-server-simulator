@@ -95,6 +95,15 @@ internal sealed partial class Selection
 
         var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue);
 
+        // A SERIALIZABLE / HOLDLOCK reader's phantom fence is settled here,
+        // before any candidate address is read: the conjuncts that bound the
+        // seek are exactly the ones that bound the range, and locking after
+        // the read would leave a window in which a concurrent insert lands
+        // unseen yet unfenced. Settling it before the seek is even known to
+        // apply costs at worst the whole-table fallback the scan path would
+        // have taken anyway.
+        SettleSerializablePhantomFence(source, table, plan, batch, outerResolver, equalities, bounds);
+
         if (equalities.Count != 0
             && TrySeekByLongestPrefix(source, table, plan, batch, snapshotXid, outerResolver, equalities, bounds, out var seekRows, out var width, out var rangeExtended))
         {
@@ -119,6 +128,112 @@ internal sealed partial class Selection
 
         IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
         return sources;
+    }
+
+    /// <summary>
+    /// Takes the phantom protection a SERIALIZABLE / <c>HOLDLOCK</c> reader is
+    /// still owed over <paramref name="table"/>: a key-range lock over the
+    /// value interval one sargable conjunct pins on an indexed leading column,
+    /// or — when no conjunct offers one — the whole-table S the scan path
+    /// falls back to. A no-op for every other isolation level.
+    /// </summary>
+    private static void SettleSerializablePhantomFence(
+        FromSource source,
+        HeapTable table,
+        DataLockPlan plan,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        Dictionary<int, Expression[]> equalities,
+        Dictionary<int, RangeBoundExprs> bounds)
+    {
+        if (!plan.SerializableRangeReader)
+            return;
+        if (ComputeSerializableKeyRange(source, table, batch, outerResolver, equalities, bounds) is { } range)
+            batch.AcquireKeyRangeLockTxScoped(table, range, LockMode.RangeSharedShared);
+        else
+            batch.EnsureSerializableTableLock(table, plan);
+    }
+
+    /// <summary>
+    /// The value interval a SERIALIZABLE reader can fence instead of locking
+    /// the whole table, or <c>null</c> when no conjunct offers one.
+    /// <para>
+    /// Soundness rests on the same property the seek does: every conjunct here
+    /// is a top-level <c>AND</c> factor of the predicate, so every row the
+    /// query can ever return satisfies it, so every row that could become a
+    /// phantom carries a column value inside the returned interval. Only a
+    /// <b>leading</b> key column of some key / index qualifies — mirroring
+    /// real, which range-locks along an index and takes an object-level S when
+    /// there is no index to walk.
+    /// </para>
+    /// <para>
+    /// Equality wins over a range bound (it is the narrower fence), and keys /
+    /// indexes are walked in their own order so the choice doesn't ride on
+    /// dictionary enumeration order. An <c>IN</c> list collapses to the hull of
+    /// its values — one interval spanning the lowest to the highest, gaps
+    /// between them included, which over-blocks rather than leaving a value
+    /// unfenced.
+    /// </para>
+    /// </summary>
+    private static KeyRange? ComputeSerializableKeyRange(
+        FromSource source,
+        HeapTable table,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        Dictionary<int, Expression[]> equalities,
+        Dictionary<int, RangeBoundExprs> bounds)
+    {
+        if (equalities.Count != 0)
+        {
+            foreach (var ordinals in EnumerateKeyOrdinals(table))
+            {
+                if (ordinals.Length == 0 || !equalities.TryGetValue(ordinals[0], out var valueSides))
+                    continue;
+                if (EvaluateProbeComponent(source, ordinals[0], valueSides, batch, outerResolver) is not { } resolved)
+                    continue;
+                // A dropped probe (NULL, cross-collation, unpromotable) means
+                // the hull wouldn't span every value the residual predicate
+                // still admits, so decline rather than under-fence.
+                var (common, probes) = resolved;
+                if (probes.Length != valueSides.Length)
+                    continue;
+                var low = probes[0];
+                var high = probes[0];
+                for (var i = 1; i < probes.Length; i++)
+                {
+                    if (probes[i].CompareTo(low) < 0)
+                        low = probes[i];
+                    if (probes[i].CompareTo(high) > 0)
+                        high = probes[i];
+                }
+
+                return new KeyRange(ordinals[0], common, hasLower: true, low, lowerInclusive: true, hasUpper: true, high, upperInclusive: true);
+            }
+        }
+
+        if (bounds.Count == 0)
+            return null;
+        foreach (var ordinals in EnumerateKeyOrdinals(table))
+        {
+            if (ordinals.Length == 0 || !bounds.TryGetValue(ordinals[0], out var bound))
+                continue;
+            // A NULL bound makes the conjunct UNKNOWN for every row present or
+            // future, so the query's result is permanently empty and no insert
+            // can phantom into it — but declining here keeps the reasoning in
+            // one place (the fallback covers it).
+            if (EvaluateRangeBounds(bound, source.StoredSchema[ordinals[0]].Type, batch, outerResolver,
+                out var common, out var hasLower, out var lowerValue, out var hasUpper, out var upperValue) != BoundEval.Value)
+            {
+                continue;
+            }
+
+            return new KeyRange(
+                ordinals[0], common,
+                hasLower, lowerValue, bound.LowerInclusive,
+                hasUpper, upperValue, bound.UpperInclusive);
+        }
+
+        return null;
     }
 
     // Wraps a narrowed row stream back into a single-source array, preserving the
@@ -650,6 +765,14 @@ internal sealed partial class Selection
             lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive);
 
         IndexSeekDiagnostics.Sink?.Add($"OrderedScan({table.Name})");
+        // The ordered scan replaces the source's own enumerable, so a
+        // SERIALIZABLE reader's phantom fence has to be taken here. The
+        // ordered prefix isn't a value interval the range path can express
+        // (the pinned run plus an open-ended order column), so this is the
+        // whole-table fallback. The empty-result returns above skip it: a NULL
+        // pin or bound makes the predicate UNKNOWN for every row present and
+        // future, so nothing can phantom into it.
+        batch.EnsureSerializableTableLock(table, plan);
         orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, candidates));
         return true;
     }

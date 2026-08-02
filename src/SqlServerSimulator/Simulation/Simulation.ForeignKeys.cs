@@ -430,9 +430,13 @@ partial class Simulation
                     _ => throw new InvalidOperationException(),
                 };
             }
+            var rewritten = RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap);
             if (IsLockableTable(childTable))
+            {
                 context.Batch.AcquireRowLockTxScoped(childTable, pageIndex, slotIndex, LockMode.Exclusive);
-            childTable.Heap.UpdateAt(pageIndex, slotIndex, RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap), undoLog, ReclaimSuperseded(childTable, context));
+                context.Batch.ProbeKeyRangesForWrite(childTable, rewritten);
+            }
+            childTable.Heap.UpdateAt(pageIndex, slotIndex, rewritten, undoLog, ReclaimSuperseded(childTable, context));
             newPairs.Add((oldClone, newRow));
         }
         // Recurse: the child rows just got their FK columns rewritten — if
@@ -462,9 +466,13 @@ partial class Simulation
                     ? EvaluateColumnDefault(childTable.Columns[ord], context)
                     : SqlValue.Null(childTable.Columns[ord].Type);
             }
+            var rewritten = RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap);
             if (IsLockableTable(childTable))
+            {
                 context.Batch.AcquireRowLockTxScoped(childTable, pageIndex, slotIndex, LockMode.Exclusive);
-            childTable.Heap.UpdateAt(pageIndex, slotIndex, RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap), undoLog, ReclaimSuperseded(childTable, context));
+                context.Batch.ProbeKeyRangesForWrite(childTable, rewritten);
+            }
+            childTable.Heap.UpdateAt(pageIndex, slotIndex, rewritten, undoLog, ReclaimSuperseded(childTable, context));
             newPairs.Add((oldClone, newRow));
         }
         // For SET NULL / SET DEFAULT under a DELETE on parent, the recursion

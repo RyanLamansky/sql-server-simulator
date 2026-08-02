@@ -570,7 +570,15 @@ partial class Simulation
                     }
 
                     EnforceOutgoingForeignKeys(destinationTable, [rowValues], context, "INSERT");
-                    var (pageIndex, slotIndex) = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap), destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
+                    var image = RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap);
+                    // Key-range probe before the heap write, not after: a wait
+                    // on a SERIALIZABLE reader's range can last until that
+                    // reader commits, and a row already in the heap with no
+                    // row-X on it yet would be visible to a READ COMMITTED
+                    // reader for the whole wait.
+                    if (IsLockableTable(destinationTable))
+                        context.Batch.ProbeKeyRangesForWrite(destinationTable, image);
+                    var (pageIndex, slotIndex) = destinationTable.Heap.Insert(image, destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
                     if (IsLockableTable(destinationTable))
                     {
                         context.Batch.AcquireRowLockTxScoped(destinationTable, pageIndex, slotIndex, LockMode.Exclusive);

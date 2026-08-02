@@ -44,5 +44,12 @@ internal sealed class NullIf : Expression
     // NULLIF(a, b) returns a (or NULL), so the result carries a's name.
     internal override bool ResultReportsNumeric => this.a.ResultReportsNumeric;
 
+    // The NULL arm of the CASE this desugars to survives unless real folds the
+    // whole call, so `NULLIF(1, 2)` projects NOT NULL (the arms differ, leaving
+    // the constant 1) while `NULLIF(1, 1)` and any column-valued spelling stay
+    // nullable — probe-confirmed against SQL Server 2025.
+    internal override bool ResultIsNullable(NullabilityContext context) =>
+        !context.TryFold(this, out var folded) || folded.IsNull;
+
     internal override string DebugDisplay() => $"NULLIF({this.a.DebugDisplay()}, {this.b.DebugDisplay()})";
 }

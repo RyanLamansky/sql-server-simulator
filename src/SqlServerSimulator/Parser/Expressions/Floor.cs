@@ -31,5 +31,7 @@ internal sealed class Floor(ParserContext context) : Expression
 
     internal override bool ResultReportsNumeric => this.source.ResultReportsNumeric;
 
+    internal override bool ResultIsNullable(NullabilityContext context) => this.source.ResultIsNullable(context);
+
     internal override string DebugDisplay() => $"FLOOR({this.source.DebugDisplay()})";
 }

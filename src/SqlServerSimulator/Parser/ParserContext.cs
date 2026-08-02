@@ -317,6 +317,16 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public Func<MultiPartName, SqlType>? OuterTypeResolver;
 
     /// <summary>
+    /// The FROM sources a <c>CONTAINS</c> / <c>FREETEXT</c> predicate binds its
+    /// column specification against. Installed by <see cref="Selection"/> as
+    /// soon as the FROM clause is parsed — before the select list and before
+    /// WHERE — and restored on the way out, so each query level offers its own
+    /// scope. Null where no query scope exists (a CHECK constraint, a computed
+    /// column), which is where real reports Msg 1046.
+    /// </summary>
+    public FromSource[]? FullTextSources;
+
+    /// <summary>
     /// Common-table-expression bindings registered by a <c>WITH</c> prefix
     /// that scope to the immediately-following statement. Populated by
     /// <c>Simulation.ParseCteBindings</c> before the SELECT / INSERT /

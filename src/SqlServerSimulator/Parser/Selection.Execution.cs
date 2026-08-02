@@ -127,12 +127,16 @@ internal sealed partial class Selection
         // SUM over an expression that can produce NULL is Msg 8662. Column
         // nullability comes from the FROM sources, the same source
         // Expression.ResultIsNullable consults for result metadata.
+        var operandNullability = new NullabilityContext(
+            parseBatch,
+            name => ColumnIsNullableAcrossSources(sources, name),
+            ColumnTypeResolverFor(sources));
         foreach (var aggregate in aggregates)
         {
             shape.Aggregates.Add(aggregate.Kind);
             if (aggregate.Kind == AggregateKind.Sum
                 && aggregate.Operand is { } operand
-                && operand.ResultIsNullable(name => ColumnIsNullableAcrossSources(sources, name)))
+                && operand.ResultIsNullable(operandNullability))
             {
                 shape.SumsNullableExpression = true;
             }
@@ -904,7 +908,7 @@ internal sealed partial class Selection
         // walk also enforces the SELECT-INTO-specific validations
         // (Msg 1038 unnamed projection, Msg 2705 duplicate name).
         var destColumnSchema = intoTarget is { } target
-            ? ComputeIntoDestSchema(target, expressions, outputSchema, outputColumnNames, sources, joins)
+            ? ComputeIntoDestSchema(target, expressions, outputSchema, outputColumnNames, sources, joins, parseBatch, ResolveColumnType)
             : null;
 
         // Updatable-view shape capture: single source, no JOINs, no DISTINCT,
@@ -915,7 +919,7 @@ internal sealed partial class Selection
         var (updatabilityProfile, updatabilityRejection) = ComputeViewUpdatabilityProfile(
             sources, joins, expressions, fromClause, distinct, aggregates, windows);
 
-        var columnNullability = ComputeColumnNullability(expressions, sources, joins);
+        var columnNullability = ComputeColumnNullability(expressions, sources, joins, parseBatch, ResolveColumnType);
 
         var selection = new Selection(outputSchema, outputColumnNames,
             hasOrderBy: orderBy.Count > 0,
@@ -989,7 +993,12 @@ internal sealed partial class Selection
     /// bacpac loader reads the file per the model.xml declaration — the two
     /// must agree.
     /// </summary>
-    private static bool[]? ComputeColumnNullability(List<Expression> expressions, FromSource[] sources, JoinSpec[] joins)
+    private static bool[]? ComputeColumnNullability(
+        List<Expression> expressions,
+        FromSource[] sources,
+        JoinSpec[] joins,
+        BatchContext parseBatch,
+        Func<MultiPartName, SqlType> resolveColumnType)
     {
         if (sources.Length > 1 || joins.Length != 0)
             return null;
@@ -1000,9 +1009,10 @@ internal sealed partial class Selection
             return s == -1 || sources[s].Columns[c].Nullable;
         }
 
+        var context = new NullabilityContext(parseBatch, ResolveNullable, resolveColumnType);
         var nullability = new bool[expressions.Count];
         for (var i = 0; i < expressions.Count; i++)
-            nullability[i] = expressions[i].ResultIsNullable(ResolveNullable);
+            nullability[i] = expressions[i].ResultIsNullable(context);
         return nullability;
     }
 

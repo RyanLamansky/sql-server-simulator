@@ -63,6 +63,22 @@ internal sealed class DbId : Expression
     internal static IEnumerable<(Database Database, short Id)> DatabasesWithIds(Simulation simulation) =>
         simulation.Databases.Values.OrderBy(static d => d.Id).Select(static d => (d, d.Id));
 
+    /// <summary>
+    /// The database carrying <paramref name="requested"/> as its
+    /// <c>database_id</c>, or <see langword="null"/> when no hosted database
+    /// does — what the explicit <c>database_id</c> argument of
+    /// <c>OBJECT_NAME</c> / <c>OBJECT_SCHEMA_NAME</c> resolves through.
+    /// </summary>
+    internal static Database? DatabaseWithId(Simulation simulation, int requested)
+    {
+        foreach (var (db, id) in DatabasesWithIds(simulation))
+        {
+            if (id == requested)
+                return db;
+        }
+        return null;
+    }
+
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 
     internal override string DebugDisplay() => this.nameArg is null ? "DB_ID()" : $"DB_ID({this.nameArg.DebugDisplay()})";

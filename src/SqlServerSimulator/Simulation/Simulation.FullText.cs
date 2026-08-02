@@ -313,13 +313,21 @@ partial class Simulation
             }
         }
 
-        // Optional WITH (option [, ...]) — parse-and-discard balanced parens.
+        // Optional WITH clause — parse-and-discard. Real accepts both the
+        // parenthesized option list and the bare `WITH CHANGE_TRACKING
+        // {MANUAL | AUTO | OFF [, NO POPULATION]}` spelling, which is the form
+        // most scripts write.
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
             context.MoveNextRequired();
-            if (context.Token is not Operator { Character: '(' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            SkipBalancedParens(context);
+            if (context.Token is Operator { Character: '(' })
+            {
+                SkipBalancedParens(context);
+            }
+            else
+            {
+                SkipChangeTrackingClause(context);
+            }
         }
 
         if (context.Batch.IsSkipping)
@@ -396,6 +404,32 @@ partial class Simulation
 
         table.FullTextIndex = new FullTextIndex(catalog.Id, keyIndexName ?? string.Empty, uniqueIndexId, columns);
         return true;
+    }
+
+    /// <summary>
+    /// Consumes the paren-less <c>WITH CHANGE_TRACKING {MANUAL | AUTO | OFF}
+    /// [, NO POPULATION]</c> trailer. The simulator searches the live rows
+    /// rather than a crawled index, so the mode carries no behavior; the
+    /// grammar still has to accept what real accepts.
+    /// </summary>
+    private static void SkipChangeTrackingClause(ParserContext context)
+    {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        if (context.Token is not Name trackingToken || !collation.Equals(trackingToken.Value, "CHANGE_TRACKING"))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Name modeToken
+            || !(collation.Equals(modeToken.Value, "MANUAL") || collation.Equals(modeToken.Value, "AUTO") || collation.Equals(modeToken.Value, "OFF")))
+        {
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        context.MoveNextOptional();
+        if (context.Token is not Operator { Character: ',' })
+            return;
+        if (context.GetNextRequired() is not Name noToken || !collation.Equals(noToken.Value, "NO"))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Name populationToken || !collation.Equals(populationToken.Value, "POPULATION"))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
     }
 
     private static int ResolveColumnOrdinalForFullText(Collation collation, HeapTable table, string columnName)

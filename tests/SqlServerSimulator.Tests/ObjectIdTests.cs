@@ -67,17 +67,44 @@ public sealed class ObjectIdTests
             select object_id('foo', 'u') as id
             """));
 
+    /// <summary>
+    /// The filter is compared against the object's <c>char(2)</c> type code, so
+    /// ANSI padding decides which whitespace matters: a one-character code
+    /// tolerates the single padding space, a third character never fits, and a
+    /// leading space or a tab is a different <c>char(2)</c> value. All four
+    /// probe-confirmed against SQL Server 2025.
+    /// </summary>
     [TestMethod]
-    public void ObjectId_TypeWithWhitespace_ReturnsNull()
+    [DataRow("'U '", true)]
+    [DataRow("'U  '", false)]
+    [DataRow("' U'", false)]
+    [DataRow("'U' + char(9)", false)]
+    public void ObjectId_TypeFilterPadding_FollowsCharTwoComparison(string filter, bool resolves)
     {
-        // Probe-confirmed: real SQL Server is whitespace-sensitive on the
-        // type filter; ' U ' returns NULL.
-        using var reader = new Simulation().ExecuteReader("""
+        using var reader = new Simulation().ExecuteReader($"""
             create table foo (id int);
-            select object_id('foo', ' U ') as id
+            select object_id('foo', {filter}) as id
             """);
         IsTrue(reader.Read());
-        IsTrue(reader.IsDBNull(0));
+        AreEqual(resolves, !reader.IsDBNull(0));
+    }
+
+    /// <summary>
+    /// A two-character code fills the <c>char(2)</c> exactly, so it takes no
+    /// padding space — <c>'PK '</c> is three characters and matches nothing
+    /// (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    [DataRow("'PK'", true)]
+    [DataRow("'PK '", false)]
+    public void ObjectId_TwoCharacterTypeFilter_TakesNoPadding(string filter, bool resolves)
+    {
+        using var reader = new Simulation().ExecuteReader($"""
+            create table foo (id int constraint pk_foo primary key);
+            select object_id('pk_foo', {filter}) as id
+            """);
+        IsTrue(reader.Read());
+        AreEqual(resolves, !reader.IsDBNull(0));
     }
 
     [TestMethod]

@@ -28,11 +28,10 @@ internal static class JsonValueRender
     /// is true, the value's string form is appended verbatim (used for
     /// JSON-producing inputs such as nested <c>JSON_OBJECT</c> /
     /// <c>JSON_ARRAY</c> / <c>JSON_QUERY</c> — matches SQL Server's
-    /// auto-detection of JSON-typed input). <paramref name="escapeSolidus"/>
-    /// writes <c>/</c> as <c>\/</c>, which <c>JSON_MODIFY</c>'s substituted
-    /// value does.
+    /// auto-detection of JSON-typed input). A string value carries the
+    /// <c>\/</c> solidus escape every one of these producers writes.
     /// </summary>
-    public static void Append(StringBuilder sb, SqlValue value, bool embedRaw, bool escapeSolidus = false)
+    public static void Append(StringBuilder sb, SqlValue value, bool embedRaw)
     {
         if (value.IsNull)
         {
@@ -103,18 +102,20 @@ internal static class JsonValueRender
         // everything else: coerce to nvarchar (SQL Server's default ISO
         // shape for the temporal types and uppercase-hex form for guid),
         // then JSON-escape.
-        AppendJsonString(sb, value.CoerceTo(SqlType.NVarchar).AsString, escapeSolidus);
+        AppendJsonString(sb, value.CoerceTo(SqlType.NVarchar).AsString, escapeSolidus: true);
     }
 
     /// <summary>
     /// Coerces a key SqlValue into a quoted, escaped JSON property name.
     /// Numeric keys cast to their string form; NULL keys raise Msg 13601.
+    /// A key escapes <c>/</c> the same way a value does (probe-confirmed:
+    /// <c>JSON_OBJECT('k/1': 'v')</c> is <c>{"k\/1":"v"}</c>).
     /// </summary>
     public static void AppendKey(StringBuilder sb, SqlValue keyValue)
     {
         if (keyValue.IsNull)
             throw SimulatedSqlException.JsonObjectNullKey();
-        AppendJsonString(sb, keyValue.CoerceTo(SqlType.NVarchar).AsString);
+        AppendJsonString(sb, keyValue.CoerceTo(SqlType.NVarchar).AsString, escapeSolidus: true);
     }
 
     private static void AppendIsoDateTime(StringBuilder sb, DateTime dt, int precision)
@@ -135,17 +136,19 @@ internal static class JsonValueRender
     }
 
     /// <summary>
-    /// Appends <paramref name="s"/> as a quoted JSON string. Shared with the
-    /// <c>REGEXP_MATCHES</c> rowset member, whose <c>substring_matches</c>
-    /// column is JSON built the same way, and with <c>JSON_MODIFY</c>'s
-    /// substituted value, which sets <paramref name="escapeSolidus"/>.
+    /// Appends <paramref name="s"/> as a quoted JSON string.
+    /// <paramref name="escapeSolidus"/> is the one per-caller choice: every
+    /// JSON producer writes <c>\/</c> for <c>/</c>, while the two sites that
+    /// reach this helper directly leave the character literal — the
+    /// <c>REGEXP_MATCHES</c> rowset member's <c>substring_matches</c> column
+    /// and the property name <c>JSON_MODIFY</c> takes from its path's own
+    /// text (both probe-confirmed).
     /// </summary>
     public static void AppendJsonString(StringBuilder sb, string s, bool escapeSolidus = false)
     {
         // Minimal JSON-string escape: only the chars JSON syntax requires
         // (probe-confirmed against SQL Server 2025 — non-ASCII / `<` / `>`
-        // are left literal). `/` is a per-caller choice: JSON_MODIFY writes
-        // `\/` where REGEXP_MATCHES' substring_matches leaves it literal.
+        // are left literal).
         _ = sb.Append('"');
         foreach (var c in s)
         {

@@ -457,10 +457,96 @@ public sealed class SpatialValueTests
         Assert.IsGreaterThan(3.0, actual - Geodesic, $"expected the great elliptic arc to exceed the geodesic by ~3.3 m, got {actual - Geodesic:F3}");
     }
 
-    /// <summary>Planar <c>STDistance</c> is straight-line.</summary>
+    /// <summary>
+    /// Exactly antipodal points define no unique plane, and real measures the
+    /// smallest central section between them — half the meridian ellipse's
+    /// perimeter, not half the equator's, which is 33 km longer.
+    /// </summary>
     [TestMethod]
-    public void PlanarDistance_IsEuclidean()
-        => AreEqual(5.0, Eval("geometry::Parse('POINT(0 0)').STDistance(geometry::Parse('POINT(3 4)'))"));
+    public void GreatEllipticArc_AntipodalPoints_MeasureHalfTheMeridian()
+    {
+        var actual = (double)Eval("geography::Parse('POINT(0 0)').STDistance(geography::Parse('POINT(180 0)'))")!;
+        AreEqual(20003931.458240643, actual, 1e-3);
+    }
+
+    /// <summary>
+    /// Planar <c>STDistance</c> is the straight-line closest approach over every
+    /// shape pair: the perpendicular foot where it lands on an edge, the nearer
+    /// endpoint where it doesn't, and zero where the instances meet or one
+    /// contains the other. A point inside a polygon's <i>hole</i> is outside the
+    /// polygon and measures to the hole's ring. Every value is real's own, and
+    /// the measure is symmetric, so each row is asserted both ways round.
+    /// </summary>
+    [TestMethod]
+    [DataRow("POINT(1 1)", "LINESTRING(0 0, 4 0)", 1.0)]
+    [DataRow("POINT(-3 4)", "LINESTRING(0 0, 4 0)", 5.0)]
+    [DataRow("POINT(2 0)", "LINESTRING(0 0, 4 0)", 0.0)]
+    [DataRow("POINT(2 5)", "MULTILINESTRING((0 0, 4 0),(0 9, 4 9))", 4.0)]
+    [DataRow("POINT(-1 5)", "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))", 1.4142135623730951)]
+    [DataRow("POINT(2 2)", "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))", 0.0)]
+    [DataRow("POINT(0 2)", "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))", 0.0)]
+    [DataRow("POINT(2 2)", "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0),(1 1, 1 3, 3 3, 3 1, 1 1))", 1.0)]
+    [DataRow("LINESTRING(0 0, 4 0)", "LINESTRING(0 3, 4 3)", 3.0)]
+    [DataRow("LINESTRING(0 0, 4 0)", "LINESTRING(5 1, 8 6)", 1.4142135623730951)]
+    [DataRow("LINESTRING(0 0, 4 4)", "LINESTRING(0 4, 4 0)", 0.0)]
+    [DataRow("LINESTRING(0 0, 2 2)", "LINESTRING(2 2, 4 0)", 0.0)]
+    [DataRow("LINESTRING(-1 2, 5 2)", "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))", 0.0)]
+    [DataRow("LINESTRING(-3 2, -1 2)", "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))", 1.0)]
+    [DataRow("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))", "POLYGON((3 0, 4 0, 4 1, 3 1, 3 0))", 2.0)]
+    [DataRow("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))", 0.0)]
+    [DataRow("POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))", "POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))", 0.0)]
+    [DataRow("POLYGON((0 0, 6 0, 6 6, 0 6, 0 0),(1 1, 1 5, 5 5, 5 1, 1 1))", "POLYGON((2 2, 3 2, 3 3, 2 3, 2 2))", 1.0)]
+    [DataRow("MULTIPOINT((0 0),(10 10))", "MULTIPOINT((3 4),(20 20))", 5.0)]
+    [DataRow("GEOMETRYCOLLECTION(POINT(0 0), LINESTRING(10 10, 12 12))", "POINT(11 10)", 0.7071067811865476)]
+    public void PlanarDistance_MatchesReal(string left, string right, double expected)
+    {
+        AreEqual(expected, Eval($"geometry::Parse('{left}').STDistance(geometry::Parse('{right}'))"));
+        AreEqual(expected, Eval($"geometry::Parse('{right}').STDistance(geometry::Parse('{left}'))"));
+    }
+
+    /// <summary>
+    /// Round-earth <c>STDistance</c> is the closest approach along great
+    /// elliptic arcs, and the discriminating case is a perpendicular foot that
+    /// lands mid-arc rather than on a vertex. Values are real's own
+    /// (2026-08-02); the tolerance is per row because what varies is real's own
+    /// arc-length accuracy, which is 1e-11 or better on most of these and
+    /// reaches 1e-8 where the measure runs a long way along the equator.
+    /// </summary>
+    [TestMethod]
+    [DataRow("POINT(45 60)", "LINESTRING(-122.35 47.62, 2.35 48.86)", 2953566.2952130623, 1e-9)]
+    [DataRow("POINT(0 10)", "LINESTRING(-30 0, 30 0)", 1105854.8440379163, 1e-8)]
+    [DataRow("POINT(-140 40)", "LINESTRING(-122.35 47.62, 2.35 48.86)", 1647653.4612717708, 1e-9)]
+    [DataRow("POINT(0.005 0.001)", "LINESTRING(0 0, 0.01 0)", 110.57427581595613, 1e-9)]
+    [DataRow("POINT(-1 0.5)", "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))", 111315.2799742638, 1e-9)]
+    [DataRow("POINT(0.5 0.5)", "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0),(0.2 0.2, 0.2 0.8, 0.8 0.8, 0.8 0.2, 0.2 0.2))", 33171.99278780328, 1e-9)]
+    [DataRow("POINT(-170 -80)", "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))", 11101669.988725359, 1e-9)]
+    [DataRow("LINESTRING(0 0, 10 0)", "LINESTRING(0 5, 10 5)", 552885.4511005873, 1e-9)]
+    [DataRow("LINESTRING(0 0, 10 0)", "LINESTRING(20 1, 30 8)", 1118617.1615951585, 1e-9)]
+    [DataRow("LINESTRING(0 0, 10 0)", "LINESTRING(20 0, 30 0)", 1113194.9192238282, 2e-8)]
+    [DataRow("LINESTRING(0 0, 0 10)", "LINESTRING(0 20, 0 30)", 1106511.4317928148, 2e-8)]
+    [DataRow("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))", "POLYGON((3 0, 4 0, 4 1, 3 1, 3 0))", 222605.29426164986, 1e-8)]
+    [DataRow("MULTIPOINT((0 0),(10 10))", "LINESTRING(20 20, 21 21)", 1541856.4391023766, 1e-9)]
+    public void GeographyDistance_MatchesRealWithinItsOwnError(string left, string right, double realValue, double tolerance)
+    {
+        AssertRelative(realValue, $"geography::Parse('{left}').STDistance(geography::Parse('{right}'))", tolerance);
+        AssertRelative(realValue, $"geography::Parse('{right}').STDistance(geography::Parse('{left}'))", tolerance);
+    }
+
+    /// <summary>
+    /// Instances that meet measure zero on the round earth as well: crossing
+    /// arcs, a point inside a polygon, and a polygon inside another.
+    /// </summary>
+    [TestMethod]
+    [DataRow("LINESTRING(-1 -1, 1 1)", "LINESTRING(-1 1, 1 -1)")]
+    [DataRow("LINESTRING(0 0, 10 0)", "LINESTRING(5 0, 15 0)")]
+    [DataRow("POINT(0.5 0.5)", "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))")]
+    [DataRow("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))")]
+    [DataRow("POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))", "POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))")]
+    public void GeographyDistance_TouchingInstances_MeasureZero(string left, string right)
+    {
+        AreEqual(0.0, Eval($"geography::Parse('{left}').STDistance(geography::Parse('{right}'))"));
+        AreEqual(0.0, Eval($"geography::Parse('{right}').STDistance(geography::Parse('{left}'))"));
+    }
 
     /// <summary>
     /// Operands in different spatial reference systems aren't comparable and
@@ -471,14 +557,102 @@ public sealed class SpatialValueTests
     [DataRow("geometry::Parse('POINT(0 0)').STDistance(geometry::STGeomFromText('POINT(3 4)',4326))")]
     [DataRow("geometry::Parse('POINT EMPTY').STDistance(geometry::Parse('POINT(3 4)'))")]
     [DataRow("geometry::Parse('POINT(0 0)').STDistance(geometry::Parse('POINT EMPTY'))")]
+    [DataRow("geometry::Parse('GEOMETRYCOLLECTION(POINT EMPTY)').STDistance(geometry::Parse('POINT(1 1)'))")]
+    [DataRow("geometry::Parse('POINT(0 0)').STDistance(null)")]
+    [DataRow("geography::Parse('POINT EMPTY').STDistance(geography::Parse('POINT(1 1)'))")]
     public void Distance_UncomparableOperands_ReadNull(string expression)
         => AreEqual(DBNull.Value, Eval(expression));
 
-    /// <summary>Ellipsoidal polygon area is the remaining round-earth measure.</summary>
+    /// <summary>A distance argument may be written as well-known text, which real reads as an instance of the receiver's type.</summary>
     [TestMethod]
-    public void GeographyArea_ReportsUnmodeled()
+    public void Distance_StringArgument_ReadsAsWellKnownText()
+        => AreEqual(5.0, Eval("geometry::Parse('POINT(0 0)').STDistance('POINT(3 4)')"));
+
+    /// <summary>
+    /// Round-earth <c>STArea()</c> integrates the ellipsoid's own surface
+    /// element over the region its <b>great elliptic</b> edges bound — a
+    /// "horizontal" edge bulges poleward between its endpoints and the area
+    /// follows the bulge, which is what separates real's answer from the
+    /// parallel-bounded quadrangle by 3e-3 m² on a 0.01° square.
+    /// </summary>
+    /// <remarks>
+    /// Values are real's own (2026-08-02) and the tolerance is per row, because
+    /// what varies across the matrix is <i>real's</i> accuracy: it holds 1e-10
+    /// or better on ordinary polygons and degrades on edges spanning a large
+    /// longitude range, the worse the nearer the pole they run — see
+    /// <c>docs/claude/spatial.md</c>.
+    /// </remarks>
+    [TestMethod]
+    [DataRow("POLYGON((0 0, 0.01 0, 0.01 0.01, 0 0.01, 0 0))", 1230907.2048772429, 1e-9)]
+    [DataRow("POLYGON((137 0, 137.01 0, 137.01 0.01, 137 0.01, 137 0))", 1230907.2048797607, 1e-9)]
+    [DataRow("POLYGON((0 -0.01, 0.01 -0.01, 0.01 0, 0 0, 0 -0.01))", 1230907.2048772429, 1e-9)]
+    [DataRow("POLYGON((0 60, 0.01 60, 0.01 60.01, 0 60.01, 0 60))", 621587.2415050108, 1e-9)]
+    [DataRow("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))", 12308776255.868843, 1e-9)]
+    [DataRow("POLYGON((-10 40, 10 40, 10 55, -10 55, -10 40))", 2489995392880.062, 1e-9)]
+    [DataRow("POLYGON((-5 -5, 5 -5, 5 5, -5 5, -5 -5))", 1232493798489.4854, 1e-9)]
+    [DataRow("POLYGON((0 0, 10 0, 10 0.0001, 0 0.0001, 0 0))", 12340413.869161015, 1e-9)]
+    [DataRow("POLYGON((0 89, 1 89, 1 89.5, 0 89.5, 0 89))", 81645307.09980054, 1e-9)]
+    [DataRow("POLYGON((0 40, 20 40, 20 50, 0 50, 0 40))", 1741374661124.119, 1e-9)]
+    [DataRow("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0),(0.2 0.2, 0.2 0.8, 0.8 0.8, 0.8 0.2, 0.2 0.2))", 7877653739.931041, 1e-9)]
+    [DataRow("MULTIPOLYGON(((0 0, 1 0, 1 1, 0 1, 0 0)),((5 5, 6 5, 6 6, 5 6, 5 5)))", 24562837957.141075, 1e-9)]
+    [DataRow("GEOMETRYCOLLECTION(POLYGON((0 0, 1 0, 1 1, 0 1, 0 0)), LINESTRING(0 0, 3 4), POINT(9 9))", 12308776246.986383, 5e-9)]
+    [DataRow("POLYGON((0 -89, 1 -89, 1 89, 0 89, 0 -89))", 1416631205336.26, 1e-7)]
+    [DataRow("POLYGON((0 0, 90 0, 90 1, 0 1, 0 0))", 1410304200101.5747, 1e-7)]
+    [DataRow("POLYGON((0 0, 90 0, 90 90, 0 90, 0 0))", 63758201600773.19, 1e-7)]
+    [DataRow("POLYGON((0 0, 90 0, 0 90, 0 0))", 63758201600773.19, 1e-7)]
+    [DataRow("POLYGON((0 0, 90 0, 180 0, 270 0, 0 0))", 255032806403092.7, 1e-7)]
+    [DataRow("POLYGON((0 60, 90 60, 180 60, 270 60, 0 60))", 23453971598496.586, 1e-4)]
+    [DataRow("POLYGON((0 89, 90 89, 180 89, 270 89, 0 89))", 24955024856.362816, 3e-4)]
+    [DataRow("POLYGON((0 89, 90 89, 90 89.5, 0 89.5, 0 89))", 4679122332.091554, 3e-4)]
+    public void EllipsoidalArea_MatchesRealWithinItsOwnError(string wkt, double realValue, double tolerance)
+        => AssertRelative(realValue, $"geography::Parse('{wkt}').STArea()", tolerance);
+
+    /// <summary>
+    /// Real's own accuracy is what the coarse-polygon tolerances above absorb:
+    /// a four-vertex ring around the pole differs from the model by 1e-4 while
+    /// the same cap written with 360 vertices — the same region, shorter edges —
+    /// comes back within 1e-8.
+    /// </summary>
+    [TestMethod]
+    public void EllipsoidalArea_PolarCap_ClosesOnRealAsItsEdgesShorten()
     {
-        var ex = Throws<NotSupportedException>(() => Eval("geography::Parse('POLYGON((0 0,1 0,1 1,0 1,0 0))').STArea()"));
-        Assert.Contains("ellipsoidal polygon area", ex.Message);
+        var vertices = string.Join(", ", Enumerable.Range(0, 360).Select(i => $"{i} 89"));
+        AssertRelative(39190016078.92191, $"geography::Parse('POLYGON(({vertices}, 0 89))').STArea()", 1e-8);
+    }
+
+    /// <summary>
+    /// A <c>geography</c> ring carries orientation — its interior lies to the
+    /// left of the direction it is written — so the clockwise spelling of a
+    /// square names everything except that square and measures the rest of the
+    /// globe. The planar type ignores orientation entirely.
+    /// </summary>
+    [TestMethod]
+    public void EllipsoidalArea_ReversedRing_MeasuresTheComplement()
+    {
+        AssertRelative(510065620480089.25, "geography::Parse('POLYGON((0 0, 0 0.01, 0.01 0.01, 0.01 0, 0 0))').STArea()", 1e-9);
+        var square = (double)Eval("geography::Parse('POLYGON((0 0, 0.01 0, 0.01 0.01, 0 0.01, 0 0))').STArea()")!;
+        var complement = (double)Eval("geography::Parse('POLYGON((0 0, 0 0.01, 0.01 0.01, 0.01 0, 0 0))').STArea()")!;
+        AreEqual(510065621724088.56, square + complement, 1.0);
+    }
+
+    /// <summary>A shape of the wrong dimension has no round-earth area either.</summary>
+    [TestMethod]
+    [DataRow("POINT(0 0)")]
+    [DataRow("LINESTRING(0 0, 1 1)")]
+    [DataRow("POLYGON EMPTY")]
+    [DataRow("POINT EMPTY")]
+    public void EllipsoidalArea_WrongDimension_MeasuresZero(string wkt)
+        => AreEqual(0.0, Eval($"geography::Parse('{wkt}').STArea()"));
+
+    /// <summary>
+    /// Asserts a measurement against real's own value on a relative tolerance:
+    /// the simulator computes its model exactly, so the gap that remains is
+    /// real's approximation rather than the simulator's.
+    /// </summary>
+    private static void AssertRelative(double realValue, string expression, double tolerance)
+    {
+        var actual = (double)Eval(expression)!;
+        var relative = Math.Abs(actual - realValue) / realValue;
+        Assert.IsLessThan(tolerance, relative, $"relative error {relative:E3} exceeds {tolerance:E0} (got {actual:R}, real {realValue:R})");
     }
 }

@@ -114,6 +114,11 @@ internal sealed class AppLockTest : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 
+    // Every argument path either answers 1 / 0 or raises, so the NOT NULL real
+    // projects here is reachable unconditionally — unlike APPLOCK_MODE, which
+    // real projects nullable.
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
+
     internal override string DebugDisplay() =>
         $"APPLOCK_TEST({this.principal.DebugDisplay()}, {this.resource.DebugDisplay()}, {this.mode.DebugDisplay()}, {this.owner.DebugDisplay()})";
 }

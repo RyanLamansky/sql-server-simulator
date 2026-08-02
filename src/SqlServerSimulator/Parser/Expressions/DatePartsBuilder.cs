@@ -288,6 +288,16 @@ internal sealed class DatePartsBuilder : Expression
         _ => throw new InvalidOperationException($"{kind} has no scale argument."),
     };
 
+    internal override bool ResultIsNullable(NullabilityContext context)
+    {
+        foreach (var argument in this.arguments)
+        {
+            if (argument.ResultIsNullable(context))
+                return true;
+        }
+        return false;
+    }
+
     internal override string DebugDisplay()
     {
         var name = this.kind switch

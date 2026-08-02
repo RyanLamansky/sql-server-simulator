@@ -120,13 +120,18 @@ public sealed class SpatialTypeTests
         Assert.IsLessThan(110575.0, distance);
     }
 
-    /// <summary>Distance between shapes that aren't both points needs closest-approach geometry.</summary>
+    /// <summary>
+    /// <c>STDistance</c> reaches shapes that aren't points: the closest approach
+    /// from a stored point to a line lands mid-arc, and the value is real's own.
+    /// </summary>
     [TestMethod]
-    public void GeographyMethodCall_STDistance_NonPointShapes_ThrowsAtExecute()
+    public void GeographyMethodCall_STDistance_MeasuresToALine()
     {
-        var ex = Throws<NotSupportedException>(() => _ = new Simulation().ExecuteScalar(
-            "select geography::Parse('LINESTRING(0 0,1 1)').STDistance(geography::Parse('POINT(1 1)'))"));
-        Assert.Contains("closest-approach", ex.Message);
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.loc (id int, g geography)");
+        _ = sim.ExecuteNonQuery("insert dbo.loc values (1, geography::Parse('POINT(0.005 0.001)'))");
+        var distance = (double)sim.ExecuteScalar("select g.STDistance(geography::Parse('LINESTRING(0 0, 0.01 0)')) from dbo.loc")!;
+        AreEqual(110.57427581595613, distance, 1e-6);
     }
 
     [TestMethod]
@@ -167,11 +172,11 @@ public sealed class SpatialTypeTests
         sim.ExecuteBatches(
             "create table dbo.loc (id int, g geography)",
             "insert dbo.loc values (1, geography::Parse('POINT(0 0)'))",
-            "create view dbo.v_area as select id, g.STArea() as a from dbo.loc");
+            "create view dbo.v_hit as select id, g.STIntersects(geography::Parse('POINT(1 1)')) as hit from dbo.loc");
         // View created successfully — the spatial method call parsed cleanly.
-        AreEqual("v_area", sim.ExecuteScalar("select name from sys.views where object_id = object_id('dbo.v_area')"));
-        // ...but execute fails, since STArea has no evaluation yet.
-        _ = Throws<NotSupportedException>(() => _ = sim.ExecuteScalar("select a from dbo.v_area"));
+        AreEqual("v_hit", sim.ExecuteScalar("select name from sys.views where object_id = object_id('dbo.v_hit')"));
+        // ...but execute fails, since round-earth topology has no evaluation.
+        _ = Throws<NotSupportedException>(() => _ = sim.ExecuteScalar("select hit from dbo.v_hit"));
     }
 
     [TestMethod]

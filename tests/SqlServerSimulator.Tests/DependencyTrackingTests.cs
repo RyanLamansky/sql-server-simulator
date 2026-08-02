@@ -872,4 +872,240 @@ public sealed class DependencyTrackingTests
             "exec sp_depends 'master.dbo.t'",
             15250,
             "The database name component of the object qualifier must be the name of the current database.");
+
+    // ---- The legacy pair: sys.sql_dependencies and sysdepends ----
+
+    /// <summary>The <c>sys.sql_dependencies</c> rows one referencing object contributes.</summary>
+    private static List<Dictionary<string, object?>> LegacyDeps(Simulation sim, string referencingName) => Rows(sim, $"""
+        select class, class_desc, column_id, referenced_major_id, referenced_minor_id,
+               is_selected, is_updated, is_select_all
+        from sys.sql_dependencies
+        where object_id = object_id('dbo.{referencingName}')
+        order by referenced_major_id, referenced_minor_id
+        """);
+
+    /// <summary>The <c>sysdepends</c> rows one referencing object contributes.</summary>
+    private static List<Dictionary<string, object?>> Sysdepends(Simulation sim, string referencingName) => Rows(sim, $"""
+        select depid, number, depnumber, status, deptype, depdbid, depsiteid, selall, resultobj, readobj
+        from sysdepends
+        where id = object_id('dbo.{referencingName}')
+        order by depid, depnumber
+        """);
+
+    /// <summary>
+    /// A plain view reports its read columns and <em>no</em> object row — the
+    /// legacy shape is narrower than <c>sys.sql_expression_dependencies</c>',
+    /// which reports the object row instead.
+    /// </summary>
+    [TestMethod]
+    public void SqlDependencies_PlainView_ReportsColumnRowsOnly()
+    {
+        var sim = Fixture();
+        var rows = LegacyDeps(sim, "v");
+        HasCount(3, rows);
+        CollectionAssert.AreEqual(new object?[] { 1, 2, 3 }, rows.ConvertAll(r => r["referenced_minor_id"]));
+        AreEqual((byte)0, rows[0]["class"]);
+        AreEqual("OBJECT_OR_COLUMN_REFERENCE_NON_SCHEMA_BOUND", rows[0]["class_desc"]);
+        AreEqual(0, rows[0]["column_id"]);
+        AreEqual(sim.ExecuteScalar("select object_id('dbo.t')"), rows[0]["referenced_major_id"]);
+        IsTrue(rows.TrueForAll(r => Flag(r, "is_selected")));
+        IsTrue(rows.TrueForAll(r => !Flag(r, "is_updated") && !Flag(r, "is_select_all")));
+    }
+
+    /// <summary>A <c>SELECT *</c> marks every column <c>is_select_all</c> instead.</summary>
+    [TestMethod]
+    public void SqlDependencies_StarView_MarksEveryColumnSelectAll()
+    {
+        var rows = LegacyDeps(Fixture(), "v_star");
+        HasCount(3, rows);
+        IsTrue(rows.TrueForAll(r => Flag(r, "is_select_all") && !Flag(r, "is_selected")));
+    }
+
+    /// <summary>
+    /// A schema-bound reference is class 1 and carries the object row as well
+    /// as its columns, since schema binding pins the object itself.
+    /// </summary>
+    [TestMethod]
+    public void SqlDependencies_SchemaBoundView_ReportsObjectRowAndColumns()
+    {
+        var rows = LegacyDeps(Fixture(), "v_sb");
+        HasCount(3, rows);
+        CollectionAssert.AreEqual(new object?[] { 0, 1, 2 }, rows.ConvertAll(r => r["referenced_minor_id"]));
+        IsTrue(rows.TrueForAll(r => (byte)r["class"]! == 1));
+        AreEqual("OBJECT_OR_COLUMN_REFERENCE_SCHEMA_BOUND", rows[0]["class_desc"]);
+    }
+
+    /// <summary>
+    /// The object row also stands alone where the reference reaches no column:
+    /// a whole-object read, a <c>DELETE</c>, an <c>INSERT</c> with no column
+    /// list, and an <c>EXEC</c> under either name shape.
+    /// </summary>
+    [TestMethod]
+    [DataRow("p_whole_read", "select 1 from dbo.t", true, false)]
+    [DataRow("p_delete", "delete from dbo.t", false, true)]
+    [DataRow("p_insert_all", "insert dbo.t values (1, 2, 'x')", false, true)]
+    [DataRow("p_call", "exec dbo.p_read", false, false)]
+    [DataRow("p_call1", "exec p_read", false, false)]
+    public void SqlDependencies_ReferenceReachingNoColumn_ReportsObjectRow(
+        string module, string body, bool selected, bool updated)
+    {
+        var sim = Fixture();
+        if (!module.StartsWith("p_call", StringComparison.Ordinal))
+            sim.ExecuteBatches($"create procedure {module} as {body}");
+        var rows = LegacyDeps(sim, module);
+        HasCount(1, rows);
+        AreEqual(0, rows[0]["referenced_minor_id"]);
+        AreEqual(selected, Flag(rows[0], "is_selected"));
+        AreEqual(updated, Flag(rows[0], "is_updated"));
+        IsFalse(Flag(rows[0], "is_select_all"));
+    }
+
+    /// <summary>
+    /// A write that names columns reports those columns and no object row —
+    /// an <c>UPDATE</c>'s SET list and an <c>INSERT</c>'s column list alike.
+    /// </summary>
+    [TestMethod]
+    [DataRow("p_update_col", "update dbo.t set a = 5")]
+    [DataRow("p_insert_col", "insert dbo.t (a) values (5)")]
+    public void SqlDependencies_WriteNamingColumns_ReportsColumnRowsOnly(string module, string body)
+    {
+        var sim = Fixture();
+        sim.ExecuteBatches($"create procedure {module} as {body}");
+        var rows = LegacyDeps(sim, module);
+        HasCount(1, rows);
+        AreEqual(2, rows[0]["referenced_minor_id"]);
+        IsTrue(Flag(rows[0], "is_updated"));
+        IsFalse(Flag(rows[0], "is_selected"));
+    }
+
+    /// <summary>
+    /// A computed column is a referencing entity in its own right: the row
+    /// carries the <em>table</em>'s object id with <c>column_id</c> naming the
+    /// computed column, and a CHECK constraint carries its own id at
+    /// <c>column_id</c> 0. Both are schema-bound references.
+    /// </summary>
+    [TestMethod]
+    public void SqlDependencies_ComputedColumnAndCheckConstraint_CarryTheirOwnReferencingIds()
+    {
+        var sim = Fixture();
+        var computed = Rows(sim, """
+            select column_id, class, referenced_minor_id
+            from sys.sql_dependencies
+            where object_id = object_id('dbo.cc') order by referenced_minor_id
+            """);
+        HasCount(1, computed);
+        AreEqual(3, computed[0]["column_id"]);
+        AreEqual((byte)1, computed[0]["class"]);
+        AreEqual(2, computed[0]["referenced_minor_id"]);
+
+        var check = Rows(sim, """
+            select column_id, class, referenced_major_id, referenced_minor_id
+            from sys.sql_dependencies
+            where object_id = object_id('dbo.ck_cc')
+            """);
+        HasCount(1, check);
+        AreEqual(0, check[0]["column_id"]);
+        AreEqual((byte)1, check[0]["class"]);
+        AreEqual(sim.ExecuteScalar("select object_id('dbo.cc')"), check[0]["referenced_major_id"]);
+    }
+
+    /// <summary>
+    /// The legacy pair stores ids, so a reference it can't resolve to one has
+    /// no row: a body naming a missing object, and a procedure whose only
+    /// dependency is a table-valued parameter's type.
+    /// </summary>
+    [TestMethod]
+    [DataRow("p_missing")]
+    [DataRow("p_tvp")]
+    public void SqlDependencies_ReferenceWithoutAnId_ContributesNoRow(string module)
+    {
+        var sim = Fixture();
+        sim.ExecuteBatches(
+            "create type tt as table (x int)",
+            "create procedure p_tvp @p tt readonly as select 1");
+        IsEmpty(LegacyDeps(sim, module));
+    }
+
+    /// <summary>
+    /// <c>sysdepends</c> packs the three use flags into <c>status</c> — 2 =
+    /// selall, 4 = resultobj, 8 = readobj — beside the bit columns that carry
+    /// them one apiece.
+    /// </summary>
+    [TestMethod]
+    public void Sysdepends_StatusPacksTheThreeUseFlags()
+    {
+        var sim = Fixture();
+        sim.ExecuteBatches("create procedure p_mixed as begin select * from dbo.t; update dbo.t set a = 1 where id = 2 end");
+        var rows = Sysdepends(sim, "p_mixed");
+        HasCount(3, rows);
+        CollectionAssert.AreEqual(new object?[] { (short)1, (short)2, (short)3 }, rows.ConvertAll(r => r["depnumber"]));
+        CollectionAssert.AreEqual(new object?[] { (short)10, (short)6, (short)2 }, rows.ConvertAll(r => r["status"]));
+        IsTrue(rows.TrueForAll(r => Flag(r, "selall")));
+        CollectionAssert.AreEqual(
+            new object?[] { true, false, false }, rows.ConvertAll(r => (object?)Flag(r, "readobj")));
+        CollectionAssert.AreEqual(
+            new object?[] { false, true, false }, rows.ConvertAll(r => (object?)Flag(r, "resultobj")));
+    }
+
+    /// <summary>
+    /// <c>number</c> is the referencing entity's minor id — a computed column's
+    /// own <c>column_id</c> — except on a procedure, where it is the procedure
+    /// group number and 1 stands for the single ungrouped body. <c>deptype</c>
+    /// mirrors <c>sys.sql_dependencies</c>' class, and the two legacy
+    /// cross-database columns are 0 on every row.
+    /// </summary>
+    [TestMethod]
+    [DataRow("p_read", (short)1, (byte)0)]
+    [DataRow("v", (short)0, (byte)0)]
+    [DataRow("v_sb", (short)0, (byte)1)]
+    [DataRow("trg", (short)0, (byte)0)]
+    public void Sysdepends_NumberAndDeptype(string module, short number, byte deptype)
+    {
+        var rows = Sysdepends(Fixture(), module);
+        IsNotEmpty(rows);
+        IsTrue(rows.TrueForAll(r => (short)r["number"]! == number));
+        IsTrue(rows.TrueForAll(r => (byte)r["deptype"]! == deptype));
+        IsTrue(rows.TrueForAll(r => (short)r["depdbid"]! == 0 && (short)r["depsiteid"]! == 0));
+    }
+
+    [TestMethod]
+    public void Sysdepends_ComputedColumn_ReportsItsColumnIdAsNumber()
+    {
+        var rows = Sysdepends(Fixture(), "cc");
+        HasCount(1, rows);
+        AreEqual((short)3, rows[0]["number"]);
+    }
+
+    /// <summary>
+    /// <c>sysdepends</c> resolves unqualified as well as under <c>sys.</c>,
+    /// the way <c>sysobjects</c> does; <c>sql_dependencies</c> takes the
+    /// qualifier only (probe-confirmed both ways).
+    /// </summary>
+    [TestMethod]
+    public void Sysdepends_ResolvesUnqualifiedAndUnderSys()
+    {
+        var sim = Fixture();
+        AreEqual(
+            sim.ExecuteScalar("select count(*) from sysdepends"),
+            sim.ExecuteScalar("select count(*) from sys.sysdepends"));
+    }
+
+    [TestMethod]
+    public void SqlDependencies_UnqualifiedName_RaisesMsg208() =>
+        Fixture().AssertSqlError("select count(*) from sql_dependencies", 208);
+
+    /// <summary>
+    /// Both views are computed on read like every other dependency surface, so
+    /// dropping the referencing module takes its rows away.
+    /// </summary>
+    [TestMethod]
+    public void SqlDependencies_DropOfReferencingModule_RemovesItsRows()
+    {
+        var sim = Fixture();
+        var viewId = sim.ExecuteScalar("select object_id('dbo.v')");
+        IsNotEmpty(LegacyDeps(sim, "v"));
+        sim.ExecuteBatches("drop view v");
+        IsEmpty(Rows(sim, $"select 1 from sys.sql_dependencies where object_id = {viewId}"));
+        IsEmpty(Rows(sim, $"select 1 from sysdepends where id = {viewId}"));
+    }
 }

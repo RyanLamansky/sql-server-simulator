@@ -18,6 +18,8 @@ internal sealed class ConnectionsExpression : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
+
     internal override string DebugDisplay() => "@@CONNECTIONS";
 }
 
@@ -36,6 +38,8 @@ internal sealed class NestLevelExpression : Expression
         SqlValue.FromInt32(runtime.Batch.Connection.NestingLevel);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@NESTLEVEL";
 }
@@ -77,6 +81,8 @@ internal sealed class DbTsExpression : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => Binary8;
 
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
+
     internal override string DebugDisplay() => "@@DBTS";
 }
 
@@ -103,6 +109,8 @@ internal sealed class ProcIdExpression : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@PROCID";
 }

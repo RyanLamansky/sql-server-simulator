@@ -174,6 +174,9 @@ public sealed class RegexpLikeAndRowsetTests
     [DataRow("regexp_matches('abc', '(?:b)')", """[{"value":"b","start":2,"length":1}]""")]
     [DataRow("regexp_matches('ab', '(x)?(b)')", """[{"value":null,"start":null,"length":null},{"value":"b","start":2,"length":1}]""")]
     [DataRow("""regexp_matches('a"b', '(a"b)')""", """[{"value":"a\"b","start":1,"length":3}]""")]
+    // Alone among the JSON the simulator writes, this column leaves `/`
+    // literal where the JSON_* builders escape it (probe-confirmed).
+    [DataRow("""regexp_matches('a/b', '(a/b)')""", """[{"value":"a/b","start":1,"length":3}]""")]
     public void Matches_SubstringMatchesJson(string source, string expected) =>
         AreEqual(expected, new Simulation().ExecuteScalarString($"select substring_matches from {source}"));
 

@@ -144,7 +144,7 @@ internal sealed class SUserSid : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
 
-    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => true;
+    internal override bool ResultIsNullable(NullabilityContext context) => true;
 
     internal override string DebugDisplay() => this.loginArg is null ? "SUSER_SID()" : $"SUSER_SID({this.loginArg.DebugDisplay()})";
 }
@@ -178,7 +178,7 @@ internal sealed class SidBinary : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
 
-    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => true;
+    internal override bool ResultIsNullable(NullabilityContext context) => true;
 
     internal override string DebugDisplay() => $"SID_BINARY({this.arg.DebugDisplay()})";
 }

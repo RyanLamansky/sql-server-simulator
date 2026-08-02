@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
@@ -17,6 +16,13 @@ namespace SqlServerSimulator.Parser;
 /// <c>$.""</c>) or <c>[&lt;n&gt;]</c> (array index access).
 /// </para>
 /// <para>
+/// Whitespace separates the grammar's tokens and may sit between any two of
+/// them — around the mode keyword, either side of the <c>$</c>, either side
+/// of a <c>.</c>, inside the brackets of an index, and trailing the path, so
+/// <c>'  lax  $ . a [ 0 ] '</c> parses (probe-confirmed, as is the keyword
+/// needing no whitespace behind it at all: <c>lax$.a</c>).
+/// </para>
+/// <para>
 /// Quoted-property escape: a doubled <c>""</c> inside the quoted form is
 /// one literal <c>"</c>, matching SQL Server. Other JSON Pointer-style
 /// escapes aren't modeled — EF Core 10 doesn't depend on them.
@@ -24,6 +30,45 @@ namespace SqlServerSimulator.Parser;
 /// </remarks>
 internal readonly struct JsonPath
 {
+    /// <summary>
+    /// The character Msg 13607 names for a path that ran out of text — a
+    /// literal period standing in for the end, the same placeholder
+    /// <see cref="JsonText"/>'s Msg 13609 scan uses.
+    /// </summary>
+    private const char EndOfPathCharacter = '.';
+
+    /// <summary>
+    /// Msg 13607's State where the parser wanted the <c>$</c>, or the
+    /// <c>.</c> / <c>[</c> / end that follows a segment, or the name behind
+    /// a <c>.</c>.
+    /// </summary>
+    private const byte StateAtSegmentStart = 22;
+
+    /// <summary>
+    /// Msg 13607's State for a path that ran out of text — and for the
+    /// grammar's own punctuation wherever it turns up out of place, and for
+    /// anything at all behind a quoted property name.
+    /// </summary>
+    private const byte StateAtEndOfPath = 14;
+
+    /// <summary>Msg 13607's State inside <c>[</c>, where a digit was due.</summary>
+    private const byte StateAtIndexDigits = 21;
+
+    /// <summary>Msg 13607's State inside <c>[</c> past the digits, where the <c>]</c> was due.</summary>
+    private const byte StateAtIndexClose = 15;
+
+    /// <summary>Msg 13607's State for an index above real's <c>uint</c> ceiling.</summary>
+    private const byte StateIndexOverflow = 16;
+
+    /// <summary>Msg 13607's State for a quoted property name the path never closed.</summary>
+    private const byte StateInQuotedName = 20;
+
+    /// <summary>
+    /// How many digits an index reads before real stops taking them, which
+    /// decides where an over-ceiling index reports.
+    /// </summary>
+    private const int MaxIndexDigits = 11;
+
     public readonly JsonPathMode Mode;
     public readonly Segment[] Segments;
 
@@ -62,91 +107,175 @@ internal readonly struct JsonPath
         var mode = JsonPathMode.Lax;
         var append = false;
         SkipWhitespace(text, ref i);
-        if (acceptAppend && i + 7 <= text.Length && text.AsSpan(i, 7).Equals("append ", StringComparison.OrdinalIgnoreCase))
+        if (acceptAppend && TryKeyword(text, ref i, "append"))
         {
             append = true;
-            i += 7;
             SkipWhitespace(text, ref i);
         }
 
-        if (i + 4 <= text.Length && text.AsSpan(i, 4).Equals("lax ", StringComparison.OrdinalIgnoreCase))
+        if (TryKeyword(text, ref i, "lax"))
         {
-            i += 4;
             SkipWhitespace(text, ref i);
         }
-        else if (i + 7 <= text.Length && text.AsSpan(i, 7).Equals("strict ", StringComparison.OrdinalIgnoreCase))
+        else if (TryKeyword(text, ref i, "strict"))
         {
             mode = JsonPathMode.Strict;
-            i += 7;
             SkipWhitespace(text, ref i);
         }
 
         if (i >= text.Length || text[i] != '$')
-            throw SimulatedSqlException.JsonInvalidPath(text);
+            throw Malformed(text, i, StateAtSegmentStart);
         i++;
+        SkipWhitespace(text, ref i);
 
+        // The state a stray character reports depends on what the parser had
+        // just read: everywhere but after a quoted property name it is
+        // StateAtSegmentStart.
+        var segmentState = StateAtSegmentStart;
         var segments = new List<Segment>();
         while (i < text.Length)
         {
             if (text[i] == '.')
             {
                 i++;
+                SkipWhitespace(text, ref i);
                 if (i < text.Length && text[i] == '"')
                 {
-                    i++;
-                    var sb = new StringBuilder();
-                    while (i < text.Length)
-                    {
-                        if (text[i] == '"')
-                        {
-                            if (i + 1 < text.Length && text[i + 1] == '"')
-                            {
-                                _ = sb.Append('"');
-                                i += 2;
-                                continue;
-                            }
-                            i++;
-                            break;
-                        }
-                        _ = sb.Append(text[i]);
-                        i++;
-                    }
-                    segments.Add(Segment.ForProperty(sb.ToString()));
+                    segments.Add(Segment.ForProperty(ReadQuotedName(text, ref i)));
+                    segmentState = StateAtEndOfPath;
                 }
                 else
                 {
+                    // A name starts with a letter or an underscore; a digit
+                    // there is one of the characters that reports state 14.
+                    if (i >= text.Length || !(char.IsLetter(text[i]) || text[i] == '_'))
+                        throw Malformed(text, i, StateAtSegmentStart);
                     var start = i;
                     while (i < text.Length && (char.IsLetterOrDigit(text[i]) || text[i] == '_'))
                         i++;
-                    if (i == start)
-                        throw SimulatedSqlException.JsonInvalidPath(text);
                     segments.Add(Segment.ForProperty(text[start..i]));
+                    segmentState = StateAtSegmentStart;
                 }
             }
             else if (text[i] == '[')
             {
                 i++;
-                var start = i;
-                while (i < text.Length && char.IsDigit(text[i]))
-                    i++;
-                if (i == start || i >= text.Length || text[i] != ']')
-                    throw SimulatedSqlException.JsonInvalidPath(text);
-                var index = int.Parse(text.AsSpan(start, i - start), CultureInfo.InvariantCulture);
-                i++;
-                segments.Add(Segment.ForIndex(index));
+                segments.Add(Segment.ForIndex(ReadIndex(text, ref i)));
+                segmentState = StateAtSegmentStart;
             }
             else
             {
-                throw SimulatedSqlException.JsonInvalidPath(text);
+                throw Malformed(text, i, segmentState);
             }
+
+            SkipWhitespace(text, ref i);
         }
 
         return new JsonPath(mode, [.. segments], append);
     }
 
+    /// <summary>
+    /// Consumes <paramref name="keyword"/> when it stands as a whole word at
+    /// <paramref name="i"/>. Real needs no whitespace behind one —
+    /// <c>lax$.a</c> and <c>append$.a</c> both parse — but it does need the
+    /// word to end there, so <c>laxx$.a</c> is malformed rather than a lax
+    /// path (both probe-confirmed).
+    /// </summary>
+    private static bool TryKeyword(string text, ref int i, string keyword)
+    {
+        if (i + keyword.Length > text.Length || !text.AsSpan(i, keyword.Length).Equals(keyword, StringComparison.OrdinalIgnoreCase))
+            return false;
+        var after = i + keyword.Length;
+        if (after < text.Length && (char.IsLetterOrDigit(text[after]) || text[after] == '_'))
+            return false;
+        i = after;
+        return true;
+    }
+
+    /// <summary>
+    /// Reads a <c>"…"</c> property name from the opening quote, resolving the
+    /// doubled <c>""</c> escape. Running off the end inside one is the single
+    /// malformed-path case with a state of its own.
+    /// </summary>
+    private static string ReadQuotedName(string text, ref int i)
+    {
+        i++;
+        var sb = new StringBuilder();
+        while (i < text.Length)
+        {
+            if (text[i] == '"')
+            {
+                if (i + 1 < text.Length && text[i + 1] == '"')
+                {
+                    _ = sb.Append('"');
+                    i += 2;
+                    continue;
+                }
+                i++;
+                return sb.ToString();
+            }
+            _ = sb.Append(text[i]);
+            i++;
+        }
+        throw SimulatedSqlException.JsonInvalidPath(EndOfPathCharacter, text.Length, StateInQuotedName);
+    }
+
+    /// <summary>
+    /// Reads an array index from just past its <c>[</c> through its <c>]</c>.
+    /// Real's ceiling is <c>uint</c>'s, and it stops reading digits at the
+    /// eleventh — so <c>$[4294967296]</c> reports its tenth digit while a
+    /// twenty-digit run reports its eleventh (probe-confirmed). Anything
+    /// above <see cref="int.MaxValue"/> clamps, since no array reaches that
+    /// far and the index is only ever compared against one.
+    /// </summary>
+    private static int ReadIndex(string text, ref int i)
+    {
+        SkipWhitespace(text, ref i);
+        var start = i;
+        ulong value = 0;
+        while (i < text.Length && char.IsAsciiDigit(text[i]) && i - start < MaxIndexDigits)
+        {
+            value = (value * 10) + (ulong)(text[i] - '0');
+            i++;
+        }
+        if (i == start)
+            throw Malformed(text, i, StateAtIndexDigits);
+        if (value > uint.MaxValue)
+            throw SimulatedSqlException.JsonInvalidPath(text[i - 1], i - 1, StateIndexOverflow);
+        SkipWhitespace(text, ref i);
+        if (i >= text.Length || text[i] != ']')
+            throw Malformed(text, i, StateAtIndexClose);
+        i++;
+        return (int)Math.Min(value, int.MaxValue);
+    }
+
+    /// <summary>
+    /// Msg 13607 for the character at <paramref name="i"/>, or for the end of
+    /// the path when there is no character left.
+    /// <paramref name="stateHere"/> is what the position reports for a
+    /// character the grammar has no other opinion about.
+    /// </summary>
+    private static SimulatedSqlException Malformed(string text, int i, byte stateHere) =>
+        i >= text.Length
+            ? SimulatedSqlException.JsonInvalidPath(EndOfPathCharacter, text.Length, StateAtEndOfPath)
+            : SimulatedSqlException.JsonInvalidPath(text[i], i, StateFor(text[i], stateHere));
+
+    /// <summary>
+    /// The grammar's own punctuation — and the digits an index is written
+    /// with — report state 14 wherever they turn up out of place, whatever
+    /// the position expected; every other character reports the position's
+    /// own state (all probe-confirmed against SQL Server 2025).
+    /// </summary>
+    private static byte StateFor(char c, byte stateHere) =>
+        c is '$' or '"' or '[' or ']' or '.' || char.IsAsciiDigit(c) ? StateAtEndOfPath : stateHere;
+
     private static void SkipWhitespace(string text, ref int i)
     {
-        while (i < text.Length && text[i] == ' ')
+        // Space, tab, line feed, form feed and carriage return — real takes
+        // all five between the path's tokens and none of them inside a name.
+        // Vertical tab and the non-breaking space are not whitespace here
+        // (both probe-confirmed).
+        while (i < text.Length && text[i] is ' ' or '\t' or '\n' or '\f' or '\r')
             i++;
     }
 

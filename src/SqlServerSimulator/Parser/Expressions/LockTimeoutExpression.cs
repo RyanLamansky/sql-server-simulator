@@ -17,5 +17,7 @@ internal sealed class LockTimeoutExpression(ParserContext context) : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
+
     internal override string DebugDisplay() => "@@LOCK_TIMEOUT";
 }

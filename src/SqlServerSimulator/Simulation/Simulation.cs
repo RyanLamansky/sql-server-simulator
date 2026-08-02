@@ -693,7 +693,15 @@ public sealed partial class Simulation
     /// The session's QUOTED_IDENTIFIER setting IS part of the key: it changes
     /// how <c>"…"</c> tokenizes, so the same text parses to different plans
     /// under each setting (mirroring real SQL Server, whose plan-cache keys
-    /// fold in the parse-time SET options).</summary>
+    /// fold in the parse-time SET options).
+    /// <para>
+    /// The session's isolation level isn't a key component but a cacheability
+    /// gate: a plan's FROM sources carry the lock acquisitions their parsing
+    /// session made, so replaying one under a different level would settle the
+    /// wrong session's protection, or none — a SERIALIZABLE reader's phantom
+    /// fence most visibly. Anything but the default READ COMMITTED therefore
+    /// skips both the lookup and the promotion and re-parses per execution.
+    /// </para></summary>
     private readonly record struct PlanCacheKey(string CommandText, string DatabaseName, string ParameterSignature, bool QuotedIdentifiers);
 
     /// <summary>Cache entry: the parsed <see cref="Selection"/> plus the
@@ -938,6 +946,7 @@ public sealed partial class Simulation
         => string.IsNullOrEmpty(command.CommandText)
             ? null
             : command.Connection is { CurrentDatabase: { } currentDb } connection
+                && connection.SessionIsolationLevel == System.Data.IsolationLevel.ReadCommitted
                 && BuildPlanCacheParameterSignature(command) is { } sig
                     ? new PlanCacheKey(command.CommandText, currentDb.Name, sig, connection.QuotedIdentifiers)
                     : null;

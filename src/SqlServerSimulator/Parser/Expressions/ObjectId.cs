@@ -8,10 +8,11 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// named object, or NULL when not found. The name argument is a runtime
 /// string parsed as a 1–3-part dotted identifier with bracket-quoting
 /// supported (<c>'[dbo].[foo]'</c>, <c>'dbo.foo'</c>, <c>'claude.dbo.foo'</c>
-/// all resolve the same). Probe-confirmed against SQL Server 2025
-/// (2026-05-11): single-arg form matches any object type; 2-arg form filters
-/// by 2-char type code (case-insensitive, whitespace-sensitive — <c>'U '</c>
-/// fails, <c>'U'</c> works); a NULL anywhere propagates NULL; a 4-part name
+/// all resolve the same). Probe-confirmed against SQL Server 2025: single-arg
+/// form matches any object type; the 2-arg form filters by the object's
+/// <c>char(2)</c> type code, so it is case-insensitive and reads a trailing
+/// padding space as part of the code (<c>'U '</c> resolves, <c>'U  '</c> and
+/// <c>' U'</c> don't); a NULL anywhere propagates NULL; a 4-part name
 /// (linked-server form) returns NULL silently. Result type is always
 /// <see cref="SqlType.Int32"/>.
 /// </summary>
@@ -66,13 +67,20 @@ internal sealed class ObjectId : Expression
             if (typeValue.IsNull)
                 return SqlValue.Null(SqlType.Int32);
             typeFilter = typeValue.CoerceTo(SqlType.NVarchar).AsString;
-            // Probe-confirmed: real SQL Server is whitespace-sensitive on the
-            // type filter (' U ' returns NULL) but case-insensitive ('u' works).
-            // Modeled codes today: 'U' (user table), 'FN' (scalar UDF),
-            // 'IF' (inline table-valued function), 'V' (view), 'P' (stored
-            // procedure), 'TR' (DML trigger), 'SN' (synonym), and the five
-            // constraint families. Other documented codes (TF / ...) return
-            // NULL pending those features.
+            // Real compares the argument against the object's char(2) type
+            // code, so ANSI padding decides which whitespace matters
+            // (probe-confirmed): a one-character code tolerates the padding
+            // space ('U ' resolves), a third character never fits ('U  ' and
+            // 'PK ' are both NULL), and a leading space or a tab is a
+            // different char(2) value entirely. Case is ignored ('u' works).
+            if (typeFilter.Length > 2)
+                return SqlValue.Null(SqlType.Int32);
+            typeFilter = typeFilter.TrimEnd(' ');
+            // Modeled codes: 'U' (user table), 'FN' (scalar UDF), 'IF' (inline
+            // table-valued function), 'V' (view), 'P' (stored procedure),
+            // 'TR' (DML trigger), 'SN' (synonym), and the five constraint
+            // families. Other documented codes (TF / ...) return NULL pending
+            // those features.
             if (!BuiltInToken.EqualsAny(typeFilter, "U", "FN", "IF", "V", "P", "TR", "SN", "PK", "UQ", "C", "D", "F"))
                 return SqlValue.Null(SqlType.Int32);
         }
@@ -85,13 +93,21 @@ internal sealed class ObjectId : Expression
         // for (probe-confirmed: OBJECT_ID('dbo.tab_none') = NULL for a user
         // without a grant), while the resolved id passes through for dbo /
         // full-visibility sessions. Trigger visibility follows its parent.
-        var restrict = PermissionEnforcement.MetadataVisibilityApplies(runtime.Batch);
-        var principalId = runtime.Batch.Connection.Security.Effective.DatabasePrincipalId;
-        SqlValue GateAs(int resultId, int governObjectId, int governSchemaId) =>
-            !restrict || PermissionChecker.CanViewMetadata(runtime.Batch.CurrentDatabase, principalId, governObjectId, governSchemaId)
+        //
+        // The question is asked in the object's OWN database, so a three-part
+        // name resolves the login's user there and filters by that principal —
+        // and a login with no user there earns the same Msg 916 a cross-database
+        // catalog read earns. The gate runs after resolution, which is why a
+        // name that matches nothing is NULL rather than a refusal even in a
+        // database the login can't reach (probe-confirmed, type-filter misses
+        // included).
+        SqlValue GateAs(Database database, int resultId, int governObjectId, int governSchemaId) =>
+            PermissionEnforcement.MetadataVisibilityPrincipal(runtime.Batch, database) is not { } principalId
+            || PermissionChecker.CanViewMetadata(database, principalId, governObjectId, governSchemaId)
                 ? SqlValue.FromInt32(resultId)
                 : SqlValue.Null(SqlType.Int32);
-        SqlValue Gate(int objectId, int schemaId) => GateAs(objectId, objectId, schemaId);
+        SqlValue Gate(SchemaObject resolved) =>
+            GateAs(runtime.Batch.DatabaseFor(resolved), resolved.ObjectId, resolved.ObjectId, resolved.SchemaId);
 
         // A synonym answers with its OWN id and is never followed to its base:
         // probe-confirmed that OBJECT_ID('syn', 'U') is NULL even when the base
@@ -100,7 +116,7 @@ internal sealed class ObjectId : Expression
         if (runtime.Batch.TryResolveSynonym(parsed, out var synonym))
         {
             return typeFilter is null || BuiltInToken.Equals(typeFilter, "SN")
-                ? Gate(synonym.ObjectId, synonym.SchemaId)
+                ? Gate(synonym)
                 : SqlValue.Null(SqlType.Int32);
         }
         if (typeFilter is not null && BuiltInToken.Equals(typeFilter, "SN"))
@@ -131,7 +147,7 @@ internal sealed class ObjectId : Expression
                     _ => false,
                 };
                 if (kindMatches)
-                    return Gate(function.ObjectId, function.SchemaId);
+                    return Gate(function);
             }
             if (typeFilter is not null)
                 return SqlValue.Null(SqlType.Int32);
@@ -142,7 +158,7 @@ internal sealed class ObjectId : Expression
         if (typeFilter is null || BuiltInToken.Equals(typeFilter, "V"))
         {
             if (runtime.Batch.TryResolveView(parsed, out var view))
-                return Gate(view.ObjectId, view.SchemaId);
+                return Gate(view);
             // Registered sys.* / INFORMATION_SCHEMA.* catalog views resolve as
             // system views (type 'V'). Their id is process-stable but not
             // byte-identical to real SQL Server's fixed system-view ids; the
@@ -160,7 +176,7 @@ internal sealed class ObjectId : Expression
         if (typeFilter is null || BuiltInToken.Equals(typeFilter, "P"))
         {
             if (runtime.Batch.TryResolveProcedure(parsed, out var procedure))
-                return Gate(procedure.ObjectId, procedure.SchemaId);
+                return Gate(procedure);
             if (typeFilter is not null)
                 return SqlValue.Null(SqlType.Int32);
         }
@@ -170,7 +186,7 @@ internal sealed class ObjectId : Expression
         if (typeFilter is null || BuiltInToken.Equals(typeFilter, "TR"))
         {
             if (runtime.Batch.TryResolveTrigger(parsed, out var trigger))
-                return GateAs(trigger.ObjectId, trigger.Parent.ObjectId, trigger.Parent.SchemaId);
+                return GateAs(runtime.Batch.DatabaseFor(trigger), trigger.ObjectId, trigger.Parent.ObjectId, trigger.Parent.SchemaId);
             if (typeFilter is not null)
                 return SqlValue.Null(SqlType.Int32);
         }
@@ -179,7 +195,7 @@ internal sealed class ObjectId : Expression
         if ((typeFilter is null || BuiltInToken.Equals(typeFilter, "U"))
             && runtime.Batch.TryResolveTable(parsed, out var table))
         {
-            return Gate(table.ObjectId, table.SchemaId);
+            return Gate(table);
         }
 
         // A constraint name resolves like any other schema-scoped object
@@ -191,7 +207,7 @@ internal sealed class ObjectId : Expression
             if (ConstraintLookup.TryResolveByName(runtime.Batch, parsed, out var constraint)
                 && (typeFilter is null || BuiltInToken.Equals(typeFilter, constraint.TypeCode)))
             {
-                return GateAs(constraint.ObjectId, constraint.Table.ObjectId, constraint.Table.SchemaId);
+                return GateAs(runtime.Batch.DatabaseFor(constraint.Table), constraint.ObjectId, constraint.Table.ObjectId, constraint.Table.SchemaId);
             }
         }
         return SqlValue.Null(SqlType.Int32);

@@ -7,11 +7,20 @@ partial class SimulatedSqlException
     /// <summary>
     /// Msg 13607: SQL Server's "JSON path is not properly formatted" error
     /// for a malformed second-arg path in JSON_VALUE / JSON_QUERY /
-    /// JSON_MODIFY (e.g. missing leading <c>$</c>, unterminated quoted
-    /// property, non-numeric array index).
+    /// JSON_MODIFY / OPENJSON (e.g. missing leading <c>$</c>, unterminated
+    /// quoted property, non-numeric array index).
+    /// <paramref name="character"/> is the character the parser stopped on
+    /// (<c>.</c> when it ran off the end of the path) and
+    /// <paramref name="position"/> its zero-based index. The State byte names
+    /// what the parser was reading when it stopped — see the state table on
+    /// the path parser.
     /// </summary>
-    internal static SimulatedSqlException JsonInvalidPath(string path) =>
-        new($"JSON path is not properly formatted. Unexpected character at position 0 in path '{path}'.", 13607, 16, 1);
+    internal static SimulatedSqlException JsonInvalidPath(char character, int position, byte state) =>
+        new(
+            $"JSON path is not properly formatted. Unexpected character '{character}' is found at position {position.ToString(CultureInfo.InvariantCulture)}.",
+            13607,
+            16,
+            state);
 
     /// <summary>
     /// Msg 13608: SQL Server raises this when a <c>strict</c>-mode JSON

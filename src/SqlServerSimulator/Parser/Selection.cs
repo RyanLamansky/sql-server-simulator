@@ -647,6 +647,10 @@ internal sealed partial class Selection
         // so the select list can bind against them; restoring it here keeps
         // the enclosing scope intact on every exit path, including throws.
         var savedOuterTypeResolver = context.OuterTypeResolver;
+        // The full-text predicates bind their column specification against this
+        // scope's own sources; a nested query installs its own and the
+        // enclosing one comes back here.
+        var savedFullTextSources = context.FullTextSources;
         var aggregates = new List<AggregateExpression>();
         var windows = new List<WindowExpression>();
         var savedEnclosingAggregateCollector = context.EnclosingAggregateCollector;
@@ -663,6 +667,7 @@ internal sealed partial class Selection
             context.WindowCollector = savedWindowCollector;
             context.EnclosingAggregateCollector = savedEnclosingAggregateCollector;
             context.OuterTypeResolver = savedOuterTypeResolver;
+            context.FullTextSources = savedFullTextSources;
         }
     }
 
@@ -1023,6 +1028,9 @@ internal sealed partial class Selection
             {
                 var scopeSources = scope.ToArray();
                 context.OuterTypeResolver = name => ResolveColumnTypeAcrossSources(scopeSources, name, outerTypeResolver);
+                // A projection-level CONTAINS / FREETEXT (`CASE WHEN
+                // CONTAINS(col, 'x') THEN …`) binds against the same scope.
+                context.FullTextSources = scopeSources;
             }
         }
 
@@ -2442,14 +2450,20 @@ internal sealed partial class Selection
                         lateralPlan: openQueryPlan);
                 }
 
+            // CONTAINSTABLE / FREETEXTTABLE dispatch: the rowset forms of the
+            // two full-text predicates, projecting KEY and RANK. Both names are
+            // reserved keywords, so they arrive here rather than in the Name
+            // case that carries OPENJSON.
+            case ReservedKeyword { Keyword: Keyword.ContainsTable or Keyword.FreeTextTable } ftRowset:
+                return BuiltInRowsetSource(context, ParseFullTextTable(context, ftRowset.Keyword == Keyword.FreeTextTable));
+
             case ReservedKeyword
             {
-                Keyword: Keyword.ContainsTable or Keyword.FreeTextTable
-                    or Keyword.SemanticKeyPhraseTable or Keyword.SemanticSimilarityTable
+                Keyword: Keyword.SemanticKeyPhraseTable or Keyword.SemanticSimilarityTable
                     or Keyword.SemanticSimilarityDetailsTable
-            } ftRowset:
+            } semanticRowset:
                 throw new NotSupportedException(
-                    $"Full-text rowset functions ({ftRowset.Keyword.ToString().ToUpperInvariant()}) are not modeled.");
+                    $"Semantic search rowset functions ({semanticRowset.Keyword.ToString().ToUpperInvariant()}) are not modeled.");
 
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -2554,12 +2568,13 @@ internal sealed partial class Selection
         // single-source projection surfaces it as the COLMETADATA fNullable flag
         // go-mssqldb / tedious expose). A correlated cell reference resolves
         // nullable — its outer-column nullability isn't threaded here.
+        var cellNullability = new NullabilityContext(context.Batch, static _ => true, TypeResolver);
         var columns = new HeapColumn[arity];
         for (var c = 0; c < arity; c++)
         {
             var nullable = false;
             for (var i = 0; i < tuples.Count && !nullable; i++)
-                nullable = tuples[i][c].ResultIsNullable(static _ => true);
+                nullable = tuples[i][c].ResultIsNullable(cellNullability);
             columns[c] = new HeapColumn(columnNames[c], schema[c], maxLength: null, nullable: nullable);
         }
 
@@ -2779,7 +2794,11 @@ internal sealed partial class Selection
         SqlType MyResolver(MultiPartName name) => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
 
         var saved = context.OuterTypeResolver;
+        var savedFullTextSources = context.FullTextSources;
         context.OuterTypeResolver = MyResolver;
+        // A WHERE-clause CONTAINS / FREETEXT binds its column specification
+        // against these same sources.
+        context.FullTextSources = sources;
         try
         {
             ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy);
@@ -2787,6 +2806,7 @@ internal sealed partial class Selection
         finally
         {
             context.OuterTypeResolver = saved;
+            context.FullTextSources = savedFullTextSources;
         }
     }
 
@@ -3600,7 +3620,7 @@ internal sealed partial class Selection
         // analyzer routes through the empty-FROM branch and produces
         // dest columns with literal-derived nullability and no identity.
         destColumnSchema: intoTarget is { } target
-            ? ComputeIntoDestSchema(target, expressions, schema, columnNames, [], [])
+            ? ComputeIntoDestSchema(target, expressions, schema, columnNames, [], [], parseBatch, TypeResolver)
             : null)
         {
             ProjectionExpressions = [.. expressions],
@@ -3621,7 +3641,7 @@ internal sealed partial class Selection
             // expressions nullable) — matching real's result metadata
             // (`select 1` → Int, not IntN). The resolver is never consulted
             // (no column can appear without a source).
-            ColumnNullability = ComputeColumnNullability(expressions, [], []),
+            ColumnNullability = ComputeColumnNullability(expressions, [], [], parseBatch, TypeResolver),
         };
     }
 

@@ -29,5 +29,7 @@ internal sealed class Ceiling(ParserContext context) : Expression
 
     internal override bool ResultReportsNumeric => this.source.ResultReportsNumeric;
 
+    internal override bool ResultIsNullable(NullabilityContext context) => this.source.ResultIsNullable(context);
+
     internal override string DebugDisplay() => $"CEILING({this.source.DebugDisplay()})";
 }

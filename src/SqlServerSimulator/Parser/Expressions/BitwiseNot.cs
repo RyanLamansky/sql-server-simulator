@@ -51,8 +51,8 @@ internal sealed class BitwiseNot : Expression
             : throw SimulatedSqlException.OperandDataTypeInvalid(type, "'~'");
     }
 
-    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) =>
-        this.operand.ResultIsNullable(resolveColumnNullable);
+    internal override bool ResultIsNullable(NullabilityContext context) =>
+        this.operand.ResultIsNullable(context);
 
     internal override void VisitColumnReferences(Action<MultiPartName> visit) =>
         this.operand.VisitColumnReferences(visit);

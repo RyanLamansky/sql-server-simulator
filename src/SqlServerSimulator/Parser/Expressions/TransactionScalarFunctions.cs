@@ -48,5 +48,7 @@ internal sealed class RowCountBig : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.BigInt;
 
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
+
     internal override string DebugDisplay() => "ROWCOUNT_BIG()";
 }

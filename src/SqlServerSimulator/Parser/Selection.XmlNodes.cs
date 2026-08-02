@@ -21,7 +21,7 @@ internal sealed partial class Selection
     /// <c>xmlexpr.nodes(...)</c>. <paramref name="columnName"/> is the column
     /// alias from the mandatory <c>AS table(column)</c> clause.
     /// </summary>
-    private static Selection FromXmlNodes(Expression target, string xquery, string columnName)
+    private static Selection FromXmlNodes(Expression target, XmlQueryExpr xquery, string columnName)
     {
         SqlType[] schema = [SqlType.Xml];
         string[] columnNames = [columnName];
@@ -83,7 +83,7 @@ internal sealed partial class Selection
 
     private static IEnumerable<byte[]> EnumerateXmlNodesRows(
         Expression target,
-        string xquery,
+        XmlQueryExpr xquery,
         SqlType[] schema,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver)

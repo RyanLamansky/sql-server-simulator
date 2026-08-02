@@ -1598,6 +1598,16 @@ partial class SimulatedSqlException
         new($"Cannot use index option ignore_dup_key to alter index '{indexName}' as it enforces a primary or unique constraint.", 1979, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 10601: an <c>INCLUDE</c> list on a
+    /// <c>CLUSTERED</c> index, which carries every non-key column already.
+    /// Probe-confirmed verbatim and probe-confirmed to fire ahead of table /
+    /// view / column resolution and ahead of Msg 1916 — it is a
+    /// statement-shape check, so the message names neither index nor table.
+    /// </summary>
+    internal static SimulatedSqlException IncludedColumnsOnClusteredIndex() =>
+        new("Cannot specify included columns for a clustered index.", 10601, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2727: <c>ALTER INDEX</c> named an index the table
     /// doesn't carry. Probe-confirmed verbatim, at the unusual Level 11.
     /// </summary>

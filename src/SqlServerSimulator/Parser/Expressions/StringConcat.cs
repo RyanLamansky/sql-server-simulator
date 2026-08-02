@@ -99,7 +99,7 @@ internal sealed class StringConcat : Expression
     // to empty too), so the result-set metadata reports the column NOT NULL
     // regardless of operand nullability (probe-confirmed against SQL Server 2025;
     // exposed by go-mssqldb / tedious COLMETADATA fNullable).
-    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => false;
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     public override SqlValue Run(RuntimeContext runtime)
     {

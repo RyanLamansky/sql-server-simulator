@@ -25,7 +25,7 @@ internal sealed class EventDataFunction : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Xml;
 
-    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullability) => true;
+    internal override bool ResultIsNullable(NullabilityContext context) => true;
 
     internal override string DebugDisplay() => "EVENTDATA()";
 }

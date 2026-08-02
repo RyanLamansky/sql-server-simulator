@@ -129,4 +129,15 @@ public class JsonAggregateTests
     [TestMethod]
     public void ObjectAgg_ValueKeyword_Rejected()
         => new Simulation().AssertSqlError(Seed + "\nselect json_objectagg(k value v) from #t", 102);
+
+    /// <summary>
+    /// Both aggregates escape <c>/</c> as <c>\/</c> the way the scalar
+    /// builders do, keys included (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("json_arrayagg(s)", """["a\/b","c\/d"]""")]
+    [DataRow("json_objectagg(s:s)", """{"a\/b":"a\/b","c\/d":"c\/d"}""")]
+    public void Aggregates_EscapeSolidus(string aggregate, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(
+            $"create table #s (id int, s nvarchar(20)); insert into #s values (1,'a/b'),(2,'c/d');\nselect {aggregate} from #s"));
 }

@@ -238,12 +238,11 @@ internal abstract class BooleanExpression
         }
         return context.Token switch
         {
-            // Full-text predicates aren't modeled — raise NotSupportedException
-            // at parse time so apps see a loud failure rather than a silent
-            // miss. See [docs/claude/full-text.md] for skip-with-diagnostic.
-            ReservedKeyword { Keyword: Keyword.Contains or Keyword.FreeText } predicate
-                => throw new NotSupportedException(
-                    $"Full-text search predicates ({predicate.Keyword.ToString().ToUpperInvariant()}) are not modeled."),
+            // CONTAINS / FREETEXT are boolean-only (real reserves both names),
+            // so they bind here rather than in ResolveBuiltIn. See
+            // [docs/claude/full-text.md] for the modeled search grammar.
+            ReservedKeyword { Keyword: Keyword.Contains or Keyword.FreeText }
+                => Expressions.FullTextPredicate.Parse(context),
             ReservedKeyword { Keyword: Keyword.Exists } => ParseExists(context),
             // REGEXP_LIKE is reserved (at compatibility level 170, where it
             // ships) and boolean-only — real raises Msg 156 for
@@ -633,6 +632,44 @@ internal abstract class BooleanExpression
     internal abstract void VisitOperandExpressions(Action<Expression> visitor);
 
     /// <summary>
+    /// The predicate-side counterpart of <see cref="Expression.IsWrittenConstant"/>:
+    /// true when real folds this condition to a constant while compiling.
+    /// Read by <see cref="NullabilityContext.TryFoldCondition"/>, which is what
+    /// lets a <c>CASE</c> / <c>IIF</c> arm guarded by a folded condition drop
+    /// out of (or take over) the projection's nullability.
+    /// </summary>
+    /// <remarks>
+    /// The default is a conservative <see langword="false"/> and each shape
+    /// that answers from its own operands opts in — a blanket
+    /// <see cref="VisitOperandExpressions"/> walk would wrongly call
+    /// <c>1 = 1 AND EXISTS (…)</c> constant, since the subquery shapes carry
+    /// operands the walk never reaches.
+    /// </remarks>
+    internal virtual bool IsWrittenConstant => false;
+
+    /// <summary>Whether every element opts into <see cref="IsWrittenConstant"/>.</summary>
+    private static bool AllWrittenConstant(BooleanExpression[] operands)
+    {
+        foreach (var operand in operands)
+        {
+            if (!operand.IsWrittenConstant)
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>Whether every element is an <see cref="Expression.IsWrittenConstant"/>.</summary>
+    private static bool AllWrittenConstant(Expression[] operands)
+    {
+        foreach (var operand in operands)
+        {
+            if (!operand.IsWrittenConstant)
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
     /// Compile-time bind of the predicate, the <see cref="BooleanExpression"/>
     /// counterpart to <see cref="Expression.GetSqlType"/>. Resolves every
     /// operand's static type — which surfaces an unknown column's Msg 207 and
@@ -786,6 +823,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class AndExpression(BooleanExpression[] operands) : BooleanExpression
     {
+        internal override bool IsWrittenConstant => AllWrittenConstant(operands);
+
         public override bool? Run(RuntimeContext runtime)
         {
             var result = (bool?)true;
@@ -840,6 +879,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class OrExpression(BooleanExpression[] operands) : BooleanExpression
     {
+        internal override bool IsWrittenConstant => AllWrittenConstant(operands);
+
         public override bool? Run(RuntimeContext runtime)
         {
             var result = (bool?)false;
@@ -913,6 +954,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class IsNullExpression(Expression source, bool negated) : BooleanExpression
     {
+        internal override bool IsWrittenConstant => source.IsWrittenConstant;
+
         public override bool? Run(RuntimeContext runtime) =>
             source.Run(runtime).IsNull ^ negated;
 
@@ -941,6 +984,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class DistinctFromExpression(Expression left, Expression right, bool negated) : BooleanExpression
     {
+        internal override bool IsWrittenConstant => left.IsWrittenConstant && right.IsWrittenConstant;
+
         public override bool? Run(RuntimeContext runtime)
         {
             var l = left.Run(runtime);
@@ -981,6 +1026,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class InExpression(Expression source, Expression[] candidates, bool negated) : BooleanExpression
     {
+        internal override bool IsWrittenConstant => source.IsWrittenConstant && AllWrittenConstant(candidates);
+
         public override bool? Run(RuntimeContext runtime)
         {
             var src = source.Run(runtime);
@@ -1090,6 +1137,9 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class BetweenExpression(Expression value, Expression lower, Expression upper, bool negated) : BooleanExpression
     {
+        internal override bool IsWrittenConstant =>
+            value.IsWrittenConstant && lower.IsWrittenConstant && upper.IsWrittenConstant;
+
         public override bool? Run(RuntimeContext runtime)
         {
             var v = value.Run(runtime);
@@ -1268,6 +1318,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class NotExpression(BooleanExpression inner) : BooleanExpression
     {
+        internal override bool IsWrittenConstant => inner.IsWrittenConstant;
+
         public override bool? Run(RuntimeContext runtime) => inner.Run(runtime) switch
         {
             true => false,
@@ -1322,6 +1374,8 @@ internal abstract class BooleanExpression
         /// compile-time <see cref="Bind"/> naming the same operator.
         /// </summary>
         protected abstract string OperatorName { get; }
+
+        internal override bool IsWrittenConstant => this.left.IsWrittenConstant && this.right.IsWrittenConstant;
 
         internal override void VisitOperandExpressions(Action<Expression> visitor)
         {

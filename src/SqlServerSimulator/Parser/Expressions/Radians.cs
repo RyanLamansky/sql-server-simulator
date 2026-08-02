@@ -53,5 +53,7 @@ internal sealed class Radians(ParserContext context) : Expression
             : throw SimulatedSqlException.FunctionRequiresNArguments(lowerName, 1);
     }
 
+    internal override bool ResultIsNullable(NullabilityContext context) => this.source.ResultIsNullable(context);
+
     internal override string DebugDisplay() => $"RADIANS({this.source.DebugDisplay()})";
 }

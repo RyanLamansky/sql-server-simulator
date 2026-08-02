@@ -33,7 +33,9 @@ partial class Simulation
     /// <c>ONLINE</c>, etc. are all valid SQL Server options that don't
     /// alter behavior in the simulator. The <c>CLUSTERED</c> keyword is
     /// likewise accepted but doesn't change storage — every table is a
-    /// flat heap regardless of declared clustering.
+    /// flat heap regardless of declared clustering. It does gate the
+    /// <c>INCLUDE</c> list, which real refuses on a clustered index
+    /// (Msg 10601) since its leaf already carries every column.
     /// </para>
     /// </remarks>
     internal static bool TryParseCreateIndex(ParserContext context)
@@ -137,9 +139,13 @@ partial class Simulation
         var ignoreDupKey = ParseOptionalIndexWithClause(context);
         SkipOptionalFilegroupClause(context);
 
-        // Probe-confirmed to precede every name-resolution error, including a
-        // missing table, so it fires here rather than after the target binds —
-        // and, being a statement-shape check, regardless of skip state.
+        // Both statement-shape checks precede every name-resolution error,
+        // including a missing table, so they fire here rather than after the
+        // target binds — and, being statement-shape checks, regardless of skip
+        // state. Probe-confirmed that a clustered INCLUDE reports ahead of
+        // IGNORE_DUP_KEY when a statement carries both.
+        if (isClustered && includeColumnNames.Count > 0)
+            throw SimulatedSqlException.IncludedColumnsOnClusteredIndex();
         if (ignoreDupKey && !isUnique)
             throw SimulatedSqlException.IgnoreDupKeyOnNonUniqueIndex();
 

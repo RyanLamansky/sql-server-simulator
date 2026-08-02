@@ -1,7 +1,7 @@
 # `xml` data type + XML schema collections + XML methods + XML indexes
 
 DDL + catalog views + xml-typed columns + `xml(schema_collection)` bindings all ship.
-`.value()` / `.nodes()` / `.query()` / `.exist()` execute against a bundled XQuery-subset evaluator (`Storage/XmlQueryEngine.cs`), and `.modify()` mutates through the same paths (`Parser/XmlDml.cs` + `Parser/XmlDmlParser.cs`).
+`.value()` / `.nodes()` / `.query()` / `.exist()` execute against a bundled [XQuery-subset evaluator](#xquery-subset-evaluator) (`Storage/XmlQuery*.cs`), and `.modify()` mutates through the same expressions (`Parser/XmlDml.cs` + `Parser/XmlDmlParser.cs`).
 The separate legacy rowset — [`OPENXML`](#openxml) over a `sp_xml_preparedocument` handle — reads XPath 1.0 through the DOM instead.
 
 ## Storage
@@ -51,44 +51,106 @@ CREATE XML INDEX name ON table(col)
 
 - **`.value(xquery, sqltype)`** — evaluates `xquery` against the target xml via `XmlQueryEngine.EvaluateScalar`, then casts the selected node's string value to `sqltype` through `Cast.ApplyCoercion`.
   The type literal (e.g. `'nvarchar(30)'`, `'money'`, `'decimal(9, 4)'`, `'integer'`) is resolved at parse time via `SqlType.GetByName`; `integer` maps to `int`.
-  Empty selection → typed NULL.
+  Empty selection → typed NULL, and an expression real doesn't type as at most one item is [Msg 2389](#static-cardinality-and-the-msg-2389-family) at parse.
   `GetSqlType` returns the resolved target type, so projection / view-output schemas are exact (not the old nvarchar(MAX) stub).
 - **`.nodes(xquery)`** — rowset-producing, valid only in a FROM / APPLY source position.
   `Selection.cs::ParseLateralFromSource` detects the `xmlexpr.nodes(...) [AS] alias(column)` shape (the parsed object name's leaf is `nodes` with a following `(`), re-parses the target as an expression, and builds a correlated single-column (`xml`) lateral plan (`Selection.XmlNodes.cs`).
   Each row's value is the serialized outer XML of one matched node, so a downstream relative `.value()` / nested `.nodes()` re-parses the fragment.
   Reaching `XmlMethodCall.Run` for `.nodes()` means it appeared in scalar position — unsupported.
-- **`.exist(xquery)`** — returns `bit`: 1 when the path selects ≥1 node (true boolean / non-empty string / non-zero number also count), 0 otherwise, NULL when the instance is NULL (`XmlQueryEngine.EvaluateExists`).
-- **`.query(xquery)`** — returns `xml`: the serialized concatenation of the matched nodes in document order, empty string when nothing matches, NULL when the instance is NULL (`XmlQueryEngine.EvaluateQuery`, reusing `EvaluateNodes`).
-  Output serialization is .NET `XPathNavigator.OuterXml`, which may differ from SQL Server's normalization (namespace-declaration placement, self-closing-tag spacing).
+- **`.exist(xquery)`** — returns `bit`: 1 when the expression's **result sequence is non-empty**, 0 otherwise, NULL when the instance is NULL (`XmlQueryEngine.EvaluateExists`).
+  That is emptiness, not an effective boolean value: `exist('false()')`, `exist('0')` and `exist('1=2')` all answer 1 because each yields one item, while `exist('()')` and `exist('/r/nope')` answer 0 (probe-confirmed).
+- **`.query(xquery)`** — returns `xml`: the serialized concatenation of the matched nodes in document order (atomic items separated by a single space), empty string when nothing matches, NULL when the instance is NULL (`XmlQueryEngine.EvaluateQuery`, reusing `EvaluateNodes`).
+  Serialization is the engine's own (`XmlQueryEngine.SerializeNode`), not `XPathNavigator.OuterXml` — the navigator's writer indents and writes ` />`, where real writes neither.
+  A fragment's own root re-declares every namespace in scope, so a relative read against a `.nodes()` row resolves the same names; real renames a re-declared prefix (`p` → `p1`) and the simulator keeps the original.
 - **`.modify()`** — the mutator, a separate sublanguage; see [`.modify()` — XML-DML](#modify--xml-dml) below.
   Reaching `XmlMethodCall` for it means it was written in a value position, which is **Msg 8137**.
 - `GetSqlType`: `.value()`→resolved target type, `.exist()`→bit, `.nodes()` / `.query()`→xml.
 - A non-literal `xquery` / type argument raises `NotSupportedException` (dynamic XQuery isn't modeled).
 
-## XQuery-subset evaluator — `Storage/XmlQueryEngine.cs`
+## XQuery-subset evaluator
 
-Backs `.value()` / `.nodes()` / `.query()` / `.exist()`, and supplies the prolog parsing + XPath translation `.modify()`'s target paths run through.
-Covers the subset SQL Server's sample databases (AdventureWorks / WideWorldImporters) exercise:
+`Storage/XmlQueryParser.cs` compiles the expression, `Storage/XmlQueryExpression.cs` is the tree it builds and evaluates, and `Storage/XmlQueryEngine.cs` is the front door the four read methods and `.modify()`'s target paths enter through.
+
+The argument is a compile-time literal everywhere, so **an expression compiles once while the SQL statement parses** — which is also where SQL Server settles its static XQuery diagnostics, so those fire there too and over an empty rowset.
+Evaluation walks an `XPathNavigator` over the parsed instance, positioned on the **document element**: a relative path (`Edu.Level`) resolves against that element while an absolute path (`/Resume/…`) resolves from the document root — the dual behavior `.nodes()`-serialized node references rely on.
+
+### The XQuery subset
 
 - **Prolog**: leading `declare default element namespace "uri";` (zero or one) and `declare namespace prefix="uri";` (zero or more).
-- **Path body**: absolute (`/Resume/Name/Name.Prefix`) and relative (`Address/Addr.Type`) child steps; prefixed (`act:number`) and unprefixed names; element names containing `.`; attribute axis (`@LocationID`); `text()` node test; `string(.)`; parenthesized sub-path with a positional predicate (`(…)[1]`) and trailing continuation (`(act:telephoneNumber)[1]/act:number`).
+  An unprefixed *element* name takes the default element namespace; an attribute never does (XQuery's scoping rule).
+  An undeclared prefix — on a name test or a function name — is **Msg 2229**.
+- **Location steps**: child (the default axis), attribute (`@x`), parent (`..`), self (`.`) and the descendant-or-self expansion of `//`.
+  Name tests may be prefixed (`act:number`) or not and may contain `.`; `*`, `text()`, `node()`, `comment()` and `processing-instruction()` are the node tests.
+  A named axis step (`child::a`) raises `NotSupportedException`.
+- **Predicates**, in any number and on any step or parenthesized expression.
+  What one *means* comes from its static type, not its runtime value:
 
-**Mechanism**: the body is translated to XPath 1.0 and evaluated through `XPathNavigator`.
-Each name test becomes a `*[local-name()='…' and namespace-uri()='…']` (attributes: `@*[…]`) predicate, so the default-element-namespace binding — which XPath 1.0 has no syntax for — is resolved at translation time without a namespace manager.
-Attributes are never in the default element namespace (XQuery's scoping rule).
-The navigator is positioned on the document element of the parsed input, so a relative path resolves against that element while an absolute path resolves from the document root — the dual behavior `.nodes()`-serialized node references rely on.
-`string(.)` is special-cased ahead of translation (its XQuery `[1]` postfix has no XPath 1.0 form).
+  | predicate's static type | meaning |
+  |---|---|
+  | numeric (`[2]`, `[1.0]`, `[count(b)]`, `[position()=2]`) | **positional** — the item at that 1-based position |
+  | boolean (a comparison, `and` / `or`, `not()`, `true()`) | a filter |
+  | node sequence (`[@x]`, `[b]`, `[b/c]`) | an existence test — non-empty selects |
+  | anything else (`["a"]`, `[string(@x)]`, `[data(@x)]`) | **Msg 2203**, quoting the type |
+
+  Chained predicates filter in written order, each seeing what the previous left: `[@x="1"][2]` is the second match, `[2][@x="1"]` tests the second item.
+- **General comparisons** `=` `!=` `<` `<=` `>` `>=` — existential over both operand sequences, and the untyped-atomic rule decides the comparison type from the *other* operand:
+
+  | shape | comparison |
+  |---|---|
+  | untyped vs a numeric literal (`[@x=1]`) | numeric — `"01"` equals `1` |
+  | untyped vs a string literal (`[@x="1"]`) | by **code point** — `"01"` doesn't equal `"1"`, and the ordering is case-sensitive whatever the database collation |
+  | untyped vs untyped (`[b=c]`) | by code point |
+  | two typed operands of different kinds (`["a"=1]`) | **Msg 2234** at compile time |
+
+  A value that won't cast to the number it's compared against matches nothing and raises nothing — `[@x=1]` and `[@x!=1]` are both empty where `@x` is `"abc"` (probe-confirmed).
+  Because the rule is existential, `!=` is **not** the complement of `not(=)`: over `<p><b>1</b><b>2</b></p>`, `[b!=1]` selects (the `2` differs) and `[not(b=1)]` doesn't.
+- **Value comparisons** `eq` `ne` `lt` `le` `gt` `ge` — the same type rules over singletons, with real's **static** cardinality check in front (below).
+  An empty operand answers the empty sequence, which a predicate reads as no match.
+- **`and` / `or` / `not()`** over effective boolean values, `and` binding tighter, parentheses available.
+- **Arithmetic** `+` `-` `*` `div` `idiv` `mod` and unary minus.
+  XQuery's name grammar swallows a `-` that follows a name character, so `@n-1` reads the attribute named `n-1` and a subtraction needs a space — real's own behavior.
+- **Parenthesized sequences** `(a, b)`, the empty sequence `()`, and a positional predicate over either (`(act:telephoneNumber)[1]/act:number`).
+- **Functions**: `avg` `ceiling` `concat` `contains` `count` `data` `distinct-values` `empty` `false` `floor` `last` `local-name` `lower-case` `max` `min` `namespace-uri` `not` `number` `position` `round` `string` `string-length` `substring` `sum` `true` `upper-case`, reachable bare or through the predeclared `fn:` prefix.
+  Anything else in the function namespace is **Msg 2395**, `There is no function '{http://www.w3.org/2004/07/xpath-functions}:starts-with()'` — which is what real answers for `starts-with` / `ends-with` / `normalize-space` / `translate` / `boolean` / `exists` / `abs` / `zero-or-one` too, since its library doesn't carry them either.
+  Arity is part of the signature: too few arguments is **Msg 2236** (`There are not enough actual arguments in the call to function "contains()".`) and too many **Msg 2238** (`Too many arguments in call to function 'count()'` — real punctuates the two differently).
+
+### Static cardinality, and the Msg 2389 family
+
+Real types an expression off its **shape**, never the instance, and refuses a construct that admits at most one item but got a sequence.
+Cardinality multiplies along a path, and only a *positional* predicate narrows a step — a filtering one leaves it plural.
+So `(/r/a)[1]` and `/r[1]/a[1]` are singular while `/r/a[1]`, `/r/a[@x="1"]` and `/r/a[@x="1"][1]` are not (probe-confirmed one shape at a time).
+
+Four constructs take the check, and each reports **Msg 2389** naming the method that carried the expression:
+
+| construct | message |
+|---|---|
+| a value comparison | `XQuery [query()]: 'eq' requires a singleton (or empty sequence), found operand of type 'xdt:untypedAtomic *'` |
+| a function whose parameter is atomic (`contains`, `substring`, `string-length`, `upper-case`, …) | the same, naming `'contains()'` |
+| a function whose parameter is `item()?` (`string`, `local-name`, `namespace-uri`) | the same, but quoting the **node** type: `'element(b,xdt:untyped) *'` |
+| `.value()` itself | `XQuery [value()]: 'value()' requires a singleton (or empty sequence), found operand of type 'xdt:untypedAtomic *'` |
+
+That last row is why the `(…)[1]` wrapper is idiomatic in every `.value()` call: real refuses `/r/a[@x="1"]` even when the instance holds exactly one match.
+
+### Not modeled yet
+
+- FLWOR (`for` / `let` / `return`), quantified (`some` / `every`) and conditional (`if`) expressions, and `$`-variable references — each raises `NotSupportedException` naming the construct rather than failing as a malformed path.
+- Element / attribute constructors in a *read* method's argument (`.modify()`'s insert content has its own constructors — see below).
+- `sql:variable()` / `sql:column()` accessors outside `.modify()`'s value terms, and the `xs:` constructor functions (`xs:integer(@a)`), both `NotSupportedException`.
+- Named axis steps (`child::` / `descendant::` / …), `NotSupportedException`.
+- **Msg 2396** — real refuses a `.query()` whose result is a top-level attribute (`/r/a/@x`) and **Msg 2390** the same for `.value()`; the simulator serializes the attribute instead.
+  `.value()`'s 2390 can't be modeled while a `.nodes()` row is re-parsed as a document, since that is what makes the legitimate `n.ref.value('@x', …)` a top-level attribute read.
+- **Msg 2210** — a heterogeneous sequence (`(1, /r/a)`) is real's error; the simulator serializes both.
 
 ### Divergences
 
-- Only the path subset above is modeled.
-  FLWOR, arithmetic / comparison / boolean XQuery operators, `local-name()`-style functions in the source text, and constructors are not — they'd surface as malformed XPath or wrong results rather than a clean error.
 - The evaluator parses its input as a **document**, so a multi-root fragment (`'<a/><b/>'`, or the typical `FOR XML …, TYPE` result) raises `XmlException` where real accepts it — real's `xml` is CONTENT-typed and admits several top-level elements.
-- `.value()` casts go through the standard string→type coercion (`casting.md`'s flexible string→date-like parser), so the AdventureWorks `vJobCandidateEducation` / `vJobCandidateEmployment` / `vPersonDemographics` views — which wrap `.value()` date strings in `CONVERT(datetime, …, 101)` — now resolve.
+- `.value()` casts go through the standard string→type coercion (`casting.md`'s flexible string→date-like parser), so the AdventureWorks `vJobCandidateEducation` / `vJobCandidateEmployment` / `vPersonDemographics` views — which wrap `.value()` date strings in `CONVERT(datetime, …, 101)` — resolve.
+- Msg 2209's quoted token comes from the simulator's own recursive-descent cursor, so a malformed expression may name a different token than real's parser does.
+- `fn:min` / `fn:max` compare numerically; real compares by the operand's own type, so a string sequence orders differently.
 
 ## `.modify()` — XML-DML
 
-`Parser/XmlDmlParser.cs` parses the sublanguage into a `Parser/XmlDml.cs` statement, and `XmlDml.Apply` runs it over a LINQ-to-XML tree selected through the same `XmlQueryEngine` translation the read methods use.
+`Parser/XmlDmlParser.cs` parses the sublanguage into a `Parser/XmlDml.cs` statement, and `XmlDml.Apply` runs it over a LINQ-to-XML tree selected through the same compiled [XQuery expression](#xquery-subset-evaluator) the read methods evaluate — so a value predicate reaches a mutator target too (`delete /r/a[@x="1"]`, `insert <c/> into (/r/a[@x="2"])[1]`).
 The `.modify()` argument is a compile-time literal, so the whole statement — path, content constructors, every static check — is parsed once; only the value terms are read per row.
 
 ### Where a mutator is legal
@@ -331,9 +393,10 @@ DacFx's bacpac export calls this per user collection while scripting `sys.xml_sc
 
 ## FOR XML result serialization
 
-`Parser/Selection.ForXml.cs` — the trailing `FOR XML { RAW[('elem')] | AUTO | PATH[('row')] } [, ELEMENTS [XSINIL|ABSENT]] [, BINARY BASE64] [, TYPE] [, ROOT[('name')]]` clause, parsed in the same `SELECT`-tail slot as FOR JSON (`Selection.ParseOptionalForXml` runs right after `ParseOptionalForJson`; a non-XML `FOR` restores the cursor for the downstream Msg 102), optionally scoped by a leading [`WITH XMLNAMESPACES`](#with-xmlnamespaces) prefix.
+`Parser/Selection.ForXml.cs` — the trailing `FOR XML { RAW[('elem')] | AUTO | PATH[('row')] | EXPLICIT } [, ELEMENTS [XSINIL|ABSENT]] [, BINARY BASE64] [, TYPE] [, ROOT[('name')]]` clause, parsed in the same `SELECT`-tail slot as FOR JSON (`Selection.ParseOptionalForXml` runs right after `ParseOptionalForJson`; a non-XML `FOR` restores the cursor for the downstream Msg 102), optionally scoped by a leading [`WITH XMLNAMESPACES`](#with-xmlnamespaces) prefix.
 Mirrors the FOR JSON shape: a trailing-clause parser + a `StringBuilder` serializer over `SqlValue` rows.
-The option list is order-free (`, TYPE, ROOT('r')` and `, ROOT('r'), TYPE` are the same clause).
+The option list is order-free (`, TYPE, ROOT('r')` and `, ROOT('r'), TYPE` are the same clause) but each option may appear once — a repeated `TYPE` / `ROOT` / `ELEMENTS` / `BINARY BASE64` is **Msg 102** reported against the clause's own `XML` keyword rather than the repeated word, whatever the mode.
+A `('name')` row-tag argument belongs to RAW and PATH alone; `AUTO('x')` / `EXPLICIT('x')` is **Msg 6859** severity 15.
 Real chunks large XML across ~2033-char rows; the simulator returns the whole fragment in one row (documented approximation, shared with FOR JSON).
 
 ### The result column, and the `TYPE` option
@@ -374,6 +437,7 @@ Real's untyped result column reports `ntext` (max length 1073741823) in its wire
   - Consecutive same-name element columns concatenate their text into one element (`[x],[x]` → `<x>1020</x>`).
   - `PATH('')` suppresses the row wrapper (bare elements at document level); an attribute column under `PATH('')` raises **Msg 6864**.
   - An attribute column after a non-attribute sibling at the same level raises **Msg 6852**.
+- **EXPLICIT** — the universal table, built from the projection's own column names; see [below](#explicit--the-universal-table).
 
 ### AUTO nesting (shared with `FOR JSON AUTO`)
 
@@ -406,6 +470,66 @@ Divergences:
 - A source with no written object name (derived table, CTE, table variable, `OPENJSON` / `STRING_SPLIT`) is named after its alias.
   That matches real for derived tables and CTEs; for the rowset functions real instead raises Msg 6800 (they aren't tables), which the simulator doesn't.
 - Grouping compares values through `SqlValue.Equals`, so it is **collation-aware** — under a case-insensitive collation `'A'` and `'a'` group together.
+
+### EXPLICIT — the universal table
+
+`Parser/Selection.ForXmlExplicit.cs`.
+The mode carries no shape of its own: the projection *is* the shape.
+`ForXmlExplicitPlan.Build` compiles the column names into one `ForXmlExplicitTag` template per tag number at parse time (so every name diagnostic fires over an empty rowset too), and `SerializeForXmlExplicit` walks the rows once, keeping a stack of the elements still open.
+
+**The row protocol.**
+Column 1 is `Tag`, column 2 is `Parent`, and every row opens exactly **one** element — the one its `Tag` value names — beneath whichever open element its `Parent` value names, `NULL` and `0` both meaning document level.
+Everything below the named parent closes first, so a row for an outer tag ends the inner elements the preceding rows opened.
+Nothing is reordered and nothing collapses: two consecutive rows with identical values open two elements (unlike AUTO's levels), and a child row ahead of its parent is **Msg 6833** rather than a re-sort.
+A row whose tag is already its own ancestor is **Msg 6805** state 2.
+
+| check | error |
+|---|---|
+| fewer than three columns | **Msg 6801** |
+| column 1 / 2 not typed `int` (`bigint`, `smallint`, a string — all rejected) | **Msg 6803** / **Msg 6804** state **1**, at parse |
+| column 1 / 2 not named `Tag` / `Parent` (case-insensitively) | **Msg 6820**, naming the position and the upper-cased expectation |
+| a row's `Tag` is NULL or not positive / its `Parent` is negative | **Msg 6803** / **Msg 6804** state **2** |
+| a row's `Tag` / `Parent` names a tag number no column declared | **Msg 6806** / **Msg 6807** state 2 |
+| a row's `Parent` names a declared tag no open element holds | **Msg 6833** |
+| a row would open a tag that is already open | **Msg 6805** state 2 |
+
+**The column-name convention** is `ElementName!TagNumber[!AttributeName[!Directive…]]`.
+The tag number is decimal digits denoting a positive value with no upper bound (255, 100000 alike); a missing `!`, an empty element name, an unnamed column or a non-positive / non-numeric tag number is **Msg 6802** quoting the name as written.
+Two columns giving one tag number different element names is **Msg 6812**, compared **ordinally** — `e` and `E` collide.
+An absent or empty attribute name puts the value in the element's own text; several such columns concatenate.
+Names reach the output **verbatim** — EXPLICIT neither escapes them the way RAW / AUTO do nor rejects them the way PATH does, so `[e f!1!a b]` emits `<e f a b="1"/>` and duplicate attribute names pass straight through.
+Attributes always precede content whatever the written order (they belong to the start tag); content keeps select-list order.
+
+| directive | effect |
+|---|---|
+| *(none)* | an attribute on the tag's element — an `xml`-typed column becomes a child element instead, as in RAW / AUTO |
+| `element` | a child element holding the value; with an empty attribute name it is the element's text |
+| `elementxsinil` | as `element`, but a NULL emits `<name xsi:nil="true"/>`; any such column puts the `xsi` declaration on the outermost element (the ROOT when there is one) |
+| `xml` | the value's own markup, unescaped and unchecked — a passthrough |
+| `cdata` | a CDATA section, wrapped in a child element when the column is named |
+| `xmltext` | the overflow element: unnamed, its attributes and content fold onto the tag's own element; named, it becomes a child element with that name |
+| `hide` | the column declares its tag and emits nothing |
+| `id` / `idref` / `nmtoken` | an ordinary attribute (they only mean anything to an inline schema) |
+| `idrefs` / `nmtokens` | **Msg 6826** |
+
+Directive words are case-insensitive, and a column may carry several.
+The combination rules fire in real's own order (probed one pair at a time): a repeated `hide` is **Msg 6835**, two identity directives **Msg 6813**, two of `element` / `elementxsinil` / `xml` / `xmltext` / `cdata` **Msg 6817**, `hide` beside an identity directive **Msg 6815**, and a word that is no directive at all — the empty string included — **Msg 6824**.
+
+NULL follows the rest of FOR XML: attributes, elements, text, CDATA and the overflow all vanish, and only `elementxsinil` marks it.
+A CDATA section can't escape, so real breaks it apart at every `]]>`, splitting after the **first** `]` — `a]]>b` comes back as `<![CDATA[a]]]><![CDATA[]>b]]>` — and the simulator matches.
+An `xmltext` value comes back as it was written — the content byte for byte (insignificant whitespace and all), and each attribute value's source text with only the delimiter normalized to `"`, so a `>` stays literal, an entity stays an entity, and a `"` out of a single-quoted value comes back unescaped (ill-formed markup real writes too).
+An overflow attribute whose name the row already wrote is dropped, a second `xmltext` on a tag is **Msg 6827**, and a value that isn't a document with a root element is **Msg 6834** — state 1 for text that parses but holds no element, state 2 for markup that doesn't parse.
+A materialized overflow keeps its element open even when it contributed nothing, so `<e a="1"></e>` rather than `<e a="1"/>`.
+
+Value formatting, escaping, `TYPE`, `ROOT`, `BINARY BASE64` and the empty-rowset asymmetry are the shared ones.
+`ELEMENTS` is **Msg 6825** (placement comes from the column names), a binary column without `BINARY BASE64` is **Msg 6829** — the same message RAW gets, raised from a scan that precedes every other check, so it beats even Msg 6801 — and `XMLSCHEMA` is real's own **Msg 3625** state 17, `'Inline XSD for FOR XML EXPLICIT' is not yet implemented.`
+
+Divergences:
+
+- **An embedded `xml` value carries no `xmlns=""`.**
+  Real re-serializes an `xml`-typed column's fragment in EXPLICIT alone and stamps `xmlns=""` on its unprefixed top-level elements (`<a><b xmlns="">x</b></a>`); the simulator embeds the stored text the way RAW and AUTO do.
+- **`idrefs` / `nmtokens` always raise Msg 6826.**
+  Real admits one where the column's expression is statically nullable — the shape that feeds one value per row in and merges them into a space-joined attribute — and reports 6826 otherwise; the simulator has no expression-nullability model, so it reports what real gives the non-nullable shape.
 
 ### XML names — escaped in RAW / AUTO, rejected everywhere else
 
@@ -471,7 +595,7 @@ Real reaches its verdict before resolving the target table (`INSERT INTO nosucht
 - `ROOT` → wrap in `<root>…</root>` (default name `root`); `ROOT('rows')` renames; `ROOT('')` raises **Msg 6861**.
 - `BINARY BASE64` → see [below](#binary-base64-and-autos-dbobject-references).
 
-An option written twice is accepted; real reports Msg 102 near `'XML'` for a repeated `TYPE` / `ROOT` / `BINARY BASE64`.
+Each option may be written once — a repeat is **Msg 102** near `'XML'`, as noted at the top of this section.
 
 ### `WITH XMLNAMESPACES`
 
@@ -570,9 +694,9 @@ Escaping is position-dependent:
 
 ### Not modeled yet
 
-EXPLICIT mode and the `XMLSCHEMA` directive raise `NotSupportedException` (under a `WITH XMLNAMESPACES` prefix they raise real's own Msg 6868 first), as do PATH node functions beyond `text()` / `data()` (`comment()`, `processing-instruction()`, `node()`, `*`, `@*`).
+The `XMLSCHEMA` directive raises `NotSupportedException` in RAW / AUTO / PATH (under a `WITH XMLNAMESPACES` prefix it raises real's own Msg 6868 first, and in EXPLICIT real's own Msg 3625), as do PATH node functions beyond `text()` / `data()` (`comment()`, `processing-instruction()`, `node()`, `*`, `@*`).
 `XMLDATA` isn't parsed at all, so it falls to Msg 102 without the prefix.
-One-row chunking is the shared approximation noted above.
+One-row chunking is the shared approximation noted above, and EXPLICIT's `idrefs` / `nmtokens` accept path is under [its divergences](#explicit--the-universal-table).
 
 See [`backlog.md`](backlog.md).
 
@@ -584,7 +708,7 @@ A mark that isn't leading is content and stays.
 
 ## Known gaps
 
-- **XQuery features beyond the path subset** the evaluator models (FLWOR, comparison / boolean / arithmetic operators, value predicates like `[@x="1"]`, constructors in a read method's argument).
+- **XQuery features beyond the expression subset** the evaluator models — see [its own list](#not-modeled-yet) (FLWOR, constructors in a read method's argument, `sql:` accessors, `xs:` constructor functions, named axes).
   `.modify()`'s paths run through the same evaluator, so the subset bounds the mutator too.
   [`OPENXML`](#openxml) is unaffected — its patterns are XPath 1.0 and run through the DOM's own engine.
 - **XSD validation** against `xml(schema_collection)` bindings — nothing validates an INSERT, an UPDATE or a `.modify()` edit, and a typed instance's paths carry untyped static types (see [`.modify()`'s divergences](#divergences-1)).

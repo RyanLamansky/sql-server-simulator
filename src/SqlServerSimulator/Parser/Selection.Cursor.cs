@@ -170,6 +170,18 @@ internal sealed class CursorSourcePlan
     /// at OPEN, so there is no live set for DYNAMIC to walk.</summary>
     public readonly bool HasRowLimit;
 
+    /// <summary>
+    /// True when an index on the participating base tables delivers this plan's
+    /// ORDER BY, so a DYNAMIC cursor can walk the order live. False caps the
+    /// cursor's sensitivity at KEYSET: real SQL Server converts a dynamic
+    /// cursor whose ordering its plan has to sort for, since a sorted result is
+    /// a materialized one (probe-confirmed via <c>sys.dm_exec_cursors</c> —
+    /// <c>ORDER BY</c> an unindexed column reports <c>Keyset</c> with a positive
+    /// <c>@@CURSOR_ROWS</c>, and <c>TYPE_WARNING</c> reports Msg 16956 for it).
+    /// A plan with no ORDER BY imposes no ordering, so this is true.
+    /// </summary>
+    public readonly bool OrderBySuppliedByIndex;
+
     public CursorSourcePlan(
         FromSource[] sources,
         JoinSpec[] joins,
@@ -223,6 +235,305 @@ internal sealed class CursorSourcePlan
         this.IdentityTables = [.. tables];
         this.IdentityViews = [.. views];
         this.IdentityColumns = [.. columns];
+        this.OrderBySuppliedByIndex = OrderIsIndexSupplied(sources, slots, projections, columnNames, orderBy);
+    }
+
+    /// <summary>
+    /// Whether an index delivers the plan's ORDER BY without a sort. Each item
+    /// is resolved down to the base-table column it reads — through a
+    /// positional ordinal, an output alias, a view's or derived table's
+    /// projection, however deep — and the resulting items are grouped into
+    /// maximal consecutive runs per base table. A run is delivered when some
+    /// key on its table matches it as a leading prefix in a consistent
+    /// direction (all forward, or all reversed — the backward scan real does
+    /// for <c>ORDER BY … DESC</c>); a run followed by items from another table
+    /// must additionally be <em>unique</em>, since only a key that fixes one
+    /// row leaves the next source free to decide the rest of the order.
+    /// Items past a unique prefix of the same table are redundant and drop out.
+    /// </summary>
+    /// <remarks>
+    /// An item that isn't a plain column reference doesn't qualify, except one
+    /// reading no column at all (<c>ORDER BY (SELECT NULL)</c>) — a constant
+    /// constrains no order, and real drops it. That is narrower than real,
+    /// which also keeps an order-preserving expression over an indexed column
+    /// (<c>ORDER BY v + 1</c>) dynamic; the simulator converts those, which is
+    /// the direction the conversion already runs in.
+    /// </remarks>
+    private static bool OrderIsIndexSupplied(
+        FromSource[] sources,
+        CursorSlot[] slots,
+        Expression[] projections,
+        string[] columnNames,
+        List<OrderBySpec> orderBy)
+    {
+        if (orderBy.Count == 0)
+            return true;
+
+        var items = new List<(HeapTable Table, int Ordinal, bool Descending)>(orderBy.Count);
+        foreach (var spec in orderBy)
+        {
+            if (ResolveOrderColumn(sources, slots, projections, columnNames, spec) is not { } resolved)
+                return false;
+            if (resolved.Table is { } table)
+                items.Add((table, resolved.Ordinal, spec.Descending));
+        }
+
+        for (var start = 0; start < items.Count;)
+        {
+            var table = items[start].Table;
+            var end = start;
+            while (end < items.Count && ReferenceEquals(items[end].Table, table))
+                end++;
+
+            // Delivered "closed" = the matched prefix is unique, so this
+            // table's order is total and another source may follow; "open" =
+            // the run's own items are all ordered but ties remain, which only
+            // works when nothing follows.
+            var closed = false;
+            var open = false;
+            foreach (var key in OrderingKeys(table))
+            {
+                var matched = MatchKeyPrefix(key, items, start, end);
+                if (matched == 0)
+                    continue;
+                if (matched == key.Ordinals.Length && key.Unique)
+                {
+                    closed = true;
+                    break;
+                }
+                open |= matched == end - start;
+            }
+
+            if (!closed && !(open && end == items.Count))
+                return false;
+            start = end;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The base-table column one ORDER BY item reads: <c>(table, storage
+    /// ordinal)</c> for a plain column reference, <c>(null, …)</c> for an item
+    /// reading no column at all, and null for anything else — a computed
+    /// expression, or a reference the plan's own sources don't resolve.
+    /// </summary>
+    private static (HeapTable? Table, int Ordinal)? ResolveOrderColumn(
+        FromSource[] sources,
+        CursorSlot[] slots,
+        Expression[] projections,
+        string[] columnNames,
+        OrderBySpec spec)
+    {
+        if (spec.IsOrdinal)
+        {
+            return spec.Ordinal >= 1 && spec.Ordinal <= projections.Length
+                ? ResolveProjectedColumn(sources, slots, projections, spec.Ordinal - 1)
+                : null;
+        }
+
+        if (spec.Expr is not Expressions.Reference reference)
+            return ReadsAnyColumn(spec.Expr!) ? null : (null, -1);
+
+        var name = reference.ReferencedName;
+        if (name.ImmediateQualifier is null)
+        {
+            // An unqualified item matches the select list first, exactly as
+            // ComputeOrderKeys resolves it, so an aliased projection orders by
+            // the column behind the alias.
+            for (var i = 0; i < columnNames.Length; i++)
+            {
+                if (BuiltInToken.Equals(columnNames[i], name.Leaf))
+                    return ResolveProjectedColumn(sources, slots, projections, i);
+            }
+        }
+
+        return ResolveSourceColumn(sources, slots, name);
+    }
+
+    /// <summary>The base-table column projection <paramref name="index"/>
+    /// reads, unwrapping an alias.</summary>
+    private static (HeapTable? Table, int Ordinal)? ResolveProjectedColumn(
+        FromSource[] sources,
+        CursorSlot[] slots,
+        Expression[] projections,
+        int index)
+    {
+        var projection = projections[index] is Expressions.NamedExpression named ? named.Inner : projections[index];
+        return projection is Expressions.Reference reference
+            ? ResolveSourceColumn(sources, slots, reference.ReferencedName)
+            : ReadsAnyColumn(projection) ? null : (null, -1);
+    }
+
+    /// <summary>
+    /// Follows a column reference to the base table underneath it: a
+    /// base-table slot answers directly, a deferred slot (view, derived table,
+    /// CTE, APPLY body) re-enters on the matching projection of its own plan.
+    /// </summary>
+    private static (HeapTable? Table, int Ordinal)? ResolveSourceColumn(FromSource[] sources, CursorSlot[] slots, MultiPartName name)
+    {
+        var (sourceIndex, columnIndex) = Selection.FindSourceColumn(sources, name);
+        if (sourceIndex < 0)
+            return null;
+
+        if (slots[sourceIndex].Table is { } table)
+        {
+            var columnName = sources[sourceIndex].ColumnNames[columnIndex];
+            for (var i = 0; i < table.Columns.Length; i++)
+            {
+                if (!BuiltInToken.Equals(table.Columns[i].Name, columnName))
+                    continue;
+                // A non-persisted computed column has no storage slot, so no
+                // key can be keyed on it.
+                var ordinal = table.StorageOrdinals[i];
+                return ordinal < 0 ? null : (table, ordinal);
+            }
+            return null;
+        }
+
+        var nested = slots[sourceIndex].Nested!;
+        return columnIndex < nested.Projections.Length
+            ? ResolveProjectedColumn(nested.Sources, nested.Slots, nested.Projections, columnIndex)
+            : null;
+    }
+
+    /// <summary>Whether an expression reads any column at all; a constant one
+    /// imposes no ordering.</summary>
+    private static bool ReadsAnyColumn(Expression expression)
+    {
+        var found = false;
+        expression.VisitColumnReferences(_ => found = true);
+        return found;
+    }
+
+    /// <summary>
+    /// How many leading items of the run <c>[start, end)</c> the key's leading
+    /// columns deliver. The first matched column fixes whether the scan reads
+    /// the key forward or backward, and every further column must agree —
+    /// mixed directions need a sort, which is what converts the cursor.
+    /// </summary>
+    private static int MatchKeyPrefix(
+        OrderingKey key,
+        List<(HeapTable Table, int Ordinal, bool Descending)> items,
+        int start,
+        int end)
+    {
+        var reversed = false;
+        var matched = 0;
+        while (matched < key.Ordinals.Length && start + matched < end)
+        {
+            var (_, ordinal, descending) = items[start + matched];
+            if (ordinal != key.Ordinals[matched])
+                break;
+            var flipped = descending != key.Descending[matched];
+            if (matched == 0)
+                reversed = flipped;
+            else if (flipped != reversed)
+                break;
+            matched++;
+        }
+        return matched;
+    }
+
+    /// <summary>
+    /// A key whose stored order a scan can read: the storage ordinals of its
+    /// columns, their declared directions, and whether the whole list
+    /// identifies one row.
+    /// </summary>
+    private readonly struct OrderingKey(int[] ordinals, bool[] descending, bool unique)
+    {
+        public readonly int[] Ordinals = ordinals;
+        public readonly bool[] Descending = descending;
+
+        /// <summary>Whether the full <see cref="Ordinals"/> list is unique. A
+        /// shorter prefix never is: a key becomes unique only once its last
+        /// column is read.</summary>
+        public readonly bool Unique = unique;
+    }
+
+    /// <summary>
+    /// The keys a scan of <paramref name="table"/> can deliver an order from:
+    /// its PRIMARY KEY / UNIQUE constraints and its enabled unfiltered indexes.
+    /// A non-unique index over a table with a clustered key carries that key's
+    /// columns after its own — real appends the clustering key as the row
+    /// locator, which is what makes <c>ORDER BY v, id</c> match an index on
+    /// <c>v</c> alone (probe-confirmed) — and becomes unique with it. A
+    /// filtered index orders only the rows its filter admits and a disabled one
+    /// isn't read at all, so neither delivers an order.
+    /// </summary>
+    private static List<OrderingKey> OrderingKeys(HeapTable table)
+    {
+        var keys = new List<OrderingKey>(table.KeyConstraints.Count + table.Indexes.Count);
+        foreach (var constraint in table.KeyConstraints)
+        {
+            var descending = new bool[constraint.StorageOrdinals.Length];
+            for (var i = 0; i < descending.Length; i++)
+                descending[i] = constraint.IsDescending(i);
+            keys.Add(new OrderingKey(constraint.StorageOrdinals, descending, unique: true));
+        }
+
+        var clustering = ClusteringKey(table);
+        foreach (var index in table.Indexes)
+        {
+            if (index.IsDisabled || index.Filter is not null)
+                continue;
+            var ordinals = new List<int>(index.KeyColumns.Length);
+            var descending = new List<bool>(index.KeyColumns.Length);
+            foreach (var column in index.KeyColumns)
+            {
+                ordinals.Add(column.StorageOrdinal);
+                descending.Add(column.IsDescending);
+            }
+
+            var unique = index.IsUnique;
+            if (!unique && !index.IsClustered && clustering is { } locator)
+            {
+                for (var i = 0; i < locator.Ordinals.Length; i++)
+                {
+                    if (ordinals.Contains(locator.Ordinals[i]))
+                        continue;
+                    ordinals.Add(locator.Ordinals[i]);
+                    descending.Add(locator.Descending[i]);
+                }
+                unique = locator.Unique;
+            }
+
+            keys.Add(new OrderingKey([.. ordinals], [.. descending], unique));
+        }
+
+        return keys;
+    }
+
+    /// <summary>The table's clustered key, whose columns a nonclustered index
+    /// carries as its row locator; null for a heap, whose locator is the
+    /// address rather than any column.</summary>
+    private static OrderingKey? ClusteringKey(HeapTable table)
+    {
+        foreach (var constraint in table.KeyConstraints)
+        {
+            if (!constraint.IsClustered)
+                continue;
+            var descending = new bool[constraint.StorageOrdinals.Length];
+            for (var i = 0; i < descending.Length; i++)
+                descending[i] = constraint.IsDescending(i);
+            return new OrderingKey(constraint.StorageOrdinals, descending, unique: true);
+        }
+
+        foreach (var index in table.Indexes)
+        {
+            if (!index.IsClustered || index.IsDisabled || index.Filter is not null)
+                continue;
+            var ordinals = new int[index.KeyColumns.Length];
+            var descending = new bool[index.KeyColumns.Length];
+            for (var i = 0; i < index.KeyColumns.Length; i++)
+            {
+                ordinals[i] = index.KeyColumns[i].StorageOrdinal;
+                descending[i] = index.KeyColumns[i].IsDescending;
+            }
+            return new OrderingKey(ordinals, descending, index.IsUnique);
+        }
+
+        return null;
     }
 }
 

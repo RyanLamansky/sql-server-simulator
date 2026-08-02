@@ -167,20 +167,31 @@ partial class Simulation
         // updatable exactly like a single table (probe-confirmed).
         var cursorPlan = Selection.TryBuildCursorPlan(selection, batch);
         var updatable = cursorPlan is not null;
-        // A TOP / OFFSET / FETCH limit — on the statement or inside a body the
-        // cursor follows — caps sensitivity at KEYSET: the limit chooses which
-        // rows are members at OPEN, so there is no live set for DYNAMIC to
-        // walk. Probe-confirmed against sys.dm_exec_cursors, including the
-        // bare forward-only default, which real reports as Keyset too.
-        var rowLimited = cursorPlan is { HasRowLimit: true };
+        // Two shapes cap sensitivity at KEYSET, both probe-confirmed against
+        // sys.dm_exec_cursors and both applying to the bare forward-only
+        // default as well as an explicit DYNAMIC. A TOP / OFFSET / FETCH limit
+        // — on the statement or inside a body the cursor follows — chooses
+        // which rows are members at OPEN, so there is no live set for DYNAMIC
+        // to walk. An ORDER BY no index delivers has to be sorted, and a sorted
+        // result is a materialized one.
+        var keysetOnly = cursorPlan is { HasRowLimit: true } or { OrderBySuppliedByIndex: false };
 
-        var sensitivity = !updatable || reqStatic || reqFastForward
+        // The type the keywords ask for, before the shape has its say: naming
+        // one takes it, and naming none means KEYSET for SCROLL and DYNAMIC for
+        // the forward-only default.
+        var requested = reqStatic || reqFastForward
             ? CursorSensitivity.Static
-            : reqKeyset || rowLimited
+            : reqKeyset
                 ? CursorSensitivity.Keyset
                 : reqDynamic
                     ? CursorSensitivity.Dynamic
                     : scroll ? CursorSensitivity.Keyset : CursorSensitivity.Dynamic;
+
+        var sensitivity = !updatable
+            ? CursorSensitivity.Static
+            : requested == CursorSensitivity.Dynamic && keysetOnly
+                ? CursorSensitivity.Keyset
+                : requested;
 
         var readOnly = sensitivity == CursorSensitivity.Static || reqFastForward || readOnlyOption;
         // Naming a sensitivity implies SCROLL unless FORWARD_ONLY says
@@ -203,13 +214,15 @@ partial class Simulation
                 ? CursorConcurrency.Optimistic
                 : scrollLocks ? CursorConcurrency.ScrollLocks : CursorConcurrency.Default;
 
-        // TYPE_WARNING: emit Msg 16956 (info, severity 10) at DECLARE when an
-        // explicitly-requested sensitivity was silently converted to a lesser
-        // one — DYNAMIC / KEYSET over a non-updatable shape forced to STATIC
-        // (probe-confirmed the warning fires at DECLARE, not OPEN).
-        if (typeWarning
-            && ((reqKeyset && sensitivity != CursorSensitivity.Keyset)
-                || (reqDynamic && sensitivity != CursorSensitivity.Dynamic)))
+        // TYPE_WARNING: emit Msg 16956 (info, severity 10) at DECLARE when the
+        // requested sensitivity was silently converted to a lesser one —
+        // DYNAMIC / KEYSET over a non-updatable shape forced to STATIC, or
+        // DYNAMIC over a row limit or an unindexed ORDER BY forced to KEYSET
+        // (probe-confirmed the warning fires at DECLARE, not OPEN). The
+        // *implied* request counts too: a cursor naming no sensitivity warns
+        // for a converted DYNAMIC and a plain SCROLL one for a converted
+        // KEYSET, both probe-confirmed.
+        if (typeWarning && sensitivity != requested)
         {
             batch.AppendInfoError(@class: 0, state: 1, number: 16956, "The created cursor is not of the requested type.");
         }

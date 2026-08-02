@@ -63,7 +63,9 @@ Specific mappings:
 - `varbinary` / `binary` → base64-quoted (`"QUI="` for `0x4142`)
 - `datetime` / `datetime2` / `smalldatetime` → quoted ISO with **T** separator (`"2025-01-15T12:34:56"`)
 - `date` / `time` / `uniqueidentifier` → quoted default ISO / uppercase-hex
-- other strings → JSON-escaped (`\"` `\\` `\b` `\f` `\n` `\r` `\t` `\uHHHH` for control chars; non-ASCII / `<` / `>` left literal, and `/` too — real escapes it as `\/` here, tracked in [`backlog.md`](backlog.md#fidelity-gaps-in-shipped-behavior); `JSON_MODIFY`'s substituted value does escape it, via `AppendJsonString`'s `escapeSolidus`)
+- other strings → JSON-escaped (`\"` `\\` `\b` `\f` `\n` `\r` `\t` `\uHHHH` for control chars, and **`/` → `\/`**; non-ASCII / `<` / `>` left literal).
+  The solidus escape reaches the keys too (`JSON_OBJECT('k/1': 'v')` is `{"k\/1":"v"}`), and every JSON producer writes it — the two builders, both aggregates, `JSON_MODIFY`'s substituted value and `FOR JSON`.
+  The exceptions are the two strings that aren't a rendered *value*: `REGEXP_MATCHES`' `substring_matches` column and the property name `JSON_MODIFY` takes from its path's own text, both of which leave `/` literal (all probe-confirmed).
 - nested `JSON_OBJECT` / `JSON_ARRAY` / `JSON_QUERY` / `JSON_MODIFY` results — embedded **raw** (not re-quoted), via compile-time `JsonValueRender.ProducesJson(Expression)` detection that unwraps `Parenthesized`.
   Other strings — including `'{"x":1}'` literals — go through the quote-and-escape path, matching SQL Server's JSON-typed-input detection without needing an `SqlValue`-level marker bit.
 
@@ -91,6 +93,33 @@ NULL input → NULL; non-string input → 0 (real SQL Server raises Msg 8116 —
 It shares [the document scan](#msg-13609--the-document-isnt-json-text) with the rest of the family and reports what that scan objects to as 0 rather than raising.
 The 2-arg shape (`VALUE | ARRAY | OBJECT | SCALAR` modifier) isn't modeled — DACFx-emitted CHECK constraints (`isjson([col])<>0`) only use the 1-arg form.
 
+## The path grammar
+
+`['append'] ['lax' | 'strict'] '$' segment*`, where a segment is `.<name>` / `."<quoted name>"` / `[<index>]`.
+One parser (`Parser/JsonPath.cs`) serves every function, so a malformed path reports identically from `JSON_VALUE` / `JSON_QUERY` / `JSON_MODIFY` / `JSON_PATH_EXISTS` and an `OPENJSON … WITH` column.
+Only `JSON_MODIFY` reads the `append` prefix; elsewhere it is Msg 13607.
+
+**Whitespace** separates the grammar's tokens and may sit between any two of them — around a keyword, either side of the `$`, either side of a `.`, inside an index's brackets, and trailing the path — so `'  lax  $ . a [ 0 ] '` resolves.
+It is space, tab, line feed, form feed and carriage return; vertical tab and the non-breaking space are not whitespace here.
+A keyword needs no whitespace behind it (`lax$.a` parses) but does need the word to end there, so `laxx$.a` is malformed.
+A name is unquoted only when it starts with a letter or `_`; the quoted form takes anything, with `""` for a literal `"`.
+An index reads up to eleven digits and tops out at `uint`'s ceiling.
+
+**Msg 13607** — `JSON path is not properly formatted. Unexpected character '<c>' is found at position <n>.` — names the character the parser stopped on and its zero-based index, with `.` at the path's length standing in for running off the end (the same placeholder [Msg 13609](#msg-13609--the-document-isnt-json-text) uses).
+The State byte names what the parser was reading, and one rule cuts across it: the grammar's own punctuation (`$` `"` `[` `]` `.`) and the digits report **14** wherever they turn up out of place, whatever the position expected.
+
+| where the parser stopped | State | example |
+|---|---|---|
+| the `$`, or the `.` / `[` / end that follows a segment, or the name behind a `.` | 22 | `'xyz'` → `'x'` at 0, `'$.a b'` → `'b'` at 4 |
+| behind a quoted name — any character at all | 14 | `'$."a"x'` → `'x'` at 5 |
+| the end of the path | 14 | `'$.'` → `'.'` at 2 |
+| inside `[`, before the digits | 21 | `'$[a]'` → `'a'` at 2 |
+| inside `[`, past the digits | 15 | `'$[1x]'` → `'x'` at 3 |
+| an index above `uint`'s ceiling | 16 | `'$[4294967296]'` → `'6'` at 11 |
+| a quoted name the path never closed | 20 | `'$."a'` → `'.'` at 4 |
+
+Every row is probed verbatim against SQL Server 2025, as is the punctuation rule (`'$.a$b'` → `'$'` at 3 State 14 where `'$.a-b'` → `'-'` at 3 State 22).
+
 ## `JSON_MODIFY` edits the source text
 
 The result is the document argument as written with one span replaced, not a re-serialization of a parsed tree, so everything the edit didn't touch survives byte for byte: `JSON_MODIFY('  {"a" : 1}  ', '$.a', 2)` is `  {"a" : 2}  `, and writing a value back over itself is byte-identical.
@@ -109,9 +138,13 @@ Under `strict` each of those is Msg 13608 State 2 instead — except the `append
 `strict` also reads a NULL value as a value: it writes JSON `null` where lax would delete the key, which is also what an array element takes in either mode (`'$[1]'` over `[1,2,3]` leaves `[1,null,3]`).
 
 The inserted text is canonical whatever spacing the document itself uses — SQL Server writes `,"b":2` into `{ "a" : 1 }`.
-Values render through the shared `JsonValueRender`, with one difference from the JSON_* builders: a substituted string escapes `/` as `\/`.
+Values render through the shared `JsonValueRender`, so a substituted string carries the same escaping the JSON_* builders write, `/` → `\/` included.
 A JSON-producing third argument (`JSON_QUERY` / `JSON_OBJECT` / `JSON_ARRAY` / a nested `JSON_MODIFY`, detected by the builders' compile-time `JsonValueRender.ProducesJson`) embeds **raw**, keeping its own spacing; every other string is quoted and escaped.
-An inserted key comes from the path's own text, escaped the same way minus the solidus rule (`'$."café"'` → `"café"`).
+An inserted key comes from the path's own text, escaped the same way minus the solidus rule (`'$."café"'` → `"café"`, `'$."a/b"'` → `"a/b"`).
+
+The written value's **type** is gated, and real binds the rule while compiling (a refused type reports over an empty rowset).
+Accepted: the string family bar `text` / `ntext` / `xml` / the spatial types, the integer family, `decimal` / `numeric`, `float`, `real` and `bit` — plus an untyped `NULL` literal, which types as `int` and so leaves the delete-a-member form open.
+Everything else is **Msg 8116**, `Argument data type <type> is invalid for argument 3 of json_modify function.` — `money` / `smallmoney`, every date/time type, `uniqueidentifier`, `binary` / `varbinary` / `image`, `text` / `ntext`, `xml`, `sql_variant`, `hierarchyid` and the spatial types, a *typed* NULL of any of them included (all probe-confirmed).
 
 ## Duplicate property names — the reader stops at the first
 
@@ -167,7 +200,9 @@ The related strict-mode errors carry State bytes of their own: `JSON_VALUE`'s **
 ### Divergences
 
 A statement that fails partway surfaces as the error alone: real streams the rows a truncated `OPENJSON` got through ahead of the error token, while the simulator's failed statement carries no rows (see [`data-reader.md`](data-reader.md)).
-Msg 13607's wording is the simulator's own (`Unexpected character at position 0 in path '<path>'`) rather than real's, which names the offending character and its index and carries State 14.
+
+The builders render a **decimal produced by a conversion or by arithmetic** at the source value's scale rather than the target type's: `JSON_ARRAY(CAST(1 AS numeric(10, 2)))` is `[1]` where real writes `[1.00]`, and `JSON_OBJECT` / `JSON_MODIFY` lose it the same way.
+A decimal literal and one read back from a column keep their scale, and the string-rendering paths (`CAST(… AS varchar)`, `CONCAT`, `FOR JSON`) format from the declared type and are unaffected — the cause is the coercion path, not these functions; see the entry under [`backlog.md`](backlog.md#fidelity-gaps-in-shipped-behavior).
 
 ## `FOR JSON` result serialization
 
@@ -241,5 +276,5 @@ FOR JSON's own formatter (`AppendForJsonValue`) — it diverges from the JSON_* 
 The date/time types **drop an all-zero fractional second** (`…T00:00:00`, not `…T00:00:00.000`) while keeping the interior/trailing zeros of a non-zero fraction (`.100`, not `.1`).
 Unlike the JSON_* builders (which emit .NET `G15` / `G7` for float / real — a documented quirk), FOR JSON matches real's scientific notation exactly.
 
-String escaping: `"` → `\"`, `\` → `\\`, **`/` → `\/`** (SQL Server escapes forward slash — the JSON_* builders do not), `\b` `\t` `\n` `\f` `\r`, other control chars < 0x20 → lowercase `\uXXXX`; chars ≥ 0x20 including non-ASCII stay verbatim.
+String escaping: `"` → `\"`, `\` → `\\`, **`/` → `\/`**, `\b` `\t` `\n` `\f` `\r`, other control chars < 0x20 → lowercase `\uXXXX`; chars ≥ 0x20 including non-ASCII stay verbatim — the same set the JSON_* builders write.
 Nested FOR JSON / `JSON_QUERY` / `JSON_OBJECT` / `JSON_ARRAY` columns embed as raw JSON (detected at compile time by `ColumnProducesRawJson`, unwrapping alias / parenthesis / scalar-subquery wrappers).

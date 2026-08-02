@@ -601,10 +601,11 @@ Probed *inlineable* despite looking otherwise, so deliberately not disqualifying
 
 ## Expression dependencies
 
-Four surfaces answer "what depends on this", all off one analysis in `Schemas/ModuleDependencies.cs`:
+Six surfaces answer "what depends on this", all off one analysis in `Schemas/ModuleDependencies.cs`:
 
 - **`sys.sql_expression_dependencies`** — the catalog view (`BuiltInResources.Dependencies.cs`).
 - **`sys.dm_sql_referencing_entities(name, class)`** / **`sys.dm_sql_referenced_entities(name, class)`** — two-argument system TVFs (`Parser/Selection.SqlDependencies.cs`), dispatched from the FROM-source parser on the same `sys.`-qualified terms as `fn_virtualfilestats`.
+- **`sys.sql_dependencies`** and **`sysdepends`** — the two views `sys.sql_expression_dependencies` replaced, same file as the catalog view. See [The legacy pair](#the-legacy-pair-syssql_dependencies-and-sysdepends).
 - **`sp_depends`** — the deprecated report (`Simulation/Simulation.Depends.cs`).
 
 ### Computed on read, never stored
@@ -666,6 +667,33 @@ Two shapes real folds:
 `is_all_columns_found` is 1 when the referenced object resolves.
 A reference that doesn't resolve marks its rows `is_incomplete` and makes the DMV raise **Msg 2020** — real hands back the rows it found and *then* raises.
 
+### The legacy pair: `sys.sql_dependencies` and `sysdepends`
+
+The two views the expression-dependency catalog replaced, and the ones real's own `sp_depends` reads.
+Both project the same rows out of `EnumerateLegacyDependencies`, differing only in shape:
+
+| | `sys.sql_dependencies` | `sysdepends` |
+| --- | --- | --- |
+| referencing object | `object_id` / `column_id` | `id` / `number` |
+| referenced object | `referenced_major_id` / `referenced_minor_id` | `depid` / `depnumber` |
+| schema-bound | `class` 0 / 1 (+ `class_desc`) | `deptype` 0 / 1 |
+| use flags | `is_selected` / `is_updated` / `is_select_all` | `readobj` / `resultobj` / `selall`, packed again into `status` |
+
+`sysdepends` resolves both unqualified and under the `sys.` qualifier, the way `sysobjects` does; `sql_dependencies` takes the qualifier only (a bare `SELECT … FROM sql_dependencies` is **Msg 208** on real).
+`status` is `8 * readobj + 4 * resultobj + 2 * selall` — so a whole-object read reads 8, an `UPDATE`'s SET column 4, a `SELECT *` column 2, and a column both read and starred 10.
+`number` is the referencing entity's minor id — a computed column's own `column_id` — except on a procedure, where it is the procedure group number a numbered `CREATE PROC p;n` would set and 1 stands for the single ungrouped body.
+`depdbid` / `depsiteid` addressed a cross-database or replicated dependency the legacy store never populated: 0 on every row.
+
+Two things the legacy pair does that the modern surfaces don't:
+
+- **It stores ids, not names.**
+  So a reference whose id the analysis can't produce contributes nothing at all — another database or server, and an object that doesn't exist.
+  A procedure's table-valued parameter is absent too: its `TYPE` class is outside a domain that is object-or-column only.
+  Conversely the id is the one the reference actually binds to, so a one-part `EXEC` name reports the procedure the default schema holds where `sys.sql_expression_dependencies` reports NULL and `is_caller_dependent`.
+- **The `referenced_minor_id = 0` row is narrower.**
+  Real records the object itself only where the reference reaches none of its columns — a whole-object read (`SELECT 1 FROM t`), a `DELETE`, an `INSERT` carrying no column list, an `EXEC` or a function call — plus every schema-bound reference, which binds the object as well as its columns.
+  A plain `SELECT a FROM t` reports column `a` and nothing else, where `sys.sql_expression_dependencies` reports the object row instead.
+
 ### `sp_depends`
 
 Up to two result sets, each preceded by its own severity-10 header, matching real's `raiserror` calls:
@@ -690,7 +718,10 @@ A trigger is listed against what its **body reads**, never against the table it 
 - **A MERGE's target key column carries an extra `is_updated`** when the same column appears in both the `ON` clause and a `WHEN NOT MATCHED THEN INSERT` column list; real reports it selected only.
 - **Msg 2020 arrives before the rows rather than after them.** Real yields `sys.dm_sql_referenced_entities`'s rows and then raises; the simulator's reader surfaces the error at `ExecuteReader`.
 - **`sp_depends` row order is by object id.** Real's procedure carries no `ORDER BY`, so its order is unspecified; the simulator's is deterministic.
-- **`sys.sysdepends` / `sys.sql_dependencies` aren't projected.** Real backs `sp_depends` with them; the simulator reads the shared analysis directly.
+- **A computed-column / CHECK / DEFAULT expression marks the columns it names `is_selected`**, where real leaves all three use flags 0 for that referencing kind — visible on `sys.dm_sql_referenced_entities`, the legacy pair, and `sp_depends`'s `selected` cell alike, since all three read the one `ColumnUse`.
+- **A reference mixing a whole-object write with a column-level one loses the object row in the legacy pair.**
+  A procedure that both `DELETE`s from `t` and `INSERT`s `t (a)` reports real's `referenced_minor_id = 0` *and* column `a`; the simulator reports column `a` alone, because the aggregated `Reference` no longer says which statement contributed which.
+  Every single-shape case matches.
 
 ## `sys.time_zone_info`
 

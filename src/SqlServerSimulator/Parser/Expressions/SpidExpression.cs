@@ -14,5 +14,7 @@ internal sealed class SpidExpression(ParserContext context) : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
+
     internal override string DebugDisplay() => "@@SPID";
 }

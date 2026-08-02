@@ -172,7 +172,8 @@ Backs `OBJECT_ID()` plus `sys.tables` / `sys.objects` / `sys.columns.object_id`.
 
 **`OBJECT_ID(name [, type])`** scalar (`Parser/Expressions/ObjectId.cs`): returns the `int` ObjectId of the named object, or NULL when not found / wrong type / malformed name.
 The name is a runtime string parsed as a 1–3-part dotted identifier with bracket-quoting (`'[dbo].[foo]'`, `'dbo.foo'`, `'simulated.dbo.foo'` all resolve identically); 4-segment names return NULL (linked-server form unmodeled).
-The type filter is case-insensitive but whitespace-sensitive — `'U'` and `'u'` match user tables; `' U '`, `'XX'`, `''` all → NULL.
+The type filter is compared against the object's `char(2)` type code, so ANSI padding decides what whitespace it tolerates (all probe-confirmed): `'U'`, `'u'` and `'U '` match user tables, while `'U  '` and `'PK '` are a character too long to be a `char(2)` value at all, and `' U'` / `'U' + char(9)` are different `char(2)` values.
+`'XX'` and `''` → NULL for the ordinary reason.
 Modeled codes: `U` (table), `V` (view, catalog views included), `P` (procedure), `FN` / `IF` (scalar UDF / inline TVF), `TR` (DML trigger), `SN` (synonym), and the five constraint families `PK` / `UQ` / `C` / `D` / `F`; the rest → NULL until those features land.
 A NULL on any argument propagates NULL.
 
@@ -268,8 +269,10 @@ NULL `object_id` / missing id → NULL; NULL `database_id` / out-of-range `datab
 Result type: `sysname`.
 
 **`OBJECT_SCHEMA_NAME(object_id [, database_id])`** (`Parser/Expressions/ObjectSchemaName.cs`): same lookup walk as `OBJECT_NAME`; returns the owning `Schema.Name` instead of the object leaf.
-Same NULL / ignored-db_id semantics.
+Same NULL semantics, and the same load-bearing `database_id` argument (probe-confirmed: an id read against another database's id answers NULL, against its own answers the schema).
 Result type: `sysname`.
+
+All three read through the metadata-visibility filter of whichever database the name or id lands in — see [`permissions.md`](permissions.md#cross-database-metadata-visibility) for the Msg-916-vs-NULL split between the name form and the id form.
 
 - **TableType / sys.objects gap**: `OBJECT_NAME` and `OBJECT_SCHEMA_NAME` both resolve table-type objects through `Schema.TableTypes` directly, so `SELECT OBJECT_NAME(type_table_object_id) FROM sys.table_types` works.
   `sys.objects` itself doesn't currently surface TT-rows (separate namespace per the `SchemaObjects()` enumerator's design), so the same lookup via `sys.objects WHERE type = 'TT'` returns empty.

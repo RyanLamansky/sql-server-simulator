@@ -452,6 +452,33 @@ internal sealed class HeapTable : SchemaObject
         this.RowLocks.GetOrAdd((pageIndex, slotIndex), static (_, t) => new LockResource { OwningTable = t }, this);
 
     /// <summary>
+    /// Lazily-interned key-range <see cref="LockResource"/>s keyed by the
+    /// <see cref="KeyRange"/> they cover — the phantom-prevention resources a
+    /// SERIALIZABLE / HOLDLOCK reader holds and every writer probes. Entries
+    /// leak once interned, the same way <see cref="RowLocks"/> does; the
+    /// <see cref="ActiveKeyRangeLocks"/> counter, not the dictionary's size,
+    /// is what tells a writer whether any probing is needed.
+    /// </summary>
+    public readonly ConcurrentDictionary<KeyRange, LockResource> KeyRangeLocks = new();
+
+    /// <summary>
+    /// Count of range-mode holds live across this table's
+    /// <see cref="KeyRangeLocks"/>. Maintained by <see cref="LockManager"/>
+    /// via <see cref="Interlocked"/> under its gate and read lock-free with
+    /// <c>Volatile.Read</c> by the writer's per-row range probe: at zero, no
+    /// SERIALIZABLE reader holds an interval on this table, so the writer
+    /// skips decoding its row and touching the gate entirely.
+    /// </summary>
+    public int ActiveKeyRangeLocks;
+
+    /// <summary>
+    /// Returns the <see cref="LockResource"/> covering <paramref name="range"/>,
+    /// allocating one (back-referenced to this table) on first reference.
+    /// </summary>
+    public LockResource GetOrCreateKeyRangeLock(KeyRange range) =>
+        this.KeyRangeLocks.GetOrAdd(range, static (_, t) => new LockResource { OwningTable = t }, this);
+
+    /// <summary>
     /// Table-level data lock used when an INSERT / UPDATE / DELETE / MERGE
     /// has escalated its per-row X locks to a single table-X (the escalation
     /// threshold lives in <see cref="SimulatedDbTransaction.RowLockEscalationThreshold"/>),

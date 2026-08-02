@@ -528,4 +528,31 @@ public sealed class PlanCacheTests
             AreEqual(entriesBefore, sim.PlanCacheCount);
         }
     }
+
+    [TestMethod]
+    public void NonDefaultIsolationLevel_NeitherHitsNorPromotes()
+    {
+        // A cached plan carries the lock acquisitions its parsing session
+        // made, so replaying one under a different isolation level would
+        // settle the wrong protection — most visibly a SERIALIZABLE reader's
+        // key-range fence. Both the lookup and the promotion skip.
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        {
+            AreEqual(3, RunCount(connection, "select val from t"));
+            var hitsBefore = sim.PlanCacheHits;
+            var entriesBefore = sim.PlanCacheCount;
+
+            using (var setIso = connection.CreateCommand())
+            {
+                setIso.CommandText = "set transaction isolation level serializable";
+                _ = setIso.ExecuteNonQuery();
+            }
+
+            AreEqual(3, RunCount(connection, "select val from t"));
+            AreEqual(3, RunCount(connection, "select id from t"));
+            AreEqual(hitsBefore, sim.PlanCacheHits);
+            AreEqual(entriesBefore, sim.PlanCacheCount);
+        }
+    }
 }

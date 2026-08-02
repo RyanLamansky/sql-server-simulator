@@ -179,7 +179,7 @@ internal sealed class Value : Expression
 
     private protected override bool IsStructuralConstant => this.IsLiteral;
 
-    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => this.Constant.IsNull;
+    internal override bool ResultIsNullable(NullabilityContext context) => this.Constant.IsNull;
 
     // A decimal-typed Value is always a decimal/numeric literal (constant @@
     // keywords never land on decimal, and parameters are separate expression

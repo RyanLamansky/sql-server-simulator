@@ -13,9 +13,10 @@ partial class Selection
     /// <item>Direct column ref preserves source column's nullability + identity.</item>
     /// <item>Identity propagates only when the FROM clause is a single
     /// non-joined heap source — JOIN/UNION/derived-table drop identity.</item>
-    /// <item>Nullability defers to <see cref="Expression.ResultIsNullable"/>
-    /// — ISNULL non-null iff either arg is, CASE non-null iff every branch
-    /// is, literals non-null unless bare NULL, everything else nullable.</item>
+    /// <item>Nullability defers to <see cref="Expression.ResultIsNullable"/>,
+    /// whose XML doc carries the whole rule set — the same inference real
+    /// applies to result metadata, so a destination column and the wire's
+    /// COLMETADATA <c>fNullable</c> flag agree cell for cell.</item>
     /// </list>
     /// Validates the destination shape: every projection column must have a
     /// name (Msg 1038), no duplicate names allowed (Msg 2705).
@@ -26,13 +27,17 @@ partial class Selection
     /// <param name="outputColumnNames">Projection column names (parallel to <paramref name="projections"/>).</param>
     /// <param name="sources">FROM-clause sources; null/empty for no-FROM SELECT.</param>
     /// <param name="joins">FROM-clause join specs; identity drops on any join.</param>
+    /// <param name="parseBatch">The parsing batch, threaded into the nullability inference.</param>
+    /// <param name="resolveColumnType">Column-type resolver, threaded into the nullability inference.</param>
     internal static HeapColumn[] ComputeIntoDestSchema(
         MultiPartName targetName,
         List<Expression> projections,
         SqlType[] outputSchema,
         string[] outputColumnNames,
         FromSource[] sources,
-        JoinSpec[] joins)
+        JoinSpec[] joins,
+        BatchContext parseBatch,
+        Func<MultiPartName, SqlType> resolveColumnType)
     {
         var destColumns = new HeapColumn[projections.Count];
         var seenNames = new HashSet<string>(BuiltInToken.Comparer);
@@ -47,6 +52,8 @@ partial class Selection
             return s == -1 || sources[s].Columns[c].Nullable;
         }
 
+        var nullabilityContext = new NullabilityContext(parseBatch, ResolveColumnNullable, resolveColumnType);
+
         for (var i = 0; i < projections.Count; i++)
         {
             var colName = outputColumnNames[i];
@@ -55,7 +62,7 @@ partial class Selection
             if (!seenNames.Add(colName))
                 throw SimulatedSqlException.DuplicateColumnInSelectInto(colName, targetName.ToString());
 
-            var nullable = projections[i].ResultIsNullable(ResolveColumnNullable);
+            var nullable = projections[i].ResultIsNullable(nullabilityContext);
             IdentityState? identity = null;
             // Direct column ref → maybe propagate identity. NamedExpression
             // wraps the parser's renaming; the underlying Reference is what

@@ -95,6 +95,16 @@ internal sealed class GreatestLeast : Expression
         return haveBest ? best : SqlValue.Null(resultType!);
     }
 
+    internal override bool ResultIsNullable(NullabilityContext context)
+    {
+        foreach (var argument in this.arguments)
+        {
+            if (argument.ResultIsNullable(context))
+                return true;
+        }
+        return false;
+    }
+
     internal override string DebugDisplay() =>
         $"{(this.isLeast ? "LEAST" : "GREATEST")}({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";
 }

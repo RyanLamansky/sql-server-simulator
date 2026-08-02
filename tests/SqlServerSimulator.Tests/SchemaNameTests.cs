@@ -92,8 +92,16 @@ public sealed class SchemaNameTests
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select object_schema_name(99999)"));
 
     [TestMethod]
-    public void ObjectSchemaName_WithDbIdArg_IgnoresArg()
-        => AreEqual("dbo", new Simulation().ExecuteScalar("create table foo (id int); select object_schema_name(object_id('foo'), 1)"));
+    public void ObjectSchemaName_WithDbIdArg_ScopesTheLookupToThatDatabase()
+    {
+        // The argument is load-bearing, as OBJECT_NAME's is: database 1 is
+        // master, which holds nothing with that id (probe-confirmed NULL), while
+        // the session's own id answers.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table foo (id int)");
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select object_schema_name(object_id('foo'), 1)"));
+        AreEqual("dbo", sim.ExecuteScalar("select object_schema_name(object_id('foo'), db_id())"));
+    }
 
     [TestMethod]
     public void RowConstructorIn_RejectedWithMatchingMsg4145()

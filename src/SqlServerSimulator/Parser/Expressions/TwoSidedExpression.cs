@@ -125,6 +125,68 @@ internal abstract class TwoSidedExpression : Expression
     }
 
     /// <summary>
+    /// Per-operator projection nullability. Arithmetic claims nullable
+    /// unconditionally — real answers nullable even for <c>1 + 1</c> — while
+    /// the bitwise operators and the concatenating spelling of <c>+</c>
+    /// propagate their operands', so <c>col_a + col_b</c> over two NOT NULL
+    /// <c>varchar</c>s is NOT NULL where the same shape over two NOT NULL
+    /// <c>int</c>s is not (probe-confirmed against SQL Server 2025). Which
+    /// <c>+</c> this is comes from the result type: <see cref="Add"/> dispatches
+    /// on operand category, so a string / binary result means it concatenated.
+    /// </summary>
+    /// <remarks>
+    /// The left spine is walked iteratively, folding the operand type and the
+    /// nullability together in one pass — mirroring <see cref="Run(RuntimeContext)"/> and
+    /// <see cref="GetSqlType"/>, and for the same reason: a flat chain of
+    /// thousands of terms would otherwise recurse once per term and re-resolve
+    /// the whole left prefix's type at every level.
+    /// </remarks>
+    internal sealed override bool ResultIsNullable(NullabilityContext context)
+    {
+        if (this.left is not TwoSidedExpression)
+        {
+            return this.Operator switch
+            {
+                '&' or '|' or '^' => this.left.ResultIsNullable(context) || this.right.ResultIsNullable(context),
+                '+' when Concatenates(context.TypeOf(this)) =>
+                    this.left.ResultIsNullable(context) || this.right.ResultIsNullable(context),
+                _ => true,
+            };
+        }
+
+        var spine = new List<TwoSidedExpression>();
+        Expression node = this;
+        while (node is TwoSidedExpression twoSided)
+        {
+            spine.Add(twoSided);
+            node = twoSided.left;
+        }
+
+        var accumulatedType = node.GetSqlType(context.Batch, context.ColumnType);
+        var nullable = node.ResultIsNullable(context);
+        for (var i = spine.Count - 1; i >= 0; i--)
+        {
+            var current = spine[i];
+            accumulatedType = current.CombineType(accumulatedType, context.Batch, context.ColumnType);
+            nullable = current.Operator switch
+            {
+                '&' or '|' or '^' => nullable || current.right.ResultIsNullable(context),
+                '+' when Concatenates(accumulatedType) => nullable || current.right.ResultIsNullable(context),
+                _ => true,
+            };
+            // Nullability only widens along the chain, so the first arithmetic
+            // operator settles the whole answer.
+            if (nullable)
+                return true;
+        }
+        return false;
+    }
+
+    private static bool Concatenates(SqlType resultType) =>
+        resultType.Category == SqlTypeCategory.String
+        || resultType is VarbinarySqlType or BinarySqlType;
+
+    /// <summary>
     /// Combines an already-resolved left-operand type with this node's right
     /// operand and operator, applying the same string-concat collation
     /// propagation the former recursive <see cref="GetSqlType"/> did per node.

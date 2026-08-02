@@ -217,13 +217,13 @@ internal sealed class XmlDmlItem
 /// the instance holds exactly one matching node, while
 /// <c>(/r/a/text())[1]</c> is <c>text ?</c> and accepted.
 /// </summary>
-internal readonly struct XmlDmlPath(string body, string xpath, XmlDmlNodeKind kind, string name, bool singleton)
+internal readonly struct XmlDmlPath(string body, XmlQueryExpr compiled, XmlDmlNodeKind kind, string name, bool singleton)
 {
     /// <summary>The path body as written, with the prolog already stripped.</summary>
     public readonly string Body = body;
 
-    /// <summary>The XPath 1.0 translation evaluated against the instance.</summary>
-    public readonly string XPath = xpath;
+    /// <summary>The compiled path, evaluated against the instance.</summary>
+    public readonly XmlQueryExpr Compiled = compiled;
 
     /// <summary>The node kind the path's last step selects.</summary>
     public readonly XmlDmlNodeKind Kind = kind;
@@ -357,13 +357,10 @@ internal sealed class XmlDml
         var document = XDocument.Parse(xmlText);
         var navigator = (document.Root ?? (XNode)document).CreateNavigator();
         var selected = new List<XObject>();
-        if (navigator.Evaluate(this.Target.XPath) is XPathNodeIterator iterator)
+        foreach (var item in XmlQueryEngine.Select(navigator, this.Target.Compiled))
         {
-            while (iterator.MoveNext())
-            {
-                if (iterator.Current!.UnderlyingObject is XObject matched)
-                    selected.Add(matched);
-            }
+            if (item is XPathNavigator node && node.UnderlyingObject is XObject matched)
+                selected.Add(matched);
         }
 
         switch (this.Kind)

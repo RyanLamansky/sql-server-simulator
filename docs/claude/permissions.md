@@ -4,6 +4,7 @@
 **Permissions are enforced**: a non-dbo session's SELECT / INSERT / UPDATE / DELETE / EXECUTE and every modeled CREATE / ALTER / DROP statement are checked at execution time against its effective principal, with role closure, fixed roles, DENY-beats-GRANT, covering permissions, and ownership chaining.
 **Session identity is real**: a per-connection principal (original login + database user + impersonation stack) drives the identity scalars, `EXECUTE AS` / `REVERT`, module `WITH EXECUTE AS`, connection-string / TDS authentication, and the per-database identity a cross-database reference or a `USE` resolves through.
 A session that never authenticates and never runs `EXECUTE AS` is `dbo`, and **dbo bypasses every check** — the enforcement layer short-circuits on `SessionSecurityContext.EffectiveIsDbo` before any allocation, so existing (dbo) consumers see byte-identical behavior.
+(The one `dbo` that doesn't bypass everything is a module's `WITH EXECUTE AS OWNER` / `SELF` frame, whose privilege stops at the database boundary — see [Cross-database references](#cross-database-references).)
 Logins are enforced as connection credentials at both front doors (TDS endpoint — see [`tds-endpoint.md`](tds-endpoint.md) — and in-process `User ID=` connection strings).
 
 ## Storage
@@ -50,8 +51,8 @@ User principals start at 5 via `Database.AllocatePrincipalId`.
 
 `SessionSecurityContext` (`src/SqlServerSimulator/SessionSecurityContext.cs`) lives on `SimulatedDbConnection.Security` (session scope).
 It carries the original login name, a base `SecurityPrincipalFrame` (database-principal id + name + login), and an impersonation stack.
-`Effective` is the top frame (or the base); `EffectiveIsDbo` (principal id == 1) is the bypass every enforcement gate short-circuits on.
-Each frame also records whether its identity is `IsDatabaseScoped` — see [Cross-database references](#cross-database-references).
+`Effective` is the top frame (or the base); `EffectiveIsDbo` (principal id == 1) is the bypass every same-database enforcement gate short-circuits on.
+Each frame also records whether its identity is `IsDatabaseScoped`, which is what makes a reference *across* a boundary ask `PermissionEnforcement.Bypasses` instead — see [Cross-database references](#cross-database-references).
 An unauthenticated in-process connection uses `CreateDefault()` — dbo as login, database user, and original login everywhere — so existing consumers see byte-identical identity output.
 
 **Identity scalars read the effective frame**: `CURRENT_USER` / `SESSION_USER` / `USER` / `USER_NAME()` / `USER_ID()` / `DATABASE_PRINCIPAL_ID()` → the effective database user; `SYSTEM_USER` / `SUSER_SNAME()` / `SUSER_NAME()` → the effective login (or the WITHOUT-LOGIN SID string); `ORIGINAL_LOGIN()` → the session's original login.
@@ -249,19 +250,25 @@ All probe-confirmed against SQL Server 2025.
 | The login's user in the target holds the permission | allowed |
 | It holds nothing (the session-database user's grant does **not** travel) | **Msg 229** naming the *target* database — `The SELECT permission was denied on the object 't2', database 'other', schema 'dbo'.` |
 | The login has **no user** in the target | **Msg 916** sev 14 state 2 — `The server principal "app" is not able to access the database "other" under the current security context.` |
-| The effective principal is `dbo` (sysadmin, or the unauthenticated in-process default) | unrestricted |
+| The effective principal is `dbo` (sysadmin, or the unauthenticated in-process default) | unrestricted — unless the `dbo` is a module's database-scoped `WITH EXECUTE AS OWNER` / `SELF` frame, which is refused like any other one |
 
-The `dbo` bypass stays a single bool read on the session's effective principal, so nothing but a genuinely restricted principal ever pays a lookup, and the lookup only runs when the touched database differs from the session's.
-That bypass is exact in the simulator's principal model: an effective `dbo` can only have come from a sysadmin login or the empty-registry dev mode, both of which are `dbo` in every database.
+The `dbo` bypass stays two field reads on the session's effective frame, so nothing but a genuinely restricted principal ever pays a lookup, and the lookup only runs when the touched database differs from the session's.
+That bypass is exact in the simulator's principal model: an effective `dbo` can only have come from a sysadmin login, the empty-registry dev mode, or a module's `WITH EXECUTE AS OWNER` / `SELF` frame — the first two `dbo` in every database, and the third refused at the boundary along with the other database-scoped identities below.
+`PermissionEnforcement.Bypasses(connection, target)` is the boundary-aware form every cross-database check site asks (`BypassesEverywhere` the same question with no target in hand, for the securable-list skips); `SessionSecurityContext.EffectiveIsDbo` remains the same-database one.
 
 A **catalog-view** read of another database asks the same question — see [Cross-database metadata visibility](#cross-database-metadata-visibility).
 
 **A database-scoped identity crosses only out of a `TRUSTWORTHY` database.**
-An `EXECUTE AS USER` frame, a module's `WITH EXECUTE AS <user>` frame, and an activated application role carry no server principal, so out of an ordinary database *every* cross-database reference raises Msg 916 whatever the target's grants say.
+An `EXECUTE AS USER` frame, any of a module's `WITH EXECUTE AS` frames, and an activated application role carry no server principal, so out of an ordinary database *every* cross-database reference raises Msg 916 whatever the target's grants say.
 The name in the message is the frame's reported login identity: the login for a `FOR LOGIN` user or an application role (the session's login survives the activation), and the `S-1-9-3-…` SID for a `WITHOUT LOGIN` user.
 `SecurityPrincipalFrame.IsDatabaseScoped` is the marker.
 
-Turning the **source** database's `TRUSTWORTHY` on (the database the token was made in — the target's flag is irrelevant) accepts the token, after which the frame's own login answers in the target like any ordinary session's: an object it holds nothing on is Msg 229 naming the target, and a login with no user there is still Msg 916.
+**`WITH EXECUTE AS OWNER` / `SELF` is database-scoped too**, though both resolve to `dbo`: the token is minted in the module's database and its `dbo`-ness stops at the boundary, so a body that reads, writes, `USE`s or reads the catalog of another database out of a non-trustworthy source is refused — probe-confirmed, and refused even when the session's own login is `sa`.
+Data reference, catalog read and `OBJECT_ID`'s three-part name all raise the same Msg 916; the id-form `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` still answer, since those ask only the visibility question (see [Cross-database metadata visibility](#cross-database-metadata-visibility)).
+Everything the frame does in its *own* database is unaffected — the bypass is boundary-aware, not withdrawn.
+The message names `dbo`, the identity every simulated database is owned by; real names the owner's login (`sa` on the probed instance).
+
+Turning the **source** database's `TRUSTWORTHY` on (the database the token was made in — the target's flag is irrelevant) accepts the token, after which the frame's own login answers in the target like any ordinary session's: an object it holds nothing on is Msg 229 naming the target, and a login with no user there is still Msg 916 — while an accepted `OWNER` / `SELF` token carries its `dbo` through and answers unrestricted.
 So a `WITHOUT LOGIN` user, whose reported identity is a SID rather than a login, is refused however trustworthy the source is.
 All probe-confirmed against SQL Server 2025.
 
@@ -287,9 +294,6 @@ A login with no user there gets Msg 916 and the session stays put; a missing dat
 `USE` runs the same gate, so a `TRUSTWORTHY` source lets an impersonating session switch where a non-trustworthy one gets Msg 916 (probe-confirmed).
 
 **Divergences.**
-The `dbo` bypass short-circuits ahead of the database-scoped-frame test, so a module's `WITH EXECUTE AS OWNER` / `SELF` frame (which resolves to `dbo`) crosses a database boundary the simulator never questions.
-Real refuses it out of a non-trustworthy database like any other database-scoped token — probe-confirmed, and it refuses even when the session's own login is `sa`.
-
 The `TRUSTWORTHY` flag is read off the **session's** current database, which is the token's home for a direct `EXECUTE AS USER` and for every same-database module; a module invoked through a three-part name carries a frame made in *its* database, and real would read the flag there.
 
 ### Reference provenance: synonyms
@@ -326,7 +330,7 @@ Visibility is **object-grain**: one permission on the object reveals *all* its c
 DENY does not hide metadata (grant-only scan — an assumption; DENY-hides-metadata was not probed).
 
 The filter is a per-enumeration seam on the catalog-view row generators (`BuiltInResources.ApplyMetadataFilter`, wired into both `Selection.ForCatalogView` overloads), gated by `PermissionEnforcement.MetadataVisibilityPrincipal(batch, targetDatabase)` — which returns the principal to filter by, or null for full visibility. It is a **session**-principal check that (unlike `Applies`) is NOT suppressed inside a module body, since metadata visibility is a property of the session principal, not the execution frame.
-(`MetadataVisibilityApplies(batch)` is the same question in bool form for the session's own database — what the `OBJECT_ID` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` scalars read.)
+The `OBJECT_ID` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` scalars read the same seam — `MetadataVisibilityPrincipal` for the name form, `TryMetadataVisibilityPrincipal` (which hides instead of raising) for the id form.
 The dbo / full-visibility fast path short-circuits on the session principal before any allocation, so existing (dbo) and SMO-as-sysadmin consumers pay one bool read and are unaffected.
 Each filtered view carries a `CatalogView.MetadataVisibilityKey` (set once at registration in `BuiltInResources.MetadataVisibility.cs`) naming the row column that governs visibility: the object-id-keyed `sys.*` views key on the row's `object_id` (or `parent_object_id`), the name-keyed `INFORMATION_SCHEMA.*` object views on the owning schema + object name.
 Filtered views: `sys.objects` / `all_objects` / `tables` / `views` / `all_views` / `procedures` / `columns` / `all_columns` / `parameters` / `all_parameters` / `sql_modules` / `all_sql_modules` / `indexes` / `index_columns` / `foreign_keys` / `foreign_key_columns` / `check_constraints` / `default_constraints` / `key_constraints` / `triggers` / `identity_columns` / `computed_columns` / `sequences` / `synonyms`, and `INFORMATION_SCHEMA.TABLES` / `COLUMNS` / `VIEWS` / `ROUTINES` / `PARAMETERS`.
@@ -348,7 +352,16 @@ A login with **no user** in the target gets **Msg 916**, and real raises it for 
 The guest rule follows the data path exactly: `master` / `tempdb` / `msdb` resolve to `guest` and filter by it, while `model` refuses like any user database.
 A database-scoped frame reaches another database's catalog only out of a `TRUSTWORTHY` source, as it reaches its data — see [Cross-database references](#cross-database-references).
 
-Not carried across the boundary yet: the `OBJECT_ID` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` scalars gate a three-part name against the *session's* database rather than the named one, so a restricted principal reads an id real would hide (and no Msg 916 where the login has no user in the target).
+**The `OBJECT_*` scalars ask in the database the argument names**, and real splits them by argument form — probe-confirmed against SQL Server 2025.
+
+`OBJECT_ID('other.dbo.t')` resolves the object first and gates second, so it behaves like a catalog read of `other`: the target user's visibility decides, and a login with no user there gets **Msg 916**.
+The resolve-first order is observable — a name that matches nothing (`other.dbo.no_such_table`), a name the type filter excludes (`OBJECT_ID('other.dbo.t', 'P')`), and an unknown database all answer NULL rather than raising, in a database the login could never have reached.
+The guest rule follows the data path: `master` / `tempdb` / `msdb` resolve to `guest` and filter by it, `model` refuses.
+A registered catalog view (`other.sys.tables`) answers its id ungated — real reveals the system views to everyone.
+
+`OBJECT_NAME(id, database_id)` and `OBJECT_SCHEMA_NAME(id, database_id)` ask the visibility question **alone** and never raise: a database the login has no user in simply reveals nothing, so the answer is NULL.
+Their bypass is the plain effective-`dbo` one rather than the boundary-aware `Bypasses`, which is real's own asymmetry — the `WITH EXECUTE AS OWNER` body that gets Msg 916 for `other.sys.tables` still reads `OBJECT_NAME(id, db_id('other'))`.
+`OBJECT_DEFINITION` takes no database argument, so it has no cross-database path at all (real's Msg 916 in that shape comes from the `OBJECT_ID` feeding it).
 
 ### Principal DDL
 

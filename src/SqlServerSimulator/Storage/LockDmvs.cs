@@ -31,6 +31,10 @@ internal static class LockDmvs
         LockMode.Shared => "S",
         LockMode.Update => "U",
         LockMode.Exclusive => "X",
+        LockMode.RangeSharedShared => "RangeS-S",
+        LockMode.RangeSharedUpdate => "RangeS-U",
+        LockMode.RangeExclusiveExclusive => "RangeX-X",
+        LockMode.RangeInsertNull => "RangeI-N",
         _ => mode.ToString(),
     };
 
@@ -51,6 +55,10 @@ internal static class LockDmvs
         var waitStatus = SqlValue.FromNVarchar("WAIT");
         var objectType = SqlValue.FromNVarchar("OBJECT");
         var ridType = SqlValue.FromNVarchar("RID");
+        // Real reports a key-range lock as resource_type KEY with a hash of the
+        // anchoring index key; the simulator names the interval itself (see
+        // KeyRange.ToString), so the type matches and the description doesn't.
+        var keyType = SqlValue.FromNVarchar("KEY");
 
         var waitsByResource = SnapshotWaiters(sim);
 
@@ -66,6 +74,11 @@ internal static class LockDmvs
                 {
                     var desc = $"{kv.Key.PageIndex}:{kv.Key.SlotIndex}";
                     foreach (var row in EmitRowsForResource(ridType, dbId, desc, t.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus))
+                        yield return row;
+                }
+                foreach (var kv in t.KeyRangeLocks)
+                {
+                    foreach (var row in EmitRowsForResource(keyType, dbId, kv.Key.ToString(), t.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus))
                         yield return row;
                 }
             }
@@ -278,6 +291,11 @@ internal static class LockDmvs
                     {
                         if (ReferenceEquals(kv.Value, resource))
                             return $"RID: {t.Name} {kv.Key.PageIndex}:{kv.Key.SlotIndex}";
+                    }
+                    foreach (var kv in t.KeyRangeLocks)
+                    {
+                        if (ReferenceEquals(kv.Value, resource))
+                            return $"KEY: {t.Name} {kv.Key}";
                     }
                 }
             }

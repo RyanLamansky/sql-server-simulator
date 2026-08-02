@@ -42,10 +42,12 @@ partial class Simulation
     /// raises Msg 911 first (probe-confirmed — existence is reported even to a
     /// principal that couldn't have opened it); an active application role
     /// raises Msg 505 ahead of everything, since real reports the approle
-    /// wording even for a would-be-dbo session. A restricted principal then
-    /// has to resolve in the target: its login's user there becomes the
-    /// session's base identity (so <c>CURRENT_USER</c> follows the switch),
-    /// and a login with no user there gets Msg 916 with the session left put.
+    /// wording even for a would-be-dbo session. Anything the boundary-aware
+    /// bypass doesn't wave through then has to resolve in the target — a
+    /// restricted principal, and a database-scoped <c>dbo</c> frame alike: its
+    /// login's user there becomes the session's base identity (so
+    /// <c>CURRENT_USER</c> follows the switch), and a login with no user there
+    /// gets Msg 916 with the session left put.
     /// </summary>
     internal static void SwitchDatabase(SimulatedDbConnection connection, string databaseName)
     {
@@ -54,7 +56,7 @@ partial class Simulation
             throw SimulatedSqlException.CannotChangeDatabaseUnderApplicationRole();
         if (!connection.Simulation.Databases.TryGetValue(databaseName, out var target))
             throw SimulatedSqlException.DatabaseDoesNotExist(databaseName);
-        if (!security.EffectiveIsDbo)
+        if (!PermissionEnforcement.Bypasses(connection, target))
         {
             var principal = PermissionEnforcement.ResolveCrossDatabasePrincipal(connection, target);
             security.RebindBaseFrameToDatabaseUser(principal);

@@ -1174,4 +1174,576 @@ public sealed class ForXmlTests
     public void SetVariable_ForXmlSubquery_Allowed()
         => AreEqual("""<row a="1"/>""",
             new Simulation().ExecuteScalar("declare @x nvarchar(max); set @x = (select 1 as a for xml raw); select @x"));
+
+    // ---- duplicate options (every mode) ----
+
+    [TestMethod]
+    public void DuplicateType_Msg102NearXml()
+        => new Simulation().AssertSqlError("select 1 a for xml raw, type, type", 102, "Incorrect syntax near 'XML'.");
+
+    [TestMethod]
+    public void DuplicateRoot_Msg102NearXml()
+        => new Simulation().AssertSqlError("select 1 a for xml raw, root('a'), root('b')", 102, "Incorrect syntax near 'XML'.");
+
+    [TestMethod]
+    public void DuplicateBinaryBase64_Msg102NearXml()
+        => new Simulation().AssertSqlError("select 1 a for xml auto, binary base64, binary base64", 102, "Incorrect syntax near 'XML'.");
+
+    /// <summary>ELEMENTS repeats the same way, whether or not the second one carries a modifier.</summary>
+    [TestMethod]
+    public void DuplicateElements_Msg102NearXml()
+    {
+        new Simulation().AssertSqlError("select 1 a for xml raw, elements, elements", 102, "Incorrect syntax near 'XML'.");
+        new Simulation().AssertSqlError("select 1 a for xml raw, elements xsinil, elements", 102, "Incorrect syntax near 'XML'.");
+        new Simulation().AssertSqlError("select 1 a for xml path, elements, elements", 102, "Incorrect syntax near 'XML'.");
+    }
+
+    /// <summary>An intervening option doesn't reset the rule.</summary>
+    [TestMethod]
+    public void DuplicateOptionAcrossOthers_Msg102NearXml()
+        => new Simulation().AssertSqlError("select 1 a for xml raw, type, root, type", 102, "Incorrect syntax near 'XML'.");
+
+    [TestMethod]
+    public void EachOptionOnceIsFine()
+        => AreEqual("<r><row><a>1</a></row></r>",
+            (string)new Simulation().ExecuteScalar("select 1 a for xml raw, elements, root('r')")!);
+
+    // ---- EXPLICIT: the universal table ----
+
+    private static string ExplicitXml(string query) => (string)new Simulation().ExecuteScalar(query)!;
+
+    /// <summary>
+    /// A universal table whose row order is a separate column, so the ordering
+    /// the tree-building protocol depends on can be driven without the sort key
+    /// entering the projection.
+    /// </summary>
+    private const string UniversalTable = """
+        create table ut (ord int, tg int, pr int, pid int, cid int, gid int);
+        """;
+
+    private static string ProtocolXml(string rows, string query)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(UniversalTable + "insert ut values " + rows);
+        return (string)sim.ExecuteScalar(query)!;
+    }
+
+    private const string ProtocolQuery =
+        "select tg as Tag, pr as Parent, pid as [p!1!id], cid as [c!2!cid], gid as [g!3!gid] from ut order by ord for xml explicit";
+
+    [TestMethod]
+    public void Explicit_SingleTag()
+        => AreEqual("""<emp id="1" nm="bob"/>""",
+            ExplicitXml("select 1 as Tag, null as Parent, 1 as [emp!1!id], 'bob' as [emp!1!nm] for xml explicit"));
+
+    [TestMethod]
+    public void Explicit_TwoLevelNesting()
+        => AreEqual("""<p id="1"><c cid="10"/><c cid="11"/></p><p id="2"><c cid="12"/></p>""",
+            ProtocolXml("(1,1,null,1,null,null),(2,2,1,null,10,null),(3,2,1,null,11,null),(4,1,null,2,null,null),(5,2,1,null,12,null)", ProtocolQuery));
+
+    /// <summary>A row for an outer tag closes everything the inner rows opened.</summary>
+    [TestMethod]
+    public void Explicit_ThreeLevelsAndSiblingClose()
+        => AreEqual("""<p id="1"><c cid="10"><g gid="100"/></c><c cid="11"/></p><p id="2"/>""",
+            ProtocolXml("(1,1,null,1,null,null),(2,2,1,null,10,null),(3,3,2,null,null,100),(4,2,1,null,11,null),(5,1,null,2,null,null)", ProtocolQuery));
+
+    /// <summary>Rows never collapse by value the way AUTO's levels do — every row opens its own element.</summary>
+    [TestMethod]
+    public void Explicit_IdenticalRowsDoNotMerge()
+        => AreEqual("""<p id="1"><c cid="10"/></p><p id="1"/>""",
+            ProtocolXml("(1,1,null,1,null,null),(2,2,1,null,10,null),(3,1,null,1,null,null)", ProtocolQuery));
+
+    /// <summary>Parent 0 means the document level, exactly as NULL does.</summary>
+    [TestMethod]
+    public void Explicit_ParentZeroIsDocumentLevel()
+        => AreEqual("""<e a="1"/>""",
+            ExplicitXml("select 1 as Tag, 0 as Parent, 1 as [e!1!a] for xml explicit"));
+
+    /// <summary>A tag-column value belonging to another tag is ignored, however non-NULL.</summary>
+    [TestMethod]
+    public void Explicit_ColumnsOfOtherTagsAreIgnored()
+        => AreEqual("""<p id="1"/>""",
+            ExplicitXml("select 1 as Tag, null as Parent, 1 as [p!1!id], 99 as [c!2!cid] for xml explicit"));
+
+    /// <summary>Attributes belong to the start tag, so they precede content whatever the written order.</summary>
+    [TestMethod]
+    public void Explicit_AttributesPrecedeContent()
+        => AreEqual("<e b=\"y\"><a>x</a><c>z</c></e>",
+            ExplicitXml("select 1 as Tag, null as Parent, 'x' as [e!1!a!element], 'y' as [e!1!b], 'z' as [e!1!c!element] for xml explicit"));
+
+    [TestMethod]
+    public void Explicit_TextContentAndChildElementsInterleave()
+        => AreEqual("<e>A<k>B</k>C</e>",
+            ExplicitXml("select 1 as Tag, null as Parent, 'A' as [e!1], 'B' as [e!1!k!element], 'C' as [e!1] for xml explicit"));
+
+    // ---- EXPLICIT: the column-name grammar ----
+
+    /// <summary>An absent or empty attribute name puts the value in the element's own text.</summary>
+    [TestMethod]
+    public void Explicit_UnnamedAttributeIsText()
+    {
+        AreEqual("<e>txt</e>", ExplicitXml("select 1 as Tag, null as Parent, 'txt' as [e!1] for xml explicit"));
+        AreEqual("<e>v</e>", ExplicitXml("select 1 as Tag, null as Parent, 'v' as [e!1!] for xml explicit"));
+        AreEqual("<e>v</e>", ExplicitXml("select 1 as Tag, null as Parent, 'v' as [e!1!!element] for xml explicit"));
+        AreEqual("<e>abcd</e>", ExplicitXml("select 1 as Tag, null as Parent, 'ab' as [e!1], 'cd' as [e!1!] for xml explicit"));
+    }
+
+    /// <summary>Directive words are matched case-insensitively.</summary>
+    [TestMethod]
+    public void Explicit_DirectiveNamesAreCaseInsensitive()
+    {
+        AreEqual("<e><a>txt</a></e>", ExplicitXml("select 1 as Tag, null as Parent, 'txt' as [e!1!a!element] for xml explicit"));
+        AreEqual("<e><a>txt</a></e>", ExplicitXml("select 1 as Tag, null as Parent, 'txt' as [e!1!a!ELEMENT] for xml explicit"));
+        AreEqual("<e><a>txt</a></e>", ExplicitXml("select 1 as Tag, null as Parent, 'txt' as [e!1!a!Element] for xml explicit"));
+    }
+
+    /// <summary>NULL: attributes and elements alike vanish, only elementxsinil marks it.</summary>
+    [TestMethod]
+    public void Explicit_NullHandlingPerDirective()
+    {
+        AreEqual("<e/>", ExplicitXml("select 1 as Tag, null as Parent, null as [e!1!a] for xml explicit"));
+        AreEqual("<e/>", ExplicitXml("select 1 as Tag, null as Parent, null as [e!1!a!element] for xml explicit"));
+        AreEqual("<e/>", ExplicitXml("select 1 as Tag, null as Parent, null as [e!1] for xml explicit"));
+        AreEqual("""<e xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><a xsi:nil="true"/></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, null as [e!1!a!elementxsinil] for xml explicit"));
+    }
+
+    /// <summary>
+    /// The xsi declaration follows the same placement rule the other modes use
+    /// — the ROOT when there is one, else every top-level element — and any
+    /// elementxsinil column arms it whether or not a NULL turns up.
+    /// </summary>
+    [TestMethod]
+    public void Explicit_XsinilDeclarationPlacement()
+    {
+        AreEqual("""<r xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><e><a xsi:nil="true"/></e></r>""",
+            ExplicitXml("select 1 as Tag, null as Parent, null as [e!1!a!elementxsinil] for xml explicit, root('r')"));
+        AreEqual("""<e xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" z="5"><a>v</a></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, 5 as [e!1!z], 'v' as [e!1!a!elementxsinil] for xml explicit"));
+        AreEqual("""<p xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><a xsi:nil="true"/><c/></p>""",
+            ExplicitXml("select 1 as Tag, null as Parent, null as [p!1!a!elementxsinil], null as [c!2!b] union all select 2,1,null,null for xml explicit"));
+    }
+
+    /// <summary>The xml directive is a passthrough — no escaping, no well-formedness check.</summary>
+    [TestMethod]
+    public void Explicit_XmlDirectiveIsRawPassthrough()
+    {
+        AreEqual("<e><a><b>x</b></a></e>", ExplicitXml("select 1 as Tag, null as Parent, '<b>x</b>' as [e!1!a!xml] for xml explicit"));
+        AreEqual("<e><b>x</b></e>", ExplicitXml("select 1 as Tag, null as Parent, '<b>x</b>' as [e!1!!xml] for xml explicit"));
+        AreEqual("<e><x>a & b < c</x></e>", ExplicitXml("select 1 as Tag, null as Parent, 'a & b < c' as [e!1!x!xml] for xml explicit"));
+        AreEqual("<e><x><a></x></e>", ExplicitXml("select 1 as Tag, null as Parent, '<a>' as [e!1!x!xml] for xml explicit"));
+    }
+
+    [TestMethod]
+    public void Explicit_CdataDirective()
+    {
+        AreEqual("<e><![CDATA[x<y]]></e>", ExplicitXml("select 1 as Tag, null as Parent, 'x<y' as [e!1!!cdata] for xml explicit"));
+        AreEqual("<e><a><![CDATA[zz]]></a></e>", ExplicitXml("select 1 as Tag, null as Parent, 'zz' as [e!1!a!cdata] for xml explicit"));
+        AreEqual("<e/>", ExplicitXml("select 1 as Tag, null as Parent, cast(null as varchar(9)) as [e!1!!cdata] for xml explicit"));
+    }
+
+    /// <summary>A CDATA section can't escape, so real breaks it apart after the first ']' of every ']]&gt;'.</summary>
+    [TestMethod]
+    public void Explicit_CdataSplitsOnSectionTerminator()
+    {
+        AreEqual("<e><![CDATA[a]]]><![CDATA[]>b]]></e>", ExplicitXml("select 1 as Tag, null as Parent, 'a]]>b' as [e!1!!cdata] for xml explicit"));
+        AreEqual("<e><![CDATA[a]]b]]></e>", ExplicitXml("select 1 as Tag, null as Parent, 'a]]b' as [e!1!!cdata] for xml explicit"));
+        AreEqual("<e><![CDATA[a]]]]><![CDATA[]>b]]></e>", ExplicitXml("select 1 as Tag, null as Parent, 'a]]]>b' as [e!1!!cdata] for xml explicit"));
+        AreEqual("<e><![CDATA[a]]]><![CDATA[]>]]]><![CDATA[]>b]]></e>", ExplicitXml("select 1 as Tag, null as Parent, 'a]]>]]>b' as [e!1!!cdata] for xml explicit"));
+    }
+
+    /// <summary>A hidden column emits nothing but still declares its tag.</summary>
+    [TestMethod]
+    public void Explicit_HideDirective()
+    {
+        AreEqual("""<e a="1"/>""", ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a], 'secret' as [e!1!h!hide] for xml explicit"));
+        AreEqual("<e/>", ExplicitXml("select 1 as Tag, null as Parent, 'v' as [e!1!!hide] for xml explicit"));
+        AreEqual("""<e a="1"><f/></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a], cast(null as int) as [f!2!b!hide] union all select 2,1,null,9 for xml explicit"));
+    }
+
+    /// <summary>hide combines with a content directive; the column just disappears.</summary>
+    [TestMethod]
+    public void Explicit_HideBeatsContentDirective()
+    {
+        AreEqual("<e/>", ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a!element!hide] for xml explicit"));
+        AreEqual("<e/>", ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a!hide!element] for xml explicit"));
+        AreEqual("<e/>", ExplicitXml("select 1 as Tag, null as Parent, '<b/>' as [e!1!a!xml!hide] for xml explicit"));
+    }
+
+    /// <summary>Outside an inline schema, id / idref / nmtoken serialize as ordinary attributes.</summary>
+    [TestMethod]
+    public void Explicit_IdentityDirectivesAreOrdinaryAttributes()
+    {
+        AreEqual("""<e a="1" b="1"/>""", ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a!id], 1 as [e!1!b!idref] for xml explicit"));
+        AreEqual("""<e a="1"/>""", ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a!nmtoken] for xml explicit"));
+        AreEqual("<e>v</e>", ExplicitXml("select 1 as Tag, null as Parent, 'v' as [e!1!!id] for xml explicit"));
+        AreEqual("<e><a>1</a></e>", ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a!id!element] for xml explicit"));
+    }
+
+    /// <summary>Duplicate attribute names on one tag pass straight through — real writes the ill-formed markup too.</summary>
+    [TestMethod]
+    public void Explicit_DuplicateAttributeNamesPassThrough()
+        => AreEqual("""<e a="1" a="2"/>""",
+            ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a], 2 as [e!1!a] for xml explicit"));
+
+    /// <summary>EXPLICIT emits names verbatim — neither RAW's escaping nor PATH's rejection applies.</summary>
+    [TestMethod]
+    public void Explicit_NamesAreWrittenVerbatim()
+    {
+        AreEqual("""<e f a b="1"/>""", ExplicitXml("select 1 as Tag, null as Parent, 1 as [e f!1!a b] for xml explicit"));
+        AreEqual("""<1e 2a="1"/>""", ExplicitXml("select 1 as Tag, null as Parent, 1 as [1e!1!2a] for xml explicit"));
+        AreEqual("""<p:e q:a="1"/>""", ExplicitXml("select 1 as Tag, null as Parent, 1 as [p:e!1!q:a] for xml explicit"));
+        AreEqual("""<e xmlns="1"/>""", ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!xmlns] for xml explicit"));
+    }
+
+    // ---- EXPLICIT: xmltext ----
+
+    /// <summary>An unnamed xmltext folds the overflow element's attributes and content onto the tag itself.</summary>
+    [TestMethod]
+    public void Explicit_XmlTextMergesOntoTag()
+        => AreEqual("""<e a="1" x="1">t</e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a], '<over x=\"1\">t</over>' as [e!1!!xmltext] for xml explicit"));
+
+    /// <summary>A named one keeps the attributes but takes the column's name.</summary>
+    [TestMethod]
+    public void Explicit_XmlTextNamedBecomesChildElement()
+    {
+        AreEqual("""<e a="1"><ov x="1">t</ov></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a], '<over x=\"1\">t</over>' as [e!1!ov!xmltext] for xml explicit"));
+        AreEqual("<e><ov/></e>", ExplicitXml("select 1 as Tag, null as Parent, '<over/>' as [e!1!ov!xmltext] for xml explicit"));
+    }
+
+    /// <summary>Merged attributes land after the tag's own, and content keeps its select-list position.</summary>
+    [TestMethod]
+    public void Explicit_XmlTextOrdering()
+        => AreEqual("""<e a="1" p="1"><k/>txt<c>z</c></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a], '<over p=\"1\"><k/>txt</over>' as [e!1!!xmltext], 'z' as [e!1!c!element] for xml explicit"));
+
+    /// <summary>An overflow attribute the row already wrote is dropped; the element still stops self-closing.</summary>
+    [TestMethod]
+    public void Explicit_XmlTextAttributeCollisionAndForcedOpenTag()
+    {
+        AreEqual("""<e a="1"></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a], '<over a=\"9\"/>' as [e!1!!xmltext] for xml explicit"));
+        AreEqual("""<e a="1"></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a], '<over/>' as [e!1!!xmltext] for xml explicit"));
+        AreEqual("""<e a="1"/>""",
+            ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a], cast(null as varchar(99)) as [e!1!!xmltext] for xml explicit"));
+    }
+
+    /// <summary>The overflow's content passes through as written, whitespace and nesting included.</summary>
+    [TestMethod]
+    public void Explicit_XmlTextContentIsVerbatim()
+    {
+        AreEqual("""<e p="1">  <k  ></k>  </e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, '<over  p = \"1\" >  <k  ></k>  </over>' as [e!1!!xmltext] for xml explicit"));
+        AreEqual("""<e xmlns="urn:z"><k/></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, '<over xmlns=\"urn:z\"><k/></over>' as [e!1!!xmltext] for xml explicit"));
+        AreEqual("<e><a>in</a></e>",
+            ExplicitXml("select 1 as Tag, null as Parent, '<a><a>in</a></a>' as [e!1!!xmltext] for xml explicit"));
+        AreEqual("""<e p="1">z</e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, '  <a p=\"1\">z</a>  ' as [e!1!!xmltext] for xml explicit"));
+        AreEqual("<e></e>", ExplicitXml("select 1 as Tag, null as Parent, '<a/><b/>' as [e!1!!xmltext] for xml explicit"));
+    }
+
+    /// <summary>
+    /// An overflow attribute value keeps its source text, only the delimiter
+    /// normalizing to <c>"</c> — so <c>&gt;</c> stays literal, an entity stays
+    /// an entity, and a <c>"</c> out of a single-quoted value comes back
+    /// unescaped (ill-formed markup real writes too).
+    /// </summary>
+    [TestMethod]
+    public void Explicit_XmlTextAttributeValuesAreVerbatim()
+    {
+        AreEqual("""<e p="a&amp;b" q="c&lt;d"></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, '<over p=''a&amp;b'' q=\"c&lt;d\"/>' as [e!1!!xmltext] for xml explicit"));
+        AreEqual("""<e p="a>b">z</e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, '<over p=\"a>b\">z</over>' as [e!1!!xmltext] for xml explicit"));
+        AreEqual("""<e p="a&gt;b"></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, '<over p=\"a&gt;b\"/>' as [e!1!!xmltext] for xml explicit"));
+        AreEqual("""<e p="a"b"></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, '<over p=''a\"b''/>' as [e!1!!xmltext] for xml explicit"));
+        AreEqual("""<e p="a&#x09;b&#x0A;c"></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, '<over p=\"a&#x09;b&#x0A;c\"/>' as [e!1!!xmltext] for xml explicit"));
+        AreEqual("""<e><ov p="a>b"/></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, '<over p=\"a>b\"/>' as [e!1!ov!xmltext] for xml explicit"));
+    }
+
+    // ---- EXPLICIT: options ----
+
+    [TestMethod]
+    public void Explicit_Root()
+        => AreEqual("""<r><e a="1"/></r>""",
+            ExplicitXml("select 1 as Tag, null as Parent, 1 as [e!1!a] for xml explicit, root('r')"));
+
+    [TestMethod]
+    public void Explicit_BinaryBase64()
+        => AreEqual("""<e a="AQI="/>""",
+            ExplicitXml("select 1 as Tag, null as Parent, cast(0x0102 as varbinary(9)) as [e!1!a] for xml explicit, binary base64"));
+
+    [TestMethod]
+    public void Explicit_ValueFormattingMatchesTheOtherModes()
+        => AreEqual("""<e bt="1" f="1.500000000000000e+000" d="2020-01-02T03:04:05" g="0E984725-C51C-4BF4-9960-E1C80E27ABA0"/>""",
+            ExplicitXml("""
+                select 1 as Tag, null as Parent, cast(1 as bit) as [e!1!bt], cast(1.5 as float) as [e!1!f],
+                       cast('2020-01-02T03:04:05' as datetime2(3)) as [e!1!d],
+                       cast('0E984725-C51C-4BF4-9960-E1C80E27ABA0' as uniqueidentifier) as [e!1!g]
+                for xml explicit
+                """));
+
+    /// <summary>Element text and attribute values take the mode-independent escaping table.</summary>
+    [TestMethod]
+    public void Explicit_Escaping()
+        => AreEqual("""<e y="a&quot;b"><x>a&amp;b&lt;c&gt;d</x></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, 'a&b<c>d' as [e!1!x!element], 'a\"b' as [e!1!y] for xml explicit"));
+
+    /// <summary>An empty rowset behaves as it does in every mode: no row, or one NULL under TYPE.</summary>
+    [TestMethod]
+    public void Explicit_EmptyRowset()
+    {
+        IsNull(new Simulation().ExecuteScalar("select 1 as Tag, null as Parent, 1 as [e!1!a] where 1=0 for xml explicit"));
+        AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select 1 as Tag, null as Parent, 1 as [e!1!a] where 1=0 for xml explicit, type"));
+    }
+
+    /// <summary>
+    /// An <c>xml</c>-typed column becomes a child element holding its nodes,
+    /// the rule RAW and AUTO also take (an attribute can't hold nodes). Real
+    /// re-serializes the embedded fragment and stamps <c>xmlns=""</c> on its
+    /// unprefixed top-level elements in EXPLICIT alone; the simulator embeds
+    /// the stored text as the other modes do.
+    /// </summary>
+    [TestMethod]
+    public void Explicit_XmlTypedColumnEmbedsAsNodes()
+        => AreEqual("<e><a><b>x</b></a></e>",
+            ExplicitXml("select 1 as Tag, null as Parent, cast('<b>x</b>' as xml) as [e!1!a] for xml explicit"));
+
+    [TestMethod]
+    public void Explicit_NestedTypeSubqueryEmbedsAsNodes()
+        => AreEqual("""<e><a><i v="9"/></a></e>""",
+            ExplicitXml("select 1 as Tag, null as Parent, (select 1 as Tag, null as Parent, 9 as [i!1!v] for xml explicit, type) as [e!1!a] for xml explicit"));
+
+    // ---- EXPLICIT: compile-time rejections ----
+
+    [TestMethod]
+    public void Explicit_FewerThanThreeColumns_Msg6801()
+    {
+        new Simulation().AssertSqlError("select 1 as [e!1!a] for xml explicit", 6801,
+            "FOR XML EXPLICIT requires at least three columns, including the tag column, the parent column, and at least one data column.");
+        _ = new Simulation().AssertSqlError("select 1 as Tag, 1 as [e!1!a] for xml explicit", 6801);
+    }
+
+    [TestMethod]
+    public void Explicit_InvalidColumnName_Msg6802()
+    {
+        new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as plaincol for xml explicit", 6802,
+            "FOR XML EXPLICIT query contains the invalid column name 'plaincol'. Use the TAGNAME!TAGID!ATTRIBUTENAME[!..] format where TAGID is a positive integer.");
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!] for xml explicit", 6802);
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!0!a] for xml explicit", 6802);
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!x!a] for xml explicit", 6802);
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!-1!a] for xml explicit", 6802);
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [!1!a] for xml explicit", 6802);
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 for xml explicit", 6802);
+    }
+
+    /// <summary>Tag ids are unbounded; only the row values have to match a declared one.</summary>
+    [TestMethod]
+    public void Explicit_LargeTagNumbers()
+    {
+        AreEqual("""<e a="1"/>""", ExplicitXml("select 255 as Tag, null as Parent, 1 as [e!255!a] for xml explicit"));
+        AreEqual("""<e a="1"/>""", ExplicitXml("select 100000 as Tag, null as Parent, 1 as [e!100000!a] for xml explicit"));
+    }
+
+    /// <summary>Tag and Parent must both be int; a compile-time miss is state 1.</summary>
+    [TestMethod]
+    public void Explicit_TagAndParentTypes_Msg6803And6804State1()
+    {
+        var tag = new Simulation().AssertSqlError("select '1' as Tag, null as Parent, 1 as [e!1!a] for xml explicit", 6803);
+        AreEqual("FOR XML EXPLICIT requires the first column to hold positive integers that represent XML tag IDs.", tag.Message);
+        AreEqual(1, tag.State);
+        _ = new Simulation().AssertSqlError("select cast(1 as bigint) as Tag, null as Parent, 1 as [e!1!a] for xml explicit", 6803);
+        _ = new Simulation().AssertSqlError("select cast(1 as smallint) as Tag, null as Parent, 1 as [e!1!a] for xml explicit", 6803);
+        var parent = new Simulation().AssertSqlError("select 1 as Tag, cast(null as bigint) as Parent, 1 as [e!1!a] for xml explicit", 6804);
+        AreEqual("FOR XML EXPLICIT requires the second column to hold NULL or nonnegative integers that represent XML parent tag IDs.", parent.Message);
+        AreEqual(1, parent.State);
+    }
+
+    /// <summary>The type check runs even over an empty rowset — it is compile time.</summary>
+    [TestMethod]
+    public void Explicit_TypeCheckIsCompileTime()
+        => new Simulation().AssertSqlError("select cast(1 as bigint) as Tag, null as Parent, 1 as [e!1!a] where 1=0 for xml explicit", 6803);
+
+    [TestMethod]
+    public void Explicit_TagAndParentNames_Msg6820()
+    {
+        new Simulation().AssertSqlError("select null as Parent, 1 as Tag, 1 as [e!1!a] for xml explicit", 6820,
+            "FOR XML EXPLICIT requires column 1 to be named 'TAG' instead of 'Parent'.");
+        new Simulation().AssertSqlError("select 1 as Tag, 1 as zz, 1 as [e!1!a] for xml explicit", 6820,
+            "FOR XML EXPLICIT requires column 2 to be named 'PARENT' instead of 'zz'.");
+        AreEqual("""<e a="1"/>""", ExplicitXml("select 1 as tag, null as parent, 1 as [e!1!a] for xml explicit"));
+    }
+
+    [TestMethod]
+    public void Explicit_TagRedeclaredWithAnotherName_Msg6812()
+    {
+        new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a], 2 as [f!1!b] for xml explicit", 6812,
+            "XML tag ID 1 that was originally declared as 'e' is being redeclared as 'f'.");
+        new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a], 2 as [E!1!b] for xml explicit", 6812,
+            "XML tag ID 1 that was originally declared as 'e' is being redeclared as 'E'.");
+    }
+
+    [TestMethod]
+    public void Explicit_UnknownDirective_Msg6824()
+    {
+        new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!bogus] for xml explicit", 6824,
+            "In the FOR XML EXPLICIT clause, mode 'bogus' in a column name is invalid.");
+        new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 'v' as [e!1!!] for xml explicit", 6824,
+            "In the FOR XML EXPLICIT clause, mode '' in a column name is invalid.");
+    }
+
+    /// <summary>Directive-combination rules, in real's own check order.</summary>
+    [TestMethod]
+    public void Explicit_DirectiveCombinations()
+    {
+        new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!element!element] for xml explicit", 6817,
+            "FOR XML EXPLICIT cannot combine multiple occurrences of ELEMENT, XML, XMLTEXT, and CDATA in column name 'e!1!a!element!element'.");
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!cdata!element] for xml explicit", 6817);
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!elementxsinil!element] for xml explicit", 6817);
+        new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!id!id] for xml explicit", 6813,
+            "FOR XML EXPLICIT cannot combine multiple occurrences of ID, IDREF, IDREFS, NMTOKEN, and/or NMTOKENS in column name 'e!1!a!id!id'.");
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!id!idref] for xml explicit", 6813);
+        new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!hide!hide] for xml explicit", 6835,
+            "FOR XML EXPLICIT field 'e!1!a!hide!hide' can specify the directive HIDE only once.");
+        new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!id!hide] for xml explicit", 6815,
+            "In the FOR XML EXPLICIT clause, ID, IDREF, IDREFS, NMTOKEN, and NMTOKENS attributes cannot be hidden in 'e!1!a!id!hide'.");
+        // A duplicate HIDE outranks both of the other combination rules.
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!element!element!hide!hide] for xml explicit", 6835);
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!element!element!id!id] for xml explicit", 6813);
+    }
+
+    [TestMethod]
+    public void Explicit_Idrefs_Msg6826()
+    {
+        new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!idrefs] for xml explicit", 6826,
+            "Every IDREFS or NMTOKENS column in a FOR XML EXPLICIT query must appear in a separate SELECT clause, and the instances must be ordered directly after the element to which they belong.");
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!nmtokens] for xml explicit", 6826);
+    }
+
+    [TestMethod]
+    public void Explicit_SecondXmlTextOnOneTag_Msg6827()
+        => new Simulation().AssertSqlError(
+            "select 1 as Tag, null as Parent, '<o1 p=\"1\"/>' as [e!1!!xmltext], '<o2 q=\"2\"/>' as [e!1!!xmltext] for xml explicit", 6827,
+            "FOR XML EXPLICIT queries allow only one XMLTEXT column per tag. Column 'e!1!!xmltext' declares another XMLTEXT column that is not permitted.");
+
+    /// <summary>The binary scan runs ahead of the universal table's own shape checks.</summary>
+    [TestMethod]
+    public void Explicit_BinaryWithoutBase64_Msg6829()
+    {
+        new Simulation().AssertSqlError("select 1 as Tag, null as Parent, cast(0x01 as varbinary(4)) as [e!1!b] for xml explicit", 6829,
+            "FOR XML EXPLICIT and RAW modes currently do not support addressing binary data as URLs in column 'e!1!b'. Remove the column, or use the BINARY BASE64 mode, or create the URL directly using the 'dbobject/TABLE[@PK1=\"V1\"]/@COLUMN' syntax.");
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as zz, cast(0x01 as varbinary(4)) as [e!1!b] for xml explicit", 6829);
+        _ = new Simulation().AssertSqlError("select 1 as Tag, cast(0x01 as varbinary(4)) as b for xml explicit", 6829);
+    }
+
+    [TestMethod]
+    public void Explicit_ElementsOption_Msg6825()
+        => new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a] for xml explicit, elements", 6825,
+            "ELEMENTS option is only allowed in RAW, AUTO, and PATH modes of FOR XML.");
+
+    [TestMethod]
+    public void Explicit_RowTagArgument_Msg6859()
+    {
+        var ex = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a] for xml explicit('x')", 6859);
+        AreEqual("Row tag name is only allowed with RAW or PATH mode of FOR XML.", ex.Message);
+        AreEqual(15, ex.Class);
+        _ = new Simulation().AssertSqlError("select 1 a for xml auto('x')", 6859);
+    }
+
+    [TestMethod]
+    public void Explicit_XmlSchema_Msg3625()
+    {
+        var ex = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a] for xml explicit, xmlschema", 3625);
+        AreEqual("'Inline XSD for FOR XML EXPLICIT' is not yet implemented.", ex.Message);
+        AreEqual(17, ex.State);
+    }
+
+    [TestMethod]
+    public void Explicit_WithXmlNamespaces_Msg6868()
+        => new Simulation().AssertSqlError(
+            "with xmlnamespaces('urn:x' as p) select 1 as Tag, null as Parent, 1 as [e!1!a] for xml explicit", 6868,
+            "The following FOR XML features are not supported with WITH XMLNAMESPACES list: EXPLICIT mode, XMLSCHEMA and XMLDATA directives.");
+
+    [TestMethod]
+    public void Explicit_InsertSource_Msg6819()
+        => WriteTarget().AssertSqlError("insert z select 1 as Tag, null as Parent, 1 as [e!1!a] for xml explicit", 6819,
+            "The FOR XML clause is not allowed in a INSERT statement.");
+
+    // ---- EXPLICIT: per-row protocol violations ----
+
+    /// <summary>A Tag value that isn't a positive integer is the same message at state 2.</summary>
+    [TestMethod]
+    public void Explicit_TagValue_Msg6803State2()
+    {
+        foreach (var tag in new[] { "0", "-1", "cast(null as int)" })
+        {
+            var ex = new Simulation().AssertSqlError($"select {tag} as Tag, null as Parent, 1 as [e!1!a] for xml explicit", 6803);
+            AreEqual(2, ex.State);
+        }
+    }
+
+    [TestMethod]
+    public void Explicit_NegativeParentValue_Msg6804State2()
+    {
+        var ex = new Simulation().AssertSqlError("select 1 as Tag, -1 as Parent, 1 as [e!1!a] for xml explicit", 6804);
+        AreEqual(2, ex.State);
+    }
+
+    [TestMethod]
+    public void Explicit_UndeclaredTagValue_Msg6806()
+    {
+        var ex = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!2!a] for xml explicit", 6806);
+        AreEqual("Undeclared tag ID 1 is used in a FOR XML EXPLICIT query.", ex.Message);
+        AreEqual(2, ex.State);
+    }
+
+    [TestMethod]
+    public void Explicit_UndeclaredParentValue_Msg6807()
+    {
+        var ex = new Simulation().AssertSqlError("select 1 as Tag, 5 as Parent, 1 as [e!1!a] for xml explicit", 6807);
+        AreEqual("Undeclared parent tag ID 5 is used in a FOR XML EXPLICIT query.", ex.Message);
+        AreEqual(2, ex.State);
+    }
+
+    /// <summary>Rows are taken in the order they arrive — a child ahead of its parent is an error, not a re-sort.</summary>
+    [TestMethod]
+    public void Explicit_ParentNotOpen_Msg6833()
+    {
+        new Simulation().AssertSqlError("select 1 as Tag, 1 as Parent, 1 as [e!1!a] for xml explicit", 6833,
+            "Parent tag ID 1 is not among the open tags. FOR XML EXPLICIT requires parent tags to be opened first. Check the ordering of the result set.");
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(UniversalTable + "insert ut values (1,2,1,null,10,null),(2,1,null,1,null,null)");
+        _ = sim.AssertSqlError(ProtocolQuery, 6833);
+    }
+
+    [TestMethod]
+    public void Explicit_CircularParentTags_Msg6805()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(UniversalTable + "insert ut values (1,1,null,1,null,null),(2,2,1,null,10,null),(3,1,2,2,null,null)");
+        var ex = sim.AssertSqlError(ProtocolQuery, 6805);
+        AreEqual("FOR XML EXPLICIT stack overflow occurred. Circular parent tag relationships are not allowed.", ex.Message);
+        AreEqual(2, ex.State);
+    }
+
+    [TestMethod]
+    public void Explicit_XmlTextInvalidDocument_Msg6834()
+    {
+        var noRoot = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 'plain' as [e!1!!xmltext] for xml explicit", 6834);
+        AreEqual("XMLTEXT field '' contains an invalid XML document. Check the root tag and its attributes.", noRoot.Message);
+        AreEqual(1, noRoot.State);
+        var named = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 'plain' as [e!1!ov!xmltext] for xml explicit", 6834);
+        AreEqual("XMLTEXT field 'ov' contains an invalid XML document. Check the root tag and its attributes.", named.Message);
+        var malformed = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, '<a>' as [e!1!!xmltext] for xml explicit", 6834);
+        AreEqual(2, malformed.State);
+    }
 }

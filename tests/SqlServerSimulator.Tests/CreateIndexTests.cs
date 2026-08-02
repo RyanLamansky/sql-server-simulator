@@ -250,6 +250,57 @@ public sealed class CreateIndexTests
     public void CreateIndex_MissingTable_RaisesMsg1088()
         => _ = new Simulation().AssertSqlError("create index ix_a on missing_table(a)", 1088);
 
+    // --- INCLUDE on a clustered index — Msg 10601 ---
+
+    [TestMethod]
+    public void CreateClusteredIndex_WithIncludeList_RaisesMsg10601()
+    {
+        var ex = new Simulation().AssertSqlError("""
+            create table t (id int not null, a int, b int);
+            create clustered index ix_a on t(a) include (b)
+            """, 10601);
+        AreEqual("Cannot specify included columns for a clustered index.", ex.Message);
+        AreEqual(1, ex.State);
+    }
+
+    [TestMethod]
+    public void CreateClusteredIndex_WithIncludeList_RaisesAheadOfMissingTable()
+        => _ = new Simulation().AssertSqlError("create clustered index ix_a on missing_table(a) include (b)", 10601);
+
+    [TestMethod]
+    public void CreateClusteredIndex_WithIncludeList_RaisesAheadOfMissingColumn()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (id int not null, a int);
+            create clustered index ix_a on t(a) include (missing_col)
+            """, 10601);
+
+    [TestMethod]
+    public void CreateClusteredIndex_WithIncludeListAndIgnoreDupKey_ReportsIncludeFirst()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (id int not null, a int, b int);
+            create clustered index ix_a on t(a) include (b) with (ignore_dup_key = on)
+            """, 10601);
+
+    [TestMethod]
+    public void CreateUniqueClusteredIndexOnView_WithIncludeList_RaisesMsg10601()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int not null, a int)",
+            "create view v with schemabinding as select id, a from dbo.t");
+        _ = sim.AssertSqlError("create unique clustered index ix_v on v(id) include (a)", 10601);
+    }
+
+    [TestMethod]
+    public void CreateNonClusteredIndex_WithIncludeList_StillAccepted()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (id int not null, a int, b int);
+            create index ix_a on t(a) include (b);
+            select count(*) from sys.index_columns ic
+                join sys.indexes i on i.object_id = ic.object_id and i.index_id = ic.index_id
+                where i.name = 'ix_a' and ic.is_included_column = 1
+            """));
+
     [TestMethod]
     public void CreateIndex_MissingColumn_RaisesMsg1911()
         => _ = new Simulation().AssertSqlError("""

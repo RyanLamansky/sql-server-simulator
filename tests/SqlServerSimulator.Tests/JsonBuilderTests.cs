@@ -189,6 +189,20 @@ public class JsonBuilderTests
         => AreEqual("[[1,2],[3]]",
             new Simulation().ExecuteScalar("select json_array(json_array(1,2), json_array(3))"));
 
+    // --- Solidus escaping ---
+
+    /// <summary>
+    /// Real escapes <c>/</c> as <c>\/</c> in a built string — in the value
+    /// and in the key alike (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("json_object('a': 'a/b')", """{"a":"a\/b"}""")]
+    [DataRow("json_object('k/1': 'v')", """{"k\/1":"v"}""")]
+    [DataRow("json_array('a/b')", """["a\/b"]""")]
+    [DataRow("json_array(json_object('a': 'http://x/y'))", """[{"a":"http:\/\/x\/y"}]""")]
+    public void Builders_EscapeSolidus(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
     // --- Result type ---
 
     [TestMethod]

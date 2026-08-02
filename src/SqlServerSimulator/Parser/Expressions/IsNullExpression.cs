@@ -58,9 +58,9 @@ internal sealed class IsNullExpression : Expression
 
     // ISNULL(x, y) is non-null iff EITHER operand is non-null: a non-null x
     // short-circuits, otherwise the result is the (possibly-non-null) y.
-    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) =>
-        this.check.ResultIsNullable(resolveColumnNullable)
-        && this.replacement.ResultIsNullable(resolveColumnNullable);
+    internal override bool ResultIsNullable(NullabilityContext context) =>
+        this.check.ResultIsNullable(context)
+        && this.replacement.ResultIsNullable(context);
 
     internal override bool ResultReportsNumeric =>
         this.check.ResultReportsNumeric || this.replacement.ResultReportsNumeric;

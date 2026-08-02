@@ -175,6 +175,115 @@ public sealed class CrossDatabasePermissionTests
         Contains("\"app\"", ex.Message);
     }
 
+    // ---- a module's OWNER / SELF frame is database-scoped too, dbo or not ----
+
+    /// <summary>
+    /// <c>home</c> gains three <c>WITH EXECUTE AS OWNER</c> / <c>SELF</c> modules
+    /// over <c>away.dbo.remote</c>, plus one over a local table — the contrast
+    /// between the boundary the frame can't cross and the database it owns.
+    /// </summary>
+    private static Simulation OwnerFrameFixture()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim, "grant select on dbo.remote to awayuser");
+        sim.ExecuteBatches(
+            "use home; create table dbo.mine (id int not null); insert dbo.mine values (3)",
+            "create procedure dbo.p_owner with execute as owner as select id from away.dbo.remote",
+            "create procedure dbo.p_self with execute as self as select id from away.dbo.remote",
+            "create procedure dbo.p_owner_write with execute as owner as insert away.dbo.remote values (8)",
+            "create procedure dbo.p_owner_local with execute as owner as select id from dbo.mine");
+        return sim;
+    }
+
+    [TestMethod]
+    [DataRow("dbo.p_owner")]
+    [DataRow("dbo.p_self")]
+    [DataRow("dbo.p_owner_write")]
+    public void ModuleOwnerOrSelfFrame_CrossDatabaseReference_Raises916(string procedure)
+    {
+        // OWNER / SELF resolve to dbo, but the token is minted in `home` and
+        // carries no server principal — so it is refused at the boundary like
+        // any other database-scoped identity, even from this dbo session.
+        var ex = OwnerFrameFixture().AssertSqlError($"use home; exec {procedure}", 916);
+        AreEqual(14, ex.Class);
+        AreEqual(2, ex.State);
+        Contains("\"away\"", ex.Message);
+    }
+
+    [TestMethod]
+    public void ModuleOwnerFrame_SameDatabaseReference_Unaffected()
+    {
+        // The refusal is about crossing, not about the frame: inside `home` the
+        // dbo frame is as unrestricted as ever.
+        AreEqual(3, OwnerFrameFixture().ExecuteScalar("use home; exec dbo.p_owner_local"));
+    }
+
+    [TestMethod]
+    public void ModuleOwnerFrame_TrustworthySource_Crosses()
+    {
+        var sim = OwnerFrameFixture();
+        _ = sim.ExecuteNonQuery("alter database home set trustworthy on");
+        AreEqual(7, sim.ExecuteScalar("use home; exec dbo.p_owner"));
+    }
+
+    [TestMethod]
+    public void ModuleOwnerFrame_RestrictedCaller_Raises916Too()
+    {
+        // Whose session it is doesn't matter — the frame is what crosses.
+        var sim = OwnerFrameFixture();
+        _ = sim.ExecuteNonQuery("use home; grant execute on dbo.p_owner to homeuser");
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("exec dbo.p_owner").ExecuteScalar());
+        AreEqual(916, ex.Number);
+    }
+
+    [TestMethod]
+    public void ModuleOwnerFrame_ScalarFunctionBody_Raises916()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim, "grant select on dbo.remote to awayuser");
+        sim.ExecuteBatches(
+            "use home",
+            "create function dbo.f_owner() returns int with execute as owner as begin declare @v int; select @v = max(id) from away.dbo.remote; return @v end");
+        _ = sim.AssertSqlError("use home; select dbo.f_owner()", 916);
+    }
+
+    [TestMethod]
+    public void ModuleOwnerFrame_CrossDatabaseCatalogRead_Raises916()
+    {
+        var sim = TwoDatabaseFixture();
+        sim.ExecuteBatches("use home", "create procedure dbo.p_cat with execute as owner as select count(*) from away.sys.tables");
+        _ = sim.AssertSqlError("use home; exec dbo.p_cat", 916);
+    }
+
+    [TestMethod]
+    public void ModuleOwnerFrame_ObjectIdThreePartName_Raises916()
+    {
+        var sim = TwoDatabaseFixture();
+        sim.ExecuteBatches("use home", "create procedure dbo.p_oid with execute as owner as select object_id('away.dbo.remote')");
+        _ = sim.AssertSqlError("use home; exec dbo.p_oid", 916);
+    }
+
+    [TestMethod]
+    public void ModuleOwnerFrame_ObjectNameIdForm_StillAnswers()
+    {
+        // The asymmetry real draws: the same frame that can't reach the away
+        // catalog still reads a foreign id's name, because the id form asks only
+        // the visibility question and a dbo frame sees everything.
+        var sim = TwoDatabaseFixture();
+        var id = (int)sim.ExecuteScalar("use away; select object_id('dbo.remote')")!;
+        sim.ExecuteBatches("use home", $"create procedure dbo.p_oname with execute as owner as select object_name({id}, db_id('away'))");
+        AreEqual("remote", sim.ExecuteScalar("use home; exec dbo.p_oname"));
+    }
+
+    [TestMethod]
+    public void ModuleOwnerFrame_Use_Raises916()
+    {
+        var sim = TwoDatabaseFixture();
+        sim.ExecuteBatches("use home", "create procedure dbo.p_use with execute as owner as use away");
+        _ = sim.AssertSqlError("use home; exec dbo.p_use", 916);
+    }
+
     // ---- ownership chaining breaks at the database boundary ----
 
     [TestMethod]

@@ -40,6 +40,10 @@ So `Simulation.CreateResultSetsForCommand` stashes the cache-key components on t
 Gates checked at the SELECT arm: `BlockDepth == 0` (top-level statement, not inside an IF / WHILE / BEGIN / TRY block), `!HasDispatchedStatement` (first statement of the batch — second-and-later top-level statements skip caching), `!IsAssignmentOnly`, `!HasSessionScopedReference` (next section), and `context.Token is null` (parser consumed the whole text — no trailing statements after this one).
 Trailing semicolons disqualify; EF queries don't emit them.
 
+One gate sits further out, in `TryBuildPlanCacheKey`, so it suppresses the **lookup** as well as the promotion: the session must be at the default **READ COMMITTED**.
+A plan's FROM sources carry the lock acquisitions their parsing session made, so replaying one under a different isolation level would settle the wrong session's protection, or none at all — a SERIALIZABLE reader's key-range fence most visibly (see [`locking.md`](locking.md#key-range-locks)).
+A session at any other level re-parses per execution.
+
 ## Disqualifying state: `HasSessionScopedReference`
 
 A batch's `HasSessionScopedReference` flag suppresses cache promotion.

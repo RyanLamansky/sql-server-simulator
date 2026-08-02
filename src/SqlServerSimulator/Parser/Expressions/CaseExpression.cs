@@ -126,21 +126,62 @@ internal sealed class CaseExpression : Expression
 
     internal override string DebugDisplay() => "CASE ...";
 
-    // CASE result is non-null only when every THEN branch is non-null AND
-    // either there's a non-null ELSE or every WHEN covers every possible
-    // input. Since proving exhaustive WHEN coverage is intractable, the
-    // simulator follows real SQL Server's documented projection rule:
-    // non-null iff every THEN AND the ELSE (or implicit ELSE NULL → null)
-    // is non-null.
-    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable)
+    // Non-null iff every surviving THEN and the ELSE (or the implicit
+    // ELSE NULL) is non-null — proving exhaustive WHEN coverage is
+    // intractable, so real's projection rule is the OR over arms.
+    // "Surviving" is the constant fold real runs first: a branch whose
+    // condition folds to a constant either becomes the whole answer (TRUE) or
+    // drops out (FALSE / UNKNOWN), which is what makes
+    // `CASE WHEN 1 = 1 THEN <not null col> END` NOT NULL despite carrying no
+    // ELSE, and `CASE WHEN 1 = 2 THEN 5 END` nullable despite carrying no
+    // nullable arm.
+    internal override bool ResultIsNullable(NullabilityContext context)
     {
         for (var i = 0; i < this.thens.Length; i++)
         {
-            if (this.thens[i].ResultIsNullable(resolveColumnNullable))
+            if (TryFoldWhen(context, i, out var branchTaken))
+            {
+                if (branchTaken)
+                    return this.thens[i].ResultIsNullable(context);
+                continue;
+            }
+
+            if (this.thens[i].ResultIsNullable(context))
                 return true;
         }
         // Missing ELSE = implicit NULL = nullable; explicit ELSE delegates.
-        return this.elseBranch is null || this.elseBranch.ResultIsNullable(resolveColumnNullable);
+        return this.elseBranch is null || this.elseBranch.ResultIsNullable(context);
+    }
+
+    /// <summary>
+    /// Folds branch <paramref name="index"/>'s condition when real would have:
+    /// a searched form's whole predicate, or a simple form's implicit
+    /// <c>input = compareValues[index]</c> over two constants.
+    /// </summary>
+    private bool TryFoldWhen(NullabilityContext context, int index, out bool branchTaken)
+    {
+        if (this.searchedWhens is { } whens)
+            return context.TryFoldCondition(whens[index], out branchTaken);
+
+        branchTaken = false;
+        if (!context.TryFold(this.input!, out var inputValue)
+            || !context.TryFold(this.compareValues![index], out var compareValue))
+        {
+            return false;
+        }
+
+        try
+        {
+            branchTaken = BooleanExpression.CompareValuesPromoted(
+                inputValue, compareValue, "equal to", static (l, r) => l.Equals(r)) == true;
+            return true;
+        }
+        catch (Exception e) when (e is SimulatedSqlException or NotSupportedException)
+        {
+            // An incomparable pair leaves the branch unfolded; the statement's
+            // own evaluation is what reports it.
+            return false;
+        }
     }
 
     // Numeric-named if any value arm (a THEN or the ELSE) is — the same arm

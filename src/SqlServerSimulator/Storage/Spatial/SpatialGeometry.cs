@@ -244,6 +244,15 @@ internal sealed class SpatialGeometry(int srid, SpatialShape root)
 
     private byte[]? encoded;
     private bool encodedIsGeography;
+    private bool? planarValidity;
+
+    /// <summary>
+    /// Whether the instance satisfies the OGC validity rules real enforces —
+    /// <c>STIsValid()</c>, and the gate most instance methods report Msg 24144
+    /// from. Computed once per instance because a stored value is decoded once
+    /// and read many times.
+    /// </summary>
+    public bool IsPlanarValid => this.planarValidity ??= SpatialValidator.IsValid(this.Root);
 
     /// <summary>
     /// The UDT serialization of this instance, cached because the row encoder

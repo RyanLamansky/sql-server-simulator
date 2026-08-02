@@ -1594,9 +1594,13 @@ partial class Simulation
         {
             foreach (var (page, slot, _, newValues, _) in pendingUpdates)
             {
+                var rewritten = RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap);
                 if (lockableTable)
+                {
                     context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive);
-                destinationTable.Heap.UpdateAt(page, slot, RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog, ReclaimSuperseded(destinationTable, context));
+                    context.Batch.ProbeKeyRangesForWrite(destinationTable, rewritten);
+                }
+                destinationTable.Heap.UpdateAt(page, slot, rewritten, undoLog, ReclaimSuperseded(destinationTable, context));
             }
         }
         if (!insteadOfInsert)

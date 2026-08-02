@@ -89,6 +89,8 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
 
     internal override bool IsRowIndependent => this.Inner.IsRowIndependent;
 
+    internal override bool ResultIsNullable(NullabilityContext context) => this.Inner.ResultIsNullable(context);
+
     // Real folds the postfix away when its operand is constant, so
     // `ORDER BY 'x' COLLATE Latin1_General_CI_AS` is Msg 408 (probe-confirmed).
     private protected override bool IsStructuralConstant => this.Inner.IsWrittenConstant;

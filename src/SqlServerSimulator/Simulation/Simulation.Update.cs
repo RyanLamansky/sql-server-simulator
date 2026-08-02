@@ -717,7 +717,13 @@ partial class Simulation
             var (pageIndex, slotIndex, fullNew, _) = affected[i];
             if (lockableTable)
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
-            table.Heap.UpdateAt(pageIndex, slotIndex, RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap), undoLog, ReclaimSuperseded(table, context));
+            var newImage = RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap);
+            // The row-X above probed the key ranges the row is leaving; a key
+            // change can also carry it INTO a range some SERIALIZABLE reader
+            // holds, which only the post-update image reveals.
+            if (lockableTable)
+                context.Batch.ProbeKeyRangesForWrite(table, newImage);
+            table.Heap.UpdateAt(pageIndex, slotIndex, newImage, undoLog, ReclaimSuperseded(table, context));
             if (lockableTable && oldBytesPerAffected is not null)
                 Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytesPerAffected[i], Storage.VersionWriteKind.Update);
         }

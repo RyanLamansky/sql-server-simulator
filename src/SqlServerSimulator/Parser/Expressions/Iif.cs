@@ -77,13 +77,13 @@ internal sealed class Iif : Expression
     // IIF desugars to a searched CASE, so it inherits CASE's metadata rule: the
     // result is NOT NULL only when both value arms are non-null (probe-confirmed
     // against SQL Server 2025; exposed by go-mssqldb / tedious COLMETADATA
-    // fNullable). A compile-time-constant condition that SQL Server folds to
-    // eliminate the null arm (e.g. `IIF(1>2, CAST(NULL AS int), 2)` → NOT NULL)
-    // is not reproduced — the same degenerate constant-fold gap as a no-ELSE
-    // `CASE WHEN <constant> …`.
-    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) =>
-        this.trueValue.ResultIsNullable(resolveColumnNullable)
-        || this.falseValue.ResultIsNullable(resolveColumnNullable);
+    // fNullable) — unless the condition is one real folds, which leaves only
+    // the arm it selects (`IIF(1 = 1, 5, NULL)` is NOT NULL, `IIF(1 = 2, 5, NULL)`
+    // nullable).
+    internal override bool ResultIsNullable(NullabilityContext context) =>
+        context.TryFoldCondition(this.condition, out var branchTaken)
+            ? (branchTaken ? this.trueValue : this.falseValue).ResultIsNullable(context)
+            : this.trueValue.ResultIsNullable(context) || this.falseValue.ResultIsNullable(context);
 
     internal override bool ResultReportsNumeric =>
         this.trueValue.ResultReportsNumeric || this.falseValue.ResultReportsNumeric;

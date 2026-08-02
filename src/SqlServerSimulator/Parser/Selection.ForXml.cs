@@ -58,12 +58,15 @@ partial class Selection
             case "AUTO":
                 mode = ForXmlMode.Auto;
                 rowElement = null;
-                context.MoveNextOptional();
+                RejectForXmlRowTagArgument(context);
                 break;
             case "EXPLICIT":
                 if (namespaces is not null)
                     throw SimulatedSqlException.ForXmlNamespacesUnsupportedFeature();
-                throw new NotSupportedException("FOR XML EXPLICIT (the universal-table format) isn't modeled; use FOR XML PATH.");
+                mode = ForXmlMode.Explicit;
+                rowElement = null;
+                RejectForXmlRowTagArgument(context);
+                break;
             case "PATH":
                 mode = ForXmlMode.Path;
                 rowElement = ParseOptionalForXmlElementName(context, "row");
@@ -83,6 +86,11 @@ partial class Selection
         var rootSpecified = false;
         var rootName = "root";
 
+        // Real's option grammar admits each option once: a repeated TYPE / ROOT
+        // / ELEMENTS / BINARY BASE64 is Msg 102 reported against the clause's
+        // own XML keyword (probe-confirmed).
+        var seen = ForXmlOptionSeen.None;
+
         while (context.Token is Operator { Character: ',' })
         {
             if (context.GetNextRequired() is not Name optionName)
@@ -90,6 +98,9 @@ partial class Selection
 
             if (Collation.Baseline.Equals(optionName.Value, "ELEMENTS"))
             {
+                RejectRepeatedForXmlOption(ref seen, ForXmlOptionSeen.Elements);
+                if (mode == ForXmlMode.Explicit)
+                    throw SimulatedSqlException.ForXmlElementsNotAllowedInMode();
                 elements = true;
                 context.MoveNextOptional();
                 if (context.Token is Name modifier && (Collation.Baseline.Equals(modifier.Value, "XSINIL") || Collation.Baseline.Equals(modifier.Value, "ABSENT")))
@@ -100,6 +111,7 @@ partial class Selection
             }
             else if (Collation.Baseline.Equals(optionName.Value, "ROOT"))
             {
+                RejectRepeatedForXmlOption(ref seen, ForXmlOptionSeen.Root);
                 rootSpecified = true;
                 context.MoveNextOptional();
                 if (context.Token is Operator { Character: '(' })
@@ -119,11 +131,13 @@ partial class Selection
                 // near BINARY itself when nothing follows.
                 if (context.GetNextRequired() is not Name encoding || !Collation.Baseline.Equals(encoding.Value, "BASE64"))
                     throw SimulatedSqlException.SyntaxErrorNear(context);
+                RejectRepeatedForXmlOption(ref seen, ForXmlOptionSeen.BinaryBase64);
                 binaryBase64 = true;
                 context.MoveNextOptional();
             }
             else if (Collation.Baseline.Equals(optionName.Value, "TYPE"))
             {
+                RejectRepeatedForXmlOption(ref seen, ForXmlOptionSeen.Type);
                 typed = true;
                 context.MoveNextOptional();
             }
@@ -131,6 +145,8 @@ partial class Selection
             {
                 if (namespaces is not null)
                     throw SimulatedSqlException.ForXmlNamespacesUnsupportedFeature();
+                if (mode == ForXmlMode.Explicit)
+                    throw SimulatedSqlException.ForXmlExplicitInlineSchemaNotImplemented();
                 throw new NotSupportedException("FOR XML XMLSCHEMA (inline XSD emission) isn't modeled.");
             }
             else
@@ -160,7 +176,38 @@ partial class Selection
             ForXmlName.ValidateSimpleName(rootName, ForXmlNameKind.Root, namespaces);
         }
 
-        return WrapForXml(inner, new ForXmlOptions(mode, rowElement, elements, xsinil, typed, binaryBase64, rootSpecified ? rootName : null, namespaces));
+        // EXPLICIT's shape lives entirely in the projection: the universal
+        // table's column names compile into the tag templates, and whether any
+        // of them carries the elementxsinil directive is what decides the xsi
+        // declaration the options object precomputes.
+        var explicitPlan = mode == ForXmlMode.Explicit ? ForXmlExplicitPlan.Build(inner, binaryBase64) : null;
+        if (explicitPlan is not null)
+            xsinil = explicitPlan.Xsinil;
+
+        return WrapForXml(inner, new ForXmlOptions(mode, rowElement, elements, xsinil, typed, binaryBase64, rootSpecified ? rootName : null, namespaces), explicitPlan);
+    }
+
+    /// <summary>
+    /// Raises Msg 6859 when a <c>('name')</c> row-tag argument follows AUTO or
+    /// EXPLICIT — both name their elements from the query rather than the
+    /// clause. Otherwise advances past the mode keyword.
+    /// </summary>
+    private static void RejectForXmlRowTagArgument(ParserContext context)
+    {
+        context.MoveNextOptional();
+        if (context.Token is Operator { Character: '(' })
+            throw SimulatedSqlException.ForXmlRowTagNotAllowedInMode();
+    }
+
+    /// <summary>
+    /// Records <paramref name="option"/> as written, raising real's Msg 102
+    /// against the <c>XML</c> keyword when the clause already carried it.
+    /// </summary>
+    private static void RejectRepeatedForXmlOption(ref ForXmlOptionSeen seen, ForXmlOptionSeen option)
+    {
+        if ((seen & option) != 0)
+            throw SimulatedSqlException.ForXmlDuplicateOption();
+        seen |= option;
     }
 
     /// <summary>
@@ -207,7 +254,7 @@ partial class Selection
         return name;
     }
 
-    private static Selection WrapForXml(Selection inner, ForXmlOptions options)
+    private static Selection WrapForXml(Selection inner, ForXmlOptions options, ForXmlExplicitPlan? explicitPlan = null)
     {
         var innerSchema = inner.Schema;
         // The TYPE option makes the result a typed xml value instead of the
@@ -217,6 +264,14 @@ partial class Selection
         // sentinel name.
         SqlType[] schema = [options.Typed ? SqlType.Xml : SqlType.NVarcharMax];
         string[] columnNames = [options.Typed ? "" : ForXmlColumnName];
+
+        if (explicitPlan is not null)
+        {
+            return new Selection(schema, columnNames,
+                hasOrderBy: false,
+                hasTopOrOffsetOrFetch: false,
+                (batch, outerResolver) => SerializeForXmlExplicit(inner, innerSchema, explicitPlan, options, batch, outerResolver));
+        }
 
         if (options.Mode == ForXmlMode.Auto)
         {
@@ -794,7 +849,7 @@ partial class Selection
     }
 }
 
-/// <summary>The three modeled FOR XML modes (EXPLICIT isn't built yet).</summary>
+/// <summary>The four FOR XML modes.</summary>
 internal enum ForXmlMode
 {
     /// <summary>Attribute-centric (default) rows named <c>row</c> / <c>('elem')</c>.</summary>
@@ -803,6 +858,23 @@ internal enum ForXmlMode
     Auto,
     /// <summary>Column aliases drive XPath-like node placement (the workhorse).</summary>
     Path,
+    /// <summary>The universal table: <c>Tag</c> / <c>Parent</c> plus <c>Element!Tag!Attribute[!Directive]</c> columns.</summary>
+    Explicit,
+}
+
+/// <summary>
+/// Which FOR XML options a clause has already written — real admits each once,
+/// so a repeat is Msg 102. <c>ELEMENTS XSINIL</c> / <c>ABSENT</c> is one option
+/// with its modifier, not two.
+/// </summary>
+[Flags]
+internal enum ForXmlOptionSeen
+{
+    None = 0,
+    Elements = 1,
+    Root = 2,
+    BinaryBase64 = 4,
+    Type = 8,
 }
 
 /// <summary>Parsed FOR XML clause options. Immutable, so it rides the cached plan.</summary>

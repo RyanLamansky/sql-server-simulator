@@ -270,6 +270,124 @@ public sealed class LockResourceTests
         AreEqual(0, table.ActiveDataWriters);
     }
 
+    [TestMethod]
+    public void RangeModes_CompatibilityMatrix_MatchesTheProbedCells()
+    {
+        // RangeS-S coexists with a second reader's RangeS-S and with RangeS-U
+        // (probed: a SERIALIZABLE reader and an overlapping UPDLOCK reader both
+        // proceed). Everything else in the family conflicts, except two writers
+        // probing the same interval with RangeI-N.
+        IsTrue(LockManager.IsCompatible(LockMode.RangeSharedShared, LockMode.RangeSharedShared));
+        IsTrue(LockManager.IsCompatible(LockMode.RangeSharedShared, LockMode.RangeSharedUpdate));
+        IsTrue(LockManager.IsCompatible(LockMode.RangeSharedUpdate, LockMode.RangeSharedShared));
+        IsTrue(LockManager.IsCompatible(LockMode.RangeInsertNull, LockMode.RangeInsertNull));
+
+        IsFalse(LockManager.IsCompatible(LockMode.RangeSharedShared, LockMode.RangeInsertNull));
+        IsFalse(LockManager.IsCompatible(LockMode.RangeInsertNull, LockMode.RangeSharedShared));
+        IsFalse(LockManager.IsCompatible(LockMode.RangeSharedUpdate, LockMode.RangeSharedUpdate));
+        IsFalse(LockManager.IsCompatible(LockMode.RangeSharedUpdate, LockMode.RangeInsertNull));
+        IsFalse(LockManager.IsCompatible(LockMode.RangeExclusiveExclusive, LockMode.RangeSharedShared));
+        IsFalse(LockManager.IsCompatible(LockMode.RangeSharedShared, LockMode.RangeExclusiveExclusive));
+        IsFalse(LockManager.IsCompatible(LockMode.RangeExclusiveExclusive, LockMode.RangeExclusiveExclusive));
+    }
+
+    [TestMethod]
+    public void RangeModes_DoNotDisturbTheRowAndTableFamilies()
+    {
+        // The range arms sit at the top of the matrix, so this pins that they
+        // settle only range pairs — the eight-mode table below them is
+        // unchanged.
+        IsTrue(LockManager.IsCompatible(LockMode.SchemaStability, LockMode.Exclusive));
+        IsTrue(LockManager.IsCompatible(LockMode.IntentShared, LockMode.IntentExclusive));
+        IsTrue(LockManager.IsCompatible(LockMode.Shared, LockMode.Update));
+        IsFalse(LockManager.IsCompatible(LockMode.Update, LockMode.Update));
+        IsFalse(LockManager.IsCompatible(LockMode.Shared, LockMode.IntentExclusive));
+        IsFalse(LockManager.IsCompatible(LockMode.Exclusive, LockMode.IntentShared));
+    }
+
+    [TestMethod]
+    public void ActiveKeyRangeLocks_TracksAHeldRange_ResetsAtCommit()
+    {
+        // The writer's per-row range probe keys off this per-table count the
+        // way the reader's fast path keys off ActiveDataWriters: at zero the
+        // writer skips decoding its row and never touches the gate. A leak
+        // here costs every writer a decode per mutation forever after.
+        var sim = new Simulation();
+        ExecuteNonQuery(sim, "create table t (k int not null primary key, v int)");
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        AreEqual(0, table.ActiveKeyRangeLocks);
+        ExecuteNonQuery(conn, "set transaction isolation level serializable; begin tran; select count(*) from t where k between 1 and 5");
+        AreEqual(1, table.ActiveKeyRangeLocks);
+        ExecuteNonQuery(conn, "commit tran");
+        AreEqual(0, table.ActiveKeyRangeLocks);
+        IsEmpty(table.KeyRangeLocks.Values.SelectMany(static r => r.Holders));
+    }
+
+    [TestMethod]
+    public void ActiveKeyRangeLocks_StaysZero_WhenTheReaderFallsBackToTheTableLock()
+    {
+        // No index leads `v`, so there is no key space to fence and the reader
+        // takes the whole-table S instead — no range resource is interned.
+        var sim = new Simulation();
+        ExecuteNonQuery(sim, "create table t (k int not null primary key, v int)");
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        ExecuteNonQuery(conn, "set transaction isolation level serializable; begin tran; select count(*) from t where v = 3");
+        AreEqual(0, table.ActiveKeyRangeLocks);
+        IsEmpty(table.KeyRangeLocks);
+        Contains(LockMode.Shared, table.TableDataLock.Holders.Select(static h => h.Mode));
+        ExecuteNonQuery(conn, "rollback tran");
+    }
+
+    [TestMethod]
+    public void KeyRange_Contains_HonorsBoundInclusivityAndRejectsNull()
+    {
+        var open = new KeyRange(
+            0, SqlType.Int32,
+            hasLower: true, SqlValue.FromInt32(10), lowerInclusive: false,
+            hasUpper: true, SqlValue.FromInt32(20), upperInclusive: false);
+        IsFalse(open.Contains(SqlValue.FromInt32(10)));
+        IsTrue(open.Contains(SqlValue.FromInt32(15)));
+        IsFalse(open.Contains(SqlValue.FromInt32(20)));
+        IsFalse(open.Contains(SqlValue.Null(SqlType.Int32)));
+
+        var closed = new KeyRange(
+            0, SqlType.Int32,
+            hasLower: true, SqlValue.FromInt32(10), lowerInclusive: true,
+            hasUpper: true, SqlValue.FromInt32(20), upperInclusive: true);
+        IsTrue(closed.Contains(SqlValue.FromInt32(10)));
+        IsTrue(closed.Contains(SqlValue.FromInt32(20)));
+        IsFalse(closed.Contains(SqlValue.FromInt32(21)));
+
+        // An open-ended upper is the infinity range past the last key.
+        var tail = new KeyRange(
+            0, SqlType.Int32,
+            hasLower: true, SqlValue.FromInt32(10), lowerInclusive: false,
+            hasUpper: false, default, upperInclusive: false);
+        IsTrue(tail.Contains(SqlValue.FromInt32(int.MaxValue)));
+        IsFalse(tail.Contains(SqlValue.FromInt32(10)));
+    }
+
+    [TestMethod]
+    public void KeyRange_InternsByIntervalNotByType()
+    {
+        // Two ranges whose bounds compare equal are one resource, so the same
+        // predicate parsed twice reuses the interned LockResource instead of
+        // minting one per parse.
+        var sim = new Simulation();
+        ExecuteNonQuery(sim, "create table t (k int not null primary key)");
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        var a = new KeyRange(0, SqlType.Int32, true, SqlValue.FromInt32(1), true, true, SqlValue.FromInt32(5), true);
+        var b = new KeyRange(0, SqlType.BigInt, true, SqlValue.FromInt32(1), true, true, SqlValue.FromInt32(5), true);
+        AreSame(table.GetOrCreateKeyRangeLock(a), table.GetOrCreateKeyRangeLock(b));
+        AreEqual("0:[1,5]", a.ToString());
+    }
+
     private static void ExecuteNonQuery(Simulation sim, string sql)
     {
         using var conn = sim.CreateDbConnection();

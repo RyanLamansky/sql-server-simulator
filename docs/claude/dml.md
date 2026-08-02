@@ -164,12 +164,9 @@ Creates a destination table from the projection's inferred schema, then copies r
 Target routes by `#`-prefix: `#foo` lands in the per-connection `TempTables` dict (same as `CREATE TABLE #foo`); regular names land in the current database's `HeapTables`.
 Probe-confirmed schema-inference rules:
 
-- **Nullability**: direct column refs preserve source nullability.
-  Integer arithmetic, `CAST`, `COALESCE`, aggregates (incl. `COUNT`), and bare `NULL` literal all project as **nullable**.
-  `ISNULL(x, y)` is **non-null when either arg is non-null** (asymmetric with COALESCE).
-  `CASE` is non-null when every `THEN` branch is non-null AND the `ELSE` branch is non-null (no-`ELSE` = implicit `ELSE NULL` = nullable).
-  Non-NULL literals are non-null.
-  String `+` should also project non-null when both operands non-null, but the simulator's runtime-dispatch design (Add can be arithmetic or concat depending on operand types) makes static analysis impractical — projects as nullable (minor fidelity gap; staging tables rarely depend on this).
+- **Nullability**: the destination column's declaration comes from the same `Expression.ResultIsNullable` inference that drives the wire's COLMETADATA `fNullable` flag — real derives both identically, so the two surfaces agree cell for cell.
+  The rule set (structural rules, the idiosyncratic per-built-in table, the operator split between arithmetic and concatenation, and the CASE family's constant fold) is documented on `Expression.ResultIsNullable` and summarized in [`tds-endpoint.md`](tds-endpoint.md); `ResultNullabilityTests` is the exhaustive matrix.
+  Highlights for a staging table: a direct ref preserves the source column's nullability, `ISNULL(x, y)` is non-null when *either* argument is (asymmetric with `COALESCE`, which needs all of them), integer arithmetic / `CAST` / aggregates including `COUNT` project nullable, and a `varchar` column concatenated with another non-null one projects NOT NULL where the same shape over two `int`s does not.
 - **Identity propagation**: only when the projection is a *direct column ref* (a `Reference`, possibly wrapped in `NamedExpression` for `AS alias`) AND the FROM clause is exactly one source with a `BackingTable` (a real heap, not a derived table / CTE / OPENJSON) AND no joins.
   WHERE/TOP/ORDER BY preserve.
   Any join, set-op, expression wrapping, or CTE drops it.
@@ -177,7 +174,7 @@ Probe-confirmed schema-inference rules:
 - **Implementation**: `Selection.IntoTarget` + `Selection.DestColumnSchema` (a `HeapColumn[]`) are captured at parse time inside `ParseInner` and propagated through `CombineSetOps` / `ApplyTopLevelOrderBy`.
   `Simulation.SelectInto.cs:ExecuteSelectInto` creates the heap table, runs the Selection, encodes each row through `RowEncoder.EncodeRow`, appends to the dest's heap, and tracks the active transaction's undo log so a `ROLLBACK` unwinds both the table creation (for temp tables) and the row writes.
 - **Schema rules + validation** live in `Selection.SelectInto.cs:ComputeIntoDestSchema`.
-  Nullability uses `Expression.ResultIsNullable` (a new virtual override on `Value` / `Reference` / `NamedExpression` / `IsNullExpression` / `CaseExpression`; default `true` for everything else).
+  Nullability uses `Expression.ResultIsNullable` (a virtual whose default is `true`, overridden per expression kind), threaded a `NullabilityContext` carrying the parsing batch plus the column nullability and column type resolvers — the type resolver is what tells string `+` from arithmetic `+`, and the batch is what evaluates the CASE family's folded conditions.
   Identity uses `UnwrapDirectRef` to drill through `NamedExpression` layers.
 - **Errors**: unnamed projection → **Msg 1038 Cl 15 St 5** (`SelectIntoMissingColumnName`); duplicate column name in projection → **Msg 2705 Cl 16 St 3** (`DuplicateColumnInSelectInto`, names the target table); target already exists → **Msg 2714** (reused factory); `##` global target → `NotSupportedException`.
 - **INTO + UNION**: real SQL Server allows `SELECT … INTO #t FROM a UNION ALL SELECT … FROM b` (INTO on first branch).

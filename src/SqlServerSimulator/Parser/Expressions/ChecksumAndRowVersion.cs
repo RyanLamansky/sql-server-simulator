@@ -35,6 +35,8 @@ internal sealed class MinActiveRowVersion : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => Binary8;
 
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
+
     internal override string DebugDisplay() => "MIN_ACTIVE_ROWVERSION()";
 }
 

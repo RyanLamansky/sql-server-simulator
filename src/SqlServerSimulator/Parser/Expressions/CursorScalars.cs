@@ -14,6 +14,8 @@ internal sealed class FetchStatusExpression : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
+
     internal override string DebugDisplay() => "@@FETCH_STATUS";
 }
 
@@ -27,6 +29,8 @@ internal sealed class CursorRowsExpression : Expression
         SqlValue.FromInt32(runtime.Batch.Connection.LastCursorRows);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@CURSOR_ROWS";
 }
@@ -86,6 +90,9 @@ internal sealed class CursorStatusFunction : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
+
+    internal override bool ResultIsNullable(NullabilityContext context) =>
+        this.scopeArg.ResultIsNullable(context) || this.nameArg.ResultIsNullable(context);
 
     internal override string DebugDisplay() => $"CURSOR_STATUS({this.scopeArg.DebugDisplay()}, {this.nameArg.DebugDisplay()})";
 }

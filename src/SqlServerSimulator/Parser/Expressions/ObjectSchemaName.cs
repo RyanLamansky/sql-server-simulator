@@ -6,26 +6,27 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <summary>
 /// SQL <c>OBJECT_SCHEMA_NAME(object_id [, database_id])</c>: returns the
 /// name of the schema that owns the object with the given <c>object_id</c>,
-/// or NULL when not found. The optional database-id argument is accepted
-/// and ignored (single-database simulator). Companion to
+/// or NULL when not found. Companion to
 /// <see cref="ObjectName"/> — same lookup walk over
 /// <see cref="Database.Schemas"/> → <see cref="Schema.SchemaObjects"/>
 /// plus <see cref="Schema.TableTypes"/> plus the constraint objects
-/// (<see cref="ConstraintLookup"/>); this variant returns the owning
+/// (<see cref="ConstraintLookup"/>), and the same load-bearing
+/// <c>database_id</c> argument (absent → the connection's current database;
+/// NULL / unknown / out-of-range id → NULL); this variant returns the owning
 /// schema's <see cref="Schema.Name"/> instead of the object's leaf.
 /// Probe-confirmed against SQL Server 2025 (2026-05-13).
 /// </summary>
 internal sealed class ObjectSchemaName : Expression
 {
     private readonly Expression idArg;
+    private readonly Expression? dbIdArg;
 
     public ObjectSchemaName(ParserContext context)
     {
         this.idArg = Parse(context);
         if (context.Token is Tokens.Operator { Character: ',' })
         {
-            // database_id arg: accepted and ignored (single-DB simulator).
-            _ = Parse(context.MoveNextRequiredReturnSelf());
+            this.dbIdArg = Parse(context.MoveNextRequiredReturnSelf());
             if (context.Token is Tokens.Operator { Character: ',' })
                 throw SimulatedSqlException.FunctionRequiresNArguments("object_schema_name", 2);
         }
@@ -39,11 +40,28 @@ internal sealed class ObjectSchemaName : Expression
         if (idValue.IsNull)
             return SqlValue.Null(SqlType.SystemName);
         var id = ScalarArguments.CoerceToInt(idValue);
+
+        Database? database;
+        if (this.dbIdArg is null)
+        {
+            database = runtime.Batch.CurrentDatabase;
+        }
+        else
+        {
+            var dbIdValue = this.dbIdArg.Run(runtime);
+            if (dbIdValue.IsNull)
+                return SqlValue.Null(SqlType.SystemName);
+            database = DbId.DatabaseWithId(runtime.Batch.Connection.Simulation, ScalarArguments.CoerceToInt(dbIdValue));
+            if (database is null)
+                return SqlValue.Null(SqlType.SystemName);
+        }
+
         // A restricted principal gets NULL for an id it can't view metadata for
-        // (probe-confirmed), matching sys.objects hiding.
-        var restrict = PermissionEnforcement.MetadataVisibilityApplies(runtime.Batch);
-        var principalId = runtime.Batch.Connection.Security.Effective.DatabasePrincipalId;
-        var database = runtime.Batch.CurrentDatabase;
+        // (probe-confirmed), matching sys.objects hiding — asked in the database
+        // the id belongs to, and answering NULL rather than raising for one the
+        // login can't reach at all, exactly as the sibling OBJECT_NAME does.
+        if (!PermissionEnforcement.TryMetadataVisibilityPrincipal(runtime.Batch, database, out var principalId))
+            return SqlValue.Null(SqlType.SystemName);
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var obj in schema.SchemaObjects())
@@ -53,7 +71,7 @@ internal sealed class ObjectSchemaName : Expression
                 var (governObjectId, governSchemaId) = obj is Trigger trigger
                     ? (trigger.Parent.ObjectId, trigger.Parent.SchemaId)
                     : (obj.ObjectId, obj.SchemaId);
-                return restrict && !PermissionChecker.CanViewMetadata(database, principalId, governObjectId, governSchemaId)
+                return principalId is { } filter && !PermissionChecker.CanViewMetadata(database, filter, governObjectId, governSchemaId)
                     ? SqlValue.Null(SqlType.SystemName)
                     : SqlValue.FromString(SqlType.SystemName, schema.Name);
             }
@@ -66,12 +84,16 @@ internal sealed class ObjectSchemaName : Expression
         // A constraint id answers the schema of the table that owns it, whose
         // visibility it also follows.
         return ConstraintLookup.TryResolveById(database, id, out var constraint)
-            && (!restrict || PermissionChecker.CanViewMetadata(database, principalId, constraint.Table.ObjectId, constraint.Table.SchemaId))
+            && (principalId is not { } constraintFilter
+                || PermissionChecker.CanViewMetadata(database, constraintFilter, constraint.Table.ObjectId, constraint.Table.SchemaId))
             ? SqlValue.FromString(SqlType.SystemName, constraint.Schema.Name)
             : SqlValue.Null(SqlType.SystemName);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
-    internal override string DebugDisplay() => $"OBJECT_SCHEMA_NAME({this.idArg.DebugDisplay()})";
+    internal override string DebugDisplay() =>
+        this.dbIdArg is null
+            ? $"OBJECT_SCHEMA_NAME({this.idArg.DebugDisplay()})"
+            : $"OBJECT_SCHEMA_NAME({this.idArg.DebugDisplay()}, {this.dbIdArg.DebugDisplay()})";
 }

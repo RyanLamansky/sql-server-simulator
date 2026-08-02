@@ -183,8 +183,11 @@ partial class Simulation
     /// Pushes a module's <c>WITH EXECUTE AS</c> frame (procedure, scalar UDF, or
     /// trigger) at invocation. OWNER / SELF resolve to <c>dbo</c>; CALLER /
     /// absent is a no-op; a named user pushes that database principal, raising
-    /// Msg 15517 at invoke time if it's missing. The matching pop is the
-    /// caller's <see cref="SessionSecurityContext.RevertTo"/> on body exit.
+    /// Msg 15517 at invoke time if it's missing. Every form the clause names is
+    /// <see cref="SecurityPrincipalFrame.IsDatabaseScoped"/> — including the
+    /// <c>dbo</c> that OWNER / SELF resolve to, whose privilege stops at the
+    /// database boundary. The matching pop is the caller's
+    /// <see cref="SessionSecurityContext.RevertTo"/> on body exit.
     /// </summary>
     internal static void PushModuleExecuteAsFrame(SimulatedDbConnection connection, string? clause, Database database)
     {
@@ -192,7 +195,12 @@ partial class Simulation
             return;
         if (clause.Equals("OWNER", StringComparison.OrdinalIgnoreCase) || clause.Equals("SELF", StringComparison.OrdinalIgnoreCase))
         {
-            connection.Security.Push(new SecurityPrincipalFrame(Database.DboPrincipalId, "dbo", "dbo"));
+            // Database-scoped like the named-user form: the token is minted in
+            // this database and carries no server principal, so it reaches
+            // another one only out of a TRUSTWORTHY source however privileged
+            // the session is (probe-confirmed — real refuses an OWNER / SELF
+            // body's cross-database reference even for an `sa` session).
+            connection.Security.Push(new SecurityPrincipalFrame(Database.DboPrincipalId, "dbo", "dbo", isDatabaseScoped: true));
             return;
         }
         if (!database.Principals.TryGetValue(clause, out var target))

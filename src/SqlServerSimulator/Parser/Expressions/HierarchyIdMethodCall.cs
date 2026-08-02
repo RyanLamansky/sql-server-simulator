@@ -271,7 +271,7 @@ internal sealed class HierarchyIdMethodCall : Expression
 
     internal override string DebugDisplay() => $"{this.target.DebugDisplay()}.{this.method}({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";
 
-    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => true;
+    internal override bool ResultIsNullable(NullabilityContext context) => true;
 
     internal override void VisitColumnReferences(Action<MultiPartName> visit)
     {

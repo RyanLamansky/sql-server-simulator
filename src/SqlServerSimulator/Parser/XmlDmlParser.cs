@@ -487,11 +487,12 @@ internal sealed class XmlDmlParser(
             analyzed = analyzed[1..close].Trim();
         }
 
+        var compiled = XmlQueryEngine.CompileBody(body, this.defaultNamespace, this.prefixes, "modify");
         if (analyzed == ".")
-            return new XmlDmlPath(body, body, XmlDmlNodeKind.Document, string.Empty, singleton);
+            return new XmlDmlPath(body, compiled, XmlDmlNodeKind.Document, string.Empty, singleton);
 
         var (kind, name) = ClassifyStep(LastStep(analyzed));
-        return new XmlDmlPath(body, XmlQueryEngine.TranslateToXPath(body, this.defaultNamespace, this.prefixes), kind, name, singleton);
+        return new XmlDmlPath(body, compiled, kind, name, singleton);
     }
 
     /// <summary>Index of the <c>)</c> closing the parenthesis at position 0, or -1.</summary>

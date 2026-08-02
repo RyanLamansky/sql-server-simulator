@@ -3,7 +3,7 @@ using SqlServerSimulator.Schemas;
 namespace SqlServerSimulator.Storage;
 
 /// <summary>
-/// Lock modes recognized by <see cref="LockManager"/>. Three orthogonal
+/// Lock modes recognized by <see cref="LockManager"/>. Four orthogonal
 /// families: schema-stability locks (Sch-S / Sch-M) protect against
 /// concurrent DDL on an object; data locks (Shared / Update / Exclusive)
 /// protect against concurrent DML reads / writes at the row level (and at
@@ -11,7 +11,9 @@ namespace SqlServerSimulator.Storage;
 /// locks (IS / IX / SIX) sit at the table level to signal "some children
 /// of this object are S- / U- / X-locked" so a TABLOCK / TABLOCKX
 /// requester at the parent can quickly check for child conflicts without
-/// scanning the row-lock dict. The compatibility matrix in
+/// scanning the row-lock dict; key-range locks (the four Range* modes)
+/// fence a <see cref="KeyRange"/> against the inserts and key-changing
+/// updates a SERIALIZABLE reader must not see. The compatibility matrix in
 /// <see cref="LockManager.IsCompatible"/> spells out the relationships.
 /// </summary>
 internal enum LockMode
@@ -32,6 +34,37 @@ internal enum LockMode
     Update,
     /// <summary>Data exclusive (X) — exclusive against every other data-family mode.</summary>
     Exclusive,
+
+    /// <summary>
+    /// Key-range shared (RangeS-S) — a SERIALIZABLE / HOLDLOCK reader's hold
+    /// on a <see cref="KeyRange"/>. Coexists with another reader's RangeS-S
+    /// and with RangeS-U; blocks a writer probing the same interval.
+    /// </summary>
+    RangeSharedShared,
+
+    /// <summary>
+    /// Key-range update (RangeS-U) — real's mode for a SERIALIZABLE reader's
+    /// hold taken with intent to write. Shares with RangeS-S, conflicts with a
+    /// second RangeS-U. Defined for the matrix and the DMV mapping; nothing
+    /// acquires it, since <c>UPDLOCK</c> / <c>XLOCK</c> are read ahead of the
+    /// isolation level and keep their row-U / row-X plan.
+    /// </summary>
+    RangeSharedUpdate,
+
+    /// <summary>
+    /// Key-range exclusive (RangeX-X) — exclusive against every other range
+    /// mode. Defined alongside <see cref="RangeSharedUpdate"/> and unacquired
+    /// for the same reason.
+    /// </summary>
+    RangeExclusiveExclusive,
+
+    /// <summary>
+    /// Key-range insert (RangeI-N) — the instant-duration mode a writer takes
+    /// to test whether the interval its row lands in is range-locked. Two
+    /// writers probing the same interval don't block each other; a held
+    /// RangeS-S / RangeS-U / RangeX-X does block them.
+    /// </summary>
+    RangeInsertNull,
 }
 
 /// <summary>
@@ -40,7 +73,8 @@ internal enum LockMode
 /// count). Every <see cref="SchemaObject"/> carries one via the inherited
 /// <see cref="SchemaObject.SchemaLock"/>; row-level locks live in
 /// <see cref="HeapTable.RowLocks"/>, lazily-interned per
-/// <c>(pageIndex, slotIndex)</c>. All mutations to <see cref="Holders"/>
+/// <c>(pageIndex, slotIndex)</c>, and key-range locks in
+/// <see cref="HeapTable.KeyRangeLocks"/>, lazily-interned per interval. All mutations to <see cref="Holders"/>
 /// happen under <see cref="LockManager"/>'s gate; the class itself has no
 /// logic.
 /// </summary>
@@ -59,8 +93,9 @@ internal sealed class LockResource
     /// <see cref="HeapTable.TableDataLock"/>), or <c>null</c> for resources
     /// not tied to a heap table (e.g. <see cref="SchemaObject.SchemaLock"/>).
     /// Set at interning time so <see cref="LockManager"/> can maintain the
-    /// owning table's <see cref="HeapTable.ActiveDataWriters"/> count without
-    /// re-deriving the table on every grant / release.
+    /// owning table's <see cref="HeapTable.ActiveDataWriters"/> and
+    /// <see cref="HeapTable.ActiveKeyRangeLocks"/> counts without re-deriving
+    /// the table on every grant / release.
     /// </summary>
     public HeapTable? OwningTable;
 
@@ -94,7 +129,7 @@ internal sealed class LockResource
 /// </summary>
 /// <remarks>
 /// <para>
-/// Compatibility matrix (phase 1b, full 8-mode SQL Server matrix):
+/// Compatibility matrix (the 8-mode SQL Server matrix plus the range family):
 /// <list type="bullet">
 /// <item>Schema family (Sch-S / Sch-M) is orthogonal to data + intent
 /// families. Sch-S × anything-else compatible; Sch-M × anything =
@@ -107,6 +142,10 @@ internal sealed class LockResource
 /// but on the same resource — happens when a TABLOCK requester sees row-
 /// IX, etc.): S × IX conflict; S × SIX conflict; U × IX conflict; U × SIX
 /// conflict; X × any-intent conflict.</item>
+/// <item>Range family (RangeS-S / RangeS-U / RangeX-X / RangeI-N): lives on
+/// its own resources (<see cref="HeapTable.KeyRangeLocks"/>) and never meets
+/// the other three families. RangeS-S × {RangeS-S, RangeS-U} OK and RangeI-N ×
+/// RangeI-N OK; every other pair conflicts.</item>
 /// <item>Same-owner re-entrance is always compatible — the conflict check
 /// skips holders whose owner matches the requester. This handles
 /// ALTER-with-Sch-S-then-Sch-M, table-IS-then-row-S coexisting on the
@@ -309,8 +348,13 @@ internal sealed class LockManager
                     if (hold.Count == 0)
                     {
                         resource.Holders.RemoveAt(i);
-                        if (mode == LockMode.Exclusive && resource.OwningTable is { } table)
-                            _ = Interlocked.Decrement(ref table.ActiveDataWriters);
+                        if (resource.OwningTable is { } table)
+                        {
+                            if (mode == LockMode.Exclusive)
+                                _ = Interlocked.Decrement(ref table.ActiveDataWriters);
+                            else if (IsRangeMode(mode))
+                                _ = Interlocked.Decrement(ref table.ActiveKeyRangeLocks);
+                        }
                         Monitor.PulseAll(this.gate);
                     }
                     else
@@ -341,10 +385,26 @@ internal sealed class LockManager
                 return false;
         }
         resource.Holders.Add(new LockResource.Hold(owner, mode, 1));
-        if (mode == LockMode.Exclusive && resource.OwningTable is { } table)
-            _ = Interlocked.Increment(ref table.ActiveDataWriters);
+        if (resource.OwningTable is { } table)
+        {
+            if (mode == LockMode.Exclusive)
+                _ = Interlocked.Increment(ref table.ActiveDataWriters);
+            else if (IsRangeMode(mode))
+                _ = Interlocked.Increment(ref table.ActiveKeyRangeLocks);
+        }
         return true;
     }
+
+    /// <summary>
+    /// True for the four key-range modes — the family that lives on
+    /// <see cref="HeapTable.KeyRangeLocks"/> resources and drives
+    /// <see cref="HeapTable.ActiveKeyRangeLocks"/>.
+    /// </summary>
+    internal static bool IsRangeMode(LockMode mode) =>
+        mode is LockMode.RangeSharedShared
+            or LockMode.RangeSharedUpdate
+            or LockMode.RangeExclusiveExclusive
+            or LockMode.RangeInsertNull;
 
     /// <summary>
     /// True if any conflicting holder's
@@ -441,6 +501,17 @@ internal sealed class LockManager
     internal static bool IsCompatible(LockMode held, LockMode requested) =>
         (held, requested) switch
         {
+            // Range family first: a KeyRangeLocks resource only ever carries
+            // range modes, and the arms below are written for the row / table
+            // families, so range pairs are settled before they can fall
+            // through into one of those. A mixed pair can't arise (no resource
+            // carries both families) and reads as a conflict.
+            (LockMode.RangeSharedShared, LockMode.RangeSharedShared) => true,
+            (LockMode.RangeSharedShared, LockMode.RangeSharedUpdate) => true,
+            (LockMode.RangeSharedUpdate, LockMode.RangeSharedShared) => true,
+            (LockMode.RangeInsertNull, LockMode.RangeInsertNull) => true,
+            (LockMode.RangeSharedShared or LockMode.RangeSharedUpdate or LockMode.RangeExclusiveExclusive or LockMode.RangeInsertNull, _) => false,
+            (_, LockMode.RangeSharedShared or LockMode.RangeSharedUpdate or LockMode.RangeExclusiveExclusive or LockMode.RangeInsertNull) => false,
             // Sch-M conflicts with everything.
             (LockMode.SchemaModification, _) => false,
             (_, LockMode.SchemaModification) => false,

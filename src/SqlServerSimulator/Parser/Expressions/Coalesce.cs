@@ -64,6 +64,38 @@ internal sealed class Coalesce : Expression
         }
     }
 
+    /// <summary>
+    /// COALESCE takes its nullability from the CASE it desugars to —
+    /// <c>CASE WHEN a IS NOT NULL THEN a … ELSE last END</c> — so it is NOT
+    /// NULL when every argument is, where <c>ISNULL</c> needs only one of its
+    /// two (the classic ISNULL-vs-COALESCE metadata quirk:
+    /// <c>COALESCE(nullable_col, 0)</c> is nullable, <c>ISNULL(nullable_col, 0)</c>
+    /// is not). Real folds each <c>IS NOT NULL</c> test whose argument is a
+    /// written constant first, which drops a constant-NULL argument out of the
+    /// walk and lets a constant non-NULL one answer for the whole call —
+    /// <c>COALESCE(NULL, 5)</c> and <c>COALESCE(5, nullable_col)</c> both
+    /// project NOT NULL (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    internal override bool ResultIsNullable(NullabilityContext context)
+    {
+        for (var i = 0; i < this.arguments.Length - 1; i++)
+        {
+            if (context.TryFold(this.arguments[i], out var folded))
+            {
+                if (!folded.IsNull)
+                    return false;
+                continue;
+            }
+
+            if (this.arguments[i].ResultIsNullable(context))
+                return true;
+        }
+
+        // The last argument is the desugared CASE's ELSE: it contributes its
+        // own nullability rather than an IS NOT NULL test.
+        return this.arguments[^1].ResultIsNullable(context);
+    }
+
     internal override string DebugDisplay() => $"COALESCE({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";
 
     // Real desugars COALESCE to a CASE and folds an all-literal one, so

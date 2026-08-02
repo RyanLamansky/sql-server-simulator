@@ -69,6 +69,11 @@ internal sealed class Round : Expression
 
     internal override bool ResultReportsNumeric => this.value.ResultReportsNumeric;
 
+    internal override bool ResultIsNullable(NullabilityContext context) =>
+        this.value.ResultIsNullable(context)
+        || this.length.ResultIsNullable(context)
+        || (this.function is not null && this.function.ResultIsNullable(context));
+
     internal override string DebugDisplay() => $"ROUND({this.value.DebugDisplay()}, {this.length.DebugDisplay()})";
 
     /// <remarks>

@@ -98,6 +98,8 @@ internal sealed class CurrentTimeFunction(CurrentTimeKind kind) : Expression
         _ => throw new InvalidOperationException($"Unknown current-time kind {this.Kind}."),
     };
 
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
+
     internal override string DebugDisplay() => this.Kind switch
     {
         CurrentTimeKind.GetDate => "GETDATE()",

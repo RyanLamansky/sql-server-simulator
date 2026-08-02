@@ -4,13 +4,17 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// SQL <c>FULLTEXTCATALOGPROPERTY('catalog_name', 'property')</c>: returns an
-/// <c>int</c> property of a full-text catalog. The simulator has no full-text
-/// indexing engine, so the population / size / status properties report the
-/// idle-empty answers a freshly created catalog gives (all <c>0</c>);
-/// <c>AccentSensitivity</c> reflects the catalog's DDL-captured
-/// <c>ACCENT_SENSITIVITY</c> option (see <see cref="Schemas.FullTextCatalog"/>).
+/// <c>int</c> property of a full-text catalog.
+/// <c>ItemCount</c> counts the rows the catalog's indexes cover and
+/// <c>UniqueKeyCount</c> the distinct terms in them — both computed by reading
+/// those tables, which is how the search pipeline answers everything else (see
+/// <c>docs/claude/full-text.md</c>). <c>AccentSensitivity</c> reflects the
+/// catalog's DDL-captured <c>ACCENT_SENSITIVITY</c> option. The size / status /
+/// age properties report the idle answers real gives a settled catalog
+/// (<c>0</c>), since nothing here is crawled in the background.
 /// An unknown catalog or unrecognized property returns NULL; property names are
-/// case-insensitive. All probe-confirmed against SQL Server 2025 (2026-07-20).
+/// case-insensitive. All probe-confirmed against SQL Server 2025 with Full-Text
+/// installed.
 /// Reference:
 /// https://learn.microsoft.com/en-us/sql/t-sql/functions/fulltextcatalogproperty-transact-sql
 /// </summary>
@@ -50,14 +54,70 @@ internal sealed class FullTextCatalogProperty : Expression
             "ACCENTSENSITIVITY" => SqlValue.FromInt32(catalog.IsAccentSensitive ? 1 : 0),
             "IMPORTSTATUS" => SqlValue.FromInt32(0),
             "INDEXSIZE" => SqlValue.FromInt32(0),
-            "ITEMCOUNT" => SqlValue.FromInt32(0),
+            "ITEMCOUNT" => SqlValue.FromInt32(CountIndexedRows(runtime, catalog.Id)),
             "LOGSIZE" => SqlValue.FromInt32(0),
             "MERGESTATUS" => SqlValue.FromInt32(0),
             "POPULATECOMPLETIONAGE" => SqlValue.FromInt32(0),
             "POPULATESTATUS" => SqlValue.FromInt32(0),
-            "UNIQUEKEYCOUNT" => SqlValue.FromInt32(0),
+            "UNIQUEKEYCOUNT" => SqlValue.FromInt32(CountDistinctTerms(runtime, catalog)),
             _ => SqlValue.Null(SqlType.Int32),
         };
+    }
+
+    /// <summary>
+    /// Rows covered by every full-text index attached to this catalog — real's
+    /// <c>ItemCount</c>, which counts indexed rows rather than terms.
+    /// </summary>
+    private static int CountIndexedRows(RuntimeContext runtime, int catalogId)
+    {
+        var total = 0;
+        foreach (var table in IndexedTables(runtime, catalogId))
+            total += table.Heap.RowCount;
+        return total;
+    }
+
+    /// <summary>
+    /// Distinct terms across everything the catalog indexes — real's
+    /// <c>UniqueKeyCount</c>. Stopwords are excluded because they never enter
+    /// the index.
+    /// </summary>
+    private static int CountDistinctTerms(RuntimeContext runtime, Schemas.FullTextCatalog catalog)
+    {
+        var terms = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var table in IndexedTables(runtime, catalog.Id))
+        {
+            var index = table.FullTextIndex!;
+            foreach (var bytes in table.Heap.EnumerateRows())
+            {
+                foreach (var column in index.Columns)
+                {
+                    var ordinal = column.ColumnId - 1;
+                    if (ordinal < 0 || ordinal >= table.Columns.Length || !table.Columns[ordinal].IsStored)
+                        continue;
+                    var value = RowDecoder.DecodeColumn(table.StoredColumns, bytes, table.StorageOrdinals[ordinal], table.Heap);
+                    if (FullText.FullTextBinding.TextOf(value) is not { } text)
+                        continue;
+                    foreach (var term in FullText.FullTextWordBreaker.Break(text, catalog.IsAccentSensitive))
+                    {
+                        if (!FullText.FullTextLexicon.IsStopword(term.Text))
+                            _ = terms.Add(term.Text);
+                    }
+                }
+            }
+        }
+        return terms.Count;
+    }
+
+    private static IEnumerable<HeapTable> IndexedTables(RuntimeContext runtime, int catalogId)
+    {
+        foreach (var schema in runtime.Batch.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                if (table.FullTextIndex?.CatalogId == catalogId)
+                    yield return table;
+            }
+        }
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;

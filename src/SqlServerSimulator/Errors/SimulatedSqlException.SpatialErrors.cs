@@ -167,6 +167,18 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ClrPropertyReadOnly(string member, string clrTypeName) =>
         new($"Could not assign to property '{member}' for type '{clrTypeName}' in assembly 'Microsoft.SqlServer.Types' because it is read only.", 6595, 16, 1);
 
+    /// <summary>24109 — <c>STRelate</c>'s pattern argument isn't nine characters long. A NULL argument reports zero, matching real.</summary>
+    internal static SimulatedSqlException SpatialRelateMaskLength(bool isGeography, int length) => SpatialFailure(
+        isGeography, SpatialFormat, 24109,
+        "The intersectionPatternMatrix argument to STRelate is not valid. This argument must contain exactly 9 characters, "
+        + $"but the string provided has {length.ToString(CultureInfo.InvariantCulture)} characters.");
+
+    /// <summary>24110 — a character outside <c>STRelate</c>'s pattern alphabet. Real reports the zero-based position and is case-sensitive.</summary>
+    internal static SimulatedSqlException SpatialRelateMaskCharacter(bool isGeography, int position, char character) => SpatialFailure(
+        isGeography, SpatialFormat, 24110,
+        $"Character {position.ToString(CultureInfo.InvariantCulture)} ({character}) of the intersectionPatternMatrix argument to "
+        + "STRelate is not valid. This argument must only contain the characters 0, 1, 2, T, F, and *.");
+
     /// <summary>24144 — an operation that needs a valid instance ran against one that isn't.</summary>
     internal static SimulatedSqlException SpatialInstanceNotValid(bool isGeography) => SpatialFailure(
         isGeography, SpatialArgument, 24144,

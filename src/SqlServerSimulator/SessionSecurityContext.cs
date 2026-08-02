@@ -20,8 +20,9 @@ internal readonly struct SecurityPrincipalFrame(int databasePrincipalId, string 
 
     /// <summary>
     /// Whether this identity exists only inside one database — an
-    /// <c>EXECUTE AS USER</c> frame, a module's <c>WITH EXECUTE AS &lt;user&gt;</c>
-    /// frame, or an activated application role. Such an identity carries no
+    /// <c>EXECUTE AS USER</c> frame, any of a module's <c>WITH EXECUTE AS</c>
+    /// frames (<c>OWNER</c> / <c>SELF</c> included, though both resolve to
+    /// <c>dbo</c>), or an activated application role. Such an identity carries no
     /// server principal, so out of an ordinary database it cannot reach another
     /// one at all: every cross-database reference raises Msg 916 naming
     /// <see cref="LoginName"/> (probe-confirmed against SQL Server 2025 — the
@@ -70,7 +71,7 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
     /// <summary>True while at least one <c>EXECUTE AS</c> / module frame is active.</summary>
     public bool IsImpersonating => this.impersonation.Count > 0;
 
-    /// <summary>True when the effective database principal is <c>dbo</c> — the bypass a future enforcement stage short-circuits on, and the "unrestricted, may USE" gate today.</summary>
+    /// <summary>True when the effective database principal is <c>dbo</c> — the same-database enforcement bypass. A reference that crosses a database boundary asks the boundary-aware form instead, since a <c>dbo</c> frame can be database-scoped.</summary>
     public bool EffectiveIsDbo => this.Effective.DatabasePrincipalId == Database.DboPrincipalId;
 
     /// <summary>Current impersonation-stack depth, captured on module entry so the matching exit can unwind exactly its own frames.</summary>

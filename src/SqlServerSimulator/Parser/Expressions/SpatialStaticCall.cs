@@ -172,8 +172,8 @@ internal sealed class SpatialStaticCall : Expression
         return $"{this.type}::{this.method}({argDisplay})";
     }
 
-    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) =>
-        this.arguments.Any(a => a.ResultIsNullable(resolveColumnNullable));
+    internal override bool ResultIsNullable(NullabilityContext context) =>
+        this.arguments.Any(a => a.ResultIsNullable(context));
 
     internal override void VisitColumnReferences(Action<MultiPartName> visit)
     {

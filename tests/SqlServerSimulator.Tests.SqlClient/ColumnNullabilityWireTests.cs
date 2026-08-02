@@ -156,6 +156,94 @@ public sealed class ColumnNullabilityWireTests
     }
 
     [TestMethod]
+    public async Task PerBuiltInDispositions_ReachTheWireFlag()
+    {
+        // The per-built-in nullability table has no rule behind it — CEILING /
+        // FLOOR / ROUND / SIGN / RADIANS and the …FROMPARTS family propagate
+        // their arguments', PI and the GETDATE family are unconditionally NOT
+        // NULL, and their near neighbours (ABS, POWER, RAND, NEWID) stay
+        // nullable. The exhaustive matrix lives in the main suite's
+        // ResultNullabilityTests; this pins that it is the flag SqlClient reads.
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, """
+            create table t (a int not null, b int null);
+            insert t values (1, null)
+            """);
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand(
+            "select ceiling(a), ceiling(b), sign(a), abs(a), pi(), getdate(), rand() from t", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        var columns = reader.GetColumnSchema();
+        IsFalse(columns[0].AllowDBNull);  // CEILING propagates a NOT NULL argument
+        IsTrue(columns[1].AllowDBNull);   // ... and a nullable one
+        IsFalse(columns[2].AllowDBNull);  // SIGN propagates
+        IsTrue(columns[3].AllowDBNull);   // ABS never does
+        IsFalse(columns[4].AllowDBNull);  // PI is unconditionally NOT NULL
+        IsFalse(columns[5].AllowDBNull);  // so is GETDATE
+        IsTrue(columns[6].AllowDBNull);   // RAND is not
+    }
+
+    [TestMethod]
+    public async Task AtAtConstantsAndConcatOperators_ReachTheWireFlag()
+    {
+        // Every @@-constant but @@IDENTITY is NOT NULL, and `+` splits on which
+        // operator it is: concatenation propagates its operands' nullability
+        // where arithmetic claims nullable however non-null the operands are.
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, """
+            create table t (a int not null, s varchar(10) not null, sn varchar(10) null);
+            insert t values (1, 'x', null)
+            """);
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand(
+            "select @@rowcount, @@spid, @@identity, s + s, s + sn, a + a, a & a, -a from t", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        var columns = reader.GetColumnSchema();
+        IsFalse(columns[0].AllowDBNull);  // @@ROWCOUNT
+        IsFalse(columns[1].AllowDBNull);  // @@SPID
+        IsTrue(columns[2].AllowDBNull);   // @@IDENTITY is the exception
+        IsFalse(columns[3].AllowDBNull);  // string concatenation propagates
+        IsTrue(columns[4].AllowDBNull);   // ... including a nullable operand
+        IsTrue(columns[5].AllowDBNull);   // arithmetic + is always nullable
+        IsFalse(columns[6].AllowDBNull);  // bitwise & propagates
+        IsTrue(columns[7].AllowDBNull);   // unary minus is arithmetic
+    }
+
+    [TestMethod]
+    public async Task CaseFamilyConstantFolds_ReachTheWireFlag()
+    {
+        // The CASE family drops an arm whose condition folds FALSE and takes
+        // only the arm whose condition folds TRUE, which is what separates
+        // NULLIF(1, 2) / COALESCE(NULL, 5) / CASE WHEN 1 = 1 THEN 5 END from
+        // their unfoldable spellings.
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("""
+            select
+                nullif(1, 2),
+                nullif(1, 1),
+                coalesce(null, 5),
+                case when 1 = 1 then 5 end,
+                case when 1 = 2 then 5 end
+            """, connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        var columns = reader.GetColumnSchema();
+        IsFalse(columns[0].AllowDBNull);  // arms differ, so the constant survives
+        IsTrue(columns[1].AllowDBNull);   // arms match, so it folds to NULL
+        IsFalse(columns[2].AllowDBNull);  // the constant-NULL argument drops out
+        IsFalse(columns[3].AllowDBNull);  // constant-true beats the implicit ELSE NULL
+        IsTrue(columns[4].AllowDBNull);   // constant-false leaves only that ELSE
+    }
+
+    [TestMethod]
     public async Task JoinedSelect_FallsBackToAllNullable()
     {
         var simulation = new Simulation();

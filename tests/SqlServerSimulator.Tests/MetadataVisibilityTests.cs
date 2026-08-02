@@ -376,4 +376,168 @@ public sealed class CrossDatabaseMetadataVisibilityTests
         AreEqual(2, sim.ExecuteScalar(
             "use home; execute as user = 'homeuser'; select count(*) from away.sys.tables where name like 'rem[_]%'"));
     }
+
+    // ---- the OBJECT_* scalars ask the same question in the named database ----
+
+    /// <summary>The <c>object_id</c> of <c>away.dbo.<paramref name="name"/></c>, read as dbo.</summary>
+    private static int AwayObjectId(Simulation sim, string name) =>
+        (int)sim.ExecuteScalar($"use away; select object_id('dbo.{name}')")!;
+
+    [TestMethod]
+    public void ObjectId_ThreePartName_TargetUserCanView_ReturnsTheId()
+    {
+        var sim = TwoDatabaseFixture();
+        var expected = AwayObjectId(sim, "rem_sel");
+        using var connection = ConnectAsApp(sim);
+        AreEqual(expected, connection.CreateCommand("select object_id('away.dbo.rem_sel')").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ObjectId_ThreePartName_TargetUserCannotView_ReturnsNull()
+    {
+        // rem_none is revealed by no grant in `away`, so the id is hidden the
+        // same way the sys.tables row is.
+        using var connection = ConnectAsApp(TwoDatabaseFixture());
+        AreEqual(DBNull.Value, connection.CreateCommand("select object_id('away.dbo.rem_none')").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ObjectId_ThreePartName_SessionGrantsDoNotTravel()
+    {
+        // A grant held in `home` reveals nothing across the boundary — the away
+        // user's own visibility is the only input.
+        var sim = TwoDatabaseFixture();
+        _ = sim.ExecuteNonQuery("use home; create table dbo.rem_none (id int); grant control on dbo.rem_none to homeuser");
+        using var connection = ConnectAsApp(sim);
+        AreEqual(DBNull.Value, connection.CreateCommand("select object_id('away.dbo.rem_none')").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ObjectId_ThreePartName_NoUserInTarget_Raises916()
+    {
+        using var connection = ConnectAsApp(TwoDatabaseFixture(createAwayUser: false));
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand("select object_id('away.dbo.rem_sel')").ExecuteScalar());
+        AreEqual(916, ex.Number);
+        AreEqual(14, ex.Class);
+        AreEqual(2, ex.State);
+        AreEqual("The server principal \"app\" is not able to access the database \"away\" under the current security context.", ex.Message);
+    }
+
+    [TestMethod]
+    public void ObjectId_ThreePartName_NoUserInTarget_UnresolvedName_ReturnsNull()
+    {
+        // The gate runs after resolution, so a name that matches nothing in an
+        // unreachable database is NULL rather than a refusal (probe-confirmed) —
+        // as is a name whose object the type filter excludes.
+        using var connection = ConnectAsApp(TwoDatabaseFixture(createAwayUser: false));
+        AreEqual(DBNull.Value, connection.CreateCommand("select object_id('away.dbo.no_such_table')").ExecuteScalar());
+        AreEqual(DBNull.Value, connection.CreateCommand("select object_id('away.dbo.rem_sel', 'P')").ExecuteScalar());
+        AreEqual(DBNull.Value, connection.CreateCommand("select object_id('nosuchdb.dbo.rem_sel')").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ObjectId_ThreePartName_GuestServedSystemDatabase_FiltersByGuest()
+    {
+        // master serves guest, so the lookup resolves there instead of refusing —
+        // and then filters by guest, which sees only what guest is granted.
+        var sim = TwoDatabaseFixture(createAwayUser: false);
+        _ = sim.ExecuteNonQuery("use master; create table dbo.m_open (id int); create table dbo.m_shut (id int); grant select on dbo.m_open to guest");
+        var expected = (int)sim.ExecuteScalar("use master; select object_id('dbo.m_open')")!;
+        using var connection = ConnectAsApp(sim);
+        AreEqual(expected, connection.CreateCommand("select object_id('master.dbo.m_open')").ExecuteScalar());
+        AreEqual(DBNull.Value, connection.CreateCommand("select object_id('master.dbo.m_shut')").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ObjectId_ThreePartName_RestrictedTemplateDatabase_Raises916()
+    {
+        // `model` allows no guest access, so it refuses like any user database.
+        var sim = TwoDatabaseFixture(createAwayUser: false);
+        _ = sim.ExecuteNonQuery("use model; create table dbo.mo_tab (id int)");
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand("select object_id('model.dbo.mo_tab')").ExecuteScalar());
+        AreEqual(916, ex.Number);
+    }
+
+    [TestMethod]
+    public void ObjectId_ThreePartName_SysadminLogin_Answers()
+    {
+        var sim = TwoDatabaseFixture(createAwayUser: false);
+        _ = sim.ExecuteNonQuery("alter server role sysadmin add member app");
+        var expected = AwayObjectId(sim, "rem_none");
+        using var connection = ConnectAsApp(sim);
+        AreEqual(expected, connection.CreateCommand("select object_id('away.dbo.rem_none')").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ObjectId_ThreePartName_DboSession_Answers()
+    {
+        var sim = TwoDatabaseFixture(createAwayUser: false);
+        AreEqual(AwayObjectId(sim, "rem_none"), sim.ExecuteScalar("use home; select object_id('away.dbo.rem_none')"));
+    }
+
+    [TestMethod]
+    public void ObjectNameIdForm_ExplicitDatabaseId_FiltersByThatDatabasesPrincipal()
+    {
+        var sim = TwoDatabaseFixture();
+        var visible = AwayObjectId(sim, "rem_sel");
+        var hidden = AwayObjectId(sim, "rem_none");
+        using var connection = ConnectAsApp(sim);
+        AreEqual("rem_sel", connection.CreateCommand($"select object_name({visible}, db_id('away'))").ExecuteScalar());
+        AreEqual(DBNull.Value, connection.CreateCommand($"select object_name({hidden}, db_id('away'))").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ObjectNameIdForm_NoUserInTarget_ReturnsNullWithoutRaising()
+    {
+        // The id form asks the visibility question alone: a database the login
+        // can't reach reveals nothing, and there is no Msg 916 to catch — unlike
+        // the three-part name form (probe-confirmed).
+        var sim = TwoDatabaseFixture(createAwayUser: false);
+        var id = AwayObjectId(sim, "rem_sel");
+        using var connection = ConnectAsApp(sim);
+        AreEqual(DBNull.Value, connection.CreateCommand($"select object_name({id}, db_id('away'))").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ObjectSchemaNameIdForm_ExplicitDatabaseId_ResolvesInThatDatabase()
+    {
+        var sim = TwoDatabaseFixture();
+        sim.ExecuteBatches("use away", "create schema rems", "create table rems.rem_sch (id int); grant select on rems.rem_sch to awayuser");
+        var id = (int)sim.ExecuteScalar("use away; select object_id('rems.rem_sch')")!;
+        using var connection = ConnectAsApp(sim);
+        AreEqual("rems", connection.CreateCommand($"select object_schema_name({id}, db_id('away'))").ExecuteScalar());
+        // Without the database-id argument the lookup stays in `home`, where the
+        // id belongs to nothing.
+        AreEqual(DBNull.Value, connection.CreateCommand($"select object_schema_name({id})").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ObjectSchemaNameIdForm_TargetUserCannotView_ReturnsNull()
+    {
+        var sim = TwoDatabaseFixture();
+        var hidden = AwayObjectId(sim, "rem_none");
+        using var connection = ConnectAsApp(sim);
+        AreEqual(DBNull.Value, connection.CreateCommand($"select object_schema_name({hidden}, db_id('away'))").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ObjectSchemaNameIdForm_NoUserInTarget_ReturnsNullWithoutRaising()
+    {
+        var sim = TwoDatabaseFixture(createAwayUser: false);
+        var id = AwayObjectId(sim, "rem_sel");
+        using var connection = ConnectAsApp(sim);
+        AreEqual(DBNull.Value, connection.CreateCommand($"select object_schema_name({id}, db_id('away'))").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void DbIdAndDbName_StillAnswerForAnUnreachableDatabase()
+    {
+        // They read no metadata of the database, so the refusal doesn't reach
+        // them (probe-confirmed).
+        using var connection = ConnectAsApp(TwoDatabaseFixture(createAwayUser: false));
+        AreEqual("away", connection.CreateCommand("select db_name(db_id('away'))").ExecuteScalar());
+    }
 }

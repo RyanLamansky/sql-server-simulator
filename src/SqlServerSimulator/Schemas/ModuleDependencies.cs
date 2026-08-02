@@ -847,6 +847,22 @@ internal static class ModuleDependencies
             };
     }
 
+    /// <summary>
+    /// The object a reference binds to for a surface that stores <em>ids</em>
+    /// rather than names — the legacy <c>sysdepends</c> /
+    /// <c>sys.sql_dependencies</c> pair, whose rows real settled when the
+    /// referencing module was created. It differs from
+    /// <see cref="Reference.ReferencedId"/> in one shape: a one-part
+    /// <c>EXEC</c> name, which the modern surfaces report NULL and
+    /// caller-dependent while the legacy pair names the procedure the default
+    /// schema holds (probe-confirmed).
+    /// </summary>
+    internal static SchemaObject? ResolveForStoredId(Database database, Reference reference) =>
+        reference.Resolved
+        ?? (reference.IsCallerDependent && database.Schemas.TryGetValue(Database.DefaultSchemaName, out var schema)
+            ? ResolveInSchema(schema, reference.EntityName)
+            : null);
+
     private static SchemaObject? ResolveInSchema(Schema schema, string leaf) =>
         schema.HeapTables.TryGetValue(leaf, out var table) ? table
         : schema.Views.TryGetValue(leaf, out var view) ? view

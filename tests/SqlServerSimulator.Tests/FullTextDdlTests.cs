@@ -223,13 +223,14 @@ public sealed class FullTextDdlTests
     }
 
     [TestMethod]
-    public void FullTextServiceProperty_ResourceProperties_ReturnZero()
+    public void FullTextServiceProperty_ResourceProperties_MatchInstalledReference()
     {
         var sim = new Simulation();
         AreEqual(0, sim.ExecuteScalar("select fulltextserviceproperty('ResourceUsage')"));
         AreEqual(0, sim.ExecuteScalar("select fulltextserviceproperty('ConnectTimeout')"));
         AreEqual(0, sim.ExecuteScalar("select fulltextserviceproperty('LoadOSResources')"));
-        AreEqual(0, sim.ExecuteScalar("select fulltextserviceproperty('VerifyResourceUsage')"));
+        // Real singles this one out with NULL even when Full-Text is installed.
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select fulltextserviceproperty('VerifyResourceUsage')"));
     }
 
     [TestMethod]

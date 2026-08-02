@@ -88,5 +88,10 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
 
     internal override bool IsRowIndependent => left.IsRowIndependent && right.IsRowIndependent;
 
+    // Concatenation propagates operand nullability, the same rule string `+`
+    // takes (and the opposite of arithmetic `+`, which claims nullable).
+    internal override bool ResultIsNullable(NullabilityContext context) =>
+        left.ResultIsNullable(context) || right.ResultIsNullable(context);
+
     private protected override bool IsStructuralConstant => left.IsWrittenConstant && right.IsWrittenConstant;
 }

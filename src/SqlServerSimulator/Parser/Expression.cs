@@ -696,37 +696,74 @@ internal abstract class Expression
     internal abstract string DebugDisplay();
 
     /// <summary>
-    /// SELECT INTO projection inference: returns whether this expression's
-    /// result can be NULL. Default is conservative-true. Subclasses that can
-    /// prove non-nullability (literal-non-null, column-ref-to-NOT-NULL,
-    /// ISNULL-with-non-null-arg, CASE-with-all-branches-non-null) override
-    /// to return false where applicable. Probe-confirmed rules:
-    /// <list type="bullet">
-    /// <item>Direct column ref preserves the source column's nullability.</item>
-    /// <item>Integer arithmetic, CAST, CONVERT, COALESCE, aggregates all
-    /// project as nullable (always YES). Aggregates include COUNT, which
-    /// real SQL Server projects as NULL allowed despite the runtime
-    /// guarantee that COUNT never returns NULL.</item>
-    /// <item>ISNULL(x, y) is non-null iff EITHER operand is non-null. COALESCE
-    /// differs — it stays nullable whenever any argument is a non-constant
-    /// nullable expression (the classic ISNULL-vs-COALESCE metadata quirk), so
-    /// it keeps the always-nullable default.</item>
-    /// <item>CASE WHEN ... END / IIF are non-null iff every THEN/ELSE (value)
-    /// branch is non-null (no-ELSE counts as implicit ELSE NULL).</item>
-    /// <item>CONCAT / CONCAT_WS are always non-null (NULL args are skipped, an
-    /// all-NULL input yields the empty string).</item>
-    /// <item>A VALUES row-constructor column is non-null iff no row supplies a
-    /// nullable cell there.</item>
-    /// </list>
-    /// Two known constant-fold gaps: a CASE / IIF whose condition SQL Server
-    /// folds to a constant to eliminate the null arm reads as nullable here, and
-    /// string <c>+</c> concatenation projects as non-null in real when both
-    /// operands are non-null but the simulator can't distinguish string-vs-
-    /// arithmetic <c>+</c> at static analysis time (the dispatch is runtime per
-    /// operand SqlValue.Type). Both are minor — CONCAT is the idiomatic
-    /// concat form, and staging tables rarely rely on NOT NULL.
+    /// Projection nullability: whether this expression's result can be NULL.
+    /// Drives the TDS COLMETADATA <c>fNullable</c> flag and the SELECT INTO
+    /// destination's column declaration, which real derives identically
+    /// (probe-confirmed cell for cell). The default is a conservative
+    /// <see langword="true"/>; nothing SQL Server marks NOT NULL is reached by
+    /// a rule, so each of the families below is its own override.
     /// </summary>
-    internal virtual bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) => true;
+    /// <remarks>
+    /// <para><b>Structural rules.</b> A direct column reference preserves the
+    /// source column's declaration; a non-NULL literal is NOT NULL; a
+    /// parenthesization, a <c>COLLATE</c> postfix and an <c>AS alias</c> pass
+    /// their operand's answer through.</para>
+    /// <para><b>Per-built-in dispositions</b>, probed one call per name — there
+    /// is no rule behind them, only a table. Three groups:</para>
+    /// <list type="bullet">
+    /// <item><b>Always NOT NULL</b>: <c>CONCAT</c> / <c>CONCAT_WS</c> (NULL
+    /// arguments are skipped, an all-NULL input yields the empty string),
+    /// <c>PI</c>, the <c>GETDATE</c> family (<c>GETUTCDATE</c>,
+    /// <c>SYSDATETIME</c>, <c>SYSUTCDATETIME</c>, <c>SYSDATETIMEOFFSET</c>,
+    /// <c>CURRENT_TIMESTAMP</c>), <c>ROWCOUNT_BIG</c>,
+    /// <c>MIN_ACTIVE_ROWVERSION</c>, <c>CURRENT_REQUEST_ID</c>,
+    /// <c>CURSOR_STATUS</c>, <c>APPLOCK_TEST</c>, and every <c>@@</c> constant
+    /// but <c>@@IDENTITY</c>.</item>
+    /// <item><b>NOT NULL when every argument is</b>: <c>CEILING</c>,
+    /// <c>FLOOR</c>, <c>ROUND</c> (all three arguments), <c>SIGN</c>,
+    /// <c>RADIANS</c>, <c>GREATEST</c> / <c>LEAST</c>, and the six
+    /// <c>…FROMPARTS</c> constructors.</item>
+    /// <item><b>Always nullable</b>: everything else, including neighbours that
+    /// read like the propagating group — <c>ABS</c>, <c>POWER</c>,
+    /// <c>SQUARE</c>, <c>SQRT</c>, <c>EXP</c>, <c>LOG</c>, <c>DEGREES</c>, the
+    /// trig family, <c>CHECKSUM</c>, <c>RAND</c>, <c>NEWID</c>, every date
+    /// function taking a date (<c>DATEADD</c>, <c>DATEDIFF</c>,
+    /// <c>DATEPART</c>, <c>YEAR</c>, <c>EOMONTH</c>, …), every string scalar
+    /// (<c>LEN</c>, <c>LEFT</c>, <c>UPPER</c>, <c>REPLACE</c>, …),
+    /// <c>CAST</c> / <c>CONVERT</c> / <c>PARSE</c> and their <c>TRY_</c>
+    /// forms, <c>@@IDENTITY</c> / <c>SCOPE_IDENTITY</c>, and every aggregate
+    /// and window function — <c>COUNT</c> included, which real marks nullable
+    /// despite never returning NULL.</item>
+    /// </list>
+    /// <para><b>Operators.</b> Arithmetic <c>+ - * / %</c> is always nullable,
+    /// even over two NOT NULL <c>int</c>s and even for <c>1 + 1</c>. Bitwise
+    /// <c>~ &amp; | ^</c> and both concatenation operators — string / binary
+    /// <c>+</c> and <c>||</c> — are NOT NULL when their operands are, which is
+    /// why the inference resolves operand types (see
+    /// <see cref="NullabilityContext"/>). Unary minus is arithmetic and so
+    /// nullable, except over a constant real folds (<c>-1</c>, <c>-(1)</c>).</para>
+    /// <para><b>The CASE family</b> — <c>CASE</c>, <c>IIF</c>, <c>COALESCE</c>,
+    /// <c>NULLIF</c>, all of which desugar into one — is NOT NULL iff every
+    /// surviving value arm is, with a missing <c>ELSE</c> counting as an
+    /// implicit <c>ELSE NULL</c>. <b>Surviving</b> is the constant fold real
+    /// applies first: an arm whose condition folds FALSE (or UNKNOWN) drops
+    /// out, and an arm whose condition folds TRUE becomes the whole answer.
+    /// That is what makes <c>NULLIF(1, 2)</c>, <c>COALESCE(NULL, 5)</c> and
+    /// <c>CASE WHEN 1 = 1 THEN 5 END</c> NOT NULL while their unfoldable
+    /// spellings stay nullable. <c>ISNULL</c> is not in this family: it is NOT
+    /// NULL when <i>either</i> operand is, where <c>COALESCE</c> needs all of
+    /// them (the classic ISNULL-vs-COALESCE metadata quirk).</para>
+    /// <para>A VALUES row-constructor column is non-null iff no row supplies a
+    /// nullable cell there.</para>
+    /// <para><b>Divergence.</b> Real additionally marks a CASE-family arm (or a
+    /// <c>GREATEST</c> / <c>LEAST</c> argument) nullable when unifying the arms
+    /// inserts a conversion that could overflow — an <c>int</c> literal beside
+    /// a <c>decimal(9, 2)</c> column, say, where the literal's ten integral
+    /// digits don't fit the column's seven. The simulator reads those NOT NULL.
+    /// The claim is runtime-accurate either way (the conversion raises rather
+    /// than yielding NULL); see docs/claude/tds-endpoint.md.</para>
+    /// </remarks>
+    internal virtual bool ResultIsNullable(NullabilityContext context) => true;
 
     /// <summary>
     /// True when this expression's result — <b>if</b> it is decimal-family —

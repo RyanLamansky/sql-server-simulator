@@ -104,7 +104,127 @@ public sealed class JsonScalarTests
 
     [TestMethod]
     public void JsonValue_InvalidPath_RaisesMsg13607()
-        => AssertSqlError("select json_value('{}', 'no-leading-dollar')", 13607);
+        => AssertSqlError("select json_value('{}', 'no-leading-dollar')", 13607,
+            "JSON path is not properly formatted. Unexpected character 'n' is found at position 0.");
+
+    // --- Path grammar: whitespace ---
+
+    /// <summary>
+    /// Whitespace separates the path's tokens and may sit between any two of
+    /// them, trailing the path included — and a mode keyword needs none
+    /// behind it at all. Space, tab, line feed, form feed and carriage return
+    /// all count; vertical tab and the non-breaking space do not (all
+    /// probe-confirmed against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("' $.a '")]
+    [DataRow("'$. a'")]
+    [DataRow("'$ .a'")]
+    [DataRow("'  lax   $.a   '")]
+    [DataRow("'lax$.a'")]
+    [DataRow("'strict$.a'")]
+    [DataRow("char(9) + '$.a' + char(9)")]
+    [DataRow("char(10) + '$.a' + char(13)")]
+    [DataRow("char(12) + '$.a'")]
+    public void JsonValue_PathWhitespace_Tolerated(string path)
+        => AreEqual("1", ExecuteScalar($"select json_value('{{\"a\":1}}', {path})"));
+
+    /// <summary>Whitespace sits between segments and inside an index alike.</summary>
+    [TestMethod]
+    [DataRow("$.a . b", "7")]
+    [DataRow("$.a . c[ 0 ]", "9")]
+    [DataRow("$ . a . b", "7")]
+    public void JsonValue_PathWhitespace_BetweenSegments(string path, string expected)
+        => AreEqual(expected, ExecuteScalar($"select json_value('{{\"a\":{{\"b\":7,\"c\":[9]}}}}', '{path}')"));
+
+    /// <summary>Trailing whitespace reaches JSON_MODIFY's edit too.</summary>
+    [TestMethod]
+    public void JsonModify_PathWhitespace_Edits()
+        => AreEqual("{ \"a\" : 2 }", ExecuteScalar("select json_modify('{ \"a\" : 1 }', ' $.a ', 2)"));
+
+    /// <summary>A keyword only counts as one when the word ends there.</summary>
+    [TestMethod]
+    public void JsonValue_KeywordRunOn_IsMalformed()
+        => new Simulation().AssertSqlError("select json_value('{\"a\":1}', 'laxx$.a')", 13607,
+            "JSON path is not properly formatted. Unexpected character 'l' is found at position 0.");
+
+    // --- Path grammar: Msg 13607's character, position and State ---
+
+    /// <summary>
+    /// Msg 13607 names the character it stopped on and its zero-based index,
+    /// with <c>.</c> at the path's length standing in for running off the
+    /// end. The State byte names what the parser was reading: 22 where the
+    /// <c>$</c> or a segment was due, 21 inside <c>[</c> before the digits,
+    /// 15 inside <c>[</c> after them, 16 for an index above real's
+    /// <c>uint</c> ceiling, 20 for a quoted name the path never closed, and
+    /// 14 for the end of the path — which the grammar's own punctuation, the
+    /// digits, and anything at all behind a quoted name report too. Every row
+    /// probed verbatim against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("xyz", 'x', 0, 22)]
+    [DataRow("$x", 'x', 1, 22)]
+    [DataRow("$ x", 'x', 2, 22)]
+    [DataRow("$.a b", 'b', 4, 22)]
+    [DataRow("$.a!", '!', 3, 22)]
+    [DataRow("$.a-b", '-', 3, 22)]
+    [DataRow("$.-a", '-', 2, 22)]
+    [DataRow("$.a[1]x", 'x', 6, 22)]
+    [DataRow("$[0]y", 'y', 4, 22)]
+    [DataRow("$$", '$', 1, 14)]
+    [DataRow("$.$", '$', 2, 14)]
+    [DataRow("$..a", '.', 2, 14)]
+    [DataRow("$.9", '9', 2, 14)]
+    [DataRow("$.[", '[', 2, 14)]
+    [DataRow("$.a$b", '$', 3, 14)]
+    [DataRow("$[0]1", '1', 4, 14)]
+    [DataRow("$.a[]", ']', 4, 14)]
+    [DataRow("$.a[ ]", ']', 5, 14)]
+    [DataRow("$[\"a\"]", '"', 2, 14)]
+    [DataRow("$.\"a\"x", 'x', 5, 14)]
+    [DataRow("$.\"a\" x", 'x', 6, 14)]
+    [DataRow("$.\"\"x", 'x', 4, 14)]
+    [DataRow("$[a]", 'a', 2, 21)]
+    [DataRow("$.a[-1]", '-', 4, 21)]
+    [DataRow("$[1x]", 'x', 3, 15)]
+    [DataRow("$[1$]", '$', 3, 14)]
+    [DataRow("$.\"a", '.', 4, 20)]
+    [DataRow("", '.', 0, 14)]
+    [DataRow("$.", '.', 2, 14)]
+    [DataRow("$[", '.', 2, 14)]
+    [DataRow("$[0", '.', 3, 14)]
+    [DataRow("$.a.", '.', 4, 14)]
+    [DataRow("$.\"a\".", '.', 6, 14)]
+    [DataRow("lax ", '.', 4, 14)]
+    [DataRow("$[4294967296]", '6', 11, 16)]
+    [DataRow("$[99999999999]", '9', 12, 16)]
+    [DataRow("$[99999999999999999999]", '9', 12, 16)]
+    public void JsonValue_MalformedPath_ReportsCharacterPositionAndState(string path, char character, int position, int state)
+    {
+        var ex = new Simulation().AssertSqlError($"select json_value('{{\"a\":1}}', '{path}')", 13607);
+        AreEqual($"JSON path is not properly formatted. Unexpected character '{character}' is found at position {position}.", ex.Message);
+        AreEqual((byte)state, ex.State);
+    }
+
+    /// <summary>
+    /// An index real's <c>uint</c> ceiling still admits resolves — past every
+    /// array there is, so the answer is NULL rather than an error.
+    /// </summary>
+    [TestMethod]
+    [DataRow("$[2147483648]")]
+    [DataRow("$[4294967295]")]
+    public void JsonValue_HugeIndex_ResolvesToNull(string path)
+        => IsInstanceOfType<DBNull>(ExecuteScalar($"select json_value('[1]', '{path}')"));
+
+    /// <summary>Every function's path goes through the one parser.</summary>
+    [TestMethod]
+    [DataRow("select json_query('{\"a\":1}', '$.a b')")]
+    [DataRow("select json_modify('{\"a\":1}', '$.a b', 2)")]
+    [DataRow("select json_path_exists('{\"a\":1}', '$.a b')")]
+    [DataRow("select * from openjson('{\"a\":1}') with (v int '$.a b')")]
+    public void MalformedPath_ReportsTheSameWayEverywhere(string sql)
+        => new Simulation().AssertSqlError(sql, 13607,
+            "JSON path is not properly formatted. Unexpected character 'b' is found at position 4.");
 
     [TestMethod]
     public void JsonModify_ReplaceExistingProperty()

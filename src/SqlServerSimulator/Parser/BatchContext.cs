@@ -192,6 +192,21 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// Buffers real's severity-10 Msg 9927 once per batch. A full-text
+    /// predicate evaluates per row, and real reports the ignored words once for
+    /// the statement, so a repeat of the same text is dropped rather than
+    /// appended.
+    /// </summary>
+    internal void AppendFullTextNoiseWordMessage()
+    {
+        if (this.pendingInfoMessages?.Contains(SimulatedSqlException.FullTextNoiseWordMessage) == true)
+            return;
+        AppendInfoError(@class: 10, state: 1,
+            SimulatedSqlException.FullTextNoiseWordMessageNumber,
+            SimulatedSqlException.FullTextNoiseWordMessage);
+    }
+
+    /// <summary>
     /// If any info statements buffered output during this batch, delivers
     /// them to <see cref="SimulatedDbConnection.InfoMessage"/> subscribers
     /// as a single event whose <see cref="SimulatedInfoMessageEventArgs.Errors"/>
@@ -770,10 +785,11 @@ internal sealed class BatchContext
     /// <item><c>TABLOCK</c> on read → table-S; on write → table-X.</item>
     /// <item>Write (no TABLOCK*) → table-IX.</item>
     /// <item>Read <c>XLOCK</c> / <c>UPDLOCK</c> → table-IX (intent to write).</item>
-    /// <item>Read session <c>SERIALIZABLE</c> (no TABLOCK*) → table-S tx-scoped
-    /// for phantom-prevention at table granularity (the simulator has no
-    /// indexes to range-lock through; locking the whole table is the
-    /// closest faithful approximation).</item>
+    /// <item>Read session <c>SERIALIZABLE</c> (no TABLOCK*) → table-IS
+    /// tx-scoped, with phantom protection deferred to whoever consumes the
+    /// source: key-range locks over the predicate's interval when it is
+    /// sargable on an indexed leading column, table-S tx-scoped otherwise.
+    /// See <see cref="EnsureSerializableTableLock"/>.</item>
     /// <item>Read session <c>READ UNCOMMITTED</c> / hint <c>NOLOCK</c> → no
     /// table-level lock acquired (dirty read).</item>
     /// <item>Read default (RC / RR / HOLDLOCK hint) → table-IS.</item>
@@ -786,8 +802,10 @@ internal sealed class BatchContext
     /// <item>RC reader → no row-S acquisition; reader probes each row for
     /// an incompatible row-X holder and waits (or skips with READPAST).</item>
     /// <item>RR / HOLDLOCK reader → row-S tx-scoped per touched row.</item>
-    /// <item>SERIALIZABLE reader → table-S tx-scoped already covers the
-    /// whole scan; no per-row row-S needed.</item>
+    /// <item>SERIALIZABLE reader → no per-row acquire; the key ranges (or
+    /// the table-S fallback) cover both the rows read and the gaps between
+    /// them, since a writer probes its row's key against every held range
+    /// whatever its own isolation level.</item>
     /// <item>UPDLOCK reader → row-U tx-scoped per touched row.</item>
     /// <item>XLOCK reader → row-X tx-scoped per touched row.</item>
     /// <item>Writer (table-IX) → row-X tx-scoped per mutated row.</item>
@@ -873,13 +891,24 @@ internal sealed class BatchContext
         }
         if (hints.Serializable || isolation == System.Data.IsolationLevel.Serializable)
         {
-            // SERIALIZABLE / HOLDLOCK hint: take table-S tx-scoped. Real
-            // SQL Server uses key-range locks here; the simulator has no
-            // index range structure so we degenerate to table-level for
-            // phantom prevention. Conservative — blocks more than real SQL
-            // Server but never incorrectly allows a phantom-creating insert.
-            this.AcquireTransactionLock(table.TableDataLock, LockMode.Shared);
-            return new DataLockPlan(rowMode: null, rowTxScoped: false, skipBlockedRows: hints.ReadPast, noLockReader: false);
+            // SERIALIZABLE / HOLDLOCK hint. Only table-IS is settled here —
+            // the predicate that decides between key-range locks and the
+            // whole-table fallback isn't known at FROM-source resolution, so
+            // the plan carries the obligation forward (see
+            // DataLockPlan.SerializableRangeReader). The IS is tx-scoped, not
+            // statement-scoped, so a concurrent TABLOCKX still conflicts for
+            // as long as the ranges are held — that writer takes no per-row
+            // lock, so the range probe would never see it.
+            this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentShared);
+            // Not plan-cacheable. Half the fence (the table-level acquisition,
+            // and the whole-table fallback the scan path reaches through the
+            // FROM source's captured batch) belongs to the session that parsed
+            // it, so a replay on another connection would settle a second
+            // session's protection against the first's transaction.
+            this.HasSessionScopedReference = true;
+            return new DataLockPlan(
+                rowMode: null, rowTxScoped: false, skipBlockedRows: hints.ReadPast, noLockReader: false,
+                serializableRangeReader: true);
         }
         // RC / RR reader.
         this.AcquireStatementLock(table.TableDataLock, LockMode.IntentShared);
@@ -906,6 +935,18 @@ internal sealed class BatchContext
     public void AcquireRowLockTxScoped(HeapTable table, int pageIndex, int slotIndex, LockMode mode)
     {
         var connection = this.Connection;
+        // A writer's row-X is the one point every DML path passes through with
+        // a RID in hand, so it is where the key-range probe hangs. The slot
+        // holds the image that matters at each site: an INSERT locks after the
+        // heap write (so it reads its new row), an UPDATE / DELETE locks
+        // before (so it reads the row it is about to supersede). An UPDATE's
+        // *new* image is probed separately at the rewrite site — a row moving
+        // INTO a held range is a phantom the old image can't reveal.
+        if (mode == LockMode.Exclusive && Volatile.Read(ref table.ActiveKeyRangeLocks) != 0
+            && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } liveImage)
+        {
+            this.ProbeKeyRangesForWrite(table, liveImage);
+        }
         if (connection.CurrentTransaction is { } tx && tx.EscalatedTables.Contains(table))
             return;
         var resource = table.GetOrCreateRowLock(pageIndex, slotIndex);
@@ -971,6 +1012,92 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// Tables this batch has already fallen back to a whole-table S lock on
+    /// for SERIALIZABLE phantom protection. Purely an idempotency guard: the
+    /// fallback is decided per materialization, and a source can be
+    /// re-enumerated many times (a correlated subquery's inner side), so
+    /// without this the same tx-scoped S would be re-acquired per pass and
+    /// pile up re-entrance counts in the transaction's held-lock list.
+    /// </summary>
+    private readonly HashSet<HeapTable> serializableTableFallbacks = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>
+    /// Discharges a SERIALIZABLE / <c>HOLDLOCK</c> reader's outstanding
+    /// phantom protection by taking table-S tx-scoped — the fallback for every
+    /// read whose shape the key-range path can't cover (a whole-table scan, a
+    /// non-sargable predicate, a predicate on an unindexed column, a
+    /// multi-source or view-backed source). Real degenerates the same way:
+    /// probed, a SERIALIZABLE scan of a heap takes an OBJECT S, and a
+    /// non-sargable predicate over an indexed table range-locks every key plus
+    /// the infinity range, which covers the same value space.
+    /// <para>
+    /// A no-op for every other plan, and for a table whose fallback this batch
+    /// already took.
+    /// </para>
+    /// </summary>
+    public void EnsureSerializableTableLock(HeapTable table, in DataLockPlan plan)
+    {
+        if (!plan.SerializableRangeReader || !this.serializableTableFallbacks.Add(table))
+            return;
+        this.AcquireTransactionLock(table.TableDataLock, LockMode.Shared);
+    }
+
+    /// <summary>
+    /// Acquires <paramref name="mode"/> on <paramref name="table"/>'s
+    /// <paramref name="range"/> for the rest of the transaction — a
+    /// SERIALIZABLE reader's phantom fence over one interval of one column's
+    /// key space.
+    /// </summary>
+    public void AcquireKeyRangeLockTxScoped(HeapTable table, KeyRange range, LockMode mode) =>
+        this.AcquireTransactionLock(table.GetOrCreateKeyRangeLock(range), mode);
+
+    /// <summary>
+    /// Blocks the caller until no other connection holds a key range covering
+    /// <paramref name="image"/>'s value for that range's column. Runs on every
+    /// writer whatever its own isolation level — a range lock's whole purpose
+    /// is to fence writers that know nothing about it — and mirrors real's
+    /// RangeI-N: an instant-duration mode taken only to test the interval and
+    /// released the moment it is granted, so it never shows up in a lock
+    /// snapshot taken after the write.
+    /// <para>
+    /// Costs nothing when no range is held anywhere on the table (the
+    /// <see cref="HeapTable.ActiveKeyRangeLocks"/> read), and one column decode
+    /// per distinct ranged ordinal otherwise.
+    /// </para>
+    /// </summary>
+    /// <exception cref="SimulatedSqlException">
+    /// Msg 1222 on lock timeout, Msg 1205 when waiting would close a cycle.
+    /// </exception>
+    public void ProbeKeyRangesForWrite(HeapTable table, byte[] image)
+    {
+        if (Volatile.Read(ref table.ActiveKeyRangeLocks) == 0)
+            return;
+        var connection = this.Connection;
+        var manager = connection.Simulation.LockManager;
+        var schema = table.StoredColumns;
+        Dictionary<int, SqlValue>? decoded = null;
+        foreach (var (range, resource) in table.KeyRangeLocks)
+        {
+            if ((uint)range.Ordinal >= (uint)schema.Length)
+                continue;
+            decoded ??= [];
+            if (!decoded.TryGetValue(range.Ordinal, out var value))
+            {
+                value = RowDecoder.DecodeColumn(schema, image, range.Ordinal, table.Heap);
+                decoded[range.Ordinal] = value;
+            }
+            if (!range.Contains(value)
+                || !manager.HasIncompatibleHolderOtherThan(resource, LockMode.RangeInsertNull, connection))
+            {
+                continue;
+            }
+
+            manager.Acquire(resource, LockMode.RangeInsertNull, connection, connection.LockTimeoutMillis);
+            manager.Release(resource, LockMode.RangeInsertNull, connection);
+        }
+    }
+
+    /// <summary>
     /// Wraps <paramref name="table"/>'s row enumeration with per-row
     /// conflict checks driven by <paramref name="plan"/>. Each yielded
     /// row's RID flows through <see cref="TouchRowForRead"/>; READPAST-
@@ -982,6 +1109,13 @@ internal sealed class BatchContext
     /// </summary>
     public static IEnumerable<byte[]> WrapWithRowConflictChecks(HeapTable table, BatchContext batch, DataLockPlan plan)
     {
+        // Reaching here means nothing narrowed the source to an index seek, so
+        // a SERIALIZABLE reader is about to scan the whole table and its
+        // phantom fence has to be the whole-table S. Deliberately inside the
+        // iterator body: the seek decision is made after the FROM source is
+        // built, and a seeked source is a different enumerable that never runs
+        // this one.
+        batch.EnsureSerializableTableLock(table, plan);
         var snapshotXid = batch.ResolveSnapshotXidForRead(table);
         foreach (var (pageIndex, slotIndex, bytes) in table.Heap.EnumerateRowsWithAddress())
         {

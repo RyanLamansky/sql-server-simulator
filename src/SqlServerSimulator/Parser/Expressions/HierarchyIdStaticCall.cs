@@ -76,8 +76,8 @@ internal sealed class HierarchyIdStaticCall : Expression
 
     internal override string DebugDisplay() => $"hierarchyid::{this.method}({this.argument?.DebugDisplay() ?? ""})";
 
-    internal override bool ResultIsNullable(Func<MultiPartName, bool> resolveColumnNullable) =>
-        this.argument is not null && this.argument.ResultIsNullable(resolveColumnNullable);
+    internal override bool ResultIsNullable(NullabilityContext context) =>
+        this.argument is not null && this.argument.ResultIsNullable(context);
 
     internal override void VisitColumnReferences(Action<MultiPartName> visit) =>
         this.argument?.VisitColumnReferences(visit);

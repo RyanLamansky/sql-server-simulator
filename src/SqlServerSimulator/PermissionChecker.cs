@@ -125,9 +125,46 @@ internal static class PermissionEnforcement
     /// bind suppresses everything — it reads no row.
     /// </summary>
     internal static bool Applies(BatchContext batch, Database target) =>
-        !batch.Connection.Security.EffectiveIsDbo
+        !Bypasses(batch.Connection, target)
         && !batch.CreateTimeBinding
         && (batch.EnforcesPermissions || !ReferenceEquals(target, batch.CurrentDatabase));
+
+    /// <summary>
+    /// The <c>dbo</c> bypass, database-boundary aware. An effective <c>dbo</c>
+    /// waves through every check in its own database, and in another one too
+    /// when the identity carries a server principal — exact in the simulator's
+    /// principal model, where such a <c>dbo</c> came from a sysadmin login or
+    /// the empty-registry dev mode, both <c>dbo</c> in every database. The one
+    /// exception is a <c>dbo</c> identity that exists only inside one database:
+    /// a module's <c>WITH EXECUTE AS OWNER</c> / <c>SELF</c> frame carries no
+    /// server principal, so it reaches another database only out of a
+    /// <see cref="Database.Trustworthy"/> source and is otherwise refused with
+    /// Msg 916 — probe-confirmed, and refused even when the session's own login
+    /// is <c>sa</c>. The same-database question stays one frame read plus two of
+    /// its fields, so the hot path pays nothing for the boundary case.
+    /// </summary>
+    internal static bool Bypasses(SimulatedDbConnection connection, Database target)
+    {
+        var effective = connection.Security.Effective;
+        return effective.DatabasePrincipalId == Database.DboPrincipalId
+            && (!effective.IsDatabaseScoped
+                || ReferenceEquals(target, connection.CurrentDatabase)
+                || connection.CurrentDatabase.Trustworthy);
+    }
+
+    /// <summary>
+    /// <see cref="Bypasses"/> with no target in hand — true when the effective
+    /// identity waves through whatever database a securable turns out to live
+    /// in, which is what lets a list be skipped whole. A database-scoped
+    /// <c>dbo</c> frame out of a non-trustworthy source answers false, and each
+    /// securable is then examined in turn.
+    /// </summary>
+    private static bool BypassesEverywhere(SimulatedDbConnection connection)
+    {
+        var effective = connection.Security.Effective;
+        return effective.DatabasePrincipalId == Database.DboPrincipalId
+            && (!effective.IsDatabaseScoped || connection.CurrentDatabase.Trustworthy);
+    }
 
     /// <summary>
     /// Resolves the principal that answers for a reference into
@@ -185,29 +222,27 @@ internal static class PermissionEnforcement
     /// <c>WITHOUT LOGIN</c> user — whose reported identity is a SID, not a login —
     /// still can't reach a database it has no user in (probe-confirmed).
     /// </summary>
-    internal static DatabasePrincipal ResolveCrossDatabasePrincipal(SimulatedDbConnection connection, Database target)
-    {
-        var effective = connection.Security.Effective;
-        return (effective.IsDatabaseScoped && !connection.CurrentDatabase.Trustworthy)
-            || !Simulation.TryMapLoginToDatabaseUser(connection.Simulation, target, effective.LoginName, out var principal)
-            ? throw SimulatedSqlException.CannotAccessDatabaseUnderSecurityContext(effective.LoginName, target.Name)
-            : principal;
-    }
+    internal static DatabasePrincipal ResolveCrossDatabasePrincipal(SimulatedDbConnection connection, Database target) =>
+        TryResolveCrossDatabasePrincipal(connection, target, out var principal)
+            ? principal
+            : throw SimulatedSqlException.CannotAccessDatabaseUnderSecurityContext(connection.Security.Effective.LoginName, target.Name);
 
     /// <summary>
-    /// Whether metadata-visibility filtering applies for this batch: a genuinely
-    /// restricted session principal that lacks the full-visibility bypass. Unlike
-    /// <see cref="Applies"/> this is NOT suppressed inside a module body — metadata
-    /// visibility is a property of the session principal, not the execution frame,
-    /// so it gates on the session principal alone. Short-circuits on
-    /// <see cref="SessionSecurityContext.EffectiveIsDbo"/> before any allocation,
-    /// so a <c>dbo</c> session pays a single bool read.
+    /// <see cref="ResolveCrossDatabasePrincipal"/> without the throw — false
+    /// where that one raises Msg 916. The id-form <c>OBJECT_NAME</c> /
+    /// <c>OBJECT_SCHEMA_NAME</c> take this path: a database their login can't
+    /// reach simply reveals nothing to them (probe-confirmed — the id form never
+    /// raises, unlike the name form's three-part lookup).
     /// </summary>
-    internal static bool MetadataVisibilityApplies(BatchContext batch)
+    private static bool TryResolveCrossDatabasePrincipal(SimulatedDbConnection connection, Database target, out DatabasePrincipal principal)
     {
-        var security = batch.Connection.Security;
-        return !security.EffectiveIsDbo
-            && !PermissionChecker.HasFullMetadataVisibility(batch.CurrentDatabase, security.Effective.DatabasePrincipalId);
+        var effective = connection.Security.Effective;
+        if (effective.IsDatabaseScoped && !connection.CurrentDatabase.Trustworthy)
+        {
+            principal = null!;
+            return false;
+        }
+        return Simulation.TryMapLoginToDatabaseUser(connection.Simulation, target, effective.LoginName, out principal);
     }
 
     /// <summary>
@@ -222,17 +257,48 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static int? MetadataVisibilityPrincipal(BatchContext batch, Database target)
     {
-        var security = batch.Connection.Security;
-        if (security.EffectiveIsDbo)
+        if (Bypasses(batch.Connection, target))
             return null;
         var principalId = ReferenceEquals(target, batch.CurrentDatabase)
-            ? security.Effective.DatabasePrincipalId
+            ? batch.Connection.Security.Effective.DatabasePrincipalId
             : ResolveCrossDatabasePrincipal(batch.Connection, target).PrincipalId;
-        return principalId == Database.DboPrincipalId
-            || PermissionChecker.HasFullMetadataVisibility(target, principalId)
+        return FilteringPrincipal(target, principalId);
+    }
+
+    /// <summary>
+    /// <see cref="MetadataVisibilityPrincipal"/> for the callers that hide
+    /// rather than raise: false when the login can't reach
+    /// <paramref name="target"/> at all, where the throwing form raises Msg 916.
+    /// The id-form <c>OBJECT_NAME</c> / <c>OBJECT_SCHEMA_NAME</c> ask the
+    /// visibility question alone — a database their login has no user in reveals
+    /// nothing and they answer NULL — and the bypass is the plain effective-
+    /// <c>dbo</c> one rather than <see cref="Bypasses"/>, since a database-scoped
+    /// <c>dbo</c> frame still reads a foreign id's name (probe-confirmed: a
+    /// <c>WITH EXECUTE AS OWNER</c> body that gets Msg 916 for the same
+    /// database's catalog still answers <c>OBJECT_NAME(id, db_id('other'))</c>).
+    /// </summary>
+    internal static bool TryMetadataVisibilityPrincipal(BatchContext batch, Database target, out int? principalId)
+    {
+        principalId = null;
+        var security = batch.Connection.Security;
+        if (security.EffectiveIsDbo)
+            return true;
+        if (ReferenceEquals(target, batch.CurrentDatabase))
+        {
+            principalId = FilteringPrincipal(target, security.Effective.DatabasePrincipalId);
+            return true;
+        }
+        if (!TryResolveCrossDatabasePrincipal(batch.Connection, target, out var principal))
+            return false;
+        principalId = FilteringPrincipal(target, principal.PrincipalId);
+        return true;
+    }
+
+    /// <summary>The principal a catalog read of <paramref name="database"/> filters by, or <see langword="null"/> when <paramref name="principalId"/> sees everything there.</summary>
+    private static int? FilteringPrincipal(Database database, int principalId) =>
+        principalId == Database.DboPrincipalId || PermissionChecker.HasFullMetadataVisibility(database, principalId)
             ? null
             : principalId;
-    }
 
     /// <summary>
     /// Checks the read permission on every securable a <see cref="Parser.Selection"/>
@@ -246,7 +312,7 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static void CheckReadSources(BatchContext batch, List<ReferencedSecurable>? securables, Dictionary<int, ColumnReadTarget>? readColumns = null)
     {
-        if (securables is null || securables.Count == 0 || batch.Connection.Security.EffectiveIsDbo)
+        if (securables is null || securables.Count == 0 || BypassesEverywhere(batch.Connection))
             return;
         foreach (var s in securables)
         {
@@ -282,7 +348,7 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static void CheckCrossDatabaseReads(BatchContext batch, Database moduleDatabase, List<ReferencedSecurable>? securables)
     {
-        if (securables is null || batch.Connection.Security.EffectiveIsDbo || batch.CreateTimeBinding)
+        if (securables is null || BypassesEverywhere(batch.Connection) || batch.CreateTimeBinding)
             return;
         foreach (var s in securables)
         {
