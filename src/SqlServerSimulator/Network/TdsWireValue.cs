@@ -140,9 +140,13 @@ internal static class TdsWireValue
             0x29 => ReadVariantTime(reader),
             0x2A => ReadVariantDateTime2(reader),
             0x2B => ReadVariantDateTimeOffset(reader),
-            0xA7 or 0xAF => ReadVariantAnsiString(reader, propBytes),
-            0xE7 or 0xEF => ReadVariantNationalString(reader, propBytes),
-            0xA5 or 0xAD => ReadVariantBinary(reader, propBytes),
+            // The blank-padded half of each pair carries its own token, and real
+            // reports it back as its own base type (`SQL_VARIANT_PROPERTY` says
+            // char / nchar / binary, not the varying spelling), so the token
+            // picks the declared type rather than collapsing to the varying one.
+            0xA7 or 0xAF => ReadVariantAnsiString(reader, propBytes, fixedWidth: baseType == 0xAF),
+            0xE7 or 0xEF => ReadVariantNationalString(reader, propBytes, fixedWidth: baseType == 0xEF),
+            0xA5 or 0xAD => ReadVariantBinary(reader, propBytes, fixedWidth: baseType == 0xAD),
             _ => throw new NotSupportedException($"The network listener does not accept sql_variant values with base type token 0x{baseType:X2}."),
         };
 #pragma warning restore SSS005
@@ -227,30 +231,39 @@ internal static class TdsWireValue
         return SqlValue.FromDateTimeOffset(SqlType.GetDateTimeOffset(scale), new DateTimeOffset(utcTicks + offset.Ticks, offset));
     }
 
-    private static SqlValue ReadVariantAnsiString(TdsValueReader reader, byte propBytes)
+    private static SqlValue ReadVariantAnsiString(TdsValueReader reader, byte propBytes, bool fixedWidth)
     {
         var utf8 = ReadCollationUtf8(reader);
         var maxLength = reader.ReadUInt16();
         for (var i = 7; i < propBytes; i++)
             _ = reader.ReadByte();
         var encoding = utf8 ? Encoding.UTF8 : CharSqlType.Cp1252Encoder;
-        return SqlValue.FromVarchar(encoding.GetString(reader.ReadBytes(maxLength)));
+        var text = encoding.GetString(reader.ReadBytes(maxLength));
+        return fixedWidth
+            ? SqlValue.FromString(CharSqlType.Get(text.Length, Collation.Baseline, Coercibility.Implicit), text)
+            : SqlValue.FromVarchar(text);
     }
 
-    private static SqlValue ReadVariantNationalString(TdsValueReader reader, byte propBytes)
+    private static SqlValue ReadVariantNationalString(TdsValueReader reader, byte propBytes, bool fixedWidth)
     {
         _ = ReadCollationUtf8(reader);
         var maxLength = reader.ReadUInt16();
         for (var i = 7; i < propBytes; i++)
             _ = reader.ReadByte();
-        return SqlValue.FromNVarchar(Encoding.Unicode.GetString(reader.ReadBytes(maxLength)));
+        var text = Encoding.Unicode.GetString(reader.ReadBytes(maxLength));
+        return fixedWidth
+            ? SqlValue.FromString(NCharSqlType.Get(text.Length, Collation.Baseline, Coercibility.Implicit), text)
+            : SqlValue.FromNVarchar(text);
     }
 
-    private static SqlValue ReadVariantBinary(TdsValueReader reader, byte propBytes)
+    private static SqlValue ReadVariantBinary(TdsValueReader reader, byte propBytes, bool fixedWidth)
     {
         var maxLength = reader.ReadUInt16();
         for (var i = 2; i < propBytes; i++)
             _ = reader.ReadByte();
-        return SqlValue.FromVarbinary(reader.ReadBytes(maxLength).ToArray());
+        var bytes = reader.ReadBytes(maxLength).ToArray();
+        return fixedWidth
+            ? SqlValue.FromBinary(BinarySqlType.Get(bytes.Length), bytes)
+            : SqlValue.FromVarbinary(bytes);
     }
 }

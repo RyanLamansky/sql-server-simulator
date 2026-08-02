@@ -86,6 +86,9 @@ Strict and one-to-one, matching real (probe-confirmed that `varchar` does **not*
 | `uniqueidentifier` | `SqlGuid` |
 | `xml` | `SqlXml` |
 
+Every row round-trips a value in and back out, `ClrAssemblyTests.ClrFunction_TypeBinding_RoundTripsAndCarriesNull` driving one identity routine per pair off `ClrAssemblyFixture.EchoTypes`.
+The two pairs sharing a CLR type (`money` / `smallmoney`, `datetime` / `smalldatetime`, `varbinary` / `binary`) are separate rows there because the *declared* T-SQL type is what the return conversion reads.
+
 Binding happens at CREATE time so the diagnostics fire there rather than at first call, matching real: **Msg 6528** (unknown assembly), **Msg 6505** (unknown type, state 2), **Msg 6506** (unknown method — real's text has no terminating period), **Msg 6550** (arity mismatch), **Msg 6551** (return type), **Msg 6552** (parameter type, state 3).
 
 NULL arguments marshal to the CLR struct's own `Null` sentinel, not to a CLR `null` — a SQLCLR routine is expected to test `IsNull` itself.

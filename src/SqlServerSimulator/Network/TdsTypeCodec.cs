@@ -814,14 +814,14 @@ internal static class TdsTypeCodec
             case DateTime2SqlType dt2:
                 {
                     var dt = inner.AsDateTime2;
-                    return ScaledTemporalVariantBody(0x2A, dt2.precision, TimeValueBytes(dt2.precision), dt.TimeOfDay.Ticks, DateOnly.FromDateTime(dt).DayNumber);
+                    return ScaledTemporalVariantBody(0x2A, dt2.precision, TimeValueBytes(dt2.precision) + DateValueBytes, dt.TimeOfDay.Ticks, DateOnly.FromDateTime(dt).DayNumber);
                 }
 
             case DateTimeOffsetSqlType dto:
                 {
                     var dtoValue = inner.AsDateTimeOffset;
                     var utc = dtoValue.UtcDateTime;
-                    var body = ScaledTemporalVariantBody(0x2B, dto.precision, TimeValueBytes(dto.precision) + 2, utc.TimeOfDay.Ticks, DateOnly.FromDateTime(utc).DayNumber);
+                    var body = ScaledTemporalVariantBody(0x2B, dto.precision, TimeValueBytes(dto.precision) + DateValueBytes + 2, utc.TimeOfDay.Ticks, DateOnly.FromDateTime(utc).DayNumber);
                     BinaryPrimitives.WriteInt16LittleEndian(body.AsSpan(body.Length - 2), (short)dtoValue.Offset.TotalMinutes);
                     return body;
                 }
@@ -839,6 +839,9 @@ internal static class TdsTypeCodec
         }
     }
 
+    /// <summary>Width of the day-number field the dated temporal types carry after their time field.</summary>
+    private const int DateValueBytes = 3;
+
     /// <summary>A variant body with a 0-property-byte header (type token + cbProps=0) sized for <paramref name="dataLength"/> data bytes.</summary>
     private static byte[] NumericBody(byte typeToken, int dataLength)
     {
@@ -848,6 +851,13 @@ internal static class TdsTypeCodec
         return body;
     }
 
+    /// <summary>
+    /// A variant body for one of the scale-carrying temporal types: a 1-property
+    /// header holding the scale, then the scaled time field, then — for the dated
+    /// ones — the day number. <paramref name="dataLength"/> counts every data
+    /// byte the type carries, day number and <c>datetimeoffset</c>'s trailing
+    /// offset included, since the caller owns whatever follows the day number.
+    /// </summary>
     private static byte[] ScaledTemporalVariantBody(byte typeToken, int scale, int dataLength, long timeTicks, int? dayNumber)
     {
         var body = new byte[3 + dataLength];
@@ -858,7 +868,7 @@ internal static class TdsTypeCodec
         var timeBytes = TimeValueBytes(scale);
         WriteScaledTimeSpan(data[..timeBytes], timeTicks, scale);
         if (dayNumber is { } dn)
-            WriteThreeByteDaysSpan(data.Slice(timeBytes, 3), dn);
+            WriteThreeByteDaysSpan(data.Slice(timeBytes, DateValueBytes), dn);
         return body;
     }
 

@@ -117,13 +117,6 @@ partial class Simulation
         }
     }
 
-    private static IEnumerable<(byte[] RowBytes, int PageIndex, int SlotIndex)> EnumerateChildRows(HeapTable child)
-    {
-        foreach (var (pageIndex, slotIndex, bytes) in child.Heap.EnumerateRowsWithAddress())
-            yield return (bytes, pageIndex, slotIndex);
-    }
-
-
     private static bool FkTupleHasNull(int[] ordinals, SqlValue[] row)
     {
         foreach (var ord in ordinals)
@@ -134,55 +127,22 @@ partial class Simulation
         return false;
     }
 
-    private static bool FkTuplesMatch(ForeignKey fk, SqlValue[] childFull, SqlValue[] parentFull)
-    {
-        if (FkTupleHasNull(fk.ChildColumnOrdinals, childFull))
-            return false;
-        for (var i = 0; i < fk.ChildColumnOrdinals.Length; i++)
-        {
-            var childVal = childFull[fk.ChildColumnOrdinals[i]];
-            var parentVal = parentFull[fk.ReferencedColumnOrdinals[i]];
-            if (parentVal.IsNull || !childVal.Equals(parentVal))
-                return false;
-        }
-        return true;
-    }
-
     /// <summary>
     /// Probes the parent table for a row whose referenced-column tuple equals
     /// the child row's FK-column tuple. Seeks the parent's per-<see cref="Heap"/>
     /// cache on the referenced columns — always a PK/UNIQUE key, so the entry is
-    /// the parent's own index — verifying each candidate against live bytes;
-    /// falls back to a full scan only when a referenced column isn't physically
-    /// stored (a computed key column).
+    /// the parent's own index — verifying each candidate against live bytes.
+    /// Both of the seek's preconditions hold for every declarable foreign key,
+    /// so it is the only path: a non-persisted computed column is the sole
+    /// unstored kind and is refused as an FK column at declaration, and the
+    /// caller has already skipped a child tuple holding a NULL.
     /// </summary>
-    private static bool ReferencedRowExists(ForeignKey fk, SqlValue[] childFull)
-    {
-        if (TryMapFkColumnsToStorage(fk.ReferencedTable, fk.ReferencedColumnOrdinals, out var refStorageOrdinals, out var commons)
-            && TryBuildSeekProbe(childFull, fk.ChildColumnOrdinals, commons, out var probe))
-        {
-            return HeapSeekCache.For(fk.ReferencedTable.Heap)
-                .AnyRowMatches(fk.ReferencedTable.Heap, fk.ReferencedTable.StoredColumns, refStorageOrdinals, commons, probe);
-        }
-
-        foreach (var rowBytes in fk.ReferencedTable.Heap.EnumerateRows())
-        {
-            var parentFull = DecodeFullRow(fk.ReferencedTable, rowBytes);
-            var match = true;
-            for (var i = 0; i < fk.ReferencedColumnOrdinals.Length; i++)
-            {
-                var parentVal = parentFull[fk.ReferencedColumnOrdinals[i]];
-                var childVal = childFull[fk.ChildColumnOrdinals[i]];
-                if (parentVal.IsNull || !parentVal.Equals(childVal))
-                {
-                    match = false;
-                    break;
-                }
-            }
-            if (match) return true;
-        }
-        return false;
-    }
+    private static bool ReferencedRowExists(ForeignKey fk, SqlValue[] childFull) =>
+        TryMapFkColumnsToStorage(fk.ReferencedTable, fk.ReferencedColumnOrdinals, out var refStorageOrdinals, out var commons)
+        && TryBuildSeekProbe(childFull, fk.ChildColumnOrdinals, commons, out var probe)
+            ? HeapSeekCache.For(fk.ReferencedTable.Heap)
+                .AnyRowMatches(fk.ReferencedTable.Heap, fk.ReferencedTable.StoredColumns, refStorageOrdinals, commons, probe)
+            : throw new InvalidOperationException($"FOREIGN KEY '{fk.Name}' has no seekable referenced-column tuple.");
 
     // Maps a foreign key's full column ordinals to the heap's storage ordinals
     // and resolves the per-column key type (the stored column's type) the seek
@@ -242,50 +202,31 @@ partial class Simulation
 
     // Matches child rows against a set of parent key tuples, pairing each match
     // with the index of the parent key it matched. Seeks the child's per-Heap
-    // cache on the FK columns per parent key (verifying each candidate against
-    // live bytes, de-duplicating by address) when those columns are stored — the
-    // child seek is index-gated by nothing more than "are the columns stored,"
-    // so it amortizes across repeated cascades; otherwise one full child scan,
-    // matching every row against every parent key.
-    //
-    // The scan is defensive rather than live: only a non-persisted computed
-    // column lacks a storage slot, and one in a FOREIGN KEY is rejected at
-    // declaration the way real rejects it — Msg 1764 from the table-level and
-    // ALTER forms, Msg 8183 from the inline one (a PERSISTED computed column is
-    // allowed and does have a slot) — so no valid schema reaches it. Kept
-    // because the seek path's precondition is a property of the storage layout
-    // rather than of the constraint.
+    // cache on the FK columns per parent key, verifying each candidate against
+    // live bytes and de-duplicating by address; the child seek is index-gated by
+    // nothing more than "are the columns stored," so it amortizes across
+    // repeated cascades. Every FK column is stored — only a non-persisted
+    // computed column isn't, and one is refused as an FK column at declaration
+    // the way real refuses it (Msg 1764 from the table-level and ALTER forms,
+    // Msg 8183 from the inline one; a PERSISTED computed column is allowed and
+    // does have a slot). A parent key holding a NULL has no children to match,
+    // which a referenced UNIQUE column reaches.
     private static IEnumerable<(int PageIndex, int SlotIndex, SqlValue[] ChildFull, int ParentIndex)> MatchChildRowsToParents(
         ForeignKey fk, IReadOnlyList<SqlValue[]> parentKeyRows)
     {
-        if (TryMapFkColumnsToStorage(fk.ChildTable, fk.ChildColumnOrdinals, out var childStorageOrdinals, out var commons))
-        {
-            var cache = HeapSeekCache.For(fk.ChildTable.Heap);
-            var seen = new HashSet<(int, int)>();
-            for (var p = 0; p < parentKeyRows.Count; p++)
-            {
-                if (!TryBuildSeekProbe(parentKeyRows[p], fk.ReferencedColumnOrdinals, commons, out var probe))
-                    continue;
-                foreach (var (page, slot, bytes) in cache.MatchingRows(fk.ChildTable.Heap, fk.ChildTable.StoredColumns, childStorageOrdinals, commons, probe))
-                {
-                    if (seen.Add((page, slot)))
-                        yield return (page, slot, DecodeFullRow(fk.ChildTable, bytes), p);
-                }
-            }
+        if (!TryMapFkColumnsToStorage(fk.ChildTable, fk.ChildColumnOrdinals, out var childStorageOrdinals, out var commons))
+            throw new InvalidOperationException($"FOREIGN KEY '{fk.Name}' has a child column that is not physically stored.");
 
-            yield break;
-        }
-
-        foreach (var (rowBytes, pageIndex, slotIndex) in EnumerateChildRows(fk.ChildTable))
+        var cache = HeapSeekCache.For(fk.ChildTable.Heap);
+        var seen = new HashSet<(int, int)>();
+        for (var p = 0; p < parentKeyRows.Count; p++)
         {
-            var childFull = DecodeFullRow(fk.ChildTable, rowBytes);
-            for (var p = 0; p < parentKeyRows.Count; p++)
+            if (!TryBuildSeekProbe(parentKeyRows[p], fk.ReferencedColumnOrdinals, commons, out var probe))
+                continue;
+            foreach (var (page, slot, bytes) in cache.MatchingRows(fk.ChildTable.Heap, fk.ChildTable.StoredColumns, childStorageOrdinals, commons, probe))
             {
-                if (FkTuplesMatch(fk, childFull, parentKeyRows[p]))
-                {
-                    yield return (pageIndex, slotIndex, childFull, p);
-                    break;
-                }
+                if (seen.Add((page, slot)))
+                    yield return (page, slot, DecodeFullRow(fk.ChildTable, bytes), p);
             }
         }
     }

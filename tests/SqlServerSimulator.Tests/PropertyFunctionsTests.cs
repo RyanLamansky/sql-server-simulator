@@ -241,57 +241,62 @@ public sealed class PropertyFunctionsTests
 
     // === TYPEPROPERTY ===
 
+    /// <summary>
+    /// The whole table, one row per type name and one column per property, as
+    /// SQL Server 2025 answers it (2026-08-02). A property the type has no
+    /// value for is NULL rather than 0, which is most of the table — and the
+    /// two grammar synonyms <c>integer</c> / <c>rowversion</c> are names
+    /// TYPEPROPERTY itself does not recognize, so every property is NULL.
+    /// </summary>
     [TestMethod]
-    public void TypeProperty_Precision_Int_Returns10()
-        => AreEqual(10, new Simulation().ExecuteScalar("select typeproperty('int', 'Precision')"));
-
-    [TestMethod]
-    public void TypeProperty_Precision_BigInt_Returns19()
-        => AreEqual(19, new Simulation().ExecuteScalar("select typeproperty('bigint', 'Precision')"));
-
-    [TestMethod]
-    public void TypeProperty_Precision_TinyInt_Returns3()
-        => AreEqual(3, new Simulation().ExecuteScalar("select typeproperty('tinyint', 'Precision')"));
-
-    [TestMethod]
-    public void TypeProperty_Precision_SmallInt_Returns5()
-        => AreEqual(5, new Simulation().ExecuteScalar("select typeproperty('smallint', 'Precision')"));
-
-    [TestMethod]
-    public void TypeProperty_Precision_Varchar_Returns8000()
-        => AreEqual(8000, new Simulation().ExecuteScalar("select typeproperty('varchar', 'Precision')"));
-
-    [TestMethod]
-    public void TypeProperty_Precision_Decimal_Returns38()
-        => AreEqual(38, new Simulation().ExecuteScalar("select typeproperty('decimal', 'Precision')"));
-
-    [TestMethod]
-    public void TypeProperty_Scale_Decimal_Returns38()
-        => AreEqual(38, new Simulation().ExecuteScalar("select typeproperty('decimal', 'Scale')"));
-
-    [TestMethod]
-    public void TypeProperty_Scale_Int_Returns0()
-        => AreEqual(0, new Simulation().ExecuteScalar("select typeproperty('int', 'Scale')"));
-
-    [TestMethod]
-    public void TypeProperty_Scale_Money_Returns4()
-        => AreEqual(4, new Simulation().ExecuteScalar("select typeproperty('money', 'Scale')"));
-
-    [TestMethod]
-    public void TypeProperty_AllowsNull_Int_Returns1()
-        => AreEqual(1, new Simulation().ExecuteScalar("select typeproperty('int', 'AllowsNull')"));
-
-    [TestMethod]
-    public void TypeProperty_AllowsNull_RowVersion_Returns0()
-        => AreEqual(0, new Simulation().ExecuteScalar("select typeproperty('rowversion', 'AllowsNull')"));
-
-    [TestMethod]
-    public void TypeProperty_UsesAnsiTrim_Varchar_Returns1()
-        => AreEqual(1, new Simulation().ExecuteScalar("select typeproperty('varchar', 'UsesAnsiTrim')"));
-
-    [TestMethod]
-    public void TypeProperty_UsesAnsiTrim_Int_Returns0()
-        => AreEqual(0, new Simulation().ExecuteScalar("select typeproperty('int', 'UsesAnsiTrim')"));
+    [DataRow("bit", 1, null, 1, null)]
+    [DataRow("int", 10, 0, 1, null)]
+    [DataRow("xml", -1, null, 1, null)]
+    [DataRow("char", 8000, null, 1, 1)]
+    [DataRow("date", 10, 0, 1, null)]
+    [DataRow("real", 24, null, 1, null)]
+    [DataRow("text", 2147483647, null, 1, null)]
+    [DataRow("time", 16, 7, 1, null)]
+    [DataRow("float", 53, null, 1, null)]
+    [DataRow("image", 2147483647, null, 1, null)]
+    [DataRow("money", 19, 4, 1, null)]
+    [DataRow("nchar", 4000, null, 1, null)]
+    [DataRow("ntext", 1073741823, null, 1, null)]
+    [DataRow("bigint", 19, 0, 1, null)]
+    [DataRow("binary", 8000, null, 1, 1)]
+    [DataRow("decimal", 38, 38, 1, null)]
+    [DataRow("numeric", 38, 38, 1, null)]
+    [DataRow("sysname", 128, null, 0, null)]
+    [DataRow("tinyint", 3, 0, 1, null)]
+    [DataRow("varchar", 8000, null, 1, 1)]
+    [DataRow("datetime", 23, 3, 1, null)]
+    [DataRow("nvarchar", 4000, null, 1, null)]
+    [DataRow("smallint", 5, 0, 1, null)]
+    [DataRow("datetime2", 27, 7, 1, null)]
+    [DataRow("timestamp", 8, null, 0, null)]
+    [DataRow("varbinary", 8000, null, 1, 1)]
+    [DataRow("smallmoney", 10, 4, 1, null)]
+    [DataRow("hierarchyid", 892, null, 1, null)]
+    [DataRow("sql_variant", 0, null, 1, 1)]
+    [DataRow("smalldatetime", 16, 0, 1, null)]
+    [DataRow("datetimeoffset", 34, 7, 1, null)]
+    [DataRow("uniqueidentifier", 16, null, 1, null)]
+    [DataRow("integer", null, null, null, null)]
+    [DataRow("rowversion", null, null, null, null)]
+    public void TypeProperty_Table_MatchesSqlServer(string typeName, int? precision, int? scale, int? allowsNull, int? usesAnsiTrim)
+    {
+        var sim = new Simulation();
+        foreach (var (property, expected) in new (string, int?)[]
+        {
+            ("Precision", precision), ("Scale", scale), ("AllowsNull", allowsNull), ("UsesAnsiTrim", usesAnsiTrim),
+        })
+        {
+            AreEqual(
+                expected is null ? DBNull.Value : expected,
+                sim.ExecuteScalar($"select typeproperty('{typeName}', '{property}')"),
+                $"{typeName}.{property}");
+        }
+    }
 
     [TestMethod]
     public void TypeProperty_UnknownType_ReturnsNull()

@@ -181,4 +181,83 @@ public sealed class TvpVariantUdtColumnTests
         AreEqual("POINT (3 4)", await new SqlCommand("select g.ToString() from dbo.sink", connection)
             .ExecuteScalarAsync(TestContext.CancellationToken));
     }
+
+    /// <summary>
+    /// The base types a <c>sql_variant</c> TVP column reaches that an RPC
+    /// <c>sql_variant</c> parameter cannot: SqlClient picks a parameter's base
+    /// type from the CLR value alone (a <see cref="DateTime"/> is always
+    /// <c>datetime</c>, a string always <c>nvarchar</c>), while a row's
+    /// <see cref="SqlMetaData"/> names the base type outright.
+    /// </summary>
+    [TestMethod]
+    [DataRow(SqlDbType.SmallDateTime, "smalldatetime")]
+    [DataRow(SqlDbType.DateTime2, "datetime2")]
+    [DataRow(SqlDbType.DateTimeOffset, "datetimeoffset")]
+    [DataRow(SqlDbType.VarChar, "varchar")]
+    public async Task SqlVariantColumn_MetadataDeclaredBaseType_SurvivesTheRoundTrip(SqlDbType declared, string baseType)
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create type dbo.VarRows as table (v sql_variant)");
+        Wire.ExecInProc(simulation, "create table dbo.sink (v sql_variant)");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        object value = declared switch
+        {
+            SqlDbType.SmallDateTime => new DateTime(2024, 3, 15, 13, 45, 0),
+            SqlDbType.DateTime2 => new DateTime(2024, 3, 15, 13, 45, 12).AddTicks(1234567),
+            SqlDbType.DateTimeOffset => new DateTimeOffset(new DateTime(2024, 3, 15, 13, 45, 12), TimeSpan.FromMinutes(330)),
+            _ => "ansi text",
+        };
+        var record = new SqlDataRecord(declared == SqlDbType.VarChar
+            ? new SqlMetaData("v", declared, 40)
+            : new SqlMetaData("v", declared));
+        record.SetValue(0, value);
+
+        await InsertViaTvp(connection, "dbo.VarRows", [record], TestContext.CancellationToken);
+
+        AreEqual(baseType, await new SqlCommand("select SQL_VARIANT_PROPERTY(v, 'BaseType') from dbo.sink", connection)
+            .ExecuteScalarAsync(TestContext.CancellationToken));
+        AreEqual(value, await new SqlCommand("select v from dbo.sink", connection)
+            .ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
+    /// An <c>xml</c> TVP column travels as its own XMLTYPE (<c>0xF1</c>) with a
+    /// PLP value — the one column type that reaches the decoder's XML arm, since
+    /// a bulk-copy <c>xml</c> destination goes as the MAX-string form instead.
+    /// The leading byte-order mark a PLP <c>xml</c> value carries is dropped on
+    /// the way in, as on every other <c>xml</c> entry path.
+    /// </summary>
+    [TestMethod]
+    public async Task XmlColumn_RoundTripsAndStripsBom()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create type dbo.XmlRows as table (id int, x xml)");
+        Wire.ExecInProc(simulation, "create table dbo.sink (id int, x xml)");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        var metadata = new[] { new SqlMetaData("id", SqlDbType.Int), new SqlMetaData("x", SqlDbType.Xml) };
+        var rows = new List<SqlDataRecord>();
+        foreach (var (id, value) in new (int, string?)[] { (1, "<r a=\"1\"><c>x</c></r>"), (2, null) })
+        {
+            var record = new SqlDataRecord(metadata);
+            record.SetInt32(0, id);
+            if (value is null)
+                record.SetDBNull(1);
+            else
+                record.SetString(1, value);
+            rows.Add(record);
+        }
+
+        await InsertViaTvp(connection, "dbo.XmlRows", rows, TestContext.CancellationToken);
+
+        await using var read = new SqlCommand("select cast(x as nvarchar(max)) from dbo.sink order by id", connection);
+        await using var reader = await read.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual("<r a=\"1\"><c>x</c></r>", reader.GetString(0));
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        IsTrue(await reader.IsDBNullAsync(0, TestContext.CancellationToken));
+    }
 }

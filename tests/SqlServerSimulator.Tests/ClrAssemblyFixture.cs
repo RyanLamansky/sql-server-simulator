@@ -22,10 +22,36 @@ internal static class ClrAssemblyFixture
     public static string HexLiteral(byte[] assembly) => "0x" + Convert.ToHexString(assembly);
 
     /// <summary>
+    /// Every <see cref="System.Data.SqlTypes"/> type the <c>EXTERNAL NAME</c>
+    /// binder marshals, each carried by an <c>Echo</c>&#160;+&#160;type-name
+    /// identity routine in <see cref="Safe"/>. An identity body exercises both
+    /// directions at once: the argument has to arrive converted for the routine
+    /// to return it, and the return value has to convert back.
+    /// </summary>
+    public static readonly Type[] EchoTypes =
+    [
+        typeof(SqlBinary),
+        typeof(SqlBoolean),
+        typeof(SqlByte),
+        typeof(SqlDateTime),
+        typeof(SqlDecimal),
+        typeof(SqlDouble),
+        typeof(SqlGuid),
+        typeof(SqlInt16),
+        typeof(SqlInt32),
+        typeof(SqlInt64),
+        typeof(SqlMoney),
+        typeof(SqlSingle),
+        typeof(SqlString),
+        typeof(SqlXml),
+    ];
+
+    /// <summary>
     /// A well-behaved assembly: <c>UserDefinedFunctions.Doubler(SqlInt32)</c>
     /// returning <c>SqlInt32</c>, plus
     /// <c>UserDefinedFunctions.Shout(SqlString)</c> returning
-    /// <see cref="SqlString"/> and <c>Boom(SqlInt32)</c> which always throws.
+    /// <see cref="SqlString"/>, <c>Boom(SqlInt32)</c> which always throws, and
+    /// one identity routine per <see cref="EchoTypes"/> entry.
     /// </summary>
     public static byte[] Safe(string name = "sim_safe") => Emit(name, includeFileIo: false, includeMutableStatic: false);
 
@@ -49,6 +75,9 @@ internal static class ClrAssemblyFixture
         EmitDoubler(type);
         EmitShout(type);
         EmitBoom(type);
+
+        foreach (var echoed in EchoTypes)
+            EmitEcho(type, echoed);
 
         if (includeFileIo)
             EmitReadFile(type);
@@ -97,6 +126,17 @@ internal static class ClrAssemblyFixture
         il.Emit(OpCodes.Ldstr, "!");
         il.Emit(OpCodes.Call, typeof(string).GetMethod(nameof(string.Concat), [typeof(string), typeof(string)])!);
         il.Emit(OpCodes.Newobj, typeof(SqlString).GetConstructor([typeof(string)])!);
+        il.Emit(OpCodes.Ret);
+    }
+
+    /// <summary><c>T Echo&lt;T&gt;(T v) =&gt; v</c>, named <c>Echo</c> + the type's
+    /// own name.</summary>
+    private static void EmitEcho(TypeBuilder type, Type clrType)
+    {
+        var method = type.DefineMethod(
+            "Echo" + clrType.Name, MethodAttributes.Public | MethodAttributes.Static, clrType, [clrType]);
+        var il = method.GetILGenerator();
+        il.Emit(OpCodes.Ldarg_0);
         il.Emit(OpCodes.Ret);
     }
 

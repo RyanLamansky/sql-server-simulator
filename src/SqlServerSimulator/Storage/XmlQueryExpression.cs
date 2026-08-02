@@ -344,6 +344,7 @@ internal sealed class XmlStep(
     /// <summary>Runs the step over every item in <paramref name="context"/>.</summary>
     public void Evaluate(List<object> context, List<object> results)
     {
+        var start = results.Count;
         var matched = new List<object>();
         foreach (var item in context)
         {
@@ -356,6 +357,65 @@ internal sealed class XmlStep(
             else
                 ApplyPredicates(matched, this.predicates, results);
         }
+
+        if (context.Count > 1)
+            SortIntoDocumentOrder(results, start);
+    }
+
+    /// <summary>
+    /// Puts a step's output in document order and drops repeats, which is what
+    /// <c>/</c> does to the union of the per-context-node sequences. A single
+    /// context node's axis output is already ordered and distinct, so only the
+    /// multi-node case needs it, and two axes actually disturb it: the
+    /// <c>descendant-or-self::node()</c> that <c>//</c> expands to puts a node
+    /// and its own descendants in the same context, so the following step
+    /// interleaves (<c>//b</c> would otherwise report a <c>b</c> child of the
+    /// root ahead of one nested under an earlier sibling), and <c>..</c> reaches
+    /// one parent once per child (<c>/r/a/..</c> is one <c>r</c>, not one per
+    /// <c>a</c>).
+    /// </summary>
+    private static void SortIntoDocumentOrder(List<object> results, int start)
+    {
+        var count = results.Count - start;
+        if (count < 2)
+            return;
+
+        // The common shape — a child or attribute step over an already-ordered
+        // context — comes out ordered and distinct, so check before paying for
+        // a sort whose comparisons each walk to a common ancestor.
+        var ordered = true;
+        for (var i = start + 1; i < results.Count; i++)
+        {
+            if (((XPathNavigator)results[i - 1]).ComparePosition((XPathNavigator)results[i]) != XmlNodeOrder.Before)
+            {
+                ordered = false;
+                break;
+            }
+        }
+        if (ordered)
+            return;
+
+        results.Sort(start, count, DocumentOrderComparer.Instance);
+        var write = start + 1;
+        for (var read = start + 1; read < results.Count; read++)
+        {
+            if (!((XPathNavigator)results[write - 1]).IsSamePosition((XPathNavigator)results[read]))
+                results[write++] = results[read];
+        }
+        results.RemoveRange(write, results.Count - write);
+    }
+
+    private sealed class DocumentOrderComparer : IComparer<object>
+    {
+        public static readonly DocumentOrderComparer Instance = new();
+
+        public int Compare(object? x, object? y) =>
+            ((XPathNavigator)x!).ComparePosition((XPathNavigator)y!) switch
+            {
+                XmlNodeOrder.Before => -1,
+                XmlNodeOrder.After => 1,
+                _ => 0,
+            };
     }
 
     /// <summary>

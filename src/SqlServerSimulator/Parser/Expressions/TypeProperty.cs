@@ -20,14 +20,25 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <list type="bullet">
 /// <item><description><c>Precision</c> — the type's catalog precision
 /// (e.g. <c>int</c>=10, <c>bigint</c>=19, <c>decimal</c>=38,
-/// <c>varchar</c>=8000, <c>money</c>=19).</description></item>
+/// <c>varchar</c>=8000, <c>money</c>=19, <c>xml</c>=-1).</description></item>
 /// <item><description><c>Scale</c> — the type's catalog scale
 /// (<c>int</c>=0, <c>money</c>=4, <c>decimal</c>=38).</description></item>
 /// <item><description><c>AllowsNull</c> — 1 for nullable types, 0 for
-/// <c>rowversion</c> / <c>sysname</c>.</description></item>
-/// <item><description><c>UsesAnsiTrim</c> — 1 for character types
-/// (the simulator's ANSI-trim behavior is always on), 0 otherwise.</description></item>
+/// <c>timestamp</c> / <c>sysname</c>.</description></item>
+/// <item><description><c>UsesAnsiTrim</c> — 1 for the blank-padded
+/// single-byte types and <c>sql_variant</c>.</description></item>
 /// </list>
+/// </para>
+/// <para>
+/// A property a type has no value for answers NULL rather than 0, which is
+/// most of the table: only the exact-numeric and date/time types carry a
+/// <c>Scale</c>, and only <c>char</c> / <c>varchar</c> / <c>binary</c> /
+/// <c>varbinary</c> / <c>sql_variant</c> carry a <c>UsesAnsiTrim</c> — the
+/// national-character types answer NULL there.
+/// Type names real doesn't recognize here answer NULL for every property, and
+/// that includes two spellings the T-SQL grammar itself accepts as synonyms,
+/// <c>integer</c> and <c>rowversion</c> (their canonical <c>int</c> and
+/// <c>timestamp</c> resolve).
 /// </para>
 /// </remarks>
 internal sealed class TypeProperty : Expression
@@ -61,12 +72,14 @@ internal sealed class TypeProperty : Expression
                 : SqlValue.Null(SqlType.Int32);
     }
 
-    private readonly struct TypeMetadata(int precision, int scale, bool allowsNull, bool usesAnsiTrim)
+    /// <summary>One row of the table; a null field is a property the type has
+    /// no value for, which answers NULL.</summary>
+    private readonly struct TypeMetadata(int? precision, int? scale, int? allowsNull, int? usesAnsiTrim)
     {
-        public readonly int Precision = precision;
-        public readonly int Scale = scale;
-        public readonly bool AllowsNull = allowsNull;
-        public readonly bool UsesAnsiTrim = usesAnsiTrim;
+        public readonly int? Precision = precision;
+        public readonly int? Scale = scale;
+        public readonly int? AllowsNull = allowsNull;
+        public readonly int? UsesAnsiTrim = usesAnsiTrim;
     }
 
     private static TypeMetadata? LookupType(string typeName)
@@ -76,84 +89,82 @@ internal sealed class TypeProperty : Expression
         {
             3 => upper switch
             {
-                "BIT" => new(1, 0, true, false),
-                "INT" => new(10, 0, true, false),
-                "XML" => new(2147483647, 0, true, false),
+                "BIT" => new(1, null, 1, null),
+                "INT" => new(10, 0, 1, null),
+                "XML" => new(-1, null, 1, null),
                 _ => null,
             },
             4 => upper switch
             {
-                "CHAR" => new(8000, 0, true, true),
-                "DATE" => new(10, 0, true, false),
-                "REAL" => new(24, 0, true, false),
-                "TEXT" => new(2147483647, 0, true, false),
-                "TIME" => new(16, 7, true, false),
+                "CHAR" => new(8000, null, 1, 1),
+                "DATE" => new(10, 0, 1, null),
+                "REAL" => new(24, null, 1, null),
+                "TEXT" => new(2147483647, null, 1, null),
+                "TIME" => new(16, 7, 1, null),
                 _ => null,
             },
             5 => upper switch
             {
-                "FLOAT" => new(53, 0, true, false),
-                "IMAGE" => new(2147483647, 0, true, false),
-                "MONEY" => new(19, 4, true, false),
-                "NCHAR" => new(4000, 0, true, true),
-                "NTEXT" => new(1073741823, 0, true, false),
+                "FLOAT" => new(53, null, 1, null),
+                "IMAGE" => new(2147483647, null, 1, null),
+                "MONEY" => new(19, 4, 1, null),
+                "NCHAR" => new(4000, null, 1, null),
+                "NTEXT" => new(1073741823, null, 1, null),
                 _ => null,
             },
             6 => upper switch
             {
-                "BIGINT" => new(19, 0, true, false),
-                "BINARY" => new(8000, 0, true, false),
+                "BIGINT" => new(19, 0, 1, null),
+                "BINARY" => new(8000, null, 1, 1),
                 _ => null,
             },
             7 => upper switch
             {
-                "DECIMAL" => new(38, 38, true, false),
-                "INTEGER" => new(10, 0, true, false),
-                "NUMERIC" => new(38, 38, true, false),
-                "SYSNAME" => new(128, 0, false, true),
-                "TINYINT" => new(3, 0, true, false),
-                "VARCHAR" => new(8000, 0, true, true),
+                "DECIMAL" => new(38, 38, 1, null),
+                "NUMERIC" => new(38, 38, 1, null),
+                "SYSNAME" => new(128, null, 0, null),
+                "TINYINT" => new(3, 0, 1, null),
+                "VARCHAR" => new(8000, null, 1, 1),
                 _ => null,
             },
             8 => upper switch
             {
-                "DATETIME" => new(23, 3, true, false),
-                "NVARCHAR" => new(4000, 0, true, true),
-                "SMALLINT" => new(5, 0, true, false),
+                "DATETIME" => new(23, 3, 1, null),
+                "NVARCHAR" => new(4000, null, 1, null),
+                "SMALLINT" => new(5, 0, 1, null),
                 _ => null,
             },
             9 => upper switch
             {
-                "DATETIME2" => new(27, 7, true, false),
-                "TIMESTAMP" => new(8, 0, false, false),
-                "VARBINARY" => new(8000, 0, true, false),
+                "DATETIME2" => new(27, 7, 1, null),
+                "TIMESTAMP" => new(8, null, 0, null),
+                "VARBINARY" => new(8000, null, 1, 1),
                 _ => null,
             },
             10 => upper switch
             {
-                "ROWVERSION" => new(8, 0, false, false),
-                "SMALLMONEY" => new(10, 4, true, false),
+                "SMALLMONEY" => new(10, 4, 1, null),
                 _ => null,
             },
             11 => upper switch
             {
-                "HIERARCHYID" => new(892, 0, true, false),
-                "SQL_VARIANT" => new(0, 0, true, false),
+                "HIERARCHYID" => new(892, null, 1, null),
+                "SQL_VARIANT" => new(0, null, 1, 1),
                 _ => null,
             },
             13 => upper switch
             {
-                "SMALLDATETIME" => new(16, 0, true, false),
+                "SMALLDATETIME" => new(16, 0, 1, null),
                 _ => null,
             },
             14 => upper switch
             {
-                "DATETIMEOFFSET" => new(34, 7, true, false),
+                "DATETIMEOFFSET" => new(34, 7, 1, null),
                 _ => null,
             },
             16 => upper switch
             {
-                "UNIQUEIDENTIFIER" => new(0, 0, true, false),
+                "UNIQUEIDENTIFIER" => new(16, null, 1, null),
                 _ => null,
             },
             _ => null,
@@ -167,8 +178,8 @@ internal sealed class TypeProperty : Expression
         {
             5 => upper switch { "SCALE" => meta.Scale, _ => null },
             9 => upper switch { "PRECISION" => meta.Precision, _ => null },
-            10 => upper switch { "ALLOWSNULL" => meta.AllowsNull ? 1 : 0, _ => null },
-            12 => upper switch { "USESANSITRIM" => meta.UsesAnsiTrim ? 1 : 0, _ => null },
+            10 => upper switch { "ALLOWSNULL" => meta.AllowsNull, _ => null },
+            12 => upper switch { "USESANSITRIM" => meta.UsesAnsiTrim, _ => null },
             _ => null,
         };
     }

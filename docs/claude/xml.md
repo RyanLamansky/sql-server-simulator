@@ -82,6 +82,12 @@ Evaluation walks an `XPathNavigator` over the parsed instance, positioned on the
 - **Location steps**: child (the default axis), attribute (`@x`), parent (`..`), self (`.`) and the descendant-or-self expansion of `//`.
   Name tests may be prefixed (`act:number`) or not and may contain `.`; `*`, `text()`, `node()`, `comment()` and `processing-instruction()` are the node tests.
   A named axis step (`child::a`) raises `NotSupportedException`.
+  A step runs once per context node — which is what scopes a predicate, so `a[1]` is the first `a` under *each* parent — and `XmlStep.SortIntoDocumentOrder` then folds the per-context-node sequences into one **document-ordered, duplicate-free** sequence, as `/` requires.
+  Two axes need it.
+  `//` expands to `descendant-or-self::node()`, putting a node and its own descendants in the same context, so the following step interleaves: over `<r><a><b>a1</b><c><b>c1</b></c></a><b>r1</b><a><b>a2</b></a></r>`, `//b` is `a1, c1, r1, a2` and not the `r1, a1, c1, a2` that step-evaluation order gives.
+  That is a value difference rather than a presentation one, since `(//b)[1]` narrows over the sorted sequence.
+  `..` reaches one parent once per child, so `/r/a/..` is a single `r`.
+  The ordered-and-distinct case is the common one (a child or attribute step over an ordered context), so a linear check precedes the sort.
 - **Predicates**, in any number and on any step or parenthesized expression.
   What one *means* comes from its static type, not its runtime value:
 

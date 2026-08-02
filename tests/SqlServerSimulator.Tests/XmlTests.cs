@@ -315,6 +315,89 @@ public sealed class XmlTests
             select cast(body.query('/r/c') as nvarchar(max)) from dbo.doc
             """));
 
+    /// <summary>
+    /// <c>//</c> expands to <c>descendant-or-self::node()</c>, which puts a node
+    /// and its own descendants in the same context, so the step after it runs
+    /// once per level. The union is still one document-ordered, duplicate-free
+    /// sequence — the step-evaluation order that falls out instead would report
+    /// the root's own <c>b</c> ahead of the ones nested under an earlier
+    /// sibling. Every expected value here matches SQL Server 2025 (2026-08-02).
+    /// </summary>
+    [TestMethod]
+    public void DescendantStep_SerializesInDocumentOrder()
+        => AreEqual("<b>a1</b><b>c1</b><b>r1</b><b>a2</b>", new Simulation().ExecuteScalar("""
+            select cast(cast(N'<r><a><b>a1</b><c><b>c1</b></c></a><b>r1</b><a><b>a2</b></a></r>' as xml)
+                .query('//b') as nvarchar(max))
+            """));
+
+    [TestMethod]
+    public void DescendantStep_UnderExplicitRoot_SerializesInDocumentOrder()
+        => AreEqual("<b>a1</b><b>c1</b><b>r1</b><b>a2</b>", new Simulation().ExecuteScalar("""
+            select cast(cast(N'<r><a><b>a1</b><c><b>c1</b></c></a><b>r1</b><a><b>a2</b></a></r>' as xml)
+                .query('/r//b') as nvarchar(max))
+            """));
+
+    /// <summary>
+    /// The ordering is load-bearing rather than cosmetic: a positional predicate
+    /// over the descendant sequence picks the document-first node, so getting the
+    /// order wrong returns the wrong value, not merely a reordered one.
+    /// </summary>
+    [TestMethod]
+    public void DescendantStep_PositionalPredicate_TakesDocumentFirst()
+        => AreEqual("a1", new Simulation().ExecuteScalar("""
+            select cast(N'<r><a><b>a1</b><c><b>c1</b></c></a><b>r1</b><a><b>a2</b></a></r>' as xml)
+                .value('(//b)[1]', 'nvarchar(10)')
+            """));
+
+    [TestMethod]
+    public void DescendantStep_Nodes_ShredsInDocumentOrder()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.doc (body xml)");
+        _ = sim.ExecuteNonQuery("insert dbo.doc values (N'<r><a><b>a1</b><c><b>c1</b></c></a><b>r1</b><a><b>a2</b></a></r>')");
+        using var reader = sim.ExecuteReader("select n.value('.', 'nvarchar(10)') from dbo.doc cross apply body.nodes('//b') t(n)");
+        var shredded = new List<string>();
+        while (reader.Read())
+            shredded.Add(reader.GetString(0));
+        AreEqual("a1,c1,r1,a2", string.Join(",", shredded));
+    }
+
+    /// <summary>A descendant of a match is itself a match, and appears after it.</summary>
+    [TestMethod]
+    public void DescendantStep_NestedMatches_KeepsOuterThenInner()
+        => AreEqual("""<b p="o"><b p="i">x</b></b><b p="i">x</b><b p="q"/>""", new Simulation().ExecuteScalar("""
+            select cast(cast(N'<r><b p="o"><b p="i">x</b></b><q><b p="q"/></q></r>' as xml)
+                .query('//b') as nvarchar(max))
+            """));
+
+    [TestMethod]
+    public void DescendantStep_Attributes_CountedAndOrderedOnce()
+    {
+        var sim = new Simulation();
+        AreEqual(3, sim.ExecuteScalar("""
+            select cast(N'<r><b p="o"><b p="i">x</b></b><q><b p="q"/></q></r>' as xml).value('count(//@p)', 'int')
+            """));
+        AreEqual("o", sim.ExecuteScalar("""
+            select cast(N'<r><b p="o"><b p="i">x</b></b><q><b p="q"/></q></r>' as xml).value('(//@p)[1]', 'nvarchar(10)')
+            """));
+    }
+
+    /// <summary>
+    /// <c>..</c> reaches the same parent once per child, and the step's output
+    /// still holds it once.
+    /// </summary>
+    [TestMethod]
+    public void ParentStep_SharedParent_ReportedOnce()
+    {
+        var sim = new Simulation();
+        AreEqual(1, sim.ExecuteScalar("""
+            select cast(N'<r><a id="1"/><a id="2"/></r>' as xml).value('count(/r/a/..)', 'int')
+            """));
+        AreEqual("""<r><a id="1"/><a id="2"/></r>""", sim.ExecuteScalar("""
+            select cast(cast(N'<r><a id="1"/><a id="2"/></r>' as xml).query('/r/a/..') as nvarchar(max))
+            """));
+    }
+
     [TestMethod]
     public void XmlExist_Method_ReturnsBit()
     {

@@ -833,8 +833,11 @@ NULL on any NULL arg / unknown object / unknown index / out-of-range key (INCLUD
 NULL on any NULL arg / unknown object / unknown index → NULL.
 
 **`TYPEPROPERTY(type_name, property)`** (`Parser/Expressions/TypeProperty.cs`): per-system-type metadata returning `int`.
-Backed by a static lookup table keyed by canonical lowercase type name (the 25 system types — `int` / `bigint` / `smallint` / `tinyint` / `bit` / `decimal` / `numeric` / `float` / `real` / `money` / `smallmoney` / `varchar` / `nvarchar` / `char` / `nchar` / `text` / `ntext` / `image` / `binary` / `varbinary` / `date` / `datetime` / `datetime2` / `smalldatetime` / `time` / `datetimeoffset` / `xml` / `uniqueidentifier` / `sysname` / `rowversion` / `timestamp` / `hierarchyid` / `sql_variant`).
-Properties: `Precision` (e.g. int=10, bigint=19, decimal=38, varchar=8000, money=19), `Scale` (int=0, money=4, decimal=38), `AllowsNull` (0 for `rowversion` / `sysname` / `timestamp`, 1 otherwise), `UsesAnsiTrim` (1 for character types, 0 otherwise).
+Backed by a static lookup table keyed by canonical lowercase type name (the 32 system types — `int` / `bigint` / `smallint` / `tinyint` / `bit` / `decimal` / `numeric` / `float` / `real` / `money` / `smallmoney` / `varchar` / `nvarchar` / `char` / `nchar` / `text` / `ntext` / `image` / `binary` / `varbinary` / `date` / `datetime` / `datetime2` / `smalldatetime` / `time` / `datetimeoffset` / `xml` / `uniqueidentifier` / `sysname` / `timestamp` / `hierarchyid` / `sql_variant`).
+Properties: `Precision` (int=10, bigint=19, decimal=38, varchar=8000, money=19, hierarchyid=892, uniqueidentifier=16, sql_variant=0, **xml=-1**), `Scale` (int=0, money=4, decimal=38, time / datetime2=7, datetime=3), `AllowsNull` (0 for `sysname` / `timestamp`, 1 otherwise), `UsesAnsiTrim` (1 for `char` / `varchar` / `binary` / `varbinary` / `sql_variant`).
+**A property the type has no value for answers NULL, not 0**, and that covers most of the table: only the exact-numeric and date/time types carry a `Scale`, and the national-character types answer NULL for `UsesAnsiTrim` where their single-byte counterparts answer 1.
+The whole table is pinned row-by-row against SQL Server 2025 by `PropertyFunctionsTests.TypeProperty_Table_MatchesSqlServer` (2026-08-02).
+**`integer` and `rowversion` are not names this function recognizes** — every property is NULL — even though the T-SQL grammar takes both as synonyms; their canonical `int` and `timestamp` resolve.
 User-defined alias types (UDDT) aren't reachable via this function in the shipped slice — apps probing them are rare.
 NULL on any arg / unknown type / unknown property → NULL.
 

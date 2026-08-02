@@ -9,6 +9,41 @@ public sealed class DataReaderTests
 {
     private static DbDataReader OpenReader(string sql) => new Simulation().ExecuteReader(sql);
 
+    /// <summary>
+    /// The peek-and-buffer <c>HasRows</c> shape is written twice — once per
+    /// cursor kind — and an ordinary SELECT only ever reaches the byte-encoded
+    /// one. A result set built from already-projected values (the catalog
+    /// procedures, the <c>sp_help</c> family) takes the other, so it needs its
+    /// own pass through peek-before-read, read-after-peek and the sticky bit.
+    /// </summary>
+    [TestMethod]
+    public void HasRows_OnAValueProjectedResultSet_PeeksAndStaysSticky()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.t (id int)");
+        using var reader = sim.ExecuteReader("exec sp_helpdb");
+        IsTrue(reader.HasRows);
+        IsTrue(reader.HasRows);
+        IsTrue(reader.Read());
+        IsTrue(reader.HasRows);
+        while (reader.Read())
+        {
+        }
+
+        IsTrue(reader.HasRows);
+    }
+
+    [TestMethod]
+    public void HasRows_OnAnEmptyValueProjectedResultSet_IsFalse()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.t (id int)");
+        using var reader = sim.ExecuteReader("exec sp_helptrigger 'dbo.t'");
+        IsFalse(reader.HasRows);
+        IsFalse(reader.Read());
+        IsFalse(reader.HasRows);
+    }
+
     [TestMethod]
     public void HasRows_TrueBeforeAndAfterRead_StickyOnceObserved()
     {

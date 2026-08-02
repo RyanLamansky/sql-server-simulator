@@ -283,4 +283,65 @@ public class ClrAssemblyTests
         AreEqual(0, new Simulation().ExecuteScalar("select cast(value as int) from sys.configurations where name = 'clr enabled'"));
         AreEqual(1, ClrSimulation().ExecuteScalar("select cast(value as int) from sys.configurations where name = 'clr enabled'"));
     }
+
+    /// <summary>
+    /// The whole T-SQL&#8596;<see cref="System.Data.SqlTypes"/> binding table,
+    /// one row per pair, driven through an identity routine so a value has to
+    /// convert in and back out to survive. The pairs that share a CLR type
+    /// (<c>money</c> / <c>smallmoney</c>, <c>datetime</c> / <c>smalldatetime</c>,
+    /// <c>varbinary</c> / <c>binary</c>) each get their own row, since the
+    /// declared T-SQL type is what the return conversion reads.
+    /// </summary>
+    [TestMethod]
+    [DataRow("nvarchar(20)", "SqlString", "N'hi'")]
+    [DataRow("int", "SqlInt32", "42")]
+    [DataRow("bigint", "SqlInt64", "cast(9000000000 as bigint)")]
+    [DataRow("smallint", "SqlInt16", "cast(-42 as smallint)")]
+    [DataRow("tinyint", "SqlByte", "cast(255 as tinyint)")]
+    [DataRow("bit", "SqlBoolean", "cast(1 as bit)")]
+    [DataRow("float", "SqlDouble", "cast(3.5 as float)")]
+    [DataRow("real", "SqlSingle", "cast(1.25 as real)")]
+    [DataRow("decimal(12,3)", "SqlDecimal", "cast(123.456 as decimal(12,3))")]
+    [DataRow("money", "SqlMoney", "cast(19.99 as money)")]
+    [DataRow("smallmoney", "SqlMoney", "cast(4.50 as smallmoney)")]
+    [DataRow("datetime", "SqlDateTime", "cast('2021-06-15T13:30:00' as datetime)")]
+    [DataRow("smalldatetime", "SqlDateTime", "cast('2024-03-15T13:45:00' as smalldatetime)")]
+    [DataRow("varbinary(10)", "SqlBinary", "0x010203")]
+    [DataRow("binary(3)", "SqlBinary", "cast(0x010203 as binary(3))")]
+    [DataRow("uniqueidentifier", "SqlGuid", "cast('11111111-2222-3333-4444-555555555555' as uniqueidentifier)")]
+    public void ClrFunction_TypeBinding_RoundTripsAndCarriesNull(string sqlType, string clrType, string literal)
+    {
+        var sim = ClrSimulation();
+        sim.ExecuteBatches(
+            CreateSafeAssembly(),
+            $"create function dbo.Echo(@v {sqlType}) returns {sqlType} as external name sim_safe.UserDefinedFunctions.Echo{clrType}");
+        AreEqual(1, sim.ExecuteScalar($"select case when dbo.Echo({literal}) = {literal} then 1 else 0 end"));
+        AreEqual(1, sim.ExecuteScalar($"select case when dbo.Echo(cast(null as {sqlType})) is null then 1 else 0 end"));
+    }
+
+    /// <summary><c>xml</c> binds to <see cref="System.Data.SqlTypes.SqlXml"/>;
+    /// it has its own test because <c>xml</c> is not a comparable type.</summary>
+    [TestMethod]
+    public void ClrFunction_XmlBinding_RoundTrips()
+    {
+        var sim = ClrSimulation();
+        sim.ExecuteBatches(
+            CreateSafeAssembly(),
+            "create function dbo.Echo(@v xml) returns xml as external name sim_safe.UserDefinedFunctions.EchoSqlXml");
+        AreEqual("<a>1</a>", sim.ExecuteScalar("select cast(dbo.Echo(cast(N'<a>1</a>' as xml)) as nvarchar(max))"));
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select dbo.Echo(cast(null as xml))"));
+    }
+
+    /// <summary>
+    /// A declared type the binder has no CLR pair for fails the bind rather than
+    /// marshalling something approximate.
+    /// </summary>
+    [TestMethod]
+    public void ClrFunction_UnmarshalledType_RejectedAtCreate()
+    {
+        var sim = ClrSimulation();
+        _ = sim.ExecuteNonQuery(CreateSafeAssembly());
+        _ = sim.AssertSqlError(
+            "create function dbo.Echo(@v date) returns date as external name sim_safe.UserDefinedFunctions.EchoSqlDateTime", 6551);
+    }
 }

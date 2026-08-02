@@ -40,6 +40,11 @@ public sealed class SqlVariantRpcParameterTests
         await RoundTrip(connection, new DateTime(2020, 1, 2, 3, 4, 5, 123), "datetime", new DateTime(2020, 1, 2, 3, 4, 5, 123));
         await RoundTrip(connection, Guid.Parse("11111111-2222-3333-4444-555555555555"), "uniqueidentifier", Guid.Parse("11111111-2222-3333-4444-555555555555"));
         await RoundTrip(connection, new SqlMoney(12.34m), "money", 12.34m);
+        await RoundTrip(
+            connection,
+            new DateTimeOffset(new DateTime(2024, 3, 15, 13, 45, 12), TimeSpan.FromMinutes(330)),
+            "datetimeoffset",
+            new DateTimeOffset(new DateTime(2024, 3, 15, 13, 45, 12), TimeSpan.FromMinutes(330)));
         await RoundTrip(connection, new byte[] { 1, 2, 3, 4 }, "varbinary", new byte[] { 1, 2, 3, 4 });
         await RoundTrip(connection, new TimeSpan(1, 2, 3), "time", new TimeSpan(1, 2, 3));
     }

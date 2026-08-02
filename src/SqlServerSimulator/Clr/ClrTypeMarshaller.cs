@@ -66,7 +66,7 @@ internal static class ClrTypeMarshaller
             : clrType == typeof(SqlDouble) ? new SqlDouble(value.AsDouble)
             : clrType == typeof(SqlSingle) ? new SqlSingle(value.AsSingle)
             : clrType == typeof(SqlDecimal) ? new SqlDecimal(value.AsDecimal)
-            : clrType == typeof(SqlMoney) ? new SqlMoney(value.AsDecimal)
+            : clrType == typeof(SqlMoney) ? new SqlMoney(value.AsMoney)
             : clrType == typeof(SqlDateTime) ? new SqlDateTime(value.Type is SmallDateTimeSqlType ? value.AsSmallDateTime : value.AsDateTime)
             : clrType == typeof(SqlBinary) ? new SqlBinary(value.AsBytes)
             : clrType == typeof(SqlGuid) ? new SqlGuid(value.AsGuid)

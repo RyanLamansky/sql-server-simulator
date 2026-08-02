@@ -820,4 +820,27 @@ public sealed class ForeignKeyTests
         _ = sim.ExecuteNonQuery($"create table p (id int not null primary key); {createChild}");
         _ = sim.AssertSqlError("insert c values (1, 99)", 547);
     }
+
+    /// <summary>
+    /// A referenced <c>UNIQUE</c> column may be NULL, and the NULL-keyed parent
+    /// row is one no child can reference — so deleting it neither rejects nor
+    /// cascades, whatever the referential action. Matches SQL Server 2025
+    /// (2026-08-02).
+    /// </summary>
+    [TestMethod]
+    [DataRow("")]
+    [DataRow("on delete cascade")]
+    public void DeleteParentRowWithNullUniqueKey_LeavesChildrenAlone(string action)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"""
+            create table p (id int null unique, tag nvarchar(5));
+            create table c (cid int not null primary key, pid int null references p(id) {action});
+            insert p values (null, 'n'), (1, 'a');
+            insert c values (10, 1);
+            delete p where tag = 'n'
+            """);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from p"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from c where pid = 1"));
+    }
 }

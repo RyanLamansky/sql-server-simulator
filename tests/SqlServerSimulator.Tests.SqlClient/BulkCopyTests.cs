@@ -551,6 +551,44 @@ public sealed class BulkCopyTests
     }
 
     /// <summary>
+    /// A <c>NOT NULL</c> fixed-width destination column travels as the
+    /// FIXEDLENTYPE token rather than its nullable N-variant, so the row value
+    /// carries no length prefix and decodes at the declared width. The
+    /// legacy-scaled families are the ones where the two forms disagree about
+    /// more than framing — <c>money</c> is a split 8-byte 1/10000 fixed-point,
+    /// <c>datetime</c> a day count plus 1/300-second ticks, <c>smalldatetime</c>
+    /// a day count plus whole minutes — so each is asserted through its own
+    /// column. The same table nullable is the sibling test above.
+    /// </summary>
+    [TestMethod]
+    public async Task NotNullFixedWidthColumns_DecodeFromTheFixedLenForm()
+    {
+        var (_, listener, connection) = await SetUpAsync(
+            "create table t (m money not null, dt datetime not null, sdt smalldatetime not null, f float not null, i int not null)",
+            TestContext.CancellationToken);
+        await using var listenerScope = listener;
+        await using var connectionScope = connection;
+
+        var stamp = new DateTime(2021, 6, 15, 13, 30, 45, 123);
+        var small = new DateTime(2024, 3, 15, 13, 45, 0);
+        var data = Table(
+            ("m", typeof(decimal)), ("dt", typeof(DateTime)), ("sdt", typeof(DateTime)),
+            ("f", typeof(double)), ("i", typeof(int)));
+        _ = data.Rows.Add(19.99m, stamp, small, 3.5, 7);
+        using (var bulk = new SqlBulkCopy(connection) { DestinationTableName = "t" })
+            await bulk.WriteToServerAsync(data, TestContext.CancellationToken);
+
+        await using var read = new SqlCommand("select m, dt, sdt, f, i from t", connection);
+        await using var reader = await read.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual(19.99m, reader.GetDecimal(0));
+        AreEqual(stamp, reader.GetDateTime(1));
+        AreEqual(small, reader.GetDateTime(2));
+        AreEqual(3.5, reader.GetDouble(3));
+        AreEqual(7, reader.GetInt32(4));
+    }
+
+    /// <summary>
     /// A byte-order mark leading an <c>xml</c> value is dropped, matching real
     /// — while the same mark in an <c>nvarchar</c> column survives.
     /// Probe-confirmed for bulk copy alongside the literal, parameter and CAST
