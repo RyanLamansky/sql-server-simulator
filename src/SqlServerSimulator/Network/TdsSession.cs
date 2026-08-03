@@ -774,10 +774,18 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 }
 
                 hasOutcome = outcomes.MoveNext();
-                var queryStatus = (ushort)(this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow) | Tds.DoneCount);
+                var queryStatus = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
+                // Real reports a result set's row count under DONE_COUNT and
+                // drops the flag (keeping the count itself) under NOCOUNT.
+                if (query.CountSuppressed != true)
+                    queryStatus |= Tds.DoneCount;
                 if ((queryStatus & Tds.DoneMore) == 0)
                     this.WriteDatabaseChangeIfAny(writer);
-                writer.WriteDoneToken(effectiveDoneToken, queryStatus, rows);
+                // CurCmd tells the client whether that count is rows returned
+                // or rows affected. A DML statement's OUTPUT clause makes the
+                // statement tabular without making its count a SELECT's, so it
+                // is the one result set that goes out unclassified.
+                writer.WriteDoneToken(effectiveDoneToken, queryStatus, rows, query.CountsRowsReturned ? Tds.CmdSelect : (ushort)0);
             }
             else if (outcome is SimulatedErrorOutcome errorOutcome)
             {
@@ -798,20 +806,29 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             else
             {
                 var affected = outcome.RecordsAffected;
-                hasOutcome = outcomes.MoveNext();
-                var status = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
                 // SET NOCOUNT ON suppresses the rows-affected count: the DONE
                 // omits DONE_COUNT so an ODBC/pyodbc driver skips this DML result
                 // and advances to a trailing SELECT SCOPE_IDENTITY() (the
                 // mssql-django identity pattern — without this it stalls on the
-                // INSERT's rowcount). Matches real SQL Server.
-                var suppressCount = this.connection!.NoCount;
+                // INSERT's rowcount). Read off the outcome rather than the live
+                // session flag: the statement after this one runs on the
+                // MoveNext below, and its own SET NOCOUNT would otherwise decide
+                // this statement's DONE.
+                var suppressCount = outcome.CountSuppressed == true;
+                hasOutcome = outcomes.MoveNext();
+                var status = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
                 if (affected >= 0 && !suppressCount)
                     status |= Tds.DoneCount;
 
                 if ((status & Tds.DoneMore) == 0)
                     this.WriteDatabaseChangeIfAny(writer);
-                writer.WriteDoneToken(effectiveDoneToken, status, suppressCount ? 0 : Math.Max(affected, 0));
+                // Real keeps the row count in the token and only clears the
+                // flag, so a suppressed count still goes out as the number.
+                writer.WriteDoneToken(
+                    effectiveDoneToken,
+                    status,
+                    Math.Max(affected, 0),
+                    outcome.CountsRowsReturned ? Tds.CmdSelect : (ushort)0);
             }
         }
 

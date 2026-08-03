@@ -22,7 +22,14 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     private readonly IEnumerable<byte[]>? rowBytes;
     private readonly IEnumerable<SqlValue[]>? rowValues;
 
-    public SimulatedSqlResultSet(SqlType[] schema, string[] columnNames, IEnumerable<byte[]> rowBytes)
+    /// <summary>
+    /// <paramref name="recordsAffected"/> is set only by a DML statement whose
+    /// <c>OUTPUT</c> clause returns rows to the client: the statement reports
+    /// what it changed as well as what it returned. Left at <c>-1</c>
+    /// everywhere else, where the row count is a returned-row count.
+    /// </summary>
+    public SimulatedSqlResultSet(SqlType[] schema, string[] columnNames, IEnumerable<byte[]> rowBytes, int recordsAffected = -1)
+        : base(recordsAffected)
     {
         this.schema = schema;
         this.columnNames = columnNames;

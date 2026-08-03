@@ -242,6 +242,10 @@ partial class Simulation
             // the body's result sets keep their production-time cap via the
             // dispatch loop's per-statement ClientTextSize stamp.
             var savedTextSize = connection.TextSize;
+            // SET NOCOUNT reverts at proc exit the same way (probe-confirmed);
+            // the counts the body's own statements reported were already
+            // stamped as it produced them.
+            var savedNoCount = connection.NoCount;
             // Materialize outcomes to a list so the try/finally cleanup
             // (NestingLevel decrement, OUTPUT param writeback, return-code
             // assignment) runs even when the iterator is partially consumed.
@@ -256,6 +260,7 @@ partial class Simulation
                 connection.NestingLevel--;
                 connection.QuotedIdentifiers = savedQuotedIdentifiers;
                 connection.TextSize = savedTextSize;
+                connection.NoCount = savedNoCount;
                 // Local temp tables the body created are dropped at proc exit
                 // (SQL Server's module-scoped lifetime — so a re-entrant call
                 // re-creates them without a Msg 2714 collision).

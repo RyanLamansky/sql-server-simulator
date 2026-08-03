@@ -242,6 +242,14 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
+- **Unary `-` / `+` bind too tightly, so a sign followed by more multiplicative operators evaluates wrongly** (probe-confirmed against SQL Server 2025, 2026-08-03).
+  T-SQL puts the unary operators at the *additive* level, below `* / %`, so real reads `a / -b / c` as `a / (-(b / c))`; the simulator parses `-b` as a primary and reads it as `(a / -b) / c`.
+  Measured: `SELECT 100 / -10 / 2` is **-20** on real and -5 here, `SELECT 8 / -2 * 4` is **-1** and -16, `SELECT 60 / -3 / 2` is **-60** and -10.
+  A single leading sign agrees (`-6 / 3` is -2 on both) because negation commutes with `*` and integer division truncates symmetrically — the divergence needs the unary's operand to be followed by another multiplicative operator, which is why ordinary application SQL never hits it and machine-generated sign chains hit it constantly.
+  The fix is in `Expression.ParsePrimary`'s `Operator { Character: '-' } => Negate.Of(ParsePrimary(…))`, which should parse its operand at multiplicative precedence instead.
+  Deliberately not bundled with the predicate-folding work that found it: it moves every unary minus in the grammar and interacts with negated-literal folding (the `-2147483648` stays-`int` rule), decimal result sizing, and ORDER BY constant detection, so it wants its own review.
+  Note the simulator currently agrees with sqllogictest's *stored* results here and real is the outlier — SQLite and PostgreSQL both use standard precedence — so the corpus cannot be used as the oracle for this one.
+
 - **Skip-mode deferred name resolution — DML target tables not placeholder-continued** — the skip-mode parse-continuation fix substitutes placeholder metadata for a missing *FROM-clause table* or *schema-qualified function* so an un-taken branch parses to completion and is discarded whole (killing the orphaned-`ELSE` cascade — see [`control-flow.md`](control-flow.md)).
   Re-probed 2026-07-29: the **spurious Msg 208 is gone** — `IF 1=0 INSERT INTO missing SELECT * FROM other; SELECT 'after'` now returns `after`, as do the UPDATE and DELETE forms, so a dead branch with a missing DML target no longer breaks the following statement.
   What still reproduces is the **orphaned `ELSE`**: the bare (non-`BEGIN`/`END`) form `IF 1=0 INSERT INTO missing … ELSE SELECT 'else-ran'` raises **Msg 102** near `else` where real runs the ELSE, and a missing **MERGE** target raises Msg 102 near `;`.

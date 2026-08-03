@@ -340,6 +340,11 @@ partial class Simulation
         // SQL it EXECs, the plan-cache key, and the Msg 1934 gates — all of
         // which read the connection.
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+        // SET NOCOUNT inside a trigger body reverts at trigger exit
+        // (probe-confirmed): the near-universal `set nocount on` opening a
+        // trigger leaves the firing statement's own count intact and doesn't
+        // follow the session out.
+        var savedNoCount = connection.NoCount;
         BatchContext? innerBatch = null;
         try
         {
@@ -391,6 +396,7 @@ partial class Simulation
         {
             connection.CurrentDatabase = savedDatabase;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
+            connection.NoCount = savedNoCount;
             connection.NestingLevel--;
             connection.TriggerNestLevel--;
             connection.FiringTriggers.RemoveAt(connection.FiringTriggers.Count - 1);

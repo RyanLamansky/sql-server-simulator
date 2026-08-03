@@ -233,7 +233,11 @@ internal sealed partial class Selection
                 CheckWindowOperand(item.Expr);
         }
 
-        fromClause.Having?.VisitOperandExpressions(op =>
+        // The surviving walk, not the written one: real runs this pass over the
+        // post-fold tree, so a HAVING conjunct it settled while compiling takes
+        // its columns out of the check (`HAVING NULL <> b` and
+        // `HAVING 1 = 0 AND b > 1` both answer no rows over an ungrouped `b`).
+        fromClause.Having?.VisitSurvivingOperandExpressions(op =>
             op.VisitColumnReferences(name => Check(name, SimulatedSqlException.ColumnNotInGroupByForHaving)));
 
         foreach (var item in orderBy)
@@ -407,7 +411,7 @@ internal sealed partial class Selection
             context.OuterTypeResolver = saved;
         }
         predicate.Bind(context.Batch, resolveColumnType);
-        return predicate;
+        return BooleanExpression.SimplifyForFilter(predicate);
     }
 
     /// <summary>

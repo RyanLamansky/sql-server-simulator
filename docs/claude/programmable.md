@@ -56,7 +56,7 @@ The outer scope chain is what separates it from the genuinely-outer `(SELECT MAX
 ### Body-shape rules — Msg 455 / 444 / 443 / 1075
 
 A **scalar UDF** and a **multi-statement TVF** carry three rules beyond name binding, all reported at `CREATE` / `ALTER`.
-Procedures, triggers and inline TVFs are exempt (probe-confirmed: a procedure body may `SELECT`, `PRINT`, `INSERT` and `SET NOCOUNT ON` freely).
+Procedures, triggers and inline TVFs are exempt (probe-confirmed: a procedure body may `SELECT`, `PRINT`, `INSERT` and `SET NOCOUNT ON` freely — and that `SET NOCOUNT` reverts when the body exits, alongside `TEXTSIZE` and `QUOTED_IDENTIFIER`; see [`data-reader.md`](data-reader.md#recordsaffected) for the scope table and what it decides).
 The walk that binds the body gathers them into `FunctionBodyShape` (`Parser/FunctionBodyShape.cs`), reached through `BatchContext.FunctionBodyShape`, which is non-null only for those two kinds.
 
 - **Msg 455** class 16 state 2, *"The last statement included within a function must be a return statement."*

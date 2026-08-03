@@ -222,12 +222,16 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
 
     public void WriteDone(ushort status, long rowCount) => this.WriteDoneToken(Tds.TokenDone, status, rowCount);
 
-    /// <summary>DONE, DONEPROC, and DONEINPROC share one 13-byte layout.</summary>
-    public void WriteDoneToken(byte token, ushort status, long rowCount)
+    /// <summary>
+    /// DONE, DONEPROC, and DONEINPROC share one 13-byte layout. <paramref name="curCmd"/>
+    /// is the kind of statement that produced the token; see <see cref="Tds.CmdSelect"/>
+    /// for what the simulator classifies and what it leaves at 0.
+    /// </summary>
+    public void WriteDoneToken(byte token, ushort status, long rowCount, ushort curCmd = 0)
     {
         this.WriteByte(token);
         this.WriteUInt16(status);
-        this.WriteUInt16(0);
+        this.WriteUInt16(curCmd);
         this.WriteInt64(rowCount);
     }
 

@@ -154,12 +154,19 @@ public sealed class PredicateCompileTimeBindTests
     /// being assigned rather than making the expression name a collation of its
     /// own.
     /// </summary>
+    /// <remarks>
+    /// The expected rows-affected differs by shape rather than by row count:
+    /// the fixture is empty, so the two DML statements report 0, while the
+    /// assignment-only <c>SELECT @v = …</c> reports none at all — real leaves a
+    /// SELECT out of rows-affected however many rows it read
+    /// (probe-confirmed).
+    /// </remarks>
     [TestMethod]
-    [DataRow("insert c1 (nx) select concat(c1.nx, c2.nx) from c1, c2")]
-    [DataRow("declare @v nvarchar(40); select @v = concat(c1.nx, c2.nx) from c1, c2")]
-    [DataRow("update c1 set nx = concat(c1.nx, c2.nx) from c1, c2")]
-    public void CrossCollationConcat_IntoAssignmentTarget_Succeeds(string sql)
-        => AreEqual(0, EmptyFixture().ExecuteNonQuery(sql));
+    [DataRow("insert c1 (nx) select concat(c1.nx, c2.nx) from c1, c2", 0)]
+    [DataRow("declare @v nvarchar(40); select @v = concat(c1.nx, c2.nx) from c1, c2", -1)]
+    [DataRow("update c1 set nx = concat(c1.nx, c2.nx) from c1, c2", 0)]
+    public void CrossCollationConcat_IntoAssignmentTarget_Succeeds(string sql, int recordsAffected)
+        => AreEqual(recordsAffected, EmptyFixture().ExecuteNonQuery(sql));
 
     /// <summary>
     /// A <c>varchar</c> whose collation never resolved has bytes in no known

@@ -64,6 +64,19 @@ internal static class Tds
     public const ushort DoneCount = 0x0010;
     public const ushort DoneAttention = 0x0020;
 
+    /// <summary>
+    /// DONE <c>CurCmd</c> for a SELECT, the one statement kind a client has to
+    /// tell apart: SqlClient sums a DONE's row count into
+    /// <c>SqlDataReader.RecordsAffected</c> unless <c>CurCmd</c> says SELECT,
+    /// since a SELECT's count is rows returned rather than rows affected
+    /// (captured off the wire from SQL Server 2025, which tags a SELECT 0x00C1,
+    /// SELECT INTO 0x00C2, INSERT 0x00C3, DELETE 0x00C4, UPDATE 0x00C5 and so
+    /// on down its statement vocabulary). The simulator classifies SELECT and
+    /// leaves every other kind 0 — no client is known to read the rest, and the
+    /// verb-by-verb table isn't modeled.
+    /// </summary>
+    public const ushort CmdSelect = 0x00C1;
+
     // ENVCHANGE types.
     public const byte EnvDatabase = 1;
     public const byte EnvLanguage = 2;

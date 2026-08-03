@@ -679,7 +679,7 @@ partial class Simulation
         // surfaces to the client (probe-confirmed). When the OUTPUT clause
         // has no target, the projected rows flow back as a result set.
         return output is { HasTarget: false } o2
-            ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!)
+            ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!, insertedCount)
             : new SimulatedNonQuery(insertedCount);
     }
 

@@ -154,7 +154,8 @@ internal abstract class BooleanExpression
             context.MoveNextRequired();
             operands.Add(ParseAnd(context));
         }
-        return new OrExpression([.. operands]);
+        var chain = new OrExpression([.. operands]);
+        return FoldConstantChain(chain, operands, context, absorbing: true);
     }
 
     /// <summary>
@@ -172,8 +173,96 @@ internal abstract class BooleanExpression
             context.MoveNextRequired();
             operands.Add(ParseNot(context));
         }
-        return new AndExpression([.. operands]);
+        var chain = new AndExpression([.. operands]);
+        return FoldConstantChain(chain, operands, context, absorbing: false);
     }
+
+    /// <summary>
+    /// Real SQL Server's compile-time collapse of an <c>AND</c> / <c>OR</c>
+    /// chain carrying an <em>absorbing</em> written-constant operand:
+    /// <c>x AND FALSE</c> is FALSE and <c>x OR TRUE</c> is TRUE whatever
+    /// <c>x</c> is, so real settles the chain while algebrizing and the other
+    /// operands leave the tree with it. Probe-confirmed to be
+    /// position-independent (<c>1 = 0 AND &lt;overflow&gt;</c> and
+    /// <c>&lt;overflow&gt; AND 1 = 0</c> both answer no rows) and
+    /// context-free — it holds under <c>NOT</c>, inside a <c>CASE WHEN</c> and
+    /// in a CHECK constraint, where <c>CHECK (1 = 0 AND x / 0 = 1)</c> rejects
+    /// the row rather than raising Msg 8134.
+    /// <para>
+    /// The collapse happens ahead of the GROUP BY containment pass, which is
+    /// what lets <c>HAVING 1 = 0 AND b &gt; 1</c> answer no rows over an
+    /// ungrouped <c>b</c> where <c>HAVING b &gt; 1</c> alone is Msg 8121 — so
+    /// the folded chain hides its operands from
+    /// <see cref="VisitSurvivingOperandExpressions"/> while still binding them
+    /// (an unknown column inside the dropped operand is still Msg 207).
+    /// </para>
+    /// </summary>
+    /// <param name="chain">The assembled n-ary node, kept as the fold's source.</param>
+    /// <param name="operands">The chain's operands, scanned for the absorbing constant.</param>
+    /// <param name="context">Parse context, supplying the batch a constant folds against.</param>
+    /// <param name="absorbing">The value that absorbs the chain: <see langword="true"/> for <c>OR</c>, <see langword="false"/> for <c>AND</c>.</param>
+    private static BooleanExpression FoldConstantChain(BooleanExpression chain, List<BooleanExpression> operands, ParserContext context, bool absorbing)
+    {
+        foreach (var operand in operands)
+        {
+            if (TryFoldWrittenConstant(operand, context) == absorbing)
+                return new ConstantFoldedPredicate(absorbing, chain);
+        }
+        return chain;
+    }
+
+    /// <summary>
+    /// Evaluates <paramref name="predicate"/> at compile time when it is a
+    /// written constant, mirroring real's own folding: a fold that <em>raises</em>
+    /// leaves the predicate standing for runtime (probe-confirmed —
+    /// <c>WHERE 1 / 0 = 1</c> reports Msg 8134 per row, while
+    /// <c>WHERE 1 / 0 = 1 AND 1 = 0</c> answers no rows because the chain
+    /// collapsed first). Returns <see langword="null"/> for UNKNOWN as well as
+    /// for "didn't fold" — every caller treats the two alike.
+    /// </summary>
+    private static bool? TryFoldWrittenConstant(BooleanExpression predicate, ParserContext context)
+    {
+        if (!predicate.IsWrittenConstant)
+            return null;
+        try
+        {
+            // A written constant reaches no column, so the resolver is
+            // unreachable rather than merely unused.
+            return predicate.Run(new RuntimeContext(static _ => throw new NotSupportedException(), context.Batch));
+        }
+        catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Applies the one simplification a <b>filter</b> position licenses that a
+    /// value position doesn't: WHERE / HAVING / ON / a positioned DML predicate
+    /// keep only the rows a predicate answers TRUE for, so a predicate real can
+    /// see is <em>never</em> TRUE while compiling settles the filter without
+    /// the rest of it ever running. That is what makes
+    /// <c>WHERE NULL &gt; a AND &lt;overflowing expression&gt;</c> and
+    /// <c>WHERE &lt;overflowing expression&gt; BETWEEN NULL AND 5</c> answer no
+    /// rows on real where the expression alone raises Msg 8115.
+    /// <para>
+    /// Unlike <see cref="FoldConstantChain"/>'s absorbing collapse this is
+    /// <em>not</em> context-free — a constant-UNKNOWN operand is FALSE-or-UNKNOWN
+    /// rather than a definite value, which a CHECK constraint (where UNKNOWN
+    /// passes and FALSE rejects) and a <c>NOT</c> both distinguish. So it is
+    /// applied only at the filter sites, never inside the predicate's own tree,
+    /// and the dropped operands stay visible to
+    /// <see cref="VisitSurvivingOperandExpressions"/>: real still reports
+    /// Msg 8121 for the ungrouped <c>b</c> in
+    /// <c>HAVING NULL &lt;&gt; b AND b &gt; 1</c>, while
+    /// <c>HAVING NULL &lt;&gt; b</c> alone — folded by the comparison rule, not
+    /// this one — reports nothing.
+    /// </para>
+    /// </summary>
+    internal static BooleanExpression SimplifyForFilter(BooleanExpression predicate) =>
+        predicate is not ConstantFoldedPredicate && predicate.IsNeverTrue
+            ? new FilterNeverTruePredicate(predicate)
+            : predicate;
 
     /// <summary>
     /// Highest-precedence boolean combinator: a sequence of <c>NOT</c>
@@ -460,7 +549,7 @@ internal abstract class BooleanExpression
 
         // Regular comparison: RHS is a value expression.
         var right = Expression.Parse(context);
-        return op switch
+        BooleanExpression comparison = op switch
         {
             ComparisonOp.Equal => new EqualityExpression(left, right),
             ComparisonOp.NotEqual => new InequalityExpression(left, right),
@@ -469,7 +558,28 @@ internal abstract class BooleanExpression
             ComparisonOp.Greater => new GreaterThanExpression(left, right),
             _ => new GreaterThanOrEqualExpression(left, right),
         };
+        // A comparison against the NULL constant is UNKNOWN for every value the
+        // other side could take, so real settles it while compiling and never
+        // looks at that side again — see FoldToUnknown. LIKE, IS [NOT] NULL,
+        // IS [NOT] DISTINCT FROM and the quantified subquery forms are parsed
+        // elsewhere and deliberately don't fold: probing shows real evaluates
+        // `<expr> LIKE NULL` and answers an empty `NULL <> ALL (…)` subquery
+        // exactly (TRUE, not UNKNOWN).
+        return Expression.IsNullConstant(left) || Expression.IsNullConstant(right)
+            ? FoldToUnknown(comparison)
+            : comparison;
     }
+
+    /// <summary>
+    /// Wraps a predicate real SQL Server settles as UNKNOWN while compiling —
+    /// a comparison against a NULL constant, and the <c>IN</c> / <c>BETWEEN</c>
+    /// shapes that reduce to one. The operands stay for binding but never run,
+    /// which is the observable behavior: real answers no rows for
+    /// <c>WHERE NULL &gt; &lt;overflowing expression&gt;</c> and reports nothing
+    /// for the ungrouped <c>b</c> in <c>HAVING NULL &lt;&gt; b</c>, yet still
+    /// reports Msg 207 for <c>WHERE NULL &gt; &lt;unknown column&gt;</c>.
+    /// </summary>
+    private static ConstantFoldedPredicate FoldToUnknown(BooleanExpression comparison) => new(null, comparison);
 
     /// <summary>
     /// The six binary comparison operators, with the T-SQL synonyms (<c>!=</c>,
@@ -574,7 +684,28 @@ internal abstract class BooleanExpression
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
-        return new InExpression(left, [.. candidates], negated);
+        var inList = new InExpression(left, [.. candidates], negated);
+        // `x IN (…)` is a chain of equalities, so it folds on the same rule the
+        // comparison shapes do — but only where every equality it stands for is
+        // against a NULL constant, negation included (`x NOT IN (NULL)` is
+        // UNKNOWN just as `x IN (NULL)` is). One non-NULL element leaves a
+        // comparison real evaluates, and it raises that side's error
+        // (probe-confirmed: `<overflow> IN (NULL)` answers rows,
+        // `<overflow> IN (NULL, 1)` is Msg 8115).
+        return Expression.IsNullConstant(left) || AllNullConstants(candidates)
+            ? FoldToUnknown(inList)
+            : inList;
+    }
+
+    /// <summary>Whether every element of an <c>IN</c> list is a NULL constant.</summary>
+    private static bool AllNullConstants(List<Expression> candidates)
+    {
+        foreach (var candidate in candidates)
+        {
+            if (!Expression.IsNullConstant(candidate))
+                return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -588,7 +719,7 @@ internal abstract class BooleanExpression
     /// other-predicate</c> falls back to the surrounding
     /// <see cref="ParseAnd"/> loop.
     /// </summary>
-    private static BetweenExpression ParseBetween(Expression left, ParserContext context, bool negated)
+    private static BooleanExpression ParseBetween(Expression left, ParserContext context, bool negated)
     {
         context.MoveNextRequired();
         var lower = Expression.Parse(context);
@@ -596,7 +727,15 @@ internal abstract class BooleanExpression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         var upper = Expression.Parse(context);
-        return new BetweenExpression(left, lower, upper, negated);
+        var between = new BetweenExpression(left, lower, upper, negated);
+        // A NULL-constant *subject* makes both halves of the range UNKNOWN, so
+        // the whole thing folds like a comparison. A NULL-constant *bound*
+        // doesn't: it leaves `UNKNOWN AND (value <= upper)`, which is FALSE when
+        // the surviving half is — probe-confirmed by real answering 'T' for
+        // `CASE WHEN 2 NOT BETWEEN NULL AND 1 …` and by
+        // `CHECK (x BETWEEN NULL AND 5)` rejecting x = 10. Those reach the
+        // filter-only simplification through IsNeverTrue instead.
+        return Expression.IsNullConstant(left) ? FoldToUnknown(between) : between;
     }
 
     /// <summary>
@@ -630,6 +769,28 @@ internal abstract class BooleanExpression
     /// traversal from here.
     /// </summary>
     internal abstract void VisitOperandExpressions(Action<Expression> visitor);
+
+    /// <summary>
+    /// The operands still standing after compile-time folding — the tree real
+    /// SQL Server runs its GROUP BY containment pass over, which is why
+    /// <c>HAVING NULL &lt;&gt; b</c> and <c>HAVING 1 = 0 AND b &gt; 1</c> report
+    /// nothing for an ungrouped <c>b</c> while <c>HAVING b &gt; 1</c> is
+    /// Msg 8121. Identical to <see cref="VisitOperandExpressions"/> everywhere
+    /// except a folded node, so every other consumer of the operand walk —
+    /// inline-CHECK validation, view updatability, read-column recording —
+    /// keeps seeing the written predicate.
+    /// </summary>
+    internal virtual void VisitSurvivingOperandExpressions(Action<Expression> visitor) =>
+        this.VisitOperandExpressions(visitor);
+
+    /// <summary>
+    /// Whether this predicate is known while compiling to never evaluate TRUE
+    /// (it is constant FALSE or constant UNKNOWN, or an <c>AND</c> carrying
+    /// such an operand). Read only by <see cref="SimplifyForFilter"/>: a value
+    /// position still has to tell FALSE from UNKNOWN, so the knowledge licenses
+    /// nothing outside a filter.
+    /// </summary>
+    internal virtual bool IsNeverTrue => false;
 
     /// <summary>
     /// The predicate-side counterpart of <see cref="Expression.IsWrittenConstant"/>:
@@ -812,6 +973,80 @@ internal abstract class BooleanExpression
     }
 
     /// <summary>
+    /// A predicate real SQL Server settled to a constant while compiling: its
+    /// <see cref="Run"/> answers that constant and the written operands never
+    /// evaluate. Two rules build one — a comparison against a NULL constant
+    /// (UNKNOWN) and an <c>AND</c> / <c>OR</c> chain absorbed by a written
+    /// constant (FALSE / TRUE).
+    /// <para>
+    /// The fold lands between name resolution and the GROUP BY containment
+    /// pass, which is exactly what real does: <c>WHERE NULL &gt; &lt;unknown
+    /// column&gt;</c> is still Msg 207 (so <see cref="Bind"/> forwards), while
+    /// the ungrouped column in <c>HAVING NULL &lt;&gt; b</c> reports nothing (so
+    /// <see cref="VisitSurvivingOperandExpressions"/> stops here). Every other
+    /// operand walk forwards, leaving inline-CHECK validation and read-column
+    /// recording reading the predicate as written.
+    /// </para>
+    /// </summary>
+    private sealed class ConstantFoldedPredicate(bool? value, BooleanExpression folded) : BooleanExpression
+    {
+        internal override bool IsWrittenConstant => true;
+
+        internal override bool IsNeverTrue => value != true;
+
+        public override bool? Run(RuntimeContext runtime) => value;
+
+        internal override string DebugDisplay() =>
+            $"{value switch { true => "TRUE", false => "FALSE", _ => "UNKNOWN" }} /* {folded.DebugDisplay()} */";
+
+        internal override void VisitOperandExpressions(Action<Expression> visitor) => folded.VisitOperandExpressions(visitor);
+
+        // The fold took these out of the tree before the containment pass ran.
+        internal override void VisitSurvivingOperandExpressions(Action<Expression> visitor) { }
+
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+            folded.Bind(batch, resolveColumnType);
+
+        // The equality shape stays readable so `catalog_column = NULL` still
+        // seeks empty rather than materializing the view: the seek planners
+        // only ever pair a bare column with the *other* side, which for an
+        // equality fold is the NULL constant itself, so nothing the fold
+        // promised not to evaluate can be reached through here. The range and
+        // equality-family shapes stay hidden — their operands are arbitrary
+        // expressions a planner would evaluate for a row-independent bound,
+        // which is exactly what folding took off the table.
+        internal override bool TryGetEqualityOperands([NotNullWhen(true)] out Expression? left, [NotNullWhen(true)] out Expression? right) =>
+            folded.TryGetEqualityOperands(out left, out right);
+    }
+
+    /// <summary>
+    /// A filter predicate <see cref="SimplifyForFilter"/> found can never be
+    /// TRUE, so the filter keeps no row and nothing under it has to run. Only
+    /// <see cref="Run"/> changes: the wrapped predicate still binds and still
+    /// offers its operands to every walk, because real reports the ungrouped
+    /// column in <c>HAVING NULL &lt;&gt; b AND b &gt; 1</c> even though it
+    /// evaluates neither conjunct.
+    /// </summary>
+    private sealed class FilterNeverTruePredicate(BooleanExpression inner) : BooleanExpression
+    {
+        internal override bool IsWrittenConstant => inner.IsWrittenConstant;
+
+        internal override bool IsNeverTrue => true;
+
+        public override bool? Run(RuntimeContext runtime) => false;
+
+        internal override string DebugDisplay() => $"FALSE /* {inner.DebugDisplay()} */";
+
+        internal override void VisitOperandExpressions(Action<Expression> visitor) => inner.VisitOperandExpressions(visitor);
+
+        internal override void VisitSurvivingOperandExpressions(Action<Expression> visitor) =>
+            inner.VisitSurvivingOperandExpressions(visitor);
+
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+            inner.Bind(batch, resolveColumnType);
+    }
+
+    /// <summary>
     /// Three-valued <c>AND</c> over an n-ary operand list (a whole flat
     /// <c>p1 AND p2 AND … AND pN</c> chain collapses to one node, so
     /// evaluation loops instead of recursing per term): <c>false AND x =
@@ -824,6 +1059,21 @@ internal abstract class BooleanExpression
     private sealed class AndExpression(BooleanExpression[] operands) : BooleanExpression
     {
         internal override bool IsWrittenConstant => AllWrittenConstant(operands);
+
+        // One conjunct that can't be TRUE is enough: AND is TRUE only when
+        // every operand is.
+        internal override bool IsNeverTrue
+        {
+            get
+            {
+                foreach (var operand in operands)
+                {
+                    if (operand.IsNeverTrue)
+                        return true;
+                }
+                return false;
+            }
+        }
 
         public override bool? Run(RuntimeContext runtime)
         {
@@ -844,6 +1094,12 @@ internal abstract class BooleanExpression
         {
             foreach (var operand in operands)
                 operand.VisitOperandExpressions(visitor);
+        }
+
+        internal override void VisitSurvivingOperandExpressions(Action<Expression> visitor)
+        {
+            foreach (var operand in operands)
+                operand.VisitSurvivingOperandExpressions(visitor);
         }
 
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
@@ -900,6 +1156,12 @@ internal abstract class BooleanExpression
         {
             foreach (var operand in operands)
                 operand.VisitOperandExpressions(visitor);
+        }
+
+        internal override void VisitSurvivingOperandExpressions(Action<Expression> visitor)
+        {
+            foreach (var operand in operands)
+                operand.VisitSurvivingOperandExpressions(visitor);
         }
 
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
@@ -1143,16 +1405,31 @@ internal abstract class BooleanExpression
         internal override bool IsWrittenConstant =>
             value.IsWrittenConstant && lower.IsWrittenConstant && upper.IsWrittenConstant;
 
+        // A NULL-constant bound makes its half of the range UNKNOWN, so the
+        // whole range is UNKNOWN or FALSE — never TRUE. The negated form can be
+        // TRUE (real answers 'T' for `2 NOT BETWEEN NULL AND 1`), so it declines.
+        internal override bool IsNeverTrue =>
+            !negated && (Expression.IsNullConstant(lower) || Expression.IsNullConstant(upper));
+
         public override bool? Run(RuntimeContext runtime)
         {
             var v = value.Run(runtime);
-            var lo = lower.Run(runtime);
-            var hi = upper.Run(runtime);
-            var ge = CompareValuesPromoted(v, lo, "greater than or equal to", static (l, r) => l.CompareTo(r) >= 0);
-            var le = CompareValuesPromoted(v, hi, "less than or equal to", static (l, r) => l.CompareTo(r) <= 0);
-            var inRange = ge == false || le == false ? false
-                : ge == true && le == true ? true
-                : (bool?)null;
+            var ge = CompareValuesPromoted(v, lower.Run(runtime), "greater than or equal to", static (l, r) => l.CompareTo(r) >= 0);
+            // Real evaluates the range as the `value >= lower AND value <= upper`
+            // it desugars to, left to right, and stops once the lower half
+            // answers false — so `b BETWEEN 99999 AND b / 0` answers no rows
+            // where `b BETWEEN 0 AND b / 0` is Msg 8134 (probe-confirmed, and
+            // the same under NOT). An UNKNOWN lower half still needs the upper:
+            // UNKNOWN AND FALSE is FALSE, which is what makes
+            // `CHECK (x BETWEEN NULL AND 5)` reject x = 10 rather than pass it.
+            var inRange = ge == false
+                ? false
+                : CompareValuesPromoted(v, upper.Run(runtime), "less than or equal to", static (l, r) => l.CompareTo(r) <= 0) switch
+                {
+                    false => false,
+                    true => ge,
+                    _ => null,
+                };
             return negated
                 ? inRange switch { true => false, false => true, _ => null }
                 : inRange;
@@ -1335,6 +1612,12 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => $"NOT {inner.DebugDisplay()}";
 
         internal override void VisitOperandExpressions(Action<Expression> visitor) => inner.VisitOperandExpressions(visitor);
+
+        // A fold under a NOT still took its operands out of the tree — real
+        // reports nothing for the ungrouped `b` in
+        // `HAVING NOT (1 = 0 AND b > 1)`.
+        internal override void VisitSurvivingOperandExpressions(Action<Expression> visitor) =>
+            inner.VisitSurvivingOperandExpressions(visitor);
 
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => inner.Bind(batch, resolveColumnType);
     }

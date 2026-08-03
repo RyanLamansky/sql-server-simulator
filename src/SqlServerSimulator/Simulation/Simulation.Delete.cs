@@ -367,7 +367,7 @@ partial class Simulation
             if (output is null || output.HasTarget)
                 return new SimulatedNonQuery(deleted.Count);
             var rows = ProjectDeleteOutput(deleted, output);
-            return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
+            return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows, deleted.Count);
         }
 
         var undoLog = table.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
@@ -433,7 +433,7 @@ partial class Simulation
             if (!output.HasTarget)
             {
                 FireAfterDeleteTriggers(context, table, deleted);
-                return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
+                return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows, deleted.Count);
             }
         }
         FireAfterDeleteTriggers(context, table, deleted);

@@ -369,6 +369,10 @@ partial class Simulation
 
         connection.NestingLevel++;
         var enteredDatabase = connection.CurrentDatabase;
+        // SET NOCOUNT inside the dynamic batch binds for that batch only, the
+        // same module scope USE and temp tables get (probe-confirmed for both
+        // EXEC('…') and sp_executesql).
+        var enteredNoCount = connection.NoCount;
         List<SimulatedStatementOutcome> outcomes;
         try
         {
@@ -385,6 +389,7 @@ partial class Simulation
             // sp_MSforeachdb's `USE [?]` idiom run each command against its
             // own database without leaving the session there.
             connection.CurrentDatabase = enteredDatabase;
+            connection.NoCount = enteredNoCount;
             // A temp table created by the dynamic batch is dropped when it
             // returns (SQL Server's module-scoped lifetime — so re-running the
             // same `create table #t` through sp_executesql, as tedious does,

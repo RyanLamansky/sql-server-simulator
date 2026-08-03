@@ -832,6 +832,45 @@ internal abstract class Expression
     };
 
     /// <summary>
+    /// Whether <paramref name="expression"/> is a <b>NULL constant</b> — the
+    /// operand shape real SQL Server settles a comparison against while
+    /// compiling, without ever looking at the other side (see
+    /// <see cref="BooleanExpression"/>'s comparison folding). That is the
+    /// <c>NULL</c> keyword, seen through parentheses, unary minus and a
+    /// <c>CAST</c> / <c>CONVERT</c> wrapper — every one of those probe-confirmed
+    /// to fold (<c>CAST(NULL AS int) &gt; &lt;overflowing expression&gt;</c>
+    /// answers no rows where the expression alone raises Msg 8115).
+    /// <para>
+    /// A NULL that <em>arithmetic</em> produced is deliberately not one:
+    /// real leaves <c>NULL + 1</c> and <c>CAST(NULL AS int) + 1</c> — and
+    /// <c>NULLIF(1, 1)</c> — as ordinary operands and raises the other side's
+    /// error, so the narrower syntactic reading matches it and never folds a
+    /// comparison real evaluates.
+    /// </para>
+    /// </summary>
+    internal static bool IsNullConstant(Expression expression)
+    {
+        while (true)
+        {
+            switch (expression)
+            {
+                case Value value:
+                    return value.IsLiteral && value.Constant.IsNull;
+                // Unary minus isn't a PureConversionOperand (it computes), but
+                // real folds `-CAST(NULL AS int)` all the same.
+                case Negate negate:
+                    expression = negate.Operand;
+                    break;
+                default:
+                    if (expression.PureConversionOperand is not { } inner)
+                        return false;
+                    expression = inner;
+                    break;
+            }
+        }
+    }
+
+    /// <summary>
     /// Significant-digit count when <paramref name="expression"/> is (or wraps,
     /// through parentheses or unary minus) a non-negative integer literal —
     /// e.g. <c>3</c>, <c>-3</c>, <c>-(3)</c>, <c>- -3</c> all report <c>1</c>;

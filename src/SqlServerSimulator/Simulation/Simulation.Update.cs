@@ -656,7 +656,7 @@ partial class Simulation
             // 0, and UPDATE(col) still reports the SET-clause columns
             // (probe-confirmed for UPDATE / DELETE / INSERT…SELECT / MERGE).
             FireAfterUpdateTriggers(context, table, affected, updatedColumnOrdinals);
-            return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, Array.Empty<byte[]>());
+            return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, Array.Empty<byte[]>(), 0);
         }
 
         // SNAPSHOT isolation write-conflict: each affected row must have
@@ -674,7 +674,7 @@ partial class Simulation
             FireInsteadOfUpdateTrigger(context, table, sourceView, affected);
             return output is null || output.HasTarget
                 ? new SimulatedNonQuery(affected.Count)
-                : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, ProjectMutationOutput(affected, output));
+                : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, ProjectMutationOutput(affected, output), affected.Count);
         }
 
         EnforceKeyConstraintsForUpdate(table, affected);
@@ -756,7 +756,7 @@ partial class Simulation
             if (!output.HasTarget)
             {
                 FireAfterUpdateTriggers(context, table, affected, updatedColumnOrdinals);
-                return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows);
+                return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows, affected.Count);
             }
         }
         FireAfterUpdateTriggers(context, table, affected, updatedColumnOrdinals);

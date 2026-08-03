@@ -1719,7 +1719,7 @@ internal sealed partial class Selection
         context.OuterTypeResolver = name => ResolveColumnTypeAcrossSources(scope, name, outerTypeResolver);
         try
         {
-            return BooleanExpression.Parse(context);
+            return BooleanExpression.SimplifyForFilter(BooleanExpression.Parse(context));
         }
         finally
         {
@@ -2978,7 +2978,8 @@ internal sealed partial class Selection
         {
             while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
             {
-                fromClause.Excluders.Add(BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()));
+                fromClause.Excluders.Add(BooleanExpression.SimplifyForFilter(
+                    BooleanExpression.Parse(context.MoveNextRequiredReturnSelf())));
             }
 
             if (context.Token is ReservedKeyword { Keyword: Keyword.Group })
@@ -2992,7 +2993,8 @@ internal sealed partial class Selection
             if (context.Token is ReservedKeyword { Keyword: Keyword.Having })
             {
                 context.RecursiveBranchConstructs.GroupingOrAggregate = true;
-                fromClause.Having = BooleanExpression.Parse(context.MoveNextRequiredReturnSelf());
+                fromClause.Having = BooleanExpression.SimplifyForFilter(
+                    BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()));
             }
         }
         finally

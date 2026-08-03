@@ -162,8 +162,8 @@ public sealed class SimulatedDbCommand : DbCommand
                 case SimulatedErrorOutcome error:
                     (errors ??= []).Add(error.Exception);
                     break;
-                case SimulatedNonQuery nonQuery when nonQuery.RecordsAffected != -1:
-                    affected += nonQuery.RecordsAffected;
+                case { ClientRecordsAffected: >= 0 } counting:
+                    affected += counting.ClientRecordsAffected;
                     counted = true;
                     break;
             }

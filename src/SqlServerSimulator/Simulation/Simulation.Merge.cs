@@ -1773,7 +1773,7 @@ partial class Simulation
         // An INTO target consumed the rows, so the statement is a non-query —
         // the same suppression INSERT / UPDATE / DELETE apply.
         return output is { HasTarget: false }
-            ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!)
+            ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, totalAffected)
             : new SimulatedNonQuery(totalAffected);
     }
 

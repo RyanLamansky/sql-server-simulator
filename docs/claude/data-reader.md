@@ -11,6 +11,51 @@ Typed accessors read `SqlValue` via the cursor indexer, unwrap via `As*` (no box
   `HasRows` sticky.
   `GetChar(int)` always raises `InvalidCastException`.
 
+## `RecordsAffected`
+
+Rows the batch's statements **changed**, summed — never rows a SELECT returned.
+The number is the same one `ExecuteNonQuery` reports for the same batch, in every shape probed against SQL Server 2025 (2026-08-03): DDL, each DML verb, SELECT, `SELECT INTO`, MERGE, `OUTPUT`-to-client DML, mixed batches, procedures, `SET NOCOUNT`.
+`-1` means no statement contributed a count.
+
+What contributes:
+
+- **DML contributes its rows-affected** — `INSERT` / `UPDATE` / `DELETE` / `MERGE`, a `WHILE` body's every iteration, a `SELECT … INTO` (it writes rows), and a statement whose `OUTPUT` clause returns rows to the client (tabular, but its count is still a rows-affected count).
+  A statement matching nothing contributes `0`, which is distinct from `-1`.
+- **A SELECT contributes nothing**, however many rows it returned — including the assignment-only `SELECT @x = col FROM t`, which reads rows without returning them, and a cursor `FETCH`.
+- **DDL, `SET`, `DECLARE`, `PRINT` and an un-taken branch contribute nothing.**
+- **`SET NOCOUNT ON` suppresses the contribution** of every statement that runs while it is on, whatever the kind — the count is recorded per statement rather than read when the client consumes the outcome, because a procedure body's `SET NOCOUNT` reverts at the body's exit, before the caller pulls what the body produced.
+
+`SET NOCOUNT`'s **scope** decides how far the suppression reaches, and real's is narrower than "the session" in four cases (probe-confirmed by running a counting statement on the same connection afterward):
+
+| where `SET NOCOUNT ON` runs | reaches the next command? |
+|---|---|
+| a plain batch (no parameters) | yes — session state, and it outlives the batch |
+| a command carrying parameters | no — SqlClient sends one as `sp_executesql`, whose SET options revert with the scope |
+| `EXEC('…')` / `sp_executesql` | no |
+| a procedure body | no |
+| a trigger body | no — and the firing statement keeps its own count |
+
+The simulator restores the flag at each of those scope exits, next to the `TEXTSIZE` / `QUOTED_IDENTIFIER` restores already there; the in-process front door treats a parameterized command as the ad-hoc scope SqlClient turns it into, which is what EF Core's modification batches (they open with `SET NOCOUNT ON`) depend on.
+The wider SET-option set is not scoped that way for a parameterized command — only `NOCOUNT` is.
+
+The value accumulates as the reader is advanced and is final once it is closed: a statement ahead of the current result set has already contributed, one behind it has not yet, and `Close` / `Dispose` runs the rest of the batch and folds in what it counted (`Close` is overridden for exactly that reason — `DbDataReader`'s base `Close` is a no-op).
+
+The wire renderer answers the same question with the two DONE-token fields real uses, both captured off SQL Server 2025's wire.
+`CurCmd` names the kind of statement that produced the token and is what a client keys on to leave a SELECT's count out of the sum — real tags a plain SELECT and a cursor `FETCH` `0x00C1`, and `SELECT INTO` / `INSERT` / `DELETE` / `UPDATE` / `MERGE` their own kinds (`0x00C2` / `0x00C3` / `0x00C4` / `0x00C5` / `0x0117`).
+`DONE_COUNT` says whether there is a count at all, and NOCOUNT clears the flag while leaving the row count in the token.
+The simulator classifies SELECT and leaves every other kind `0`; see [`tds-endpoint.md`](tds-endpoint.md).
+
+### Divergences
+
+- **Mid-stream timing after a result set is exhausted.**
+  Real's client reads tokens ahead to the next result-set boundary, so once `Read` has returned false the counts of the *following* non-row-returning statements are already in; the simulator folds them on the `NextResult` that steps over them.
+  A batch's final value agrees, and a single-statement batch is unaffected.
+- **A DML statement's `OUTPUT` count lands early.**
+  The simulator materializes a result before streaming it, so `RecordsAffected` reports an `INSERT … OUTPUT`'s count the moment the reader parks on it; real learns it from the DONE that follows the rows, and reads `-1` until they are drained.
+- **A trigger's own DML doesn't contribute.**
+  Real counts the writes a trigger body performs into the firing statement's total (an INSERT firing a trigger that writes two rows reports 3); the simulator reports the firing statement's own count alone.
+  Both front doors agree with each other — the counts never reach the outcome stream.
+
 ## Batch-error surfacing (positional)
 
 The reader consumes the unified continue-on-error outcome stream (see [`control-flow.md`](control-flow.md)), so a mid-batch statement error is a `SimulatedErrorOutcome` in the stream rather than a throw.

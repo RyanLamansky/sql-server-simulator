@@ -9,7 +9,19 @@ namespace SqlServerSimulator;
 internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
 {
     private protected SimulatedQueryResult()
-        : base(-1)
+        : this(-1)
+    {
+    }
+
+    /// <summary>
+    /// Carries a rows-affected count on a tabular result — the DML statement
+    /// whose <c>OUTPUT</c> clause returns its touched rows to the client. Such
+    /// a statement still reports the rows it changed, so the count is a
+    /// rows-affected one; every other result set passes <c>-1</c> and its row
+    /// count stays a returned-row count.
+    /// </summary>
+    private protected SimulatedQueryResult(int recordsAffected)
+        : base(recordsAffected, countsRowsReturned: recordsAffected < 0)
     {
     }
 

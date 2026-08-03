@@ -112,6 +112,10 @@ public class QualityTests
                 nameof(SimulatedDbDataReader.IsDBNull),
                 nameof(SimulatedDbDataReader.NextResult),
                 nameof(SimulatedDbDataReader.Read),
+                // Overridden rather than inherited: DbDataReader's base Close
+                // is a no-op, and closing has to run the batch's remaining
+                // statements so RecordsAffected is final afterward.
+                nameof(SimulatedDbDataReader.Close),
             ],
             [typeof(SimulatedSqlException)] = [
                 nameof(SimulatedSqlException.ErrorCode),

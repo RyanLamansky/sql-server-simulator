@@ -8,7 +8,8 @@
   Reachable in any boolean context (WHERE / HAVING / ON / CASE-WHEN / CHECK); bare SELECT-list use raises Msg 156 in real SQL Server because `IS` isn't a value operator.
 - `[NOT] BETWEEN` desugars to `value >= lower AND value <= upper` (inclusive on both ends, probe-confirmed).
   Reversed bounds (low > high) collapse to a definite false; NULL in any operand position propagates through three-valued AND.
-  `value` is evaluated once per row by `BetweenExpression.Run` (the desugaring is per-row semantics, not duplicated evaluation).
+  `value` is evaluated once per row by `BetweenExpression.Run` (the desugaring is per-row semantics, not duplicated evaluation), and the desugared halves are evaluated **left to right with the AND's own short-circuit**: a lower half that answers false settles the range, so `b BETWEEN 99999 AND b / 0` answers rows where `b BETWEEN 0 AND b / 0` is Msg 8134, and the same holds under `NOT` (probe-confirmed).
+  An UNKNOWN lower half still evaluates the upper one — UNKNOWN AND FALSE is FALSE, which is what makes `CHECK (x BETWEEN NULL AND 5)` reject `x = 10`.
   BETWEEN binds tighter than the surrounding AND/OR, so `value between a and b and other` parses as `(value between a and b) AND (other)`; bounds may be arbitrary value expressions (Expression.Parse stops at the trailing AND keyword).
 - Quantified comparison (`Parser/BooleanExpression.cs` — `QuantifiedComparisonExpression`): all six operators (`=`, `<>`, `<`, `<=`, `>`, `>=`) plus T-SQL synonyms (`!=` → `<>`, `!<` → `>=`, `!>` → `<=`) fold at parse time into a `ComparisonOp` enum.
   `SOME` is a pure alias of `ANY`.
@@ -53,6 +54,57 @@
   `NULLIF(a, b)` = `CASE WHEN a = b THEN NULL ELSE a END`.
   EF emits `ISNULL` only for `??` with a CAST; bare `??` emits `COALESCE`.
   Neither IIF nor NULLIF is EF-emitted (LINQ ternary → CASE) — load-bearing for `FromSqlInterpolated`.
+
+## Compile-time predicate folding
+
+Real SQL Server settles some predicates while compiling, and an operand it settled is never evaluated — so the error that operand would have raised never appears.
+The simulator folds on the same two rules (`BooleanExpression`'s `ConstantFoldedPredicate`), plus one more that only a filter position licenses.
+All three are **semantics-preserving**: each drops an operand whose value provably can't change the answer, so none of them commits the simulator to reproducing an optimizer's cost choices.
+
+**A comparison against a NULL constant is UNKNOWN**, whatever the other side holds, so real folds it without looking at that side at all.
+`WHERE NULL > a * 2000000000` answers no rows where the expression alone is Msg 8115, `WHERE NULL > a / 0` where it is Msg 8134, and `WHERE 1 / 0 = NULL` folds too — the NULL rule beats even constant evaluation.
+It covers all six comparison operators in either operand position, and the shapes that reduce to one: `NULL BETWEEN lo AND hi`, `NULL IN (…)`, `x IN (NULL)` and `x NOT IN (NULL)` (an all-NULL list only — one non-NULL element leaves an equality real evaluates).
+`LIKE` takes no such fold in either position, `IS [NOT] NULL` resolves UNKNOWN rather than propagating it, and a quantified `NULL <op> ANY | ALL (SELECT …)` stays exact — real answers an empty subquery `TRUE` for `ALL`, not UNKNOWN.
+
+The **NULL constant** is the `NULL` keyword read through parentheses, unary minus and a `CAST` / `CONVERT` wrapper, matching what real folds (`CAST(NULL AS int)`, `-CAST(NULL AS int)`, `(NULL)`).
+A NULL that *arithmetic* produced is not one: real evaluates `NULL + 1 > <bad>` and `CAST(NULL AS int) + 1 > <bad>`, and reports the other side's error.
+`Expression.IsNullConstant` reads the shape syntactically, so `NULLIF(1, 1)` and `ISNULL(NULL, NULL)` — which real does fold, having reduced them to a NULL constant first — stay unfolded here; that direction raises where real answers rows, never the reverse.
+
+**An `AND` / `OR` chain carrying an absorbing written constant is that constant**: `x AND FALSE` is FALSE and `x OR TRUE` is TRUE whatever `x` is.
+The collapse is position-independent (`1 = 0 AND <bad>` and `<bad> AND 1 = 0` both answer no rows) and context-free — it holds under `NOT`, inside a `CASE WHEN`, and in a CHECK constraint, where `CHECK (1 = 0 AND x / 0 = 1)` rejects the row with Msg 547 rather than raising Msg 8134.
+A fold that *raises* leaves its own predicate standing for runtime, matching real: `WHERE 1 / 0 = 1` reports Msg 8134 per row, while `WHERE 1 / 0 = 1 AND 1 = 0` answers no rows because the chain collapsed first.
+Only a **written** constant absorbs.
+A predicate real evaluates once per execution rather than folding — `@v = 1`, `GETDATE() < '1900-01-01'`, `RAND() < 0` — is real's *startup filter*, which suppresses the runtime error but not the binding checks; the simulator doesn't model it, and the divergence only shows when such a predicate is written after the operand that raises.
+
+**A filter keeps only the rows a predicate answers TRUE for**, so a predicate real can see is never TRUE settles WHERE / HAVING / ON / a positioned DML predicate without the rest of it running (`BooleanExpression.SimplifyForFilter`).
+That is what makes `WHERE NULL > a AND <bad>` and `WHERE <bad> BETWEEN NULL AND 5` answer no rows.
+Unlike the absorbing collapse this is **not** context-free — a constant-UNKNOWN operand is FALSE-or-UNKNOWN rather than a definite value, and both `NOT` and a CHECK constraint distinguish those (real answers `T` for `2 NOT BETWEEN NULL AND 1`, and rejects `x = 10` from `CHECK (x BETWEEN NULL AND 5)`).
+So it is applied at the filter sites only, never inside the predicate's own tree.
+
+### Where the fold sits among the binding checks
+
+Real folds **after name resolution and before the GROUP BY containment pass**, and both halves are observable.
+
+- An unknown column inside a dropped operand still reports **Msg 207** — `WHERE NULL > zzz` and `WHERE 1 = 0 AND zzz > 1` both raise it.
+  So a folded node still binds its operands (`ConstantFoldedPredicate.Bind` forwards).
+- An ungrouped column inside a dropped operand reports **nothing**: `HAVING NULL <> b`, `HAVING 1 = 0 AND b > 1` and `HAVING NOT (1 = 0 AND b > 1)` all answer no rows over an ungrouped `b`, where `HAVING b > 1` alone is Msg 8121.
+  The containment pass therefore walks `VisitSurvivingOperandExpressions` — identical to the written operand walk everywhere except a folded node, so inline-CHECK validation, view updatability and read-column recording keep reading the predicate as written.
+
+The filter-only rule doesn't take its siblings out of the tree, which is exactly the line real draws: `HAVING NULL <> b AND b > 1` **does** report Msg 8121 for the surviving conjunct, and so does `HAVING b > 1 AND NULL > 1`, while the absorbing `1 = 0` beside the same `b > 1` reports nothing.
+A folded WHERE doesn't excuse the HAVING either (`WHERE NULL > <bad> GROUP BY a HAVING b > 1` is Msg 8121).
+Structural parse-phase rules run ahead of everything and are untouched — an aggregate in a WHERE is Msg 147 even under `1 = 0 AND`.
+
+The folded node keeps its **equality** shape readable to the seek planners, so `WHERE <catalog column> = NULL` still seeks empty instead of materializing the view; the range and equality-family shapes stay hidden, since their operands are arbitrary expressions a planner would evaluate for a row-independent bound — which is what folding took off the table.
+
+### Not folded yet
+
+- **Real's own conjunct reordering.** `WHERE a / 0 = 1 AND a = 999` answers no rows on real (it evaluates the cheap comparison first and never reaches the division) while the simulator raises Msg 8134.
+  That is a cost choice, not a semantic one, and it reverses per plan.
+- **`NULL <op> ANY | ALL (SELECT …)`.** Real runs the subquery for row existence but drops its projection, so `NULL <> ALL (SELECT a * 2000000000 FROM t)` answers no rows where the simulator raises Msg 8115.
+  Folding it isn't available — the answer over an *empty* subquery is TRUE, not UNKNOWN — so this needs an existence-only execution path.
+- **An `IN` list evaluates every element on real**, even after an earlier one matched: `WHERE a IN (2, 3, 0, a / 0)` is Msg 8134 there and answers rows here.
+  The simulator keeps its left-to-right short-circuit, which costs an error real raises but avoids evaluating a long literal list per row.
+- **A folded condition doesn't reach `Expression.IsWrittenConstant`**, so `ORDER BY CASE WHEN NULL > a THEN 1 ELSE 2 END` sorts by the folded constant instead of reporting real's Msg 408 — the CASE's constant-ness is decided while its arguments parse, before the fold.
 
 ## Derived-table column-alias list
 

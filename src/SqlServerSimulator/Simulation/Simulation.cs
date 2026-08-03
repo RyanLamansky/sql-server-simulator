@@ -902,6 +902,15 @@ public sealed partial class Simulation
             batch.PlanCacheParameterSignature = prepared.ParameterSignature;
             batch.PlanCacheSchemaVersion = schemaVersionAtStart;
         }
+
+        // A command carrying parameters is an ad-hoc scope, not a plain batch:
+        // SqlClient sends one as an sp_executesql RPC, and SQL Server reverts
+        // the SET options it changed when that scope returns (probe-confirmed —
+        // `SET NOCOUNT ON` in a parameterized command doesn't reach the next
+        // command, while the same text with no parameters does). EF Core's
+        // modification batches open with `SET NOCOUNT ON` and rely on it.
+        var adHocScope = command.ScopeTempTablesToBatch || command.Parameters.Count > 0;
+        var enteredNoCount = batch.Connection.NoCount;
         try
         {
             var context = batch.Parser;
@@ -912,6 +921,8 @@ public sealed partial class Simulation
         }
         finally
         {
+            if (adHocScope)
+                batch.Connection.NoCount = enteredNoCount;
             // The flush has to run even when the consumer disposes the reader
             // before fully draining the iterator (ExecuteScalar reads one row
             // and disposes) — otherwise PRINT / sev-≤10 RAISERROR output that
@@ -1040,9 +1051,13 @@ public sealed partial class Simulation
             PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
             var rows = selection.Execute(batch).RowBytes.ToList();
             connection.LastStatementRowCount = rows.Count;
-            yield return selection.IsAssignmentOnly
-                ? new SimulatedNonQuery(rows.Count)
-                : new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows) { ColumnNullability = selection.ColumnNullability, ColumnReportsNumeric = selection.ColumnReportsNumeric };
+            var replayed = selection.IsAssignmentOnly
+                ? new SimulatedNonQuery(rows.Count, countsRowsReturned: true)
+                : (SimulatedStatementOutcome)new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows) { ColumnNullability = selection.ColumnNullability, ColumnReportsNumeric = selection.ColumnReportsNumeric };
+            // Replay bypasses the dispatch loop, so it stamps the NOCOUNT
+            // suppression the loop's post-statement walk would have.
+            replayed.CountSuppressed = connection.NoCount;
+            yield return replayed;
             WriteBackOutputParameters(batch);
         }
         finally
@@ -1692,6 +1707,14 @@ public sealed partial class Simulation
         // through untouched so the innermost producing frame wins.
         foreach (var o in outcomes!)
         {
+            // SET NOCOUNT ON suppresses the statement's count wherever a client
+            // reads one. Recorded per outcome rather than read at consumption
+            // time because a procedure body's SET NOCOUNT reverts when the body
+            // exits, which is before the caller pulls the outcomes the body
+            // produced; the null-coalescing assignment keeps the innermost
+            // producing frame's setting for the same reason the stamps below
+            // do.
+            o.CountSuppressed ??= connection.NoCount;
             if (o is not SimulatedQueryResult query)
                 continue;
             if (connection.TextSize >= 0)
@@ -1930,7 +1953,7 @@ public sealed partial class Simulation
                     var rows = selection.Execute(batch).RowBytes.ToList();
                     connection.LastStatementRowCount = rows.Count;
                     outcome = selection.IsAssignmentOnly
-                        ? new SimulatedNonQuery(rows.Count)
+                        ? new SimulatedNonQuery(rows.Count, countsRowsReturned: true)
                         : new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows) { ColumnNullability = selection.ColumnNullability, ColumnReportsNumeric = selection.ColumnReportsNumeric };
 
                     // Plan-cache promotion inline before the yield. Gates:

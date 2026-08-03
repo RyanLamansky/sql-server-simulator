@@ -20,6 +20,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
     private SimulatedQueryResult? currentResult;
     private RowCursor cursor = EmptyCursor.Instance;
     private int recordsAffected;
+    private bool anyRecordsAffected;
     private bool closed;
 
     internal SimulatedDbDataReader(IEnumerable<SimulatedStatementOutcome> outcomes)
@@ -42,6 +43,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
     {
         while (this.outcomes.MoveNext())
         {
+            this.Accumulate(this.outcomes.Current);
             switch (this.outcomes.Current)
             {
                 case SimulatedQueryResult query:
@@ -100,8 +102,20 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// <inheritdoc/>
     public override bool IsClosed => closed;
 
-    /// <inheritdoc/>
-    public override int RecordsAffected => recordsAffected;
+    /// <summary>
+    /// Rows the batch's statements have <em>affected</em> so far, summed —
+    /// never the number of rows a SELECT returned, and <c>-1</c> until some
+    /// statement has contributed a count. Real SqlClient accumulates this from
+    /// the DONE tokens as they arrive, so the value grows as the reader is
+    /// advanced and is final once the reader is closed: a statement ahead of
+    /// the current result set has already contributed, one behind it has not
+    /// yet, and closing the reader runs the rest of the batch and folds in
+    /// what it counted. <c>SET NOCOUNT ON</c> suppresses a statement's
+    /// contribution, matching real (probe-confirmed against SQL Server 2025:
+    /// the final value equals what <c>ExecuteNonQuery</c> returns for the same
+    /// batch, in every shape probed).
+    /// </summary>
+    public override int RecordsAffected => this.anyRecordsAffected ? this.recordsAffected : -1;
 
     /// <inheritdoc/>
     public override bool GetBoolean(int ordinal)
@@ -376,63 +390,84 @@ public sealed class SimulatedDbDataReader : DbDataReader
     public override bool NextResult()
     {
         this.cursor.Dispose();
-        var hasNext = this.AdvanceToNextResult();
-
-        if (hasNext)
-            this.recordsAffected = 0;
-
-        return hasNext;
+        return this.AdvanceToNextResult();
     }
 
     /// <inheritdoc/>
-    public override bool Read()
+    public override bool Read() => this.cursor.MoveNext();
+
+    /// <summary>
+    /// Folds one pulled outcome into <see cref="RecordsAffected"/>. Called for
+    /// every outcome the reader consumes — the ones it steps over while
+    /// hunting for the next result set, the one it stops on, and the ones the
+    /// closing drain runs — so the running total covers exactly the statements
+    /// the batch has executed so far.
+    /// </summary>
+    private void Accumulate(SimulatedStatementOutcome outcome)
     {
-        var hasNext = this.cursor.MoveNext();
+        var contribution = outcome.ClientRecordsAffected;
+        if (contribution < 0)
+            return;
 
-        if (hasNext)
-            this.recordsAffected++;
-
-        return hasNext;
+        this.recordsAffected += contribution;
+        this.anyRecordsAffected = true;
     }
 
     /// <summary>
-    /// Closes the reader. Real SqlClient closes a reader by running the
-    /// batch's remaining statements to completion (so their side effects
-    /// persist) and discarding any results and errors — a disposed reader
-    /// never throws. This drains the outcome stream at statement granularity:
-    /// each remaining statement executes, and a continued error (already an
-    /// outcome, not a throw) is simply enumerated past. Row-level pull inside
-    /// the statement the reader was parked on stays abandoned — the documented
-    /// non-draining-reader divergence is unchanged.
+    /// Closes the reader, which is the same work as disposing it — SqlClient's
+    /// <c>Close</c> ends the reader rather than deferring to a later dispose,
+    /// and callers that read <see cref="RecordsAffected"/> "after close" expect
+    /// the drained total. <see cref="DbDataReader"/>'s base
+    /// <see cref="DbDataReader.Close"/> is a no-op, so this override is what
+    /// makes the two entry points agree.
     /// </summary>
+    public override void Close() => this.CloseCore();
+
+    /// <inheritdoc/>
     protected override void Dispose(bool disposing)
     {
-        if (!this.closed)
-        {
-            this.closed = true;
-            this.cursor.Dispose();
-            try
-            {
-                while (this.outcomes.MoveNext())
-                {
-                }
-            }
-            catch (SimulatedSqlException)
-            {
-                // A batch-aborting error (e.g. deadlock) thrown out of the
-                // stream during the drain — swallowed; dispose never surfaces
-                // batch errors.
-            }
-            catch (NotSupportedException)
-            {
-                // An unmodeled feature (e.g. BEGIN DISTRIBUTED TRANSACTION)
-                // reached during the drain — likewise swallowed.
-            }
+        this.CloseCore();
+        base.Dispose(disposing);
+    }
 
-            this.outcomes.Dispose();
+    /// <summary>
+    /// Real SqlClient closes a reader by running the batch's remaining
+    /// statements to completion (so their side effects persist) and discarding
+    /// any results and errors — a closed reader never throws. This drains the
+    /// outcome stream at statement granularity: each remaining statement
+    /// executes, its rows-affected folds into <see cref="RecordsAffected"/>
+    /// (which is why the value is final once the reader is closed), and a
+    /// continued error (already an outcome, not a throw) is simply enumerated
+    /// past. Row-level pull inside the statement the reader was parked on stays
+    /// abandoned — the documented non-draining-reader divergence is unchanged.
+    /// Idempotent: the base <see cref="DbDataReader.Dispose(bool)"/> calls
+    /// <see cref="Close"/> back, and a second close is a no-op.
+    /// </summary>
+    private void CloseCore()
+    {
+        if (this.closed)
+            return;
+
+        this.closed = true;
+        this.cursor.Dispose();
+        try
+        {
+            while (this.outcomes.MoveNext())
+                this.Accumulate(this.outcomes.Current);
+        }
+        catch (SimulatedSqlException)
+        {
+            // A batch-aborting error (e.g. deadlock) thrown out of the
+            // stream during the drain — swallowed; closing never surfaces
+            // batch errors.
+        }
+        catch (NotSupportedException)
+        {
+            // An unmodeled feature (e.g. BEGIN DISTRIBUTED TRANSACTION)
+            // reached during the drain — likewise swallowed.
         }
 
-        base.Dispose(disposing);
+        this.outcomes.Dispose();
     }
 
     private SqlType[] CurrentSchema => this.currentResult?.Schema ?? [];
