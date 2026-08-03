@@ -24,6 +24,8 @@ internal abstract class TwoSidedExpression : Expression
 
     private protected override bool IsStructuralConstant => this.left.IsWrittenConstant && this.right.IsWrittenConstant;
 
+    internal override bool IsNonNullConstantComputation => this.left.IsNonNullConstantComputation && this.right.IsNonNullConstantComputation;
+
     /// <summary>
     /// Builds the <see cref="TwoSidedExpression"/> that corresponds to a
     /// compound-assignment operator's arithmetic step. Used by the SET and

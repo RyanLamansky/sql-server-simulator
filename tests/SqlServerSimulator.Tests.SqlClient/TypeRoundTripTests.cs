@@ -141,6 +141,33 @@ public sealed class TypeRoundTripTests
     }
 
     [TestMethod]
+    public async Task NegativeZero_FloatAndReal_CarryTheSignBitOverTheWire()
+    {
+        // Real SqlClient hands back a genuine IEEE 754 negative zero for
+        // `-CAST(0 AS float)` (bit pattern 0x8000000000000000), so the wire
+        // encoding has to keep the sign a stored `float` / `real` carries.
+        // AreEqual can't see it — -0.0 == 0.0 — hence the IsNegative asserts.
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, """
+            create table t (f float, r real);
+            insert t values (-cast(0 as float), -cast(0 as real)), (cast(0 as float), cast(0 as real))
+            """);
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("select f, r from t", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        IsTrue(double.IsNegative(reader.GetDouble(0)));
+        IsTrue(float.IsNegative(reader.GetFloat(1)));
+
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        IsFalse(double.IsNegative(reader.GetDouble(0)));
+        IsFalse(float.IsNegative(reader.GetFloat(1)));
+    }
+
+    [TestMethod]
     public async Task DateTimes_TypedGetters()
     {
         var simulation = new Simulation();

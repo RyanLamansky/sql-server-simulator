@@ -812,7 +812,25 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                             ? (decimal)this.reference! == (decimal)other.reference!
                             : this.Type == SqlType.HierarchyId
                                 ? ((byte[])this.reference!).AsSpan().SequenceEqual((byte[])other.reference!)
-                                : this.primitive == other.primitive && ReferenceContentEquals(this.reference, other.reference)));
+                                : this.IdentityPrimitive == other.IdentityPrimitive && ReferenceContentEquals(this.reference, other.reference)));
+
+    /// <summary>
+    /// The <see cref="primitive"/> payload with IEEE 754 negative zero folded
+    /// onto positive zero, so the sign of zero doesn't split identity.
+    /// <c>float</c> / <c>real</c> keep the sign of zero as a stored value —
+    /// real renders <c>-CAST(0 AS real)</c> as <c>-0</c> — but compare equal to
+    /// positive zero everywhere identity is asked: <c>WHERE f = 0</c> matches
+    /// both, <c>DISTINCT</c> / <c>GROUP BY</c> / <c>UNION</c> collapse them to
+    /// one row (reporting whichever arrived first), and a unique index calls
+    /// them duplicates. Only the zero pattern is folded, so NaN — unreachable
+    /// through SQL Server's own arithmetic, which raises instead — keeps the
+    /// reflexive bitwise identity that IEEE equality would deny it.
+    /// </summary>
+    private long IdentityPrimitive =>
+        this.Type.Category == SqlTypeCategory.Approximate
+            && this.primitive == (this.Type == SqlType.Float ? long.MinValue : int.MinValue)
+            ? 0
+            : this.primitive;
 
     /// <summary>
     /// Object equality that respects content for <c>byte[]</c> (varbinary) and
@@ -958,7 +976,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         }
         else
         {
-            hash.Add(this.primitive);
+            hash.Add(this.IdentityPrimitive);
             hash.Add(this.reference);
         }
         return hash.ToHashCode();

@@ -58,17 +58,22 @@
 ## Compile-time predicate folding
 
 Real SQL Server settles some predicates while compiling, and an operand it settled is never evaluated — so the error that operand would have raised never appears.
-The simulator folds on the same two rules (`BooleanExpression`'s `ConstantFoldedPredicate`), plus one more that only a filter position licenses.
-All three are **semantics-preserving**: each drops an operand whose value provably can't change the answer, so none of them commits the simulator to reproducing an optimizer's cost choices.
+The simulator folds on the same rules (`BooleanExpression`'s `ConstantFoldedPredicate`), plus the ones only a filter position licenses.
+Every one is **semantics-preserving**: each drops an operand whose value provably can't change the answer, so none of them commits the simulator to reproducing an optimizer's cost choices.
+The same standard extends the rules to the *value*-side shapes a compile-time constant settles the same way — a simple `CASE`'s input, `NULLIF`'s first argument, and the arms a `CASE` / `COALESCE` can't reach.
 
 **A comparison against a NULL constant is UNKNOWN**, whatever the other side holds, so real folds it without looking at that side at all.
 `WHERE NULL > a * 2000000000` answers no rows where the expression alone is Msg 8115, `WHERE NULL > a / 0` where it is Msg 8134, and `WHERE 1 / 0 = NULL` folds too — the NULL rule beats even constant evaluation.
-It covers all six comparison operators in either operand position, and the shapes that reduce to one: `NULL BETWEEN lo AND hi`, `NULL IN (…)`, `x IN (NULL)` and `x NOT IN (NULL)` (an all-NULL list only — one non-NULL element leaves an equality real evaluates).
+It covers all six comparison operators in either operand position, and the shapes that reduce to one: `NULL BETWEEN lo AND hi`, `x BETWEEN NULL AND NULL`, `NULL IN (…)`, `x IN (NULL)` and `x NOT IN (NULL)` (an all-NULL list only — one non-NULL element leaves an equality real evaluates).
 `LIKE` takes no such fold in either position, `IS [NOT] NULL` resolves UNKNOWN rather than propagating it, and a quantified `NULL <op> ANY | ALL (SELECT …)` stays exact — real answers an empty subquery `TRUE` for `ALL`, not UNKNOWN.
+
+`x BETWEEN NULL AND NULL` folds because **both** halves of the range it desugars to are UNKNOWN, which the surrounding `NOT` can't change either — so all four spellings (`NOT x BETWEEN …`, `x NOT BETWEEN …`, `NOT x NOT BETWEEN …`) read UNKNOWN, and the fold is context-free the way the absorbing collapse is: a value position reads not-TRUE and `CHECK (x BETWEEN NULL AND NULL)` admits the row.
+*One* NULL bound is a different predicate — it leaves `UNKNOWN AND (x <= upper)`, which is FALSE when the surviving half is — so it folds no further than the filter-only never-TRUE rule below, and `HAVING NOT c BETWEEN NULL AND 5` is still Msg 8121 where `HAVING NOT c BETWEEN NULL AND NULL` answers no rows.
 
 The **NULL constant** is the `NULL` keyword read through parentheses, unary minus and a `CAST` / `CONVERT` wrapper, matching what real folds (`CAST(NULL AS int)`, `-CAST(NULL AS int)`, `(NULL)`).
 A NULL that *arithmetic* produced is not one: real evaluates `NULL + 1 > <bad>` and `CAST(NULL AS int) + 1 > <bad>`, and reports the other side's error.
 `Expression.IsNullConstant` reads the shape syntactically, so `NULLIF(1, 1)` and `ISNULL(NULL, NULL)` — which real does fold, having reduced them to a NULL constant first — stay unfolded here; that direction raises where real answers rows, never the reverse.
+(The simple-`CASE` and `NULLIF` rules below read the *evaluated* constant instead, because real's own line falls differently there — see `ConstantFolding.FoldsToNull` — and so does a comparison in a `HAVING`, which is its own section below.)
 
 **An `AND` / `OR` chain carrying an absorbing written constant is that constant**: `x AND FALSE` is FALSE and `x OR TRUE` is TRUE whatever `x` is.
 The collapse is position-independent (`1 = 0 AND <bad>` and `<bad> AND 1 = 0` both answer no rows) and context-free — it holds under `NOT`, inside a `CASE WHEN`, and in a CHECK constraint, where `CHECK (1 = 0 AND x / 0 = 1)` rejects the row with Msg 547 rather than raising Msg 8134.
@@ -76,10 +81,75 @@ A fold that *raises* leaves its own predicate standing for runtime, matching rea
 Only a **written** constant absorbs.
 A predicate real evaluates once per execution rather than folding — `@v = 1`, `GETDATE() < '1900-01-01'`, `RAND() < 0` — is real's *startup filter*, which suppresses the runtime error but not the binding checks; the simulator doesn't model it, and the divergence only shows when such a predicate is written after the operand that raises.
 
+The **range's implicit `AND` absorbs the same way**: `value BETWEEN lower AND upper` is `value >= lower AND value <= upper`, so a half that folds to a written-constant FALSE settles the range whatever the other half would have done.
+`WHERE 84 BETWEEN <bad> AND 61` answers no rows (the `84 <= 61` half is FALSE), the `NOT` spelling answers every row, `CHECK (84 BETWEEN x / 0 AND 61)` rejects with Msg 547 rather than raising, and `HAVING 84 BETWEEN b AND 61` reports nothing for the ungrouped `b` — all probe-confirmed.
+It takes a *constant* half: `WHERE 84 BETWEEN <bad> AND 99` still raises, and so does `WHERE col BETWEEN col / 0 AND 1`, where real's own answer (no rows) comes from a plan-dependent evaluation order rather than a fold.
+
+**A simple `CASE` whose comparisons no arm can win runs its ELSE alone**, dropping the input and the compare values with the comparisons they fed.
+Real settles it two ways, both probed: the input folds to NULL (`CASE CAST(NULL AS int) WHEN <bad> THEN …`, and `CASE NULLIF(1, 1) WHEN …` / `CASE CAST(NULL AS int) / 17 WHEN …` alike, since real folds the input first), or every compare value does (`CASE <bad> WHEN CAST(NULL AS int) THEN … WHEN NULL THEN …`, where the input itself then never runs).
+`NULLIF(a, b)` is the `CASE WHEN a = b THEN NULL ELSE a END` it desugars to and takes the first of those: a constant-NULL `a` leaves `b` unevaluated.
+Both read `ConstantFolding.FoldsToNull`, a **wider** rule than `Expression.IsNullConstant` on purpose — the comparison fold stays syntactic because real's does, and a folded-NULL operand there still raises the other side's error (`WHERE CAST(NULL AS int) / 17 > <overflowing expression>` is Msg 8115 on real, in both operand positions).
+The fences are compile-time-ness and completeness: one non-NULL compare value beside the NULL one leaves the input standing (`CASE <bad> WHEN CAST(NULL AS int) THEN 1 WHEN 5 THEN 2 …` raises), a NULL the *row* supplies doesn't fold at all (`CASE nullcol WHEN <bad> THEN …` raises on real too), and `NULLIF(NULL, <bad>)` is left alone because real refuses that spelling outright with Msg 4151.
+
 **A filter keeps only the rows a predicate answers TRUE for**, so a predicate real can see is never TRUE settles WHERE / HAVING / ON / a positioned DML predicate without the rest of it running (`BooleanExpression.SimplifyForFilter`).
 That is what makes `WHERE NULL > a AND <bad>` and `WHERE <bad> BETWEEN NULL AND 5` answer no rows.
 Unlike the absorbing collapse this is **not** context-free — a constant-UNKNOWN operand is FALSE-or-UNKNOWN rather than a definite value, and both `NOT` and a CHECK constraint distinguish those (real answers `T` for `2 NOT BETWEEN NULL AND 1`, and rejects `x = 10` from `CHECK (x BETWEEN NULL AND 5)`).
 So it is applied at the filter sites only, never inside the predicate's own tree.
+
+A filter that is *itself* a written constant folds here rather than in the tree, for the same reason: `WHERE 1 = 0`, `HAVING NULL IS NOT NULL`, `HAVING NOT NULL = NULL`, `HAVING 1 > 2` and `HAVING NOT 1 = 1` carry no chain for the absorbing collapse to work on, and the UNKNOWN ones are only actionable because a filter wants TRUE.
+A fold that raises still leaves the predicate standing (`HAVING 1 / 0 = 1` reports Msg 8134).
+
+Three-valued `NOT` is an involution, so the rule reads through a negation off the **mirror** property: `NOT p` is never TRUE exactly when `p` is never FALSE (`BooleanExpression.IsNeverFalse`).
+Two shapes answer it, each the negation of one that already answered `IsNeverTrue`:
+
+- a **negated range with a NULL-constant bound** is TRUE or UNKNOWN, so `WHERE NOT x NOT BETWEEN NULL AND <bad>` answers no rows (both bound positions) while the single negation `WHERE x NOT BETWEEN NULL AND <bad>` still raises;
+- an **`IN` list carrying a NULL constant** is TRUE or UNKNOWN, so `WHERE x NOT IN (<bad>, 1, NULL)` and `WHERE NOT x IN (<bad>, 1, NULL)` answer no rows while the un-negated `WHERE x IN (<bad>, 1, NULL)` raises.
+
+`AND` and `OR` propagate both properties (an `AND` is never FALSE only when every operand is; an `OR` is never TRUE only when every operand is), which is what settles `WHERE <bad> = 1 AND NOT (NULL) BETWEEN b AND 5` and `WHERE (x BETWEEN NULL AND 5) OR (x BETWEEN NULL AND <bad>)`.
+Being filter-only, none of it moves a sibling out of the containment pass: `HAVING b NOT IN (1, NULL)` is still Msg 8121, and `CHECK (x NOT IN (1, NULL))` still rejects `x = 1` with Msg 547 — the never-TRUE reading would have admitted it.
+
+An **`IN` list carrying its own left operand** answers the same pair, because `x IN (…, x, …)` *is* `x IS NOT NULL`: a non-NULL `x` matches itself and a NULL one leaves every comparison UNKNOWN.
+So `WHERE x NOT IN (x / 0, x)` and the `NOT x IN (…)` spelling answer no rows in either element order, matching real.
+The un-negated form is left alone deliberately — see the plan-dependent list below.
+Only a whole column reference read through parentheses matches, which is the only spelling that provably names the same column.
+
+### A never-TRUE HAVING empties the whole statement
+
+A `HAVING` real can see is never TRUE keeps no group, so the statement answers nothing whatever the rest of it would have done — and real then runs **none** of it.
+`SELECT a FROM t WHERE a / 0 IS NOT NULL GROUP BY a HAVING NULL IS NOT NULL` answers no rows there rather than Msg 8134, and so do the `1 = 0` / `1 > 2` / `NOT 1 = 1` / `NULL = NULL` / `NOT NULL = NULL` spellings, the shapes the never-TRUE rule already settled (`HAVING MAX(a) BETWEEN NULL AND 5`, `HAVING NOT NULL IN (a)`), and the ungrouped `SELECT MAX(a / 0) FROM t HAVING 1 = 0`.
+`Selection`'s row-source closure returns an empty sequence for those, which skips the scan, the WHERE, the aggregate pass, the select list and the ORDER BY together.
+
+The emptiness is settled *after* binding, not instead of it — the whole binding battery already ran to build the plan, so real's own errors still report: **Msg 207** for `WHERE zzz > 1 … HAVING 1 = 0`, **Msg 8120** for `SELECT b FROM t GROUP BY a HAVING 1 = 0`, **Msg 8121** for `WHERE 1 = 0 GROUP BY a HAVING b > 1` (all probe-confirmed).
+A `HAVING` that can be TRUE settles nothing, so `WHERE a / 0 > 1 … HAVING MAX(a) > 1` still raises.
+
+### A HAVING reads a folded NULL where a WHERE doesn't
+
+In a `HAVING`, a comparison whose operand real *evaluates* to NULL while compiling is settled UNKNOWN — the arithmetic NULL the comparison rule above refuses.
+`HAVING CAST(NULL AS int) / 17 = b` and `HAVING b NOT IN (CAST(NULL AS int) / 44 - 73)` report nothing for an ungrouped `b` and answer no rows over a bad WHERE, and so do the `NULL + 1` spelling, either operand position, and the `BETWEEN` form with both bounds folding.
+`BooleanExpression.SettleFoldedNullComparisons` rewrites the parsed HAVING per comparison, which is the grain real works at: `HAVING <folded> AND b > 1` still reports Msg 8121 for the surviving conjunct.
+
+The same comparison in a **`WHERE`** stays exact, because real's reading there is a *plan* rather than a rule: `WHERE CAST(NULL AS int) / 17 > <overflowing expression>` raises Msg 8115, and adding `DISTINCT`, a `GROUP BY`, a `TOP 2` or a join to that one statement flips it to no rows (all probe-confirmed, and `ORDER BY` / `MAX(…)` / `COUNT(*)` leave it raising).
+A `HAVING` carries a grouping by construction, so its reading is the stable one and it is the only site the rewrite runs at.
+
+### An arm real can't reach drops its aggregates
+
+Real picks a `CASE`'s arm while compiling whenever it can settle the conditions there, and everything the arms it dropped carried goes with them — **including an aggregate**, which the aggregate pass would otherwise evaluate per row whether or not the arm holding it can be reached.
+`SELECT CASE 23 WHEN -38 THEN COUNT(7 / 0) ELSE 2 END` answers 2 there, and so does the same shape over a column argument.
+`CaseExpression.DecideArms` settles it: an arm is unreachable when its own condition folds to something other than TRUE, and once any arm's folds to TRUE every later arm and the ELSE go with it, whatever the arms before it did.
+`COALESCE` settles the same way off its first non-NULL constant argument — `SELECT COALESCE(61, SUM(7 / 0))` answers 61 — and both mark rather than remove: the aggregate stays *registered*, because real keeps the statement a vector aggregate and keeps reporting **Msg 8120** for an ungrouped column beside it even when the arm holding its only aggregate is the one it dropped (`SELECT col, CASE WHEN 1 = 0 THEN SUM(other) ELSE 2 END FROM t`, probe-confirmed both ways).
+
+The fence is compile-time-ness: an arm real decides *per row* keeps its aggregates, so `CASE WHEN col = 1 THEN SUM(7 / 0) ELSE 2 END` raises there as it does here, as do a reachable arm (`CASE 23 WHEN 23 THEN SUM(7 / 0) …`) and a `COALESCE` whose leading argument isn't a constant value.
+
+The settled arm also decides the whole expression's **constant-ness**, which is what real's ORDER BY gates read: `ORDER BY CASE 1 WHEN 1 THEN 5 ELSE col END` and `ORDER BY COALESCE(61, col)` are Msg 408 while `ORDER BY CASE 1 WHEN 1 THEN col ELSE 5 END` and `ORDER BY COALESCE(col, 61)` sort, and the `OVER (ORDER BY …)` path agrees with Msg 5308 (all probe-confirmed).
+A *folded predicate* is a settled condition too, so `ORDER BY CASE WHEN NULL > a THEN 1 ELSE 2 END` and `ORDER BY CASE WHEN 1 = 0 AND a > 1 THEN 1 ELSE 2 END` reach Msg 408 as they do on real.
+
+### COUNT of an expression real types NOT NULL
+
+Real reduces `COUNT(<expression it types NOT NULL>)` to `COUNT(*)` and never evaluates the argument, so `SELECT COUNT(61 / 0)` and `SELECT COUNT(2000000000 * 3)` answer a count there.
+`Selection.ReduceConstantCounts` applies it behind two fences.
+The argument has to be a computation over non-NULL literals (`Expression.IsNonNullConstantComputation` — literals, parentheses, unary minus and the binary operators), which is the nullability real's own reduction reads: narrower than the folded *value*, since a fold that raises has no value, and narrower than the projection metadata's, where arithmetic claims nullable even over two literals.
+And the query must carry no **grouping expression**: real evaluates the argument once a `GROUP BY` names one (`SELECT COUNT(61 / 0) FROM t GROUP BY a` is Msg 8134 there, while the same statement without the GROUP BY — and with `GROUP BY ()` — answers).
+`COUNT(DISTINCT 61 / 0)`, `SUM(61 / 0)`, `MAX(61 / 0)` and `COUNT(<column> / 0)` all raise on both.
 
 ### Where the fold sits among the binding checks
 
@@ -98,13 +168,22 @@ The folded node keeps its **equality** shape readable to the seek planners, so `
 
 ### Not folded yet
 
-- **Real's own conjunct reordering.** `WHERE a / 0 = 1 AND a = 999` answers no rows on real (it evaluates the cheap comparison first and never reaches the division) while the simulator raises Msg 8134.
-  That is a cost choice, not a semantic one, and it reverses per plan.
+- **Real's own evaluation ordering**, which is a per-row short-circuit over a conjunct order the plan chose.
+  `WHERE a / 0 = 1 AND a = 999` answers no rows on real (it evaluates the cheap comparison first and never reaches the division) while the simulator raises Msg 8134.
+  The choice is a *cost* one and it reverses with the data rather than with anything a compile-time rule could settle: `WHERE nullable_col IS NULL AND <bad> BETWEEN …` answers no rows over rows where the cheap conjunct is FALSE and raises as soon as one row satisfies it (probe-confirmed both ways over the same statement).
+  The same freedom moves the two *operands* of one comparison and the two halves of one range: `WHERE <overflowing expression> <= 18 / CAST(NULL AS int)` raises on real, while `DISTINCT`, a `GROUP BY`, a `TOP 2` or a join on that one statement each flip it to no rows — real's arithmetic-NULL comparison fold reaches a WHERE only under the plan that isn't trivial, which is why the simulator applies it in a HAVING alone (above).
+  An **empty constant interval** is the same story: `WHERE <bad> BETWEEN 41 AND 5` raises Msg 8134 on real, `SELECT DISTINCT` of the same statement answers no rows, and `HAVING b BETWEEN 41 AND 5` still reports Msg 8121 for the ungrouped `b`.
+  These are cost choices, not semantic ones, and they reverse per plan.
 - **`NULL <op> ANY | ALL (SELECT …)`.** Real runs the subquery for row existence but drops its projection, so `NULL <> ALL (SELECT a * 2000000000 FROM t)` answers no rows where the simulator raises Msg 8115.
   Folding it isn't available — the answer over an *empty* subquery is TRUE, not UNKNOWN — so this needs an existence-only execution path.
+- **An un-negated `IN` list carrying its own left operand.** `x IN (…, x, …)` is `x IS NOT NULL` and could be folded, but real doesn't settle it consistently: `WHERE x IN (x / 0, x)` answers rows there while moving the same self element to the front — `WHERE x IN (x, x / 0)` — raises Msg 8134.
+  Two written orders of one semantic list, two answers, so folding it would answer where real raises.
+  The simulator keeps its own left-to-right evaluation; the negated spelling, whose two orders *do* agree on real, is settled by the never-TRUE rule above.
 - **An `IN` list evaluates every element on real**, even after an earlier one matched: `WHERE a IN (2, 3, 0, a / 0)` is Msg 8134 there and answers rows here.
   The simulator keeps its left-to-right short-circuit, which costs an error real raises but avoids evaluating a long literal list per row.
-- **A folded condition doesn't reach `Expression.IsWrittenConstant`**, so `ORDER BY CASE WHEN NULL > a THEN 1 ELSE 2 END` sorts by the folded constant instead of reporting real's Msg 408 — the CASE's constant-ness is decided while its arguments parse, before the fold.
+  (A list carrying a NULL constant under a negation is settled by the never-TRUE rule above and never reaches this.)
+- **Real's runtime want-TRUE cutoff in a `CASE WHEN` / `IIF` condition.** There real evaluates left to right and stops as soon as the answer can't be TRUE, which is order-sensitive rather than a fold: `CASE WHEN 5 BETWEEN NULL AND 1 / 0 …` answers `F` while `CASE WHEN 5 BETWEEN 1 / 0 AND NULL …` raises.
+  Applying the compile-time never-TRUE rule at those sites would answer for the second shape too — the over-permissive direction — so the condition sites keep evaluating as written.
 
 ## Derived-table column-alias list
 

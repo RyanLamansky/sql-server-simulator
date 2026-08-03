@@ -181,6 +181,8 @@ internal sealed class Value : Expression
 
     internal override bool ResultIsNullable(NullabilityContext context) => this.Constant.IsNull;
 
+    internal override bool IsNonNullConstantComputation => this.IsLiteral && !this.Constant.IsNull;
+
     // A decimal-typed Value is always a decimal/numeric literal (constant @@
     // keywords never land on decimal, and parameters are separate expression
     // classes), and every such literal is numeric-named.

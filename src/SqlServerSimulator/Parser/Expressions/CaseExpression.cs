@@ -45,15 +45,44 @@ internal sealed class CaseExpression : Expression
     private readonly Expression[]? compareValues;
     private readonly Expression[] thens;
     private readonly Expression? elseBranch;
+
+    /// <summary>
+    /// Whether the simple form carries a NULL constant on one side of <em>every</em>
+    /// <c>WHEN</c> comparison it stands for — the input folds to NULL, or every
+    /// compare value does — which makes all of them UNKNOWN and leaves no arm
+    /// reachable, so real runs the ELSE alone and drops the rest of the CASE
+    /// with the comparisons. Probe-confirmed in both directions
+    /// (<c>CASE CAST(NULL AS int) WHEN 7 / 0 THEN …</c> and
+    /// <c>CASE 7 / 0 WHEN CAST(NULL AS int) THEN … WHEN NULL THEN …</c> both
+    /// answer where the dropped operand alone raises), and so are its fences: a
+    /// single non-NULL compare value beside the NULL one leaves the input
+    /// standing (<c>CASE 7 / 0 WHEN CAST(NULL AS int) THEN 1 WHEN 5 THEN 2 …</c>
+    /// is Msg 8134).
+    /// <para>
+    /// Settled while parsing because that is when real settles it: a NULL the
+    /// <em>row</em> supplies doesn't skip the arms — <c>CASE nullcol WHEN 7 /
+    /// zerocol …</c> is Msg 8134 on real, where
+    /// <c>CASE CAST(NULL AS int) WHEN 7 / zerocol …</c> answers the ELSE.
+    /// </para>
+    /// </summary>
+    private readonly bool noArmReachable;
+
     private SqlType? cachedResultType;
 
-    private CaseExpression(Expression? input, BooleanExpression[]? searchedWhens, Expression[]? compareValues, Expression[] thens, Expression? elseBranch)
+    private CaseExpression(
+        Expression? input,
+        BooleanExpression[]? searchedWhens,
+        Expression[]? compareValues,
+        Expression[] thens,
+        Expression? elseBranch,
+        bool noArmReachable)
     {
         this.input = input;
         this.searchedWhens = searchedWhens;
         this.compareValues = compareValues;
         this.thens = thens;
         this.elseBranch = elseBranch;
+        this.noArmReachable = noArmReachable;
     }
 
     /// <summary>
@@ -65,7 +94,7 @@ internal sealed class CaseExpression : Expression
     /// column's via <see cref="BooleanExpression.CompareValuesPromoted"/>.
     /// </summary>
     internal static CaseExpression CreateSimple(Expression input, Expression[] compareValues, Expression[] thens, Expression? elseBranch) =>
-        new(input, searchedWhens: null, compareValues, thens, elseBranch);
+        new(input, searchedWhens: null, compareValues, thens, elseBranch, noArmReachable: false);
 
     public override SqlValue Run(RuntimeContext runtime)
     {
@@ -85,12 +114,17 @@ internal sealed class CaseExpression : Expression
 
     private SqlValue FindSimpleMatch(RuntimeContext runtime)
     {
-        var inputValue = this.input!.Run(runtime);
-        for (var i = 0; i < this.compareValues!.Length; i++)
+        // Every comparison settled UNKNOWN while compiling, so real drops the
+        // input and the compare values with them and goes straight to the ELSE.
+        if (!this.noArmReachable)
         {
-            var compareValue = this.compareValues[i].Run(runtime);
-            if (BooleanExpression.CompareValuesPromoted(inputValue, compareValue, "equal to", static (l, r) => l.Equals(r)) == true)
-                return this.thens[i].Run(runtime);
+            var inputValue = this.input!.Run(runtime);
+            for (var i = 0; i < this.compareValues!.Length; i++)
+            {
+                var compareValue = this.compareValues[i].Run(runtime);
+                if (BooleanExpression.CompareValuesPromoted(inputValue, compareValue, "equal to", static (l, r) => l.Equals(r)) == true)
+                    return this.thens[i].Run(runtime);
+            }
         }
         return this.elseBranch is null ? SqlValue.Null(this.cachedResultType ?? SqlType.Int32) : this.elseBranch.Run(runtime);
     }
@@ -243,6 +277,130 @@ internal sealed class CaseExpression : Expression
         }
     }
 
+    /// <summary>
+    /// Settles which arms real can see are unreachable while compiling, the
+    /// step every rule below rides on. An arm is unreachable when its own
+    /// condition folds to something other than TRUE, or when an earlier arm's
+    /// folds to TRUE — and once any arm's does, every later arm and the ELSE go
+    /// with it, whatever the arms before it did.
+    /// <para>
+    /// Returns whether the walk settled <em>every</em> condition it passed, so
+    /// the caller can tell "the ELSE is the answer" (nothing decided TRUE, all
+    /// decided) from "nothing decided yet". <paramref name="takenArm"/> is the
+    /// arm real knows wins, or -1; <paramref name="elseDropped"/> is set once
+    /// any arm decided TRUE.
+    /// </para>
+    /// </summary>
+    private static bool DecideArms(
+        Expression? input,
+        List<BooleanExpression>? searchedWhens,
+        List<Expression>? compareValues,
+        ParserContext context,
+        bool[] armDropped,
+        out int takenArm,
+        out bool elseDropped)
+    {
+        takenArm = -1;
+        elseDropped = false;
+        var inputIsConstant = false;
+        SqlValue inputValue = default;
+        if (input is not null)
+            inputIsConstant = ConstantFolding.TryFold(input, context, out inputValue);
+
+        var allDecided = true;
+        for (var i = 0; i < armDropped.Length; i++)
+        {
+            if (elseDropped)
+            {
+                armDropped[i] = true;
+                continue;
+            }
+
+            var condition = input is null
+                ? ConstantFolding.TryFoldPredicate(searchedWhens![i], context, out var folded) ? folded == true : null
+                : FoldSimpleCondition(inputIsConstant, inputValue, compareValues![i], context);
+            if (condition is null)
+            {
+                allDecided = false;
+            }
+            else if (condition == true)
+            {
+                elseDropped = true;
+                if (allDecided)
+                    takenArm = i;
+            }
+            else
+            {
+                armDropped[i] = true;
+            }
+        }
+        return allDecided;
+    }
+
+    /// <summary>
+    /// Folds one simple-form <c>WHEN</c>'s implicit <c>input = compareValue</c>.
+    /// A NULL constant on either side settles it UNKNOWN without the other side
+    /// folding at all, which is how real settles
+    /// <c>CASE &lt;bad&gt; WHEN CAST(NULL AS int) THEN … WHEN NULL THEN …</c>;
+    /// one live compare value beside the NULL one leaves the input standing.
+    /// </summary>
+    private static bool? FoldSimpleCondition(bool inputIsConstant, SqlValue inputValue, Expression compareValue, ParserContext context)
+    {
+        if (inputIsConstant && inputValue.IsNull)
+            return false;
+        if (!ConstantFolding.TryFold(compareValue, context, out var candidate))
+            return null;
+        if (candidate.IsNull)
+            return false;
+        if (!inputIsConstant)
+            return null;
+        try
+        {
+            return BooleanExpression.CompareValuesPromoted(
+                inputValue, candidate, "equal to", static (l, r) => l.Equals(r)) == true;
+        }
+        catch (Exception e) when (e is SimulatedSqlException or NotSupportedException)
+        {
+            // An incomparable pair leaves the arm standing; the statement's own
+            // evaluation is what reports it.
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Stops the aggregate pass evaluating an unreachable arm's aggregates.
+    /// Real picks the arm while compiling and everything the arms it dropped
+    /// carried goes with them — including an aggregate, which is otherwise
+    /// evaluated per row whether or not the arm holding it can be reached
+    /// (<c>SELECT CASE 23 WHEN -38 THEN COUNT(7 / 0) ELSE 2 END</c> answers 2
+    /// on real, and does so even where the argument reads a column). The
+    /// aggregate stays registered — see
+    /// <see cref="AggregateExpression.OperandUnreachable"/> for why. The fence
+    /// is that the arm's condition has to be settled while compiling: an arm
+    /// real decides per row keeps its aggregates, so
+    /// <c>CASE WHEN col = 1 THEN SUM(7 / 0) ELSE 2 END</c> raises there as it
+    /// does here.
+    /// </summary>
+    /// <param name="collector">The enclosing query's aggregate list, or null outside one.</param>
+    /// <param name="bounds">
+    /// Collector counts sampled before each arm and before the ELSE, plus the
+    /// count after the whole CASE — so entry <c>i</c> bounds arm <c>i</c>'s own
+    /// registrations.
+    /// </param>
+    /// <param name="unreachable">Which of the <paramref name="bounds"/> intervals real settled as unreachable.</param>
+    private static void MarkUnreachableAggregates(List<AggregateExpression>? collector, int[] bounds, bool[] unreachable)
+    {
+        if (collector is null)
+            return;
+        for (var i = 0; i < unreachable.Length; i++)
+        {
+            if (!unreachable[i])
+                continue;
+            for (var j = bounds[i]; j < bounds[i + 1]; j++)
+                collector[j].OperandUnreachable = true;
+        }
+    }
+
     private static CaseExpression ParseCaseBody(ParserContext context)
     {
         context.MoveNextRequired();
@@ -257,9 +415,13 @@ internal sealed class CaseExpression : Expression
         var thens = new List<Expression>();
         var searchedWhensList = input is null ? new List<BooleanExpression>() : null;
         var compareValuesList = input is not null ? new List<Expression>() : null;
+        // Where each arm's — then the ELSE's — aggregate registrations start,
+        // so the unreachable ones can be withdrawn once the arm walk settles.
+        var aggregateBounds = new List<int>();
 
         while (context.Token is ReservedKeyword { Keyword: Keyword.When })
         {
+            aggregateBounds.Add(context.AggregateCollector?.Count ?? 0);
             context.MoveNextRequired();
 
             if (input is null)
@@ -274,12 +436,14 @@ internal sealed class CaseExpression : Expression
             thens.Add(Expression.Parse(context));
         }
 
+        aggregateBounds.Add(context.AggregateCollector?.Count ?? 0);
         Expression? elseBranch = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Else })
         {
             context.MoveNextRequired();
             elseBranch = Expression.Parse(context);
         }
+        aggregateBounds.Add(context.AggregateCollector?.Count ?? 0);
 
         // Real SQL Server fires Msg 8133 at compile time when every result
         // expression — every THEN body, plus the explicit ELSE if present
@@ -290,15 +454,37 @@ internal sealed class CaseExpression : Expression
         for (var i = 0; !anyTypedBranch && i < thens.Count; i++)
             anyTypedBranch = !IsBareNullLiteral(thens[i]);
 
-        return context.Token is not ReservedKeyword { Keyword: Keyword.End }
-            ? throw SimulatedSqlException.SyntaxErrorNear(context)
-            : !anyTypedBranch
-                ? throw SimulatedSqlException.AllResultsInCaseAreNull()
-                : new CaseExpression(
-                    input,
-                    input is null ? [.. searchedWhensList!] : null,
-                    input is not null ? [.. compareValuesList!] : null,
-                    [.. thens],
-                    elseBranch);
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.End })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (!anyTypedBranch)
+            throw SimulatedSqlException.AllResultsInCaseAreNull();
+
+        var armDropped = new bool[thens.Count];
+        var allDecided = DecideArms(input, searchedWhensList, compareValuesList, context, armDropped, out var takenArm, out var elseDropped);
+        bool[] unreachable = [.. armDropped, elseDropped];
+        MarkUnreachableAggregates(context.AggregateCollector, [.. aggregateBounds], unreachable);
+
+        var parsed = new CaseExpression(
+            input,
+            input is null ? [.. searchedWhensList!] : null,
+            input is not null ? [.. compareValuesList!] : null,
+            [.. thens],
+            elseBranch,
+            // Real drops the input and the compare values with the arms when it
+            // can see none of them matches, and runs the ELSE alone.
+            noArmReachable: input is not null && allDecided && takenArm < 0);
+        // Real folds the whole CASE to a constant whenever the arm it settled
+        // on is one — even where an arm it dropped reads a column or an
+        // aggregate, which is what makes `ORDER BY CASE 1 WHEN 1 THEN 5 ELSE
+        // col END` Msg 408 while `ORDER BY CASE 1 WHEN 1 THEN col ELSE 5 END`
+        // sorts (both probe-confirmed).
+        if (allDecided
+            && (takenArm >= 0
+                ? thens[takenArm].IsWrittenConstant
+                : elseBranch is null || elseBranch.IsWrittenConstant))
+        {
+            parsed.FoldedOverConstantArguments = true;
+        }
+        return parsed;
     }
 }

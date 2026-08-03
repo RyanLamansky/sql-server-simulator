@@ -110,8 +110,8 @@ internal sealed class Format : Expression
         TinyIntSqlType or SmallIntSqlType or Int32SqlType or BigIntSqlType => v.CoerceTo(SqlType.BigInt).AsInt64.ToString(format, culture),
         DecimalSqlType => v.AsDecimal.ToString(format, culture),
         MoneySqlType or SmallMoneySqlType => v.AsMoney.ToString(format, culture),
-        FloatSqlType => v.AsDouble.ToString(format, culture),
-        RealSqlType => v.AsSingle.ToString(format, culture),
+        FloatSqlType => WithoutNegativeZero(v.AsDouble).ToString(format, culture),
+        RealSqlType => WithoutNegativeZero(v.AsSingle).ToString(format, culture),
         DateSqlType => v.AsDate.ToString(format, culture),
         DateTimeSqlType or SmallDateTimeSqlType => v.AsDateTime.ToString(format, culture),
         DateTime2SqlType => v.AsDateTime2.ToString(format, culture),
@@ -119,6 +119,20 @@ internal sealed class Format : Expression
         TimeSqlType => v.AsTime.ToString(format, culture),
         _ => throw new NotSupportedException($"FORMAT for value type {v.Type} not modeled."),
     };
+
+    /// <summary>
+    /// Drops the sign of an IEEE 754 negative zero. FORMAT is the one string
+    /// surface that doesn't report it: real renders <c>-CAST(0 AS float)</c> as
+    /// <c>-0</c> through CAST / CONCAT / STR / CONVERT / PRINT, yet
+    /// <c>FORMAT(…, 'G')</c> — and every other format string probed, including
+    /// <c>N2</c> / <c>F3</c> / <c>E2</c> / <c>C</c> / <c>P</c> — gives an
+    /// unsigned zero, the .NET Framework formatting behavior its CLR
+    /// implementation carries. .NET Core renders the sign, so it's folded here.
+    /// </summary>
+    private static double WithoutNegativeZero(double value) => value == 0 ? 0d : value;
+
+    /// <inheritdoc cref="WithoutNegativeZero(double)"/>
+    private static float WithoutNegativeZero(float value) => value == 0 ? 0f : value;
 
     /// <summary>
     /// Eagerly raises Msg 8116 for value types SQL Server's FORMAT rejects.

@@ -58,6 +58,27 @@ internal sealed class AggregateExpression : Expression
     public readonly bool Distinct;
 
     /// <summary>
+    /// Set by the projection planner when real reduces this
+    /// <c>COUNT</c> / <c>COUNT_BIG</c> to <c>COUNT(*)</c> and never evaluates
+    /// the argument — see <c>Selection.ReduceConstantCounts</c> for the rule
+    /// and its fences. Value-independent, so it rides the cached plan.
+    /// </summary>
+    public bool CountsRowsOnly;
+
+    /// <summary>
+    /// Set at parse time when this aggregate sits in a <c>CASE</c> arm — or
+    /// behind a <c>COALESCE</c> argument — real settled as unreachable while
+    /// compiling, so the aggregate pass must not evaluate its operand per row
+    /// (<c>SELECT CASE 23 WHEN -38 THEN COUNT(7 / 0) ELSE 2 END</c> answers 2
+    /// on real). The aggregate stays <em>registered</em> all the same, because
+    /// real keeps the query a vector aggregate and keeps reporting Msg 8120
+    /// for an ungrouped column beside it even when the arm holding its only
+    /// aggregate is the one it dropped (both probe-confirmed). Its result is
+    /// never read — the arm that would read it can't be reached.
+    /// </summary>
+    public bool OperandUnreachable;
+
+    /// <summary>
     /// Items from a postfix <c>WITHIN GROUP (ORDER BY ...)</c> clause; null
     /// when no ORDER BY was supplied. Set exactly once during parse, after the
     /// aggregate is constructed and registered (the postfix follows the

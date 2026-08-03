@@ -1,5 +1,42 @@
 # Type promotion and decimal arithmetic
 
+## Operator precedence
+
+Two levels of left-associative binary operators, plus the unary prefixes.
+`* / %` bind tightest (tightness 2 in `Expression.BinaryTightness`); `+ - & | ^` and the `<< >>` shifts share the looser level (tightness 1); comparison and below are the boolean layer's, and terminate an expression.
+Probe-confirmed that the shifts sit with the additive family rather than above it: `2 * 3 << 1` = 12, `4 | 1 << 2` = 20.
+
+### The unary signs bind at the additive level
+
+`+` and `-` as **prefixes** sit at the additive level too — *below* `* / %` — so a sign reaches past its immediate operand and takes the whole following multiplicative chain.
+`a / -b / c` is therefore `a / (-(b / c))`, not `(a / -b) / c`.
+Probe-confirmed against SQL Server 2025 (2026-08-03):
+
+| expression | value | grouping |
+| --- | --- | --- |
+| `100 / -10 / 2` | -20 | `100 / (-(10 / 2))` |
+| `8 / - 2 * 4` | -1 | `8 / (-(2 * 4))` |
+| `100 / - 20 % 7` | -16 | `100 / (-(20 % 7))` — `%` joins the chain |
+| `- 6 + 2` | -4 | `(-6) + 2` — the additive level stops the reach |
+| `- 6 & 3` | 2 | `(-6) & 3`, not `-(6 & 3)` = -2 |
+| `- 2 << 3` | -16 | `(-2) << 3` |
+| `100 / -(10) / 2` | -20 | parenthesizing the *operand* doesn't stop the reach |
+| `100 / (-10) / 2` | -5 | parenthesizing the *sign expression* does |
+
+A single leading sign agrees under either binding — negation commutes with `*` and integer division truncates symmetrically — so the divergence only shows when a second multiplicative operator follows the sign's operand (`-6 / 3` is -2 either way).
+
+`~` is the exception: it binds **tighter** than `*` and takes a lone operand, so `~ 2 * 3` is `(~2) * 3` = -9, not `~(2 * 3)` = -7.
+Its operand may itself be a sign, which then reaches for the chain again: `~ - 2 * 3` is `~(-(2 * 3))` = 5.
+
+`Expression.ParsePrimary` implements this — the two sign arms parse their operand through `ParseSignedOperand` (`ParseBinaryContinuation` at `minTightness: 2`), the `~` arm through `ParsePrimary`.
+Because a stack of signs recurses through `ParseSignedOperand` once per sign without passing through `Expression.Parse`, that method carries the Msg 8631 stack probe itself — see [`grammar.md`](grammar.md#msg-8631-backstop).
+
+The regrouping is not cosmetic.
+It moves which operands pair up, so it moves what `PromoteForArithmetic` computes: `cast(1 as decimal(9,2)) / -cast(3 as decimal(9,4)) / cast(7 as decimal(9,6))` is `decimal(38, 17)` where the parenthesized `/ (-cast(3 as decimal(9,4))) /` form is `decimal(38, 21)`.
+And it moves error behavior — `5 / -0 * CAST(NULL AS int)` pulls the NULL into the divisor's group, so the division is by NULL and returns NULL, while `-91 / - 0 * - 45` divides by zero and raises **Msg 8134**.
+
+The legacy paren-less `SELECT TOP n` takes no unary prefix at all (its count is a bare constant or variable): real raises **Msg 102** naming the operator for `TOP -1` / `TOP +1` / `TOP ~1`, where the parenthesized `TOP (-1)` takes the sign and validates the resulting value.
+
 ## Integer ↔ string promotion
 Cross-category `int ↔ string` lands the integer's specific subtype (`tinyint + '3'` stays tinyint; `bigint + '3'` stays bigint).
 String parses through the integer's CAST path: empty/whitespace → 0, `+`/`-` accepted, leading/trailing whitespace trimmed.
@@ -52,6 +89,26 @@ Real's Msg 402 here beats the Msg 206 operand-type clash it reports for a binary
 Accumulation is in `double`, each single widening exactly on the way in, which is what real does — `SUM` over `real` values `{16777216, 1, 1, 1, 1}` returns `16777220`, where a single-width running total would have stuck at `16777216`.
 Probed alongside it: `AVG(smallmoney)` reports **`money`**, not `smallmoney` (`SUM(smallmoney)` already did), so neither `SUM` nor `AVG` can produce `real` or `smallmoney` and the accumulator dispatch no longer carries arms for them.
 Oracle: `RealTypePromotionTests`.
+
+<a id="negative-zero"></a>
+### Negative zero
+
+`float` / `real` carry IEEE 754's signed zero, and real reports it: `SELECT -CAST(0 AS real)` renders `-0`.
+Unary minus is the shape that produces it, so `Negate` flips the sign bit for the approximate family rather than taking the shared `0 - x` path, which would fold the sign away — under round-to-nearest `0.0 - 0.0` is `+0.0`, and only a true negation gives `-0.0`.
+Everything else is straight IEEE arithmetic, which already agreed: `0e0 * -1`, `-1 * 0e0` and `0e0 / -1` are `-0`, while `-0 + 0` is `+0`, `-0 * 1` is `-0`, and `SUM` / `AVG` accumulating from `+0` come back positive.
+
+**The sign of zero is a stored value, never an identity.**
+It survives a `float` / `real` column, `SELECT … INTO`, a table variable and the wire (SqlClient hands back bit pattern `0x8000000000000000`), but `-0` and `+0` compare **equal** everywhere identity is asked: `WHERE f = 0` matches both, `DISTINCT` / `GROUP BY` / `UNION` / `INTERSECT` collapse them to one row and `EXCEPT` to none, and a unique index calls them duplicates (**Msg 1505**).
+The surviving row is whichever arrived first, so the reported sign follows insertion order — `MIN` and `MAX` likewise keep the first of the pair, since neither compares less than the other.
+`SqlValue` gets this by folding the negative-zero bit pattern onto the positive one in `Equals` / `GetHashCode` (`CompareTo` needed nothing — .NET's `double.CompareTo` already returns 0 for the pair).
+Only the zero pattern folds, so NaN — unreachable through SQL Server's own arithmetic, which raises instead — keeps the reflexive bitwise identity IEEE equality would deny it.
+
+**The exact numerics have no signed zero**, so a `decimal` / `numeric` / integer zero widens to a *positive* float however it was produced: `CAST(-0.0 AS float)`, `CAST(0.0 * -1 AS float)` and `CAST(-CAST(0 AS decimal(10, 2)) AS float)` are all `0` on real, and a `float` `-0` narrowing back to `decimal` renders `0.00`.
+This needs guarding rather than falling out, because .NET's `decimal` *does* keep a sign bit through a zero result — `0.0m * -1` and `decimal.Negate(0m)` both set it, and the widening conversion would carry it into an IEEE negative zero real never produces from an exact numeric.
+The decimal→approximate coercions fold it away; the sign is invisible on every other decimal surface (`ToString`, equality, ordering, and the storage round-trip all already treat it as `+0`).
+
+Every string surface reports the sign — `CAST … AS varchar`, `CONCAT`, `STR`, `CONVERT` styles 1/2/3, `PRINT`, `FOR JSON`, `FOR XML` — **except `FORMAT`**, which gives an unsigned zero for every format string probed (`G` / `N2` / `F3` / `E2` / `C` / `0.00` / `#.##`), the .NET Framework rendering its CLR implementation carries; .NET Core signs it, so `Format` folds it.
+`SIGN` and `ABS` of `-0` are `0`, as on real.
 
 <a id="not-modeled-yet-approximate"></a>
 **Not modeled yet.**
@@ -165,6 +222,7 @@ It rides `Expression.ResultReportsNumeric` (a structural recursion, default `fal
 Unary minus is a dedicated `Negate` node, not `0 - x` — negating through a subtraction against a typed `int` zero would inflate an exact-numeric's precision by one (the additive `+1`) and re-type integers against `(10, 0)`.
 `Negate` preserves the operand's own precision/scale/family (`-1.1` → `numeric(2, 1)`, `-CAST(1.5 AS decimal(5, 3))` → `decimal(5, 3)`, `-CAST(1 AS bigint)` → `bigint`, `-$1.00` → `money`, `-CAST(1 AS real)` → `real`), widens the unsigned `tinyint` to `smallint` (negation needs a signed type), and raises Msg 8117 for `bit`.
 The *value* is still computed via the shared `0 - x` arithmetic (so string coercion, date rejection, NULL propagation, and overflow all match the subtraction path), then re-boxed to the preserved type; only the five diverging cases (decimal / real / smallint / tinyint / bit) override the additive result — money / smallmoney / float / int / bigint the additive path already types correctly.
+The one exception is `float` / `real`, which negate by flipping the IEEE sign bit instead, because the subtraction folds the two zeros together — see [Negative zero](#negative-zero).
 
 ### Untyped NULL yields to a typed operand
 A bare `NULL` keyword is typed `int` as a placeholder (SQL Server has no truly untyped NULL), but that placeholder must not win a joint promotion: `COALESCE(NULL, 'z')` and `ISNULL(NULL, 'z')` are `varchar` (returning `'z'`), not `int`

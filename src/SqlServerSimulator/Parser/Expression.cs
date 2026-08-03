@@ -181,41 +181,57 @@ internal abstract class Expression
     }
 
     /// <summary>
-    /// Parses a single primary expression: a leading atom (literal, reference,
-    /// grouped expression, CASE, function name, …) plus every postfix that
-    /// binds tighter than a binary operator (member / method access, the
-    /// <c>::</c> type-scope, a function-call argument list, <c>OVER</c>,
-    /// <c>WITHIN GROUP</c>, <c>AT TIME ZONE</c>, <c>COLLATE</c>) and any
+    /// Parses a single operand: a leading atom (literal, reference, grouped
+    /// expression, CASE, function name, …) plus every postfix that binds
+    /// tighter than a binary operator (member / method access, the <c>::</c>
+    /// type-scope, a function-call argument list, <c>OVER</c>,
+    /// <c>WITHIN GROUP</c>, <c>AT TIME ZONE</c>, <c>COLLATE</c>), behind any
     /// leading unary operator (<c>+ - ~</c>). Returns with
     /// <see cref="ParserContext.Token"/> on the first token not consumed by
-    /// the primary (a binary operator or a surrounding terminator), so the
-    /// caller's <see cref="ParseBinaryContinuation"/> reads it without a
-    /// further advance.
-    /// </summary>
-    /// <summary>
-    /// Parses a single operand — a literal / variable / parenthesized
-    /// expression / function call with its unary prefixes and postfixes — and
-    /// stops before any binary operator. Exposed for the legacy bare
-    /// <c>SELECT TOP n</c> form, whose count is a lone operand: parsing it as a
-    /// full expression would fold <c>TOP 1 *</c> into a multiplication and
-    /// swallow the select-list star.
+    /// the operand (a binary operator no tighter than the one the unary
+    /// prefixes already absorbed, or a surrounding terminator), so the caller's
+    /// <see cref="ParseBinaryContinuation"/> reads it without a further
+    /// advance. Exposed for the legacy bare <c>SELECT TOP n</c> form, whose
+    /// count is a lone operand: parsing it as a full expression would fold
+    /// <c>TOP 1 *</c> into a multiplication and swallow the select-list star.
     /// </summary>
     internal static Expression ParsePrimary(ParserContext context)
     {
-        // Leading unary operators bind to the following primary (not the whole
-        // binary chain); the surrounding ParseBinaryContinuation then folds in
-        // any looser operators. `-2 + 3` therefore parses as `(-2) + 3`
-        // (left-associative, value 1) rather than `-(2 + 3)`. Unary minus is a
-        // dedicated Negate node (not `0 - x`) so it preserves the operand's
-        // numeric precision/scale and keeps a negated integer literal a
-        // digit-count literal for decimal-arithmetic sizing.
+        // The two signs sit at SQL Server's *additive* precedence level —
+        // below `* / %` — so a sign takes the whole following multiplicative
+        // chain as its operand (ParseSignedOperand), while `~` binds tighter
+        // than `*` and takes a lone operand. Probe-confirmed against SQL Server
+        // 2025 (2026-08-03): `100 / -10 / 2` = -20 (`100 / -(10 / 2)`),
+        // `8 / - 2 * 4` = -1, `100 / - 20 % 7` = -16, `~ 2 * 3` = -9
+        // ((~2) * 3), and `~ - 2 * 3` = 5 (`~(-(2 * 3))` — `~`'s own operand
+        // may itself be a sign, which then reaches for the chain).
+        // Operators looser than multiplicative stop the sign's reach:
+        // `- 6 + 2` = -4, `- 6 & 3` = 2, `- 2 << 3` = -16.
+        // Unary minus is a dedicated Negate node (not `0 - x`) so it preserves
+        // the operand's numeric precision/scale and keeps a negated integer
+        // literal a digit-count literal for decimal-arithmetic sizing.
         return context.Token switch
         {
-            Operator { Character: '+' } => ParsePrimary(context.MoveNextRequiredReturnSelf()),
-            Operator { Character: '-' } => Negate.Of(ParsePrimary(context.MoveNextRequiredReturnSelf())),
+            Operator { Character: '+' } => ParseSignedOperand(context),
+            Operator { Character: '-' } => Negate.Of(ParseSignedOperand(context)),
             Operator { Character: '~' } => BitwiseNot.Create(ParsePrimary(context.MoveNextRequiredReturnSelf())),
             _ => ParsePostfix(ParseLeadingAtom(context), context),
         };
+    }
+
+    /// <summary>
+    /// Parses the operand of a leading unary <c>+</c> / <c>-</c>: the following
+    /// multiplicative chain (<c>* / %</c>), which is everything binding tighter
+    /// than the additive level the signs themselves occupy. Called with
+    /// <see cref="ParserContext.Token"/> on the sign; returns with it on the
+    /// first token the chain didn't consume. Carries its own stack probe
+    /// because a stack of signs recurses through here once per sign without
+    /// passing through <see cref="Parse"/>.
+    /// </summary>
+    private static Expression ParseSignedOperand(ParserContext context)
+    {
+        EnsureParseStack();
+        return ParseBinaryContinuation(ParsePrimary(context.MoveNextRequiredReturnSelf()), minTightness: 2, context);
     }
 
     /// <summary>
@@ -1092,6 +1108,20 @@ internal abstract class Expression
     /// rather than refusing a term real accepts.
     /// </summary>
     private protected virtual bool IsStructuralConstant => false;
+
+    /// <summary>
+    /// Whether this is a computation over non-NULL literals alone, which real
+    /// types NOT NULL however it evaluates — an overflow or a divide by zero
+    /// included, since a NULL operand would have propagated NULL rather than
+    /// raising. Read by the <c>COUNT(&lt;NOT NULL expression&gt;)</c> reduction
+    /// (see <c>Selection.ReduceConstantCounts</c>), which is the one place the
+    /// distinction from the projection-metadata nullability
+    /// (<see cref="ResultIsNullable"/>, where arithmetic claims nullable even
+    /// over two literals) is observable. The default is a conservative
+    /// <see langword="false"/>: a shape that doesn't opt in keeps evaluating
+    /// its argument, which is what real does for everything nullable.
+    /// </summary>
+    internal virtual bool IsNonNullConstantComputation => false;
 
     /// <summary>
     /// Maximum shared nesting budget (see <see cref="ParserContext.NestingDepth"/>)

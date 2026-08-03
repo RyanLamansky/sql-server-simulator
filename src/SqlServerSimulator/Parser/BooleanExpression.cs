@@ -259,10 +259,20 @@ internal abstract class BooleanExpression
     /// this one — reports nothing.
     /// </para>
     /// </summary>
-    internal static BooleanExpression SimplifyForFilter(BooleanExpression predicate) =>
-        predicate is not ConstantFoldedPredicate && predicate.IsNeverTrue
+    internal static BooleanExpression SimplifyForFilter(BooleanExpression predicate, ParserContext context)
+    {
+        if (predicate is ConstantFoldedPredicate)
+            return predicate;
+        // A filter that is itself a written constant folds here rather than in
+        // the tree: `WHERE 1 = 0`, `HAVING NULL IS NOT NULL` and
+        // `HAVING NOT NULL = NULL` carry no chain for the absorbing collapse to
+        // work on, and the constant they fold to is only actionable because a
+        // filter wants TRUE — a CHECK constraint reads the UNKNOWN ones the
+        // other way.
+        return predicate.IsNeverTrue || (ConstantFolding.TryFoldPredicate(predicate, context, out var folded) && folded != true)
             ? new FilterNeverTruePredicate(predicate)
             : predicate;
+    }
 
     /// <summary>
     /// Highest-precedence boolean combinator: a sequence of <c>NOT</c>
@@ -582,6 +592,50 @@ internal abstract class BooleanExpression
     private static ConstantFoldedPredicate FoldToUnknown(BooleanExpression comparison) => new(null, comparison);
 
     /// <summary>
+    /// Re-runs the UNKNOWN fold above against the <em>evaluated</em> constant
+    /// rather than the written <c>NULL</c> keyword, which is the reading real
+    /// gives a <c>HAVING</c> and only a <c>HAVING</c>.
+    /// <para>
+    /// Probed apart in both directions: <c>HAVING CAST(NULL AS int) / 17 = b</c>
+    /// and <c>HAVING b NOT IN (CAST(NULL AS int) / 44 - 73)</c> report nothing
+    /// for an ungrouped <c>b</c> and answer no rows over a bad WHERE, while the
+    /// same comparison in a <c>WHERE</c> still raises the other side's error
+    /// (<c>WHERE CAST(NULL AS int) / 17 &gt; &lt;overflowing expression&gt;</c>
+    /// is Msg 8115) — and the WHERE half is a <em>plan</em> reading there, since
+    /// adding <c>DISTINCT</c>, a <c>GROUP BY</c>, a <c>TOP</c> or a join to that
+    /// statement flips it to no rows. A HAVING carries a grouping by
+    /// construction, so its reading is the stable one and it is the only site
+    /// this runs at.
+    /// </para>
+    /// <para>
+    /// Applied per comparison rather than to the clause as a whole, matching
+    /// real: <c>HAVING &lt;folded&gt; AND b &gt; 1</c> still reports Msg 8121 for
+    /// the surviving conjunct.
+    /// </para>
+    /// </summary>
+    internal virtual BooleanExpression SettleFoldedNullComparisons(ParserContext context) => this;
+
+    /// <summary>Applies <see cref="SettleFoldedNullComparisons"/> to every operand of a chain.</summary>
+    private static BooleanExpression[] SettleOperands(BooleanExpression[] operands, ParserContext context)
+    {
+        var settled = new BooleanExpression[operands.Length];
+        for (var i = 0; i < operands.Length; i++)
+            settled[i] = operands[i].SettleFoldedNullComparisons(context);
+        return settled;
+    }
+
+    /// <summary>Whether every element of an <c>IN</c> list folds to NULL while compiling.</summary>
+    private static bool AllFoldToNull(Expression[] candidates, ParserContext context)
+    {
+        foreach (var candidate in candidates)
+        {
+            if (!ConstantFolding.FoldsToNull(candidate, context))
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
     /// The six binary comparison operators, with the T-SQL synonyms (<c>!=</c>,
     /// <c>!&gt;</c>, <c>!&lt;</c>) folded into their canonical forms at parse
     /// time (so the runtime only sees six shapes regardless of source spelling).
@@ -684,7 +738,7 @@ internal abstract class BooleanExpression
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
-        var inList = new InExpression(left, [.. candidates], negated);
+        var inList = new InExpression(left, [.. candidates], negated, AnySelfReference(left, candidates));
         // `x IN (…)` is a chain of equalities, so it folds on the same rule the
         // comparison shapes do — but only where every equality it stands for is
         // against a NULL constant, negation included (`x NOT IN (NULL)` is
@@ -692,6 +746,8 @@ internal abstract class BooleanExpression
         // comparison real evaluates, and it raises that side's error
         // (probe-confirmed: `<overflow> IN (NULL)` answers rows,
         // `<overflow> IN (NULL, 1)` is Msg 8115).
+        // A list carrying *one* NULL constant beside other elements folds no
+        // further than "never TRUE under NOT" — see InExpression.IsNeverFalse.
         return Expression.IsNullConstant(left) || AllNullConstants(candidates)
             ? FoldToUnknown(inList)
             : inList;
@@ -706,6 +762,51 @@ internal abstract class BooleanExpression
                 return false;
         }
         return true;
+    }
+
+    /// <summary>Whether any element of an <c>IN</c> list is a NULL constant.</summary>
+    private static bool AnyNullConstant(Expression[] candidates)
+    {
+        foreach (var candidate in candidates)
+        {
+            if (Expression.IsNullConstant(candidate))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether an <c>IN</c> list carries the list's own left operand written
+    /// again — <c>x IN (…, x, …)</c>, which is exactly <c>x IS NOT NULL</c>:
+    /// a non-NULL <c>x</c> matches itself, and a NULL one leaves every
+    /// comparison UNKNOWN. So the list is TRUE-or-UNKNOWN, never FALSE, and the
+    /// negation is never TRUE — probe-confirmed in both spellings and either
+    /// element position (<c>WHERE x NOT IN (x / 0, x)</c> and
+    /// <c>WHERE x NOT IN (x, x / 0)</c> both answer no rows on real).
+    /// <para>
+    /// Matched on a whole column reference read through parentheses, which is
+    /// the only spelling that provably names the same column; anything else
+    /// leaves the list standing.
+    /// </para>
+    /// </summary>
+    private static bool AnySelfReference(Expression source, List<Expression> candidates)
+    {
+        if (SelfReferenceName(source) is not { } name)
+            return false;
+        foreach (var candidate in candidates)
+        {
+            if (SelfReferenceName(candidate) is { } other && other.Count == name.Count && BuiltInToken.Equals(other.ToString(), name.ToString()))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>The column a bare (possibly parenthesized) reference names, or null for anything else.</summary>
+    private static MultiPartName? SelfReferenceName(Expression expression)
+    {
+        while (expression is Parenthesized parenthesized)
+            expression = parenthesized.Wrapped;
+        return expression is Reference reference ? reference.ReferencedName : null;
     }
 
     /// <summary>
@@ -729,13 +830,48 @@ internal abstract class BooleanExpression
         var upper = Expression.Parse(context);
         var between = new BetweenExpression(left, lower, upper, negated);
         // A NULL-constant *subject* makes both halves of the range UNKNOWN, so
-        // the whole thing folds like a comparison. A NULL-constant *bound*
-        // doesn't: it leaves `UNKNOWN AND (value <= upper)`, which is FALSE when
-        // the surviving half is — probe-confirmed by real answering 'T' for
+        // the whole thing folds like a comparison — and so do NULL constants in
+        // *both* bound slots, which leave `UNKNOWN AND UNKNOWN` however the
+        // subject reads. Both are UNKNOWN under NOT as well, so the fold is
+        // context-free: probe-confirmed by real answering 'F' for all four
+        // negation spellings of `CASE WHEN 5 BETWEEN NULL AND NULL …`, by
+        // `CHECK (x BETWEEN NULL AND NULL)` and `CHECK (NOT x BETWEEN NULL AND
+        // NULL)` both admitting the row, and by
+        // `HAVING NOT c NOT BETWEEN NULL AND NULL` answering no rows over an
+        // ungrouped `c` where one NULL bound is Msg 8121.
+        if (Expression.IsNullConstant(left) || (Expression.IsNullConstant(lower) && Expression.IsNullConstant(upper)))
+            return FoldToUnknown(between);
+        // *One* NULL-constant bound doesn't fold: it leaves
+        // `UNKNOWN AND (value <= upper)`, which is FALSE when the surviving half
+        // is — probe-confirmed by real answering 'T' for
         // `CASE WHEN 2 NOT BETWEEN NULL AND 1 …` and by
         // `CHECK (x BETWEEN NULL AND 5)` rejecting x = 10. Those reach the
         // filter-only simplification through IsNeverTrue instead.
-        return Expression.IsNullConstant(left) ? FoldToUnknown(between) : between;
+        return FoldConstantRangeHalf(between, left, lower, upper, negated, context);
+    }
+
+    /// <summary>
+    /// Applies the absorbing collapse <see cref="FoldConstantChain"/> runs over
+    /// a written <c>AND</c> to the implicit one a range carries: <c>value
+    /// BETWEEN lower AND upper</c> is <c>value &gt;= lower AND value &lt;=
+    /// upper</c>, so a half that folds to FALSE settles the range whatever the
+    /// other half would have done. Probe-confirmed context-free and
+    /// position-independent: <c>84 BETWEEN 27 / 0 AND 61</c> reads FALSE
+    /// (Msg 8134 for the same halves in the other order, where the raising half
+    /// decides first), the <c>NOT</c> spelling reads TRUE, and
+    /// <c>CHECK (84 BETWEEN x / 0 AND 61)</c> rejects the row with Msg 547
+    /// rather than raising.
+    /// </summary>
+    private static BooleanExpression FoldConstantRangeHalf(
+        BetweenExpression between, Expression value, Expression lower, Expression upper, bool negated, ParserContext context)
+    {
+        if (!value.IsWrittenConstant)
+            return between;
+        var lowerIsFalse = lower.IsWrittenConstant
+            && TryFoldWrittenConstant(new GreaterThanOrEqualExpression(value, lower), context) == false;
+        var upperIsFalse = upper.IsWrittenConstant
+            && TryFoldWrittenConstant(new LessThanOrEqualExpression(value, upper), context) == false;
+        return lowerIsFalse || upperIsFalse ? new ConstantFoldedPredicate(negated, between) : between;
     }
 
     /// <summary>
@@ -791,6 +927,17 @@ internal abstract class BooleanExpression
     /// nothing outside a filter.
     /// </summary>
     internal virtual bool IsNeverTrue => false;
+
+    /// <summary>
+    /// The mirror of <see cref="IsNeverTrue"/>: the predicate is known while
+    /// compiling to never evaluate FALSE (it is constant TRUE or constant
+    /// UNKNOWN). Read only through <c>NOT</c> — <c>NOT p</c> is never TRUE
+    /// exactly when <c>p</c> is never FALSE — which is what settles the
+    /// double-negated shapes real settles: <c>WHERE NOT x NOT BETWEEN NULL AND
+    /// &lt;bad&gt;</c> and <c>WHERE NOT x IN (&lt;bad&gt;, NULL)</c> both answer
+    /// no rows there while the operand alone raises.
+    /// </summary>
+    internal virtual bool IsNeverFalse => false;
 
     /// <summary>
     /// The predicate-side counterpart of <see cref="Expression.IsWrittenConstant"/>:
@@ -994,6 +1141,8 @@ internal abstract class BooleanExpression
 
         internal override bool IsNeverTrue => value != true;
 
+        internal override bool IsNeverFalse => value != false;
+
         public override bool? Run(RuntimeContext runtime) => value;
 
         internal override string DebugDisplay() =>
@@ -1075,6 +1224,21 @@ internal abstract class BooleanExpression
             }
         }
 
+        // AND is FALSE as soon as any operand is, so it takes *every* operand
+        // declining FALSE to keep the chain off it.
+        internal override bool IsNeverFalse
+        {
+            get
+            {
+                foreach (var operand in operands)
+                {
+                    if (!operand.IsNeverFalse)
+                        return false;
+                }
+                return true;
+            }
+        }
+
         public override bool? Run(RuntimeContext runtime)
         {
             var result = (bool?)true;
@@ -1101,6 +1265,9 @@ internal abstract class BooleanExpression
             foreach (var operand in operands)
                 operand.VisitSurvivingOperandExpressions(visitor);
         }
+
+        internal override BooleanExpression SettleFoldedNullComparisons(ParserContext context) =>
+            new AndExpression(SettleOperands(operands, context));
 
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         {
@@ -1137,6 +1304,37 @@ internal abstract class BooleanExpression
     {
         internal override bool IsWrittenConstant => AllWrittenConstant(operands);
 
+        // The mirror of AND's pair: OR is TRUE as soon as any operand is (so it
+        // takes every operand declining TRUE to keep the chain off it), and
+        // FALSE only when every operand is. Probe-confirmed on the first —
+        // `WHERE (x BETWEEN NULL AND 5) OR (x BETWEEN NULL AND <bad>)` answers
+        // no rows on real where the operand alone raises.
+        internal override bool IsNeverTrue
+        {
+            get
+            {
+                foreach (var operand in operands)
+                {
+                    if (!operand.IsNeverTrue)
+                        return false;
+                }
+                return true;
+            }
+        }
+
+        internal override bool IsNeverFalse
+        {
+            get
+            {
+                foreach (var operand in operands)
+                {
+                    if (operand.IsNeverFalse)
+                        return true;
+                }
+                return false;
+            }
+        }
+
         public override bool? Run(RuntimeContext runtime)
         {
             var result = (bool?)false;
@@ -1149,6 +1347,9 @@ internal abstract class BooleanExpression
             }
             return result;
         }
+
+        internal override BooleanExpression SettleFoldedNullComparisons(ParserContext context) =>
+            new OrExpression(SettleOperands(operands, context));
 
         internal override string DebugDisplay() => string.Join(" OR ", operands.Select(o => o.DebugDisplay()));
 
@@ -1286,9 +1487,30 @@ internal abstract class BooleanExpression
     /// match); a non-NULL left with no match and no NULL element returns
     /// the negated flag. Subquery form <c>IN (SELECT ...)</c> isn't modeled.
     /// </summary>
-    private sealed class InExpression(Expression source, Expression[] candidates, bool negated) : BooleanExpression
+    private sealed class InExpression(Expression source, Expression[] candidates, bool negated, bool selfReferenced) : BooleanExpression
     {
         internal override bool IsWrittenConstant => source.IsWrittenConstant && AllWrittenConstant(candidates);
+
+        // A NULL constant among the elements contributes an UNKNOWN equality to
+        // the chain the list stands for, so a list that matches nothing reads
+        // UNKNOWN rather than FALSE: `x IN (…, NULL, …)` is TRUE or UNKNOWN and
+        // `x NOT IN (…, NULL, …)` is FALSE or UNKNOWN. Probe-confirmed on both
+        // halves — real answers no rows for `WHERE x NOT IN (<bad>, NULL)` and
+        // for the `NOT x IN (…)` spelling, and raises the operand's own error
+        // for the un-negated `WHERE x IN (<bad>, NULL)`.
+        // The list's own left operand written again reads the same way (see
+        // AnySelfReference), so it answers both properties too — but only the
+        // negated half matches real: it settles `x NOT IN (x / 0, x)` in either
+        // element order, while the un-negated `x IN (x / 0, x)` raises there
+        // for one written order and answers for the other.
+        internal override bool IsNeverTrue => negated && (AnyNullConstant(candidates) || selfReferenced);
+
+        internal override bool IsNeverFalse => !negated && (AnyNullConstant(candidates) || selfReferenced);
+
+        internal override BooleanExpression SettleFoldedNullComparisons(ParserContext context) =>
+            ConstantFolding.FoldsToNull(source, context) || AllFoldToNull(candidates, context)
+                ? FoldToUnknown(this)
+                : this;
 
         public override bool? Run(RuntimeContext runtime)
         {
@@ -1411,6 +1633,13 @@ internal abstract class BooleanExpression
         internal override bool IsNeverTrue =>
             !negated && (Expression.IsNullConstant(lower) || Expression.IsNullConstant(upper));
 
+        // The same UNKNOWN-or-FALSE range read through the negation: TRUE or
+        // UNKNOWN, never FALSE. That is what makes the doubly-negated
+        // `NOT x NOT BETWEEN NULL AND <bad>` never TRUE, which real settles
+        // without evaluating the bound (probe-confirmed, both bound positions).
+        internal override bool IsNeverFalse =>
+            negated && (Expression.IsNullConstant(lower) || Expression.IsNullConstant(upper));
+
         public override bool? Run(RuntimeContext runtime)
         {
             var v = value.Run(runtime);
@@ -1434,6 +1663,12 @@ internal abstract class BooleanExpression
                 ? inRange switch { true => false, false => true, _ => null }
                 : inRange;
         }
+
+        internal override BooleanExpression SettleFoldedNullComparisons(ParserContext context) =>
+            ConstantFolding.FoldsToNull(value, context)
+                || (ConstantFolding.FoldsToNull(lower, context) && ConstantFolding.FoldsToNull(upper, context))
+                ? FoldToUnknown(this)
+                : this;
 
         internal override string DebugDisplay() =>
             $"{value.DebugDisplay()} {(negated ? "NOT BETWEEN" : "BETWEEN")} {lower.DebugDisplay()} AND {upper.DebugDisplay()}";
@@ -1602,12 +1837,21 @@ internal abstract class BooleanExpression
     {
         internal override bool IsWrittenConstant => inner.IsWrittenConstant;
 
+        // Three-valued NOT swaps the two verdicts and leaves UNKNOWN alone, so
+        // each side reads the other's off the operand.
+        internal override bool IsNeverTrue => inner.IsNeverFalse;
+
+        internal override bool IsNeverFalse => inner.IsNeverTrue;
+
         public override bool? Run(RuntimeContext runtime) => inner.Run(runtime) switch
         {
             true => false,
             false => true,
             null => null,
         };
+
+        internal override BooleanExpression SettleFoldedNullComparisons(ParserContext context) =>
+            new NotExpression(inner.SettleFoldedNullComparisons(context));
 
         internal override string DebugDisplay() => $"NOT {inner.DebugDisplay()}";
 
@@ -1664,6 +1908,11 @@ internal abstract class BooleanExpression
         protected abstract string OperatorName { get; }
 
         internal override bool IsWrittenConstant => this.left.IsWrittenConstant && this.right.IsWrittenConstant;
+
+        internal override BooleanExpression SettleFoldedNullComparisons(ParserContext context) =>
+            ConstantFolding.FoldsToNull(this.left, context) || ConstantFolding.FoldsToNull(this.right, context)
+                ? FoldToUnknown(this)
+                : this;
 
         internal override void VisitOperandExpressions(Action<Expression> visitor)
         {

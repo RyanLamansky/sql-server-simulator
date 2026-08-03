@@ -60,8 +60,8 @@ internal abstract class Aggregator
     /// </summary>
     public static Aggregator Create(AggregateExpression aggregate, SqlType operandType, SqlType resultType, bool removable = false) => aggregate.Kind switch
     {
-        AggregateKind.Count => new CountAggregator(isStar: aggregate.Operand is null, isBigCount: false, distinct: aggregate.Distinct),
-        AggregateKind.CountBig => new CountAggregator(isStar: aggregate.Operand is null, isBigCount: true, distinct: aggregate.Distinct),
+        AggregateKind.Count => new CountAggregator(isStar: aggregate.Operand is null || aggregate.CountsRowsOnly, isBigCount: false, distinct: aggregate.Distinct),
+        AggregateKind.CountBig => new CountAggregator(isStar: aggregate.Operand is null || aggregate.CountsRowsOnly, isBigCount: true, distinct: aggregate.Distinct),
         AggregateKind.ApproxCountDistinct => new CountAggregator(isStar: false, isBigCount: true, distinct: true),
         AggregateKind.Max => operandType.IsLob || operandType is BitSqlType
             ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "max")

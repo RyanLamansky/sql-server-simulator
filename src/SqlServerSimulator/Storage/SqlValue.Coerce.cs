@@ -1139,13 +1139,30 @@ internal readonly partial struct SqlValue
         {
             _ when SqlType.IsStringCategory(this.Type) => ParseStringToDouble(this.AsString, this.Type),
             _ when SqlType.IsIntegerCategory(this.Type) => AsInt64Widened(this),
-            DecimalSqlType => (double)this.AsDecimal,
+            DecimalSqlType => DecimalToDouble(this.AsDecimal),
             _ when this.Type == SqlType.Float => this.AsDouble,
             _ when this.Type == SqlType.Real => this.AsSingle,
             _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
         };
         return target == SqlType.Float ? FromDouble(d) : FromSingle((float)d);
     }
+
+    /// <summary>
+    /// Widens a <c>decimal</c> to <see cref="double"/>, folding away .NET's
+    /// signed zero. SQL Server's exact numerics have no negative zero — real
+    /// reports <c>CAST(0.0 * -1 AS float)</c> as <c>0</c> — but .NET's
+    /// <see cref="decimal"/> carries a sign bit through a zero result
+    /// (<c>0.0m * -1</c> and <c>decimal.Negate(0m)</c> both set it), and the
+    /// widening conversion would turn that into an IEEE negative zero real
+    /// only produces from <c>float</c> / <c>real</c> arithmetic.
+    /// </summary>
+    private static double DecimalToDouble(decimal value) => value == 0 ? 0d : (double)value;
+
+    /// <summary>
+    /// Narrows a <c>decimal</c> to <see cref="float"/>, folding away .NET's
+    /// signed zero for the reason <see cref="DecimalToDouble"/> gives.
+    /// </summary>
+    private static float DecimalToSingle(decimal value) => value == 0 ? 0f : (float)value;
 
     private SqlValue CoerceFromApproximate(SqlType target)
     {
@@ -1270,9 +1287,9 @@ internal readonly partial struct SqlValue
         if (SqlType.IsStringCategory(target))
             return FromString(target, FormatDecimal(d, ((DecimalSqlType)this.Type).scale));
         if (target == SqlType.Float)
-            return FromDouble((double)d);
+            return FromDouble(DecimalToDouble(d));
         if (target == SqlType.Real)
-            return FromSingle((float)d);
+            return FromSingle(DecimalToSingle(d));
         if (SqlType.IsMoneyCategory(target))
             return FromMoney(target, d);
         if (target == SqlType.DateTime)

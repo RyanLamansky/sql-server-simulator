@@ -90,6 +90,38 @@ public sealed class ExpressionNestingLimitTests
         AreEqual(1, result);
     }
 
+    // --- Stacked / chained unary signs: genuinely nested, Msg 8631 backstop. ---
+    // A sign parses the following multiplicative chain as its operand (SQL
+    // Server's additive binding for `+` / `-`), so both a stack of signs and a
+    // chain of signed factors recurse once per sign without passing through
+    // Expression.Parse — ParseSignedOperand carries its own probe. Real bounds
+    // both shapes with Msg 191 (past ~350 signed factors, ~1000 stacked signs);
+    // the simulator tolerates far more and then raises Msg 8631, the same
+    // more-permissive-then-graceful direction taken for flat chains.
+
+    [TestMethod]
+    public void SignedMultiplicativeChain_ModerateDepth_Evaluates()
+        => AreEqual(1, new Simulation().ExecuteScalar(
+            "select " + string.Join(" * ", Enumerable.Repeat("-1", 300))));
+
+    [TestMethod]
+    [Timeout(60000)]
+    public void UnarySignStack_ExtremeDepth_OnSmallStackThread_IsGracefulNeverProcessDeath()
+    {
+        var sql = "select " + string.Concat(Enumerable.Repeat("- ", 20000)) + "1";
+        RunOnSmallStack(sql, out _, out var failure);
+        AreEqual(8631, IsInstanceOfType<SimulatedSqlException>(failure).Number);
+    }
+
+    [TestMethod]
+    [Timeout(60000)]
+    public void SignedMultiplicativeChain_ExtremeDepth_OnSmallStackThread_IsGracefulNeverProcessDeath()
+    {
+        var sql = "select " + string.Join(" * ", Enumerable.Repeat("-1", 20000));
+        RunOnSmallStack(sql, out _, out var failure);
+        AreEqual(8631, IsInstanceOfType<SimulatedSqlException>(failure).Number);
+    }
+
     private void RunOnSmallStack(string sql, out object? result, out Exception? failure)
         => RunOnStack(512 * 1024, sql, out result, out failure);
 

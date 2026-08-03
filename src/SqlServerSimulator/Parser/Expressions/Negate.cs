@@ -18,11 +18,13 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <item><c>-$1.00</c> → <c>money</c>; <c>-CAST(1 AS real)</c> → <c>real</c>
 /// (not <c>float</c>); <c>-CAST(1 AS float)</c> → <c>float</c>.</item>
 /// </list>
-/// The value is still computed via the shared <c>0 - x</c> arithmetic (so
-/// string coercion, date rejection, NULL propagation, and overflow all match
-/// the subtraction path), then re-boxed to the preserved result type. A negated
-/// integer literal stays a digit-count literal for decimal-arithmetic sizing —
-/// see <see cref="Expression.IntegerLiteralDigits"/>.
+/// The value is computed via the shared <c>0 - x</c> arithmetic (so string
+/// coercion, date rejection, NULL propagation, and overflow all match the
+/// subtraction path), then re-boxed to the preserved result type — except for
+/// <c>float</c> / <c>real</c>, which flip the IEEE 754 sign bit instead so a
+/// negated zero stays negative. A negated integer literal stays a digit-count
+/// literal for decimal-arithmetic sizing — see
+/// <see cref="Expression.IntegerLiteralDigits"/>.
 /// </summary>
 internal sealed class Negate(Expression operand) : Expression
 {
@@ -56,6 +58,20 @@ internal sealed class Negate(Expression operand) : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = this.Operand.Run(runtime);
+
+        // float / real negate by flipping the IEEE 754 sign bit, which the
+        // shared `0 - x` path does not reproduce: subtraction folds the two
+        // zeros together (0.0 - 0.0 is +0.0 under round-to-nearest), so the
+        // negative zero real reports for `-CAST(0 AS real)` would be lost.
+        // Every other operand type keeps the additive path, whose typing,
+        // string coercion, date rejection and overflow rules match real's.
+        if (!value.IsNull && value.Type.Category == SqlTypeCategory.Approximate)
+        {
+            return value.Type == SqlType.Float
+                ? SqlValue.FromDouble(-value.AsDouble)
+                : SqlValue.FromSingle(-value.AsSingle);
+        }
+
         var resultType = PreservedResultType(value.Type);
         var raw = Subtract.NegateViaZero(value);
         return resultType is null ? raw
@@ -105,6 +121,8 @@ internal sealed class Negate(Expression operand) : Expression
     internal override bool IsRowIndependent => this.Operand.IsRowIndependent;
 
     private protected override bool IsStructuralConstant => this.Operand.IsWrittenConstant;
+
+    internal override bool IsNonNullConstantComputation => this.Operand.IsNonNullConstantComputation;
 
     internal override string DebugDisplay() => $"-{this.Operand.DebugDisplay()}";
 }

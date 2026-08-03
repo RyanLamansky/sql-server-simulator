@@ -120,4 +120,208 @@ public sealed class FloatTests
         IsTrue(reader.Read());
         AreEqual(expected, reader.GetDouble(0));
     }
+
+    // IEEE 754 negative zero. `AreEqual(0.0, x)` can't see it — -0.0 == 0.0 in
+    // .NET as in SQL Server — so these assert the rendering or the sign bit.
+
+    [TestMethod]
+    [DataRow("-cast(0 as real)")]
+    [DataRow("-cast(0 as float)")]
+    [DataRow("-cast(-0 as real)")]
+    [DataRow("-cast(0.0 as float)")]
+    [DataRow("-(0e0)")]
+    [DataRow("-0.0e0")]
+    [DataRow("-(0e0 - 0e0)")]
+    [DataRow("0e0 * -1")]
+    [DataRow("-1 * 0e0")]
+    [DataRow("0e0 / -1")]
+    [DataRow("-cast(0 as real) * 58")]
+    [DataRow("power(-cast(0 as float), 1)")]
+    [DataRow("round(-cast(0 as float), 0)")]
+    public void NegativeZero_ApproximateNegation_KeepsTheSign(string expression)
+        // Unary minus flips the IEEE sign bit rather than computing `0 - x`,
+        // which would fold the two zeros together (0.0 - 0.0 is +0.0).
+        => AreEqual("-0", ExecuteScalar($"select cast({expression} as varchar(30))"));
+
+    [TestMethod]
+    [DataRow("-cast(0 as real)", "-0")]
+    [DataRow("-cast(-0 as real)", "-0")]
+    [DataRow("-cast(-col1 + col1 as real)", "-0")]
+    [DataRow("-cast(+0 as real) * col1", "-0")]
+    [DataRow("+ -col1 * + cast(-col1 + col1 as real) * + 58", "-0")]
+    public void NegativeZero_CorpusShapes_RenderNegativeZeroOnce(string expression, string expected)
+    {
+        // Each shape collapses to a single row: -0 and +0 are one value for
+        // DISTINCT even though the surviving row still renders its sign.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table tab2 (col1 float); insert tab2 values (1), (2), (3)");
+        AreEqual(1, sim.ExecuteScalar($"select count(*) from (select distinct {expression} c from tab2) q"));
+        AreEqual(expected, sim.ExecuteScalar($"select cast(c as varchar(30)) from (select distinct {expression} c from tab2) q"));
+    }
+
+    [TestMethod]
+    [DataRow("cast(-0.0 as float)")]
+    [DataRow("cast(-0.0 as real)")]
+    [DataRow("cast(0.0 * -1 as float)")]
+    [DataRow("cast(-cast(0 as decimal(10, 2)) as float)")]
+    [DataRow("cast(0.0 - 0.0 as float)")]
+    [DataRow("cast(0 * -1 as float)")]
+    public void NegativeZero_ExactNumericSource_StaysUnsigned(string expression)
+        // SQL Server's exact numerics have no signed zero, so a decimal or
+        // integer zero widens to a *positive* float however it was produced —
+        // .NET's decimal does keep a sign bit through `0.0m * -1`, and that
+        // must not leak across the conversion.
+        => AreEqual("0", ExecuteScalar($"select cast({expression} as varchar(30))"));
+
+    [TestMethod]
+    [DataRow("select cast(-0.0 as varchar(30))", "0.0")]
+    [DataRow("select cast(-cast(0 as decimal(10, 2)) as varchar(30))", "0.00")]
+    [DataRow("select cast(cast(0e0 * -1 as decimal(10, 2)) as varchar(30))", "0.00")]
+    [DataRow("select cast(0 * -1 as varchar(30))", "0")]
+    [DataRow("select cast(sign(-cast(0 as float)) as varchar(30))", "0")]
+    [DataRow("select cast(abs(-cast(0 as float)) as varchar(30))", "0")]
+    public void NegativeZero_ExactNumericAndSignScalars_RenderUnsigned(string commandText, string expected)
+        => AreEqual(expected, ExecuteScalar(commandText));
+
+    [TestMethod]
+    [DataRow("cast(f as varchar(30))", "-0")]
+    [DataRow("cast(r as varchar(30))", "-0")]
+    [DataRow("concat('[', f, ']')", "[-0]")]
+    [DataRow("'[' + str(f, 10, 2) + ']'", "[     -0.00]")]
+    [DataRow("convert(varchar(30), f, 2)", "-0.000000000000000e+000")]
+    [DataRow("cast(cast(cast(f as real) as float) as varchar(30))", "-0")]
+    [DataRow("cast((select f as a for json path) as varchar(100))", """[{"a":-0.000000000000000e+000}]""")]
+    [DataRow("cast((select f as a for xml path('r')) as varchar(100))", "<r><a>-0.000000000000000e+000</a></r>")]
+    public void NegativeZero_SurvivesStorageAndStringConversion(string projection, string expected)
+    {
+        // A stored float / real keeps the sign bit, and every string surface
+        // but FORMAT reports it.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (f float, r real);
+            insert t values (-cast(0 as float), -cast(0 as real))
+            """);
+        AreEqual(expected, sim.ExecuteScalar($"select {projection} from t"));
+    }
+
+    [TestMethod]
+    [DataRow("'G'", "0")]
+    [DataRow("'N2'", "0.00")]
+    [DataRow("'F3'", "0.000")]
+    [DataRow("'E2'", "0.00E+000")]
+    [DataRow("'C'", "$0.00")]
+    [DataRow("'0.00'", "0.00")]
+    [DataRow("'#.##'", "")]
+    public void NegativeZero_Format_DropsTheSign(string format, string expected)
+    {
+        // FORMAT is the one string surface that hides it — real's CLR
+        // implementation carries .NET Framework's unsigned-zero rendering.
+        AreEqual(expected, ExecuteScalar($"select format(-cast(0 as float), {format})"));
+        AreEqual(expected, ExecuteScalar($"select format(-cast(0 as real), {format})"));
+    }
+
+    [TestMethod]
+    public void NegativeZero_Format_StillSignsANonZero()
+        => AreEqual("-1", ExecuteScalar("select format(cast(-1 as float), 'G')"));
+
+    [TestMethod]
+    public void NegativeZero_Print_ReportsTheSign()
+    {
+        using var connection = (SimulatedDbConnection)new Simulation().CreateOpenConnection();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.Add(e.Message);
+        _ = connection.CreateCommand("declare @f float = -cast(0 as float); print @f").ExecuteNonQuery();
+        AreEqual("-0", string.Join("\n", messages));
+    }
+
+    [TestMethod]
+    [DataRow("select count(*) from t where f = 0", 2)]
+    [DataRow("select count(*) from t where f = -cast(0 as float)", 2)]
+    [DataRow("select count(*) from (select distinct f from t) q", 1)]
+    [DataRow("select count(*) from (select f from t group by f) q", 1)]
+    [DataRow("select count(*) from (select f from t union select cast(0 as float)) q", 1)]
+    [DataRow("select count(*) from (select f from t intersect select cast(0 as float)) q", 1)]
+    [DataRow("select count(*) from (select f from t except select cast(0 as float)) q", 0)]
+    public void NegativeZero_ComparesEqualToPositiveZero(string commandText, int expected)
+    {
+        // IEEE equality: the sign of zero is a stored value, never an identity.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (f float);
+            insert t values (-cast(0 as float)), (cast(0 as float))
+            """);
+        AreEqual(expected, sim.ExecuteScalar(commandText));
+    }
+
+    [TestMethod]
+    [DataRow("-cast(0 as float)", "cast(0 as float)", "-0")]
+    [DataRow("cast(0 as float)", "-cast(0 as float)", "0")]
+    public void NegativeZero_DistinctReportsTheRowItMetFirst(string first, string second, string expected)
+    {
+        // Grouping collapses the pair, and the surviving row is whichever
+        // arrived first — so the reported sign follows insertion order.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table t (f float); insert t values ({first}), ({second})");
+        AreEqual(expected, sim.ExecuteScalar("select cast(f as varchar(30)) from (select distinct f from t) q"));
+        AreEqual(expected, sim.ExecuteScalar("select cast(f as varchar(30)) from t group by f"));
+        AreEqual(expected, sim.ExecuteScalar("select cast(min(f) as varchar(30)) from t"));
+        AreEqual(expected, sim.ExecuteScalar("select cast(max(f) as varchar(30)) from t"));
+    }
+
+    [TestMethod]
+    public void NegativeZero_UniqueIndexTreatsItAsADuplicate()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (f float);
+            insert t values (-cast(0 as float)), (cast(0 as float))
+            """);
+        var ex = sim.AssertSqlError("create unique index ix on t (f)", 1505);
+        Assert.Contains("duplicate key", ex.Message);
+    }
+
+    [TestMethod]
+    [DataRow("f + 0", "0")]
+    [DataRow("f * 1", "-0")]
+    [DataRow("-f", "0")]
+    [DataRow("sum(f)", "0")]
+    [DataRow("avg(f)", "0")]
+    public void NegativeZero_IeeeArithmetic(string expression, string expected)
+    {
+        // Straight IEEE: -0 + 0 is +0, -0 * 1 is -0, negating -0 is +0, and a
+        // sum accumulating from +0 comes back positive.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (f float); insert t values (-cast(0 as float))");
+        AreEqual(expected, sim.ExecuteScalar($"select cast({expression} as varchar(30)) from t"));
+    }
+
+    [TestMethod]
+    public void NegativeZero_ClientValueCarriesTheSignBit()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using var command = connection.CreateCommand("select -cast(0 as float), -cast(0 as real), cast(0 as float), cast(0 as real)");
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        IsTrue(double.IsNegative(reader.GetDouble(0)));
+        IsTrue(float.IsNegative(reader.GetFloat(1)));
+        IsFalse(double.IsNegative(reader.GetDouble(2)));
+        IsFalse(float.IsNegative(reader.GetFloat(3)));
+    }
+
+    [TestMethod]
+    public void NegativeZero_SelectIntoAndTableVariablePreserveIt()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (f float);
+            insert t values (-cast(0 as float));
+            select f into t2 from t
+            """);
+        AreEqual("-0", sim.ExecuteScalar("select cast(f as varchar(30)) from t2"));
+        AreEqual("-0", sim.ExecuteScalar("""
+            declare @v table (f float);
+            insert @v select f from t;
+            select cast(f as varchar(30)) from @v
+            """));
+    }
 }

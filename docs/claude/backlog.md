@@ -101,41 +101,39 @@ Remaining phases, roughly in value order:
 
 ### sqllogictest differential sweep — surfaced gaps
 
-SQLite's sqllogictest corpus (7,195,342 query and 225,371 statement records across 622 `.test` scripts, cross-validated against several engines including SQL Server 2005 circa 2008, with per-engine `skipif mssql` / `onlyif mssql` directives) is staged at `.vs/sqllogictest/` (gitignored; provenance and re-download URL in its `README-provenance.md`).
-It is used in **differential mode**: a C# runner (`.vs/sqllogictest/runner/`, gitignored, usage in its `RUNNING.txt`) replays each record against the simulator in-process and the live local SQL Server 2025 side by side and diffs both directions.
-The stored expected results are 2008-era SQLite canonicalizations and are **not** the oracle — real is; the file tally is corroboration only (232,935 records where all three agree, 7 where both engines agree with each other and differ from the file).
+The oracle itself — corpus, sharded runner, how to re-run and re-read it, and the traps that silently invalidate a run — is documented in [`sqllogictest.md`](sqllogictest.md).
+Nothing from it is checked in; it regenerates in minutes.
 
-A pilot over 45 scripts (`select1..5`, all 12 `evidence/`, and a seeded sample of `index/` and `random/` recorded in `runner/pilot-phase2.txt`) covered 315,592 records at ~520 records/second, against a baseline of 206,380 exact and 26,560 order-insensitive matches.
-`select1..4` and every `index/` category ran clean; nearly every root below came from `random/expr` and `random/aggregates`, so a full sweep should be **weighted toward those 250 files** (~1 hour) rather than spread evenly over the ~4-6 hours the whole corpus costs.
+Standing measurement on the 391-file `random/` slice (5,295,251 records, 16 shards, ~460 s): **26 divergent records**, all of them the plan-dependent residue below.
+Re-run it after any bundle touching the parser, the expression evaluator or the type system.
 
-Two harness lessons worth carrying to any future differential runner, since both silently fabricate or inflate findings:
-a swallowed simulator exception reports as a *clean run*, which manufactures entries in the over-permissive class specifically (the simulator materializes a row-returning statement's error on the first `Read` rather than at `ExecuteReader`, so a loop that skips `Read` when `FieldCount == 0` never sees it);
-and a `statement` record that errors on both engines can still have applied a different prefix of its batch to each, so state divergence has to taint the rest of the script or every later mismatch reads as an independent wrong-answer bug.
-
-Roots surfaced (each reproduced minimally from a clean state, against both engines):
+Still open from what it surfaced:
 
 - **One trailing garbage identifier after a completed clause is swallowed**: `SELECT a FROM t zzz qqq`, and the same after `WHERE` / `GROUP BY` / `ORDER BY` / a comma-FROM list, return rows where real raises Msg 102 at the second identifier.
   Exactly one extra identifier is consumed, and the no-`FROM` path is already tight (`SELECT 1 zzz qqq` is Msg 102 on both).
   This is the identifier half of the trailing-token rule [`grammar.md`](grammar.md) records as narrowed to value literals — now with concrete shapes.
-- **`DbDataReader.RecordsAffected` counts rows returned** rather than rows affected: 0 for an INSERT that affected one row, and the row count for a SELECT where SqlClient answers -1.
-  `ExecuteNonQuery` matches real exactly (-1 for DDL, N for DML), so only the reader path diverges — see [`data-reader.md`](data-reader.md).
-- **Real folds a comparison against the NULL literal at compile time and never evaluates the other operand**, while the simulator evaluates eagerly: `WHERE NULL > a*a*a*a*79` is 0 rows on real and Msg 8115 here, and `HAVING NULL <> b` is 0 rows on real and Msg 8121 here — real skips even the *binding* check.
-  A constant-false conjunct written first (`WHERE 1 = 0 AND a/0 > 1`) agrees on both.
-  Whether to model optimizer-visible short-circuiting is a judgement call, not just a fix.
 - **Msg 102 where real raises Msg 156 naming the keyword**, at a residue of sites (`NOT`, `NULL`, `INTO`, `OR`, `UPDATE`, `DELETE`, `INSERT`); the simulator already reports Msg 156 correctly elsewhere, so this is site-specific rather than a missing error.
   Also `DROP INDEX <1-part>` is real's Msg 159, the simulator's Msg 102.
 - **Many-way joins do not scale**: `select5`'s 20-24-table equi-joins answer in milliseconds on real and exceed a 15-second `CommandTimeout` here, one of them running past a 40-second wall without honoring its own timeout.
-  Not a correctness gap, but it consumed roughly three quarters of the pilot's wall clock — see the join-strategy notes in [`joins.md`](joins.md).
-
-Closing those five surfaced further divergences, none of them touched, each probe-confirmed against SQL Server 2025 (2026-08-03):
-
+  Not a correctness gap, but it is why the sweep's file list is `random/` rather than the whole corpus — see the join-strategy notes in [`joins.md`](joins.md).
 - **A `FROM`-less star is three behaviors real distinguishes and the simulator answers Msg 102 for all**: `SELECT *`, `SELECT 1, *` and `SELECT COUNT(*), *` are **Msg 263** ("Must specify table to select from."), `SELECT t.*` is **Msg 107**, and `EXISTS (SELECT *)` is legal.
 - **`<binary> <operator> <approximate>`** (`0x02 + CAST(2 AS real)`) is real's **Msg 206** in both operand orders for `+ - * /`; the simulator raises `NotSupportedException`.
 - **`STDEV` / `VAR` over `money`** is `float` on real; the simulator raises **Msg 529**.
 - **An integer literal padded past 12 characters is `numeric(significant_digits, 0)`**, not `int` — `SELECT 0000000000300` is `numeric(3, 0)` on real while the 11-character `00000000300` is `int`.
-  `NULLIF` inherits it, so `NULLIF(0000000000300, 1)` is `numeric(3, 0)` on real and `smallint` here; the rule belongs to the bare-literal tokenizer, not to NULLIF — see [`arithmetic.md`](arithmetic.md).
+  The rule belongs to the bare-literal tokenizer — see [`arithmetic.md`](arithmetic.md).
 - **Real answers a statement's binder errors together where the simulator raises the leading one alone** — `INSERT` reports 207 + 110, and 273 + 10709, as one multi-error response.
   The module-body bind already gathers every error of a *body*; this is the same shape for a single statement — see [`programmable.md`](programmable.md).
+- **`SELECT TOP (-1)`** returns no rows where real raises **Msg 127**; the DML `UPDATE` / `DELETE TOP (-1)` path already raises it, so only the SELECT site misses it.
+- **Decimal division rounds where real truncates** — `CAST(3 AS decimal(9,4)) / CAST(7 AS decimal(9,6))` is `0.42857142857143` here and `.42857142857142` on real.
+  Independent of any unary sign, and it makes deep decimal-division chains diverge in their last digits even where the declared type matches.
+- **`FORMAT(x, 'P')` renders three decimal places where real renders two** (`0.000%` against `0.00%`, for positive zero as well), an invariant-culture percent-digits difference; changing FORMAT's culture defaults reaches every specifier, so it wants its own probe pass.
+
+**Five sweep divergences remain, each demonstrated irreducible** — real's own answer flips under something the simulator cannot legitimately model, so matching them would mean modeling plan selection rather than semantics.
+Two are the trivial-plan boundary: `WHERE <overflow> <= 18 / CAST(NULL AS int)` raises as written, and answers 0 rows the moment `DISTINCT`, `GROUP BY`, `TOP 2` or a join is added — while `ORDER BY` / `MAX()` / `COUNT(*)` leave it raising.
+One is written order inside an un-negated `IN` list (`x IN (x/0, x)` answers, `x IN (x, x/0)` raises — same elements).
+Two are per-row short-circuiting that flips with the *data*, not the text (a row satisfying the cheap conjunct makes real raise in both written orders).
+The same comparison in a **`HAVING`** folds unconditionally — a HAVING always carries a grouping, so it never gets the trivial plan — which is why that position is closed and `WHERE` is not.
+Precisely-scoped list in the "Not folded yet" section of [`query.md`](query.md).
 
 The sweep also produced a **data-loss repro for the parse-phase batch divergence** [`control-flow.md`](control-flow.md) already lists as accepted: `INSERT INTO t VALUES(3,'z'); SELECT ~~~ FROM;` leaves the row inserted here and rejects the whole batch on real (Msg 156, and Msg 159 for the `DROP INDEX` shape), so the accepted-divergence rationale — that real tooling never sends invalid batches — now has a measured cost in silent state divergence rather than only in error timing.
 Runtime errors (Msg 208 deferred name, Msg 8134) correctly leave earlier statements applied on both, so the divergence is specifically parse-phase.
@@ -241,14 +239,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 ## Fidelity gaps in shipped behavior
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
-
-- **Unary `-` / `+` bind too tightly, so a sign followed by more multiplicative operators evaluates wrongly** (probe-confirmed against SQL Server 2025, 2026-08-03).
-  T-SQL puts the unary operators at the *additive* level, below `* / %`, so real reads `a / -b / c` as `a / (-(b / c))`; the simulator parses `-b` as a primary and reads it as `(a / -b) / c`.
-  Measured: `SELECT 100 / -10 / 2` is **-20** on real and -5 here, `SELECT 8 / -2 * 4` is **-1** and -16, `SELECT 60 / -3 / 2` is **-60** and -10.
-  A single leading sign agrees (`-6 / 3` is -2 on both) because negation commutes with `*` and integer division truncates symmetrically — the divergence needs the unary's operand to be followed by another multiplicative operator, which is why ordinary application SQL never hits it and machine-generated sign chains hit it constantly.
-  The fix is in `Expression.ParsePrimary`'s `Operator { Character: '-' } => Negate.Of(ParsePrimary(…))`, which should parse its operand at multiplicative precedence instead.
-  Deliberately not bundled with the predicate-folding work that found it: it moves every unary minus in the grammar and interacts with negated-literal folding (the `-2147483648` stays-`int` rule), decimal result sizing, and ORDER BY constant detection, so it wants its own review.
-  Note the simulator currently agrees with sqllogictest's *stored* results here and real is the outlier — SQLite and PostgreSQL both use standard precedence — so the corpus cannot be used as the oracle for this one.
 
 - **Skip-mode deferred name resolution — DML target tables not placeholder-continued** — the skip-mode parse-continuation fix substitutes placeholder metadata for a missing *FROM-clause table* or *schema-qualified function* so an un-taken branch parses to completion and is discarded whole (killing the orphaned-`ELSE` cascade — see [`control-flow.md`](control-flow.md)).
   Re-probed 2026-07-29: the **spurious Msg 208 is gone** — `IF 1=0 INSERT INTO missing SELECT * FROM other; SELECT 'after'` now returns `after`, as do the UPDATE and DELETE forms, so a dead branch with a missing DML target no longer breaks the following statement.

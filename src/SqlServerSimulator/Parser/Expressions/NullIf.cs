@@ -28,6 +28,17 @@ internal sealed class NullIf : Expression
     /// </summary>
     private readonly SqlType? narrowedLiteralType;
 
+    /// <summary>
+    /// Whether the first argument is a written constant real folds to NULL,
+    /// which makes the <c>=</c> this desugars to UNKNOWN and so leaves the
+    /// second argument unreachable — real answers NULL for
+    /// <c>NULLIF(-CAST(NULL AS real), &lt;bad&gt;)</c> where the second argument
+    /// alone raises. A bare <c>NULL</c> literal is excluded because real refuses
+    /// that spelling outright (Msg 4151), so folding it would settle a shape
+    /// real never runs.
+    /// </summary>
+    private readonly bool constantNullFirst;
+
     private SqlType? cachedResultType;
 
     public NullIf(ParserContext context)
@@ -37,6 +48,7 @@ internal sealed class NullIf : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.b = Parse(context.MoveNextRequiredReturnSelf());
         this.narrowedLiteralType = NarrowedLiteralType(this.a);
+        this.constantNullFirst = !IsBareNullLiteral(this.a) && ConstantFolding.FoldsToNull(this.a, context);
     }
 
     /// <summary>
@@ -75,6 +87,10 @@ internal sealed class NullIf : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var av = this.a.Run(runtime);
+        // A compile-time NULL on the left can equal nothing, so the second
+        // argument never runs and the first comes back as the ELSE arm's value.
+        if (this.constantNullFirst)
+            return av;
         var bv = this.b.Run(runtime);
         var equal = BooleanExpression.CompareValuesPromoted(av, bv, "equal to", static (l, r) => l.Equals(r));
         if (equal == true)

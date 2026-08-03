@@ -242,6 +242,12 @@ internal sealed partial class Selection
                 for (var i = 0; i < aggregates.Count; i++)
                 {
                     var aggregate = aggregates[i];
+                    // An arm real settled as unreachable while compiling never
+                    // supplies a value, so its operand isn't evaluated and the
+                    // aggregator stays at its empty result — which nothing
+                    // reads, the arm holding it being unreachable.
+                    if (aggregate.OperandUnreachable)
+                        continue;
                     if (aggregate.Kind == AggregateKind.StringAgg && state.Aggregators[i] is Aggregators.StringAggAggregator stringAgg)
                     {
                         var separatorValue = aggregate.Separator!.Run(rowRuntime);
@@ -278,7 +284,7 @@ internal sealed partial class Selection
                         objectAgg.SetKey(aggregate.KeyExpression!.Run(rowRuntime));
                     }
 
-                    var operand = aggregate.Operand;
+                    var operand = aggregate.CountsRowsOnly ? null : aggregate.Operand;
                     state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : operand.Run(rowRuntime));
                 }
             }

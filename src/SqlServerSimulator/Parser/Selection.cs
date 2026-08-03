@@ -936,14 +936,22 @@ internal sealed partial class Selection
             // `TOP (expr)` or the legacy bare constant / variable. Parsing it as
             // a full expression would fold a following select-list star into a
             // multiplication (`TOP 1 *` → `1 * …`, `TOP (1) *` → `(1) * …`),
-            // swallowing the star and failing near the next token; ParsePrimary
-            // stops before any binary operator, leaving `*` for the select list.
+            // swallowing the star and failing near the next token.
+            // The legacy form takes no unary prefix at all: real raises Msg 102
+            // naming the operator for `TOP -1` / `TOP +1` / `TOP ~1`
+            // (probe-confirmed 2026-08-03), where the parenthesized form takes
+            // the sign and validates the value (Msg 127 when negative).
+            // Rejecting the prefix here also keeps ParsePrimary on its
+            // stops-before-any-binary-operator path — a sign would otherwise
+            // absorb the following multiplicative chain, star included.
             var savedRejectInTop = context.RejectNextValueFor;
             context.RejectNextValueFor = true;
             try
             {
                 context.RecursiveBranchConstructs.TopOrOffset = true;
-                topExpression = Expression.ParsePrimary(context.MoveNextRequiredReturnSelf());
+                if (context.MoveNextRequiredReturnSelf().Token is Operator { Character: '+' or '-' or '~' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                topExpression = Expression.ParsePrimary(context);
             }
             finally
             {
@@ -1719,7 +1727,7 @@ internal sealed partial class Selection
         context.OuterTypeResolver = name => ResolveColumnTypeAcrossSources(scope, name, outerTypeResolver);
         try
         {
-            return BooleanExpression.SimplifyForFilter(BooleanExpression.Parse(context));
+            return BooleanExpression.SimplifyForFilter(BooleanExpression.Parse(context), context);
         }
         finally
         {
@@ -2979,7 +2987,7 @@ internal sealed partial class Selection
             while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
             {
                 fromClause.Excluders.Add(BooleanExpression.SimplifyForFilter(
-                    BooleanExpression.Parse(context.MoveNextRequiredReturnSelf())));
+                    BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()), context));
             }
 
             if (context.Token is ReservedKeyword { Keyword: Keyword.Group })
@@ -2993,8 +3001,10 @@ internal sealed partial class Selection
             if (context.Token is ReservedKeyword { Keyword: Keyword.Having })
             {
                 context.RecursiveBranchConstructs.GroupingOrAggregate = true;
+                // A HAVING settles a comparison against a folded-NULL constant
+                // the way a WHERE doesn't — see SettleFoldedNullComparisons.
                 fromClause.Having = BooleanExpression.SimplifyForFilter(
-                    BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()));
+                    BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()).SettleFoldedNullComparisons(context), context);
             }
         }
         finally

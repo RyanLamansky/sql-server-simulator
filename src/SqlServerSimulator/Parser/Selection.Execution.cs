@@ -411,7 +411,7 @@ internal sealed partial class Selection
             context.OuterTypeResolver = saved;
         }
         predicate.Bind(context.Batch, resolveColumnType);
-        return BooleanExpression.SimplifyForFilter(predicate);
+        return BooleanExpression.SimplifyForFilter(predicate, context);
     }
 
     /// <summary>
@@ -925,11 +925,24 @@ internal sealed partial class Selection
 
         var columnNullability = ComputeColumnNullability(expressions, sources, joins, parseBatch, ResolveColumnType);
 
+        ReduceConstantCounts(aggregates, fromClause);
+
+        // A HAVING real can see is never TRUE keeps no group, so the statement
+        // answers nothing whatever the rest of it would have done — and real
+        // then runs none of it, which is what makes
+        // `SELECT a FROM t WHERE a / 0 IS NOT NULL GROUP BY a HAVING NULL IS
+        // NOT NULL` answer no rows there rather than Msg 8134. Every binding
+        // check above still ran, so Msg 207 / 8120 / 8121 report as they do on
+        // real; only the row work is skipped.
+        var resultIsProvablyEmpty = fromClause.Having?.IsNeverTrue == true;
+
         var selection = new Selection(outputSchema, outputColumnNames,
             hasOrderBy: orderBy.Count > 0,
             hasTopOrOffsetOrFetch: topExpression is not null || offsetExpression is not null || fetchExpression is not null,
             (batch, outerResolver) =>
             {
+                if (resultIsProvablyEmpty)
+                    return [];
                 // Per-execution count resolution: the expressions may carry
                 // parameters, and this closure replays across executions of a
                 // plan-cached SELECT (EF's Skip/Take shape), so the values
@@ -977,6 +990,41 @@ internal sealed partial class Selection
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
         (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
         return selection;
+    }
+
+    /// <summary>
+    /// Applies real's <c>COUNT(&lt;expression it types NOT NULL&gt;)</c> →
+    /// <c>COUNT(*)</c> reduction, which drops the argument without evaluating
+    /// it: <c>SELECT COUNT(61 / 0)</c> and <c>SELECT COUNT(2000000000 * 3)</c>
+    /// answer a count on real where the argument alone raises, while
+    /// <c>COUNT(&lt;nullable column&gt; / 0)</c> and
+    /// <c>COUNT(DISTINCT 61 / 0)</c> — and <c>SUM</c> / <c>MAX</c> of the same
+    /// — raise on both (all probe-confirmed).
+    /// <para>
+    /// Two fences. The argument has to be a computation over non-NULL literals
+    /// (<see cref="Expression.IsNonNullConstantComputation"/>), which is the
+    /// nullability real's own reduction reads — narrower than the folded value,
+    /// since a fold that raises has no value, and narrower than the projection
+    /// metadata's, where arithmetic claims nullable even over two literals. And
+    /// the query must carry no <em>grouping expression</em>: real evaluates the
+    /// argument once a GROUP BY names one (<c>SELECT COUNT(61 / 0) FROM t GROUP
+    /// BY a</c> is Msg 8134 there, while the same statement without the GROUP
+    /// BY — and with <c>GROUP BY ()</c> — answers).
+    /// </para>
+    /// </summary>
+    private static void ReduceConstantCounts(List<AggregateExpression> aggregates, FromClause fromClause)
+    {
+        if (fromClause.AllGroupingExpressions.Count > 0)
+            return;
+        foreach (var aggregate in aggregates)
+        {
+            if (aggregate.Kind is AggregateKind.Count or AggregateKind.CountBig
+                && !aggregate.Distinct
+                && aggregate.Operand?.IsNonNullConstantComputation == true)
+            {
+                aggregate.CountsRowsOnly = true;
+            }
+        }
     }
 
     /// <summary>

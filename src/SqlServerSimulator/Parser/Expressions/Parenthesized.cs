@@ -28,6 +28,8 @@ internal sealed class Parenthesized(Expression wrapped) : Expression
 
     private protected override bool IsStructuralConstant => this.Wrapped.IsWrittenConstant;
 
+    internal override bool IsNonNullConstantComputation => this.Wrapped.IsNonNullConstantComputation;
+
     internal override bool ResultReportsNumeric => this.Wrapped.ResultReportsNumeric;
 
     internal override bool ResultIsNullable(NullabilityContext context) => this.Wrapped.ResultIsNullable(context);

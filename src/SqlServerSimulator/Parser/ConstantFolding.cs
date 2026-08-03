@@ -159,6 +159,86 @@ internal static class ConstantFolding
         FoldedBuiltInLookup.Contains(uppercaseName);
 
     /// <summary>
+    /// Whether <paramref name="expression"/> is a written constant real folds to
+    /// <b>NULL</b> while compiling. Read by the two shapes whose comparison
+    /// against that value can then match nothing — a simple <c>CASE</c>'s input
+    /// and <c>NULLIF</c>'s first argument — so their remaining operands leave
+    /// the tree with the comparison (probe-confirmed: <c>CASE CAST(NULL AS int)
+    /// WHEN &lt;bad&gt; THEN …</c>, <c>CASE CAST(NULL AS int) / 17 WHEN …</c>,
+    /// <c>CASE NULLIF(1, 1) WHEN …</c> and <c>NULLIF(-CAST(NULL AS real),
+    /// &lt;bad&gt;)</c> all answer on real where the operand alone raises).
+    /// <para>
+    /// This is a strictly wider reading than <see cref="Expression.IsNullConstant"/>,
+    /// which stays syntactic because real's <em>comparison</em> fold does — a
+    /// folded-NULL operand there still raises the other side's error
+    /// (<c>WHERE CAST(NULL AS int) / 17 &gt; &lt;overflowing expression&gt;</c>
+    /// is Msg 8115 on real). The two rules are probed apart and stay apart.
+    /// </para>
+    /// <para>
+    /// A fold that raises answers <see langword="false"/>, leaving the shape to
+    /// report the error at runtime the way real does.
+    /// </para>
+    /// </summary>
+    internal static bool FoldsToNull(Expression expression, ParserContext context) =>
+        TryFold(expression, context, out var value) && value.IsNull;
+
+    /// <summary>
+    /// Evaluates <paramref name="expression"/> at compile time when real folds
+    /// it there — <see cref="Expression.IsWrittenConstant"/> decides which
+    /// shapes qualify, and a fold that <em>raises</em> answers
+    /// <see langword="false"/> so the shape reports the error at runtime the
+    /// way real does.
+    /// </summary>
+    internal static bool TryFold(Expression expression, ParserContext context, out SqlValue value)
+    {
+        if (expression.IsWrittenConstant)
+        {
+            try
+            {
+                // A written constant reaches no column, so the resolver is
+                // unreachable rather than merely unused.
+                value = expression.Run(new RuntimeContext(static _ => throw new NotSupportedException(), context.Batch));
+                return true;
+            }
+            catch (Exception e) when (e is SimulatedSqlException or NotSupportedException)
+            {
+            }
+        }
+
+        value = default;
+        return false;
+    }
+
+    /// <summary>
+    /// The <see cref="BooleanExpression"/> counterpart of
+    /// <see cref="TryFold(Expression, ParserContext, out SqlValue)"/>: evaluates
+    /// a predicate real settles while compiling, reporting its three-valued
+    /// result through <paramref name="value"/>. A predicate that isn't written
+    /// constant — and a fold that raises, which real leaves standing for
+    /// runtime — answers <see langword="false"/>, which callers must keep
+    /// distinct from a fold that answered UNKNOWN.
+    /// </summary>
+    internal static bool TryFoldPredicate(BooleanExpression predicate, ParserContext context, out bool? value)
+    {
+        if (predicate.IsWrittenConstant)
+        {
+            try
+            {
+                // A written constant reaches no column, so the resolver is
+                // unreachable rather than merely unused.
+                value = predicate.Run(new RuntimeContext(static _ => throw new NotSupportedException(), context.Batch));
+                return true;
+            }
+            catch (Exception e) when (e is SimulatedSqlException or NotSupportedException)
+            {
+            }
+        }
+
+        value = null;
+        return false;
+    }
+
+    /// <summary>
     /// Applies real's Msg 5308 / 5309 gate to one ORDER BY term inside an
     /// <c>OVER (…)</c>, a named <c>WINDOW</c> definition or a
     /// <c>WITHIN GROUP (…)</c> — the positions that carry no ordinal

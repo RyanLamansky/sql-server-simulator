@@ -109,4 +109,24 @@ public class TopTests
         var ex = Throws<System.Data.Common.DbException>(() => new Simulation().ExecuteScalar("select top ('abc') 1"));
         AreEqual("1060", ex.Data["HelpLink.EvtID"]);
     }
+
+    /// <summary>
+    /// The legacy paren-less <c>TOP n</c> takes a bare constant or variable and
+    /// no unary prefix at all: real raises Msg 102 naming the operator
+    /// (probe-confirmed 2026-08-03). The parenthesized form does take a sign
+    /// and validates the resulting value instead.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select top -1 v from t", '-')]
+    [DataRow("select top +1 v from t", '+')]
+    [DataRow("select top ~1 v from t", '~')]
+    [DataRow("select top -1 * from t", '-')]
+    public void Top_BareFormWithUnaryPrefix_RaisesMsg102(string commandText, char operatorCharacter)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (v int)");
+        var ex = Throws<System.Data.Common.DbException>(() => sim.ExecuteScalar(commandText));
+        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        AreEqual($"Incorrect syntax near '{operatorCharacter}'.", ex.Message);
+    }
 }
