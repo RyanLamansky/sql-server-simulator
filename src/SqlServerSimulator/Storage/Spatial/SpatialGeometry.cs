@@ -245,6 +245,7 @@ internal sealed class SpatialGeometry(int srid, SpatialShape root)
     private byte[]? encoded;
     private bool encodedIsGeography;
     private bool? planarValidity;
+    private bool? geodeticValidity;
 
     /// <summary>
     /// Whether the instance satisfies the OGC validity rules real enforces —
@@ -253,6 +254,16 @@ internal sealed class SpatialGeometry(int srid, SpatialShape root)
     /// and read many times.
     /// </summary>
     public bool IsPlanarValid => this.planarValidity ??= SpatialValidator.IsValid(this.Root);
+
+    /// <summary>
+    /// The same question on the round earth, where the edges are great elliptic
+    /// arcs and a ring's written direction decides which side its interior is
+    /// on. Cached for the same reason.
+    /// </summary>
+    public bool IsGeodeticValid => this.geodeticValidity ??= SpatialGeodeticValidator.IsValid(this.Root);
+
+    /// <summary>Validity in the terms of whichever spatial type owns the value.</summary>
+    public bool IsValidFor(bool isGeography) => isGeography ? this.IsGeodeticValid : this.IsPlanarValid;
 
     /// <summary>
     /// The UDT serialization of this instance, cached because the row encoder

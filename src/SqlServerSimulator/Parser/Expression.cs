@@ -368,17 +368,29 @@ internal abstract class Expression
                             }
                             // Spatial property shape: <expr>.STX / .Lat / .STSrid
                             // — no argument list, so nothing distinguishes it from
-                            // a dotted column name by syntax alone. Dispatching is
-                            // therefore limited to receivers that can't be a table
-                            // qualifier: a constructor call, a variable, a
-                            // parenthesized expression. A spatial *column*'s
-                            // property (`Location.Lat`) still reads as a two-part
-                            // column name and needs binder support to tell apart.
-                            // Method names reach here too when written without an
-                            // argument list, which is the shape real reports as a
-                            // missing property (Msg 6592).
-                            if (expression is not Reference && SpatialMethodCall.IsKnownMemberName(name.Value))
+                            // a dotted column name by syntax alone. A receiver that
+                            // can't be a table qualifier (a constructor call, a
+                            // variable, a parenthesized expression) dispatches off
+                            // the member catalog; a name-shaped receiver asks the
+                            // query scope whether it is a spatial column, which is
+                            // what reads `Location.Lat` off a column and leaves
+                            // `t.Lat` a two-part column name (Msg 326 where both
+                            // bind). A method written without an argument list and
+                            // a property written with one both reach here, and
+                            // real reports each as a missing member (Msg 6592 /
+                            // 6506) rather than as a syntax error.
+                            var spatialMember = expression is Reference spatialQualifier
+                                ? SpatialMethodCall.BindsAsColumnProperty(spatialQualifier.ReferencedName, name.Value, context)
+                                : SpatialMethodCall.IsKnownMemberName(name.Value);
+                            if (spatialMember)
                             {
+                                var memberCheckpoint = context.SaveCheckpoint();
+                                if (context.GetNextOptional() is Operator { Character: '(' })
+                                {
+                                    expression = SpatialMethodCall.Parse(expression, name.Value, context);
+                                    continue;
+                                }
+                                context.RestoreCheckpoint(memberCheckpoint);
                                 expression = SpatialMethodCall.Property(expression, name.Value);
                                 continue;
                             }
@@ -753,15 +765,18 @@ internal abstract class Expression
     /// spellings stay nullable. <c>ISNULL</c> is not in this family: it is NOT
     /// NULL when <i>either</i> operand is, where <c>COALESCE</c> needs all of
     /// them (the classic ISNULL-vs-COALESCE metadata quirk).</para>
+    /// <para><b>Arm conversions.</b> A surviving CASE-family arm — and every
+    /// <c>GREATEST</c> / <c>LEAST</c> argument — additionally answers for the
+    /// conversion the arm unification puts on it, reading nullable whenever
+    /// that conversion could alter the value (see
+    /// <see cref="SqlType.ConversionPreservesEveryValue"/>). That is what makes
+    /// <c>COALESCE(&lt;decimal(9, 2) col&gt;, 0)</c> nullable while
+    /// <c>COALESCE(&lt;decimal(9, 2) col&gt;, 0.0)</c> is NOT NULL. Set
+    /// operators and a VALUES constructor unify the same way and do <i>not</i>
+    /// carry the rule; <c>ISNULL</c> takes its first argument's type outright,
+    /// so nothing converts there either.</para>
     /// <para>A VALUES row-constructor column is non-null iff no row supplies a
     /// nullable cell there.</para>
-    /// <para><b>Divergence.</b> Real additionally marks a CASE-family arm (or a
-    /// <c>GREATEST</c> / <c>LEAST</c> argument) nullable when unifying the arms
-    /// inserts a conversion that could overflow — an <c>int</c> literal beside
-    /// a <c>decimal(9, 2)</c> column, say, where the literal's ten integral
-    /// digits don't fit the column's seven. The simulator reads those NOT NULL.
-    /// The claim is runtime-accurate either way (the conversion raises rather
-    /// than yielding NULL); see docs/claude/tds-endpoint.md.</para>
     /// </remarks>
     internal virtual bool ResultIsNullable(NullabilityContext context) => true;
 
@@ -897,6 +912,18 @@ internal abstract class Expression
             ? unresolved.Mark(promoted)
             : promoted;
     }
+
+    /// <summary>
+    /// Whether unifying <paramref name="arm"/> onto <paramref name="promoted"/>
+    /// inserts a conversion real reports as nullable — one that could alter the
+    /// value. The CASE family and <c>GREATEST</c> / <c>LEAST</c> apply this to
+    /// each surviving value arm on top of the arm's own nullability; an untyped
+    /// <c>NULL</c> arm carries no value to convert and is skipped. See
+    /// <see cref="SqlType.ConversionPreservesEveryValue"/> for the rule and
+    /// <see cref="ResultIsNullable"/> for the family it belongs to.
+    /// </summary>
+    private protected static bool ArmConversionIsNullable(Expression arm, SqlType promoted, NullabilityContext context) =>
+        !IsUntypedNullLiteral(arm) && !SqlType.ConversionPreservesEveryValue(context.TypeOf(arm), promoted);
 
     /// <summary>
     /// Visits every <see cref="Reference"/> node in this expression's tree,

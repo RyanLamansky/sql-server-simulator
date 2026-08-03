@@ -1,6 +1,5 @@
 using System.Text;
 using System.Xml;
-using System.Xml.Linq;
 using System.Xml.XPath;
 
 namespace SqlServerSimulator.Storage;
@@ -46,7 +45,22 @@ internal static class XmlQueryEngine
     public static XmlQueryExpr Compile(string xquery, string method)
     {
         var (defaultNamespace, prefixes, body) = ParsePrologAndBody(xquery);
-        var compiled = CompileBody(body, defaultNamespace, prefixes, method);
+        if (body.Length == 0)
+            throw SimulatedSqlException.XQueryExpressionMissing();
+        var parser = new XmlQueryParser(body, defaultNamespace, prefixes, method);
+        var compiled = parser.ParseBody();
+
+        // A node constructor is legal in query() and exist(), which hand the
+        // node on, and refused by the two that would have to look inside it —
+        // value() atomizes and nodes() addresses (probe-confirmed, each with
+        // its own wording).
+        if (parser.ConstructsXml)
+        {
+            if (method.Equals("value", StringComparison.Ordinal))
+                throw SimulatedSqlException.XQueryConstructedXmlNotSupported(method, "data()");
+            if (method.Equals("nodes", StringComparison.Ordinal))
+                throw SimulatedSqlException.XQueryConstructedXmlNotSupported(method, "'nodes()'");
+        }
 
         // value() takes the first item of its result, but only where real types
         // the expression as at most one item — `(…)[1]` or an attribute step,
@@ -130,10 +144,12 @@ internal static class XmlQueryEngine
 
     /// <summary>
     /// Runs <paramref name="compiled"/> against the parsed instance, with the
-    /// document element as the context item.
+    /// context item <see cref="XmlInstance.CreateReadNavigator"/> picks — the
+    /// document element of a single-root instance, the fragment's root node
+    /// otherwise.
     /// </summary>
     public static List<object> Select(string xmlText, XmlQueryExpr compiled) =>
-        Select(XDocument.Parse(xmlText).Root!.CreateNavigator(), compiled);
+        Select(XmlInstance.CreateReadNavigator(xmlText), compiled);
 
     /// <summary>Runs <paramref name="compiled"/> from an existing context node.</summary>
     public static List<object> Select(XPathNavigator context, XmlQueryExpr compiled) =>
@@ -152,6 +168,30 @@ internal static class XmlQueryEngine
         var text = new StringBuilder();
         AppendNode(text, node, isFragmentRoot: true);
         return text.ToString();
+    }
+
+    /// <summary>
+    /// Splices a sequence into a constructor's markup. In element content a
+    /// node contributes its own markup and an atomic value its escaped text,
+    /// adjacent atomics separated by a single space; in an attribute value
+    /// everything atomizes, since an attribute can't hold nodes.
+    /// </summary>
+    internal static void AppendSequence(StringBuilder text, List<object> items, bool isAttribute)
+    {
+        var previousWasAtomic = false;
+        foreach (var item in items)
+        {
+            if (!isAttribute && item is XPathNavigator node)
+            {
+                AppendNode(text, node, isFragmentRoot: true);
+                previousWasAtomic = false;
+                continue;
+            }
+            if (previousWasAtomic)
+                _ = text.Append(' ');
+            Parser.Selection.AppendForXmlText(text, XmlQueryValues.StringValue(item), isAttribute);
+            previousWasAtomic = true;
+        }
     }
 
     private static void AppendNode(StringBuilder text, XPathNavigator node, bool isFragmentRoot)
@@ -174,6 +214,19 @@ internal static class XmlQueryEngine
                 return;
             case XPathNodeType.Element:
                 break;
+            case XPathNodeType.Root:
+                // The instance's own root, which `/` and a `..` off a top-level
+                // node reach: real serializes its content, so a fragment comes
+                // back as the several top-level nodes it holds.
+                var top = node.Clone();
+                if (!top.MoveToFirstChild())
+                    return;
+                do
+                {
+                    AppendNode(text, top, isFragmentRoot: true);
+                }
+                while (top.MoveToNext());
+                return;
             default:
                 Parser.Selection.AppendForXmlText(text, node.Value, isAttribute: false);
                 return;

@@ -23,6 +23,7 @@ An inline `PRIMARY KEY` beside an inline `UNIQUE` is **Msg 8151** (`Both a PRIMA
 Both fire wherever a column definition is parsed: CREATE TABLE, `DECLARE @t TABLE` (the message names `@t`), `CREATE TYPE … AS TABLE`, `ALTER TABLE … ADD <column>`, and the inline tail of a **persisted computed column**.
 
 The restriction is on the column *definition* only — a table-level `CHECK` over a column that already carries an inline one is legal, as is a later `ALTER TABLE … ADD CHECK`, and a `DEFAULT` pairs with a `CHECK` freely.
+Clauses of *different* kinds compose in any order and either naming, so a column may carry an unnamed `UNIQUE` followed by a `CONSTRAINT ck CHECK (…)` — the shape Django's schema editor emits for a field that is both `unique=True` and constrained.
 All probe-confirmed against SQL Server 2025.
 
 **Divergence**: the message names the table by the leaf the parser carries, where real echoes the name as written (`table 'dbo.t'` for a schema-qualified CREATE) — shared with the sibling column-definition errors (Msg 8141 / 8147).

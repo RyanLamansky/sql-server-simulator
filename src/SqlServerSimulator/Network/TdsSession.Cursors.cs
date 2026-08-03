@@ -210,6 +210,10 @@ internal sealed partial class TdsSession
 #pragma warning disable CA2100 // This IS a SQL endpoint: the statement is the client's query by design.
             command.CommandText = declareOpen;
 #pragma warning restore CA2100
+            // An API server cursor keeps KEYSET over a table with no unique
+            // index where a T-SQL one converts to a read-only snapshot
+            // (probe-confirmed), so the synthesized DECLARE says which it is.
+            command.ApiServerCursor = true;
             foreach (var wire in boundParameters)
                 _ = AddParameter(command, wire);
             _ = command.ExecuteNonQuery();

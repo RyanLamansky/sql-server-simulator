@@ -61,11 +61,34 @@ internal sealed class XmlUntypedAtomic(string text)
 }
 
 /// <summary>
+/// The <c>$</c>-variable bindings live for one evaluation of one compiled
+/// expression. A compiled tree is shared across rows and sessions, so a
+/// binding can't live on the tree; it lives here, reached through the
+/// evaluation frame, and each <c>for</c> / <c>let</c> / quantified binding owns
+/// a slot the parser assigned it.
+/// </summary>
+internal sealed class XmlVariableScope
+{
+    private List<object>?[] slots = [];
+
+    /// <summary>The sequence bound to <paramref name="slot"/>.</summary>
+    public List<object> Read(int slot) => this.slots[slot]!;
+
+    /// <summary>Binds <paramref name="value"/> to <paramref name="slot"/>.</summary>
+    public void Write(int slot, List<object> value)
+    {
+        if (slot >= this.slots.Length)
+            Array.Resize(ref this.slots, slot + 4);
+        this.slots[slot] = value;
+    }
+}
+
+/// <summary>
 /// One evaluation frame: the context item plus its position within the
 /// sequence the enclosing step produced, which <c>position()</c> / <c>last()</c>
-/// and a positional predicate read.
+/// and a positional predicate read, and the variable bindings in scope.
 /// </summary>
-internal readonly struct XmlQueryFrame(XPathNavigator context, int position, int size)
+internal readonly struct XmlQueryFrame(XPathNavigator context, int position, int size, XmlVariableScope? variables = null)
 {
     /// <summary>The context item.</summary>
     public readonly XPathNavigator Context = context;
@@ -75,6 +98,12 @@ internal readonly struct XmlQueryFrame(XPathNavigator context, int position, int
 
     /// <summary>Length of the sequence <see cref="Context"/> came from.</summary>
     public readonly int Size = size;
+
+    /// <summary>
+    /// The bindings in scope, allocated by the outermost binding construct and
+    /// shared by every frame below it; null while no variable is bound.
+    /// </summary>
+    public readonly XmlVariableScope? Variables = variables;
 }
 
 /// <summary>
@@ -189,7 +218,7 @@ internal sealed class XmlFilterExpr(XmlQueryExpr source, XmlQueryExpr[] predicat
     public override void Evaluate(in XmlQueryFrame frame, List<object> results)
     {
         var items = this.source.Evaluate(frame);
-        XmlStep.ApplyPredicates(items, this.predicates, results);
+        XmlStep.ApplyPredicates(items, this.predicates, results, frame.Variables);
     }
 
     public override string NodeTypeBase() => this.source.NodeTypeBase();
@@ -219,7 +248,7 @@ internal sealed class XmlPathExpr(XmlQueryExpr start, XmlStep[] steps)
         foreach (var step in this.steps)
         {
             var next = new List<object>();
-            step.Evaluate(current, next);
+            step.Evaluate(current, next, frame.Variables);
             current = next;
         }
         results.AddRange(current);
@@ -342,7 +371,7 @@ internal sealed class XmlStep(
     };
 
     /// <summary>Runs the step over every item in <paramref name="context"/>.</summary>
-    public void Evaluate(List<object> context, List<object> results)
+    public void Evaluate(List<object> context, List<object> results, XmlVariableScope? variables)
     {
         var start = results.Count;
         var matched = new List<object>();
@@ -355,7 +384,7 @@ internal sealed class XmlStep(
             if (this.predicates.Length == 0)
                 results.AddRange(matched);
             else
-                ApplyPredicates(matched, this.predicates, results);
+                ApplyPredicates(matched, this.predicates, results, variables);
         }
 
         if (context.Count > 1)
@@ -424,7 +453,7 @@ internal sealed class XmlStep(
     /// <c>[@x="1"][2]</c> takes the second match while <c>[2][@x="1"]</c> tests
     /// the second item.
     /// </summary>
-    public static void ApplyPredicates(List<object> items, XmlQueryExpr[] predicates, List<object> results)
+    public static void ApplyPredicates(List<object> items, XmlQueryExpr[] predicates, List<object> results, XmlVariableScope? variables)
     {
         var current = items;
         foreach (var predicate in predicates)
@@ -432,7 +461,7 @@ internal sealed class XmlStep(
             var kept = new List<object>();
             for (var i = 0; i < current.Count; i++)
             {
-                var frame = new XmlQueryFrame(current[i] as XPathNavigator ?? EmptyNavigator, i + 1, current.Count);
+                var frame = new XmlQueryFrame(current[i] as XPathNavigator ?? EmptyNavigator, i + 1, current.Count, variables);
                 if (XmlQueryValues.PredicateHolds(predicate, frame))
                     kept.Add(current[i]);
             }
@@ -600,11 +629,307 @@ internal sealed class XmlArithmeticExpr(XmlQueryExpr left, XmlQueryExpr? right, 
     }
 }
 
+/// <summary>
+/// One <c>for</c> / <c>let</c> / quantified binding: the slot the binding
+/// construct writes per iteration and the static type its <c>$</c>-references
+/// carry. A <c>for</c> binds one item at a time, so its variable is exactly one
+/// item whatever the binding sequence's cardinality; a <c>let</c> binds the
+/// whole sequence once and its variable carries that sequence's type as-is
+/// (probe-confirmed: <c>let $i := /r/a return string($i)</c> is Msg 2389).
+/// </summary>
+internal sealed class XmlVariableBinding(string name, int slot, XmlQueryExpr source, bool perItem)
+{
+    /// <summary>The name as written, without the <c>$</c>.</summary>
+    public readonly string Name = name;
+
+    /// <summary>Index into the evaluation's <see cref="XmlVariableScope"/>.</summary>
+    public readonly int Slot = slot;
+
+    /// <summary>The binding sequence.</summary>
+    public readonly XmlQueryExpr Source = source;
+
+    /// <summary>Whether the binding iterates (<c>for</c>) rather than binding the whole sequence (<c>let</c>).</summary>
+    public readonly bool PerItem = perItem;
+
+    /// <summary>Static item kind a reference to this variable carries.</summary>
+    public readonly XmlStaticKind Kind = source.Kind;
+
+    /// <summary>Static cardinality a reference to this variable carries.</summary>
+    public readonly XmlOccurrence Occurrence = perItem ? XmlOccurrence.ExactlyOne : source.Occurrence;
+
+    /// <summary>Atomized type name a reference to this variable carries.</summary>
+    public readonly string TypeName = source.TypeName;
+
+    /// <summary>Un-suffixed node-form type name a reference to this variable carries.</summary>
+    public readonly string NodeType = source.NodeTypeBase();
+}
+
+/// <summary>A <c>$</c>-variable reference, resolved to its binding at compile time.</summary>
+internal sealed class XmlVariableRefExpr(XmlVariableBinding binding)
+    : XmlQueryExpr(binding.Kind, binding.Occurrence, binding.TypeName)
+{
+    private readonly XmlVariableBinding binding = binding;
+
+    public override void Evaluate(in XmlQueryFrame frame, List<object> results) =>
+        results.AddRange(frame.Variables!.Read(this.binding.Slot));
+
+    public override string NodeTypeBase() => this.binding.NodeType;
+}
+
+/// <summary>One <c>order by</c> item: its key expression and its direction.</summary>
+internal sealed class XmlOrderSpec(XmlQueryExpr key, bool descending)
+{
+    /// <summary>The sort key, evaluated once per tuple.</summary>
+    public readonly XmlQueryExpr Key = key;
+
+    /// <summary>Whether the item carried <c>descending</c>.</summary>
+    public readonly bool Descending = descending;
+
+    /// <summary>
+    /// Whether the key compares numerically. Real compares an untyped key by
+    /// code point — <c>"10"</c> sorts before <c>"2"</c> — and only a key it
+    /// types as a number numerically (probe-confirmed).
+    /// </summary>
+    public readonly bool Numeric = key.Kind == XmlStaticKind.Number;
+}
+
+/// <summary>
+/// One tuple the <c>for</c> / <c>let</c> clauses produced, held back until the
+/// whole stream is known because an <c>order by</c> has to sort it.
+/// </summary>
+internal sealed class XmlFlworTuple(object?[] keys, List<object>[] bindings, int ordinal)
+{
+    /// <summary>The evaluated sort keys, one per <c>order by</c> item; null where the key was empty.</summary>
+    public readonly object?[] Keys = keys;
+
+    /// <summary>The bound sequences, one per binding, restored before the return clause runs.</summary>
+    public readonly List<object>[] Bindings = bindings;
+
+    /// <summary>Position in the unsorted stream, which keeps the sort stable.</summary>
+    public readonly int Ordinal = ordinal;
+}
+
+/// <summary>
+/// A FLWOR expression. The result keeps iteration order and every duplicate —
+/// it is not folded into document order the way a path step's output is
+/// (probe-confirmed: <c>for $i in /r/a return /r/b</c> answers the same
+/// <c>b</c> once per <c>a</c>).
+/// </summary>
+internal sealed class XmlFlworExpr(
+    XmlVariableBinding[] bindings,
+    XmlQueryExpr? where,
+    XmlOrderSpec[] orderBy,
+    XmlQueryExpr body)
+    : XmlQueryExpr(body.Kind, FlworOccurrence(bindings, body), body.TypeName)
+{
+    private readonly XmlVariableBinding[] bindings = bindings;
+    private readonly XmlQueryExpr? where = where;
+    private readonly XmlOrderSpec[] orderBy = orderBy;
+    private readonly XmlQueryExpr body = body;
+
+    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    {
+        var scope = frame.Variables ?? new XmlVariableScope();
+        var inner = new XmlQueryFrame(frame.Context, frame.Position, frame.Size, scope);
+        if (this.orderBy.Length == 0)
+        {
+            this.Bind(0, inner, scope, results, null);
+            return;
+        }
+
+        var tuples = new List<XmlFlworTuple>();
+        this.Bind(0, inner, scope, results, tuples);
+        tuples.Sort(this.Compare);
+        foreach (var tuple in tuples)
+        {
+            for (var i = 0; i < this.bindings.Length; i++)
+                scope.Write(this.bindings[i].Slot, tuple.Bindings[i]);
+            this.body.Evaluate(inner, results);
+        }
+    }
+
+    public override string NodeTypeBase() => this.body.NodeTypeBase();
+
+    /// <summary>
+    /// Cardinality multiplies along the <c>for</c> bindings — each iterates —
+    /// while a <c>let</c> binds once and a <c>where</c> doesn't narrow the
+    /// static type (probe-confirmed).
+    /// </summary>
+    private static XmlOccurrence FlworOccurrence(XmlVariableBinding[] bindings, XmlQueryExpr body)
+    {
+        var occurrence = body.Occurrence;
+        foreach (var binding in bindings)
+        {
+            if (binding.PerItem)
+                occurrence = Combine(occurrence, binding.Source.Occurrence);
+        }
+        return occurrence;
+    }
+
+    /// <summary>
+    /// Walks the binding clauses, producing one tuple per combination. With no
+    /// <c>order by</c> the return clause runs inline; with one, the tuple is
+    /// captured and the return clause waits for the sort.
+    /// </summary>
+    private void Bind(int index, in XmlQueryFrame frame, XmlVariableScope scope, List<object> results, List<XmlFlworTuple>? tuples)
+    {
+        if (index == this.bindings.Length)
+        {
+            if (this.where is not null && !XmlQueryValues.EffectiveBoolean(this.where.Evaluate(frame)))
+                return;
+            if (tuples is null)
+            {
+                this.body.Evaluate(frame, results);
+                return;
+            }
+
+            var keys = new object?[this.orderBy.Length];
+            for (var i = 0; i < this.orderBy.Length; i++)
+            {
+                var key = this.orderBy[i].Key.Evaluate(frame);
+                keys[i] = key.Count == 0 ? null : XmlQueryValues.Atomize(key[0]);
+            }
+            var snapshot = new List<object>[this.bindings.Length];
+            for (var i = 0; i < this.bindings.Length; i++)
+                snapshot[i] = scope.Read(this.bindings[i].Slot);
+            tuples.Add(new XmlFlworTuple(keys, snapshot, tuples.Count));
+            return;
+        }
+
+        var binding = this.bindings[index];
+        var items = binding.Source.Evaluate(frame);
+        if (!binding.PerItem)
+        {
+            scope.Write(binding.Slot, items);
+            this.Bind(index + 1, frame, scope, results, tuples);
+            return;
+        }
+        foreach (var item in items)
+        {
+            scope.Write(binding.Slot, [item]);
+            this.Bind(index + 1, frame, scope, results, tuples);
+        }
+    }
+
+    /// <summary>
+    /// Orders two tuples. An empty key sorts first ascending — real's default
+    /// is <c>empty least</c>, and <c>descending</c> reverses the comparison so
+    /// it lands last (probe-confirmed) — and the stream position breaks ties,
+    /// which is what makes the sort stable.
+    /// </summary>
+    private int Compare(XmlFlworTuple left, XmlFlworTuple right)
+    {
+        for (var i = 0; i < this.orderBy.Length; i++)
+        {
+            var spec = this.orderBy[i];
+            var comparison = CompareKeys(left.Keys[i], right.Keys[i], spec.Numeric);
+            if (comparison != 0)
+                return spec.Descending ? -comparison : comparison;
+        }
+        return left.Ordinal.CompareTo(right.Ordinal);
+    }
+
+    private static int CompareKeys(object? left, object? right, bool numeric) =>
+        left is null || right is null
+            ? left is null ? (right is null ? 0 : -1) : 1
+            : numeric
+                ? XmlQueryValues.ToNumber(left).CompareTo(XmlQueryValues.ToNumber(right))
+                : string.CompareOrdinal(XmlQueryValues.StringValue(left), XmlQueryValues.StringValue(right));
+}
+
+/// <summary>
+/// <c>some $v in … satisfies …</c> / <c>every $v in … satisfies …</c>. An empty
+/// binding sequence makes <c>some</c> false and <c>every</c> true
+/// (probe-confirmed).
+/// </summary>
+internal sealed class XmlQuantifiedExpr(XmlVariableBinding[] bindings, XmlQueryExpr satisfies, bool isEvery)
+    : XmlQueryExpr(XmlStaticKind.Boolean, XmlOccurrence.ExactlyOne, "xs:boolean")
+{
+    private readonly XmlVariableBinding[] bindings = bindings;
+    private readonly XmlQueryExpr satisfies = satisfies;
+    private readonly bool isEvery = isEvery;
+
+    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    {
+        var scope = frame.Variables ?? new XmlVariableScope();
+        var inner = new XmlQueryFrame(frame.Context, frame.Position, frame.Size, scope);
+        results.Add(this.Test(0, inner, scope));
+    }
+
+    private bool Test(int index, in XmlQueryFrame frame, XmlVariableScope scope)
+    {
+        if (index == this.bindings.Length)
+            return XmlQueryValues.EffectiveBoolean(this.satisfies.Evaluate(frame));
+
+        var binding = this.bindings[index];
+        foreach (var item in binding.Source.Evaluate(frame))
+        {
+            scope.Write(binding.Slot, [item]);
+
+            // some stops at the first tuple that holds, every at the first that
+            // doesn't; either way the decisive answer is the one to report.
+            var held = this.Test(index + 1, frame, scope);
+            if (held != this.isEvery)
+                return held;
+        }
+        return this.isEvery;
+    }
+}
+
+/// <summary><c>if (…) then … else …</c>; XQuery's <c>else</c> is mandatory.</summary>
+internal sealed class XmlConditionalExpr(XmlQueryExpr condition, XmlQueryExpr thenBranch, XmlQueryExpr elseBranch)
+    : XmlQueryExpr(thenBranch.Kind, Combine(thenBranch.Occurrence, elseBranch.Occurrence), thenBranch.TypeName)
+{
+    private readonly XmlQueryExpr condition = condition;
+    private readonly XmlQueryExpr thenBranch = thenBranch;
+    private readonly XmlQueryExpr elseBranch = elseBranch;
+
+    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    {
+        var taken = XmlQueryValues.EffectiveBoolean(this.condition.Evaluate(frame)) ? this.thenBranch : this.elseBranch;
+        taken.Evaluate(frame, results);
+    }
+
+    public override string NodeTypeBase() => this.thenBranch.NodeTypeBase();
+}
+
+/// <summary>
+/// A direct element constructor, held as the literal markup segments the
+/// <c>{…}</c> enclosed expressions sit between. Each evaluation splices the
+/// evaluated sequences in — as markup in element content, as text in an
+/// attribute value — and parses the result, so the constructed node serializes
+/// like any other.
+/// </summary>
+internal sealed class XmlConstructedNodeExpr(string[] literals, XmlQueryExpr[] enclosed, bool[] inAttribute, string elementName)
+    : XmlQueryExpr(XmlStaticKind.Node, XmlOccurrence.ExactlyOne, "xdt:untypedAtomic")
+{
+    private readonly string[] literals = literals;
+    private readonly XmlQueryExpr[] enclosed = enclosed;
+    private readonly bool[] inAttribute = inAttribute;
+    private readonly string elementName = elementName;
+
+    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    {
+        var text = new System.Text.StringBuilder(this.literals[0]);
+        for (var i = 0; i < this.enclosed.Length; i++)
+        {
+            XmlQueryEngine.AppendSequence(text, this.enclosed[i].Evaluate(frame), this.inAttribute[i]);
+            _ = text.Append(this.literals[i + 1]);
+        }
+        results.Add(System.Xml.Linq.XDocument.Parse(text.ToString()).Root!.CreateNavigator());
+    }
+
+    public override string NodeTypeBase() => $"element({this.elementName},xdt:untyped)";
+}
+
 /// <summary>What a function parameter admits, and therefore what it diagnoses.</summary>
 internal enum XmlArgumentRule
 {
-    /// <summary>Any sequence — <c>count()</c>, <c>sum()</c>, <c>not()</c>.</summary>
+    /// <summary>Any sequence — <c>count()</c>, <c>sum()</c>, <c>empty()</c>.</summary>
     Sequence,
+
+    /// <summary>A condition: a non-boolean, non-node argument is Msg 2204 (<c>not()</c>).</summary>
+    Condition,
 
     /// <summary>An atomic type: a plural argument is Msg 2389 quoting the atomized type.</summary>
     Atomic,

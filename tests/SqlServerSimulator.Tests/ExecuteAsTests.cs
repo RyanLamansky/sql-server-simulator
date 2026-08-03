@@ -4,8 +4,9 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// Session-principal identity: <c>EXECUTE AS</c> / <c>REVERT</c> impersonation
-/// (database users, logins, the missing-target and dbo-quirk error paths, the
-/// nested-impersonation IMPERSONATE gate), the identity scalars under
+/// (database users, logins, the missing-target error path, the
+/// nested-impersonation IMPERSONATE gate that <c>dbo</c> takes like any other
+/// target), the identity scalars under
 /// impersonation, <c>CREATE USER … FOR LOGIN</c> / <c>WITHOUT LOGIN</c> linkage,
 /// module <c>WITH EXECUTE AS</c>, and the restricted-principal Msg 916 gate.
 /// Stage 1 is identity only — no permission enforcement.
@@ -80,9 +81,61 @@ public sealed class ExecuteAsTests
             "execute as user = 'ghost'; select 1", 15517,
             "Cannot execute as the database principal because the principal \"ghost\" does not exist, this type of principal cannot be impersonated, or you do not have permission.");
 
+    // ---- EXECUTE AS USER = 'dbo' takes the ordinary IMPERSONATE gate ----
+    // Probe-confirmed against SQL Server 2025 on two instances: a session that
+    // holds IMPERSONATE on dbo — a sysadmin, a db_owner member, or an explicit
+    // grantee — impersonates it successfully, and only a principal holding none
+    // of that gets Msg 15517.
+
     [TestMethod]
-    public void ExecuteAsUser_Dbo_AlwaysRaises15517()
-        => new Simulation().AssertSqlError("execute as user = 'dbo'; select 1", 15517);
+    public void ExecuteAsUser_Dbo_FromDboSession_Succeeds()
+        => AreEqual("dbo|dbo", new Simulation().ExecuteScalar(
+            "execute as user = 'dbo'; select current_user + '|' + system_user"));
+
+    [TestMethod]
+    public void ExecuteAsUser_Dbo_WithoutImpersonateGrant_Raises15517()
+        => new Simulation().AssertSqlError("""
+            create user a without login;
+            execute as user = 'a';
+            execute as user = 'dbo';
+            select 1
+            """, 15517,
+            "Cannot execute as the database principal because the principal \"dbo\" does not exist, this type of principal cannot be impersonated, or you do not have permission.");
+
+    [TestMethod]
+    public void ExecuteAsUser_Dbo_WithImpersonateGrant_Succeeds()
+        => AreEqual("a|dbo", new Simulation().ExecuteScalar("""
+            create user a without login;
+            grant impersonate on user::dbo to a;
+            declare @out nvarchar(200);
+            execute as user = 'a';
+            set @out = current_user;
+            execute as user = 'dbo';
+            select @out + '|' + current_user
+            """));
+
+    [TestMethod]
+    public void ExecuteAsUser_Dbo_ByDbOwnerMember_Succeeds()
+        => AreEqual("dbo", new Simulation().ExecuteScalar("""
+            create user a without login;
+            alter role db_owner add member a;
+            execute as user = 'a';
+            execute as user = 'dbo';
+            select current_user
+            """));
+
+    [TestMethod]
+    public void ExecuteAsUser_Dbo_FrameIsDatabaseScoped_CrossDatabaseRaises916()
+    {
+        // The token carries no server principal, so it reaches another database
+        // only out of a TRUSTWORTHY source — real narrows even an `sa` session
+        // this way (probe-confirmed).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create database other");
+        _ = sim.ExecuteNonQuery("use other; create table dbo.t (id int not null); insert dbo.t values (1)");
+        var ex = sim.AssertSqlError("execute as user = 'dbo'; select id from other.dbo.t", 916);
+        AreEqual("The server principal \"dbo\" is not able to access the database \"other\" under the current security context.", ex.Message);
+    }
 
     [TestMethod]
     public void NestedImpersonation_ByNonDbo_WithoutImpersonateGrant_Raises15517()

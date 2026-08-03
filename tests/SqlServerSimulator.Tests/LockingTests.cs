@@ -171,6 +171,86 @@ public sealed class LockingTests
     }
 
     [TestMethod]
+    public async Task NoWaitHint_ConflictingRowRaisesMsg1222()
+    {
+        // NOWAIT is real's "SET LOCK_TIMEOUT 0 for a specific table": the
+        // conflicting row-U acquire fails fast instead of waiting. This is
+        // the shape mssql-django emits for `select_for_update(nowait=True)`
+        // — WITH (NOWAIT, ROWLOCK, UPDLOCK).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int, v int); insert t values (1, 1)");
+        using var writer = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = writer.CreateCommand("begin tran; update t set v = 2 where id = 1").ExecuteNonQuery();
+
+        var ex = await Task.Run(() =>
+            Throws<DbException>(() =>
+                reader.CreateCommand("select v from t with (nowait, rowlock, updlock) where id = 1").ExecuteScalar()),
+            TestContext.CancellationToken);
+        AreEqual("1222", ex.Data["HelpLink.EvtID"]);
+
+        _ = writer.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public async Task NoWaitHint_ScopedToItsOwnTable()
+    {
+        // The hint names one table, so a second source in the same statement
+        // keeps the session's own (infinite) timeout and waits.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table a (id int, v int);
+            create table b (id int, v int);
+            insert a values (1, 1);
+            insert b values (1, 1)
+            """);
+        using var writer = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = writer.CreateCommand("begin tran; update b set v = 2 where id = 1").ExecuteNonQuery();
+
+        var readerStarted = new ManualResetEventSlim();
+        var readerResult = (object?)null;
+        var readerTask = Task.Run(() =>
+        {
+            readerStarted.Set();
+            readerResult = reader.CreateCommand(
+                "select b.v from a with (nowait, updlock) join b on b.id = a.id").ExecuteScalar();
+        }, TestContext.CancellationToken);
+
+        IsTrue(readerStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
+        await Task.Delay(100, TestContext.CancellationToken);
+        IsNull(readerResult);
+
+        _ = writer.CreateCommand("commit tran").ExecuteNonQuery();
+        await readerTask;
+        AreEqual(2, readerResult);
+    }
+
+    [TestMethod]
+    public async Task ReadPastWithUpdLock_SkipsRowHeldByAnotherTransaction()
+    {
+        // READPAST beside UPDLOCK leaves out the rows another transaction
+        // holds — mssql-django's `select_for_update(skip_locked=True)` shape.
+        // The holder's mode is row-U, not row-X, so the reader has to probe
+        // for its own requested mode rather than for a writer.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int); insert t values (1, 1), (2, 2)");
+        using var holder = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; update t set v = 9 where id = 1").ExecuteNonQuery();
+
+        var readValue = await Task.Run(() =>
+            reader.CreateCommand("select sum(id) from t with (rowlock, updlock, readpast)").ExecuteScalar(),
+            TestContext.CancellationToken);
+        AreEqual(2, readValue);
+
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    [TestMethod]
     public async Task NoLockHint_ReadsThroughUncommittedX()
     {
         // NOLOCK skips S acquisition entirely → reader sees the

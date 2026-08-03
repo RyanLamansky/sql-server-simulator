@@ -468,24 +468,6 @@ public sealed class SpatialPredicateTests
     public void GeographyOnlyRejectsTheGeometryOnlyPredicates(string member)
         => _ = new Simulation().AssertSqlError($"select geography::Parse('POINT(0 0)').{member}", 6506);
 
-    /// <summary>
-    /// The predicates real does expose on <c>geography</c> need round-earth
-    /// topology and stay unmodeled, naming themselves in the failure.
-    /// </summary>
-    [TestMethod]
-    [DataRow("STIntersects(geography::Parse('POINT(0 0)'))")]
-    [DataRow("STContains(geography::Parse('POINT(0 0)'))")]
-    [DataRow("STWithin(geography::Parse('POINT(0 0)'))")]
-    [DataRow("STDisjoint(geography::Parse('POINT(0 0)'))")]
-    [DataRow("STEquals(geography::Parse('POINT(0 0)'))")]
-    [DataRow("STOverlaps(geography::Parse('POINT(0 0)'))")]
-    [DataRow("STIsValid()")]
-    public void GeographyPredicates_AreNotModeled(string member)
-    {
-        var ex = Throws<NotSupportedException>(() => _ = Eval($"geography::Parse('POINT(0 0)').{member}"));
-        Assert.Contains("geography", ex.Message);
-    }
-
     /// <summary>A predicate over a stored column reaches the same engine as one over a literal.</summary>
     [TestMethod]
     public void PredicateOverStoredColumn_Evaluates()

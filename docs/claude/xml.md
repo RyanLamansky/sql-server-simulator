@@ -19,6 +19,25 @@ Type identity preserved through `sys.columns.user_type_id` / `sys.types`.
 **`HeapColumn.XmlSchemaCollection`** — nullable ref linking xml columns to their collection.
 Metadata only; the simulator does **not** validate xml payloads against the XSD.
 
+### The value model: documents and fragments
+
+SQL Server's `xml` is CONTENT-typed, so an instance is not required to be a document: `CAST('<a/><b/>' AS xml)`, `CAST('<a>1</a>tail' AS xml)` and `CAST('abc' AS xml)` are all legal, and a `FOR XML …, TYPE` result routinely carries several top-level elements.
+`Storage/XmlInstance.cs` is the single parse seam both the read methods and `.modify()` enter through, and it admits every one of those shapes.
+
+| instance | context item for a relative path | root of an absolute path |
+|---|---|---|
+| one top-level element, no top-level text | that element | the document node |
+| anything else (several elements, top-level text, empty) | the fragment's root node | the same root node |
+
+The fragment row is real's own rule — real's context item is the *document node* for every instance — so `/a` reaches a top-level element of `'<a/><b/>'`, `/text()` reaches the top-level text of `'<a>1</a>tail'`, and `/` and `/a/..` both serialize the whole content.
+The document row is the simulator's, and it is what makes a `.nodes()` row work: each row is one node's serialized outer XML, re-parsed as its own instance, so a downstream relative `.value('@x')` has to resolve against that element rather than above it (real hands the row a node reference instead, and its relative reads land the same way).
+The divergence shows only where a relative path is written against a single-root instance directly — `@x.query('a')` over `<r><a/></r>` selects the `a` where real selects nothing.
+
+Whitespace-only text between top-level nodes is insignificant and dropped, and an XML declaration is dropped, both matching real; text carrying anything else keeps its surrounding spaces (`'<a/> x <b/>'` round-trips as written).
+That normalization is the *evaluator's* — an `xml` payload is stored verbatim, so it becomes visible only on the `.modify()` round trip.
+
+`.modify()` edits a mutable container (`XmlInstance.CreateMutableContainer`) whose children are the instance's top-level nodes, which is what lets an edit *produce* a fragment: `insert <b/> after (/r)[1]` on `<r/>` answers `<r/><b/>` and `insert <c/> into (/)[1]` on `<a/>` answers `<a/><c/>`, both as on real.
+
 **`HeapTable.XmlIndexes`** — `List<XmlIndex>`.
 `XmlIndex` carries name + columnOrdinal + isPrimary + `UsingPrimaryIndexName` (for secondary) + nullable `SecondaryType` (PATH / VALUE / PROPERTY) + ObjectId + `InternalTableObjectId` (allocated per **primary** index at CREATE — see the internal node-table surface below; 0 for secondaries).
 
@@ -72,7 +91,8 @@ CREATE XML INDEX name ON table(col)
 `Storage/XmlQueryParser.cs` compiles the expression, `Storage/XmlQueryExpression.cs` is the tree it builds and evaluates, and `Storage/XmlQueryEngine.cs` is the front door the four read methods and `.modify()`'s target paths enter through.
 
 The argument is a compile-time literal everywhere, so **an expression compiles once while the SQL statement parses** — which is also where SQL Server settles its static XQuery diagnostics, so those fire there too and over an empty rowset.
-Evaluation walks an `XPathNavigator` over the parsed instance, positioned on the **document element**: a relative path (`Edu.Level`) resolves against that element while an absolute path (`/Resume/…`) resolves from the document root — the dual behavior `.nodes()`-serialized node references rely on.
+Evaluation walks an `XPathNavigator` over the parsed instance, positioned on the context item [the value model](#the-value-model-documents-and-fragments) picks: the **document element** of a single-root instance — so a relative path (`Edu.Level`) resolves against that element while an absolute path (`/Resume/…`) resolves from the document root, the dual behavior `.nodes()`-serialized node references rely on — and a fragment's own root node otherwise.
+An empty or whitespace-only argument is **Msg 6306** (`Invalid XQuery expression passed to XML data type method.`) in every method, `.modify()` included.
 
 ### The XQuery subset
 
@@ -113,12 +133,76 @@ Evaluation walks an `XPathNavigator` over the parsed instance, positioned on the
 - **Value comparisons** `eq` `ne` `lt` `le` `gt` `ge` — the same type rules over singletons, with real's **static** cardinality check in front (below).
   An empty operand answers the empty sequence, which a predicate reads as no match.
 - **`and` / `or` / `not()`** over effective boolean values, `and` binding tighter, parentheses available.
+  Their operands take the [condition type gate](#conditions-and-the-msg-2204-gate).
 - **Arithmetic** `+` `-` `*` `div` `idiv` `mod` and unary minus.
   XQuery's name grammar swallows a `-` that follows a name character, so `@n-1` reads the attribute named `n-1` and a subtraction needs a space — real's own behavior.
-- **Parenthesized sequences** `(a, b)`, the empty sequence `()`, and a positional predicate over either (`(act:telephoneNumber)[1]/act:number`).
+- **Sequences** `(a, b)`, the empty sequence `()`, and a positional predicate over either (`(act:telephoneNumber)[1]/act:number`).
+  The comma form is the grammar's own `Expr`, so it is also what the body itself and an `if` condition take — `/r/a, /r/b` is a legal `.query()` argument — while a predicate, a function argument and every FLWOR clause take a single expression, which is why `/r/a[., .]` is **Msg 9303** (`Syntax error near ',', expected ']'.`).
+- **[FLWOR, quantified and conditional expressions](#flwor-quantified-and-conditional-expressions)** and the `$`-variable references they bind.
+- **Direct element constructors** `<out a="{…}">{…}</out>` with arbitrary nesting, in `.query()` and `.exist()`.
+  An enclosed expression contributes its nodes' markup in element content and its atomized text in an attribute value; adjacent atomic items are space-separated and `{{` / `}}` are the literal-brace escapes.
+  `.value()` and `.nodes()` refuse a constructed node with **Msg 2373**, worded differently for each: `data() is not supported with constructed XML` and `'nodes()' is not supported with constructed XML`.
+  A constructor resolves its name through the [prolog](#the-xquery-subset) exactly as a path step does, so `declare default element namespace "urn:d"; <b/>` builds `<b xmlns="urn:d"/>`; a declared prefix the markup never writes isn't declared on the result, as real omits it.
+- **The computed `element name {…}` constructor**, which nests and takes the same content a direct one does (`element n {element m {1}}`, `element n {/r/a}`), and whose name resolves through the prolog the same way (an undeclared prefix is **Msg 2229**).
+  Real takes only that **constant-QName** form: a `{…}` name expression is **Msg 9315** (`Only constant expressions are supported for the name expression of computed element and attribute constructors.`) whatever it holds, a string literal included.
+  The computed comment and processing-instruction forms are real's own refusals — **Msg 9326** and **Msg 9325**, `Computed comment constructors are not supported.` / `Computed processing instruction constructors are not supported.` — in every method, `.modify()`'s insert content included.
 - **Functions**: `avg` `ceiling` `concat` `contains` `count` `data` `distinct-values` `empty` `false` `floor` `last` `local-name` `lower-case` `max` `min` `namespace-uri` `not` `number` `position` `round` `string` `string-length` `substring` `sum` `true` `upper-case`, reachable bare or through the predeclared `fn:` prefix.
   Anything else in the function namespace is **Msg 2395**, `There is no function '{http://www.w3.org/2004/07/xpath-functions}:starts-with()'` — which is what real answers for `starts-with` / `ends-with` / `normalize-space` / `translate` / `boolean` / `exists` / `abs` / `zero-or-one` too, since its library doesn't carry them either.
   Arity is part of the signature: too few arguments is **Msg 2236** (`There are not enough actual arguments in the call to function "contains()".`) and too many **Msg 2238** (`Too many arguments in call to function 'count()'` — real punctuates the two differently).
+
+### FLWOR, quantified and conditional expressions
+
+```
+for $v in <expr> [, $v in <expr>]…        let $v := <expr> [, $v := <expr>]…
+[where <expr>] [[stable] order by <expr> [ascending | descending] [, …]] return <expr>
+
+some  $v in <expr> [, …] satisfies <expr>
+every $v in <expr> [, …] satisfies <expr>
+
+if (<expr>) then <expr> else <expr>
+```
+
+The grammar SQL Server 2025 accepts, probed one form at a time:
+
+| form | |
+|---|---|
+| `for` / `let`, in any number and interleaved in either order | ships |
+| several bindings in one clause (`for $a in X, $b in Y`), a binding reading an earlier one (`$b in $a/c`) | ships |
+| `where`, `order by` with `ascending` / `descending` / several items / a leading `stable` | ships |
+| nested FLWOR, a FLWOR as a binding source, as a predicate's expression, as a `.modify()` target | ships |
+| `for $i at $p in …` (positional variable) | **Msg 9335** `'at'` |
+| `for $i as xs:string in …` (typed binding) | **Msg 9335** `'as'` |
+| `order by … empty greatest` / `empty least` / `collation "…"` | **Msg 9335** naming the whole modifier |
+
+Clause order is enforced: what follows the bindings must be `where`, `(stable) order by` or `return` — anything else is **Msg 9332** (`Syntax error near '$i', expected 'where', '(stable) order by' or 'return'.`) — and after those, anything but `return` is **Msg 9303**, which is also what a missing `then` / `else` / `satisfies` reports.
+A missing binding separator splits by construct: a quantified expression reports **Msg 9303** (`… near '/', expected 'in'.`) where a FLWOR reports **Msg 2205** (`"in" was expected.`, `":="` for a `let`).
+A `$`-reference no binding introduced is **Msg 2227**, `The variable '$nope' was not found in the scope in which it was referenced.`
+
+Semantics:
+
+- The result keeps **iteration order and every duplicate** — it is not folded into document order the way a path step's output is, so `for $i in /r/a return /r/b` answers the same `b` once per `a`.
+  Multiple bindings nest like loops (`for $a in X, $b in Y` and two consecutive `for` clauses are the same thing).
+- An **`order by` key compares by code point** unless real types it as a number, so `order by $i/@x` puts `"10"` before `"2"` while `order by number($i/@x)` doesn't.
+  An empty key sorts first (real's default is `empty least`) and `descending` reverses the comparison, putting it last; ties keep stream order.
+- `some` over an empty binding sequence is false and `every` is true; `satisfies` reads the effective boolean value.
+- XQuery's `else` is mandatory, and the branches must agree on nodes-versus-atomics (**Msg 2210** otherwise, below).
+- `position()` and `last()` read the sequence a predicate is filtering, so real refuses them anywhere else — a FLWOR's return clause included — with **Msg 2371**, `'position()' can only be used within a predicate or XPath selector`.
+
+Static cardinality follows the shape: a `for` multiplies its binding sequence's cardinality into the return clause's, a `let` binds the whole sequence once and contributes none, and a `where` narrows neither.
+So `.value('for $i in (/r/a)[1] return $i', …)` reads while `.value('for $i in /r/a return $i', …)` is Msg 2389 — and the type it quotes is the return clause's, `'xs:string *'` for `return "x"`.
+A `let` variable carries its binding's own static type, which is what makes `let $i := /r/a return string($i)` Msg 2389 quoting `'element(a,xdt:untyped) *'`.
+
+### Conditions and the Msg 2204 gate
+
+A **condition** — an `if` test, a `where`, a `satisfies` body, an `and` / `or` operand, a `not()` argument — admits only a boolean or a node sequence.
+Unlike a *predicate*, where a numeric expression is a position, a numeric condition is refused, and so is a string or an already-atomized `data(…)`:
+
+```
+XQuery [query()]: Only 'http://www.w3.org/2001/XMLSchema#boolean?' or 'node()*'
+expressions allowed in conditions and with logical operators, found 'xs:integer'
+```
+
+Real settles it statically, so it fires while the SQL statement parses and over an empty rowset, like the rest of the family.
 
 ### Static cardinality, and the Msg 2389 family
 
@@ -126,33 +210,42 @@ Real types an expression off its **shape**, never the instance, and refuses a co
 Cardinality multiplies along a path, and only a *positional* predicate narrows a step — a filtering one leaves it plural.
 So `(/r/a)[1]` and `/r[1]/a[1]` are singular while `/r/a[1]`, `/r/a[@x="1"]` and `/r/a[@x="1"][1]` are not (probe-confirmed one shape at a time).
 
-Four constructs take the check, and each reports **Msg 2389** naming the method that carried the expression:
+Five constructs take the check, and each reports **Msg 2389** naming the method that carried the expression:
 
 | construct | message |
 |---|---|
 | a value comparison | `XQuery [query()]: 'eq' requires a singleton (or empty sequence), found operand of type 'xdt:untypedAtomic *'` |
 | a function whose parameter is atomic (`contains`, `substring`, `string-length`, `upper-case`, …) | the same, naming `'contains()'` |
 | a function whose parameter is `item()?` (`string`, `local-name`, `namespace-uri`) | the same, but quoting the **node** type: `'element(b,xdt:untyped) *'` |
+| an `order by` key | the same, naming `'order by'` |
 | `.value()` itself | `XQuery [value()]: 'value()' requires a singleton (or empty sequence), found operand of type 'xdt:untypedAtomic *'` |
 
 That last row is why the `(…)[1]` wrapper is idiomatic in every `.value()` call: real refuses `/r/a[@x="1"]` even when the instance holds exactly one match.
 
+**Msg 2210** rides the same static typing: a sequence — a comma list or an `if`'s two branches — may not put nodes beside atomic values, and the message names the atomic type first whichever side wrote it (`Heterogeneous sequences are not allowed: found 'xs:string' and 'element(a,xdt:untyped) *'`).
+Two atomic types are fine, so `(1, "a")` reads.
+
 ### Not modeled yet
 
-- FLWOR (`for` / `let` / `return`), quantified (`some` / `every`) and conditional (`if`) expressions, and `$`-variable references — each raises `NotSupportedException` naming the construct rather than failing as a malformed path.
-- Element / attribute constructors in a *read* method's argument (`.modify()`'s insert content has its own constructors — see below).
+- The computed **`attribute name {…}`** and **`text {…}`** constructors in a read method (`NotSupportedException`; both ship in `.modify()`'s insert content, and the computed `element name {…}` ships in both), and the direct comment / processing-instruction forms (`<!-- c -->`, `<?pi d?>`); the direct element form ships.
+  An `attribute` constructor's value would have to be hoisted into the enclosing element's tag, which the splice-and-parse constructor model doesn't reach; real refuses one outside an element anyway (**Msg 2396**, not modeled).
+  `.modify()`'s insert content has its own constructor set — see below.
+- **An arbitrary XQuery expression inside `.modify()`'s insert content** — a `{…}` there is the value sublanguage (literals and the `sql:` accessors), so `insert <b>{for $i in /r/a return string($i)}</b>` doesn't parse.
+  A mutator's *target path* takes the whole expression grammar, FLWOR included.
 - `sql:variable()` / `sql:column()` accessors outside `.modify()`'s value terms, and the `xs:` constructor functions (`xs:integer(@a)`), both `NotSupportedException`.
 - Named axis steps (`child::` / `descendant::` / …), `NotSupportedException`.
 - **Msg 2396** — real refuses a `.query()` whose result is a top-level attribute (`/r/a/@x`) and **Msg 2390** the same for `.value()`; the simulator serializes the attribute instead.
   `.value()`'s 2390 can't be modeled while a `.nodes()` row is re-parsed as a document, since that is what makes the legitimate `n.ref.value('@x', …)` a top-level attribute read.
-- **Msg 2210** — a heterogeneous sequence (`(1, /r/a)`) is real's error; the simulator serializes both.
 
 ### Divergences
 
-- The evaluator parses its input as a **document**, so a multi-root fragment (`'<a/><b/>'`, or the typical `FOR XML …, TYPE` result) raises `XmlException` where real accepts it — real's `xml` is CONTENT-typed and admits several top-level elements.
+- A **single-root instance's context item is its document element** rather than real's document node, so a relative path written directly against one resolves a level lower — see [the value model](#the-value-model-documents-and-fragments), which also covers what a fragment does instead.
 - `.value()` casts go through the standard string→type coercion (`casting.md`'s flexible string→date-like parser), so the AdventureWorks `vJobCandidateEducation` / `vJobCandidateEmployment` / `vPersonDemographics` views — which wrap `.value()` date strings in `CONVERT(datetime, …, 101)` — resolve.
 - Msg 2209's quoted token comes from the simulator's own recursive-descent cursor, so a malformed expression may name a different token than real's parser does.
+  Real also splits its generic syntax errors further than the simulator does — a path that ends mid-step is its **Msg 9341** (`Syntax error near '<eof>', expected a step expression.`) where the simulator reports 2209 — and a construct keyword written without the token that identifies it (`for i in …`, `if 1=1 then …`) is real's 2209 near the *keyword* while the simulator names the token it stopped on.
+- **`position()` / `last()` legality is lexical.** The simulator allows them anywhere inside a written predicate, so a FLWOR nested in one can read them; real's rule is its own binder's.
 - `fn:min` / `fn:max` compare numerically; real compares by the operand's own type, so a string sequence orders differently.
+- **A constructed node re-parses.** Each evaluation splices the enclosed sequences into the literal markup and parses the result, so a value carrying markup-significant text is escaped by position rather than kept as a node identity; the serialized answer matches real for every probed shape.
 
 ## `.modify()` — XML-DML
 
@@ -193,12 +286,25 @@ replace value of <target> with <value>
 ```
 
 **`insert`** — content is one item or a parenthesized sequence.
-Item forms: a direct element constructor with arbitrary nesting (`<n><m><o>3</o></m></n>`), a direct comment (`<!-- c -->`) or processing instruction (`<?pi data?>`), the computed `attribute n {…}` / `text {…}` / `comment {…}` / `processing-instruction n {…}` constructors, and a bare `sql:variable("@v")` / `sql:column("c")` carrying `xml`.
+Item forms: a direct element constructor with arbitrary nesting (`<n><m><o>3</o></m></n>`), a direct comment (`<!-- c -->`) or processing instruction (`<?pi data?>`), the computed `element n {…}` / `attribute n {…}` / `text {…}` constructors, and a bare `sql:variable("@v")` / `sql:column("c")` carrying `xml`.
+A computed `element` takes a content sequence of the same items, so constructors nest (`element n {element m {1}}`, `element n {attribute a {1}}`) and adjacent atomic items join with a single space (`element n {"a","b"}` is `<n>a b</n>`); a `{…}` name expression is **Msg 9315** and the computed comment / processing-instruction forms are **Msg 9326** / **Msg 9325**, all three real's own refusals shared with the read methods.
 An element constructor's `{…}` enclosed expressions are substituted with the value's XML text and escaped by position (element content vs attribute value); `{{` / `}}` are the literal-brace escapes.
 A constructor resolves its **name through the prolog** exactly as a path step does — `declare default element namespace "urn:d"; insert <b/>` builds a `urn:d` element, and `declare namespace p="urn:x"; insert <p:b/>` a `urn:x` one (probe-confirmed) — while an already-serialized `sql:variable` / `sql:column` fragment brings its own scope.
 The serializer re-declares whatever the insertion point doesn't already bind, so an unqualified constructed element landing under a namespaced parent comes back as `<b xmlns=""/>`, byte-identical to real.
 `into` appends (as does `as last`), `as first` prepends, `before` / `after` place a sibling.
-An attribute item always attaches to the target element whatever the `as first` / `as last` keyword says.
+`before` / `after` on the outermost element, and `into` the document node, both produce a [fragment](#the-value-model-documents-and-fragments) — `insert <b/> after (/r)[1]` on `<r/>` is `<r/><b/>`.
+
+An attribute item always attaches to the target element whatever the `as first` / `as last` keyword says, and threads into real's **internal node order** rather than landing at the end of the list.
+An instance's own attributes sit at the odd ordinals 1, 3, 5, … and the *i*-th attribute one statement adds takes ordinal 2*i*, so a single insert lands right after the first attribute and a sequence interleaves one per gap before spilling to the end:
+
+```
+<a m="1" n="2" o="3" p="4"/> + attribute z          → <a m="1" z="9" n="2" o="3" p="4"/>
+                             + (attribute z, attribute y)
+                                                    → <a m="1" z="9" n="2" y="8" o="3" p="4"/>
+```
+
+Namespace declarations count as attributes for that ordering, and a second statement renumbers against what the first left — which reproduces real's own answer for repeated single inserts (`m n o p` plus `z`, then `y`, then `w`, is `m w y z n o p` on both).
+Every shape above was probed one at a time.
 
 **`delete`** — no cardinality restriction: every matched node goes, elements / attributes / text alike.
 Deleting the top-level element leaves an empty instance (`''`).
@@ -228,11 +334,13 @@ The messages quote that static type, and the simulator reproduces the notation: 
 | `replace value of … with <b/>` | **Msg 9310** — `… The 'with' clause of 'replace value of' cannot contain constructed XML.` |
 | `replace value of` with no `with` | **Msg 2205** — `XQuery [modify()]: "with" was expected.` |
 | `delete .` or a `delete` of an atomic value | **Msg 2264** — `… Only non-document nodes may be deleted, found '…'` |
-| the argument isn't XML-DML at all (`'/r'`) | **Msg 6305** — `XQuery data manipulation expression required in XML data type method.` |
-| the XML-DML fails to parse | **Msg 2209** — `XQuery [modify()]: Syntax error near '<eof>'` |
+| the argument parses as XQuery but isn't XML-DML (`'/r'`, `'count(/r)'`, `'<a/>'`, a FLWOR) | **Msg 6305** — `XQuery data manipulation expression required in XML data type method.` |
+| the argument doesn't parse as XQuery either (`'('`, `'/r['`, a bare `'insert'`) | **Msg 2209** — `XQuery [modify()]: Syntax error near '<eof>'` |
+| the argument is empty or whitespace | **Msg 6306** — `Invalid XQuery expression passed to XML data type method.` |
 | an `insert` would duplicate an attribute name | **Msg 6308** — `XML well-formedness check: Duplicate attribute 'n'. Rewrite your XQuery so it returns well-formed XML.` |
 
 The insert checks run in real's own order — target cardinality, then content type, then the attribute-position rule, then the target's node kind (probed one shape at a time), so `insert "abc" into (/r/a)` reports 2226 rather than 2207.
+The Msg 6305 / 2209 split is real's too: text no XML-DML keyword opened is handed to the expression grammar, and only its failure reports 2209.
 
 Msg 2207's type names come from the argument: a written literal reports no occurrence indicator (`xs:string`, and an integer literal is `xs:integer`), while a `sql:` accessor reports one off the SQL type (`xs:string ?` / `xs:int ?` / `xs:long ?` / `xs:decimal ?`).
 A `sql:variable`'s type is known while the modify text parses, so its 2207 fires at compile time; a `sql:column`'s resolves through the UPDATE SET list's target-table scope, and where no column scope exists the check falls to execution.
@@ -254,16 +362,11 @@ This is the only place an `xml` payload is re-serialized — an unmodified value
 
 ### Divergences
 
-- **A multi-root result isn't representable.** `insert <b/> after (/r)[1]` — where `/r` is the instance's own top-level element — answers `<r/><b/>` on real; the simulator raises `NotSupportedException` naming the shape, since the evaluator parses an instance as a document throughout (the same reason a multi-root instance can't be read, noted under the evaluator's divergences).
-  A comment or processing instruction beside the top-level element is fine and matches real.
-- **Attribute insert position.** `insert attribute z {…} into (/r/a)[1]` appends to the attribute list; real threads the new attribute into its internal node order, which can land it mid-list (`<a b="1" d="2"/>` → `<a b="1" z="9" d="2"/>`, probed).
-  The set of attributes matches; the written order doesn't.
 - **Typed xml is edited as untyped.** The `xml(collection)` binding is metadata only (no XSD parse anywhere in the simulator), so a `.modify()` on a typed column neither validates the result (real's **Msg 6923**) nor types the `with` value against the schema (real's **Msg 2247**), and `replace value of` still requires a `text()` / attribute target where real would accept the typed element itself.
-- **Msg 6305 vs Msg 2209.** Real reports 6305 for an argument that parses as XQuery but isn't XML-DML and 2209 for text that isn't XQuery at all; the simulator splits on the leading statement keyword, so anything not starting with `insert` / `delete` / `replace` reports 6305 and only a failure *after* the keyword reports 2209.
-  Real's 2209 also quotes a token the simulator's recursive-descent parser may name differently.
+- Real's **Msg 2209 quotes a token** the simulator's recursive-descent parser may name differently — `insert <b/> into /r extra` is real's `'r'` and the simulator's own stopping token.
 - **`SET t.col.modify(…)`** reports Msg 102 near `'.'` where real reports it near `'modify'`.
-- A computed `element {…}` constructor in insert content raises `NotSupportedException`; the direct form covers the same ground.
 - A **prolog prefix** used by a constructor is re-declared on the inserted element whether or not the insertion point already binds it; real omits the declaration when the prefix is already in scope.
+- An `insert`'s content sequence mixing an atomic item with a node one isn't rejected (real's **Msg 2210** heterogeneous-sequence rule); the simulator writes the atomic as text inside a constructor and reports Msg 2207 for a top-level one.
 
 ## `OPENXML`
 
@@ -440,10 +543,45 @@ Real's untyped result column reports `ntext` (max length 1073741823) in its wire
 - **PATH** — always element-centric; the column alias drives node placement (compiled once into a shared per-row element template, `ForXmlElement`):
   - `[@x]` → attribute `x` on the row element; `[name]` → child element; `[parent/child]` → nested elements at arbitrary depth (contiguous same-prefix steps share the parent).
   - `[text()]` / an **unnamed** column → the row element's text content; `[data()]` → text content, but adjacent `data()` atomic values are space-separated (`10 30 50`) where `text()` concatenates (`123`).
+  - The rest of the [node functions](#paths-node-functions) — `[comment()]`, `[processing-instruction(target)]`, `[node()]` and `[*]` — place their own node kinds.
   - Consecutive same-name element columns concatenate their text into one element (`[x],[x]` → `<x>1020</x>`).
   - `PATH('')` suppresses the row wrapper (bare elements at document level); an attribute column under `PATH('')` raises **Msg 6864**.
-  - An attribute column after a non-attribute sibling at the same level raises **Msg 6852**.
+  - An attribute column after a non-attribute sibling at the same level raises **Msg 6852** — a comment or processing instruction counts as a non-attribute sibling for it.
+  - A NULL drops the child element it would have filled, but the **row** element always stands: a row whose whole content is NULL is `<row/>`, not a missing row (RAW's included).
 - **EXPLICIT** — the universal table, built from the projection's own column names; see [below](#explicit--the-universal-table).
+
+### PATH's node functions
+
+The last step of a PATH alias may be a node function instead of a name.
+All six ship, and all six are matched **ordinally with no namespace prefix** — `TEXT()`, `a:comment()` and `comment (  )` are all Msg 6850, since anything the classifier doesn't recognize falls through to the [XML-name rules](#xml-names--escaped-in-raw--auto-rejected-everywhere-else) and trips on its own `(` or `*` (a prefix that isn't declared reports Msg 6846 first, as any step would).
+
+| step | places |
+|---|---|
+| `text()` | the value as escaped text content |
+| `data()` | the same, as an atom a space separates from an adjacent one |
+| `node()` / `*` | text content that takes an `xml` value as **nodes** rather than refusing it |
+| `comment()` | `<!--value-->` |
+| `processing-instruction(target)` | `<?target value?>` |
+
+Each takes a path prefix (`[a/comment()]` nests under `<a>`) and keeps its position among its siblings.
+Neither constructor escapes its value — real writes it raw, so a `?>` inside a processing instruction closes it early and produces XML that won't re-parse, and a `<` inside a comment stays a `<`.
+The one thing real does check is the dashes a comment can't carry: an interior `--` is **Msg 9322 state 2** and a trailing `-` is **state 3**, both raised while serializing the row.
+A processing instruction's separator is exactly one space, so an empty value is `<?p ?>` and a value of `' x '` is `<?p  x ?>`.
+
+A NULL under either constructor writes nothing at all, `ELEMENTS XSINIL` included — the nil marker is for an element that would have held a value, which `text()` / `data()` / `node()` still get.
+
+The remaining rules, all probe-confirmed:
+
+- **Msg 6853** — an `xml`-typed column under `text()`, `data()`, `comment()` or `processing-instruction(…)`, none of which has a text form to write it as: `Column 'comment()': the last step in the path can't be applied to XML data type or CLR type in FOR XML PATH.`, quoting the whole alias.
+  `node()`, `*` and a plain element step embed its nodes instead.
+- **Msg 6854** — `processing-instruction()` names no target.
+- **Msg 6879** — the target is `xml`, which would construct an XML declaration.
+  The check is ordinal, so `XML` and `XmL` pass.
+- **Msg 6850** — the target isn't an XML name, with **no `:` allowance** unlike an element or attribute step.
+  Real leaves the message's name-kind word *empty* here, so it reads `" name 'processing-instruction(1a)' contains an invalid XML identifier…"` with a leading space — probe-confirmed, not a rendering slip.
+
+`@*` is not a node function: real reads it as an attribute named `*` and reports Msg 6850 on the `*`.
+RAW and AUTO have no node functions at all — they escape the alias like any other name, so `[comment()]` becomes the attribute `comment_x0028__x0029_`.
 
 ### AUTO nesting (shared with `FOR JSON AUTO`)
 
@@ -569,7 +707,7 @@ The rejections, in the order the validator applies them:
   A **supplementary** character passes here though RAW would escape it (`[a𝐀]` → `<a𝐀>`), the one place the two halves disagree.
 - **Msg 6849** — a PATH alias with an empty step: `FOR XML PATH error in column '/a' - '//' and leading and trailing '/' are not allowed in simple path expressions.`
 
-A PATH alias is a path, so each `/`-separated step is validated on its own while the message quotes the whole alias (`[x/y z]` faults on the space); the last step's leading `@` is stripped first (a bare `[@]` reports the `@` itself) and its `text()` / `data()` node function is exempt.
+A PATH alias is a path, so each `/`-separated step is validated on its own while the message quotes the whole alias (`[x/y z]` faults on the space); the last step's leading `@` is stripped first (a bare `[@]` reports the `@` itself) and a [node function](#paths-node-functions) there is exempt from the name rules, its `processing-instruction` target taking its own.
 An explicit row / ROOT name is a single name, so a `/` in one is simply an invalid character (`PATH('a/b')` → Msg 6850 on `/`).
 The row tag is checked before the ROOT name.
 `RAW('')` is row-tag omission like `PATH('')`, which only element-centric serialization can carry: `RAW(''), ELEMENTS` emits the bare elements and the attribute-centric default raises **Msg 6864**.
@@ -700,7 +838,7 @@ Escaping is position-dependent:
 
 ### Not modeled yet
 
-The `XMLSCHEMA` directive raises `NotSupportedException` in RAW / AUTO / PATH (under a `WITH XMLNAMESPACES` prefix it raises real's own Msg 6868 first, and in EXPLICIT real's own Msg 3625), as do PATH node functions beyond `text()` / `data()` (`comment()`, `processing-instruction()`, `node()`, `*`, `@*`).
+The `XMLSCHEMA` directive raises `NotSupportedException` in RAW / AUTO / PATH (under a `WITH XMLNAMESPACES` prefix it raises real's own Msg 6868 first, and in EXPLICIT real's own Msg 3625).
 `XMLDATA` isn't parsed at all, so it falls to Msg 102 without the prefix.
 One-row chunking is the shared approximation noted above, and EXPLICIT's `idrefs` / `nmtokens` accept path is under [its divergences](#explicit--the-universal-table).
 

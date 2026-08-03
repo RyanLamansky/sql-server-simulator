@@ -205,6 +205,37 @@ public class SelectTests
     }
 
     [TestMethod]
+    // The 128-character limit measures the identifier's own characters, not its
+    // source text: the delimiters don't count, so `[` + 128 + `]` is legal.
+    // Django's schema editor emits exactly-128-character table names.
+    public void DelimitedIdentifierVeryLong()
+    {
+        var identifier = new string('z', 128);
+        using var reader = new Simulation().ExecuteReader($"select 1 as [{identifier}]");
+        IsTrue(reader.Read());
+        AreEqual(identifier, reader.GetName(0));
+    }
+
+    [TestMethod]
+    // An escaped `]]` is one character of the body, so 127 characters plus one
+    // escaped bracket is a legal 128-character identifier.
+    public void DelimitedIdentifierEscapedBracketCountsOnce()
+    {
+        var body = new string('z', 127) + ']';
+        using var reader = new Simulation().ExecuteReader($"select 1 as [{new string('z', 127)}]]]");
+        IsTrue(reader.Read());
+        AreEqual(body, reader.GetName(0));
+    }
+
+    [TestMethod]
+    // Msg 103 quotes the first 128 characters of the undelimited body.
+    public void DelimitedIdentifierTooLong()
+    {
+        var ex = new Simulation().AssertSqlError($"select 1 as [{new string('z', 129)}]", 103);
+        Contains($"starts with '{new string('z', 128)}'", ex.Message);
+    }
+
+    [TestMethod]
     [DataRow("select x from ( select 1 as x ) as x", "x", 1)]
     [DataRow("select x from ( select 1 + 1 as x ) as x", "x", 2)]
     public void DerivedTable(string commandText, string name, object value)

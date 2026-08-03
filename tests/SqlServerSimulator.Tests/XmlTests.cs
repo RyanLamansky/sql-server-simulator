@@ -417,6 +417,62 @@ public sealed class XmlTests
         AreEqual(DBNull.Value, sim.ExecuteScalar("select body.exist('/r') from dbo.doc"));
     }
 
+    /// <summary>
+    /// SQL Server's <c>xml</c> is CONTENT-typed, so an instance may hold several
+    /// top-level elements and top-level text. A fragment's context item is its
+    /// root node — real's document node — so <c>/a</c> reaches a top-level
+    /// element and <c>/</c> serializes the whole content. Probed against SQL
+    /// Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("<a/><b/>", "/*", "<a/><b/>")]
+    [DataRow("<a/><b/>", "/", "<a/><b/>")]
+    [DataRow("<a/><b/>", "/a", "<a/>")]
+    [DataRow("<a/><b/>", "/a/..", "<a/><b/>")]
+    [DataRow("<a>1</a><a>2</a>", "/a[2]", "<a>2</a>")]
+    [DataRow("<a>1</a>tail", "/text()", "tail")]
+    [DataRow("<r><a>1</a></r>", "/", "<r><a>1</a></r>")]
+    public void XmlQuery_OverAFragment(string instance, string xquery, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(
+            $"declare @x xml = '{instance}'; select cast(@x.query('{xquery}') as nvarchar(max))"));
+
+    [TestMethod]
+    [DataRow("<a>1</a><a>2</a>", "(/a)[2]", "2")]
+    [DataRow("<a>1</a>tail", "(/text())[1]", "tail")]
+    public void XmlValue_OverAFragment(string instance, string xquery, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(
+            $"declare @x xml = '{instance}'; select @x.value('{xquery}', 'nvarchar(20)')"));
+
+    [TestMethod]
+    public void XmlExist_OverAFragment()
+    {
+        var sim = new Simulation();
+        IsTrue((bool)sim.ExecuteScalar("declare @x xml = '<a/><b/>'; select @x.exist('/b')")!);
+        IsFalse((bool)sim.ExecuteScalar("declare @x xml = '<a/><b/>'; select @x.exist('/c')")!);
+    }
+
+    [TestMethod]
+    public void XmlNodes_OverAFragment_ShredsEachTopLevelElement()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.doc (body xml)");
+        _ = sim.ExecuteNonQuery("insert dbo.doc values (N'<a>1</a><b>2</b>')");
+        using var reader = sim.ExecuteReader("select cast(n.query('.') as nvarchar(max)) from dbo.doc cross apply body.nodes('/*') t(n)");
+        var shredded = new List<string>();
+        while (reader.Read())
+            shredded.Add(reader.GetString(0));
+        AreEqual("<a>1</a>,<b>2</b>", string.Join(",", shredded));
+    }
+
+    /// <summary>An empty instance answers rather than failing to parse.</summary>
+    [TestMethod]
+    public void XmlQuery_OverAnEmptyInstance_SelectsNothing()
+    {
+        var sim = new Simulation();
+        AreEqual(string.Empty, sim.ExecuteScalar("declare @x xml = ''; select cast(@x.query('/a') as nvarchar(max))"));
+        IsFalse((bool)sim.ExecuteScalar("declare @x xml = ''; select @x.exist('/a')")!);
+    }
+
     [TestMethod]
     public void XmlModify_InSelectList_Raises8137()
     {

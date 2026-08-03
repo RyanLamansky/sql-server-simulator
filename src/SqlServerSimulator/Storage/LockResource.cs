@@ -43,18 +43,17 @@ internal enum LockMode
     RangeSharedShared,
 
     /// <summary>
-    /// Key-range update (RangeS-U) — real's mode for a SERIALIZABLE reader's
-    /// hold taken with intent to write. Shares with RangeS-S, conflicts with a
-    /// second RangeS-U. Defined for the matrix and the DMV mapping; nothing
-    /// acquires it, since <c>UPDLOCK</c> / <c>XLOCK</c> are read ahead of the
-    /// isolation level and keep their row-U / row-X plan.
+    /// Key-range update (RangeS-U) — a SERIALIZABLE / HOLDLOCK reader's hold
+    /// taken with intent to write, which is what <c>UPDLOCK</c> alongside
+    /// either fences its interval in. Shares with RangeS-S, conflicts with a
+    /// second RangeS-U.
     /// </summary>
     RangeSharedUpdate,
 
     /// <summary>
     /// Key-range exclusive (RangeX-X) — exclusive against every other range
-    /// mode. Defined alongside <see cref="RangeSharedUpdate"/> and unacquired
-    /// for the same reason.
+    /// mode. What <c>XLOCK</c> under SERIALIZABLE / HOLDLOCK fences its
+    /// interval in.
     /// </summary>
     RangeExclusiveExclusive,
 

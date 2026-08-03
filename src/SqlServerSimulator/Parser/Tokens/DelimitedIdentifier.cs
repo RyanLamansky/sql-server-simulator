@@ -5,7 +5,7 @@
 /// <c>SET QUOTED_IDENTIFIER ON</c>. The <see cref="Value"/> carries the
 /// unescaped body; the delimiters themselves are not part of it.
 /// </summary>
-sealed class DelimitedIdentifier(string value, string command, int index, int length) : Name(command, index, length)
+sealed class DelimitedIdentifier(string value, string command, int index, int length) : Name(command, index, length, value)
 {
     public override ReadOnlySpan<char> Span => Value.AsSpan();
 

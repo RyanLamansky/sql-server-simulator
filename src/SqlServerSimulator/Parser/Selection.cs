@@ -647,10 +647,10 @@ internal sealed partial class Selection
         // so the select list can bind against them; restoring it here keeps
         // the enclosing scope intact on every exit path, including throws.
         var savedOuterTypeResolver = context.OuterTypeResolver;
-        // The full-text predicates bind their column specification against this
-        // scope's own sources; a nested query installs its own and the
+        // The full-text predicates and the spatial property form bind against
+        // this scope's own sources; a nested query installs its own and the
         // enclosing one comes back here.
-        var savedFullTextSources = context.FullTextSources;
+        var savedScopeSources = context.ScopeSources;
         var aggregates = new List<AggregateExpression>();
         var windows = new List<WindowExpression>();
         var savedEnclosingAggregateCollector = context.EnclosingAggregateCollector;
@@ -667,7 +667,7 @@ internal sealed partial class Selection
             context.WindowCollector = savedWindowCollector;
             context.EnclosingAggregateCollector = savedEnclosingAggregateCollector;
             context.OuterTypeResolver = savedOuterTypeResolver;
-            context.FullTextSources = savedFullTextSources;
+            context.ScopeSources = savedScopeSources;
         }
     }
 
@@ -1029,8 +1029,9 @@ internal sealed partial class Selection
                 var scopeSources = scope.ToArray();
                 context.OuterTypeResolver = name => ResolveColumnTypeAcrossSources(scopeSources, name, outerTypeResolver);
                 // A projection-level CONTAINS / FREETEXT (`CASE WHEN
-                // CONTAINS(col, 'x') THEN …`) binds against the same scope.
-                context.FullTextSources = scopeSources;
+                // CONTAINS(col, 'x') THEN …`) and a spatial column's property
+                // form (`Location.Lat`) both bind against the same scope.
+                context.ScopeSources = scopeSources;
             }
         }
 
@@ -1924,6 +1925,37 @@ internal sealed partial class Selection
         return synonym;
     }
 
+    /// <summary>
+    /// Folds a separately-parsed plan's securable and read-column lists into the
+    /// active sinks, so the reads of a body that owns its own lists — a CTE, the
+    /// only such source — are checked as part of the referencing statement.
+    /// A column set that is already empty, or that merges with an empty one,
+    /// stays empty: that is the <c>COUNT(*)</c> shape, which requires SELECT on
+    /// every column and so absorbs any narrower set.
+    /// </summary>
+    private static void FoldSecurables(ParserContext context, Selection plan)
+    {
+        if (context.SecurableSink is not { } sink || plan.ReferencedSecurables is not { } securables)
+            return;
+        sink.AddRange(securables);
+        if (context.ReadColumnSink is not { } columnSink || plan.ReadColumnsByObject is not { } readColumns)
+            return;
+        foreach (var (objectId, target) in readColumns)
+        {
+            if (!columnSink.TryGetValue(objectId, out var existing))
+            {
+                columnSink[objectId] = target;
+            }
+            else if (existing.Ordinals.Count != 0)
+            {
+                if (target.Ordinals.Count == 0)
+                    existing.Ordinals.Clear();
+                else
+                    existing.Ordinals.UnionWith(target.Ordinals);
+            }
+        }
+    }
+
     private static FromSource ParseSingleFromSource(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver) =>
         ApplyOptionalPivotUnpivot(context, ParseSingleFromSourceCore(context, depth, outerTypeResolver), outerTypeResolver);
 
@@ -2075,6 +2107,15 @@ internal sealed partial class Selection
 
                     if (cteBinding.Plan is null)
                         throw SimulatedSqlException.RecursiveCteMissingUnionAll(cteBinding.Name);
+
+                    // A CTE body parses before the referencing statement's sink
+                    // exists, so it owns its reads and they reach no check site
+                    // of their own. Folding them into the statement's list is
+                    // what puts them through the ordinary execution-time SELECT
+                    // check — real checks a CTE body's reads against the caller
+                    // like any other source (probe-confirmed, Msg 229 naming the
+                    // base object).
+                    FoldSecurables(context, cteBinding.Plan);
 
                     var cteColumns = new HeapColumn[cteBinding.Plan.Schema.Length];
                     for (var ci = 0; ci < cteColumns.Length; ci++)
@@ -2794,11 +2835,11 @@ internal sealed partial class Selection
         SqlType MyResolver(MultiPartName name) => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
 
         var saved = context.OuterTypeResolver;
-        var savedFullTextSources = context.FullTextSources;
+        var savedScopeSources = context.ScopeSources;
         context.OuterTypeResolver = MyResolver;
         // A WHERE-clause CONTAINS / FREETEXT binds its column specification
         // against these same sources.
-        context.FullTextSources = sources;
+        context.ScopeSources = sources;
         try
         {
             ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy);
@@ -2806,7 +2847,7 @@ internal sealed partial class Selection
         finally
         {
             context.OuterTypeResolver = saved;
-            context.FullTextSources = savedFullTextSources;
+            context.ScopeSources = savedScopeSources;
         }
     }
 

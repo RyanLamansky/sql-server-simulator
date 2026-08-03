@@ -61,9 +61,9 @@ partial class Simulation
     /// the login's database user in the current database
     /// (<c>SYSTEM_USER</c> becomes the login, <c>CURRENT_USER</c> the mapped
     /// user); USER pushes the database principal directly. Missing / non-
-    /// impersonatable targets and the <c>USER = 'dbo'</c> quirk raise Msg 15517
-    /// (15406 for LOGIN). Nested impersonation by a non-dbo principal requires
-    /// IMPERSONATE on the target.
+    /// impersonatable targets raise Msg 15517 (15406 for LOGIN). Nested
+    /// impersonation by a non-dbo principal requires IMPERSONATE on the target,
+    /// <c>dbo</c> included — see <see cref="RequireImpersonatePermission"/>.
     /// </summary>
     private static void ApplyExecuteAs(SimulatedDbConnection connection, Database database, bool isLogin, string targetName)
     {
@@ -80,14 +80,8 @@ partial class Simulation
             return;
         }
 
-        // EXECUTE AS USER = 'dbo' fails with 15517 even for a sysadmin session
-        // (probe-confirmed quirk).
-        if (BuiltInToken.Comparer.Equals(targetName, "dbo")
-            || !database.Principals.TryGetValue(targetName, out var target)
-            || target.TypeCode != "S")
-        {
+        if (!database.Principals.TryGetValue(targetName, out var target) || target.TypeCode != "S")
             throw SimulatedSqlException.CannotExecuteAsDatabasePrincipal(targetName);
-        }
         RequireImpersonatePermission(security, database, target.PrincipalId, targetName);
         // Database-scoped: an EXECUTE AS USER token carries no server principal,
         // so it can't reach another database (Msg 916 at any cross-database
@@ -96,29 +90,35 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Gates nested <c>EXECUTE AS USER</c>: dbo may impersonate anyone; a
-    /// non-dbo principal needs an explicit class-4 (DATABASE_PRINCIPAL)
-    /// IMPERSONATE grant on the target (state G or W). A direct
-    /// <see cref="Database.Permissions"/> scan against the current effective
-    /// principal — role-closure expansion is a later stage. The LOGIN form
-    /// gates at server scope instead (<see cref="RequireImpersonateLoginPermission"/>).
+    /// Gates nested <c>EXECUTE AS USER</c>: dbo may impersonate anyone; anyone
+    /// else needs IMPERSONATE on the target at class 4 (DATABASE_PRINCIPAL),
+    /// which the ordinary <see cref="PermissionChecker.IsGranted"/> walk answers
+    /// from an explicit grant, a role that holds one, <c>CONTROL</c> on the
+    /// principal, or <c>db_owner</c> membership. The LOGIN form gates at server
+    /// scope instead (<see cref="RequireImpersonateLoginPermission"/>).
     /// </summary>
+    /// <remarks>
+    /// The <c>dbo</c> target takes the same gate as any other user
+    /// (probe-confirmed against SQL Server 2025 on two instances): a sysadmin
+    /// session and a <c>db_owner</c> member both run <c>EXECUTE AS USER = 'dbo'</c>
+    /// successfully, an explicit <c>GRANT IMPERSONATE ON USER::dbo</c> admits a
+    /// restricted principal, and only a principal holding none of that gets
+    /// Msg 15517.
+    /// </remarks>
     private static void RequireImpersonatePermission(SessionSecurityContext security, Database database, int targetPrincipalId, string targetName)
     {
         if (security.EffectiveIsDbo)
             return;
-        var granteeId = security.Effective.DatabasePrincipalId;
-        foreach (var permission in database.Permissions)
+        if (!PermissionChecker.IsGranted(
+                database,
+                security.Effective.DatabasePrincipalId,
+                Permission.Impersonate,
+                PermissionChecker.ClassDatabasePrincipal,
+                targetPrincipalId,
+                schemaId: 0))
         {
-            if (permission.Class == 4
-                && permission.MajorId == targetPrincipalId
-                && permission.GranteePrincipalId == granteeId
-                && permission.State is PermissionState.Grant or PermissionState.GrantWithGrantOption)
-            {
-                return;
-            }
+            throw SimulatedSqlException.CannotExecuteAsDatabasePrincipal(targetName);
         }
-        throw SimulatedSqlException.CannotExecuteAsDatabasePrincipal(targetName);
     }
 
     /// <summary>

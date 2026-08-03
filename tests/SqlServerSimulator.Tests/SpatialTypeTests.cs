@@ -144,13 +144,13 @@ public sealed class SpatialTypeTests
     }
 
     [TestMethod]
-    public void GeographyMethodCall_STIntersects_ThrowsAtExecute()
+    public void GeographyMethodCall_STIntersects_EvaluatesOverStoredColumn()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.loc (id int, g geography)");
         _ = sim.ExecuteNonQuery("insert dbo.loc values (1, geography::Parse('POINT(0 0)'))");
-        var ex = Throws<NotSupportedException>(() => _ = sim.ExecuteScalar("select g.STIntersects(geography::Parse('POINT(1 1)')) from dbo.loc"));
-        Assert.Contains("STIntersects", ex.Message);
+        IsFalse((bool)sim.ExecuteScalar("select g.STIntersects(geography::Parse('POINT(1 1)')) from dbo.loc")!);
+        IsTrue((bool)sim.ExecuteScalar("select g.STIntersects(geography::Parse('POINT(0 0)')) from dbo.loc")!);
     }
 
     [TestMethod]
@@ -172,11 +172,11 @@ public sealed class SpatialTypeTests
         sim.ExecuteBatches(
             "create table dbo.loc (id int, g geography)",
             "insert dbo.loc values (1, geography::Parse('POINT(0 0)'))",
-            "create view dbo.v_hit as select id, g.STIntersects(geography::Parse('POINT(1 1)')) as hit from dbo.loc");
+            "create view dbo.v_hull as select id, g.STConvexHull() as hull from dbo.loc");
         // View created successfully — the spatial method call parsed cleanly.
-        AreEqual("v_hit", sim.ExecuteScalar("select name from sys.views where object_id = object_id('dbo.v_hit')"));
-        // ...but execute fails, since round-earth topology has no evaluation.
-        _ = Throws<NotSupportedException>(() => _ = sim.ExecuteScalar("select hit from dbo.v_hit"));
+        AreEqual("v_hull", sim.ExecuteScalar("select name from sys.views where object_id = object_id('dbo.v_hull')"));
+        // ...but execute fails, since the constructive operations have no evaluation.
+        _ = Throws<NotSupportedException>(() => _ = sim.ExecuteScalar("select hull from dbo.v_hull"));
     }
 
     [TestMethod]

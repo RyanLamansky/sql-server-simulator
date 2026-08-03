@@ -66,10 +66,13 @@ partial class Simulation
     /// Otherwise the view's updatability shape gates routing: an updatable
     /// view delegates to <see cref="ProcessHeapInsert"/> against the view's
     /// <see cref="View.BaseTable"/> with column-name lookups translated
-    /// through <see cref="View.BaseColumnOrdinals"/>; a non-updatable
-    /// view raises <strong>Msg 4403</strong> / <strong>Msg 4405</strong>
-    /// from <see cref="View.RejectionReason"/>. OUTPUT with a view target
-    /// is rejected at the inner site (NotSupportedException).
+    /// through <see cref="View.BaseColumnOrdinals"/>; one whose chain bottoms
+    /// out in a multi-source body goes to <see cref="ProcessJoinViewInsert"/>,
+    /// which reads the column list to decide which base table the write lands
+    /// in; anything else raises <strong>Msg 4403</strong> /
+    /// <strong>Msg 4405</strong> from <see cref="View.RejectionReason"/>.
+    /// OUTPUT with a view target is rejected at the inner site
+    /// (NotSupportedException).
     /// </summary>
     private static SimulatedStatementOutcome ProcessViewInsert(View destinationView, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName)
     {
@@ -83,9 +86,11 @@ partial class Simulation
             ? ProcessInsteadOfInsertOnView(destinationView, context, top)
             : destinationView.BaseTable is { } baseTable
                 ? ProcessHeapInsert(baseTable, context, top, destinationName, destinationView)
-                : throw (destinationView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{destinationView.Schema.Name}.{destinationView.Name}")
-                    : SimulatedSqlException.CannotUpdateNonUpdatableView($"{destinationView.Schema.Name}.{destinationView.Name}"));
+                : destinationView.IsJoinUpdatable
+                    ? ProcessJoinViewInsert(destinationView, context, top, destinationName)
+                    : throw (destinationView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
+                        ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{destinationView.Schema.Name}.{destinationView.Name}")
+                        : SimulatedSqlException.CannotUpdateNonUpdatableView($"{destinationView.Schema.Name}.{destinationView.Name}"));
 
     /// <summary>
     /// INSERT into a view whose INSTEAD OF INSERT trigger replaces the
@@ -203,7 +208,7 @@ partial class Simulation
     /// <c>ExecuteReader</c>); otherwise a plain <see cref="SimulatedNonQuery"/>
     /// is returned.
     /// </summary>
-    private static SimulatedStatementOutcome ProcessHeapInsert(HeapTable destinationTable, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName, View? destinationView = null)
+    private static SimulatedStatementOutcome ProcessHeapInsert(HeapTable destinationTable, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName, View? destinationView = null, JoinViewInsertPlan? joinViewPlan = null)
     {
         RejectDisabledClusteredIndex(destinationTable);
         RejectIncorrectSetOptionsForWrite(destinationTable, context.Batch, "INSERT");
@@ -238,7 +243,12 @@ partial class Simulation
                     throw SimulatedSqlException.SyntaxErrorNear(context);
 
                 var columnName = column.Value;
-                var tableColumn = ResolveInsertTargetColumn(context.Batch.CurrentDatabase.Collation, columnName, destinationTable, destinationView);
+                // A join-view target resolved the whole list against its chain
+                // before this parse ran — the target table it picked is what
+                // this call is writing — so it replays that answer here.
+                var tableColumn = joinViewPlan is null
+                    ? ResolveInsertTargetColumn(context.Batch.CurrentDatabase.Collation, columnName, destinationTable, destinationView)
+                    : joinViewPlan.Columns[columnName];
                 if (tableColumn.Computed is not null)
                     throw SimulatedSqlException.ColumnCannotBeModified(tableColumn.Name);
                 if (tableColumn.Type == SqlType.RowVersion)
@@ -549,7 +559,7 @@ partial class Simulation
             // before the heap write so a violating INSERT leaves the heap
             // unchanged (matches SQL Server's "the statement has been
             // terminated" semantic on Msg 550).
-            if (destinationView?.CheckOptionCheck is { } checkOption && !checkOption(rowValues, context.Batch))
+            if ((joinViewPlan?.CheckOption ?? destinationView?.CheckOptionCheck) is { } checkOption && !checkOption(rowValues, context.Batch))
                 throw SimulatedSqlException.ViewCheckOptionViolation();
 
             if (!context.Batch.IsSkipping)

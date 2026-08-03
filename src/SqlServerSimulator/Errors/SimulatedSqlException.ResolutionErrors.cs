@@ -70,6 +70,15 @@ partial class SimulatedSqlException
         new("A SELECT statement that assigns a value to a variable must not be combined with data-retrieval operations.", 141, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 326 — a dotted name that reads both ways at
+    /// once: a spatial column's property (<c>Location.Lat</c>) and a column of
+    /// a source aliased with the same word. Probe-confirmed wording, which
+    /// names the whole dotted identifier and then both readings.
+    /// </summary>
+    internal static SimulatedSqlException AmbiguousSpatialPropertyOrColumn(string qualifier, string leaf) =>
+        new($"Multi-part identifier '{qualifier}.{leaf}' is ambiguous. Both columns '{qualifier}' and '{qualifier}.{leaf}' exist.", 326, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 4104: the OUTPUT clause references an
     /// identifier that doesn't exist in either the INSERTED/DELETED virtual
     /// tables or the MERGE source alias.

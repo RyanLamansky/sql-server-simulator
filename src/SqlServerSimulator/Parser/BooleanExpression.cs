@@ -1114,8 +1114,11 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class ExistsExpression(Selection inner) : BooleanExpression
     {
-        public override bool? Run(RuntimeContext runtime) =>
-            inner.Execute(runtime.Batch, runtime.ResolveColumn).RowBytes.Any();
+        public override bool? Run(RuntimeContext runtime)
+        {
+            PermissionEnforcement.CheckSubqueryReads(runtime.Batch, inner);
+            return inner.Execute(runtime.Batch, runtime.ResolveColumn).RowBytes.Any();
+        }
 
         internal override string DebugDisplay() => "EXISTS (...)";
 
@@ -1204,6 +1207,7 @@ internal abstract class BooleanExpression
                 return null;
 
             var sawNull = false;
+            PermissionEnforcement.CheckSubqueryReads(runtime.Batch, inner);
             var resultSet = inner.Execute(runtime.Batch, runtime.ResolveColumn);
             foreach (var rowBytes in resultSet.RowBytes)
             {
@@ -1257,6 +1261,7 @@ internal abstract class BooleanExpression
             var sawDefinitiveTrue = false;
             var sawDefinitiveFalse = false;
 
+            PermissionEnforcement.CheckSubqueryReads(runtime.Batch, inner);
             var resultSet = inner.Execute(runtime.Batch, runtime.ResolveColumn);
             foreach (var rowBytes in resultSet.RowBytes)
             {

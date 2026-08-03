@@ -323,7 +323,7 @@ Captured at CREATE VIEW time via `AnalyzeViewUpdatability` (in `Simulation.Creat
 Probed against SQL Server 2025.
 
 **Eligible shape** (each level in a view-on-view chain must satisfy all):
-- Exactly one FROM source (a heap table OR another updatable view) — a multi-source body takes the [join-view UPDATE](#update-through-a-join-view) path instead.
+- Exactly one FROM source (a heap table OR another updatable view) — a multi-source body, and a chain whose bottom is one, take the [join-view DML](#dml-through-a-join-view) path instead.
 - No DISTINCT, no aggregates, no GROUP BY, no HAVING, no window functions, no set-op chain.
   TOP / OFFSET / FETCH / ORDER BY are allowed (they only affect reads).
 - Every column referenced in any WHERE clause up the chain maps to a real base-table column (no WHERE that references an upstream derived projection).
@@ -338,10 +338,11 @@ The map composes through view-on-view chains so a renamed column at level 1 refe
 - **INSERT**: `ProcessViewInsert` validates `BaseTable` is non-null (else Msg 4403 / Msg 4405 by `RejectionReason`), then routes to `ProcessHeapInsert(baseTable, context, destinationView)`.
   Column-name lookups in the explicit list translate through `BaseColumnOrdinals`; touching a `-1` ordinal raises **Msg 4406**.
   Implicit column list (no `(cols)` after view name) expands to the view's writable projection columns mapped to base ordinals — derived columns and computed/identity/rowversion base columns drop out, defaults fire normally for unlisted base columns.
+  A `BaseTable`-less but `IsJoinUpdatable` view branches to [DML through a join view](#dml-through-a-join-view), which reads the column list off a parser checkpoint before it can name a target.
 - **UPDATE**: `ParseUpdate` resolves the leading identifier as a view, threads `leadingView` into `ResolveSetAssignments` (view-name → base-ordinal translation, same Msg 4406 path) and `ExecuteUpdateAgainstTable`.
   The heap scan gates `VisibilityCheck` before the user's WHERE — UPDATE through a filtered view only affects rows visible through the view.
   WHERE column references resolve against view's output columns first (so an UPDATE against a renamed view uses the rename, not the base name).
-  A `BaseTable`-less but `IsJoinUpdatable` view branches instead to [UPDATE through a join view](#update-through-a-join-view), which the SET list can't route until it has parsed.
+  A `BaseTable`-less but `IsJoinUpdatable` view branches to the same join-view path, which the SET list can't route until it has parsed.
 - **DELETE**: `ParseDelete` mirrors the same shape.
   Same visibility filter + column-name remap.
 
@@ -353,11 +354,11 @@ DELETE never fires Msg 550 (a row leaving the view is fine).
 **Errors** (all probe-confirmed verbatim against SQL Server 2025):
 - **Msg 4403**: INSERT / UPDATE / DELETE through a view with aggregate / DISTINCT / GROUP BY.
   Body of the message names the view (`"Cannot update the view or function 'dbo.v' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator."`).
-- **Msg 4405**: DELETE or INSERT through a multi-source view, and an UPDATE whose SET list spans two of its base tables.
-  Real raises the same for all three (state 1, `"View or function 'dbo.v' is not updatable because the modification affects multiple base tables."`) — a DELETE removes a whole row and so touches every base table whatever the view projects, and an INSERT is refused unless its column list names one base table's columns.
+- **Msg 4405**: DELETE through a multi-source view, an INSERT whose column list doesn't name one base table's columns, and an UPDATE whose SET list spans two of them.
+  Real raises the same for all three (state 1, `"View or function 'dbo.v' is not updatable because the modification affects multiple base tables."`) — a DELETE removes a whole row and so touches every base table whatever the view projects.
 - **Msg 4406**: INSERT or UPDATE touched a derived projection column.
   Per-column gate — a view with mixed direct + derived columns accepts INSERT/UPDATE on the direct columns and DELETE through it works fine.
-  It beats Msg 4405 when a SET list carries both faults, in either written order (probe-confirmed).
+  Msg 4405 and Msg 4406 are both raised as the **left-to-right walk of the list meets them**, so a derived target beside a single other one reports 4406 whichever order they appear in, and only a list whose earlier pair already spans two base tables reports 4405 ahead of a derived column behind it (probe-confirmed on both verbs).
 - **Msg 550**: WITH CHECK OPTION violation (covers chain spans).
 
 **Catalog surface**: unchanged — `INFORMATION_SCHEMA.VIEWS.IS_UPDATABLE` stays hardcoded `'NO'` (probe-confirmed real SQL Server always reports `'NO'` here regardless of actual updatability, so the existing surface is correct).
@@ -367,10 +368,8 @@ The row lands in the base; the view's WHERE only filters reads.
 The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row selection* (which rows to mutate), not INSERT acceptance.
 
 **Fidelity gaps**:
-- **A view over a join view** is Msg 4403 where real passes the write through both levels.
-  The chain analysis composes through each level's base-table map and a join view has none; flattening the levels into one source set (or chaining the output-column resolvers through them) is the work.
-- **INSERT through a join view** is Msg 4405 whatever the column list, where real accepts one whose explicit list names a single base table's columns (probe-confirmed: it writes that table, the untargeted columns taking their defaults; an implicit list or one spanning two tables is Msg 4405 on real too).
-  The INSERT path picks its base table and per-column ordinals from `View.BaseTable` / `View.BaseColumnOrdinals` before the column list parses, so routing it wants the list read first — a checkpoint / re-scan the UPDATE path doesn't need because its SET list is already parsed by then.
+- **A GROUP BY view's aggregate column reports Msg 4403 where real reports Msg 4406** — real splits the two by which column the write names: `SET <group-by column>` is 4403 and `SET <aggregate column>` is 4406, since the aggregate is a derived field (probe-confirmed, and the same split through a view over such a view).
+  `RejectionReason` settles the whole view before any column is looked at, so the per-column 4406 gate never runs on a shape that already failed.
 - **OUTPUT through a view** raises `NotSupportedException` for INSERT / UPDATE / DELETE.
   Would need view-output-column rebinding for INSERTED.* / DELETED.* projection.
 - **Multi-source UPDATE / DELETE** (alias-form `UPDATE alias SET ... FROM ...` where the alias resolves to a view) raises `NotSupportedException` — the alias-form FROM clause can't compose with the view's visibility predicate in the existing joined-update infrastructure.
@@ -380,36 +379,53 @@ The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row sele
   The analysis reads the body's FROM source, which is the CTE rather than a base table; seeing through the CTE's own plan is what's missing.
   Reading such a view ships in full — see [`ctes.md`](ctes.md#where-a-prefix-may-appear).
 
-## UPDATE through a join view
+## DML through a join view
 
-A view whose body reads several sources is `BaseTable`-less and carries `ViewUpdatabilityRejection.MultipleSources`, but real accepts an UPDATE through it as long as the **SET list lands entirely in one base table** — the restriction is on the SET targets, not on what the WHERE reads.
-`View.IsJoinUpdatable` marks such a body (multi-source and otherwise DML-eligible) and routes `ParseUpdate` to `ExecuteJoinViewUpdate` in `Simulation.Update.JoinView.cs`; INSERT and DELETE keep raising Msg 4405 off `RejectionReason`, which is what real does.
+A view whose body reads several sources is `BaseTable`-less and carries `ViewUpdatabilityRejection.MultipleSources`, but real accepts a write through it as long as the columns it names **land entirely in one base table** — an UPDATE's SET list or an INSERT's explicit column list.
+The restriction is on the write targets, not on what the WHERE reads.
+A **single-source view reading such a view** carries the same pair, so the shape composes to any depth: `AnalyzeViewUpdatability` propagates `MultipleSources` + `IsJoinUpdatable` up the chain and the write walks the levels at the statement.
+DELETE stays Msg 4405 whatever it touches, which is what real does — it removes a whole row and so reaches every base table.
 Probed against SQL Server 2025 (17.0.4065.4).
 
-The body is **re-parsed at the statement** (`Simulation.ParseViewBodyPlan`, the propagating twin of the cursor-planning `TryParseViewBodyPlan`) rather than captured at CREATE, because the profile carries live `FromSource` row enumerators — the same reason the read path re-parses per reference.
+`ParseUpdate` routes to `ExecuteJoinViewUpdate` in `Simulation.Update.JoinView.cs`, `ProcessViewInsertCore` to `ProcessJoinViewInsert`; the level machinery both share is `Simulation.JoinViewDml.cs`.
+
+**The level stack** is `JoinViewChain`: index 0 is the multi-source view, each higher index a single-source view reading the one below, and the last is the view the statement named (whose name every error reports).
+Each level's body is **re-parsed at the statement** (`Simulation.ParseViewBodyPlan`, the propagating twin of the cursor-planning `TryParseViewBodyPlan`) rather than captured at CREATE, because the profile carries live `FromSource` row enumerators — the same reason the read path re-parses per reference.
 `ViewUpdatabilityProfile` therefore holds `Sources` / `Joins` alongside the projections and excluders.
 
-**Binding the SET list.** Each SET column resolves to its view output ordinal, then through that ordinal's projection to the `(source, column)` it reads.
-A projection that isn't a direct column reference is Msg 4406 as it is met; targets landing in more than one source are Msg 4405; the winning source is the target, and its `FromSource.BackingTable` is the heap the statement writes (a target source that is itself a view or a derived table stays Msg 4405).
-Identity / computed / rowversion / GENERATED ALWAYS targets report exactly as they do on a direct UPDATE (`RejectUnmodifiableSetTarget`).
+**Chained resolvers, not a flattened source set.** `BuildChainResolvers` returns one resolver per level, each answering a name written against its own level's output columns by evaluating that column's projection in the level below's context; the bottom level's projections read the join tuple directly.
+That keeps every level's expressions in the names they were written with — no rewriting — and gives each level's WHERE excluders their own runtime context.
 
-**Execution** mirrors the alias-form joined UPDATE — join tuples, a `byte[]`→address side-channel on the target source, dedupe by `(page, slot)` — with two view-shaped differences:
+**Binding the write targets.** `DescendToBaseColumn` resolves a column name one level at a time: output ordinal → that ordinal's projection → the name it references at the level below, until the bottom, where `FindSourceColumn` names the `(source, column)`.
+A level whose projection isn't a direct column reference is Msg 4406 naming the statement's view; targets landing in more than one source are Msg 4405; the winning source is the target, and its `FromSource.BackingTable` is the heap the statement writes (a target source that is itself a view or a derived table stays Msg 4405).
+Both are raised as the left-to-right walk of the list meets them.
+Identity / computed / rowversion / GENERATED ALWAYS UPDATE targets report exactly as they do on a direct UPDATE (`RejectUnmodifiableSetTarget`).
 
-- The statement's WHERE and SET expressions name the view's **output** columns, so each resolves by evaluating that column's projection against the current tuple.
-  That makes a **derived output column readable in the WHERE** even though writing one is Msg 4406, matching real.
-- The body's own WHERE gates which tuples are candidates, the way `VisibilityCheck` does on the single-base path.
+**INSERT reads its column list twice.** `ProcessHeapInsert` needs its target table before it parses the list, and the list is what names the target — so `ProcessJoinViewInsert` scans the names off a `ParserContext` checkpoint, descends each, and hands the resolved base columns back through `JoinViewInsertPlan` for the rewound parse to replay.
+The UPDATE path needs no such scan: its SET list has already parsed by the time it routes.
+Everything downstream of the target is the ordinary heap insert — defaults fire for the untargeted columns, the base table's IDENTITY allocates and `SCOPE_IDENTITY` reports it (`SET IDENTITY_INSERT` names the **base table**; real answers Msg 8105 for the view name), and a NOT NULL column the list omits reports the base table's own Msg 515.
+No column list at all — including `DEFAULT VALUES` — has nothing to route on and is Msg 4405, as on real.
+
+**UPDATE execution** mirrors the alias-form joined UPDATE — join tuples, a `byte[]`→address side-channel on the target source, dedupe by `(page, slot)` — with two view-shaped differences:
+
+- The statement's WHERE and SET expressions name the top level's **output** columns, so each resolves by evaluating that column's projection down the chain against the current tuple.
+  That makes a **derived output column readable in the WHERE** even though writing one is Msg 4406, matching real — at any level.
+- Every level's own WHERE gates which tuples are candidates, the way the composed `VisibilityCheck` does on the single-base path.
 
 Dedupe is what makes a base row appearing in several join tuples take the SET **once**: a 1-side row joined to three rows advances by one increment and reports `@@ROWCOUNT` 1 (probe-confirmed).
 When the SET reads the many side, the tuple it lands on is undefined in real and the first one here — heap order, the same rule the alias-form joined UPDATE follows.
 Through an outer-join view the preserved side is writable on a NULL-extended row while the nullable side has nothing to write and the statement affects zero rows rather than raising (probe-confirmed).
 
-**WITH CHECK OPTION** on a join view covers the body's WHERE *and* the join: the post-update row must both find a partner and pass the WHERE.
-`JoinViewRowRemainsVisible` re-runs the join with the target source narrowed to the one post-update row, so a row that changed which partner it matches is judged on its new partner — real accepts exactly that, and refuses a value that leaves the WHERE or a join key that matches nothing (all three probe-confirmed).
+**WITH CHECK OPTION** covers the body's WHERE *and* the join at every level that carries one: the written row must find a join partner and pass every WHERE from the bottom up through that level.
+`ChainRowRemainsVisible` re-runs the join with the target source narrowed to the one written row, so a row that changed which partner it matches is judged on its new partner — real accepts exactly that, and refuses a value that leaves the WHERE or a join key that matches nothing (all three probe-confirmed, on INSERT as on UPDATE).
+Only the **highest** CHECK OPTION level is evaluated, since visibility there implies visibility at every level below.
 The probe row is encoded with no LOB store, which keeps every value inline and allocates no off-row chain for a row that may never be written; its ceiling is the encoder's 65535-byte var-offset cap.
 
 **Positioned DML follows for free.** `WHERE CURRENT OF` through a join-view cursor binds via the identity slot the cursor stamped with that view, so a single-base positioned UPDATE writes through, a SET list spanning both base tables is Msg 4405, a positioned DELETE is Msg 4405, and naming the base table under the view is Msg 16933 — see [`cursors.md`](cursors.md#where-current-of).
 
-**Gap**: only the join view's own `WITH CHECK OPTION` is enforced on this path — a chained shape that would carry another level's is unreachable while a view over a join view stays Msg 4403.
+**Not modeled yet**: a level that reads **several sources of its own** — a join view over a join view — is Msg 4405, where real flattens both levels and accepts an INSERT or UPDATE naming one base table.
+The target source there is a view rather than a heap, so there is no `(page, slot)` address behind the row the write would claim; reaching one means recursing the level walk into that source's own sources.
+**MERGE** into a join view is Msg 4405 off `RejectionReason` for the same statement real accepts (a `WHEN NOT MATCHED THEN INSERT` naming one base table's columns — probe-confirmed).
 
 ## Stored procedures
 `CREATE [OR ALTER] PROCEDURE schema.name [(@p type [= default] [OUTPUT], ...)] [WITH options] AS body` lives in `Schema.Procedures`.

@@ -105,9 +105,11 @@ public sealed class JoinViewUpdateTests
     }
 
     /// <summary>
-    /// Writing a derived output column is Msg 4406, and it wins over the
-    /// multiple-base-tables error whichever order the SET list puts the two
-    /// targets in (probe-confirmed both ways).
+    /// Writing a derived output column is Msg 4406, reported as the
+    /// left-to-right walk of the SET list meets it — so a derived target
+    /// beside a single other one is 4406 whichever order they appear in, and
+    /// only a list whose earlier pair already spans two base tables reports
+    /// Msg 4405 ahead of it (all three probe-confirmed).
     /// </summary>
     [TestMethod]
     public void SettingADerivedOutputColumnIsMsg4406()
@@ -119,6 +121,7 @@ public sealed class JoinViewUpdateTests
         Assert.AreEqual("Update or insert of view or function 'dbo.vd' failed because it contains a derived or constant field.", ex.Message);
         _ = simulation.AssertSqlError("update dbo.vd set nplus = 5, val = 6 where oid = 1", 4406);
         _ = simulation.AssertSqlError("update dbo.vd set val = 6, nplus = 5 where oid = 1", 4406);
+        _ = simulation.AssertSqlError("update dbo.vd set oid = 1, val = 6, nplus = 5 where oid = 1", 4405);
     }
 
     /// <summary>A derived output column is readable in the WHERE even though writing it isn't.</summary>
@@ -154,20 +157,6 @@ public sealed class JoinViewUpdateTests
         _ = simulation.ExecuteNonQuery("create view dbo.vc as select o.id as oid, o.n, m.id as mid, m.val from dbo.one o, dbo.many m where m.one_id = o.id");
         Assert.AreEqual(1, simulation.ExecuteNonQuery("update dbo.vc set val = val + 1 where oid = 2"));
         Assert.AreEqual(401, simulation.ExecuteScalar<int>("select val from dbo.many where id = 21"));
-    }
-
-    /// <summary>
-    /// A single-source view <em>over</em> a join view is Msg 4403 where real
-    /// passes the write through both levels: the chain analysis composes
-    /// through a level's base-table map, and a join view has none. Pinned so
-    /// the divergence is visible — see docs/claude/programmable.md.
-    /// </summary>
-    [TestMethod]
-    public void ViewOverAJoinViewIsNotUpdatableYet()
-    {
-        var simulation = Seeded();
-        _ = simulation.ExecuteNonQuery("create view dbo.vn as select oid, n, mid, val from dbo.v where oid < 3");
-        _ = simulation.AssertSqlError("update dbo.vn set val = val + 1 where mid = 12", 4403);
     }
 
     /// <summary>

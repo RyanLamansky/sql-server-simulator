@@ -1248,7 +1248,7 @@ partial class Simulation
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Default }:
                     throw SimulatedSqlException.MultipleColumnConstraints("DEFAULT", columnName.Value, tableName);
-                case ReservedKeyword { Keyword: Keyword.Constraint } inlineConstraintKw when inlineKeyKind is null && inlineFkName is null:
+                case ReservedKeyword { Keyword: Keyword.Constraint } inlineConstraintKw when inlineFkName is null:
                     if (isTableType)
                         throw SimulatedSqlException.SyntaxErrorNearKeyword(inlineConstraintKw);
                     if (isTableVariable)
@@ -1271,6 +1271,15 @@ partial class Simulation
                         case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References }:
                             inlineFkName = namedConstraint.Value;
                             continue;
+                        // A key clause the column already carries — same rules
+                        // as the unnamed form below, since a name on the second
+                        // one doesn't make it a separate constraint.
+                        case ReservedKeyword { Keyword: Keyword.Primary } when inlineKeyKind == KeyConstraintKind.PrimaryKey:
+                            throw SimulatedSqlException.MultipleColumnConstraints("PRIMARY KEY", columnName.Value, tableName);
+                        case ReservedKeyword { Keyword: Keyword.Unique } when inlineKeyKind == KeyConstraintKind.Unique:
+                            throw SimulatedSqlException.MultipleColumnConstraints("UNIQUE", columnName.Value, tableName);
+                        case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } when inlineKeyKind is not null:
+                            throw SimulatedSqlException.BothPrimaryKeyAndUniqueOnColumn(columnName.Value, tableName);
                         case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
                             inlineKeyName = namedConstraint.Value;
                             (inlineKeyKind, inlineKeyClustered, inlineKeyIgnoreDupKey) = ParseInlineKeyKindAndModifiers(context);
@@ -1900,7 +1909,9 @@ partial class Simulation
     /// per-kind default: PK clustered, UNIQUE nonclustered); the flag drives
     /// index-id allocation even though the simulator has no row-ordered storage.
     /// Leaves <see cref="ParserContext.Token"/> on the next constraint keyword,
-    /// comma, or closing paren.
+    /// comma, or closing paren — or null, since <c>ALTER TABLE … ADD c int
+    /// UNIQUE</c> puts the clause at the end of the batch where CREATE TABLE's
+    /// closing paren always follows it.
     /// </summary>
     private static (KeyConstraintKind Kind, bool? Clustered, bool IgnoreDupKey) ParseInlineKeyKindAndModifiers(ParserContext context)
     {
@@ -1915,12 +1926,12 @@ partial class Simulation
         {
             kind = KeyConstraintKind.Unique;
         }
-        context.MoveNextRequired();
+        context.MoveNextOptional();
         bool? clustered = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Clustered or Keyword.NonClustered } modifier)
         {
             clustered = modifier.Keyword == Keyword.Clustered;
-            context.MoveNextRequired();
+            context.MoveNextOptional();
         }
         return (kind, clustered, ParseOptionalIndexWithClause(context));
     }

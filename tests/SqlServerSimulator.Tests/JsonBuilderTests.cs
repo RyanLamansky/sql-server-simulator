@@ -203,6 +203,25 @@ public class JsonBuilderTests
     public void Builders_EscapeSolidus(string expression, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
 
+    // --- Declared decimal scale ---
+
+    /// <summary>
+    /// The builders write the raw numeric value rather than formatting from
+    /// the declared type, so the trailing zeros SQL Server's <c>decimal</c>
+    /// and <c>money</c> values carry reach the output — <c>cast(1 as
+    /// numeric(10, 2))</c> is <c>1.00</c>, and every <c>money</c> value shows
+    /// its fixed scale of 4 (probed verbatim against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("json_array(cast(1 as numeric(10, 2)))", "[1.00]")]
+    [DataRow("json_array(cast(1 as numeric(10, 0)))", "[1]")]
+    [DataRow("json_array(cast(1 as money), cast(1 as smallmoney))", "[1.0000,1.0000]")]
+    [DataRow("json_array(cast(1 as numeric(10, 2)) + 0)", "[1.00]")]
+    [DataRow("""json_object('a': cast(1.5 as numeric(10, 4)))""", """{"a":1.5000}""")]
+    [DataRow("""json_modify('{"a":0}', '$.a', cast(1 as numeric(10, 2)))""", """{"a":1.00}""")]
+    public void Builders_DecimalAndMoney_WriteTheDeclaredScale(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
     // --- Result type ---
 
     [TestMethod]

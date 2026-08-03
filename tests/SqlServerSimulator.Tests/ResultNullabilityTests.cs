@@ -35,8 +35,13 @@ public sealed class ResultNullabilityTests
             nn int not null, nu int null, knn int not null,
             snn varchar(20) not null, snu varchar(20) null,
             dnn datetime not null, dnu datetime null,
-            mnn decimal(9, 2) not null, mnu decimal(9, 2) null);
-        insert nb values (2020, null, 1, 'a', null, '2020-01-01', null, 1.5, null);
+            mnn decimal(9, 2) not null, mnu decimal(9, 2) null,
+            bnn bigint not null, tnn tinyint not null,
+            fnn float not null, rnn real not null, ynn smallmoney not null,
+            p70 decimal(7, 0) not null, p90 decimal(9, 0) not null, p160 decimal(16, 0) not null,
+            dtnn date not null, d2nn datetime2(7) not null, sdnn smalldatetime not null);
+        insert nb values (2020, null, 1, 'a', null, '2020-01-01', null, 1.5, null,
+            1, 1, 1, 1, 1, 1, 1, 1, '2020-01-01', '2020-01-01', '2020-01-01');
         """;
 
     /// <summary>
@@ -230,6 +235,57 @@ public sealed class ResultNullabilityTests
     [DataRow("case 1 when 2 then nu end", true)]
     [DataRow("case nn when 1 then 5 end", true)]
     public void CaseFamily_ProjectsProbedNullability(string projection, bool expected)
+        => AreEqual(expected, ProjectsNullable(projection), projection);
+
+    /// <summary>
+    /// The second half of the CASE-family rule: a surviving arm also answers
+    /// for the conversion the arm unification put on it, and reads nullable
+    /// when that conversion could alter the value. Loss, not failure, is the
+    /// test — <c>decimal</c> → <c>float</c> and <c>datetime</c> →
+    /// <c>datetime2</c> can't raise, and both read nullable.
+    /// </summary>
+    [TestMethod]
+    // Exact numeric narrowed by the integer literal's own value width: the
+    // unification takes decimal(9, 2) from the column because the literal is
+    // one digit wide, then converts the literal from its declared int.
+    [DataRow("coalesce(mnn, 0)", true)]
+    [DataRow("coalesce(mnn, 100)", true)]
+    [DataRow("coalesce(0, mnn)", true)]                     // the folded constant arm converts too
+    [DataRow("coalesce(mnn, 2147483647)", false)]           // ten digits widen the result to decimal(12, 2)
+    [DataRow("coalesce(mnn, 0.0)", false)]
+    [DataRow("coalesce(mnn, tnn)", false)]                  // a tinyint column's three digits fit
+    [DataRow("coalesce(mnn, nn)", false)]                   // an int column widens the result instead
+    [DataRow("coalesce(ynn, nn)", true)]                    // smallmoney holds six integral digits
+    [DataRow("coalesce(ynn, tnn)", false)]
+    [DataRow("isnull(mnn, 0)", false)]                      // ISNULL takes argument one's type, converting nothing
+    [DataRow("greatest(mnn, 1)", true)]
+    [DataRow("least(mnn, 1)", true)]
+    [DataRow("greatest(mnn, 2147483647)", false)]
+    [DataRow("iif(nn = 1, mnn, 0)", true)]
+    [DataRow("case when nn = 1 then mnn else 0 end", true)]
+    // Approximate targets: exact only for an integral source whose whole range
+    // lands on integers the mantissa represents (2^53 for float, 2^24 for real).
+    [DataRow("coalesce(nn, fnn)", false)]
+    [DataRow("coalesce(bnn, fnn)", true)]
+    [DataRow("coalesce(mnn, fnn)", true)]                   // a scaled decimal has no exact binary form
+    [DataRow("coalesce(p90, fnn)", false)]
+    [DataRow("coalesce(p160, fnn)", true)]
+    [DataRow("coalesce(p70, rnn)", false)]
+    [DataRow("coalesce(p90, rnn)", true)]
+    [DataRow("coalesce(nn, rnn)", true)]
+    [DataRow("coalesce(rnn, fnn)", false)]                  // every real is a float
+    [DataRow("coalesce(fnn, 1)", false)]
+    [DataRow("coalesce(fnn, 1.5)", true)]
+    // Date/time: range and grid.
+    [DataRow("coalesce(dtnn, dnn)", true)]                  // date reaches back past datetime's 1753 floor
+    [DataRow("coalesce(sdnn, dtnn)", true)]                 // and past smalldatetime's 1900 one
+    [DataRow("coalesce(dtnn, d2nn)", false)]
+    [DataRow("coalesce(dnn, d2nn)", true)]                  // datetime's 1/300-second grid isn't a tick grid
+    [DataRow("coalesce(sdnn, dnn)", false)]                 // a whole minute is
+    // Strings widen, so their unification converts nothing.
+    [DataRow("coalesce(snn, 'abc')", false)]
+    [DataRow("coalesce(snn, 'a literal longer than the column')", false)]
+    public void ArmConversion_ProjectsProbedNullability(string projection, bool expected)
         => AreEqual(expected, ProjectsNullable(projection), projection);
 
     /// <summary>

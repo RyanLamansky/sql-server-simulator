@@ -55,10 +55,10 @@ partial class Simulation
 
     /// <summary>
     /// The propagating form of <see cref="TryParseViewBodyPlan"/>, used by
-    /// UPDATE through a join view: the statement is about to write through
-    /// the body, so a body that won't parse or bind is the statement's own
-    /// error rather than something to fall back from. Statement schema locks
-    /// stay held for the rest of the statement.
+    /// DML through a join view: the statement is about to write through the
+    /// body, so a body that won't parse or bind is the statement's own error
+    /// rather than something to fall back from. Statement schema locks stay
+    /// held for the rest of the statement.
     /// </summary>
     internal Selection ParseViewBodyPlan(BatchContext outerBatch, View view) =>
         ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: false);

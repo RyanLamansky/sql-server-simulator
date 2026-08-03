@@ -73,13 +73,67 @@ internal static class ForXmlName
         ValidateStep(name, name, kind, namespaces);
 
     /// <summary>
+    /// What a <c>FOR XML PATH</c> alias's last step selects. The node
+    /// functions are matched <b>ordinally</b> and carry no namespace prefix —
+    /// real refuses <c>TEXT()</c> and <c>a:comment()</c> alike (Msg 6850),
+    /// since anything the classifier doesn't recognize falls through to the
+    /// XML-name rules and trips on its <c>(</c> or <c>*</c>.
+    /// </summary>
+    internal enum ForXmlPathLeaf
+    {
+        /// <summary>A named element step, or an attribute when the step led with <c>@</c>.</summary>
+        Element,
+
+        /// <summary><c>text()</c> — the value as escaped text content.</summary>
+        Text,
+
+        /// <summary><c>data()</c> — an atomic value, space-joined with an adjacent one.</summary>
+        Data,
+
+        /// <summary><c>node()</c> / <c>*</c> — text content that takes an <c>xml</c> value as nodes rather than refusing it.</summary>
+        Node,
+
+        /// <summary><c>comment()</c> — the value inside a comment constructor, unescaped.</summary>
+        Comment,
+
+        /// <summary><c>processing-instruction(target)</c> — the value inside a PI constructor, unescaped.</summary>
+        ProcessingInstruction,
+    }
+
+    /// <summary>
+    /// Classifies a PATH alias's last step. A
+    /// <c>processing-instruction(…)</c> step reports its target through
+    /// <paramref name="processingInstructionTarget"/>, empty included — the
+    /// target's own validity is <see cref="ValidatePathColumn"/>'s business.
+    /// </summary>
+    internal static ForXmlPathLeaf ClassifyPathLeaf(string step, out string? processingInstructionTarget)
+    {
+        const string processingInstruction = "processing-instruction(";
+        if (step.StartsWith(processingInstruction, StringComparison.Ordinal) && step.EndsWith(')'))
+        {
+            processingInstructionTarget = step[processingInstruction.Length..^1];
+            return ForXmlPathLeaf.ProcessingInstruction;
+        }
+
+        processingInstructionTarget = null;
+        return step switch
+        {
+            "*" or "node()" => ForXmlPathLeaf.Node,
+            "comment()" => ForXmlPathLeaf.Comment,
+            "data()" => ForXmlPathLeaf.Data,
+            "text()" => ForXmlPathLeaf.Text,
+            _ => ForXmlPathLeaf.Element,
+        };
+    }
+
+    /// <summary>
     /// Validates a <c>FOR XML PATH</c> column alias, which is a path of
     /// <c>/</c>-separated steps: an empty step raises Msg 6849, the last step's
-    /// leading <c>@</c> (attribute) is stripped before checking and its
-    /// <c>text()</c> / <c>data()</c> node function is exempt, and every
-    /// remaining step goes through the same name rules as a row tag. Messages
-    /// name the whole alias, not the offending step. An unnamed column (empty
-    /// alias) maps to text content and carries no name to check.
+    /// leading <c>@</c> (attribute) is stripped before checking and a node
+    /// function there is exempt from the name rules, and every remaining step
+    /// goes through the same rules as a row tag. Messages name the whole alias,
+    /// not the offending step. An unnamed column (empty alias) maps to text
+    /// content and carries no name to check.
     /// </summary>
     internal static void ValidatePathColumn(string alias, ForXmlNamespaces? namespaces)
     {
@@ -105,11 +159,48 @@ internal static class ForXmlName
                     throw SimulatedSqlException.ForXmlInvalidName(ForXmlNameKind.Column, alias, '@');
                 step = step[1..];
             }
-            else if (Collation.Baseline.Equals(step, "text()") || Collation.Baseline.Equals(step, "data()"))
+            else
             {
-                continue;
+                switch (ClassifyPathLeaf(step, out var target))
+                {
+                    case ForXmlPathLeaf.ProcessingInstruction:
+                        ValidateProcessingInstructionTarget(alias, target!);
+                        continue;
+                    case ForXmlPathLeaf.Element:
+                        break;
+                    default:
+                        continue;
+                }
             }
             ValidateStep(alias, step, ForXmlNameKind.Column, namespaces);
+        }
+    }
+
+    /// <summary>
+    /// The <c>processing-instruction(target)</c> target's own rules: an empty
+    /// one is Msg 6854, the lowercase <c>xml</c> real reserves for the XML
+    /// declaration is Msg 6879 (<c>XML</c> and <c>XmL</c> pass — the check is
+    /// ordinal), and the rest is an XML name with <b>no</b> <c>:</c> allowance,
+    /// unlike an element or attribute step. Msg 6850 quotes the whole alias
+    /// and, unlike a column name's, leads with real's empty name-kind word.
+    /// </summary>
+    private static void ValidateProcessingInstructionTarget(string alias, string target)
+    {
+        if (target.Length == 0)
+            throw SimulatedSqlException.ForXmlProcessingInstructionForm(alias);
+        if (target == "xml")
+            throw SimulatedSqlException.ForXmlProcessingInstructionXmlTarget();
+
+        for (var i = 0; i < target.Length; i++)
+        {
+            var c = target[i];
+            if (char.IsHighSurrogate(c) && i + 1 < target.Length && char.IsLowSurrogate(target[i + 1]))
+            {
+                i++;
+                continue;
+            }
+            if (!(i == 0 ? XmlConvert.IsStartNCNameChar(c) : XmlConvert.IsNCNameChar(c)))
+                throw SimulatedSqlException.ForXmlInvalidName(ForXmlNameKind.ProcessingInstructionTarget, alias, c);
         }
     }
 
@@ -169,4 +260,12 @@ internal enum ForXmlNameKind
 
     /// <summary>The row tag — <c>RAW('elem')</c> / <c>PATH('row')</c>.</summary>
     Row,
+
+    /// <summary>
+    /// A <c>processing-instruction(target)</c> target. Real's Msg 6850 leaves
+    /// its name-kind word empty here, so the message reads
+    /// <c>" name 'processing-instruction(1a)' contains …"</c> with a leading
+    /// space — probe-confirmed, not a rendering slip.
+    /// </summary>
+    ProcessingInstructionTarget,
 }

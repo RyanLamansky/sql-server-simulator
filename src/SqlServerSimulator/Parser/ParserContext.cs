@@ -317,14 +317,21 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public Func<MultiPartName, SqlType>? OuterTypeResolver;
 
     /// <summary>
-    /// The FROM sources a <c>CONTAINS</c> / <c>FREETEXT</c> predicate binds its
-    /// column specification against. Installed by <see cref="Selection"/> as
-    /// soon as the FROM clause is parsed — before the select list and before
-    /// WHERE — and restored on the way out, so each query level offers its own
-    /// scope. Null where no query scope exists (a CHECK constraint, a computed
-    /// column), which is where real reports Msg 1046.
+    /// The FROM sources of the query level being parsed. Installed by
+    /// <see cref="Selection"/> as soon as the FROM clause is parsed — before the
+    /// select list and before WHERE — and restored on the way out, so each level
+    /// offers its own scope. Null where no query scope exists (a CHECK
+    /// constraint, a computed column).
     /// </summary>
-    public FromSource[]? FullTextSources;
+    /// <remarks>
+    /// Two parse-time decisions read it: a <c>CONTAINS</c> / <c>FREETEXT</c>
+    /// predicate binds its column specification here (real reports Msg 1046
+    /// where there is no scope), and a dotted name whose leaf is a spatial
+    /// member name asks whether its qualifier is a spatial <i>column</i>, which
+    /// is what tells <c>Location.Lat</c>'s property read apart from an
+    /// <c>alias.column</c> reference.
+    /// </remarks>
+    public FromSource[]? ScopeSources;
 
     /// <summary>
     /// Common-table-expression bindings registered by a <c>WITH</c> prefix

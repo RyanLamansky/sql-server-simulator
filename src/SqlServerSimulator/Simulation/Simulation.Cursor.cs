@@ -161,10 +161,8 @@ partial class Simulation
         // be followed into its body: the body is parsed once, at DECLARE, the
         // point real SQL Server fixes the cursor's plan at too. Otherwise
         // honor the requested type; an unspecified type defaults to KEYSET when
-        // SCROLL was asked for and DYNAMIC for the forward-only default. A base
-        // table without a unique key is fine — cursor identity rides the heap's
-        // stable (page, slot) addresses, not the row's values. A JOIN is
-        // updatable exactly like a single table (probe-confirmed).
+        // SCROLL was asked for and DYNAMIC for the forward-only default. A JOIN
+        // is updatable exactly like a single table (probe-confirmed).
         var cursorPlan = Selection.TryBuildCursorPlan(selection, batch);
         var updatable = cursorPlan is not null;
         // Two shapes cap sensitivity at KEYSET, both probe-confirmed against
@@ -192,6 +190,24 @@ partial class Simulation
             : requested == CursorSensitivity.Dynamic && keysetOnly
                 ? CursorSensitivity.Keyset
                 : requested;
+
+        // A T-SQL KEYSET keys on a row locator every participating base table
+        // has to carry, so a table with none converts the cursor to a read-only
+        // snapshot — probe-confirmed for every route to KEYSET (explicit,
+        // through SCROLL, through either cap) and for a join with one keyless
+        // side. Dropping the plan alongside puts the cursor on exactly the
+        // STATIC path a non-navigable query takes, so nothing downstream has to
+        // tell the two apart.
+        // The API server cursors sp_cursoropen drives are exempt: real keeps
+        // those Keyset over a keyless table and takes positioned DML through
+        // them, keying on the row address the way this engine always does
+        // (probe-confirmed, and the split sys.dm_exec_cursors reports as
+        // "API | Keyset" against the T-SQL cursor's "TSQL | Snapshot").
+        if (sensitivity == CursorSensitivity.Keyset && !batch.ApiServerCursor && cursorPlan is { SupportsKeyset: false })
+        {
+            sensitivity = CursorSensitivity.Static;
+            cursorPlan = null;
+        }
 
         var readOnly = sensitivity == CursorSensitivity.Static || reqFastForward || readOnlyOption;
         // Naming a sensitivity implies SCROLL unless FORWARD_ONLY says

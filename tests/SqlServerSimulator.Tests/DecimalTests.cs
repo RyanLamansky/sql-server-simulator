@@ -242,4 +242,87 @@ public sealed class DecimalTests
         IsTrue(reader.Read());
         AreEqual(expected, reader.GetDecimal(0));
     }
+
+    /// <summary>
+    /// The .NET <see cref="decimal"/> a conversion or a computation produces
+    /// carries the *declared* scale of its result type, not whatever scale the
+    /// source value happened to have — <c>cast(1 as numeric(10, 2))</c> is
+    /// <c>1.00m</c>. Scale is invisible to decimal equality, so the assertion
+    /// compares the rendered text; the expectations are the strings SQL Server
+    /// 2025 emits for the same expression through <c>JSON_ARRAY</c>, which
+    /// writes the raw value rather than formatting from the declared type.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(1 as numeric(10, 2))", "1.00")]
+    [DataRow("cast(1 as numeric(10, 0))", "1")]
+    [DataRow("cast(1.5 as numeric(10, 4))", "1.5000")]
+    [DataRow("cast(1 as decimal(28, 7))", "1.0000000")]
+    [DataRow("convert(numeric(10, 2), 1)", "1.00")]
+    [DataRow("try_cast('1' as numeric(10, 2))", "1.00")]
+    [DataRow("try_convert(numeric(10, 2), 1)", "1.00")]
+    [DataRow("cast(cast(1 as numeric(10, 2)) as numeric(10, 5))", "1.00000")]
+    [DataRow("cast(cast(1.999 as numeric(10, 3)) as numeric(10, 1))", "2.0")]
+    // Widening a value rounded down to a signed zero drops the sign, as real does.
+    [DataRow("cast(cast(-0.001 as numeric(10, 2)) as numeric(10, 4))", "0.0000")]
+    [DataRow("case when 1 = 1 then cast(1 as numeric(10, 2)) else cast(1 as numeric(10, 4)) end", "1.0000")]
+    [DataRow("(select cast(1 as numeric(10, 2)))", "1.00")]
+    public void DeclaredScale_Conversions_CarryTheTargetScale(string expression, string expected) =>
+        AreEqual(expected, ExecuteScalar<decimal>($"select {expression}")
+            .ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// Arithmetic results carry the scale the per-operator promotion rules
+    /// declare — <c>max(s1, s2)</c> for <c>+ - %</c>, <c>s1 + s2</c> for
+    /// <c>*</c>, and division's <c>max(6, s1 + p2 + 1)</c>. Expectations
+    /// probed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(1 as numeric(10, 2)) + cast(1 as numeric(5, 1))", "2.00")]
+    [DataRow("cast(1 as numeric(10, 2)) + 0", "1.00")]
+    [DataRow("cast(1 as numeric(10, 2)) + cast(1 as int)", "2.00")]
+    [DataRow("cast(1 as numeric(10, 2)) - cast(1 as numeric(10, 2))", "0.00")]
+    [DataRow("cast(1 as numeric(10, 2)) * cast(2 as numeric(5, 1))", "2.000")]
+    [DataRow("cast(1 as numeric(10, 2)) / cast(2 as numeric(5, 1))", "0.50000000")]
+    [DataRow("cast(10 as numeric(5, 0)) / cast(4 as numeric(5, 0))", "2.500000")]
+    [DataRow("cast(1 as numeric(10, 2)) % cast(0.7 as numeric(5, 1))", "0.30")]
+    [DataRow("-cast(1 as numeric(10, 2))", "-1.00")]
+    [DataRow("round(cast(1.239 as numeric(10, 3)), 1)", "1.200")]
+    [DataRow("abs(cast(-1 as numeric(10, 2)))", "1.00")]
+    [DataRow("sign(cast(-1 as numeric(10, 2)))", "-1.00")]
+    [DataRow("power(cast(2 as numeric(10, 2)), 2)", "4.00")]
+    // CEILING / FLOOR return numeric(p, 0), so the fractional digits go away.
+    [DataRow("ceiling(cast(1.2 as numeric(10, 2)))", "2")]
+    [DataRow("floor(cast(1.8 as numeric(10, 2)))", "1")]
+    public void DeclaredScale_Arithmetic_CarriesTheResultTypeScale(string expression, string expected) =>
+        AreEqual(expected, ExecuteScalar<decimal>($"select {expression}")
+            .ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// A value read back from storage, and an aggregate over one, carry their
+    /// declared scale too — <c>SUM</c> keeps the column's, <c>AVG</c> promotes
+    /// to <c>numeric(38, max(s, 6))</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("v", "1.00")]
+    [DataRow("sum(v)", "1.00")]
+    [DataRow("avg(v)", "1.000000")]
+    [DataRow("min(v)", "1.00")]
+    [DataRow("max(v)", "1.00")]
+    public void DeclaredScale_StorageAndAggregates_CarryTheDeclaredScale(string expression, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar<decimal>($"""
+            create table t (v numeric(10, 2));
+            insert t (v) values (1);
+            select {expression} from t
+            """).ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// <c>CHECKSUM</c> keys off the numeric value rather than the declared
+    /// scale, so two spellings of the same number agree the way real's do.
+    /// </summary>
+    [TestMethod]
+    public void Checksum_IgnoresDeclaredScale() =>
+        AreEqual(1, ExecuteScalar("""
+            select case when checksum(cast(1 as numeric(10, 2))) = checksum(cast(1 as numeric(10, 0)))
+                then 1 else 0 end
+            """));
 }

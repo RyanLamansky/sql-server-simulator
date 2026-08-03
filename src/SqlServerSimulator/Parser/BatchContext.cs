@@ -645,6 +645,17 @@ internal sealed class BatchContext
     public bool ForceTempTableScope;
 
     /// <summary>
+    /// Set on the batch the TDS endpoint synthesizes for the
+    /// <c>sp_cursoropen</c> family (see
+    /// <see cref="SimulatedDbCommand.ApiServerCursor"/>), which opens an API
+    /// server cursor rather than a T-SQL one. The two origins resolve
+    /// sensitivity identically bar one probed split: a KEYSET over a table with
+    /// no unique index or clustered key converts to a read-only snapshot for
+    /// T-SQL and stays Keyset for the API.
+    /// </summary>
+    public bool ApiServerCursor;
+
+    /// <summary>
     /// True when this batch is a module body — a procedure, trigger, or
     /// dynamic-SQL scope (or an RPC ad-hoc-statement scope,
     /// <see cref="ForceTempTableScope"/>) — whose locally-created <c>#temp</c>
@@ -728,6 +739,18 @@ internal sealed class BatchContext
     public readonly List<(LockResource Resource, LockMode Mode)> StatementSchemaLocks = [];
 
     /// <summary>
+    /// Tables the current statement resolved with a <c>NOWAIT</c> table hint.
+    /// Real scopes the hint to the table it sits on, but the per-row lock
+    /// acquisitions happen far from the hint list — every DML path reaches
+    /// <see cref="AcquireRowLockTxScoped"/> with a table and a RID and nothing
+    /// else — so the hinted tables are recorded here at
+    /// <see cref="AcquireDataLockIfApplicable"/> and looked up there. Cleared
+    /// with the statement's locks, so a hint doesn't leak into the batch's
+    /// next statement.
+    /// </summary>
+    private readonly HashSet<HeapTable> noWaitTables = [];
+
+    /// <summary>
     /// Acquires <paramref name="mode"/> on <paramref name="resource"/> for
     /// the current connection, honoring the connection's
     /// <see cref="SimulatedDbConnection.LockTimeoutMillis"/>, and records the
@@ -737,10 +760,10 @@ internal sealed class BatchContext
     /// fail by throwing — on success the lock IS held, and we always reach
     /// the append. On throw the lock isn't held, no cleanup needed.
     /// </summary>
-    public void AcquireStatementLock(LockResource resource, LockMode mode)
+    public void AcquireStatementLock(LockResource resource, LockMode mode, bool noWait = false)
     {
         var connection = this.Connection;
-        connection.Simulation.LockManager.Acquire(resource, mode, connection, connection.LockTimeoutMillis);
+        connection.Simulation.LockManager.Acquire(resource, mode, connection, noWait ? 0 : connection.LockTimeoutMillis);
         this.StatementSchemaLocks.Add((resource, mode));
     }
 
@@ -758,10 +781,10 @@ internal sealed class BatchContext
     /// commit semantics, matching real SQL Server's implicit-commit-after-
     /// statement behavior for DML outside <c>BEGIN TRAN</c>.
     /// </remarks>
-    public void AcquireTransactionLock(LockResource resource, LockMode mode)
+    public void AcquireTransactionLock(LockResource resource, LockMode mode, bool noWait = false)
     {
         var connection = this.Connection;
-        connection.Simulation.LockManager.Acquire(resource, mode, connection, connection.LockTimeoutMillis);
+        connection.Simulation.LockManager.Acquire(resource, mode, connection, noWait ? 0 : connection.LockTimeoutMillis);
         if (connection.CurrentTransaction is { } tx)
             tx.HeldLocks.Add((resource, mode));
         else
@@ -827,6 +850,9 @@ internal sealed class BatchContext
         if (Simulation.SystemHeapTables.Values.Contains(table))
             return DataLockPlan.Bypass;
 
+        if (hints.NoWait)
+            _ = this.noWaitTables.Add(table);
+
         var connection = this.Connection;
         var isolation = connection.SessionIsolationLevel;
 
@@ -850,7 +876,7 @@ internal sealed class BatchContext
         // TABLOCKX: table-X tx-scoped; no per-row work.
         if (hints.TabLockX)
         {
-            this.AcquireTransactionLock(table.TableDataLock, LockMode.Exclusive);
+            this.AcquireTransactionLock(table.TableDataLock, LockMode.Exclusive, hints.NoWait);
             return new DataLockPlan(rowMode: null, rowTxScoped: false, skipBlockedRows: false, noLockReader: false);
         }
 
@@ -858,7 +884,7 @@ internal sealed class BatchContext
         {
             if (isWrite)
             {
-                this.AcquireTransactionLock(table.TableDataLock, LockMode.Exclusive);
+                this.AcquireTransactionLock(table.TableDataLock, LockMode.Exclusive, hints.NoWait);
                 return new DataLockPlan(rowMode: null, rowTxScoped: false, skipBlockedRows: false, noLockReader: false);
             }
             // Reader TABLOCK: table-S. Tx-scoped iff HOLDLOCK/SER/REPEATABLE or session RR/SER.
@@ -866,40 +892,52 @@ internal sealed class BatchContext
                 || hints.Repeatable
                 || isolation is System.Data.IsolationLevel.RepeatableRead or System.Data.IsolationLevel.Serializable;
             if (tabLockTxScoped)
-                this.AcquireTransactionLock(table.TableDataLock, LockMode.Shared);
+                this.AcquireTransactionLock(table.TableDataLock, LockMode.Shared, hints.NoWait);
             else
-                this.AcquireStatementLock(table.TableDataLock, LockMode.Shared);
+                this.AcquireStatementLock(table.TableDataLock, LockMode.Shared, hints.NoWait);
             return new DataLockPlan(rowMode: null, rowTxScoped: false, skipBlockedRows: false, noLockReader: false);
         }
 
         if (isWrite)
         {
-            this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentExclusive);
+            this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentExclusive, hints.NoWait);
             return new DataLockPlan(rowMode: LockMode.Exclusive, rowTxScoped: true, skipBlockedRows: false, noLockReader: false);
         }
 
         // Reader path (no TABLOCK*).
-        if (hints.XLock)
+        var serializable = hints.Serializable || isolation == System.Data.IsolationLevel.Serializable;
+        if (hints.XLock || hints.UpdLock)
         {
-            this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentExclusive);
-            return new DataLockPlan(rowMode: LockMode.Exclusive, rowTxScoped: true, skipBlockedRows: hints.ReadPast, noLockReader: false);
+            // Table-IX either way — probed, real reports IX at the object for
+            // an UPDLOCK / XLOCK read whatever the isolation level.
+            this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentExclusive, hints.NoWait);
+            var hintedRowMode = hints.XLock ? LockMode.Exclusive : LockMode.Update;
+            if (!serializable)
+                return new DataLockPlan(rowMode: hintedRowMode, rowTxScoped: true, skipBlockedRows: hints.ReadPast, noLockReader: false);
+            // SERIALIZABLE on top of the hint: real fences the same interval a
+            // plain SERIALIZABLE read would, in the mode the hint names —
+            // RangeS-U for UPDLOCK, RangeX-X for XLOCK (probe-confirmed, and
+            // neither takes a plain key lock beside it). The per-row hold stays
+            // on top: range modes live on resources of their own here, so
+            // dropping the row-U / row-X would stop blocking the readers and
+            // writers that take one without ever probing a range.
+            this.HasSessionScopedReference = true;
+            return new DataLockPlan(
+                rowMode: hintedRowMode, rowTxScoped: true, skipBlockedRows: hints.ReadPast, noLockReader: false,
+                serializableRangeMode: hints.XLock ? LockMode.RangeExclusiveExclusive : LockMode.RangeSharedUpdate,
+                fence: new PhantomFenceState());
         }
-        if (hints.UpdLock)
-        {
-            this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentExclusive);
-            return new DataLockPlan(rowMode: LockMode.Update, rowTxScoped: true, skipBlockedRows: hints.ReadPast, noLockReader: false);
-        }
-        if (hints.Serializable || isolation == System.Data.IsolationLevel.Serializable)
+        if (serializable)
         {
             // SERIALIZABLE / HOLDLOCK hint. Only table-IS is settled here —
             // the predicate that decides between key-range locks and the
             // whole-table fallback isn't known at FROM-source resolution, so
             // the plan carries the obligation forward (see
-            // DataLockPlan.SerializableRangeReader). The IS is tx-scoped, not
+            // DataLockPlan.SerializableRangeMode). The IS is tx-scoped, not
             // statement-scoped, so a concurrent TABLOCKX still conflicts for
             // as long as the ranges are held — that writer takes no per-row
             // lock, so the range probe would never see it.
-            this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentShared);
+            this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentShared, hints.NoWait);
             // Not plan-cacheable. Half the fence (the table-level acquisition,
             // and the whole-table fallback the scan path reaches through the
             // FROM source's captured batch) belongs to the session that parsed
@@ -908,10 +946,11 @@ internal sealed class BatchContext
             this.HasSessionScopedReference = true;
             return new DataLockPlan(
                 rowMode: null, rowTxScoped: false, skipBlockedRows: hints.ReadPast, noLockReader: false,
-                serializableRangeReader: true);
+                serializableRangeMode: LockMode.RangeSharedShared,
+                fence: new PhantomFenceState());
         }
         // RC / RR reader.
-        this.AcquireStatementLock(table.TableDataLock, LockMode.IntentShared);
+        this.AcquireStatementLock(table.TableDataLock, LockMode.IntentShared, hints.NoWait);
         var rowTxScoped = hints.Repeatable || isolation == System.Data.IsolationLevel.RepeatableRead;
         // RR: acquire row-S tx-scoped per row.
         // RC default: probe-only (no acquire). Encoded as rowMode = null + noLockReader = false;
@@ -950,7 +989,7 @@ internal sealed class BatchContext
         if (connection.CurrentTransaction is { } tx && tx.EscalatedTables.Contains(table))
             return;
         var resource = table.GetOrCreateRowLock(pageIndex, slotIndex);
-        connection.Simulation.LockManager.Acquire(resource, mode, connection, connection.LockTimeoutMillis);
+        connection.Simulation.LockManager.Acquire(resource, mode, connection, this.LockTimeoutFor(table));
         if (connection.CurrentTransaction is { } activeTx)
         {
             activeTx.HeldLocks.Add((resource, mode));
@@ -1031,13 +1070,17 @@ internal sealed class BatchContext
     /// non-sargable predicate over an indexed table range-locks every key plus
     /// the infinity range, which covers the same value space.
     /// <para>
-    /// A no-op for every other plan, and for a table whose fallback this batch
-    /// already took.
+    /// A no-op for every other plan, for a source whose fence is already
+    /// settled (a key range the seek path claimed covers the same obligation
+    /// more narrowly), and for a table whose fallback this batch already took.
     /// </para>
     /// </summary>
     public void EnsureSerializableTableLock(HeapTable table, in DataLockPlan plan)
     {
-        if (!plan.SerializableRangeReader || !this.serializableTableFallbacks.Add(table))
+        if (plan.SerializableRangeMode is null || plan.Fence is not { Settled: false } fence)
+            return;
+        fence.Settled = true;
+        if (!this.serializableTableFallbacks.Add(table))
             return;
         this.AcquireTransactionLock(table.TableDataLock, LockMode.Shared);
     }
@@ -1053,12 +1096,12 @@ internal sealed class BatchContext
 
     /// <summary>
     /// Blocks the caller until no other connection holds a key range covering
-    /// <paramref name="image"/>'s value for that range's column. Runs on every
-    /// writer whatever its own isolation level — a range lock's whole purpose
-    /// is to fence writers that know nothing about it — and mirrors real's
-    /// RangeI-N: an instant-duration mode taken only to test the interval and
-    /// released the moment it is granted, so it never shows up in a lock
-    /// snapshot taken after the write.
+    /// <paramref name="image"/>'s values for that range's ordinal tuple. Runs
+    /// on every writer whatever its own isolation level — a range lock's whole
+    /// purpose is to fence writers that know nothing about it — and mirrors
+    /// real's RangeI-N: an instant-duration mode taken only to test the
+    /// interval and released the moment it is granted, so it never shows up in
+    /// a lock snapshot taken after the write.
     /// <para>
     /// Costs nothing when no range is held anywhere on the table (the
     /// <see cref="HeapTable.ActiveKeyRangeLocks"/> read), and one column decode
@@ -1076,17 +1119,32 @@ internal sealed class BatchContext
         var manager = connection.Simulation.LockManager;
         var schema = table.StoredColumns;
         Dictionary<int, SqlValue>? decoded = null;
+        SqlValue[] probe = [];
         foreach (var (range, resource) in table.KeyRangeLocks)
         {
-            if ((uint)range.Ordinal >= (uint)schema.Length)
-                continue;
-            decoded ??= [];
-            if (!decoded.TryGetValue(range.Ordinal, out var value))
+            var ordinals = range.Ordinals;
+            if (probe.Length < ordinals.Length)
+                probe = new SqlValue[ordinals.Length];
+            var decodable = true;
+            for (var i = 0; i < ordinals.Length; i++)
             {
-                value = RowDecoder.DecodeColumn(schema, image, range.Ordinal, table.Heap);
-                decoded[range.Ordinal] = value;
+                var ordinal = ordinals[i];
+                if ((uint)ordinal >= (uint)schema.Length)
+                {
+                    decodable = false;
+                    break;
+                }
+                decoded ??= [];
+                if (!decoded.TryGetValue(ordinal, out var value))
+                {
+                    value = RowDecoder.DecodeColumn(schema, image, ordinal, table.Heap);
+                    decoded[ordinal] = value;
+                }
+                probe[i] = value;
             }
-            if (!range.Contains(value)
+
+            if (!decodable
+                || !range.Contains(probe.AsSpan(0, ordinals.Length))
                 || !manager.HasIncompatibleHolderOtherThan(resource, LockMode.RangeInsertNull, connection))
             {
                 continue;
@@ -1203,7 +1261,11 @@ internal sealed class BatchContext
     /// Based on <paramref name="plan"/>:
     /// <list type="bullet">
     /// <item><see cref="DataLockPlan.NoLockReader"/> — no probe, no acquire (dirty read).</item>
-    /// <item><see cref="DataLockPlan.RowMode"/> non-null — acquire that mode tx-scoped.</item>
+    /// <item><see cref="DataLockPlan.RowMode"/> non-null — acquire that mode
+    /// tx-scoped, unless <see cref="DataLockPlan.SkipBlockedRows"/> is set and
+    /// another connection already holds the row incompatibly, which is the
+    /// <c>UPDLOCK, READPAST</c> / <c>XLOCK, READPAST</c> pair real answers by
+    /// leaving the row out of the result (probe-confirmed).</item>
     /// <item>Else (RC probe path) — check for a row-X holder by another
     /// connection. If found and <see cref="DataLockPlan.SkipBlockedRows"/>
     /// is true, return false so the caller skips this row (READPAST).
@@ -1218,6 +1280,16 @@ internal sealed class BatchContext
             return true;
         if (plan.RowMode is { } mode)
         {
+            // READPAST beside UPDLOCK / XLOCK: probe before acquiring, since
+            // the acquire would block. The RC path's ActiveDataWriters gate
+            // doesn't serve here — it counts row-X grants only, and the holder
+            // this pair most often meets is another UPDLOCK reader's row-U.
+            if (plan.SkipBlockedRows
+                && table.RowLocks.TryGetValue((pageIndex, slotIndex), out var held)
+                && this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(held, mode, this.Connection))
+            {
+                return false;
+            }
             this.AcquireRowLockTxScoped(table, pageIndex, slotIndex, mode);
             return true;
         }
@@ -1248,7 +1320,7 @@ internal sealed class BatchContext
         // Wait for the row's writers to drain. Transient acquire-release
         // matches real SQL Server's RC pattern: "block until committed,
         // then release immediately."
-        manager.Acquire(resource, LockMode.Shared, connection, connection.LockTimeoutMillis);
+        manager.Acquire(resource, LockMode.Shared, connection, this.LockTimeoutFor(table));
         manager.Release(resource, LockMode.Shared, connection);
         return true;
     }
@@ -1273,7 +1345,16 @@ internal sealed class BatchContext
             manager.Release(resource, mode, connection);
         }
         this.StatementSchemaLocks.Clear();
+        this.noWaitTables.Clear();
     }
+
+    /// <summary>
+    /// The lock timeout to use for <paramref name="table"/>: zero when the
+    /// current statement named it with a <c>NOWAIT</c> table hint, else the
+    /// session's own <see cref="SimulatedDbConnection.LockTimeoutMillis"/>.
+    /// </summary>
+    private int LockTimeoutFor(HeapTable table)
+        => this.noWaitTables.Count != 0 && this.noWaitTables.Contains(table) ? 0 : this.Connection.LockTimeoutMillis;
 
     public bool IsSkipping =>
         this.SkipModeFlag

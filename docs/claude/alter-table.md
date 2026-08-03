@@ -233,6 +233,8 @@ Computed columns via `col AS expr [PERSISTED [NOT NULL]] [inline constraints]` a
 
 The optional `COLUMN` keyword between `ADD` and the column name is accepted (probe-confirmed real SQL Server accepts both shapes); the simulator's grammar recognizes `COLUMN` as a reserved keyword here.
 
+An inline `UNIQUE` / `PRIMARY KEY` may be the batch's last token — CREATE TABLE always has a closing paren after the clause, this form doesn't, and `ALTER TABLE t ADD c int NULL UNIQUE` is what Django's schema editor emits for a `unique=True` field a migration adds.
+
 ### Backfill semantic
 
 Existing rows are re-encoded against the new schema.

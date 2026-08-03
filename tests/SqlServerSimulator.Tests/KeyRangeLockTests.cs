@@ -42,6 +42,20 @@ public sealed class KeyRangeLockTests
         return sim;
     }
 
+    /// <summary>
+    /// Table keyed on the composite <c>(a, b)</c>, so a predicate bounding a
+    /// leading prefix has a tuple interval to fence.
+    /// </summary>
+    private static Simulation CompositeKeyedTable()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table ck (a int not null, b int not null, v int not null, primary key (a, b));
+            insert ck values (1, 2, 100), (1, 5, 101), (1, 9, 102), (2, 2, 103), (2, 7, 104), (3, 1, 105)
+            """);
+        return sim;
+    }
+
     // Runs `writeSql` on `writer` from a threadpool thread and asserts it is
     // still blocked after the holder has had time to matter, then releases the
     // holder and drains the write. Returns once the write has completed.
@@ -407,6 +421,253 @@ public sealed class KeyRangeLockTests
 
         await AssertProceeds(writer, "insert t values (26, 9)");
         await AssertBlocksUntil(reader, writer, "insert t values (22, 8)", "rollback tran");
+    }
+
+    [TestMethod]
+    public async Task CompositePrefixAndRange_InsertInsideTheTupleInterval_Blocks()
+    {
+        // `a = 1 AND b between 2 and 5` fences the tuple interval
+        // [(1,2), (1,5)] on the (a, b) key — probed against real, which range
+        // locks the three keys the predicate spans.
+        var sim = CompositeKeyedTable();
+        using var reader = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where a = 1 and b between 2 and 5").ExecuteScalar();
+        await AssertBlocksUntil(reader, writer, "insert ck values (1, 3, 900)", "rollback tran");
+    }
+
+    [TestMethod]
+    public async Task CompositePrefixAndRange_InsertUnderADifferentLeadingValue_DoesNotBlock()
+    {
+        // The payoff of the tuple fence: (2, 3) carries a `b` inside the
+        // second column's interval but a different `a`, so it sits outside the
+        // lexicographic interval entirely. Probed — real admits it too, while
+        // it blocks (1, 3).
+        var sim = CompositeKeyedTable();
+        using var reader = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where a = 1 and b between 2 and 5").ExecuteScalar();
+        await AssertProceeds(writer, "insert ck values (2, 3, 901)");
+
+        _ = reader.CreateCommand("rollback tran").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public async Task CompositeFullTupleEquality_FencesExactlyThatTuple()
+    {
+        // `a = 1 AND b = 3` matches nothing, so only the fence makes the
+        // phantom impossible — and it is the single tuple, not the whole `a = 1`
+        // group.
+        var sim = CompositeKeyedTable();
+        using var reader = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        AreEqual(0, reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where a = 1 and b = 3").ExecuteScalar());
+        await AssertProceeds(writer, "insert ck values (1, 4, 902)");
+        await AssertBlocksUntil(reader, writer, "insert ck values (1, 3, 903)", "rollback tran");
+    }
+
+    [TestMethod]
+    public async Task CompositePrefixOnly_FencesTheWholeGroupAndNothingElse()
+    {
+        // `a = 1` pins only the leading column, so the interval leaves `b`
+        // open: every row under `a = 1` is fenced and every other `a` is free.
+        // Probed on both sides.
+        var sim = CompositeKeyedTable();
+        using var reader = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where a = 1").ExecuteScalar();
+        await AssertProceeds(writer, "insert ck values (2, 5, 904)");
+        await AssertBlocksUntil(reader, writer, "insert ck values (1, 100, 905)", "rollback tran");
+    }
+
+    [TestMethod]
+    public async Task CompositePrefix_UpdateMovingARowIntoTheTupleInterval_Blocks()
+    {
+        // The post-update image is the only one that reveals the phantom, and
+        // the tuple probe has to read both key columns to see it.
+        var sim = CompositeKeyedTable();
+        using var reader = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where a = 1 and b between 2 and 5").ExecuteScalar();
+        await AssertBlocksUntil(reader, writer, "update ck set a = 1, b = 4 where a = 3 and b = 1", "rollback tran");
+    }
+
+    [TestMethod]
+    public async Task PredicateOnTheSecondKeyColumnOnly_FallsBackToWholeTable()
+    {
+        // No leading bound, so there is no prefix to fence — real degenerates
+        // to range-locking every key plus infinity, which is the whole key
+        // space the table-S covers here.
+        var sim = CompositeKeyedTable();
+        using var reader = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where b = 2").ExecuteScalar();
+        await AssertBlocksUntil(reader, writer, "insert ck values (9, 9, 906)", "rollback tran");
+    }
+
+    [TestMethod]
+    public void DmTranLocks_ProjectsACompositeRange_WithTheTupleInterval()
+    {
+        var sim = CompositeKeyedTable();
+        using var reader = sim.CreateOpenConnection();
+        _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where a = 1 and b between 2 and 5").ExecuteScalar();
+
+        AreEqual("0,1:[(1,2),(1,5)]", reader.CreateCommand("""
+            select resource_description from sys.dm_tran_locks
+            where resource_type = 'KEY' and request_mode = 'RangeS-S'
+            """).ExecuteScalar());
+
+        _ = reader.CreateCommand("rollback tran").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public void DmTranLocks_ProjectsAnUpdLockSerializableRead_AsRangeSU()
+    {
+        // Probed: SERIALIZABLE + UPDLOCK reports RangeS-U at the key and IX at
+        // the object, where the same read without SERIALIZABLE reports a plain
+        // key U.
+        var sim = KeyedTable();
+        using var reader = sim.CreateOpenConnection();
+        _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select v from t with (updlock) where k between 15 and 25").ExecuteScalar();
+
+        AreEqual(1, reader.CreateCommand("""
+            select count(*) from sys.dm_tran_locks
+            where resource_type = 'KEY' and request_mode = 'RangeS-U' and request_status = 'GRANT'
+            """).ExecuteScalar());
+
+        _ = reader.CreateCommand("rollback tran").ExecuteNonQuery();
+        AreEqual(0, reader.CreateCommand("select count(*) from sys.dm_tran_locks where resource_type = 'KEY'").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void DmTranLocks_ProjectsAnXLockSerializableRead_AsRangeXX()
+    {
+        var sim = KeyedTable();
+        using var reader = sim.CreateOpenConnection();
+        _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select v from t with (xlock) where k between 15 and 25").ExecuteScalar();
+
+        AreEqual(1, reader.CreateCommand("""
+            select count(*) from sys.dm_tran_locks
+            where resource_type = 'KEY' and request_mode = 'RangeX-X' and request_status = 'GRANT'
+            """).ExecuteScalar());
+
+        _ = reader.CreateCommand("rollback tran").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public void UpdLockUnderReadCommitted_TakesNoRange()
+    {
+        // The isolation level is what turns the hint's row mode into a range —
+        // UPDLOCK on its own keeps the row-U plan and interns no range.
+        var sim = KeyedTable();
+        using var reader = sim.CreateOpenConnection();
+        _ = reader.CreateCommand("begin tran; select v from t with (updlock) where k between 15 and 25").ExecuteScalar();
+
+        AreEqual(0, reader.CreateCommand("select count(*) from sys.dm_tran_locks where resource_type = 'KEY'").ExecuteScalar());
+
+        _ = reader.CreateCommand("rollback tran").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public void HoldLockWithUpdLock_UnderReadCommitted_TakesRangeSU()
+    {
+        // HOLDLOCK is SERIALIZABLE for the statement it sits on, so it reaches
+        // the same RangeS-U the session-level setting does.
+        var sim = KeyedTable();
+        using var reader = sim.CreateOpenConnection();
+        _ = reader.CreateCommand("begin tran; select v from t with (updlock, holdlock) where k between 15 and 25").ExecuteScalar();
+
+        AreEqual(1, reader.CreateCommand("""
+            select count(*) from sys.dm_tran_locks where resource_type = 'KEY' and request_mode = 'RangeS-U'
+            """).ExecuteScalar());
+
+        _ = reader.CreateCommand("rollback tran").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public async Task RangeSU_FencesAConcurrentInsert_LikeRangeSS()
+    {
+        var sim = KeyedTable();
+        using var reader = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select v from t with (updlock) where k between 15 and 25").ExecuteScalar();
+        await AssertProceeds(writer, "insert t values (26, 9)");
+        await AssertBlocksUntil(reader, writer, "insert t values (22, 8)", "rollback tran");
+    }
+
+    [TestMethod]
+    public async Task TwoRangeSUReaders_OfTheSameInterval_BlockEachOther()
+    {
+        // RangeS-U × RangeS-U conflicts where RangeS-S × RangeS-S doesn't —
+        // probed, where the second UPDLOCK reader of the same interval waits.
+        var sim = KeyedTable();
+        using var readerA = sim.CreateOpenConnection();
+        using var readerB = sim.CreateOpenConnection();
+
+        _ = readerA.CreateCommand("set transaction isolation level serializable; begin tran; select v from t with (updlock) where k between 15 and 25").ExecuteScalar();
+        await AssertBlocksUntil(
+            readerA,
+            readerB,
+            "set transaction isolation level serializable; begin tran; select v from t with (updlock) where k between 15 and 25",
+            "rollback tran");
+
+        _ = readerB.CreateCommand("rollback tran").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public async Task RangeSU_AndRangeSS_OverTheSameInterval_Coexist()
+    {
+        var sim = KeyedTable();
+        using var readerA = sim.CreateOpenConnection();
+        using var readerB = sim.CreateOpenConnection();
+
+        _ = readerA.CreateCommand("set transaction isolation level serializable; begin tran; select v from t with (updlock) where k between 15 and 25").ExecuteScalar();
+        await AssertProceeds(readerB, "set transaction isolation level serializable; begin tran; select v from t where k between 15 and 25");
+
+        _ = readerB.CreateCommand("rollback tran").ExecuteNonQuery();
+        _ = readerA.CreateCommand("rollback tran").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public async Task RangeXX_BlocksAPlainSerializableReaderOfTheSameInterval()
+    {
+        // RangeX-X conflicts with every other range mode, RangeS-S included —
+        // probed, where the plain SERIALIZABLE reader waits behind the XLOCK
+        // holder.
+        var sim = KeyedTable();
+        using var readerA = sim.CreateOpenConnection();
+        using var readerB = sim.CreateOpenConnection();
+
+        _ = readerA.CreateCommand("set transaction isolation level serializable; begin tran; select v from t with (xlock) where k between 15 and 25").ExecuteScalar();
+        await AssertBlocksUntil(
+            readerA,
+            readerB,
+            "set transaction isolation level serializable; begin tran; select v from t where k between 15 and 25",
+            "rollback tran");
+
+        _ = readerB.CreateCommand("rollback tran").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public async Task SerializableUpdLockOnAnUnindexedColumn_FallsBackToWholeTable()
+    {
+        // No key space to fence, so the fence is the whole-table S the plain
+        // SERIALIZABLE reader falls back to — real range-locks every key plus
+        // infinity here, which covers the same value space.
+        var sim = KeyedTable();
+        using var reader = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select k from t with (updlock) where v = 2").ExecuteScalar();
+        AreEqual(0, reader.CreateCommand("select count(*) from sys.dm_tran_locks where resource_type = 'KEY'").ExecuteScalar());
+        await AssertBlocksUntil(reader, writer, "insert t values (999, 9)", "rollback tran");
     }
 
     [TestMethod]

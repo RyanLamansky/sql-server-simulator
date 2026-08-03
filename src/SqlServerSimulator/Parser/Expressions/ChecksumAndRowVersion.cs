@@ -104,7 +104,12 @@ internal sealed class Checksum : Expression
         if (t == SqlType.Float) return BitConverter.GetBytes(v.AsDouble);
         if (t == SqlType.Real) return BitConverter.GetBytes(v.AsSingle);
         if (t is BinarySqlType or VarbinarySqlType) return v.AsBytes;
-        if (t is DecimalSqlType) return Encoding.UTF8.GetBytes(v.AsDecimal.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        // "G29" drops the trailing zeros the declared scale carries, so the
+        // checksum keys off the numeric value alone — real agrees the same way
+        // (CHECKSUM(CAST(1 AS numeric(10, 2))) equals CHECKSUM(CAST(1 AS
+        // numeric(10, 0))), probe-confirmed), even though the fold itself is
+        // the simulator's own.
+        if (t is DecimalSqlType) return Encoding.UTF8.GetBytes(v.AsDecimal.ToString("G29", System.Globalization.CultureInfo.InvariantCulture));
         // Date/time, guid, others — fall back to canonical string form.
         return Encoding.Unicode.GetBytes(v.CoerceTo(SqlType.NVarchar).AsString);
     }

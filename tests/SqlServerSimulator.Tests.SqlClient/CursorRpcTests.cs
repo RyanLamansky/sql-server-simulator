@@ -176,6 +176,52 @@ public sealed class CursorRpcTests
         AreEqual(-1, fRows);
     }
 
+    /// <summary>
+    /// An API server cursor keeps KEYSET over a table with no unique index or
+    /// clustered key, where the T-SQL <c>DECLARE … CURSOR KEYSET</c> form
+    /// converts to a read-only snapshot. Probe-confirmed against SQL Server
+    /// 2025: <c>sys.dm_exec_cursors</c> reports <c>API | Keyset</c>,
+    /// <c>sp_cursoropen</c> echoes the requested scrollopt rather than STATIC's
+    /// <c>0x8</c>, and the positioned <c>sp_cursor</c> UPDATE writes through —
+    /// the row address is identity enough on this path.
+    /// </summary>
+    [TestMethod]
+    public async Task ApiKeysetOverKeylessTable_StaysKeysetAndUpdatable()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
+        await using var connection = await Wire.OpenAsync(listener, Token);
+        await using (var setup = new SqlCommand(
+            "CREATE TABLE dbo.curh (id int NOT NULL, qty int NOT NULL);" +
+            "INSERT INTO dbo.curh VALUES (1,10),(2,20);",
+            connection))
+        {
+            _ = await setup.ExecuteNonQueryAsync(Token);
+        }
+
+        var (handle, scroll, _, rowcount) = await OpenAsync(connection, "SELECT id, qty FROM dbo.curh ORDER BY id", 0x1, 0x2, Token);
+        AreEqual(0x1, scroll);
+        AreEqual(2, rowcount);
+        _ = await FetchAsync(connection, handle, 0x1, 1, 2, Token);
+
+        await using (var upd = Proc("sp_cursor", connection))
+        {
+            var ret = new SqlParameter("@RETURN_VALUE", SqlDbType.Int) { Direction = ParameterDirection.ReturnValue };
+            _ = upd.Parameters.Add(ret);
+            _ = upd.Parameters.Add(new SqlParameter("@cursor", SqlDbType.Int) { Value = handle });
+            _ = upd.Parameters.Add(new SqlParameter("@optype", SqlDbType.Int) { Value = 0x1 });
+            _ = upd.Parameters.Add(new SqlParameter("@rownum", SqlDbType.Int) { Value = 1 });
+            _ = upd.Parameters.Add(new SqlParameter("@table", SqlDbType.NVarChar, 128) { Value = "dbo.curh" });
+            _ = upd.Parameters.Add(new SqlParameter("@qty", SqlDbType.Int) { Value = 999 });
+            _ = await upd.ExecuteNonQueryAsync(Token);
+            AreEqual(0, ret.Value);
+        }
+
+        AreEqual(0, await CloseAsync(connection, handle, Token));
+        await using var verify = new SqlCommand("SELECT qty FROM dbo.curh WHERE id = 1", connection);
+        AreEqual(999, await verify.ExecuteScalarAsync(Token));
+    }
+
     [TestMethod]
     public async Task PositionedUpdateAndDelete_ViaSpCursor()
     {

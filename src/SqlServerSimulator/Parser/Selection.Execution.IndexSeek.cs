@@ -48,13 +48,36 @@ internal sealed partial class Selection
         if (source.BackingTable is not { } table || source.LateralPlan is not null)
             return sources;
 
+        if (source.HeapPlan is not { } plan)
+        {
+            IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
+            return sources;
+        }
+
+        var conjuncts = new List<BooleanExpression>();
+        foreach (var excluder in excluders)
+            excluder.CollectConjuncts(conjuncts);
+
+        var equalities = CollectColumnEqualities(source, conjuncts, allowCorrelatedColumnValue);
+        var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue);
+
+        // A SERIALIZABLE / HOLDLOCK reader's phantom fence is settled here,
+        // before any candidate address is read: the conjuncts that bound the
+        // seek are exactly the ones that bound the range, and locking after
+        // the read would leave a window in which a concurrent insert lands
+        // unseen yet unfenced. Settling it before the seek is even known to
+        // apply costs at worst the whole-table fallback the scan path would
+        // have taken anyway.
+        SettleSerializablePhantomFence(source, table, plan, batch, outerResolver, equalities, bounds);
+
         // The seek narrows the row source, then routes each candidate through
         // the SAME per-row lock / conflict pipeline the full scan uses — so it
         // touches (and locks) only the seeked rows, matching a real index seek.
-        // tx-scoped row locks (REPEATABLE READ / SERIALIZABLE / UPDLOCK …) keep
-        // the whole-table scan, which deliberately locks every row it reads to
-        // end of transaction.
-        if (source.HeapPlan is not { } plan || plan.RowTxScoped)
+        // tx-scoped row locks (REPEATABLE READ / UPDLOCK / XLOCK) keep the
+        // whole-table scan, which deliberately locks every row it reads to end
+        // of transaction — their phantom fence is settled above all the same,
+        // since a SERIALIZABLE reader carrying UPDLOCK / XLOCK owes one.
+        if (plan.RowTxScoped)
         {
             IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
             return sources;
@@ -71,38 +94,6 @@ internal sealed partial class Selection
         // empty version store the sweep is empty and every candidate resolves to
         // its live bytes. See MaterializeSnapshotCandidates.
         var snapshotXid = batch.ResolveSnapshotXidForRead(table);
-
-        var conjuncts = new List<BooleanExpression>();
-        foreach (var excluder in excluders)
-            excluder.CollectConjuncts(conjuncts);
-
-        // Map each indexable column of THIS source carrying a stable-value
-        // equality conjunct (or IN-list / OR-of-equalities on the same column)
-        // to its value side(s). First writer wins per column; a redundant
-        // later conjunct just stays as a residual filter.
-        var equalities = new Dictionary<int, Expression[]>();
-        foreach (var conjunct in conjuncts)
-        {
-            if (conjunct.TryGetEqualityOperands(out var left, out var right))
-            {
-                _ = TryRecordColumnEquality(source, left, right, equalities, allowCorrelatedColumnValue)
-                    || TryRecordColumnEquality(source, right, left, equalities, allowCorrelatedColumnValue);
-                continue;
-            }
-            if (conjunct.TryGetEqualityFamily(out var family))
-                _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue);
-        }
-
-        var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue);
-
-        // A SERIALIZABLE / HOLDLOCK reader's phantom fence is settled here,
-        // before any candidate address is read: the conjuncts that bound the
-        // seek are exactly the ones that bound the range, and locking after
-        // the read would leave a window in which a concurrent insert lands
-        // unseen yet unfenced. Settling it before the seek is even known to
-        // apply costs at worst the whole-table fallback the scan path would
-        // have taken anyway.
-        SettleSerializablePhantomFence(source, table, plan, batch, outerResolver, equalities, bounds);
 
         if (equalities.Count != 0
             && TrySeekByLongestPrefix(source, table, plan, batch, snapshotXid, outerResolver, equalities, bounds, out var seekRows, out var width, out var rangeExtended))
@@ -133,9 +124,11 @@ internal sealed partial class Selection
     /// <summary>
     /// Takes the phantom protection a SERIALIZABLE / <c>HOLDLOCK</c> reader is
     /// still owed over <paramref name="table"/>: a key-range lock over the
-    /// value interval one sargable conjunct pins on an indexed leading column,
-    /// or — when no conjunct offers one — the whole-table S the scan path
-    /// falls back to. A no-op for every other isolation level.
+    /// tuple interval the sargable conjuncts pin on the leading columns of some
+    /// key / index, or — when no conjunct offers one — the whole-table S the
+    /// scan path falls back to. A no-op for every other isolation level. The
+    /// mode comes off the plan, so an <c>UPDLOCK</c> / <c>XLOCK</c> reader
+    /// fences the same interval in <c>RangeS-U</c> / <c>RangeX-X</c>.
     /// </summary>
     private static void SettleSerializablePhantomFence(
         FromSource source,
@@ -146,33 +139,51 @@ internal sealed partial class Selection
         Dictionary<int, Expression[]> equalities,
         Dictionary<int, RangeBoundExprs> bounds)
     {
-        if (!plan.SerializableRangeReader)
+        if (plan.SerializableRangeMode is not { } mode)
             return;
-        if (ComputeSerializableKeyRange(source, table, batch, outerResolver, equalities, bounds) is { } range)
-            batch.AcquireKeyRangeLockTxScoped(table, range, LockMode.RangeSharedShared);
-        else
+        // Deliberately not short-circuited on an already-settled fence: a
+        // correlated inner re-plans per outer row, and each outer value names
+        // an interval of its own that has to be fenced too.
+        if (ComputeSerializableKeyRange(source, table, batch, outerResolver, equalities, bounds) is not { } range)
+        {
             batch.EnsureSerializableTableLock(table, plan);
+            return;
+        }
+
+        if (plan.Fence is { } fence)
+            fence.Settled = true;
+        batch.AcquireKeyRangeLockTxScoped(table, range, mode);
     }
 
     /// <summary>
-    /// The value interval a SERIALIZABLE reader can fence instead of locking
-    /// the whole table, or <c>null</c> when no conjunct offers one.
+    /// The key-space interval a SERIALIZABLE reader can fence instead of
+    /// locking the whole table, or <c>null</c> when no conjunct offers one.
     /// <para>
     /// Soundness rests on the same property the seek does: every conjunct here
     /// is a top-level <c>AND</c> factor of the predicate, so every row the
     /// query can ever return satisfies it, so every row that could become a
-    /// phantom carries a column value inside the returned interval. Only a
-    /// <b>leading</b> key column of some key / index qualifies — mirroring
-    /// real, which range-locks along an index and takes an object-level S when
-    /// there is no index to walk.
+    /// phantom carries a key tuple inside the returned interval. Only a
+    /// <b>leading prefix</b> of some key / index qualifies — mirroring real,
+    /// which range-locks along an index and takes an object-level S when there
+    /// is no index to walk.
     /// </para>
     /// <para>
-    /// Equality wins over a range bound (it is the narrower fence), and keys /
-    /// indexes are walked in their own order so the choice doesn't ride on
-    /// dictionary enumeration order. An <c>IN</c> list collapses to the hull of
-    /// its values — one interval spanning the lowest to the highest, gaps
-    /// between them included, which over-blocks rather than leaving a value
-    /// unfenced.
+    /// The fence follows the equality prefix as deep as the conjuncts pin it
+    /// (<c>a = 1 AND b = 2</c> against a key on <c>(a, b)</c> fences the single
+    /// tuple), and extends one column further when a range bound lands on the
+    /// key column right after the prefix (<c>a = 1 AND b BETWEEN 2 AND 5</c>).
+    /// A prefix the predicate stops short of stays open, so <c>a = 1</c> alone
+    /// fences every <c>b</c> under <c>a = 1</c> and nothing else. The longest
+    /// prefix across all keys / indexes wins, keys walked before indexes so a
+    /// tie doesn't ride on dictionary enumeration order, and a bound
+    /// continuation breaks a tie between equal prefixes.
+    /// </para>
+    /// <para>
+    /// An <c>IN</c> list collapses to the hull of its values — one interval
+    /// spanning the lowest to the highest, gaps between them included, which
+    /// over-blocks rather than leaving a value unfenced. Across a multi-column
+    /// prefix the same hull is taken per column, so the lexicographic interval
+    /// spans the whole cartesian product and then some.
     /// </para>
     /// </summary>
     private static KeyRange? ComputeSerializableKeyRange(
@@ -183,57 +194,133 @@ internal sealed partial class Selection
         Dictionary<int, Expression[]> equalities,
         Dictionary<int, RangeBoundExprs> bounds)
     {
-        if (equalities.Count != 0)
-        {
-            foreach (var ordinals in EnumerateKeyOrdinals(table))
-            {
-                if (ordinals.Length == 0 || !equalities.TryGetValue(ordinals[0], out var valueSides))
-                    continue;
-                if (EvaluateProbeComponent(source, ordinals[0], valueSides, batch, outerResolver) is not { } resolved)
-                    continue;
-                // A dropped probe (NULL, cross-collation, unpromotable) means
-                // the hull wouldn't span every value the residual predicate
-                // still admits, so decline rather than under-fence.
-                var (common, probes) = resolved;
-                if (probes.Length != valueSides.Length)
-                    continue;
-                var low = probes[0];
-                var high = probes[0];
-                for (var i = 1; i < probes.Length; i++)
-                {
-                    if (probes[i].CompareTo(low) < 0)
-                        low = probes[i];
-                    if (probes[i].CompareTo(high) > 0)
-                        high = probes[i];
-                }
-
-                return new KeyRange(ordinals[0], common, hasLower: true, low, lowerInclusive: true, hasUpper: true, high, upperInclusive: true);
-            }
-        }
-
-        if (bounds.Count == 0)
+        if (equalities.Count == 0 && bounds.Count == 0)
             return null;
+
+        var resolved = new Dictionary<int, (SqlType Common, SqlValue[] Probes)?>();
+        int[]? bestOrdinals = null;
+        var bestLength = 0;
+        var bestContinues = false;
         foreach (var ordinals in EnumerateKeyOrdinals(table))
         {
-            if (ordinals.Length == 0 || !bounds.TryGetValue(ordinals[0], out var bound))
+            var length = 0;
+            while (length < ordinals.Length && ResolveComponent(ordinals[length]) is not null)
+                length++;
+            var continues = length < ordinals.Length && bounds.ContainsKey(ordinals[length]);
+            if (length == 0 && !continues)
                 continue;
-            // A NULL bound makes the conjunct UNKNOWN for every row present or
-            // future, so the query's result is permanently empty and no insert
-            // can phantom into it — but declining here keeps the reasoning in
-            // one place (the fallback covers it).
-            if (EvaluateRangeBounds(bound, source.StoredSchema[ordinals[0]].Type, batch, outerResolver,
-                out var common, out var hasLower, out var lowerValue, out var hasUpper, out var upperValue) != BoundEval.Value)
-            {
-                continue;
-            }
-
-            return new KeyRange(
-                ordinals[0], common,
-                hasLower, lowerValue, bound.LowerInclusive,
-                hasUpper, upperValue, bound.UpperInclusive);
+            if (bestOrdinals is null || length > bestLength || (length == bestLength && continues && !bestContinues))
+                (bestOrdinals, bestLength, bestContinues) = (ordinals, length, continues);
         }
 
-        return null;
+        if (bestOrdinals is null)
+            return null;
+
+        var width = bestLength + (bestContinues ? 1 : 0);
+        var rangeOrdinals = bestOrdinals[..width];
+        var commons = new SqlType[width];
+        var lower = new List<SqlValue>(width);
+        var upper = new List<SqlValue>(width);
+        for (var i = 0; i < bestLength; i++)
+        {
+            var (common, probes) = resolved[rangeOrdinals[i]]!.Value;
+            commons[i] = common;
+            var low = probes[0];
+            var high = probes[0];
+            for (var p = 1; p < probes.Length; p++)
+            {
+                if (probes[p].CompareTo(low) < 0)
+                    low = probes[p];
+                if (probes[p].CompareTo(high) > 0)
+                    high = probes[p];
+            }
+
+            lower.Add(low);
+            upper.Add(high);
+        }
+
+        var lowerInclusive = true;
+        var upperInclusive = true;
+        if (bestContinues)
+        {
+            var boundOrdinal = rangeOrdinals[bestLength];
+            var bound = bounds[boundOrdinal];
+            // A NULL bound makes the conjunct UNKNOWN for every row present or
+            // future, so the query's result is permanently empty and no insert
+            // can phantom into it; an unevaluatable one can't narrow anything.
+            // Either way the equality prefix behind it is still a sound fence,
+            // so keep that and drop the continuation.
+            if (EvaluateRangeBounds(bound, source.StoredSchema[boundOrdinal].Type, batch, outerResolver,
+                out var boundCommon, out var hasLower, out var lowerValue, out var hasUpper, out var upperValue) == BoundEval.Value)
+            {
+                commons[bestLength] = boundCommon;
+                if (hasLower)
+                {
+                    lower.Add(lowerValue);
+                    lowerInclusive = bound.LowerInclusive;
+                }
+                if (hasUpper)
+                {
+                    upper.Add(upperValue);
+                    upperInclusive = bound.UpperInclusive;
+                }
+            }
+            else if (bestLength == 0)
+            {
+                return null;
+            }
+            else
+            {
+                rangeOrdinals = rangeOrdinals[..bestLength];
+                Array.Resize(ref commons, bestLength);
+            }
+        }
+
+        return new KeyRange(rangeOrdinals, commons, [.. lower], lowerInclusive, [.. upper], upperInclusive);
+
+        // Resolves (and memoizes) the probe components for one column, null for
+        // a column that can't anchor the fence — no stable-value equality, or a
+        // dropped probe (NULL, cross-collation, unpromotable) whose hull
+        // wouldn't span every value the residual predicate still admits. Either
+        // bounds the prefix there rather than under-fencing.
+        (SqlType Common, SqlValue[] Probes)? ResolveComponent(int storageOrdinal)
+        {
+            if (resolved.TryGetValue(storageOrdinal, out var cached))
+                return cached;
+            (SqlType Common, SqlValue[] Probes)? component = null;
+            if (equalities.TryGetValue(storageOrdinal, out var valueSides)
+                && EvaluateProbeComponent(source, storageOrdinal, valueSides, batch, outerResolver) is { } evaluated
+                && evaluated.Probes.Length == valueSides.Length)
+            {
+                component = evaluated;
+            }
+
+            resolved[storageOrdinal] = component;
+            return component;
+        }
+    }
+
+    // Maps each indexable column of THIS source carrying a stable-value
+    // equality conjunct (or IN-list / OR-of-equalities on the same column) to
+    // its value side(s). First writer wins per column; a redundant later
+    // conjunct just stays as a residual filter.
+    private static Dictionary<int, Expression[]> CollectColumnEqualities(
+        FromSource source, List<BooleanExpression> conjuncts, bool allowCorrelatedColumnValue)
+    {
+        var equalities = new Dictionary<int, Expression[]>();
+        foreach (var conjunct in conjuncts)
+        {
+            if (conjunct.TryGetEqualityOperands(out var left, out var right))
+            {
+                _ = TryRecordColumnEquality(source, left, right, equalities, allowCorrelatedColumnValue)
+                    || TryRecordColumnEquality(source, right, left, equalities, allowCorrelatedColumnValue);
+                continue;
+            }
+            if (conjunct.TryGetEqualityFamily(out var family))
+                _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue);
+        }
+
+        return equalities;
     }
 
     // Wraps a narrowed row stream back into a single-source array, preserving the

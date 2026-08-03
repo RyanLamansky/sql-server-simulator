@@ -2,7 +2,7 @@ namespace SqlServerSimulator.Parser.FullText;
 
 /// <summary>
 /// Binds a full-text predicate's column specification against the FROM sources
-/// the enclosing query already parsed. <see cref="ParserContext.FullTextSources"/>
+/// the enclosing query already parsed. <see cref="ParserContext.ScopeSources"/>
 /// carries that scope: <c>Selection</c> installs it once the FROM clause is
 /// bound — which happens before the select list <i>and</i> before WHERE, so
 /// both a <c>WHERE CONTAINS(…)</c> and a <c>CASE WHEN CONTAINS(…)</c> in the
@@ -19,7 +19,7 @@ internal static class FullTextScope
     /// </summary>
     public static FullTextBinding Bind(ParserContext context, FullTextColumnSpec.Spec spec)
     {
-        if (context.FullTextSources is not { Length: > 0 } sources)
+        if (context.ScopeSources is not { Length: > 0 } sources)
             throw SimulatedSqlException.FullTextPredicateNotAllowedHere();
 
         var collation = context.Batch.CurrentDatabase.Collation;

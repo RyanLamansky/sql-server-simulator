@@ -49,6 +49,9 @@ partial class SimulatedSqlException
     private const string SpatialOutOfRange = "System.ArgumentOutOfRangeException";
     private const string SpatialArgument = "System.ArgumentException";
 
+    /// <summary>The spatial library's own exception type, which the round-earth checks report under rather than a <c>System.</c> one.</summary>
+    private const string SpatialGeodetic = "Microsoft.SqlServer.Types.GLArgumentException";
+
     /// <summary>
     /// The label list real names in <see cref="SpatialInvalidLabel"/> — the
     /// curved and whole-globe kinds appear here because real accepts them,
@@ -111,6 +114,16 @@ partial class SimulatedSqlException
     /// <summary>24201 — a <c>geography</c> coordinate outside the latitude domain. Longitude has no equivalent check; real accepts any value there.</summary>
     internal static SimulatedSqlException SpatialLatitudeOutOfRange() => SpatialFailure(
         isGeography: true, SpatialFormat, 24201, "Latitude values must be between -90 and 90 degrees.");
+
+    /// <summary>
+    /// 24206 — a <c>geography</c> edge whose endpoints are exactly antipodal.
+    /// Real raises it while <i>constructing</i> the instance, and reports it as
+    /// its own spatial-library exception type rather than a <c>System.</c> one.
+    /// </summary>
+    internal static SimulatedSqlException SpatialAntipodalEdge() => SpatialFailure(
+        isGeography: true, SpatialGeodetic, 24206,
+        "The specified input cannot be accepted because it contains an edge with antipodal points. For information about "
+        + "using spatial methods with FullGlobe objects, see Types of Spatial Data in SQL Server Books Online.");
 
     /// <summary>24102 — <c>STPointN</c> index below 1. Real's wording differs from <see cref="SpatialGeometryIndexTooSmall"/> by one word ("This number" vs "The number"), reproduced verbatim.</summary>
     internal static SimulatedSqlException SpatialPointIndexTooSmall(bool isGeography, int n) => SpatialFailure(

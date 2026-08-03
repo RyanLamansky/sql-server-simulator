@@ -157,6 +157,13 @@ internal sealed partial class Selection
         public bool XLock;
         /// <summary><c>READPAST</c> — skip blocked rows during scan instead of waiting. Default RC behavior is wait.</summary>
         public bool ReadPast;
+        /// <summary>
+        /// <c>NOWAIT</c> — every lock this statement takes on the hinted table
+        /// gets a zero timeout, so a conflict raises Msg 1222 instead of
+        /// waiting. Real documents it as "equivalent to specifying SET
+        /// LOCK_TIMEOUT 0 for a specific table".
+        /// </summary>
+        public bool NoWait;
         /// <summary><c>TABLOCK</c> — escalate to table-S (read) or table-X (write) instead of row-level.</summary>
         public bool TabLock;
         /// <summary><c>TABLOCKX</c> — escalate to table-X regardless of read / write direction.</summary>
@@ -396,8 +403,9 @@ internal sealed partial class Selection
         // a subsequent UPDATE inside the same tx doesn't deadlock with
         // another connection's S-then-U upgrade. XLOCK treats the read like
         // a write (row-X tx-scoped). TABLOCK / TABLOCKX escalates to table
-        // granularity. READPAST skips blocked rows instead of waiting.
-        // Everything else parses-and-discards.
+        // granularity. READPAST skips blocked rows instead of waiting, and
+        // NOWAIT zeroes the lock timeout for the hinted table so a conflict
+        // raises Msg 1222 at once. Everything else parses-and-discards.
         if (sourceSpan.Equals("NOLOCK", StringComparison.OrdinalIgnoreCase) || sourceSpan.Equals("READUNCOMMITTED", StringComparison.OrdinalIgnoreCase))
         {
             info.NoLock = true;
@@ -422,6 +430,10 @@ internal sealed partial class Selection
         else if (sourceSpan.Equals("READPAST", StringComparison.OrdinalIgnoreCase))
         {
             info.ReadPast = true;
+        }
+        else if (sourceSpan.Equals("NOWAIT", StringComparison.OrdinalIgnoreCase))
+        {
+            info.NoWait = true;
         }
         else if (sourceSpan.Equals("TABLOCK", StringComparison.OrdinalIgnoreCase))
         {

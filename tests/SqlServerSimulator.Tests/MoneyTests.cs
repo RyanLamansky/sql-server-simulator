@@ -167,4 +167,33 @@ public sealed class MoneyTests
         _ = command.ExecuteNonQuery();
         AreEqual(19.99m, simulation.ExecuteScalar<decimal>("select v from t"));
     }
+
+    /// <summary>
+    /// money's fixed scale of 4 rides on the .NET <see cref="decimal"/> itself,
+    /// not only on the rendering paths — scale is invisible to decimal
+    /// equality, so the assertion compares rendered text against what SQL
+    /// Server 2025 writes through <c>JSON_ARRAY</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(1 as money)", "1.0000")]
+    [DataRow("cast(1 as smallmoney)", "1.0000")]
+    [DataRow("$1", "1.0000")]
+    [DataRow("cast(1.5 as money)", "1.5000")]
+    [DataRow("cast(1 as money) + cast(1 as money)", "2.0000")]
+    [DataRow("cast(1 as money) * cast(2 as money)", "2.0000")]
+    [DataRow("cast(1 as money) / cast(3 as money)", "0.3333")]
+    public void DeclaredScale_MoneyValues_CarryScaleFour(string expression, string expected) =>
+        AreEqual(expected, ExecuteScalar<decimal>($"select {expression}")
+            .ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// <c>FORMAT</c> reaches the money value through the same scale-4
+    /// <see cref="decimal"/>, so the general format spec shows all four digits
+    /// while an explicit one still governs (probed against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("'G'", "1.0000")]
+    [DataRow("'N2'", "1.00")]
+    public void Format_MoneyValue_FormatsTheScaleFourDecimal(string format, string expected) =>
+        AreEqual(expected, ExecuteScalar($"select format(cast(1 as money), {format})"));
 }

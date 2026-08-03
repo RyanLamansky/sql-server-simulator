@@ -198,7 +198,9 @@ Alternate / ANSI forms SQL Server 2025 accepts, each probed against the live ref
 - **2-arg `LTRIM(x, chars)` / `RTRIM(x, chars)`** (SQL Server 2022+) strip any of the set's characters from the one side; NULL `chars` yields NULL.
   The 1-arg forms keep their space-only behavior.
 - **`GREATEST` / `LEAST`** (`Parser/Expressions/GreatestLeast.cs`, `isLeast` flag) — horizontal max / min.
-  All arguments promote to the single highest-precedence result type (`SqlType.Promote`), NULLs are skipped, and the result is NULL only when every argument is NULL.
+  All arguments promote to the single highest-precedence result type, NULLs are skipped, and the result is NULL only when every argument is NULL.
+  The promotion is the CASE family's arm unification (`SqlType.PromoteBranches`), so an integer-literal argument sizes by its own digit count against a decimal sibling: `GREATEST(<decimal(9, 2) col>, 1)` stays `decimal(9, 2)` where `GREATEST(<decimal(9, 2) col>, 2147483647)` widens to `decimal(12, 2)`.
+  Projection nullability follows the same family — see [`tds-endpoint.md`](tds-endpoint.md).
   `GREATEST(1.5, 2)` → `2` as `numeric`; `GREATEST('a','b',3)` → Msg 245 (the int-promoted set can't parse `'a'`), matching real.
 
 ## EF.Functions-driven string scalars: `PATINDEX` / `STUFF` / `QUOTENAME` / `REPLICATE` / `SPACE` / `FORMAT`

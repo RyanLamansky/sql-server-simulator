@@ -182,6 +182,17 @@ internal sealed class CursorSourcePlan
     /// </summary>
     public readonly bool OrderBySuppliedByIndex;
 
+    /// <summary>
+    /// True when every base table the plan reads carries a row locator real
+    /// SQL Server's KEYSET cursor can key on. False converts the cursor to a
+    /// read-only snapshot however KEYSET was reached — explicitly, through
+    /// <c>SCROLL</c>, or through the row-limit / ORDER BY caps — matching
+    /// real, which reports <c>Snapshot | Read Only</c> and refuses positioned
+    /// DML there with Msg 16929. Every participating table must qualify: a
+    /// join with one keyless side converts (probe-confirmed).
+    /// </summary>
+    public readonly bool SupportsKeyset;
+
     public CursorSourcePlan(
         FromSource[] sources,
         JoinSpec[] joins,
@@ -236,6 +247,36 @@ internal sealed class CursorSourcePlan
         this.IdentityViews = [.. views];
         this.IdentityColumns = [.. columns];
         this.OrderBySuppliedByIndex = OrderIsIndexSupplied(sources, slots, projections, columnNames, orderBy);
+        this.SupportsKeyset = Array.TrueForAll(this.IdentityTables, KeysetIdentifiable);
+    }
+
+    /// <summary>
+    /// Whether a table carries the row locator real SQL Server's KEYSET cursor
+    /// keys on. A PRIMARY KEY / UNIQUE constraint qualifies, and so does any
+    /// unfiltered unique index — a <em>disabled</em> one included, which is
+    /// metadata presence rather than usability (probe-confirmed: a cursor over
+    /// a heap whose only unique index is disabled still reports <c>Keyset</c>
+    /// and takes positioned DML). A clustered index qualifies whether or not
+    /// it is unique, since a non-unique one gets a uniquifier and its key
+    /// still fixes one row (probe-confirmed). A <em>filtered</em> unique index
+    /// does not — it covers only part of the table — and neither does a
+    /// non-unique nonclustered index, an IDENTITY column, or a
+    /// <c>rowversion</c> column, all probe-confirmed to convert.
+    /// </summary>
+    private static bool KeysetIdentifiable(HeapTable table)
+    {
+        // PRIMARY KEY / UNIQUE are unique and unfiltered by construction, so
+        // any one of them qualifies the table.
+        if (table.KeyConstraints.Count > 0)
+            return true;
+
+        foreach (var index in table.Indexes)
+        {
+            if ((index.IsUnique || index.IsClustered) && index.Filter is null)
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>

@@ -343,32 +343,87 @@ public sealed class LockResourceTests
     }
 
     [TestMethod]
+    public void SerializableUpdLockRead_TakesRangeSU_AndKeepsItsRowU()
+    {
+        // Real folds the two into one key lock; range modes live on resources
+        // of their own here, so the row-U stays on top of the RangeS-U — which
+        // is what keeps blocking the readers and writers that take a row lock
+        // without ever probing a range.
+        var sim = new Simulation();
+        ExecuteNonQuery(sim, "create table t (k int not null primary key, v int); insert t values (2, 20)");
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        ExecuteNonQuery(conn, "set transaction isolation level serializable; begin tran; select v from t with (updlock) where k between 1 and 5");
+
+        AreEqual(1, table.ActiveKeyRangeLocks);
+        Contains(
+            LockMode.RangeSharedUpdate,
+            table.KeyRangeLocks.Values.SelectMany(static r => r.Holders).Select(static h => h.Mode));
+        Contains(LockMode.Update, table.RowLocks.Values.SelectMany(static r => r.Holders).Select(static h => h.Mode));
+        Contains(LockMode.IntentExclusive, table.TableDataLock.Holders.Select(static h => h.Mode));
+        DoesNotContain(LockMode.Shared, table.TableDataLock.Holders.Select(static h => h.Mode));
+
+        ExecuteNonQuery(conn, "rollback tran");
+        AreEqual(0, table.ActiveKeyRangeLocks);
+    }
+
+    [TestMethod]
     public void KeyRange_Contains_HonorsBoundInclusivityAndRejectsNull()
     {
-        var open = new KeyRange(
-            0, SqlType.Int32,
+        var open = SingleColumn(
             hasLower: true, SqlValue.FromInt32(10), lowerInclusive: false,
             hasUpper: true, SqlValue.FromInt32(20), upperInclusive: false);
-        IsFalse(open.Contains(SqlValue.FromInt32(10)));
-        IsTrue(open.Contains(SqlValue.FromInt32(15)));
-        IsFalse(open.Contains(SqlValue.FromInt32(20)));
-        IsFalse(open.Contains(SqlValue.Null(SqlType.Int32)));
+        IsFalse(Covers(open, SqlValue.FromInt32(10)));
+        IsTrue(Covers(open, SqlValue.FromInt32(15)));
+        IsFalse(Covers(open, SqlValue.FromInt32(20)));
+        IsFalse(Covers(open, SqlValue.Null(SqlType.Int32)));
 
-        var closed = new KeyRange(
-            0, SqlType.Int32,
+        var closed = SingleColumn(
             hasLower: true, SqlValue.FromInt32(10), lowerInclusive: true,
             hasUpper: true, SqlValue.FromInt32(20), upperInclusive: true);
-        IsTrue(closed.Contains(SqlValue.FromInt32(10)));
-        IsTrue(closed.Contains(SqlValue.FromInt32(20)));
-        IsFalse(closed.Contains(SqlValue.FromInt32(21)));
+        IsTrue(Covers(closed, SqlValue.FromInt32(10)));
+        IsTrue(Covers(closed, SqlValue.FromInt32(20)));
+        IsFalse(Covers(closed, SqlValue.FromInt32(21)));
 
         // An open-ended upper is the infinity range past the last key.
-        var tail = new KeyRange(
-            0, SqlType.Int32,
+        var tail = SingleColumn(
             hasLower: true, SqlValue.FromInt32(10), lowerInclusive: false,
             hasUpper: false, default, upperInclusive: false);
-        IsTrue(tail.Contains(SqlValue.FromInt32(int.MaxValue)));
-        IsFalse(tail.Contains(SqlValue.FromInt32(10)));
+        IsTrue(Covers(tail, SqlValue.FromInt32(int.MaxValue)));
+        IsFalse(Covers(tail, SqlValue.FromInt32(10)));
+    }
+
+    [TestMethod]
+    public void KeyRange_Contains_ComparesTheTupleLexicographically()
+    {
+        // `a = 1 AND b between 2 and 5` over a key on (a, b): the interval runs
+        // from (1,2) to (1,5), so a second-column value inside the interval but
+        // under a different leading value is outside it.
+        var closed = Tuple(
+            [SqlValue.FromInt32(1), SqlValue.FromInt32(2)], lowerInclusive: true,
+            [SqlValue.FromInt32(1), SqlValue.FromInt32(5)], upperInclusive: true);
+        IsTrue(Covers(closed, SqlValue.FromInt32(1), SqlValue.FromInt32(3)));
+        IsTrue(Covers(closed, SqlValue.FromInt32(1), SqlValue.FromInt32(2)));
+        IsFalse(Covers(closed, SqlValue.FromInt32(1), SqlValue.FromInt32(6)));
+        IsFalse(Covers(closed, SqlValue.FromInt32(2), SqlValue.FromInt32(3)));
+        IsFalse(Covers(closed, SqlValue.FromInt32(0), SqlValue.FromInt32(3)));
+        IsFalse(Covers(closed, SqlValue.Null(SqlType.Int32), SqlValue.FromInt32(3)));
+        AreEqual("0,1:[(1,2),(1,5)]", closed.ToString());
+    }
+
+    [TestMethod]
+    public void KeyRange_Contains_TreatsAShorterBoundTupleAsOpenBelowIt()
+    {
+        // `a = 1 AND b > 2`: the lower bound names both columns, the upper only
+        // the first, so every b above 2 under a = 1 is inside and no other a is.
+        var halfOpen = Tuple(
+            [SqlValue.FromInt32(1), SqlValue.FromInt32(2)], lowerInclusive: false,
+            [SqlValue.FromInt32(1)], upperInclusive: true);
+        IsTrue(Covers(halfOpen, SqlValue.FromInt32(1), SqlValue.FromInt32(int.MaxValue)));
+        IsFalse(Covers(halfOpen, SqlValue.FromInt32(1), SqlValue.FromInt32(2)));
+        IsFalse(Covers(halfOpen, SqlValue.FromInt32(2), SqlValue.FromInt32(3)));
+        AreEqual("0,1:((1,2),(1,*)]", halfOpen.ToString());
     }
 
     [TestMethod]
@@ -382,11 +437,20 @@ public sealed class LockResourceTests
         using var conn = sim.CreateDbConnection();
         conn.Open();
         var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
-        var a = new KeyRange(0, SqlType.Int32, true, SqlValue.FromInt32(1), true, true, SqlValue.FromInt32(5), true);
-        var b = new KeyRange(0, SqlType.BigInt, true, SqlValue.FromInt32(1), true, true, SqlValue.FromInt32(5), true);
+        var a = new KeyRange([0], [SqlType.Int32], [SqlValue.FromInt32(1)], true, [SqlValue.FromInt32(5)], true);
+        var b = new KeyRange([0], [SqlType.BigInt], [SqlValue.FromInt32(1)], true, [SqlValue.FromInt32(5)], true);
         AreSame(table.GetOrCreateKeyRangeLock(a), table.GetOrCreateKeyRangeLock(b));
         AreEqual("0:[1,5]", a.ToString());
     }
+
+    private static KeyRange SingleColumn(
+        bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive) =>
+        new([0], [SqlType.Int32], hasLower ? [lower] : [], lowerInclusive, hasUpper ? [upper] : [], upperInclusive);
+
+    private static KeyRange Tuple(SqlValue[] lower, bool lowerInclusive, SqlValue[] upper, bool upperInclusive) =>
+        new([0, 1], [SqlType.Int32, SqlType.Int32], lower, lowerInclusive, upper, upperInclusive);
+
+    private static bool Covers(KeyRange range, params SqlValue[] probe) => range.Contains(probe);
 
     private static void ExecuteNonQuery(Simulation sim, string sql)
     {

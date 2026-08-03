@@ -75,25 +75,30 @@ internal sealed class Coalesce : Expression
     /// walk and lets a constant non-NULL one answer for the whole call —
     /// <c>COALESCE(NULL, 5)</c> and <c>COALESCE(5, nullable_col)</c> both
     /// project NOT NULL (probe-confirmed against SQL Server 2025).
+    /// <para>Each surviving argument additionally answers for the conversion
+    /// the arm unification put on it, so <c>COALESCE(&lt;decimal(9, 2) col&gt;, 0)</c>
+    /// is nullable on the int literal's account alone — see
+    /// <see cref="Expression.ArmConversionIsNullable"/>.</para>
     /// </summary>
     internal override bool ResultIsNullable(NullabilityContext context)
     {
+        var promoted = context.TypeOf(this);
         for (var i = 0; i < this.arguments.Length - 1; i++)
         {
             if (context.TryFold(this.arguments[i], out var folded))
             {
                 if (!folded.IsNull)
-                    return false;
+                    return ArmConversionIsNullable(this.arguments[i], promoted, context);
                 continue;
             }
 
-            if (this.arguments[i].ResultIsNullable(context))
+            if (this.arguments[i].ResultIsNullable(context) || ArmConversionIsNullable(this.arguments[i], promoted, context))
                 return true;
         }
 
         // The last argument is the desugared CASE's ELSE: it contributes its
         // own nullability rather than an IS NOT NULL test.
-        return this.arguments[^1].ResultIsNullable(context);
+        return this.arguments[^1].ResultIsNullable(context) || ArmConversionIsNullable(this.arguments[^1], promoted, context);
     }
 
     internal override string DebugDisplay() => $"COALESCE({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";

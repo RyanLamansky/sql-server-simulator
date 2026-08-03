@@ -16,7 +16,7 @@ namespace SqlServerSimulator.Parser.Tokens;
 /// <param name="anchor">The first word token of the synonym — supplies the source string and start offset.</param>
 /// <param name="endIndex">The end offset (past the last character) of the synonym's last word token.</param>
 sealed class SynonymTypeName(string canonicalName, Token anchor, int endIndex)
-    : Name(anchor.command, anchor.StartIndex, endIndex - anchor.StartIndex)
+    : Name(anchor.command, anchor.StartIndex, endIndex - anchor.StartIndex, canonicalName)
 {
     public override ReadOnlySpan<char> Span => canonicalName;
 

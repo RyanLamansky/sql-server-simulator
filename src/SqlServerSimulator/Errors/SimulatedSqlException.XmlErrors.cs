@@ -111,10 +111,48 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ForXmlNotAllowedInAssignment() =>
         new("The FOR XML clause is not allowed in a ASSIGNMENT statement.", 6819, 16, 3);
 
+    /// <summary>
+    /// Msg 6853: a <c>FOR XML PATH</c> alias whose last step is a node function
+    /// (<c>text()</c> / <c>data()</c> / <c>comment()</c> /
+    /// <c>processing-instruction(…)</c>) maps an <c>xml</c>-typed column, which
+    /// has no text form to place there. <c>node()</c> / <c>*</c> and a plain
+    /// element step take one instead. Probe-confirmed wording against SQL
+    /// Server 2025; the message quotes the whole alias.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlPathLastStepNotApplicable(string column) =>
+        new($"Column '{column}': the last step in the path can't be applied to XML data type or CLR type in FOR XML PATH.", 6853, 16, 1);
+
+    /// <summary>
+    /// Msg 6854: a <c>processing-instruction()</c> step names no target.
+    /// Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlProcessingInstructionForm(string column) =>
+        new($"Invalid column alias '{column}' for formatting column as XML processing instruction in FOR XML PATH - it must be in 'processing-instruction(target)' format.", 6854, 16, 1);
+
+    /// <summary>
+    /// Msg 6879: a <c>processing-instruction(xml)</c> step would construct an
+    /// XML declaration. The check is ordinal, so <c>XML</c> and <c>XmL</c> pass
+    /// (probe-confirmed against SQL Server 2025, wording included).
+    /// </summary>
+    internal static SimulatedSqlException ForXmlProcessingInstructionXmlTarget() =>
+        new("'xml' is an invalid XML processing instruction target. Possible attempt to construct XML declaration using XML processing instruction constructor. XML declaration construction with FOR XML is not supported.", 6879, 16, 1);
+
+    /// <summary>
+    /// Msg 9322: a value placed in a <c>comment()</c> step carries a <c>--</c>
+    /// (state 2) or ends in a <c>-</c> (state 3), either of which would close
+    /// or corrupt the comment constructor. Real raises this while serializing —
+    /// per row, on the value — and leaves the rest of the comment content
+    /// unescaped. Probe-confirmed wording and both states against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlCommentDashes(bool trailing) =>
+        new("Two consecutive '-' can only appear in a comment constructor if they are used to close the comment ('-->').", 9322, 16, trailing ? (byte)3 : (byte)2);
+
     /// <summary>The Msg 6850 leading word for each name position.</summary>
     private static string NameKindWord(ForXmlNameKind kind) => kind switch
     {
         ForXmlNameKind.Column => "Column",
+        // Real leaves this one empty, so the message leads with a space.
+        ForXmlNameKind.ProcessingInstructionTarget => "",
         ForXmlNameKind.Root => "ROOT",
         _ => "Row",
     };
@@ -436,6 +474,14 @@ partial class SimulatedSqlException
         new("XQuery data manipulation expression required in XML data type method.", 6305, 16, 1);
 
     /// <summary>
+    /// Msg 6306: the argument carries no expression at all — an empty or
+    /// whitespace-only string, which every XML method reports the same way.
+    /// Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryExpressionMissing() =>
+        new("Invalid XQuery expression passed to XML data type method.", 6306, 16, 1);
+
+    /// <summary>
     /// Msg 2209: the XML-DML text fails to parse, naming the token at fault
     /// (<c>&lt;eof&gt;</c> when the text ran out). Probe-confirmed wording
     /// against SQL Server 2025.
@@ -444,12 +490,114 @@ partial class SimulatedSqlException
         XQuerySyntaxError("modify", token);
 
     /// <summary>
+    /// Msg 9315: a computed <c>element</c> / <c>attribute</c> constructor whose
+    /// name is written as a <c>{…}</c> expression. Real takes only the constant
+    /// QName form (<c>element n {…}</c>) and reports this for every braced name,
+    /// a string literal included. Probe-confirmed wording against SQL Server
+    /// 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryComputedNameNotConstant(string method) =>
+        new(
+            $"XQuery [{method}()]: Only constant expressions are supported for the name expression of computed element and attribute constructors.",
+            9315,
+            16,
+            1);
+
+    /// <summary>
+    /// Msg 9325 / 9326: the computed processing-instruction and comment
+    /// constructors, which real parses and refuses in every XML method,
+    /// <c>.modify()</c>'s insert content included. Probe-confirmed wording
+    /// against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryComputedConstructorNotSupported(string method, bool isComment) =>
+        isComment
+            ? new($"XQuery [{method}()]: Computed comment constructors are not supported.", 9326, 16, 1)
+            : new($"XQuery [{method}()]: Computed processing instruction constructors are not supported.", 9325, 16, 1);
+
+    /// <summary>
     /// Msg 2209: an XQuery expression fails to parse. Every XML method's
     /// diagnostics name the method that carried the expression
     /// (<c>XQuery [value()]:</c> …), probe-confirmed across all five.
     /// </summary>
     internal static SimulatedSqlException XQuerySyntaxError(string method, string token) =>
         new($"XQuery [{method}()]: Syntax error near '{token}'", 2209, 16, 1);
+
+    /// <summary>
+    /// Msg 9303: a construct whose grammar names the one word that belongs at
+    /// the cursor — <c>if</c>'s <c>then</c> / <c>else</c>, a quantified
+    /// expression's <c>in</c> / <c>satisfies</c>, a FLWOR's <c>return</c>, a
+    /// predicate's <c>]</c>. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQuerySyntaxErrorExpecting(string method, string token, string expected) =>
+        new($"XQuery [{method}()]: Syntax error near '{token}', expected '{expected}'.", 9303, 16, 1);
+
+    /// <summary>
+    /// Msg 9332: what follows a FLWOR's <c>for</c> / <c>let</c> clauses is none
+    /// of the three that may. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryFlworClauseExpected(string method, string token) =>
+        new(
+            $"XQuery [{method}()]: Syntax error near '{token}', expected 'where', '(stable) order by' or 'return'.",
+            9332,
+            16,
+            1);
+
+    /// <summary>
+    /// Msg 2205: a word the grammar requires is missing outright — a
+    /// <c>replace value of</c> without its <c>with</c>, a <c>for</c> binding
+    /// without its <c>in</c>, a <c>let</c> binding without its <c>:=</c>.
+    /// Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryTokenExpected(string method, string token) =>
+        new($"XQuery [{method}()]: \"{token}\" was expected.", 2205, 16, 1);
+
+    /// <summary>
+    /// Msg 2227: a <c>$</c>-variable reference no enclosing <c>for</c> /
+    /// <c>let</c> / quantified binding introduced. Probe-confirmed wording
+    /// against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryVariableNotFound(string method, string name) =>
+        new($"XQuery [{method}()]: The variable '${name}' was not found in the scope in which it was referenced.", 2227, 16, 1);
+
+    /// <summary>
+    /// Msg 2204: a condition — an <c>if</c> test, a <c>where</c>, a
+    /// <c>satisfies</c> body, an <c>and</c> / <c>or</c> operand, a
+    /// <c>not()</c> argument — whose static type is neither boolean nor a node
+    /// sequence. Unlike a predicate (Msg 2203) a numeric one is refused too.
+    /// Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryConditionNotBoolean(string method, string staticType) =>
+        new(
+            $"XQuery [{method}()]: Only 'http://www.w3.org/2001/XMLSchema#boolean?' or 'node()*' "
+            + $"expressions allowed in conditions and with logical operators, found '{staticType}'",
+            2204,
+            16,
+            1);
+
+    /// <summary>
+    /// Msg 2210: a sequence — a comma list or an <c>if</c>'s two branches —
+    /// mixing nodes with atomic values. The message names the atomic type
+    /// first whichever side wrote it (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XQueryHeterogeneousSequence(string method, string atomicType, string nodeType) =>
+        new($"XQuery [{method}()]: Heterogeneous sequences are not allowed: found '{atomicType}' and '{nodeType}'", 2210, 16, 1);
+
+    /// <summary>
+    /// Msg 2371: <c>position()</c> or <c>last()</c> outside a predicate, where
+    /// there is no sequence for it to read. Probe-confirmed wording against SQL
+    /// Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XQueryPositionOutsidePredicate(string method, string localName) =>
+        new($"XQuery [{method}()]: '{localName}()' can only be used within a predicate or XPath selector", 2371, 16, 1);
+
+    /// <summary>
+    /// Msg 2373: a node constructor in a method that can't take one —
+    /// <c>value()</c>, which would have to atomize it, and <c>nodes()</c>,
+    /// which would have to address it. Real words the two differently
+    /// (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XQueryConstructedXmlNotSupported(string method, string detail) =>
+        new($"XQuery [{method}()]: {detail} is not supported with constructed XML", 2373, 16, 1);
 
     /// <summary>
     /// Msg 2203: a predicate's static type is neither numeric (positional),
@@ -527,8 +675,7 @@ partial class SimulatedSqlException
     /// Msg 2205: a <c>replace value of</c> has no <c>with</c> clause.
     /// Probe-confirmed wording against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException XmlDmlWithExpected() =>
-        new("XQuery [modify()]: \"with\" was expected.", 2205, 16, 1);
+    internal static SimulatedSqlException XmlDmlWithExpected() => XQueryTokenExpected("modify", "with");
 
     /// <summary>
     /// Msg 2337: the <c>replace value of</c> target isn't statically at most

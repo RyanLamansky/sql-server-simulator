@@ -135,22 +135,27 @@ internal sealed class CaseExpression : Expression
     // `CASE WHEN 1 = 1 THEN <not null col> END` NOT NULL despite carrying no
     // ELSE, and `CASE WHEN 1 = 2 THEN 5 END` nullable despite carrying no
     // nullable arm.
+    // A surviving arm also answers for the conversion the branch unification
+    // put on it (Expression.ArmConversionIsNullable).
     internal override bool ResultIsNullable(NullabilityContext context)
     {
+        var promoted = context.TypeOf(this);
         for (var i = 0; i < this.thens.Length; i++)
         {
             if (TryFoldWhen(context, i, out var branchTaken))
             {
                 if (branchTaken)
-                    return this.thens[i].ResultIsNullable(context);
+                    return this.thens[i].ResultIsNullable(context) || ArmConversionIsNullable(this.thens[i], promoted, context);
                 continue;
             }
 
-            if (this.thens[i].ResultIsNullable(context))
+            if (this.thens[i].ResultIsNullable(context) || ArmConversionIsNullable(this.thens[i], promoted, context))
                 return true;
         }
         // Missing ELSE = implicit NULL = nullable; explicit ELSE delegates.
-        return this.elseBranch is null || this.elseBranch.ResultIsNullable(context);
+        return this.elseBranch is null
+            || this.elseBranch.ResultIsNullable(context)
+            || ArmConversionIsNullable(this.elseBranch, promoted, context);
     }
 
     /// <summary>

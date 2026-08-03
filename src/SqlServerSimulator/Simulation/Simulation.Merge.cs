@@ -302,6 +302,10 @@ partial class Simulation
             selectionColumnNames = selection.ColumnNames;
             materialize = batch =>
             {
+                // The USING source is its own query expression, so it owns the
+                // securable list of its reads and reaches none of the statement
+                // check sites the MERGE target's own permissions run through.
+                PermissionEnforcement.CheckSubqueryReads(batch, selection);
                 var rs = selection.Execute(batch);
                 var rows = new List<SqlValue[]>();
                 foreach (var rowBytes in rs.RowBytes)

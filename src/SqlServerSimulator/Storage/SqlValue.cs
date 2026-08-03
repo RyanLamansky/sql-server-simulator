@@ -514,14 +514,38 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// <summary>
     /// Non-NULL SQL <c>decimal(p, s)</c> value. The .NET <see cref="decimal"/>
     /// payload is boxed in the reference slot; <paramref name="type"/> carries
-    /// the precision and scale identity. Caller is responsible for ensuring
-    /// the value already fits the declared scale (use
+    /// the precision and scale identity, and the payload is re-tagged to that
+    /// declared scale — SQL Server's value carries exactly the declared number
+    /// of fractional digits, so <c>CAST(1 AS numeric(10, 2))</c> is
+    /// <c>1.00m</c> rather than <c>1m</c>, which is what a surface writing the
+    /// raw <see cref="decimal"/> (the JSON builders, <c>GetDecimal</c>) has to
+    /// see. Precision remains the caller's to validate (use
     /// <see cref="CoerceTo(SqlType)"/> for the rounding-and-overflow path).
     /// </summary>
     public static SqlValue FromDecimal(SqlType type, decimal value) =>
-        type is not DecimalSqlType
+        type is not DecimalSqlType declared
             ? throw new ArgumentException($"{type} is not a decimal type.", nameof(type))
-            : new(type, 0, value, isNull: false);
+            : new(type, 0, AtScale(value, declared.scale), isNull: false);
+
+    /// <summary>
+    /// Re-tags a <see cref="decimal"/> to carry <paramref name="scale"/>
+    /// fractional digits. Widening adds a zero of the target scale (.NET's
+    /// addition takes the larger operand's scale) and so leaves the numeric
+    /// value untouched; a payload carrying more digits than the declared scale
+    /// rounds half-away-from-zero, the rule SQL Server's narrowing conversions
+    /// use and the one the <c>F&lt;scale&gt;</c> rendering paths already apply.
+    /// .NET's <see cref="decimal"/> caps at 28 fractional digits and a 96-bit
+    /// mantissa, so a wider declared scale — or trailing zeros that wouldn't
+    /// fit beside the integer part — settles at the widest representation
+    /// available instead of failing.
+    /// </summary>
+    private static decimal AtScale(decimal value, int scale)
+    {
+        var current = value.Scale;
+        return current == scale ? value
+            : current > scale ? decimal.Round(value, scale, MidpointRounding.AwayFromZero)
+            : value + new decimal(lo: 0, mid: 0, hi: 0, isNegative: false, scale: (byte)Math.Min(scale, 28));
+    }
 
     /// <summary>
     /// Non-NULL SQL <c>money</c> / <c>smallmoney</c> value. The decimal
@@ -698,12 +722,18 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             ? throw new InvalidOperationException($"Value is {this.Type}, not a decimal type.")
             : (decimal)this.reference!;
 
-    /// <summary>Returns the money/smallmoney value as a <see cref="decimal"/> with scale 4.</summary>
+    /// <summary>
+    /// Returns the money/smallmoney value as a <see cref="decimal"/> carrying
+    /// money's fixed scale of 4 — dividing the scaled integer alone would drop
+    /// trailing zeros the real value keeps (<c>CAST(1 AS money)</c> is
+    /// <c>1.0000m</c>), which shows wherever the raw <see cref="decimal"/>
+    /// reaches a surface.
+    /// </summary>
     public decimal AsMoney => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
         : this.Type != SqlType.Money && this.Type != SqlType.SmallMoney
             ? throw new InvalidOperationException($"Value is {this.Type}, not a money type.")
-            : this.primitive / (decimal)MoneySqlType.ScaleFactor;
+            : AtScale(this.primitive / (decimal)MoneySqlType.ScaleFactor, MoneySqlType.Scale);
 
     /// <summary>Returns the raw scaled-int64 representation of a money/smallmoney value (storage-layer use only).</summary>
     internal long AsMoneyScaledUnits => this.IsNull

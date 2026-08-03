@@ -15,7 +15,8 @@ internal readonly struct DataLockPlan(
     bool rowTxScoped,
     bool skipBlockedRows,
     bool noLockReader,
-    bool serializableRangeReader = false)
+    LockMode? serializableRangeMode = null,
+    PhantomFenceState? fence = null)
 {
     /// <summary>
     /// Lock mode to acquire per touched row, or <c>null</c> when no row-
@@ -46,15 +47,31 @@ internal readonly struct DataLockPlan(
     public readonly bool NoLockReader = noLockReader;
 
     /// <summary>
-    /// True for a SERIALIZABLE / <c>HOLDLOCK</c> reader, whose phantom
-    /// protection is still owed when the plan is handed back: the table-level
-    /// acquisition so far is only IS. Whoever consumes the source settles it —
-    /// the index-seek path by claiming a <see cref="Storage.KeyRange"/> over
-    /// the predicate's interval, every other path by falling back to the
-    /// table-S the whole-scan case needs
-    /// (<c>BatchContext.EnsureSerializableTableLock</c>).
+    /// The range mode a SERIALIZABLE / <c>HOLDLOCK</c> reader still owes
+    /// phantom protection in, or <c>null</c> for every other reader. The
+    /// table-level acquisition made so far doesn't cover it, so whoever
+    /// consumes the source settles it — the index-seek path by claiming a
+    /// <see cref="Storage.KeyRange"/> over the predicate's interval in this
+    /// mode, every other path by falling back to the table-S the whole-scan
+    /// case needs (<c>BatchContext.EnsureSerializableTableLock</c>).
+    /// <para>
+    /// <c>RangeS-S</c> for a plain SERIALIZABLE read, <c>RangeS-U</c> when it
+    /// carries <c>UPDLOCK</c> and <c>RangeX-X</c> when it carries
+    /// <c>XLOCK</c> — the modes real reports for the same three reads.
+    /// </para>
     /// </summary>
-    public readonly bool SerializableRangeReader = serializableRangeReader;
+    public readonly LockMode? SerializableRangeMode = serializableRangeMode;
+
+    /// <summary>
+    /// Shared cell recording whether this source's fence has been settled,
+    /// non-null exactly when <see cref="SerializableRangeMode"/> is. The plan
+    /// is a struct copied into <c>FromSource.HeapPlan</c> and into the row
+    /// wrapper, so the reference is what makes the two see one another's work:
+    /// a source that claimed a key range must not then have the whole-table S
+    /// added on top by the scan wrapper, which would re-block the key space the
+    /// range deliberately left free.
+    /// </summary>
+    public readonly PhantomFenceState? Fence = fence;
 
     /// <summary>
     /// Plan for sources where data locks don't apply (table variables,
@@ -68,4 +85,21 @@ internal readonly struct DataLockPlan(
     /// reader skips conflict checks entirely.
     /// </summary>
     public static readonly DataLockPlan NoLock = new(rowMode: null, rowTxScoped: false, skipBlockedRows: false, noLockReader: true);
+}
+
+/// <summary>
+/// One SERIALIZABLE / <c>HOLDLOCK</c> heap source's phantom-fence bookkeeping,
+/// allocated with the source's <see cref="DataLockPlan"/> and shared by every
+/// copy of it. One flag: whether the fence this source owes has been taken,
+/// whichever form it took.
+/// </summary>
+internal sealed class PhantomFenceState
+{
+    /// <summary>
+    /// Set once this source's fence — a key range or the whole-table S — is
+    /// held. Read by <c>BatchContext.EnsureSerializableTableLock</c>, whose
+    /// fallback is otherwise reached from the scan wrapper even for a source
+    /// the index-seek path already fenced with a range.
+    /// </summary>
+    public bool Settled;
 }

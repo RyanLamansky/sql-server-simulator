@@ -296,6 +296,12 @@ Probed *inlineable* despite looking otherwise, so deliberately not disqualifying
 - **`INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS`** (9 cols, probe-confirmed SQL Server 2025): one row per FOREIGN KEY.
   `UNIQUE_CONSTRAINT_CATALOG` / `_SCHEMA` / `_NAME sysname` name the referenced PK / UNIQUE constraint (resolved by matching the FK's referenced column set against the referenced table's `KeyConstraints`), `MATCH_OPTION varchar(7)` (constant `'SIMPLE'`), `UPDATE_RULE` / `DELETE_RULE varchar(11)` (ISO spaced wording `'NO ACTION'` / `'CASCADE'` / `'SET NULL'` / `'SET DEFAULT'` — distinct from `sys.foreign_keys`' underscore desc form).
   SQLAlchemy's `get_foreign_keys` reads it.
+- **`INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE`** (7 cols, probe-confirmed SQL Server 2025): one row per (constraint, column) pair, over PRIMARY KEY / UNIQUE / FOREIGN KEY / CHECK.
+  The table columns lead and the constraint columns trail — `TABLE_CATALOG` / `_SCHEMA` / `_NAME`, `COLUMN_NAME sysname`, `CONSTRAINT_CATALOG` / `_SCHEMA` / `_NAME sysname` — the reverse of `TABLE_CONSTRAINTS`.
+  PK / UNIQUE name their key columns and a FOREIGN KEY its child columns, the same sets `KEY_COLUMN_USAGE` reports; a CHECK names the columns its predicate reads.
+  A CHECK's columns come from the declaring column for the inline form and otherwise from matching the stored definition text against the parent table's column names — an approximation of real's expression walk, which over-reports a column whose name also appears as a string literal inside the predicate.
+  `mssql-django`'s `get_relations` joins it twice to resolve a foreign key's child and referenced columns, and its absence used to fail every Django introspection / constraint / index test.
+- **`INFORMATION_SCHEMA.CONSTRAINT_TABLE_USAGE`** (6 cols, probe-confirmed SQL Server 2025): one row per constraint, naming the table it sits on — the same shape as `CONSTRAINT_COLUMN_USAGE` without `COLUMN_NAME`.
 - **`sys.dm_os_host_info`** (single-row, server-scope DMV): `host_platform` / `host_distribution` / `host_release` / `host_service_pack_level` / `host_architecture nvarchar(256)`, `host_sku` / `os_language_version int`.
   SSMS selects `host_platform` from it on every connect.
   The row reflects the **actual .NET host process** rather than a canned Windows row (honest values per user preference): `host_platform` is `'Windows'` / `'Linux'` / `'macOS'` via `OperatingSystem.Is*` (macOS is a deliberate divergence — real SQL Server never runs there); `host_architecture` is `RuntimeInformation.OSArchitecture` uppercased (`'X64'` / `'ARM64'`).
@@ -933,14 +939,19 @@ Two argument-sensitive splits, both probed:
   `DATENAME` needs no such split: it is language-dependent for every unit.
 - Probed *deterministic* despite looking otherwise, so deliberately absent from the table: `CHECKSUM` / `BINARY_CHECKSUM` / `HASHBYTES`, `QUOTENAME` (while `PARSENAME` is nondeterministic), `MIN_ACTIVE_ROWVERSION`, `DECOMPRESS` (while `COMPRESS` is nondeterministic — probed, not a typo), `APPROX_COUNT_DISTINCT`, `ISNUMERIC`, `TEXTPTR`, `DATEDIFF` / `DATEADD` / `DATETRUNC` / `DATE_BUCKET` / `EOMONTH`, and every window function.
 
-**Divergence — the `CAST` / `CONVERT` style rule.**
-Real also classifies a conversion between a date/time type and a character string as nondeterministic unless an explicit style from the deterministic set is supplied, so a module whose only nondeterministic construct is such a conversion reports 1 where real reports 0.
-Deciding it needs the source and target types of the conversion, which a token scan doesn't carry.
-The probed style table, identical in both directions and across `datetime` / `datetime2` / `date` targets:
+**The `CAST` / `CONVERT` style rule** (`Schemas/ModuleDeterminism.Conversions.cs`).
+A conversion *between a date/time type and a character string* is nondeterministic unless an explicit style from the deterministic set is supplied — in both directions, at every member of both families (`char` / `nchar` / `nvarchar` / `sysname` / `text` / `ntext` / `varchar`, and `date` / `datetime` / `datetime2` / `datetimeoffset` / `smalldatetime` / `time`), and identically for the `TRY_` spellings.
+A `CAST` carries no style at all, so a date/time ↔ string `CAST` is always nondeterministic.
+The probed style table:
 
 | | styles |
 | --- | --- |
-| deterministic | 20, 21, 101, 102, 103, 104, 105, 108, 110, 111, 112, 114, 120, 121, 126, 127 |
-| nondeterministic | no style at all, 0–14, 22–25, 100, 106, 107, 109, 113 |
+| deterministic | 20, 21, 101, 102, 103, 104, 105, 108, 110, 111, 112, 114, 120, 121, 126, 127, 130, 131 |
+| nondeterministic | no style at all, 0–19, 22–25, 100, 106, 107, 109, 113 |
 
-Non-date sources are unaffected: `CAST`/`CONVERT` from `money`, `float` or `binary` to a string is deterministic at any style.
+Every other conversion is left alone: `CONVERT(varchar(20), <int>)`, `CONVERT(datetime, <int>)`, `CONVERT(int, <string>)` and `CONVERT(datetime2, <datetime>)` are all deterministic.
+
+The named type and the style read straight off the token stream; the *converted expression's* own type is what the scan has to infer, and it does so from the evidence the source extent carries — a bare or alias-qualified column name resolved against the columns of the tables and views the body references, a `@name` against the module's declared parameters and the body's own `DECLARE`s, a character literal, and a nested `CAST` / `CONVERT`'s named type.
+A call to a built-in whose result family doesn't follow its arguments contributes that family and hides what it wraps (`YEAR` / `DATEPART` / `DATEDIFF` / `LEN` → neither family, `DATEADD` / the `…FROMPARTS` constructors → date/time, `LEFT` / `CONCAT` / `STR` → string), which is what keeps `CONVERT(varchar(20), YEAR(<date>))` deterministic while `CONVERT(varchar(20), DATEADD(day, 1, <date>))` is not; every other call propagates, so `ISNULL` / `CASE` / an aggregate over a date column still reads as a date.
+
+What stays undecidable, all erring toward *deterministic* — the answer the module had before the rule shipped, so the inference only moves a cell toward real: a column name the body's tables don't carry (a CTE or derived table's own output, an alias-type column), a user function whose return type isn't its argument's, a style written as an expression rather than a literal (`121 + 0`, which real folds and reports deterministic), and an ANSI type synonym (`character varying`).

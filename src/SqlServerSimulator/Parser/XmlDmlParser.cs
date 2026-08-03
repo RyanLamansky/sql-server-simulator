@@ -30,14 +30,21 @@ internal sealed class XmlDmlParser(
     public XmlDml ParseStatement()
     {
         this.SkipWhitespace();
+        if (this.index >= this.text.Length)
+            throw SimulatedSqlException.XQueryExpressionMissing();
+        if (this.TryKeyword("insert"))
+            return this.ParseInsert();
+        if (this.TryKeyword("delete"))
+            return this.ParseDelete();
+        if (this.TryKeyword("replace"))
+            return this.ParseReplaceValueOf();
+
         // Real distinguishes "this parses as XQuery but isn't XML-DML" (Msg
-        // 6305) from "this isn't XQuery at all" (Msg 2209); the simulator
-        // splits on the leading keyword, so a path expression reports 6305 and
-        // anything else that fails after a DML keyword reports 2209.
-        return this.TryKeyword("insert") ? this.ParseInsert()
-            : this.TryKeyword("delete") ? this.ParseDelete()
-            : this.TryKeyword("replace") ? this.ParseReplaceValueOf()
-            : throw SimulatedSqlException.XmlDmlExpressionRequired();
+        // 6305) from "this isn't XQuery at all" (Msg 2209) by trying the
+        // expression grammar on text no XML-DML keyword opened: `count(/r)`
+        // and `for $i in /r return $i` are 6305 where `(` and `/r[` are 2209.
+        _ = XmlQueryEngine.CompileBody(this.text, this.defaultNamespace, this.prefixes, "modify");
+        throw SimulatedSqlException.XmlDmlExpressionRequired();
     }
 
     private XmlDml ParseDelete()
@@ -173,23 +180,69 @@ internal sealed class XmlDmlParser(
         {
             case "attribute":
                 this.index += word.Length;
-                var attributeName = this.ReadConstructorName();
-                return XmlDmlItem.Computed(XmlDmlItemKind.Attribute, attributeName, this.ParseBracedTerms());
+                return XmlDmlItem.Computed(XmlDmlItemKind.Attribute, this.ReadConstructorName(), this.ParseBracedTerms());
             case "comment":
-                this.index += word.Length;
-                return XmlDmlItem.Computed(XmlDmlItemKind.Comment, string.Empty, this.ParseBracedTerms());
+                throw SimulatedSqlException.XQueryComputedConstructorNotSupported("modify", isComment: true);
             case "element":
-                throw new NotSupportedException("A computed 'element {…}' constructor in XML-DML content isn't modeled; write the element directly.");
-            case "processing-instruction":
                 this.index += word.Length;
-                var target = this.ReadConstructorName();
-                return XmlDmlItem.Computed(XmlDmlItemKind.ProcessingInstruction, target, this.ParseBracedTerms());
+                var elementName = this.ReadConstructorName();
+                this.ValidateConstructorPrefix(elementName);
+                return XmlDmlItem.Element(elementName, this.ParseBracedContent());
+            case "processing-instruction":
+                throw SimulatedSqlException.XQueryComputedConstructorNotSupported("modify", isComment: false);
             case "text":
                 this.index += word.Length;
                 return XmlDmlItem.Computed(XmlDmlItemKind.Text, string.Empty, this.ParseBracedTerms());
             default:
                 return XmlDmlItem.Value(this.ParseTerms(terminator: '\0', single: true));
         }
+    }
+
+    /// <summary>
+    /// A computed <c>element</c> constructor's <c>{ … }</c> body: the same
+    /// content items an <c>insert</c> takes, so constructors nest
+    /// (<c>element n {element m {1}}</c>) and an empty body builds an empty
+    /// element.
+    /// </summary>
+    private XmlDmlItem[] ParseBracedContent()
+    {
+        this.SkipWhitespace();
+        if (this.Current != '{')
+            throw this.SyntaxError();
+        this.index++;
+        this.SkipWhitespace();
+        if (this.Current == '}')
+        {
+            this.index++;
+            return [];
+        }
+
+        var items = new List<XmlDmlItem>();
+        while (true)
+        {
+            items.Add(this.ParseContentItem());
+            this.SkipWhitespace();
+            if (this.Current == ',')
+            {
+                this.index++;
+                continue;
+            }
+            if (this.Current != '}')
+                throw this.SyntaxError();
+            this.index++;
+            return [.. items];
+        }
+    }
+
+    /// <summary>
+    /// A constructed element's prefix resolves through the prolog exactly as a
+    /// path step's does, so an undeclared one is Msg 2229.
+    /// </summary>
+    private void ValidateConstructorPrefix(string name)
+    {
+        var colon = name.IndexOf(':', StringComparison.Ordinal);
+        if (colon >= 0 && !this.prefixes.ContainsKey(name[..colon]))
+            throw SimulatedSqlException.XQueryUndeclaredNamespace("modify", name[..colon]);
     }
 
     /// <summary>
@@ -316,10 +369,16 @@ internal sealed class XmlDmlParser(
         return XmlDmlItem.Markup([markup], [], []);
     }
 
-    /// <summary>Reads the name of a computed <c>attribute</c> / <c>processing-instruction</c> constructor.</summary>
+    /// <summary>
+    /// Reads the constant QName of a computed <c>element</c> / <c>attribute</c>
+    /// constructor. Real takes only that form — a <c>{…}</c> name expression is
+    /// Msg 9315 whatever it holds, a string literal included.
+    /// </summary>
     private string ReadConstructorName()
     {
         this.SkipWhitespace();
+        if (this.Current == '{')
+            throw SimulatedSqlException.XQueryComputedNameNotConstant("modify");
         var start = this.index;
         while (this.index < this.text.Length && (char.IsLetterOrDigit(this.text[this.index]) || this.text[this.index] is '_' or '-' or '.' or ':'))
             this.index++;

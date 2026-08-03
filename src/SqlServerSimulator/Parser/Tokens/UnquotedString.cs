@@ -3,7 +3,7 @@ namespace SqlServerSimulator.Parser.Tokens;
 sealed class UnquotedString : Name
 {
     private UnquotedString(string command, int index, int length)
-        : base(command, index, length)
+        : base(command, index, length, command.AsSpan(index, length))
     {
     }
 

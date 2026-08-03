@@ -297,6 +297,21 @@ public sealed class ForXmlTests
         => AreEqual("<r>1</r><r>2</r><r>3</r>",
             Xml("select id as [text()] from t for xml path('r')"));
 
+    /// <summary>
+    /// A NULL drops the child element it would have filled, but the row element
+    /// always stands — a row whose whole content is NULL is <c>&lt;row/&gt;</c>,
+    /// not a missing row (probe-confirmed across RAW, PATH and every leaf kind).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select cast(null as varchar(5)) as a from t where id = 1 for xml raw")]
+    [DataRow("select cast(null as varchar(5)) as a from t where id = 1 for xml raw, elements")]
+    [DataRow("select cast(null as varchar(5)) as a from t where id = 1 for xml path")]
+    [DataRow("select cast(null as varchar(5)) as [text()] from t where id = 1 for xml path")]
+    [DataRow("select cast(null as varchar(5)) as [data()] from t where id = 1 for xml path")]
+    [DataRow("select cast(null as varchar(5)) from t where id = 1 for xml path")]
+    public void AllNullRow_StillEmitsTheRowElement(string query)
+        => AreEqual("<row/>", Xml(query));
+
     [TestMethod]
     public void Path_AttributeUnderEmptyRowTag_Msg6864()
     {
@@ -324,6 +339,183 @@ public sealed class ForXmlTests
     [TestMethod]
     public void Path_TextThenData_NoLeadingSpace()
         => AreEqual("<r>a1 2</r>", Xml("select 'a' as [text()], 1 as [data()], 2 as [data()] from t where id = 1 for xml path('r')"));
+
+    // ---- The remaining PATH node functions ----
+
+    /// <summary>
+    /// <c>comment()</c> and <c>processing-instruction(target)</c> build their
+    /// own node kinds, <c>node()</c> and <c>*</c> are text content, and each
+    /// takes a path prefix and keeps its position among its siblings. Neither
+    /// constructor escapes its value — real writes it raw, so a <c>?&gt;</c> in
+    /// a processing instruction closes it early and produces XML that won't
+    /// re-parse (probe-confirmed, quirk and all).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 'x' as [comment()] from t where id = 1", "<r><!--x--></r>")]
+    [DataRow("select 'x' as [processing-instruction(foo)] from t where id = 1", "<r><?foo x?></r>")]
+    [DataRow("select 'x' as [node()] from t where id = 1", "<r>x</r>")]
+    [DataRow("select 'x' as [*] from t where id = 1", "<r>x</r>")]
+    [DataRow("select 'x' as [a/comment()] from t where id = 1", "<r><a><!--x--></a></r>")]
+    [DataRow("select 'x' as [a/processing-instruction(pi)] from t where id = 1", "<r><a><?pi x?></a></r>")]
+    [DataRow("select 'x' as [a/*] from t where id = 1", "<r><a>x</a></r>")]
+    [DataRow("select 1 as a, 'x' as [comment()], 2 as b from t where id = 1", "<r><a>1</a><!--x--><b>2</b></r>")]
+    [DataRow("select 1 as [a/comment()], 2 as [a/b] from t where id = 1", "<r><a><!--1--><b>2</b></a></r>")]
+    [DataRow("select 'a' as [comment()], 'b' as [comment()] from t where id = 1", "<r><!--a--><!--b--></r>")]
+    [DataRow("select 'a' as [node()], 'b' as [node()] from t where id = 1", "<r>ab</r>")]
+    [DataRow("select 1 as [@id], 'x' as [comment()] from t where id = 1", """<r id="1"><!--x--></r>""")]
+    // Neither constructor escapes; node() takes the same escaping as text().
+    [DataRow("select '<b>&' as [comment()] from t where id = 1", "<r><!--<b>&--></r>")]
+    [DataRow("select '<b>&' as [processing-instruction(p)] from t where id = 1", "<r><?p <b>&?></r>")]
+    [DataRow("select '<b>&' as [node()] from t where id = 1", "<r>&lt;b&gt;&amp;</r>")]
+    // The separator is one space, then the value as written.
+    [DataRow("select ' x ' as [processing-instruction(p)] from t where id = 1", "<r><?p  x ?></r>")]
+    [DataRow("select '' as [processing-instruction(p)] from t where id = 1", "<r><?p ?></r>")]
+    [DataRow("select '' as [comment()] from t where id = 1", "<r><!----></r>")]
+    // A NULL writes nothing, and a comment breaks a run of data() atoms.
+    [DataRow("select cast(null as varchar(5)) as [comment()] from t where id = 1", "<r/>")]
+    [DataRow("select cast(null as varchar(5)) as [processing-instruction(p)] from t where id = 1", "<r/>")]
+    [DataRow("select cast(null as varchar(5)) as [node()] from t where id = 1", "<r/>")]
+    [DataRow("select 'a' as [data()], 'b' as [comment()], 'c' as [data()] from t where id = 1", "<r>a<!--b-->c</r>")]
+    // A target real doesn't reserve; only the exactly-lowercase 'xml' is refused.
+    [DataRow("select 'x' as [processing-instruction(XmL)] from t where id = 1", "<r><?XmL x?></r>")]
+    [DataRow("select 'x' as [processing-instruction(xmla)] from t where id = 1", "<r><?xmla x?></r>")]
+    public void Path_NodeFunction_ProbedShape(string query, string expected)
+        => AreEqual(expected, Xml(query + " for xml path('r')"));
+
+    [TestMethod]
+    public void Path_Comment_UnderOmittedRowTag()
+        => AreEqual("<!--x-->", Xml("select 'x' as [comment()] from t where id = 1 for xml path('')"));
+
+    /// <summary>
+    /// A NULL under a comment / processing-instruction step stays absent under
+    /// XSINIL, where the text-shaped steps get the nil marker.
+    /// </summary>
+    [TestMethod]
+    [DataRow("[a/comment()]", """<r xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/>""")]
+    [DataRow("[a/processing-instruction(p)]", """<r xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/>""")]
+    [DataRow("[a/text()]", """<r xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><a xsi:nil="true"/></r>""")]
+    [DataRow("[a/node()]", """<r xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><a xsi:nil="true"/></r>""")]
+    public void Path_NullNodeFunction_UnderXsinil(string alias, string expected)
+        => AreEqual(expected, Xml($"select cast(null as varchar(5)) as {alias} from t where id = 1 for xml path('r'), elements xsinil"));
+
+    /// <summary>
+    /// A comment can't carry the pair of dashes that would close it, nor end in
+    /// the dash that would make one — real reports the two cases at different
+    /// states while serializing the row.
+    /// </summary>
+    [TestMethod]
+    [DataRow("a--b", 2)]
+    [DataRow("--", 2)]
+    [DataRow("a-", 3)]
+    [DataRow("-", 3)]
+    public void Path_CommentWithDashes_Msg9322(string value, int state)
+    {
+        var ex = Seeded().AssertSqlError($"select '{value}' as [comment()] from t where id = 1 for xml path('r')", 9322);
+        AreEqual("Two consecutive '-' can only appear in a comment constructor if they are used to close the comment ('-->').", ex.Message);
+        AreEqual(state, ex.State);
+    }
+
+    [TestMethod]
+    public void Path_CommentWithInteriorDash_Serializes()
+        => AreEqual("<r><!--a-b--></r>", Xml("select 'a-b' as [comment()] from t where id = 1 for xml path('r')"));
+
+    /// <summary>
+    /// The node functions are matched ordinally and carry no namespace prefix,
+    /// so every other spelling falls through to the XML-name rules and trips on
+    /// its own <c>(</c> or <c>*</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("[COMMENT()]", '(')]
+    [DataRow("[TEXT()]", '(')]
+    [DataRow("[DATA()]", '(')]
+    [DataRow("[NODE()]", '(')]
+    [DataRow("[PROCESSING-INSTRUCTION(a)]", '(')]
+    [DataRow("[comment (   )]", ' ')]
+    [DataRow("[comment(a)]", '(')]
+    [DataRow("[comment()/a]", '(')]
+    [DataRow("[@*]", '*')]
+    [DataRow("[*/a]", '*')]
+    public void Path_UnrecognizedNodeFunction_Msg6850(string alias, char offender)
+    {
+        var ex = Seeded().AssertSqlError($"select 1 as {alias} from t for xml path", 6850);
+        Contains($"'{offender}'(0x{(int)offender:X4}) is the first character at fault", ex.Message);
+        StartsWith("Column name ", ex.Message);
+    }
+
+    /// <summary>
+    /// A namespace prefix on a node function is refused whichever way it fails:
+    /// undeclared it is the prefix error, declared it is the name error the
+    /// step's own <c>(</c> raises.
+    /// </summary>
+    [TestMethod]
+    public void Path_PrefixedNodeFunction_IsRefused()
+    {
+        var undeclared = Seeded().AssertSqlError("select 1 as [a:comment()] from t for xml path", 6846);
+        AreEqual("XML name space prefix 'a' declaration is missing for FOR XML column name 'a:comment()'.", undeclared.Message);
+        var declared = Seeded().AssertSqlError(
+            "with xmlnamespaces('urn:u' as a) select 1 as [a:comment()] from t for xml path", 6850);
+        Contains("'('(0x0028) is the first character at fault", declared.Message);
+    }
+
+    /// <summary>
+    /// A processing-instruction target is an XML name with no <c>:</c>
+    /// allowance, and real's Msg 6850 leaves the name-kind word empty for it —
+    /// the message leads with a space and quotes the whole alias.
+    /// </summary>
+    [TestMethod]
+    [DataRow("[processing-instruction(1a)]", '1')]
+    [DataRow("[processing-instruction(a b)]", ' ')]
+    [DataRow("[processing-instruction(a:b)]", ':')]
+    public void Path_InvalidProcessingInstructionTarget_Msg6850(string alias, char offender)
+    {
+        var ex = Seeded().AssertSqlError($"select 1 as {alias} from t for xml path", 6850);
+        AreEqual(
+            $" name '{alias[1..^1]}' contains an invalid XML identifier as required by FOR XML; '{offender}'(0x{(int)offender:X4}) is the first character at fault.",
+            ex.Message);
+    }
+
+    [TestMethod]
+    public void Path_ProcessingInstructionWithoutTarget_Msg6854()
+    {
+        var ex = Seeded().AssertSqlError("select 1 as [processing-instruction()] from t for xml path", 6854);
+        AreEqual(
+            "Invalid column alias 'processing-instruction()' for formatting column as XML processing instruction in FOR XML PATH - it must be in 'processing-instruction(target)' format.",
+            ex.Message);
+    }
+
+    [TestMethod]
+    public void Path_ProcessingInstructionTargetXml_Msg6879()
+    {
+        var ex = Seeded().AssertSqlError("select 1 as [processing-instruction(xml)] from t for xml path", 6879);
+        AreEqual(
+            "'xml' is an invalid XML processing instruction target. Possible attempt to construct XML declaration using XML processing instruction constructor. XML declaration construction with FOR XML is not supported.",
+            ex.Message);
+    }
+
+    /// <summary>
+    /// An <c>xml</c>-typed column has no text form, so every node function that
+    /// writes one refuses it; <c>node()</c> / <c>*</c> and a plain element step
+    /// embed its nodes instead.
+    /// </summary>
+    [TestMethod]
+    [DataRow("[text()]")]
+    [DataRow("[data()]")]
+    [DataRow("[comment()]")]
+    [DataRow("[processing-instruction(p)]")]
+    [DataRow("[p/text()]")]
+    public void Path_XmlColumnUnderNodeFunction_Msg6853(string alias)
+    {
+        var ex = XmlColumnSimulation().AssertSqlError($"select doc as {alias} from xp where id = 1 for xml path('r')", 6853);
+        AreEqual($"Column '{alias[1..^1]}': the last step in the path can't be applied to XML data type or CLR type in FOR XML PATH.", ex.Message);
+    }
+
+    [TestMethod]
+    [DataRow("[node()]", "<r><a/></r>")]
+    [DataRow("[*]", "<r><a/></r>")]
+    [DataRow("[p/node()]", "<r><p><a/></p></r>")]
+    public void Path_XmlColumnUnderNodeOrStar_Embeds(string alias, string expected)
+        => AreEqual(expected,
+            (string)XmlColumnSimulation().ExecuteScalar($"select doc as {alias} from xp where id = 1 for xml path('r')")!);
 
     // ---- ROOT ----
 

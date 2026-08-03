@@ -92,6 +92,10 @@ The tokenizer's `NextToken(…, bool quotedIdentifiers)` reads the parser flag t
 Empty `""` (ON) and properly-closed empty `[]` raise **Msg 1038** (class 15, **state 4**, `EmptyColumnAlias()`) at the *tokenizer* level — so at every identifier position (`SELECT 1 AS ""`, `SELECT [] FROM t`, `CREATE TABLE ""(c int)`), not only select-list aliases.
 An unclosed `"` (either mode) raises **Msg 105** via `UnclosedStringLiteral(body)`, whose message echoes the scanned body: `Unclosed quotation mark after the character string '<body>'.` (the `'…'` / `N'…'` / `"…"` scanners share `ParseQuotedBody`, hence one Msg-105 shape).
 
+The **128-character identifier limit** (**Msg 103**, class 15 state 4) measures the identifier's own characters, not its source text: the delimiters don't count, so `[` + 128 characters + `]` is legal, and an escaped `]]` / `""` counts once (both probe-confirmed).
+The message quotes the first 128 characters of that undelimited body.
+Django's schema editor emits exactly-128-character table names for a long model's implicit m2m table, which is what surfaced the delimiter-counting version of the rule.
+
 `@@OPTIONS` (`Parser/Expressions/Value.cs` `FromAtAtOptions`) returns 5432 with **bit 256** tracking the parse-position QI setting — `@@OPTIONS & 256` is 256 under ON, 0 under OFF.
 The **plan cache** key (`PlanCacheKey`, `Simulation/Simulation.cs`) includes the `QuotedIdentifiers` bool, so the identical text `SELECT "abc"` caches separately under ON vs OFF and never replays the wrong reading.
 

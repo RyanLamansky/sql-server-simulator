@@ -885,7 +885,12 @@ public sealed partial class Simulation
         if (cacheKey is not null)
             _ = Interlocked.Increment(ref this.PlanCacheMisses);
 
-        var batch = new BatchContext(command) { ContinueOnError = continueOnError, ForceTempTableScope = command.ScopeTempTablesToBatch };
+        var batch = new BatchContext(command)
+        {
+            ContinueOnError = continueOnError,
+            ForceTempTableScope = command.ScopeTempTablesToBatch,
+            ApiServerCursor = command.ApiServerCursor,
+        };
         // Stash the prepared cache-key components on the batch so the SELECT
         // arm can promote inline (the iterator's post-foreach code is
         // unreachable when the consumer disposes the reader without draining

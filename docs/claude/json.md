@@ -59,7 +59,8 @@ The flag is save/restored so a nested JSON_OBJECT inside another JSON_OBJECT's v
 Value formatting matches real SQL Server byte-for-byte except float / real (documented quirk — simulator emits .NET `G15` / `G7`, real SQL Server emits `1.234e+000`).
 Specific mappings:
 - `bit` → unquoted `true` / `false`
-- integer / decimal / money — unquoted number
+- integer / decimal / money — unquoted number, written as the SQL value carries it rather than formatted from the declared type, so an exact numeric's trailing zeros are whatever its type declares: `JSON_ARRAY(CAST(1 AS numeric(10, 2)))` is `[1.00]`, `JSON_OBJECT('a': CAST(1.5 AS numeric(10, 4)))` is `{"a":1.5000}`, `JSON_MODIFY('{"a":0}', '$.a', CAST(1 AS numeric(10, 2)))` is `{"a":1.00}`, and every `money` / `smallmoney` value shows its fixed scale of 4.
+  That falls out of the [declared-scale stamp](arithmetic.md#the-value-carries-the-declared-scale) rather than living here, so a conversion, arithmetic, an aggregate and a column read all agree.
 - `varbinary` / `binary` → base64-quoted (`"QUI="` for `0x4142`)
 - `datetime` / `datetime2` / `smalldatetime` → quoted ISO with **T** separator (`"2025-01-15T12:34:56"`)
 - `date` / `time` / `uniqueidentifier` → quoted default ISO / uppercase-hex
@@ -200,9 +201,6 @@ The related strict-mode errors carry State bytes of their own: `JSON_VALUE`'s **
 ### Divergences
 
 A statement that fails partway surfaces as the error alone: real streams the rows a truncated `OPENJSON` got through ahead of the error token, while the simulator's failed statement carries no rows (see [`data-reader.md`](data-reader.md)).
-
-The builders render a **decimal produced by a conversion or by arithmetic** at the source value's scale rather than the target type's: `JSON_ARRAY(CAST(1 AS numeric(10, 2)))` is `[1]` where real writes `[1.00]`, and `JSON_OBJECT` / `JSON_MODIFY` lose it the same way.
-A decimal literal and one read back from a column keep their scale, and the string-rendering paths (`CAST(… AS varchar)`, `CONCAT`, `FOR JSON`) format from the declared type and are unaffected — the cause is the coercion path, not these functions; see the entry under [`backlog.md`](backlog.md#fidelity-gaps-in-shipped-behavior).
 
 ## `FOR JSON` result serialization
 

@@ -373,6 +373,149 @@ public sealed class CrossDatabasePermissionTests
         AreEqual(42, connection.CreateCommand("select id from dbo.v_local").ExecuteScalar());
     }
 
+    // ---- a subquery that owns its own read list is checked too ----
+    // A subquery written in an expression slot no query expression encloses —
+    // a scalar UDF's value-form RETURN, a SET / DECLARE initializer, an IF /
+    // WHILE condition, a CTE body, a MERGE USING source — reaches none of the
+    // per-statement check sites, so the check runs where its plan executes.
+    // Real makes no distinction between those shapes and an ordinary read
+    // (probe-confirmed: an intact ownership chain skips both scalar-UDF body
+    // forms alike, and a chain broken by the database boundary or by an
+    // other-owner schema raises Msg 229 naming the base object for both).
+
+    [TestMethod]
+    public void ScalarFunctionReturnSubqueryOverAnotherDatabase_RequiresGrantOnTheBase()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim);
+        sim.ExecuteBatches(
+            "use home",
+            "create function dbo.f_sub() returns int as begin return (select count(*) from away.dbo.remote) end",
+            "grant execute on dbo.f_sub to homeuser");
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select dbo.f_sub()").ExecuteScalar());
+        AreEqual(229, ex.Number);
+        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Message);
+    }
+
+    [TestMethod]
+    public void ScalarFunctionSelectAssignmentOverAnotherDatabase_RequiresGrantOnTheBase()
+    {
+        // The sibling body form, pinned alongside: real answers identically for
+        // the two, so the simulator must not split them either.
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim);
+        sim.ExecuteBatches(
+            "use home",
+            "create function dbo.f_assign() returns int as begin declare @v int; select @v = count(*) from away.dbo.remote; return @v end",
+            "grant execute on dbo.f_assign to homeuser");
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select dbo.f_assign()").ExecuteScalar());
+        AreEqual(229, ex.Number);
+        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Message);
+    }
+
+    [TestMethod]
+    public void ScalarFunctionReturnSubqueryOverAnotherDatabase_WithBaseGrant_Succeeds()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim, "grant select on dbo.remote to awayuser");
+        sim.ExecuteBatches(
+            "use home",
+            "create function dbo.f_sub() returns int as begin return (select count(*) from away.dbo.remote) end",
+            "grant execute on dbo.f_sub to homeuser");
+        using var connection = ConnectAsApp(sim);
+        AreEqual(1, connection.CreateCommand("select dbo.f_sub()").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ScalarFunctionReturnSubqueryOverAnotherDatabase_NoUserInTarget_Raises916()
+    {
+        var sim = TwoDatabaseFixture();
+        sim.ExecuteBatches(
+            "use home",
+            "create function dbo.f_sub() returns int as begin return (select count(*) from away.dbo.remote) end",
+            "grant execute on dbo.f_sub to homeuser");
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select dbo.f_sub()").ExecuteScalar());
+        AreEqual(916, ex.Number);
+    }
+
+    [TestMethod]
+    public void ScalarFunctionReturnSubquery_SameDatabase_StillChains()
+    {
+        // The intact chain hides the base table from the check for the
+        // RETURN-subquery form exactly as it does for an ordinary body read.
+        var sim = TwoDatabaseFixture();
+        sim.ExecuteBatches(
+            "use home; create table dbo.other (id int not null); insert dbo.other values (42)",
+            "create function dbo.f_local() returns int as begin return (select count(*) from dbo.other) end",
+            "grant execute on dbo.f_local to homeuser");
+        using var connection = ConnectAsApp(sim);
+        AreEqual(1, connection.CreateCommand("select dbo.f_local()").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void SetVariableSubqueryOverAnotherDatabase_RequiresGrantOnTheBase()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim);
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
+            "declare @v int; set @v = (select count(*) from away.dbo.remote); select @v").ExecuteScalar());
+        AreEqual(229, ex.Number);
+        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Message);
+    }
+
+    [TestMethod]
+    public void IfExistsSubqueryOverAnotherDatabase_RequiresGrantOnTheBase()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim);
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
+            "if exists (select * from away.dbo.remote) select 1 else select 0").ExecuteScalar());
+        AreEqual(229, ex.Number);
+        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Message);
+    }
+
+    [TestMethod]
+    public void CteBodyOverAnotherDatabase_RequiresGrantOnTheBase()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim);
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
+            "with x as (select id from away.dbo.remote) select count(*) from x").ExecuteScalar());
+        AreEqual(229, ex.Number);
+        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Message);
+    }
+
+    [TestMethod]
+    public void CteBodyOverAnotherDatabase_WithBaseGrant_Succeeds()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim, "grant select on dbo.remote to awayuser");
+        using var connection = ConnectAsApp(sim);
+        AreEqual(1, connection.CreateCommand("with x as (select id from away.dbo.remote) select count(*) from x").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void MergeUsingSourceOverAnotherDatabase_RequiresGrantOnTheBase()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim);
+        _ = sim.ExecuteNonQuery("use home; grant update on dbo.local to homeuser");
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("""
+            merge dbo.local as t
+            using (select id from away.dbo.remote) as s on t.id = s.id
+            when matched then update set t.id = s.id
+            """).ExecuteNonQuery());
+        AreEqual(229, ex.Number);
+        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Message);
+    }
+
     // ---- TRUSTWORTHY lets a database-scoped identity cross ----
 
     [TestMethod]

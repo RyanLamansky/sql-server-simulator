@@ -80,10 +80,22 @@ internal sealed class Iif : Expression
     // fNullable) — unless the condition is one real folds, which leaves only
     // the arm it selects (`IIF(1 = 1, 5, NULL)` is NOT NULL, `IIF(1 = 2, 5, NULL)`
     // nullable).
-    internal override bool ResultIsNullable(NullabilityContext context) =>
-        context.TryFoldCondition(this.condition, out var branchTaken)
-            ? (branchTaken ? this.trueValue : this.falseValue).ResultIsNullable(context)
-            : this.trueValue.ResultIsNullable(context) || this.falseValue.ResultIsNullable(context);
+    // A surviving arm also answers for the conversion the arm unification put
+    // on it (Expression.ArmConversionIsNullable).
+    internal override bool ResultIsNullable(NullabilityContext context)
+    {
+        var promoted = context.TypeOf(this);
+        if (context.TryFoldCondition(this.condition, out var branchTaken))
+        {
+            var taken = branchTaken ? this.trueValue : this.falseValue;
+            return taken.ResultIsNullable(context) || ArmConversionIsNullable(taken, promoted, context);
+        }
+
+        return this.trueValue.ResultIsNullable(context)
+            || this.falseValue.ResultIsNullable(context)
+            || ArmConversionIsNullable(this.trueValue, promoted, context)
+            || ArmConversionIsNullable(this.falseValue, promoted, context);
+    }
 
     internal override bool ResultReportsNumeric =>
         this.trueValue.ResultReportsNumeric || this.falseValue.ResultReportsNumeric;

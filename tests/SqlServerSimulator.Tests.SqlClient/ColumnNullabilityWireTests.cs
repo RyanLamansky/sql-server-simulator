@@ -102,6 +102,39 @@ public sealed class ColumnNullabilityWireTests
     }
 
     [TestMethod]
+    public async Task CaseFamilyArmConversion_ReachesTheWireFlag()
+    {
+        // A CASE-family arm (or GREATEST / LEAST argument) reads nullable when
+        // the arm unification's conversion could alter the value: the int
+        // literal beside a decimal(9, 2) column doesn't fit the column's seven
+        // integral digits, and neither does a scaled decimal fit float's binary
+        // mantissa. Widening the same arms converts nothing. Probe-confirmed
+        // against SQL Server 2025; the exhaustive matrix lives in the main
+        // suite's ResultNullabilityTests.
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, """
+            create table t (m decimal(9, 2) not null, i int not null, f float not null);
+            insert t values (1.5, 1, 1)
+            """);
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand(
+            "select coalesce(m, 0), coalesce(m, 0.0), greatest(m, 1), coalesce(m, f), coalesce(i, f) from t", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        var columns = reader.GetColumnSchema();
+        IsTrue(columns[0].AllowDBNull);   // int literal → decimal(9, 2)
+        IsFalse(columns[1].AllowDBNull);  // numeric(2, 1) literal fits
+        IsTrue(columns[2].AllowDBNull);   // GREATEST carries the same rule
+        IsTrue(columns[3].AllowDBNull);   // decimal → float loses the exact value
+        IsFalse(columns[4].AllowDBNull);  // int → float does not
+
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual(1.5m, reader.GetDecimal(0));
+    }
+
+    [TestMethod]
     public async Task ValuesConstructorColumn_NullableIsOrOverRows()
     {
         // A VALUES row-constructor column projects NOT NULL iff no row supplies

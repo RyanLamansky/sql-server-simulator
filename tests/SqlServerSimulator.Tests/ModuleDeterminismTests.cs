@@ -56,9 +56,9 @@ public sealed class ModuleDeterminismTests
     [DataRow("@@rowcount")]
     [DataRow("@@nestlevel")]
     [DataRow("cast(format(@a, 'd') as int)")]
-    [DataRow("cast(datename(month, cast('2020-01-01' as date)) as int)")]
-    [DataRow("datepart(week, cast('2020-01-01' as date))")]
-    [DataRow("datepart(weekday, cast('2020-01-01' as date))")]
+    [DataRow("len(datename(month, @d))")]
+    [DataRow("datepart(week, @d)")]
+    [DataRow("datepart(weekday, @d)")]
     [DataRow("isdate('2020-01-01')")]
     [DataRow("cast(parse('5' as int) as int)")]
     [DataRow("cast(try_parse('5' as int) as int)")]
@@ -85,7 +85,7 @@ public sealed class ModuleDeterminismTests
     public void SchemaBoundBody_ReachingNondeterministicBuiltIn_Reports0(string expression)
     {
         var sim = new Simulation();
-        sim.ExecuteBatches($"create function f(@a int) returns int with schemabinding as begin return ({expression}) end");
+        sim.ExecuteBatches($"create function f(@a int, @d date) returns int with schemabinding as begin return ({expression}) end");
         AreEqual(0, sim.ExecuteScalar("select objectproperty(object_id('dbo.f'), 'IsDeterministic')"));
     }
 
@@ -104,11 +104,11 @@ public sealed class ModuleDeterminismTests
     [DataRow("binary_checksum(@a)")]
     [DataRow("cast(hashbytes('SHA2_256', 'abc') as int)")]
     [DataRow("cast(quotename('a') as int)")]
-    [DataRow("datepart(year, cast('2020-01-01' as date))")]
-    [DataRow("datepart(iso_week, cast('2020-01-01' as date))")]
-    [DataRow("datediff(day, cast('2020-01-01' as date), cast('2020-02-01' as date))")]
-    [DataRow("cast(dateadd(day, 1, cast('2020-01-01' as date)) as int)")]
-    [DataRow("cast(eomonth(cast('2020-01-01' as date)) as int)")]
+    [DataRow("datepart(year, @d)")]
+    [DataRow("datepart(iso_week, @d)")]
+    [DataRow("datediff(day, @d, @d)")]
+    [DataRow("datepart(day, dateadd(day, 1, @d))")]
+    [DataRow("datepart(day, eomonth(@d))")]
     [DataRow("cast(decompress(0x) as int)")]
     [DataRow("isnumeric('5')")]
     [DataRow("cast(min_active_rowversion() as int)")]
@@ -121,8 +121,85 @@ public sealed class ModuleDeterminismTests
         var sim = new Simulation();
         sim.ExecuteBatches(
             "create table t (x int)",
-            $"create function f(@a int) returns int with schemabinding as begin return ({expression}) end");
+            $"create function f(@a int, @d date) returns int with schemabinding as begin return ({expression}) end");
         AreEqual(1, sim.ExecuteScalar("select objectproperty(object_id('dbo.f'), 'IsDeterministic')"));
+    }
+
+    /// <summary>
+    /// The <c>CAST</c> / <c>CONVERT</c> rule: a conversion between a date/time
+    /// type and a character string is nondeterministic in either direction
+    /// unless an explicit style from the probed deterministic set is supplied,
+    /// and every other conversion is left alone. The converted expression's own
+    /// type decides which conversions are in the rule at all, so the analysis
+    /// resolves it from the referenced tables' columns, the module's
+    /// parameters, a literal, a nested conversion, and the built-ins whose
+    /// result family doesn't follow their arguments.
+    /// </summary>
+    [TestMethod]
+    // Date/time → character string, no usable style.
+    [DataRow("len(convert(varchar(20), dt))", 0)]
+    [DataRow("len(cast(dt as varchar(20)))", 0)]                          // CAST can carry no style at all
+    [DataRow("len(convert(varchar(20), dt, 0))", 0)]
+    [DataRow("len(convert(varchar(20), dt, 100))", 0)]
+    [DataRow("len(convert(nvarchar(20), dt))", 0)]
+    [DataRow("len(convert(char(20), dt))", 0)]
+    [DataRow("len(convert(varchar(20), @d))", 0)]                         // a parameter carries its declared type
+    [DataRow("len(convert(varchar(20), isnull(dt, dt)))", 0)]             // a propagating call keeps the column's type
+    [DataRow("len(convert(varchar(20), cast(s as datetime)))", 0)]        // a nested conversion states its own
+    [DataRow("len(convert(varchar(20), dateadd(day, 1, dt)))", 0)]
+    [DataRow("len(convert(varchar(20), datefromparts(2020, 1, 1)))", 0)]  // ... as does a date-returning built-in
+    // Character string → date/time, the same rule mirrored.
+    [DataRow("datepart(year, convert(datetime, s))", 0)]
+    [DataRow("datepart(year, convert(date, s))", 0)]
+    [DataRow("datepart(year, cast(s as datetime))", 0)]
+    [DataRow("datepart(year, convert(datetime, @p))", 0)]
+    // A deterministic style clears it.
+    [DataRow("len(convert(varchar(20), dt, 20))", 1)]
+    [DataRow("len(convert(varchar(20), dt, 112))", 1)]
+    [DataRow("len(convert(varchar(20), dt, 120))", 1)]
+    [DataRow("len(convert(varchar(20), dt, 126))", 1)]
+    [DataRow("len(convert(varchar(20), dt, 131))", 1)]                    // the Hijri styles are deterministic too
+    [DataRow("datepart(year, convert(datetime, s, 121))", 1)]
+    // Conversions the rule never touches: neither side is a date/time ↔
+    // character-string pair.
+    [DataRow("len(convert(varchar(20), i))", 1)]
+    [DataRow("len(convert(varchar(20), @a))", 1)]
+    [DataRow("len(cast(i as varchar(20)))", 1)]
+    [DataRow("len(convert(varchar(20), 'abc'))", 1)]
+    [DataRow("convert(int, s)", 1)]
+    [DataRow("datepart(year, convert(datetime2, dt))", 1)]
+    [DataRow("len(convert(varchar(20), left(s, 4)))", 1)]
+    [DataRow("len(convert(varchar(20), year(dt)))", 1)]                   // YEAR takes a date and returns a number
+    [DataRow("len(convert(varchar(20), datediff(day, dt, dt)))", 1)]
+    public void SchemaBoundBody_DateTimeStringConversion_FollowsTheStyleRule(string expression, int expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (dt datetime not null, s varchar(20) not null, i int not null)",
+            $"""
+            create function f(@a int, @d date, @p varchar(20)) returns int with schemabinding
+            as begin return (select top 1 {expression} from dbo.t) end
+            """);
+        AreEqual(expected, sim.ExecuteScalar("select objectproperty(object_id('dbo.f'), 'IsDeterministic')"));
+    }
+
+    /// <summary>
+    /// A style the scan can't read as a literal is treated as no style at all,
+    /// which is what real answers for a variable one. Real additionally folds a
+    /// constant style expression (<c>121 + 0</c> reads deterministic there);
+    /// the scan reports that one nondeterministic.
+    /// </summary>
+    [TestMethod]
+    public void SchemaBoundBody_NonLiteralConversionStyle_Reports0()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (dt datetime not null)",
+            """
+            create function f(@a int) returns int with schemabinding
+            as begin return (select top 1 len(convert(varchar(20), dt, @a)) from dbo.t) end
+            """);
+        AreEqual(0, sim.ExecuteScalar("select objectproperty(object_id('dbo.f'), 'IsDeterministic')"));
     }
 
     /// <summary>

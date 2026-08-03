@@ -336,7 +336,9 @@ public sealed class CheckConstraintTests
     [DataRow("create table t (a int, cc as a + 1 persisted check (cc > 0) check (cc < 10))", "CHECK", "cc", "t")]
     [DataRow("create table t (b int default 1 default 2)", "DEFAULT", "b", "t")]
     [DataRow("create table t (b int unique unique)", "UNIQUE", "b", "t")]
+    [DataRow("create table t (b int unique constraint uq2 unique)", "UNIQUE", "b", "t")]
     [DataRow("create table t (b int primary key primary key)", "PRIMARY KEY", "b", "t")]
+    [DataRow("create table t (b int primary key constraint pk2 primary key)", "PRIMARY KEY", "b", "t")]
     [DataRow("declare @t table (b int check (b > 0) check (b < 10))", "CHECK", "b", "@t")]
     [DataRow("create type tt as table (b int check (b > 0) check (b < 10))", "CHECK", "b", "tt")]
     public void ColumnConstraint_DeclaredTwiceInline_RaisesMsg8148(string commandText, string kind, string column, string table)
@@ -368,11 +370,27 @@ public sealed class CheckConstraintTests
     [TestMethod]
     [DataRow("create table t (b int primary key unique)")]
     [DataRow("create table t (b int unique primary key)")]
+    [DataRow("create table t (b int primary key constraint uq unique)")]
+    [DataRow("create table t (b int unique constraint pk primary key)")]
     public void ColumnConstraint_InlinePrimaryKeyAndUnique_RaisesMsg8151(string commandText)
         => new Simulation().AssertSqlError(
             commandText,
             8151,
             "Both a PRIMARY KEY and UNIQUE constraint have been defined for column 'b', table 't'. Only one is allowed.");
+
+    /// <summary>
+    /// A named <c>CONSTRAINT n …</c> clause may follow an unnamed inline key on
+    /// the same column — the shape Django's schema editor emits for a field
+    /// carrying both <c>unique=True</c> and a check constraint.
+    /// </summary>
+    [TestMethod]
+    public void ColumnConstraint_NamedClauseAfterUnnamedKey_Creates()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (b int not null unique constraint ck_b check (b >= 0))");
+        Assert.AreEqual(1, sim.ExecuteScalar("select count(*) from sys.check_constraints where name = 'ck_b'"));
+        Assert.AreEqual(1, sim.ExecuteScalar("select count(*) from sys.key_constraints where parent_object_id = object_id('t') and type = 'UQ'"));
+    }
 
     /// <summary>
     /// The Msg 8148 gate also covers a column added by ALTER TABLE, where the

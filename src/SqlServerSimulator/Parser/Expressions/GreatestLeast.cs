@@ -38,13 +38,18 @@ internal sealed class GreatestLeast : Expression
         this.arguments = [.. args];
     }
 
+    // An integer-literal argument sizes by digit count against a decimal
+    // sibling, the same rule the CASE family's arm unification applies:
+    // `GREATEST(<decimal(9, 2) col>, 1)` is decimal(9, 2) where
+    // `GREATEST(<decimal(9, 2) col>, 2147483647)` widens to decimal(12, 2)
+    // (probe-confirmed against SQL Server 2025).
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var t = this.arguments[0].GetSqlType(batch, resolveColumnType);
-        for (var i = 1; i < this.arguments.Length; i++)
-            t = SqlType.Promote(t, this.arguments[i].GetSqlType(batch, resolveColumnType));
-        this.cachedResultType = t;
-        return t;
+        var branches = new (SqlType, int)[this.arguments.Length];
+        for (var i = 0; i < this.arguments.Length; i++)
+            branches[i] = (this.arguments[i].GetSqlType(batch, resolveColumnType), IntegerLiteralDigits(this.arguments[i]));
+        this.cachedResultType = SqlType.PromoteBranches(branches);
+        return this.cachedResultType;
     }
 
     internal override bool ResultReportsNumeric
@@ -62,16 +67,22 @@ internal sealed class GreatestLeast : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        // Result type resolves from the runtime argument types (promoted) —
-        // computed here rather than from the GetSqlType cache because Run is
-        // reachable when GetSqlType wasn't called (a nested function whose own
-        // GetSqlType doesn't cascade into operand types).
         var values = new SqlValue[this.arguments.Length];
-        var resultType = this.cachedResultType;
         for (var i = 0; i < values.Length; i++)
-        {
             values[i] = this.arguments[i].Run(runtime);
-            resultType = resultType is null ? values[i].Type : SqlType.Promote(resultType, values[i].Type);
+
+        // The parse-time result type stands when there is one: it carries the
+        // integer-literal digit sizing, which promoting the runtime values
+        // would widen back out (an argument arriving as int would push
+        // decimal(9, 2) to decimal(12, 2) and mismatch the declared schema).
+        // Promotion over the runtime types is the fallback for the paths that
+        // reach Run without a GetSqlType — a nested function whose own
+        // GetSqlType doesn't cascade into operand types.
+        var resultType = this.cachedResultType;
+        if (resultType is null)
+        {
+            foreach (var value in values)
+                resultType = resultType is null ? value.Type : SqlType.Promote(resultType, value.Type);
         }
 
         SqlValue best = default;
@@ -95,11 +106,15 @@ internal sealed class GreatestLeast : Expression
         return haveBest ? best : SqlValue.Null(resultType!);
     }
 
+    // NOT NULL when every argument is — and when none of them needs a
+    // value-altering conversion to reach the promoted result type, the same
+    // rule the CASE family carries (Expression.ArmConversionIsNullable).
     internal override bool ResultIsNullable(NullabilityContext context)
     {
+        var promoted = context.TypeOf(this);
         foreach (var argument in this.arguments)
         {
-            if (argument.ResultIsNullable(context))
+            if (argument.ResultIsNullable(context) || ArmConversionIsNullable(argument, promoted, context))
                 return true;
         }
         return false;

@@ -29,6 +29,15 @@ public sealed class SimulatedDbCommand : DbCommand
     /// </summary>
     internal bool ScopeTempTablesToBatch;
 
+    /// <summary>
+    /// When set, a <c>DECLARE … CURSOR</c> in this command's batch opens an API
+    /// server cursor rather than a T-SQL one. Set by the TDS endpoint's
+    /// <c>sp_cursoropen</c> family, which synthesizes the DECLARE / OPEN pair;
+    /// the two origins differ in one probed respect, so the flag rides along
+    /// rather than the parser guessing from the cursor's name.
+    /// </summary>
+    internal bool ApiServerCursor;
+
     internal SimulatedDbCommand(Simulation simulation, SimulatedDbConnection connection)
     {
         this.simulation = simulation;

@@ -336,6 +336,32 @@ internal static class PermissionEnforcement
     }
 
     /// <summary>
+    /// Checks the reads of a subquery that carries a securable list of its own —
+    /// one written in an expression slot no query expression encloses: a scalar
+    /// UDF's value-form <c>RETURN (SELECT …)</c>, a <c>SET</c> / <c>DECLARE</c>
+    /// initializer, an <c>IF</c> / <c>WHILE</c> condition, a <c>PRINT</c>
+    /// operand, or a DML statement's operand. Those plans reach none of the
+    /// per-statement check sites, so without this the reference is unchecked.
+    /// A subquery nested inside a query expression records into <em>that</em>
+    /// statement's list and carries none of its own, so the per-row evaluation
+    /// path reads one null field and returns.
+    /// </summary>
+    /// <remarks>
+    /// Inside a module body the same-database references stay chained and only
+    /// the cross-database ones answer to the caller's rights — which is the
+    /// behavior real shows for both scalar-UDF body forms alike: an intact
+    /// ownership chain skips the check for <c>RETURN (SELECT …)</c> and for
+    /// <c>SELECT @v = … FROM t</c> equally, and a chain broken by an
+    /// other-owner schema or by the database boundary raises Msg 229 naming the
+    /// base object for both (probe-confirmed against SQL Server 2025).
+    /// </remarks>
+    internal static void CheckSubqueryReads(BatchContext batch, Selection inner)
+    {
+        if (inner.ReferencedSecurables is { } securables)
+            CheckReadSources(batch, securables, inner.ReadColumnsByObject);
+    }
+
+    /// <summary>
     /// Checks the reads a module body makes into a database other than
     /// <paramref name="moduleDatabase"/> — the ownership chain the body's own
     /// frame suppresses breaks at the database boundary, so those references

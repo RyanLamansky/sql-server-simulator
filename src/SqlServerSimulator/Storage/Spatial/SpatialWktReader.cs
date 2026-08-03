@@ -55,9 +55,11 @@ internal sealed class SpatialWktReader
             reader.ExpectLiteral(requiredLabel);
         var root = reader.ReadTaggedText(requiredLabel);
         reader.SkipWhitespace();
-        return reader.position < text.Length
-            ? throw SimulatedSqlException.SpatialWktNotValid(isGeography)
-            : new SpatialGeometry(srid, root);
+        if (reader.position < text.Length)
+            throw SimulatedSqlException.SpatialWktNotValid(isGeography);
+        if (isGeography)
+            SpatialGeodeticValidator.RejectAntipodalEdges(root);
+        return new SpatialGeometry(srid, root);
     }
 
     /// <summary>Label spellings, longest-first so a prefix match never stops short of the real label.</summary>

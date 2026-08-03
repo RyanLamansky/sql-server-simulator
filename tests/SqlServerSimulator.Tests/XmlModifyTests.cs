@@ -420,16 +420,159 @@ public sealed class XmlModifyTests
         AreEqual(expected, ModifyVariable(instance, "insert <z/> into (/r)[1]"));
 
     [TestMethod]
-    public void Insert_ElementBesideTopLevelElement_RaisesNotSupported()
+    [DataRow("insert <b/> after (/r)[1]", "<r/><b/>")]
+    [DataRow("insert <b/> before (/r)[1]", "<b/><r/>")]
+    public void Insert_ElementBesideTopLevelElement_ProducesFragment(string dml, string expected) =>
+        AreEqual(expected, ModifyVariable("<r/>", dml));
+
+    [TestMethod]
+    public void Insert_IntoTheDocumentNode_AppendsAtTopLevel() =>
+        AreEqual("<a/><c/>", ModifyVariable("<a/>", "insert <c/> into (/)[1]"));
+
+    [TestMethod]
+    public void Insert_AfterASecondTopLevelElement_Appends() =>
+        AreEqual("<a/><b/><c/>", ModifyVariable("<a/><b/>", "insert <c/> after (/b)[1]"));
+
+    [TestMethod]
+    public void Update_InsertAfterTopLevelElement_StoresAFragment()
     {
-        var ex = ThrowsExactly<NotSupportedException>(() =>
-            new Simulation().ExecuteScalar("declare @x xml = '<r/>'; set @x.modify('insert <b/> after (/r)[1]'); select @x"));
-        Contains("top-level element", ex.Message);
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.doc (body xml); insert dbo.doc values (N'<r/>')");
+        _ = sim.ExecuteNonQuery("update dbo.doc set body.modify('insert <b/> after (/r)[1]')");
+        AreEqual("<r/><b/>", sim.ExecuteScalar("select body from dbo.doc"));
     }
+
+    [TestMethod]
+    public void Delete_TopLevelElementOfAFragment_LeavesTheRest() =>
+        AreEqual("<b/>", ModifyVariable("<a/><b/>", "delete /a"));
 
     [TestMethod]
     public void Insert_CommentBesideTopLevelElement_Succeeds() =>
         AreEqual("<r/><!--c-->", ModifyVariable("<r/>", "insert <!--c--> after (/r)[1]"));
+
+    // ---- attribute insert position ----------------------------------------
+
+    [TestMethod]
+    [DataRow("<a/>", "insert attribute z {9} into (/a)[1]", "<a z=\"9\"/>")]
+    [DataRow("<a b=\"1\"/>", "insert attribute z {9} into (/a)[1]", "<a b=\"1\" z=\"9\"/>")]
+    [DataRow("<a b=\"1\" d=\"2\"/>", "insert attribute z {9} into (/a)[1]", "<a b=\"1\" z=\"9\" d=\"2\"/>")]
+    [DataRow("<a m=\"1\" n=\"2\" o=\"3\" p=\"4\"/>", "insert attribute z {9} into (/a)[1]", "<a m=\"1\" z=\"9\" n=\"2\" o=\"3\" p=\"4\"/>")]
+    [DataRow("<a m=\"1\" n=\"2\" o=\"3\" p=\"4\"/>", "insert (attribute z {9}, attribute y {8}) into (/a)[1]", "<a m=\"1\" z=\"9\" n=\"2\" y=\"8\" o=\"3\" p=\"4\"/>")]
+    [DataRow("<a m=\"1\" n=\"2\" o=\"3\" p=\"4\"/>", "insert (attribute z {9}, attribute y {8}, attribute w {7}) into (/a)[1]", "<a m=\"1\" z=\"9\" n=\"2\" y=\"8\" o=\"3\" w=\"7\" p=\"4\"/>")]
+    [DataRow("<a b=\"1\"/>", "insert (attribute z {9}, attribute y {8}, attribute w {7}) into (/a)[1]", "<a b=\"1\" z=\"9\" y=\"8\" w=\"7\"/>")]
+    [DataRow("<a m=\"1\" n=\"2\"/>", "insert (attribute q {1}, attribute r {2}, attribute s {3}, attribute t {4}, attribute u {5}) into (/a)[1]", "<a m=\"1\" q=\"1\" n=\"2\" r=\"2\" s=\"3\" t=\"4\" u=\"5\"/>")]
+    [DataRow("<a xmlns:p=\"u\" b=\"1\" d=\"2\"/>", "insert attribute z {9} into (/a)[1]", "<a xmlns:p=\"u\" z=\"9\" b=\"1\" d=\"2\"/>")]
+    [DataRow("<a m=\"1\" n=\"2\"/>", "insert attribute z {9} as first into (/a)[1]", "<a m=\"1\" z=\"9\" n=\"2\"/>")]
+    public void Insert_AttributeThreadsIntoTheNodeOrder(string instance, string dml, string expected) =>
+        AreEqual(expected, ModifyVariable(instance, dml));
+
+    [TestMethod]
+    public void Insert_AttributeAcrossStatements_KeepsThreading() =>
+        AreEqual(
+            "<a m=\"1\" w=\"7\" y=\"8\" z=\"9\" n=\"2\" o=\"3\" p=\"4\"/>",
+            new Simulation().ExecuteScalar("""
+                declare @x xml = '<a m="1" n="2" o="3" p="4"/>';
+                set @x.modify('insert attribute z {9} into (/a)[1]');
+                set @x.modify('insert attribute y {8} into (/a)[1]');
+                set @x.modify('insert attribute w {7} into (/a)[1]');
+                select @x
+                """));
+
+    // ---- computed constructors --------------------------------------------
+
+    [TestMethod]
+    [DataRow("insert element n {\"v\"} into (/r)[1]", "<r><n>v</n></r>")]
+    [DataRow("insert element n {} into (/r)[1]", "<r><n/></r>")]
+    [DataRow("insert element n {element m {1}} into (/r)[1]", "<r><n><m>1</m></n></r>")]
+    [DataRow("insert element n {attribute a {1}} into (/r)[1]", "<r><n a=\"1\"/></r>")]
+    [DataRow("insert element n {<c/>} into (/r)[1]", "<r><n><c/></n></r>")]
+    [DataRow("insert element n {\"a\",\"b\"} into (/r)[1]", "<r><n>a b</n></r>")]
+    public void Insert_ComputedElementConstructor(string dml, string expected) =>
+        AreEqual(expected, ModifyVariable("<r/>", dml));
+
+    [TestMethod]
+    public void Insert_ComputedElementTakesThePrologDefaultNamespace() =>
+        AreEqual(
+            "<r xmlns=\"urn:d\"><n>5</n></r>",
+            new Simulation().ExecuteScalar("declare @x xml = '<r xmlns=\"urn:d\"/>'; set @x.modify('declare default element namespace \"urn:d\"; insert element n {5} into (/r)[1]'); select @x"));
+
+    [TestMethod]
+    public void Insert_ComputedElementTakesAPrologPrefix() =>
+        AreEqual(
+            "<r><p:m xmlns:p=\"urn:x\">1</p:m></r>",
+            new Simulation().ExecuteScalar("declare @x xml = '<r/>'; set @x.modify('declare namespace p=\"urn:x\"; insert element p:m {1} into (/r)[1]'); select @x"));
+
+    [TestMethod]
+    public void Insert_ComputedElementWithUndeclaredPrefix_Raises2229() =>
+        new Simulation().AssertSqlError(
+            "declare @x xml = '<r/>'; set @x.modify('insert element n:m {1} into (/r)[1]'); select @x",
+            2229,
+            "XQuery [modify()]: The name \"n\" does not denote a namespace.");
+
+    [TestMethod]
+    [DataRow("insert element {\"a\"} {1} into (/r)[1]")]
+    [DataRow("insert attribute {\"z\"} {1} into (/r)[1]")]
+    public void Insert_ComputedNameExpression_Raises9315(string dml) =>
+        new Simulation().AssertSqlError(
+            $"declare @x xml = '<r/>'; set @x.modify('{dml}'); select @x",
+            9315,
+            "XQuery [modify()]: Only constant expressions are supported for the name expression of computed element and attribute constructors.");
+
+    [TestMethod]
+    public void Insert_ComputedCommentConstructor_Raises9326() =>
+        new Simulation().AssertSqlError(
+            "declare @x xml = '<r/>'; set @x.modify('insert comment {\"c\"} into (/r)[1]'); select @x",
+            9326,
+            "XQuery [modify()]: Computed comment constructors are not supported.");
+
+    [TestMethod]
+    public void Insert_ComputedProcessingInstructionConstructor_Raises9325() =>
+        new Simulation().AssertSqlError(
+            "declare @x xml = '<r/>'; set @x.modify('insert processing-instruction p {\"d\"} into (/r)[1]'); select @x",
+            9325,
+            "XQuery [modify()]: Computed processing instruction constructors are not supported.");
+
+    [TestMethod]
+    public void Insert_ComputedTextConstructor_Succeeds() =>
+        AreEqual("<r>t</r>", ModifyVariable("<r/>", "insert text {\"t\"} into (/r)[1]"));
+
+    // ---- statement-shape diagnostics --------------------------------------
+
+    [TestMethod]
+    [DataRow("/r")]
+    [DataRow("1+1")]
+    [DataRow("foo")]
+    [DataRow("count(/r)")]
+    [DataRow("deleted /r")]
+    [DataRow("<a/>")]
+    [DataRow("for $i in /r return $i")]
+    [DataRow("let $i := 1 return $i")]
+    [DataRow("if (1=1) then 1 else 2")]
+    public void Modify_ArgumentParsesAsXQueryButIsNotXmlDml_Raises6305(string xquery) =>
+        new Simulation().AssertSqlError(
+            $"declare @x xml = '<r/>'; set @x.modify('{xquery}'); select @x",
+            6305,
+            "XQuery data manipulation expression required in XML data type method.");
+
+    [TestMethod]
+    [DataRow("(")]
+    [DataRow("insert")]
+    [DataRow("delete")]
+    [DataRow("/r[")]
+    public void Modify_ArgumentIsNotXQueryAtAll_Raises2209(string xquery) =>
+        new Simulation().AssertSqlError(
+            $"declare @x xml = '<r/>'; set @x.modify('{xquery}'); select @x",
+            2209,
+            "XQuery [modify()]: Syntax error near '<eof>'");
+
+    [TestMethod]
+    [DataRow("")]
+    [DataRow("   ")]
+    public void Modify_EmptyArgument_Raises6306(string xquery) =>
+        new Simulation().AssertSqlError(
+            $"declare @x xml = '<r/>'; set @x.modify('{xquery}'); select @x",
+            6306,
+            "Invalid XQuery expression passed to XML data type method.");
 
     [TestMethod]
     public void Modify_OnTypedColumn_EditsWithoutSchemaValidation()

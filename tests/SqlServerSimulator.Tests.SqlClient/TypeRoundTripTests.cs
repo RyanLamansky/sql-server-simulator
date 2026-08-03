@@ -206,6 +206,34 @@ public sealed class TypeRoundTripTests
         AreEqual(oracle[0][1], reader.GetString(1));
     }
 
+    /// <summary>
+    /// SqlClient's <c>GetDecimal</c> hands back the declared scale, which the
+    /// value-equality assertions above can't see (scale is invisible to
+    /// <see cref="decimal"/> equality) and which the in-proc oracle can't
+    /// witness on its own. Expectations are what SqlClient reads from a real
+    /// server for the same columns.
+    /// </summary>
+    [TestMethod]
+    public async Task DecimalAndMoney_TypedGetters_CarryTheDeclaredScale()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, """
+            create table t (n numeric(10, 2), z numeric(10, 0), m money, s smallmoney);
+            insert t values (1, 1, 1, 1)
+            """);
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("select n, z, m, s from t", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual("1.00", reader.GetDecimal(0).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        AreEqual("1", reader.GetDecimal(1).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        AreEqual("1.0000", reader.GetDecimal(2).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        AreEqual("1.0000", reader.GetDecimal(3).ToString(System.Globalization.CultureInfo.InvariantCulture));
+    }
+
     [TestMethod]
     public async Task Binary_TypedGetters()
     {

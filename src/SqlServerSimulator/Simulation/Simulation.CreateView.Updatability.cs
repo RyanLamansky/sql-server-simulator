@@ -33,10 +33,11 @@ partial class Simulation
     /// WHERE and join predicates read columns of more than one table, so
     /// there is no single base row to evaluate them against. Such a view
     /// records <see cref="ViewUpdatabilityRejection.MultipleSources"/>
-    /// (Msg 4405, what INSERT and DELETE raise) plus
-    /// <c>IsJoinUpdatable</c>, which routes UPDATE to the join-view path in
-    /// <c>Simulation.Update.JoinView.cs</c> — that one re-parses the body
-    /// and works off the live profile.
+    /// (Msg 4405, what DELETE raises) plus <c>IsJoinUpdatable</c>, which
+    /// routes UPDATE and INSERT to the chain-walking paths in
+    /// <c>Simulation.JoinViewDml.cs</c> — those re-parse each level's body
+    /// and work off the live profiles. A single-source view reading such a
+    /// view carries the same pair, so the chain can be any depth.
     /// </para>
     /// </remarks>
     private static (HeapTable? BaseTable, int[] BaseColumnOrdinals, ViewUpdatabilityRejection Rejection, Func<SqlValue[], BatchContext, bool>? VisibilityCheck, Func<SqlValue[], BatchContext, bool>? CheckOptionCheck, bool IsJoinUpdatable)
@@ -67,6 +68,14 @@ partial class Simulation
             sourceColumnToBaseOrdinal = upstreamView.BaseColumnOrdinals;
             upstreamVisibility = upstreamView.VisibilityCheck;
             upstreamCheckOption = upstreamView.CheckOptionCheck;
+        }
+        else if (source.BackingView is { IsJoinUpdatable: true })
+        {
+            // The chain bottoms out in a multi-source view, which has no
+            // single base table for this level to compose through. The write
+            // walks the level stack at the statement instead, so this level
+            // carries the same pair the join view itself does.
+            return (null, [], ViewUpdatabilityRejection.MultipleSources, null, null, true);
         }
         else
         {

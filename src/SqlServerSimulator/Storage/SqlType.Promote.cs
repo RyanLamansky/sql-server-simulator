@@ -698,4 +698,160 @@ internal abstract partial class SqlType
         NVarcharSqlType nv => nv.length,
         _ => 0,
     };
+
+    /// <summary>
+    /// True when every value of <paramref name="source"/> reaches
+    /// <paramref name="target"/> unchanged — no range overflow, no rounding,
+    /// no truncation — through the implicit conversion <see cref="Promote"/> /
+    /// <see cref="PromoteBranches"/> inserts on an arm it didn't pick.
+    /// </summary>
+    /// <remarks>
+    /// <para>SQL Server's projection-nullability inference asks exactly this of
+    /// every CASE-family arm and GREATEST / LEAST argument: an arm whose
+    /// conversion to the unified type could alter the value reads nullable.
+    /// That is what makes <c>COALESCE(&lt;decimal(9, 2) column&gt;, 0)</c>
+    /// nullable — the <c>int</c> literal's ten integral digits don't fit the
+    /// column's seven, and the unification narrows to the column's own width
+    /// because the literal's <em>value</em> is one digit wide — while
+    /// <c>COALESCE(&lt;decimal(9, 2) column&gt;, 0.0)</c> is NOT NULL.
+    /// Probe-confirmed against SQL Server 2025 cell for cell through both
+    /// <c>sys.dm_exec_describe_first_result_set</c> and a <c>SELECT … INTO</c>
+    /// destination's <c>is_nullable</c>.</para>
+    /// <para>Loss, not failure, is the test real applies: <c>decimal</c> →
+    /// <c>float</c> and <c>datetime</c> → <c>datetime2</c> can't raise, yet
+    /// both read nullable because the target's grid doesn't carry the source's
+    /// values exactly.</para>
+    /// </remarks>
+    public static bool ConversionPreservesEveryValue(SqlType source, SqlType target) =>
+        source == target
+        || (source is VarbinarySqlType or BinarySqlType ? BinaryConversionPreservesEveryValue(source, target)
+        : source.Category switch
+        {
+            SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money =>
+                ExactNumericConversionPreservesEveryValue(source, target),
+            // A float carries every real; the reverse drops mantissa bits.
+            SqlTypeCategory.Approximate => source == Real && target == Float,
+            SqlTypeCategory.String => StringConversionPreservesEveryValue(source, target),
+            SqlTypeCategory.DateTime => DateTimeConversionPreservesEveryValue(source, target),
+            _ => false,
+        });
+
+    /// <summary>
+    /// The integral-digit / scale shape an exact-numeric type occupies, with
+    /// the integer and money families canonicalized through their
+    /// decimal-equivalent precision and scale.
+    /// </summary>
+    private static (int Integral, int Scale) ExactNumericShape(SqlType type)
+    {
+        var (precision, scale) = type.Category switch
+        {
+            SqlTypeCategory.Integer => IntegerAsDecimal(type),
+            SqlTypeCategory.Money => MoneyAsDecimal(type),
+            _ => (((DecimalSqlType)type).precision, ((DecimalSqlType)type).scale),
+        };
+        return (precision - scale, scale);
+    }
+
+    /// <summary>
+    /// Exact-numeric source: another exact numeric keeps every value when it
+    /// has room for both the integral digits and the scale, and a binary
+    /// mantissa keeps them only when the source is integral and its whole
+    /// range lands on integers the mantissa represents exactly — every
+    /// 15-digit integer fits <c>float</c>'s 2^53 and every 7-digit one fits
+    /// <c>real</c>'s 2^24, which is where <c>decimal(15, 0)</c> → <c>float</c>
+    /// and <c>decimal(16, 0)</c> → <c>float</c> part company.
+    /// </summary>
+    private static bool ExactNumericConversionPreservesEveryValue(SqlType source, SqlType target)
+    {
+        var (integral, scale) = ExactNumericShape(source);
+        switch (target.Category)
+        {
+            case SqlTypeCategory.Integer:
+            case SqlTypeCategory.Decimal:
+            case SqlTypeCategory.Money:
+                var (targetIntegral, targetScale) = ExactNumericShape(target);
+                return targetIntegral >= integral && targetScale >= scale;
+            case SqlTypeCategory.Approximate:
+                return scale == 0 && integral <= (target == Float ? 15 : 7);
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// String source: a UTF-16 source needs a UTF-16 target (the ANSI half
+    /// converts up freely), and the target has to be at least as long. An
+    /// unspecified length on either side pins nothing, so it reports preserved
+    /// rather than inventing a truncation.
+    /// </summary>
+    private static bool StringConversionPreservesEveryValue(SqlType source, SqlType target)
+    {
+        if (target.Category != SqlTypeCategory.String || (IsNationalStringCategory(source) && !IsNationalStringCategory(target)))
+            return false;
+
+        var sourceLength = DeclaredStringLength(source);
+        var targetLength = DeclaredStringLength(target);
+        return sourceLength == 0 || targetLength is 0 or MaxLengthSentinel
+            || (sourceLength != MaxLengthSentinel && targetLength >= sourceLength);
+    }
+
+    /// <summary>
+    /// Declared length for the value-preservation test: the bounded families
+    /// carry it on the type, the legacy LOB families report the MAX sentinel,
+    /// and <c>sysname</c> is <c>nvarchar(128)</c>.
+    /// </summary>
+    private static int DeclaredStringLength(SqlType type) => type switch
+    {
+        CharSqlType c => c.length,
+        NCharSqlType nc => nc.length,
+        VarcharSqlType v => v.length,
+        NVarcharSqlType nv => nv.length,
+        SystemNameSqlType => 128,
+        _ => MaxLengthSentinel,
+    };
+
+    /// <summary>
+    /// Binary source: preserved when the target is a binary family at least as
+    /// long, with the same unspecified-length reading as the string rule.
+    /// </summary>
+    private static bool BinaryConversionPreservesEveryValue(SqlType source, SqlType target)
+    {
+        if (target is not (VarbinarySqlType or BinarySqlType))
+            return false;
+
+        var sourceLength = source is VarbinarySqlType sourceVarbinary ? sourceVarbinary.length : ((BinarySqlType)source).length;
+        var targetLength = target is VarbinarySqlType targetVarbinary ? targetVarbinary.length : ((BinarySqlType)target).length;
+        return sourceLength == 0 || targetLength is 0 or MaxLengthSentinel
+            || (sourceLength != MaxLengthSentinel && targetLength >= sourceLength);
+    }
+
+    /// <summary>
+    /// Date/time source: the target has to carry every component the source
+    /// has, cover its range, and land on a grid at least as fine.
+    /// <c>date</c> reaches <c>datetime</c> / <c>smalldatetime</c> only through
+    /// a range both of them fall short of (they start in 1753 / 1900), and
+    /// <c>datetime</c>'s 1/300-second grid lands on no other type's ticks at
+    /// all — which is why <c>datetime</c> → <c>datetime2(7)</c> reads nullable
+    /// while <c>smalldatetime</c> → <c>datetime</c> does not.
+    /// </summary>
+    private static bool DateTimeConversionPreservesEveryValue(SqlType source, SqlType target) => source switch
+    {
+        DateSqlType => target is DateTime2SqlType or DateTimeOffsetSqlType,
+        SmallDateTimeSqlType => target is DateTimeSqlType or DateTime2SqlType or DateTimeOffsetSqlType,
+        TimeSqlType time => target switch
+        {
+            TimeSqlType t => t.precision >= time.precision,
+            DateTime2SqlType d => d.precision >= time.precision,
+            DateTimeOffsetSqlType o => o.precision >= time.precision,
+            _ => false,
+        },
+        DateTime2SqlType datetime2 => target switch
+        {
+            DateTime2SqlType d => d.precision >= datetime2.precision,
+            DateTimeOffsetSqlType o => o.precision >= datetime2.precision,
+            _ => false,
+        },
+        DateTimeOffsetSqlType offset => target is DateTimeOffsetSqlType o && o.precision >= offset.precision,
+        _ => false,
+    };
 }

@@ -951,4 +951,23 @@ public sealed class AlterTableColumnTests
             "create table t (a int not null primary key desc, b int)",
             156,
             "Incorrect syntax near the keyword 'desc'.");
+
+    /// <summary>
+    /// An inline key clause on an added column may be the batch's last token —
+    /// CREATE TABLE always has a closing paren after it, <c>ALTER TABLE … ADD</c>
+    /// doesn't. Django's schema editor emits exactly this for a
+    /// <c>unique=True</c> field added by a migration.
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter table t add c int null unique", "UQ")]
+    [DataRow("alter table t add c int null unique nonclustered", "UQ")]
+    [DataRow("alter table t add c int not null primary key", "PK")]
+    public void AlterTableAddColumn_InlineKeyAtEndOfBatch_Creates(string alter, string type)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int)");
+        _ = sim.ExecuteNonQuery(alter);
+        AreEqual(1, sim.ExecuteScalar(
+            $"select count(*) from sys.key_constraints where parent_object_id = object_id('t') and type = '{type}'"));
+    }
 }

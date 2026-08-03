@@ -108,9 +108,11 @@ internal static class SpatialWkb
     {
         var at = 0;
         var shape = ReadShape(bytes, ref at, isGeography);
-        return requiredType is { } required && shape.Type != required
-            ? throw SimulatedSqlException.SpatialInvalidOpenGisType(isGeography, shape.Type.ToString())
-            : new SpatialGeometry(srid, shape);
+        if (requiredType is { } required && shape.Type != required)
+            throw SimulatedSqlException.SpatialInvalidOpenGisType(isGeography, shape.Type.ToString());
+        if (isGeography)
+            SpatialGeodeticValidator.RejectAntipodalEdges(shape);
+        return new SpatialGeometry(srid, shape);
     }
 
     private static SpatialShape ReadShape(ReadOnlySpan<byte> bytes, ref int at, bool isGeography)

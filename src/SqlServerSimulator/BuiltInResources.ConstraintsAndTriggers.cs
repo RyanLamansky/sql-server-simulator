@@ -223,6 +223,37 @@ internal static partial class BuiltInResources
             new("DELETE_RULE", SqlType.Varchar, 11, true),
         ], EnumerateInformationSchemaReferentialConstraints);
 
+        // INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE: one row per (constraint,
+        // column) pair, over PRIMARY KEY / UNIQUE / FOREIGN KEY (the child
+        // columns, as in KEY_COLUMN_USAGE) and CHECK. Probe-confirmed 7-column
+        // shape (SQL Server 2025), with the table columns leading and the
+        // constraint columns trailing — the reverse of TABLE_CONSTRAINTS.
+        // mssql-django's `get_relations` joins it twice to resolve a foreign
+        // key's child and referenced columns.
+        Iso("CONSTRAINT_COLUMN_USAGE",
+        [
+            new("TABLE_CATALOG", SqlType.SystemName, 128, true),
+            new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
+            new("TABLE_NAME", SqlType.SystemName, 128, true),
+            new("COLUMN_NAME", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_NAME", SqlType.SystemName, 128, true),
+        ], EnumerateInformationSchemaConstraintColumnUsage);
+
+        // INFORMATION_SCHEMA.CONSTRAINT_TABLE_USAGE: one row per constraint,
+        // naming the table it sits on. Probe-confirmed 6-column shape — the
+        // same as CONSTRAINT_COLUMN_USAGE without COLUMN_NAME.
+        Iso("CONSTRAINT_TABLE_USAGE",
+        [
+            new("TABLE_CATALOG", SqlType.SystemName, 128, true),
+            new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
+            new("TABLE_NAME", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_NAME", SqlType.SystemName, 128, true),
+        ], EnumerateInformationSchemaConstraintTableUsage);
+
         // sys.check_constraints: probe-confirmed 13-column shape (a subset
         // of sys.objects + the check-specific columns). Used by EF Migrations'
         // model snapshot and tooling that introspects existing CHECK rules.
@@ -973,6 +1004,118 @@ internal static partial class BuiltInResources
                     for (var i = 0; i < fk.ChildColumnOrdinals.Length; i++)
                         yield return Row(fk.Name, table.Columns[fk.ChildColumnOrdinals[i]].Name, i + 1);
                 }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE</c>: one row per
+    /// (constraint, column) pair. PRIMARY KEY / UNIQUE name their key columns
+    /// and a FOREIGN KEY its child columns, the same sets
+    /// <see cref="EnumerateInformationSchemaKeyColumnUsage"/> reports; a CHECK
+    /// names the columns its predicate reads.
+    /// <para>
+    /// A CHECK's columns come from the declaring column for the inline form and
+    /// otherwise from matching the stored definition text against the parent
+    /// table's column names — an approximation of real's expression walk, which
+    /// over-reports a column whose name also appears as a string literal inside
+    /// the predicate.
+    /// </para>
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaConstraintColumnUsage(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var catalog = SqlValue.FromSystemName(database.Name);
+        foreach (var schema in database.Schemas.Values)
+        {
+            var schemaName = SqlValue.FromSystemName(schema.Name);
+            foreach (var table in schema.HeapTables.Values)
+            {
+                var tableName = SqlValue.FromSystemName(table.Name);
+                SqlValue[] Row(string constraintName, string columnName) =>
+                [
+                    catalog,
+                    schemaName,
+                    tableName,
+                    SqlValue.FromSystemName(columnName),
+                    catalog,
+                    schemaName,
+                    SqlValue.FromSystemName(constraintName),
+                ];
+                foreach (var key in table.KeyConstraints.OrderBy(k => k.ObjectId))
+                {
+                    foreach (var storageOrdinal in key.StorageOrdinals)
+                        yield return Row(key.Name, table.StoredColumns[storageOrdinal].Name);
+                }
+                foreach (var fk in table.OutgoingForeignKeys.OrderBy(f => f.ObjectId))
+                {
+                    foreach (var ordinal in fk.ChildColumnOrdinals)
+                        yield return Row(fk.Name, table.Columns[ordinal].Name);
+                }
+                foreach (var ck in table.CheckConstraints.OrderBy(c => c.ObjectId))
+                {
+                    foreach (var columnName in CheckConstraintColumns(database, table, ck))
+                        yield return Row(ck.Name, columnName);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The column names a CHECK constraint reads: the declaring column for the
+    /// inline form, else every column of <paramref name="table"/> whose name
+    /// appears in the constraint's stored definition text.
+    /// </summary>
+    private static IEnumerable<string> CheckConstraintColumns(Database database, HeapTable table, CheckConstraint check)
+    {
+        if (check.InlineColumn is { } inlineColumn)
+        {
+            yield return inlineColumn;
+            yield break;
+        }
+
+        var definition = check.Definition;
+        if (definition is null)
+            yield break;
+
+        var comparison = database.Collation.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        foreach (var column in table.Columns)
+        {
+            if (definition.Contains(column.Name, comparison))
+                yield return column.Name;
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.CONSTRAINT_TABLE_USAGE</c>: one row per
+    /// PRIMARY KEY / UNIQUE / FOREIGN KEY / CHECK constraint, naming the table
+    /// it sits on.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaConstraintTableUsage(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var catalog = SqlValue.FromSystemName(database.Name);
+        foreach (var schema in database.Schemas.Values)
+        {
+            var schemaName = SqlValue.FromSystemName(schema.Name);
+            foreach (var table in schema.HeapTables.Values)
+            {
+                var tableName = SqlValue.FromSystemName(table.Name);
+                SqlValue[] Row(string constraintName) =>
+                [
+                    catalog,
+                    schemaName,
+                    tableName,
+                    catalog,
+                    schemaName,
+                    SqlValue.FromSystemName(constraintName),
+                ];
+                foreach (var key in table.KeyConstraints.OrderBy(k => k.ObjectId))
+                    yield return Row(key.Name);
+                foreach (var fk in table.OutgoingForeignKeys.OrderBy(f => f.ObjectId))
+                    yield return Row(fk.Name);
+                foreach (var ck in table.CheckConstraints.OrderBy(c => c.ObjectId))
+                    yield return Row(ck.Name);
             }
         }
     }

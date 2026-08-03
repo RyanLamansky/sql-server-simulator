@@ -522,13 +522,30 @@ public sealed class CursorTests
         "create table h (id int not null, name varchar(20) not null); " +
         "insert h values (1,'a'),(2,'b'),(3,'c');";
 
+    /// <summary>
+    /// A clustered index and no key constraint: the table carries the row
+    /// locator KEYSET needs, so the cursor stays KEYSET, while
+    /// <c>CursorUniqueKeyOrdinals</c> finds no PK / UNIQUE and membership falls
+    /// back to the row's stable <c>(page, slot)</c> address. That pairing is
+    /// what the address-identity tests below exercise.
+    /// </summary>
+    private const string ClusteredNoConstraintSeed =
+        "create table h (id int not null, name varchar(20) not null); " +
+        "create clustered index ix_h on h (id); " +
+        "insert h values (1,'a'),(2,'b'),(3,'c');";
+
+    /// <summary>
+    /// A keyless heap has nothing for a keyset to key on, so real converts the
+    /// cursor to a read-only snapshot: membership <em>and</em> values freeze at
+    /// OPEN, so a mid-loop UPDATE doesn't show through.
+    /// </summary>
     [TestMethod]
-    public void KeysetCursor_NoUniqueKeyHeap_SeesUpdatedValues()
-        => AreEqual("a;NEW;c;", new Simulation().ExecuteScalar(NoKeySeed + """
+    public void KeysetCursor_NoUniqueKeyHeap_ConvertsToFrozenSnapshot()
+        => AreEqual("a;b;c;", new Simulation().ExecuteScalar(NoKeySeed + """
             declare @id int, @name varchar(20), @log varchar(200) = '';
             declare c cursor keyset for select id, name from h order by id;
             open c; fetch next from c into @id, @name;
-            update h set name = 'NEW' where id = 2;        -- non-key UPDATE on no-key heap
+            update h set name = 'NEW' where id = 2;        -- invisible to the snapshot
             while @@fetch_status = 0
             begin
               set @log = @log + @name + ';';
@@ -538,11 +555,27 @@ public sealed class CursorTests
             select @log
             """));
 
+    /// <summary>The converted cursor is read-only, so positioned DML — UPDATE
+    /// or DELETE — is Msg 16929.</summary>
     [TestMethod]
-    public void WhereCurrentOf_NoUniqueKeyHeap_UpdatesPositionedRow()
-        => AreEqual("POS", new Simulation().ExecuteScalar(NoKeySeed + """
+    [DataRow("update h set name = 'POS' where current of c")]
+    [DataRow("delete h where current of c")]
+    public void WhereCurrentOf_NoUniqueKeyHeap_IsReadOnly(string positioned)
+        => AssertSqlError(NoKeySeed + $"""
             declare @id int;
             declare c cursor for select id from h order by id;
+            open c;
+            fetch next from c into @id;        -- id 1
+            fetch next from c into @id;        -- id 2 (positioned)
+            {positioned};
+            select 1
+            """, 16929, "The cursor is READ ONLY.");
+
+    [TestMethod]
+    public void WhereCurrentOf_AddressIdentityKeyset_UpdatesPositionedRow()
+        => AreEqual("POS", new Simulation().ExecuteScalar(ClusteredNoConstraintSeed + """
+            declare @id int;
+            declare c cursor keyset for select id from h order by id;
             open c;
             fetch next from c into @id;        -- id 1
             fetch next from c into @id;        -- id 2 (positioned)
@@ -552,10 +585,10 @@ public sealed class CursorTests
             """));
 
     [TestMethod]
-    public void WhereCurrentOf_NoUniqueKeyHeap_DeletesPositionedRow()
-        => AreEqual(2, ExecuteScalar<int>(NoKeySeed + """
+    public void WhereCurrentOf_AddressIdentityKeyset_DeletesPositionedRow()
+        => AreEqual(2, ExecuteScalar<int>(ClusteredNoConstraintSeed + """
             declare @id int;
-            declare c cursor for select id from h order by id;
+            declare c cursor keyset for select id from h order by id;
             open c;
             fetch next from c into @id;
             fetch next from c into @id;
@@ -570,7 +603,7 @@ public sealed class CursorTests
     /// </summary>
     [TestMethod]
     public void ForwardedUpdate_PreservesRowAddressForCursorRefetch()
-        => AreEqual("AAA", new Simulation().ExecuteScalar(NoKeySeed + """
+        => AreEqual("AAA", new Simulation().ExecuteScalar(ClusteredNoConstraintSeed + """
             declare @id int, @name varchar(20);
             declare c cursor keyset for select id, name from h order by id;
             open c;

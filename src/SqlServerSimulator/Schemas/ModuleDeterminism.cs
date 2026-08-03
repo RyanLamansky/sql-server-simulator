@@ -44,16 +44,15 @@ namespace SqlServerSimulator.Schemas;
 /// nondeterministic built-in and needs no column or FROM-position detail.
 /// </para>
 /// <para>
-/// <b>Divergence.</b> Real also classifies <c>CAST</c> / <c>CONVERT</c> between
-/// a date/time type and a character string as nondeterministic unless an
-/// explicit style from the deterministic set is supplied — see
-/// <c>docs/claude/catalog-views.md</c> for the probed style table. Deciding
-/// that needs the source and target types of the conversion, which a token
-/// scan doesn't carry, so a module whose only nondeterministic construct is
-/// such a conversion reports 1 where real reports 0.
+/// <b>Conversions.</b> Real also classifies a <c>CAST</c> / <c>CONVERT</c>
+/// between a date/time type and a character string as nondeterministic unless
+/// an explicit style from the deterministic set is supplied; that half of the
+/// rule lives in <c>ModuleDeterminism.Conversions.cs</c>, which carries both
+/// the probed style set and what the token scan can and can't decide about the
+/// converted expression's own type.
 /// </para>
 /// </remarks>
-internal static class ModuleDeterminism
+internal static partial class ModuleDeterminism
 {
     /// <summary>
     /// Built-in scalar functions real SQL Server classifies nondeterministic,
@@ -249,8 +248,11 @@ internal static class ModuleDeterminism
                 return false;
         }
 
-        if (!Scan(body, out var referencedModules))
+        if (!Scan(body, out var tokens, out var referencedModules)
+            || !ConversionsAreDeterministic(tokens, NameFamilies(database, module, tokens, referencedModules)))
+        {
             return false;
+        }
 
         foreach (var (qualifier, leaf) in referencedModules)
         {
@@ -284,10 +286,10 @@ internal static class ModuleDeterminism
     /// caller's lookup. The body always tokenizes — the CREATE-time parser
     /// walked the same text to find its end.
     /// </remarks>
-    private static bool Scan(string body, out List<(string Qualifier, string Leaf)> referencedModules)
+    private static bool Scan(string body, out List<Token> tokens, out List<(string Qualifier, string Leaf)> referencedModules)
     {
         referencedModules = [];
-        List<Token> tokens = [];
+        tokens = [];
         var index = 0;
         while (Tokenizer.NextToken(body, ref index, Collation.Baseline) is { } token)
         {

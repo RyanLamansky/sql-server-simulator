@@ -109,7 +109,7 @@ internal sealed class Format : Expression
     {
         TinyIntSqlType or SmallIntSqlType or Int32SqlType or BigIntSqlType => v.CoerceTo(SqlType.BigInt).AsInt64.ToString(format, culture),
         DecimalSqlType => v.AsDecimal.ToString(format, culture),
-        MoneySqlType or SmallMoneySqlType => v.AsDecimal.ToString(format, culture),
+        MoneySqlType or SmallMoneySqlType => v.AsMoney.ToString(format, culture),
         FloatSqlType => v.AsDouble.ToString(format, culture),
         RealSqlType => v.AsSingle.ToString(format, culture),
         DateSqlType => v.AsDate.ToString(format, culture),

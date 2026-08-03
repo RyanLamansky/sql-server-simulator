@@ -368,7 +368,7 @@ partial class Selection
             if (options.Elements || inner.Schema[i] is XmlSqlType)
             {
                 var element = new ForXmlElement(xmlName);
-                element.Content.Add(new ForXmlLeaf(i, atomic: false));
+                element.Content.Add(new ForXmlLeaf(i, ForXmlName.ForXmlPathLeaf.Node, null));
                 wrapper.Content.Add(element);
             }
             else
@@ -459,23 +459,26 @@ partial class Selection
 
     /// <summary>
     /// Places one PATH column into the row-element template by its alias:
-    /// <c>@a</c> → attribute, <c>a/b</c> → nested elements, <c>text()</c> /
-    /// <c>data()</c> / an unnamed column → text content, a plain name → a leaf
+    /// <c>@a</c> → attribute, <c>a/b</c> → nested elements, a node function or
+    /// an unnamed column → content of that node kind, a plain name → a leaf
     /// element holding the value. Adjacent same-name element steps merge (so
     /// <c>[x],[x]</c> concatenates and <c>[a/b],[a/c]</c> shares the <c>a</c>
-    /// parent). Enforces Msg 6852 (attribute after non-attribute), Msg 6864
-    /// (attribute under a suppressed row tag), and Msg 6851 (an xml-typed
-    /// column mapped to an attribute — an attribute can't hold nodes).
+    /// parent). Enforces Msg 6852 (attribute after non-attribute — a comment or
+    /// processing instruction counts as content for it), Msg 6864 (attribute
+    /// under a suppressed row tag), Msg 6851 (an xml-typed column mapped to an
+    /// attribute — an attribute can't hold nodes) and Msg 6853 (an xml-typed
+    /// column under a node function with no text form for it).
     /// </summary>
     private static void InsertForXmlPath(
         ForXmlElement root, string alias, int column, SqlType columnType, bool rowTagOmitted, ForXmlNamespaces? namespaces)
     {
         // PATH rejects a name RAW / AUTO would escape (Msg 6850), along with the
-        // path-shape and namespace-prefix rules on it.
+        // path-shape, node-function and namespace-prefix rules on it.
         ForXmlName.ValidatePathColumn(alias, namespaces);
 
         var segments = alias.Length == 0 ? [] : alias.Split('/');
-        var atomic = false;
+        var leafKind = ForXmlName.ForXmlPathLeaf.Node;
+        var processingInstructionTarget = (string?)null;
         var attributeName = (string?)null;
         var descendCount = segments.Length;
 
@@ -487,14 +490,11 @@ partial class Selection
                 attributeName = leaf[1..];
                 descendCount = segments.Length - 1;
             }
-            else if (Collation.Baseline.Equals(leaf, "text()"))
+            else
             {
-                descendCount = segments.Length - 1;
-            }
-            else if (Collation.Baseline.Equals(leaf, "data()"))
-            {
-                atomic = true;
-                descendCount = segments.Length - 1;
+                leafKind = ForXmlName.ClassifyPathLeaf(leaf, out processingInstructionTarget);
+                if (leafKind != ForXmlName.ForXmlPathLeaf.Element)
+                    descendCount = segments.Length - 1;
             }
         }
 
@@ -502,6 +502,14 @@ partial class Selection
             throw SimulatedSqlException.ForXmlAttributeWithoutRowTag();
         if (attributeName is not null && columnType is XmlSqlType)
             throw SimulatedSqlException.ForXmlAttributeInvalidType(alias);
+        // node() / * take an xml value as nodes; the others have only a text
+        // form to write, which an xml instance doesn't have.
+        if (columnType is XmlSqlType
+            && leafKind is ForXmlName.ForXmlPathLeaf.Text or ForXmlName.ForXmlPathLeaf.Data
+                or ForXmlName.ForXmlPathLeaf.Comment or ForXmlName.ForXmlPathLeaf.ProcessingInstruction)
+        {
+            throw SimulatedSqlException.ForXmlPathLastStepNotApplicable(alias);
+        }
 
         // Descend/merge the element steps that precede the leaf.
         var node = root;
@@ -516,7 +524,11 @@ partial class Selection
         }
         else
         {
-            node.Content.Add(new ForXmlLeaf(column, atomic));
+            // A plain name step descended into its own element above, so the
+            // value lands there as ordinary content.
+            node.Content.Add(leafKind == ForXmlName.ForXmlPathLeaf.Element
+                ? new ForXmlLeaf(column, ForXmlName.ForXmlPathLeaf.Node, null)
+                : new ForXmlLeaf(column, leafKind, processingInstructionTarget));
         }
     }
 
@@ -560,7 +572,7 @@ partial class Selection
             }
             else
             {
-                SerializeForXmlElement(sb, rowElement, rowBytes, innerSchema, options, topLevelDeclarations);
+                SerializeForXmlElement(sb, rowElement, rowBytes, innerSchema, options, topLevelDeclarations, isRowElement: true);
                 prevAtomic = false;
             }
         }
@@ -696,15 +708,21 @@ partial class Selection
     /// Serializes one element (open tag, attributes, content, close/self-close)
     /// onto <paramref name="sb"/>. A single-leaf element whose value is NULL is
     /// omitted under the default ABSENT semantics, or rendered as
-    /// <c>&lt;name xsi:nil="true"/&gt;</c> under XSINIL.
+    /// <c>&lt;name xsi:nil="true"/&gt;</c> under XSINIL — but the <b>row</b>
+    /// element always stands (a row whose only content is NULL is
+    /// <c>&lt;row/&gt;</c> on real, not a missing row), which is what
+    /// <paramref name="isRowElement"/> distinguishes.
     /// </summary>
     private static void SerializeForXmlElement(
-        StringBuilder sb, ForXmlElement element, byte[] rowBytes, SqlType[] innerSchema, ForXmlOptions options, string declarations)
+        StringBuilder sb, ForXmlElement element, byte[] rowBytes, SqlType[] innerSchema, ForXmlOptions options, string declarations, bool isRowElement = false)
     {
-        if (element.Content.Count == 1 && element.Content[0] is ForXmlLeaf onlyLeaf
+        if (!isRowElement && element.Content.Count == 1 && element.Content[0] is ForXmlLeaf onlyLeaf
             && RowDecoder.DecodeColumn(innerSchema, rowBytes, onlyLeaf.Column).IsNull)
         {
-            if (!options.Xsinil)
+            // A NULL under a comment / processing-instruction step writes
+            // nothing at all, XSINIL included — the nil marker is for an
+            // element that would have held a value (probe-confirmed).
+            if (!options.Xsinil || onlyLeaf.Kind is ForXmlName.ForXmlPathLeaf.Comment or ForXmlName.ForXmlPathLeaf.ProcessingInstruction)
                 return;
             _ = sb.Append('<').Append(element.Name).Append(declarations).Append(" xsi:nil=\"true\"/>");
             return;
@@ -742,16 +760,41 @@ partial class Selection
                     var value = RowDecoder.DecodeColumn(innerSchema, rowBytes, leaf.Column);
                     if (value.IsNull)
                         break;
-                    if (leaf.Atomic && prevAtomic)
-                        _ = sb.Append(' ');
-                    // An xml-typed value is already markup: it embeds as
-                    // nodes, not as escaped text. That covers a stored xml
-                    // column, a CAST(… AS xml), and a nested FOR XML … TYPE
-                    // subquery alike — the type is what decides, matching real.
-                    if (innerSchema[leaf.Column] is XmlSqlType)
-                        _ = sb.Append(ScalarForXmlText(value));
-                    else
-                        AppendForXmlText(sb, ForXmlColumnText(value, leaf.Column, rowBytes, innerSchema, options), isAttribute: false);
+                    switch (leaf.Kind)
+                    {
+                        // A comment / processing instruction writes its value
+                        // raw — real escapes nothing inside either constructor,
+                        // so a `?>` in a PI value closes it early and produces
+                        // XML that won't re-parse. The one thing it does check
+                        // is the pair of dashes a comment can't carry (Msg 9322).
+                        case ForXmlName.ForXmlPathLeaf.Comment:
+                            var comment = ForXmlColumnText(value, leaf.Column, rowBytes, innerSchema, options);
+                            if (comment.Contains("--", StringComparison.Ordinal))
+                                throw SimulatedSqlException.ForXmlCommentDashes(trailing: false);
+                            if (comment.EndsWith('-'))
+                                throw SimulatedSqlException.ForXmlCommentDashes(trailing: true);
+                            _ = sb.Append("<!--").Append(comment).Append("-->");
+                            break;
+                        case ForXmlName.ForXmlPathLeaf.ProcessingInstruction:
+                            _ = sb.Append("<?").Append(leaf.ProcessingInstructionTarget).Append(' ')
+                                .Append(ForXmlColumnText(value, leaf.Column, rowBytes, innerSchema, options)).Append("?>");
+                            break;
+                        default:
+                            if (leaf.Atomic && prevAtomic)
+                                _ = sb.Append(' ');
+                            // An xml-typed value is already markup: it embeds as
+                            // nodes, not as escaped text. That covers a stored xml
+                            // column, a CAST(… AS xml), and a nested FOR XML … TYPE
+                            // subquery alike — the type is what decides, matching real.
+                            if (innerSchema[leaf.Column] is XmlSqlType)
+                                _ = sb.Append(ScalarForXmlText(value));
+                            else
+                                AppendForXmlText(sb, ForXmlColumnText(value, leaf.Column, rowBytes, innerSchema, options), isAttribute: false);
+                            break;
+                    }
+                    // A comment or processing instruction breaks a run of
+                    // data() atoms, so the values either side of one aren't
+                    // space-joined (probe-confirmed).
                     prevAtomic = leaf.Atomic;
                     break;
             }
@@ -970,11 +1013,23 @@ internal sealed class ForXmlAttribute(string name, int column)
     public readonly int Column = column;
 }
 
-/// <summary>A text leaf in FOR XML content; <see cref="Atomic"/> marks a <c>data()</c> value (space-joined).</summary>
-internal sealed class ForXmlLeaf(int column, bool atomic)
+/// <summary>
+/// A value leaf in FOR XML content, bound to a result column.
+/// <see cref="Kind"/> is what the alias's last step selected — text content,
+/// a space-joined <c>data()</c> atom, a comment or a processing instruction —
+/// and never <see cref="ForXmlName.ForXmlPathLeaf.Element"/>, which descends
+/// into an element of its own and places a text leaf inside it.
+/// </summary>
+internal sealed class ForXmlLeaf(int column, ForXmlName.ForXmlPathLeaf kind, string? processingInstructionTarget)
 {
     public readonly int Column = column;
-    public readonly bool Atomic = atomic;
+    public readonly ForXmlName.ForXmlPathLeaf Kind = kind;
+
+    /// <summary>The PI target; non-null exactly for a processing-instruction leaf.</summary>
+    public readonly string? ProcessingInstructionTarget = processingInstructionTarget;
+
+    /// <summary>A <c>data()</c> atom, which a space separates from an adjacent one.</summary>
+    public bool Atomic => this.Kind == ForXmlName.ForXmlPathLeaf.Data;
 }
 
 /// <summary>

@@ -61,6 +61,20 @@ Pure integer-pair, pure money-pair, and float-involving arithmetic skip the deci
 
 `SqlType.Promote` (joint-envelope, `scale = max(s1, s2); precision = min(38, max(p1-s1, p2-s2) + scale)`) stays the right rule for non-arithmetic uses.
 
+### The value carries the declared scale
+
+Those formulas settle the result *type*; the .NET `decimal` behind the value carries the same scale, so `CAST(1 AS numeric(10, 2))` is `1.00m` and not `1m`.
+`SqlValue.FromDecimal` stamps it — widening adds a zero of the target scale (.NET's addition takes the larger operand's scale, leaving the number untouched) and a payload with more fractional digits than the declared scale rounds half-away-from-zero, the same rule the `F<scale>` rendering paths apply.
+Because it sits in the factory every decimal-typed value passes through, one stamp covers `CAST` / `CONVERT` / `TRY_*`, arithmetic, the aggregates, the math scalars, `GENERATE_SERIES`, a column read, and the TVP / BCP / TDS / CLR ingestion paths alike; `SqlValue.AsMoney` does the same for `money` / `smallmoney`'s fixed scale of 4, which the scaled-integer storage would otherwise divide away.
+
+It matters wherever a surface writes the raw `decimal` instead of formatting from the declared type — [the JSON builders](json.md), `FOR JSON`, `FORMAT`, and `SimulatedDbDataReader.GetDecimal` / `GetValue` (SqlClient's readers hand back the declared scale too).
+Scale is invisible to `decimal` equality, comparison and hashing, so `GROUP BY` keys, `DISTINCT`, index seek keys and `SqlValue.Equals` are untouched; `CHECKSUM` renders its decimal input with `G29` so it keys off the numeric value the way real's does (`CHECKSUM(CAST(1 AS numeric(10, 2)))` equals `CHECKSUM(CAST(1 AS numeric(10, 0)))`).
+The TDS encoder already rescales to the declared scale from the column metadata, so the wire bytes don't move.
+
+The one thing that can't be carried is a declared scale past .NET `decimal`'s 28 fractional digits, or trailing zeros with no room beside the integer part — `numeric(38, 30)`, or `numeric(38, 20)` holding a 15-digit integer part — where the value settles at the widest representation available rather than failing.
+Probed against SQL Server 2025 through `JSON_ARRAY`, which writes the raw value: `+ - %` carry `max(s1, s2)`, `*` carries `s1 + s2`, `/` carries `max(6, s1 + p2 + 1)`, `SUM` keeps the column's scale, `AVG` promotes to `numeric(38, max(s, 6))`, `ROUND` / `ABS` / `SIGN` / `POWER` keep the operand's, and `CEILING` / `FLOOR` drop to `numeric(p, 0)`.
+Oracle: `DecimalTests`, `MoneyTests`, `JsonBuilderTests`, and `TypeRoundTripTests` for the wire reader.
+
 ### Integer literals size by digit count against a decimal
 SQL Server types an integer **literal** as `numeric(digit_count, 0)` — not `int`'s fixed precision 10 — when it is unified with a decimal/numeric partner, so `10.0/3` is `numeric(8, 6)`, not `numeric(14, 12)` (the `3` contributes `(1, 0)`; `10.0/CAST(3 AS int)` keeps `(14, 12)` since a non-literal `int` stays `(10, 0)`).
 The rule is literal-specific and pervasive — it fires across `/ * + -`, `CASE`, `COALESCE` / `IIF`, and set ops — but only when the partner is decimal-category: `3 + 4` and `SELECT 1 UNION SELECT 2` stay `int`, and a money/float partner ignores the digit count (`$10.00/3` stays `money`).

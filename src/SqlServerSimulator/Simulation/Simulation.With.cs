@@ -119,7 +119,7 @@ partial class Simulation
             var binding = new CteBinding(cteName.Value, []);
             bindings[cteName.Value] = binding;
 
-            var body = ParseCteBody(context, binding);
+            var body = ParseCteBodyRecordingReads(context, binding);
 
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -153,6 +153,37 @@ partial class Simulation
             if (context.Token is not Operator { Character: ',' })
                 break;
             context.MoveNextRequired();
+        }
+    }
+
+    /// <summary>
+    /// Parses a CTE body under a securable sink of its own and attaches the
+    /// result to the body plan. A CTE body reaches
+    /// <see cref="Selection.ParseIntersectChain"/> directly rather than through
+    /// the query-expression entry that creates the sink, so without this its
+    /// reads are recorded nowhere; the referencing FROM source folds the
+    /// attached list into the statement's, where the ordinary execution-time
+    /// SELECT check picks it up.
+    /// </summary>
+    private static Selection ParseCteBodyRecordingReads(ParserContext context, CteBinding binding)
+    {
+        var outerSecurables = context.SecurableSink;
+        var outerReadColumns = context.ReadColumnSink;
+        context.SecurableSink = [];
+        context.ReadColumnSink = [];
+        try
+        {
+            var body = ParseCteBody(context, binding);
+            if (context.SecurableSink is { Count: > 0 } bodySecurables)
+                body.ReferencedSecurables = bodySecurables;
+            if (context.ReadColumnSink is { Count: > 0 } bodyReadColumns)
+                body.ReadColumnsByObject = bodyReadColumns;
+            return body;
+        }
+        finally
+        {
+            context.SecurableSink = outerSecurables;
+            context.ReadColumnSink = outerReadColumns;
         }
     }
 

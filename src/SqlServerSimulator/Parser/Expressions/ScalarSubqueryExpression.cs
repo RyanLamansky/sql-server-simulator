@@ -34,6 +34,7 @@ internal sealed class ScalarSubqueryExpression(Selection inner) : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
+        PermissionEnforcement.CheckSubqueryReads(runtime.Batch, this.Inner);
         var resultSet = this.Inner.Execute(runtime.Batch, runtime.ResolveColumn);
         using var enumerator = resultSet.RowBytes.GetEnumerator();
         if (!enumerator.MoveNext())

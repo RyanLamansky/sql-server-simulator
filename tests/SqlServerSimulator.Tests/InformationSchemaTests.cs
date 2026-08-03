@@ -660,6 +660,64 @@ public sealed class InformationSchemaTests
         IsFalse(reader.Read());
     }
 
+    // INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE: the FK row names the child
+    // column, the PK row its key column. Real puts the table columns first and
+    // the constraint columns last, the reverse of TABLE_CONSTRAINTS.
+    [TestMethod]
+    public void ConstraintColumnUsage_ForeignKeyAndPrimaryKeyColumns()
+    {
+        var sim = ReflectionFixture();
+        using var reader = sim.ExecuteReader("""
+            select CONSTRAINT_NAME, COLUMN_NAME, TABLE_SCHEMA
+            from INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE
+            where TABLE_NAME = 'rc' order by COLUMN_NAME
+            """);
+        IsTrue(reader.Read());
+        StartsWith("PK__", reader.GetString(0));
+        AreEqual("cid", reader.GetString(1));
+        AreEqual("dbo", reader.GetString(2));
+        IsTrue(reader.Read());
+        AreEqual("fk_rc", reader.GetString(0));
+        AreEqual("rid", reader.GetString(1));
+        IsFalse(reader.Read());
+    }
+
+    // A CHECK constraint contributes the columns its predicate reads — the
+    // declaring column for the inline form, and every column named in the
+    // definition for the table-level one.
+    [TestMethod]
+    public void ConstraintColumnUsage_CheckConstraintColumns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (
+                a int not null constraint ck_a check (a > 0),
+                b int not null,
+                c int not null,
+                constraint ck_bc check (b < c));
+            """);
+        AreEqual("a", sim.ExecuteScalar("""
+            select COLUMN_NAME from INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE
+            where CONSTRAINT_NAME = 'ck_a'
+            """));
+        AreEqual("b,c", sim.ExecuteScalar("""
+            select string_agg(COLUMN_NAME, ',') within group (order by COLUMN_NAME)
+            from INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE where CONSTRAINT_NAME = 'ck_bc'
+            """));
+    }
+
+    // INFORMATION_SCHEMA.CONSTRAINT_TABLE_USAGE: one row per constraint, no
+    // COLUMN_NAME column.
+    [TestMethod]
+    public void ConstraintTableUsage_OneRowPerConstraint()
+    {
+        var sim = ReflectionFixture();
+        AreEqual(2, sim.ExecuteScalar("""
+            select count(*) from INFORMATION_SCHEMA.CONSTRAINT_TABLE_USAGE where TABLE_NAME = 'rc'
+            """));
+        _ = sim.AssertSqlError("select COLUMN_NAME from INFORMATION_SCHEMA.CONSTRAINT_TABLE_USAGE", 207);
+    }
+
     // INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS: the FK's referenced PK name,
     // MATCH_OPTION 'SIMPLE', and the ISO spaced rule wording.
     [TestMethod]

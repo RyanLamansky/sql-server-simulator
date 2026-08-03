@@ -2,8 +2,9 @@
 
 Spatial values are parsed instances, stored in SQL Server's own UDT serialization.
 WKT parsing (with real's validation failures), canonical WKT rendering, per-value SRID, Z / M ordinates, EMPTY instances, the OGC binary encodings, the constructor family and the whole structural member surface all ship.
-So do all three measures for both spatial types — area, length and distance, planar and round-earth — and, for `geometry`, the whole topological surface: the eight predicates, `STRelate`, `STIsValid`, and the Msg 24144 gate an invalid instance puts on most instance methods.
-What doesn't yet is the round-earth topology and the constructive operations (`STUnion` / `STBuffer` / …), which parse cleanly and raise `NotSupportedException` at execute — see [Not modeled yet](#not-modeled-yet).
+So do all three measures for both spatial types — area, length and distance, planar and round-earth — and the whole topological surface of both: `geometry`'s eight predicates plus `STRelate`, `geography`'s six, `STIsValid` for each, and the Msg 24144 gate an invalid instance puts on most instance methods.
+So do the derived-point members each type carries alone — `geometry`'s `STCentroid` / `STPointOnSurface` / `STIsSimple` and `geography`'s `EnvelopeAngle` / `EnvelopeCenter`.
+What doesn't yet is the constructive operations (`STUnion` / `STBuffer` / …), which parse cleanly and raise `NotSupportedException` at execute — see [Not modeled yet](#not-modeled-yet).
 
 The sole AW spatial column (`Person.Address.SpatialLocation`, geography) loads as a first-class spatial-typed column rather than degrading to `varbinary(MAX)`.
 
@@ -113,16 +114,15 @@ Coordinates are in WKT axis order for both spatial types, so a geography point w
 One catalog (`Members`) holds every member with its **form** (property vs method), its **owning type** (both / geography-only / geometry-only) and its result type.
 Real enforces all three, and so does the simulator:
 
-- a method name written without parentheses, or a property written with them → **Msg 6592** (`Could not find property or field '…' for type '…'`)
-- a property the other spatial type owns (`Lat` on geometry, `STX` on geography) → **Msg 6592**
-- a method the other spatial type owns (`NumRings()` on geometry) → **Msg 6506**, which real emits *without* a trailing period, unlike 6592
+- a **method name written without parentheses** → **Msg 6592** (`Could not find property or field '…' for type '…'`), and so does a property the other spatial type owns (`Lat` on geometry, `STX` on geography)
+- a **property written with parentheses** (`.Lat()`) → **Msg 6506**, the CLR *method*-not-found error, which is also what a method the other spatial type owns (`NumRings()` on geometry) reports; real emits 6506 *without* a trailing period, unlike 6592
 
 **Properties** (no argument list): `STSrid`, `STX` / `STY` (geometry), `Lat` / `Long` (geography), `Z`, `M`, `HasZ`, `HasM`.
 
-**Methods that evaluate**: `ToString`, `STAsText`, `AsTextZM`, `STAsBinary`, `AsBinaryZM`, `STGeometryType`, `STDimension`, `STNumPoints`, `STPointN`, `STStartPoint`, `STEndPoint`, `STIsClosed`, `STIsEmpty`, `STIsRing`, `STNumGeometries`, `STGeometryN`, `STExteriorRing`, `STNumInteriorRing`, `STInteriorRingN`, `NumRings` / `RingN` (geography), `InstanceOf`, `MinDbCompatibilityLevel`, `ReorientObject`, plus the measures and — on `geometry` — the [topological predicates](#topological-predicates-the-de-9im-engine) and `STIsValid`.
+**Methods that evaluate**: `ToString`, `STAsText`, `AsTextZM`, `STAsBinary`, `AsBinaryZM`, `STGeometryType`, `STDimension`, `STNumPoints`, `STPointN`, `STStartPoint`, `STEndPoint`, `STIsClosed`, `STIsEmpty`, `STIsRing`, `STNumGeometries`, `STGeometryN`, `STExteriorRing`, `STNumInteriorRing`, `STInteriorRingN`, `NumRings` / `RingN` (geography), `InstanceOf`, `MinDbCompatibilityLevel`, `ReorientObject`, plus the measures, the [topological predicates](#topological-predicates-the-de-9im-engine) and `STIsValid`, `geometry`'s [`STCentroid` / `STPointOnSurface`](#representative-points-stcentroid-and-stpointonsurface) and [`STIsSimple`](#simplicity--stissimple), and `geography`'s [`EnvelopeAngle` / `EnvelopeCenter`](#the-bounding-cap-envelopecenter-and-envelopeangle).
 
 The catalog carries a fourth column beside form / scope / result: whether the member refuses a stored-but-invalid instance, which is the [Msg 24144 gate](#validity--stisvalid-and-msg-24144).
-`STIsValid` itself is a member of **both** spatial types, unlike `STIsSimple` / `STTouches` / `STCrosses` / `STRelate`, which are `geometry`-only.
+`STIsValid` itself is a member of **both** spatial types, unlike `STIsSimple` / `STTouches` / `STCrosses` / `STRelate` / `STCentroid` / `STPointOnSurface` / `STEnvelope`, which are `geometry`-only, and `EnvelopeAngle` / `EnvelopeCenter` / `NumRings` / `RingN` / `ReorientObject`, which are `geography`-only — naming one on the wrong receiver is **Msg 6506**, real's CLR method-not-found error, since the method genuinely isn't on that class.
 
 Semantics worth pinning, all probe-confirmed:
 
@@ -219,6 +219,40 @@ A shape of the wrong dimension measures **0**, not NULL: a Point has neither len
 
 **Divergence**: real accumulates a GeometryCollection's area with visible float noise — `GEOMETRYCOLLECTION(POLYGON((0 0,0 2,2 2,2 0,0 0)), LINESTRING(0 0,3 4))` measures `3.9999999999999076` where the simulator returns exactly `4`.
 Matching it would mean reproducing real's internal summation order; the same noise shows in `STCentroid` and `STPointOnSurface`.
+
+## Representative points: `STCentroid` and `STPointOnSurface`
+
+Both are `geometry`-only — naming either on a `geography` receiver is **Msg 6506** — and both refuse an invalid instance with Msg 24144.
+They live in `Storage/Spatial/SpatialCentroid.cs`.
+
+**`STCentroid()`** answers only for a `Polygon` or a `MultiPolygon`.
+A point, a line, a MultiPoint, a MultiLineString and — probe-confirmed — a `GEOMETRYCOLLECTION` whose every member is a polygon all read **NULL**, as does an empty instance of any kind.
+The answer is the moment sum over the rings, the exterior ring adding and every interior ring subtracting whichever way each was written, so a 10×10 square holding a 2×2 hole centres at `488/96`.
+
+**`STPointOnSurface()`** answers for every kind, and each has its own rule:
+
+| Kind | Real's answer |
+| --- | --- |
+| Point | the point |
+| LineString | the midpoint of its **first segment**, not its halfway point — `LINESTRING(0 0, 10 0, 11 0)` is `POINT (5 0)` |
+| MultiPoint / MultiLineString | its **first** member's answer |
+| Polygon | the centroid of the **ear at the exterior ring's topmost — then rightmost — vertex** |
+| MultiPolygon | the same rule inside the member reaching **furthest right, then furthest up** |
+| GeometryCollection | the polygon rule over every polygon member it holds, at any depth; with no polygon, its **last** member's answer |
+
+The two orderings genuinely differ — a polygon picks its vertex topmost-first while a MultiPolygon picks its member rightmost-first — and each is what the probes force.
+`POLYGON((0 0, 4 0, 4 1, 1 1, 1 4, 0 4, 0 0))` answers from its narrow upper arm, which only the topmost-first reading gives; a MultiPolygon pairing a tall left member with a small right one answers from the right one however the two are written, which only the rightmost-first reading gives.
+The pick is geometric rather than positional, so rotating a ring or writing it the other way round doesn't move the answer.
+
+### Divergences
+
+Real's own values carry float noise a few ulps wide — a 4×2 rectangle centres at `POINT (2.0000000000000071 1.0000000000000036)` where the exact arithmetic says `(2, 1)` — so the simulator's answers differ from real's in the last bits of every areal case, as they do for the [measures](#planar-measures).
+
+Beyond that, the **ear rule is real's own for a polygon with no interior ring, and not always for one with**.
+Where the ear at the topmost vertex isn't a triangle of the polygon's own interior — or where real's triangulation simply cut elsewhere — the simulator falls back to a scanline point: the rightmost interior span of the horizontal line just below the topmost vertex.
+That keeps the guarantee real's answer carries (the point lies in the instance, verified against the rings) without matching real's pick.
+Over a 32-shape sweep diffed cell by cell against SQL Server 2025 (2026-08-02) the four members here agree on **124 of 128** cells; all four disagreements are `STPointOnSurface`, three on polygons with holes and one on a concave hexagon where real answers from an interior triangle rather than an ear.
+Reproducing those would mean reproducing real's hole bridging and triangulation order, which one data point per arrangement doesn't fix.
 
 ## Round-earth measures: the great elliptic arc
 
@@ -318,6 +352,25 @@ The search runs on the **chord** rather than the arc length and only the winner 
 And the pairs worth searching are picked out by a **chord pre-pass**: a chord runs through the ellipsoid, so it never exceeds the surface distance and `c·(1 + c²/6b²)` never falls short of it; one cheap pass takes the shortest chord over every pair and the exact pass measures only those clearing that threshold.
 Without it a scan starting from an infinite bound measures the whole first row exactly — for two 2,000-vertex borders that is thousands of searches a chord rules out in a few flops each, and it was the difference between 13 s and 0.6 s.
 
+## The bounding cap: `EnvelopeCenter` and `EnvelopeAngle`
+
+`geography`-only — naming either on a `geometry` receiver is **Msg 6506** — and both refuse an invalid instance with Msg 24144.
+`Storage/Spatial/SpatialEnvelope.cs` computes them.
+
+Both run on the **unit sphere**, reading each coordinate's latitude as a spherical angle rather than a geodetic one.
+`EnvelopeCenter()` is the normalized **sum of the instance's points as unit vectors** and `EnvelopeAngle()` is the greatest angle from that centre to any of them, in degrees.
+A 1° square at the equator is what identifies the model: real centres it at latitude `0.50001903822621641` and reports `0.70711575561904183`, which is what the vector mean gives — the coordinate midpoint would sit at latitude 0.5 exactly, and a minimal enclosing cap would be narrower.
+
+Three rules ride on top, all probe-derived:
+
+- A **closed figure's repeated last point** takes no part in the sum, while an ordinary repeated vertex does: `LINESTRING(0 0, 0 0, 10 0)` centres a third of the way along at longitude `3.3295630553023212`, and the retraced triangle `LINESTRING(0 0, 10 0, 10 10, 0 0)` centres on its three distinct vertices.
+- An instance whose greatest angle **reaches 90°** reports the angle as **180** — real's way of saying no cap below a hemisphere holds it — while the centre still reports the bearing it found.
+- A summed direction that **cancels** leaves no bearing at all, and real answers `POINT (0 90)`, the north pole.
+  The fold is a tolerance rather than exact cancellation: two points 1.75e-8 apart in summed magnitude still answer with their own bearing, and 1.75e-9 apart answer the pole, so the simulator folds below 1e-8.
+
+An **empty** instance reads NULL from both.
+Over a 20-shape sweep against SQL Server 2025 (2026-08-02) all 40 cells agree, the worst absolute difference being 2e-12.
+
 ## Topological predicates: the DE-9IM engine
 
 `geometry`'s eight predicates — `STIntersects`, `STContains`, `STWithin`, `STTouches`, `STCrosses`, `STOverlaps`, `STDisjoint`, `STEquals` — plus `STRelate` evaluate over a hand-rolled planar engine in `Storage/Spatial/SpatialTopology.cs` + `SpatialRelate.cs`.
@@ -381,10 +434,50 @@ That is what real does, and it is neither exact arithmetic nor a fixed epsilon:
 
 Coordinates otherwise compare exactly.
 
+## Round-earth topology: `geography`'s predicates
+
+`geography` exposes **six** predicates — `STIntersects`, `STContains`, `STWithin`, `STDisjoint`, `STEquals`, `STOverlaps` — and they evaluate over a round-earth DE-9IM engine in `Storage/Spatial/SpatialGeodeticRelate.cs` + `SpatialGeodeticTopology.cs`.
+`STTouches` / `STCrosses` / `STRelate` / `STIsSimple` are not members of `SqlGeography` at all, and naming one is **Msg 6506** (see [Members](#members--parserexpressionsspatialmethodcallcs)).
+
+The construction is the [planar engine](#topological-predicates-the-de-9im-engine)'s: every edge is noded against every other, and the arrangement's nodes, edge pieces and adjacent faces are each classified against both operands, a node contributing dimension 0 to its cell, a piece 1 and a face 2, with the exterior/exterior cell 2 unconditionally.
+The predicates are the same masks over the same matrix, so only their four round-earth primitives are new.
+The matrix itself stays internal, since real exposes no `STRelate` here to read it through.
+
+### The four primitives
+
+- **Two edges meet where their planes do.**
+  A great elliptic arc is cut from a plane through the ellipsoid's centre, so two arcs' planes intersect in a line whose two surface points are the only places the arcs can touch.
+  That one fact carries the crossing test, the intersection collection and the properly-cross test.
+  Arcs sharing a plane have no such line and are compared by **span** instead: the endpoints of either that lie on the other are the shared boundary, and two distinct ones mean a one-dimensional overlap where one means a touch.
+- **Sidedness is a step, not a determinant.** The point a short way off an edge is computed on the surface — `up × tangent` is the left — and then classified by the same containment test everything else uses, which keeps one definition of "inside" for the whole engine.
+- **Containment is a crossing count.** A ring set alternates interior and exterior across every edge, so the parity of boundary crossings along the arc from a point known to be inside settles which face a query point is in.
+  The known-inside point is a step off the **left** of a ring, which is where a geography ring puts its interior — that is what makes a clockwise square the whole globe less itself rather than an error, and what a lone azimuth-sum winding cannot express: a winding number seen from a point is the same for the region and for its antipodal image, so it names the wrong face for exactly the shapes whose interior is the unbounded one.
+  A count is refused as unreliable when the path grazes a ring vertex or runs along an edge, and the question is re-asked from another interior point; three are kept per polygon.
+- **Nodes snap.** Two arcs meeting at a vertex both operands wrote produce a point computed from two plane normals, landing a nanometre or so off the vertex itself, where the planar engine's arithmetic is exact. Anything within **0.1 mm** of an existing node folds onto it, through a cell-hashed lookup.
+
+Each polygon carries its **own** interior reference, so overlapping members of a `GEOMETRYCOLLECTION` each answer for themselves rather than sharing one parity.
+
+### Cost
+
+An extent shortcut skips the arrangement when two operands' bounding spheres miss — but only when both operands **stay inside** their own extents, which a clockwise ring does not.
+Every pairwise scan runs through an x-sweep with an active list, and the sidedness of a piece lying along one of an operand's own ring edges is read from that ring's direction rather than from a global containment test, which is what keeps a self-comparison of a many-vertex border from being quadratic.
+A 2,000-vertex polygon answers `STContains` in well under a second and `STIsValid` in tens of milliseconds.
+
+### Agreement with real
+
+Two shape squares were driven through SQL Server 2025 and diffed cell by cell (2026-08-02): a 50-shape square of **2,500** ordered pairs mixing points, lines, polygons, holes, complements, antimeridian and polar shapes, and a 36-shape square of **1,296** pairs in *generic position* — coordinates offset so nothing lies exactly on anything else's boundary.
+
+| Square | Pairs agreeing | Predicate bits agreeing |
+| --- | --- | --- |
+| 50 shapes, many touching exactly | 2,476 / 2,500 = **99.04%** | 14,966 / 15,000 = **99.77%** |
+| 36 shapes, generic position | 1,294 / 1,296 = **99.85%** | 7,774 / 7,776 = **99.97%** |
+
+Every remaining disagreement falls in one of the two classes under [Divergences](#divergences), and both are real contradicting itself.
+
 ## Validity — `STIsValid` and Msg 24144
 
 Real stores a malformed-but-parseable instance happily and then refuses to *operate* on it.
-`Storage/Spatial/SpatialValidator.cs` implements the rules, probe-derived and diffed 64-for-64 against the reference:
+`Storage/Spatial/SpatialValidator.cs` implements the planar rules, probe-derived and diffed 64-for-64 against the reference:
 
 - A **Point** or **MultiPoint** is always valid, repeated coordinates included.
 - A **LineString** is invalid when its last two vertices coincide, or when any two of its segments share a one-dimensional stretch.
@@ -396,24 +489,71 @@ Real stores a malformed-but-parseable instance happily and then refuses to *oper
 - A **MultiPolygon**'s members may touch at points but may not overlap, share a one-dimensional stretch, or contain one another.
 - A **GeometryCollection** is valid exactly when every member is; members may overlap each other freely.
 
-**Msg 24144** (`This operation cannot be completed because the instance is not valid…`, wrapped in the usual [Msg 6522 envelope](#the-msg-6522-wrapper)) is what most of the instance surface reports against an invalid instance — and the split is sharp.
-Real *tolerates* invalidity in `STAsText` / `ToString` / `AsTextZM` / `STAsBinary` / `AsBinaryZM`, the ordinate reads (`STX` / `STY` / `Z` / `M` / `HasZ` / `HasM`), `STSrid`, `STIsEmpty`, `STIsRing`, `STLength`, `MinDbCompatibilityLevel`, `MakeValid` and `STIsValid` itself.
-Everything else — `STArea`, `STDimension`, `STGeometryType`, `STNumPoints`, `STPointN`, `STStartPoint` / `STEndPoint`, `STIsClosed`, `STNumGeometries`, `STGeometryN`, `STExteriorRing`, `STNumInteriorRing` / `STInteriorRingN`, `InstanceOf`, `STDistance`, every predicate, `STRelate`, and every constructive operation — raises.
-The gate is a `ValidityGate` flag on the member catalog in `Parser/Expressions/SpatialMethodCall.cs`, and validity is computed once per instance and cached, because a stored value is decoded once and read many times.
+### Round-earth validity
+
+`geography` asks the same question over great elliptic edges, in `Storage/Spatial/SpatialGeodeticValidator.cs`.
+The rule list is the planar one's with three differences, all probe-derived:
+
+- **Ring orientation is load-bearing.** Every ring of a polygon must agree on which region the polygon names — read off the first ring's left side, with each other ring then having to find that region on its own left and something else on its right.
+  A hole wound *with* its shell is invalid where planar validity doesn't look at orientation at all; a lone ring wound "backwards" is valid and names the complementary region.
+- **Retracing means something different**, because the edges are arcs.
+  `LINESTRING(0 0, 2 2, 1 1)` is invalid as `geometry` — the second segment runs back along the first — and valid as `geography`, since the arc from (0,0) to (2,2) doesn't pass through (1,1).
+  A figure that stops on the vertex it already sits on is valid here too (`LINESTRING(0 0, 2 0, 2 0)`, which the planar rule rejects), because the repeat collapses before the edge checks rather than after; what a line may not do is have two of its edges share a one-dimensional stretch.
+- **A ring that revisits one of its own vertices splits into lobes**, and the ordinary ring rules then decide.
+  A lobe nested inside the main one and wound the other way is a hole that happens to meet its shell, which is valid; a lobe beside it, or a nested one wound the same way, is not.
+  This is what real accepts on genuine coastline data — one WideWorldImporters border traces back to its own start vertex — and the four arrangements were probed one by one.
+
+An edge whose endpoints are **antipodal** never reaches validity at all: no plane contains just those two points, so no arc joins them, and real refuses the instance while *constructing* it with **Msg 24206** (`The specified input cannot be accepted because it contains an edge with antipodal points…`), reported under its own `Microsoft.SqlServer.Types.GLArgumentException` rather than a `System.` type.
+The refusal is an **angular tolerance of 1e-8 radians**, not exact equality: from `POINT(0 0)`, an edge reaching latitude 5.7e-7° past the antimeridian raises where 5.8e-7° is accepted.
+The check runs on the WKT and well-known-binary construction paths; a pair of antipodal points that no edge joins (`MULTIPOINT((0 0), (180 0))`) is fine.
+
+**Msg 24144** (`This operation cannot be completed because the instance is not valid…`, wrapped in the usual [Msg 6522 envelope](#the-msg-6522-wrapper)) is what most of the instance surface reports against an invalid instance — and the split is sharp, and the same for both spatial types.
+Real *tolerates* invalidity in `STAsText` / `ToString` / `AsTextZM` / `STAsBinary` / `AsBinaryZM`, the ordinate reads (`STX` / `STY` / `Lat` / `Long` / `Z` / `M` / `HasZ` / `HasM`), `STSrid`, `STIsEmpty`, `STIsRing`, `STLength`, `MinDbCompatibilityLevel`, `MakeValid` and `STIsValid` itself.
+Everything else — `STArea`, `STDimension`, `STGeometryType`, `STNumPoints`, `STPointN`, `STStartPoint` / `STEndPoint`, `STIsClosed`, `STNumGeometries`, `STGeometryN`, `STExteriorRing`, `STNumInteriorRing` / `STInteriorRingN`, `NumRings` / `RingN`, `ReorientObject`, `EnvelopeAngle` / `EnvelopeCenter`, `STCentroid`, `STPointOnSurface`, `STIsSimple`, `InstanceOf`, `STDistance`, every predicate, `STRelate`, and every constructive operation — raises.
+The gate is a `ValidityGate` flag on the member catalog in `Parser/Expressions/SpatialMethodCall.cs`, asked in the terms of the receiver's own spatial type, and validity is computed once per instance and cached, because a stored value is decoded once and read many times.
 An invalid **argument** raises the same way an invalid receiver does.
+
+Round-earth validity was diffed against the reference over **67** shapes spanning both spatial types' rule differences, and over all **190** `geography` borders of WideWorldImporters — exact on every one.
+
+## Simplicity — `STIsSimple`
+
+Simplicity is what validity stops short of: a self-crossing `LINESTRING` is a valid instance and not a simple one.
+`geometry`-only — `SqlGeography` has no such member, so naming it there is Msg 6506 — and gated on validity like everything else structural, so `Storage/Spatial/SpatialSimplicity.cs` never sees the one-dimensional overlaps validity already rejects.
+
+- A **MultiPoint** is simple when no two of its points coincide.
+- A **curve** — a line figure or a polygon ring — is simple when consecutive segments meet only at their shared vertex and no other pair meets at all, with a **closed** figure's first and last segments counting as consecutive.
+  So a ring written as a `LINESTRING` is simple, while one that runs back over its own start and carries on isn't, and a line whose end lands in the interior of an earlier segment isn't either.
+- Two **different figures** of one instance may meet only at a point that is a **boundary point of both** — an endpoint of an open figure.
+  A ring is closed and so has none, which is why two members of a `MULTIPOLYGON` touching at a single point are valid and *not* simple, and why a hole meeting its shell at one point is too.
+  Two lines meeting end to end are simple; one running into another's interior isn't.
+- A **GeometryCollection** is simple exactly when every member is.
+  Real never compares one member against another, so two crossing lines are simple as a collection and not as a `MULTILINESTRING`.
+- An **empty** instance is simple, and a NULL receiver reads NULL.
+
+Diffed against SQL Server 2025 over the same 32-shape sweep as the [representative points](#representative-points-stcentroid-and-stpointonsurface) — exact on every one.
+
+## The property form of a spatial column
+
+`SELECT Location.Lat FROM t` reads the property off the column, and so does the three-part `t.Location.Lat` / `q.Location.Lat` spelling through a source's own qualifier.
+Nothing in the syntax separates that from an `alias.column` reference, so the parser asks the **query scope** (`ParserContext.ScopeSources`, the FROM sources of the level being parsed) whether the qualifier is a spatial column, and the answer decides:
+
+- the qualifier is a spatial column and the whole dotted name isn't itself a column → the property reading, whatever the leaf is, so an unrecognized member is real's **Msg 6592** rather than a column failure;
+- **both** bind — a source aliased like the spatial column, carrying a column named like the member — → **Msg 326** (`Multi-part identifier 'Location.Lat' is ambiguous. Both columns 'Location' and 'Location.Lat' exist.`), and where the leaf names no member at all the column reading wins silently;
+- neither binds → an ordinary column reference, which reports the ordinary resolution error.
+
+A property written with parentheses (`Location.Lat()`) routes to the method form so it reports Msg 6506, matching real, and the four-part `dbo.t.Location.Lat` stays a column reference because real refuses it (Msg 4104).
+The method form (`Location.STAsText()`) has always worked everywhere, scope or no scope, since its argument list disambiguates it.
+
+**Not modeled yet**: the property form only reaches sites where a query scope is installed — a SELECT's projection, WHERE and ORDER BY.
+A scope-less site (an UPDATE's SET list, a CHECK constraint, a computed column) still reads the two-part name as a column.
+A dotted name that binds neither way reports **Msg 207** where real reports **Msg 4104** for any unbindable multi-part name, which is a general column-resolution difference rather than a spatial one.
 
 ## Not modeled yet
 
-- **`geography`'s topological predicates** — `STIntersects` / `STContains` / `STWithin` / `STDisjoint` / `STEquals` / `STOverlaps`, and `STIsValid`; those seven are the whole surface real exposes there, since `STTouches` / `STCrosses` / `STRelate` / `STIsSimple` are `geometry`-only members that report Msg 6506 on a `geography` receiver.
-  The planar engine doesn't transfer: a round-earth edge is a great elliptic arc, so segment intersection, point-in-ring and ring orientation all become spherical problems, and real's own answers differ — `LINESTRING(0 0, 2 2)` and `LINESTRING(0 0, 1 1, 2 2)` are equal as `geometry` and **not** equal as `geography`, because the arc from (0,0) to (2,2) doesn't pass through (1,1).
-  A planar approximation would answer the second case wrongly, so the seven raise `NotSupportedException` naming `geography` instead.
-  The Msg 24144 gate follows the same line: it fires for `geometry`, where the validator exists, and not for `geography`.
-- **`STCentroid` / `STPointOnSurface` / `EnvelopeAngle` / `EnvelopeCenter`.**
-- **`STIsSimple`** — validity stops short of the self-intersection classification simplicity asks for (a self-crossing LineString is valid and not simple).
+- **`STRelate`'s matrix on `geography`** — the round-earth engine computes the nine cells but nothing reads them out, since real exposes no `STRelate` there to compare a matrix against.
+  The six predicates are masks over it; a `geography`-shaped `STRelate` would need a probe oracle that doesn't exist.
 - **Constructive operations** — `STUnion` / `STIntersection` / `STDifference` / `STSymDifference` / `STBuffer` / `STConvexHull` / `STBoundary` / `STEnvelope` / `MakeValid` / `Reduce` / `Filter` / `ShortestLineTo` / `BufferWithTolerance` / `BufferWithCurves` / `CurveToLineWithTolerance`.
-- **A spatial column's property form** — `Location.Lat` reads as a two-part *column* name, because nothing in the syntax distinguishes the two and `t.Lat` is far more likely to be a column.
-  Dispatch is limited to receivers that can't be a table qualifier (a constructor call, a variable, a parenthesized expression); telling the two apart for a column needs binder support.
-  The method form (`Location.STAsText()`) works everywhere, since the argument list disambiguates.
+- **A spatial column's property form outside a query scope** — see [The property form of a spatial column](#the-property-form-of-a-spatial-column) for what ships and what an UPDATE's SET list, a CHECK constraint and a computed column still read as a two-part column name.
 - **Curved shapes and FULLGLOBE** — `CIRCULARSTRING` / `COMPOUNDCURVE` / `CURVEPOLYGON` / `FULLGLOBE` are recognized labels (real accepts them, so reporting them as unknown would be the wrong error) that raise `NotSupportedException` naming the kind.
 - **GML** — `AsGml` / `STAsGML`, and the `GeomFromGml` constructors.
 - **SRID-aware operations** — the SRID is tracked per value, reported, and compared between two operands (a mismatch reads NULL, as on real), but nothing transforms between reference systems and every `geography` SRID measures on WGS 84.
@@ -424,9 +564,6 @@ An invalid **argument** raises the same way an invalid receiver does.
 
 ## Divergences
 
-- **A `geography` measure answers where real reports Msg 24144.**
-  Real validates a round-earth instance before measuring it — `POLYGON((0 0,1 0,1 1,0 1,0 0),(0.2 0.2, 0.8 0.2, 0.8 0.8, 0.2 0.8, 0.2 0.2))`, whose hole is wound the same way as its shell, raises 24144 from `STArea()` — while the simulator's validator is the planar one and the [24144 gate](#validity--stisvalid-and-msg-24144) fires for `geometry` only, so the same instance measures the region its ring orientations describe.
-  Round-earth validity arrives with the round-earth topology.
 - **A `GEOMETRYCOLLECTION`'s round-earth area carries real's float noise.**
   Real sums a collection's members with visible drift — a square that measures `12308776255.868843` on its own measures `12308776246.986383` as a collection member, 8.9 m² lower — the same noise the [planar measures](#planar-measures) show.
   The simulator's answer is the same either way.
@@ -438,6 +575,19 @@ An invalid **argument** raises the same way an invalid receiver does.
      The [orientation filter](#arithmetic-and-tolerance) covers the near-collinearity half of real's tolerance and is matched; this end-of-segment half is not.
   3. **Endpoint touches on a diagonal segment.** Real's segment intersection misses some and invents others — `LINESTRING(0 0, 2 2)` and `LINESTRING(1 -1, 1 1)` read as *disjoint* although they share (1,1), while `LINESTRING(0 0, 4 4)` and `LINESTRING(2 0, 2 2)` correctly touch; conversely `LINESTRING(1 1, 3 3)` and `LINESTRING(2 0, 2 2)` read as *crossing* where they touch.
      Real is inconsistent with itself across these, so there is no rule to reproduce.
+- **Two residual classes in the round-earth predicate matrix**, over the squares measured under [Agreement with real](#agreement-with-real).
+  Both are real disagreeing with itself, and both have a planar counterpart above:
+  1. **A point or stretch lying exactly on a polygon boundary.** Real's round-earth boundary classification is not exact, and which way it falls depends on whether the arithmetic happens to be exact for those coordinates.
+     `POINT(1 1)` on the meridian edge of `POLYGON((1 0, 3 0, 3 2, 1 2, 1 0))` reads as *within* it, while `POINT(0 2)` on the meridian edge of `POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))` correctly reads as boundary — the second sits at longitude 0, where the Cartesian arithmetic is exact.
+     `POINT(2 2)` is a written **vertex** of `POLYGON((0 2, 2 2, 2 4, 0 4, 0 2))` and reads as *disjoint* from it although `STDistance` on the same pair is 0.
+     The same tolerance is what makes two polygons sharing only a boundary stretch report `STOverlaps` true.
+     The simulator classifies exactly; every disagreement in the 50-shape square is this class.
+  2. **A `GEOMETRYCOLLECTION` containing a `POLYGON`**, the same class as the planar engine's first.
+     A collection whose point member lies in a complement polygon's interior reports `STIntersects` true and `STOverlaps` false, which no consistent matrix supports; the simulator answers by the masks.
+     This is the whole residue of the generic-position square.
+- **A self-touching ring is valid on `geography` and not on `geometry`.**
+  Real accepts one on **both** types when the second lobe nests inside the first with the opposite winding — the arrangement one WideWorldImporters border carries — and the round-earth validator splits the ring into lobes to match it, while the planar validator still rejects any ring that meets itself.
+  The two disagree on such a ring until the lobe split reaches `SpatialValidator` as well.
 - **The serialized `isValid` property bit is always set.**
   Real clears it for a stored-but-invalid instance — a bowtie polygon serializes with properties `0x00` where a square gets `0x04` — and the encoder doesn't, so an invalid instance's bytes differ from real's in that one bit.
   `STIsValid()` and the Msg 24144 gate read the shape tree rather than the bit, so behavior on such an instance is right; only the byte form isn't.

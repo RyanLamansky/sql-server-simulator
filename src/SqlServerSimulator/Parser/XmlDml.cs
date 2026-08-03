@@ -68,14 +68,11 @@ internal enum XmlDmlItemKind
     /// <summary>A computed <c>attribute name {…}</c> constructor.</summary>
     Attribute,
 
+    /// <summary>A computed <c>element name {…}</c> constructor.</summary>
+    Element,
+
     /// <summary>A computed <c>text {…}</c> constructor.</summary>
     Text,
-
-    /// <summary>A computed <c>comment {…}</c> constructor.</summary>
-    Comment,
-
-    /// <summary>A computed <c>processing-instruction name {…}</c> constructor.</summary>
-    ProcessingInstruction,
 
     /// <summary>A bare expression — legal only when it evaluates to <c>xml</c>.</summary>
     Value,
@@ -186,26 +183,37 @@ internal sealed class XmlDmlItem
     /// </summary>
     public readonly bool[] EnclosedInAttribute;
 
-    private XmlDmlItem(XmlDmlItemKind kind, string name, string[] literals, XmlDmlTerm[][] enclosed, bool[] enclosedInAttribute)
+    /// <summary>
+    /// A computed <c>element</c> constructor's own content items, which nest to
+    /// any depth (<c>element n {element m {1}}</c>); empty for every other kind.
+    /// </summary>
+    public readonly XmlDmlItem[] Children;
+
+    private XmlDmlItem(XmlDmlItemKind kind, string name, string[] literals, XmlDmlTerm[][] enclosed, bool[] enclosedInAttribute, XmlDmlItem[] children)
     {
         this.Kind = kind;
         this.Name = name;
         this.Literals = literals;
         this.Enclosed = enclosed;
         this.EnclosedInAttribute = enclosedInAttribute;
+        this.Children = children;
     }
 
     /// <summary>A direct constructor's markup template.</summary>
     public static XmlDmlItem Markup(string[] literals, XmlDmlTerm[][] enclosed, bool[] enclosedInAttribute) =>
-        new(XmlDmlItemKind.Markup, string.Empty, literals, enclosed, enclosedInAttribute);
+        new(XmlDmlItemKind.Markup, string.Empty, literals, enclosed, enclosedInAttribute, []);
 
-    /// <summary>A computed <c>attribute</c> / <c>text</c> / <c>comment</c> / <c>processing-instruction</c> constructor.</summary>
+    /// <summary>A computed <c>attribute</c> / <c>text</c> constructor.</summary>
     public static XmlDmlItem Computed(XmlDmlItemKind kind, string name, XmlDmlTerm[] value) =>
-        new(kind, name, [], [value], []);
+        new(kind, name, [], [value], [], []);
+
+    /// <summary>A computed <c>element name {…}</c> constructor over its content items.</summary>
+    public static XmlDmlItem Element(string name, XmlDmlItem[] children) =>
+        new(XmlDmlItemKind.Element, name, [], [], [], children);
 
     /// <summary>A bare expression item, legal only when it evaluates to <c>xml</c>.</summary>
     public static XmlDmlItem Value(XmlDmlTerm[] value) =>
-        new(XmlDmlItemKind.Value, string.Empty, [], [value], []);
+        new(XmlDmlItemKind.Value, string.Empty, [], [value], [], []);
 }
 
 /// <summary>
@@ -354,8 +362,8 @@ internal sealed class XmlDml
         if (xmlText.AsSpan().Trim().IsEmpty)
             return xmlText;
 
-        var document = XDocument.Parse(xmlText);
-        var navigator = (document.Root ?? (XNode)document).CreateNavigator();
+        var container = XmlInstance.CreateMutableContainer(xmlText);
+        var navigator = XmlInstance.CreateMutableNavigator(container);
         var selected = new List<XObject>();
         foreach (var item in XmlQueryEngine.Select(navigator, this.Target.Compiled))
         {
@@ -376,7 +384,7 @@ internal sealed class XmlDml
                 this.InsertContent(selected[0], runtime);
                 break;
         }
-        return Serialize(document);
+        return Serialize(container);
     }
 
     /// <summary>
@@ -384,12 +392,13 @@ internal sealed class XmlDml
     /// declaration, empty elements self-closing with no space before the
     /// slash, CDATA sections folded into escaped text, and the same
     /// position-dependent escaping <c>FOR XML</c> applies (probe-confirmed
-    /// against SQL Server 2025).
+    /// against SQL Server 2025). The container's children are the instance's
+    /// top-level nodes, so a fragment writes each of them in turn.
     /// </summary>
-    internal static string Serialize(XDocument document)
+    internal static string Serialize(XContainer container)
     {
         var sb = new StringBuilder();
-        foreach (var node in document.Nodes())
+        foreach (var node in container.Nodes())
             AppendNode(sb, node, XNamespace.None);
         return sb.ToString();
     }
@@ -516,12 +525,7 @@ internal sealed class XmlDml
         {
             // Only `into` reaches here with attributes — Msg 2258 rejected the
             // positional forms at parse — so the element is the target itself.
-            foreach (var attribute in attributes)
-            {
-                if (owner.Attribute(attribute.Name) is not null)
-                    throw SimulatedSqlException.XmlDuplicateAttribute(attribute.Name.LocalName);
-                owner.Add(attribute);
-            }
+            InsertAttributes(owner, attributes);
         }
         if (nodes.Count == 0)
             return;
@@ -530,8 +534,6 @@ internal sealed class XmlDml
         {
             case XmlDmlPosition.Before:
             case XmlDmlPosition.After:
-                if (targetNode.Parent is null && nodes.Exists(n => n is XElement))
-                    throw new NotSupportedException("An XML-DML insert that would place an element beside the instance's top-level element isn't modeled — the simulator's xml values hold a single top-level element.");
                 if (this.Position == XmlDmlPosition.Before)
                     targetNode.AddBeforeSelf(nodes);
                 else
@@ -543,6 +545,39 @@ internal sealed class XmlDml
             default:
                 ((XContainer)targetNode).Add(nodes);
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Threads inserted attributes into the element's list the way real's
+    /// internal node order does. An instance's own attributes sit at the odd
+    /// ordinals 1, 3, 5, … and the <em>i</em>-th attribute one statement adds
+    /// takes ordinal 2<em>i</em>, so a single insert lands right after the first
+    /// attribute and a sequence of them interleaves one per gap before
+    /// spilling to the end — <c>&lt;a m n o p/&gt;</c> plus <c>(z, y)</c> comes
+    /// back <c>m z n y o p</c> (probe-confirmed one shape at a time, namespace
+    /// declarations counting as attributes like any other).
+    /// </summary>
+    private static void InsertAttributes(XElement owner, List<XAttribute> added)
+    {
+        var existing = new List<XAttribute>();
+        foreach (var attribute in owner.Attributes())
+            existing.Add(attribute);
+        foreach (var attribute in added)
+        {
+            if (owner.Attribute(attribute.Name) is not null)
+                throw SimulatedSqlException.XmlDuplicateAttribute(attribute.Name.LocalName);
+        }
+
+        owner.RemoveAttributes();
+        if (existing.Count > 0)
+            owner.Add(existing[0]);
+        for (var i = 0; i < Math.Max(added.Count, existing.Count - 1); i++)
+        {
+            if (i < added.Count)
+                owner.Add(added[i]);
+            if (i + 1 < existing.Count)
+                owner.Add(existing[i + 1]);
         }
     }
 
@@ -559,11 +594,8 @@ internal sealed class XmlDml
             case XmlDmlItemKind.Attribute:
                 attributes.Add(new XAttribute(item.Name, Atomize(item.Enclosed[0], runtime)));
                 break;
-            case XmlDmlItemKind.Comment:
-                nodes.Add(new XComment(Atomize(item.Enclosed[0], runtime)));
-                break;
-            case XmlDmlItemKind.ProcessingInstruction:
-                nodes.Add(new XProcessingInstruction(item.Name, Atomize(item.Enclosed[0], runtime)));
+            case XmlDmlItemKind.Element:
+                nodes.Add(this.BuildElement(item, runtime));
                 break;
             case XmlDmlItemKind.Text:
                 nodes.Add(new XText(Atomize(item.Enclosed[0], runtime)));
@@ -587,6 +619,56 @@ internal sealed class XmlDml
                 }
                 this.AppendFragment(nodes, markup.ToString(), this.PrologScope());
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Builds a computed <c>element name {…}</c> constructor's node. The name
+    /// resolves through the prolog exactly as a path step's does, and the
+    /// content items nest — attributes among them land on the element, atomic
+    /// terms become its text.
+    /// </summary>
+    private XElement BuildElement(XmlDmlItem item, RuntimeContext runtime)
+    {
+        var colon = item.Name.IndexOf(':', StringComparison.Ordinal);
+        var prefix = colon < 0 ? string.Empty : item.Name[..colon];
+        var local = colon < 0 ? item.Name : item.Name[(colon + 1)..];
+        var uri = colon < 0 ? this.defaultElementNamespace : this.prefixes[prefix];
+        var element = new XElement(uri is null ? XName.Get(local) : XName.Get(local, uri));
+        if (prefix.Length > 0)
+            element.Add(new XAttribute(XNamespace.Xmlns + prefix, uri!));
+
+        var attributes = new List<XAttribute>();
+        var nodes = new List<XNode>();
+        var atomics = new List<string>();
+        foreach (var child in item.Children)
+        {
+            // Inside a constructor the content sequence's atomic items are the
+            // element's text — the Msg 2207 rule that guards a top-level insert
+            // doesn't apply — and adjacent ones join with a single space, real's
+            // own atomization (`element n {"a","b"}` is `<n>a b</n>`).
+            if (child.Kind == XmlDmlItemKind.Value && child.Enclosed[0][0].StaticType is not XmlSqlType)
+            {
+                atomics.Add(Atomize(child.Enclosed[0], runtime));
+                continue;
+            }
+            Flush();
+            this.Materialize(child, runtime, attributes, nodes);
+        }
+        Flush();
+
+        foreach (var attribute in attributes)
+            element.Add(attribute);
+        foreach (var node in nodes)
+            element.Add(node);
+        return element;
+
+        void Flush()
+        {
+            if (atomics.Count == 0)
+                return;
+            nodes.Add(new XText(string.Join(' ', atomics)));
+            atomics.Clear();
         }
     }
 
