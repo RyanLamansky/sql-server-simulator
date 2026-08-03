@@ -25,11 +25,40 @@ namespace SqlServerSimulator.Parser;
 internal sealed partial class Selection
 {
     /// <summary>
+    /// What one recognized table-hint name contributes to the
+    /// <see cref="TableHintInfo"/> the clause builds. Every name real accepts
+    /// carries one of these; the ones the simulator has no execution effect
+    /// for carry <see cref="TableHintKind.Discard"/>, which is what keeps
+    /// the accept-list and the modifier dispatch a single table.
+    /// </summary>
+    private enum TableHintKind
+    {
+        /// <summary>Recognized, no modeled effect — parsed and discarded.</summary>
+        Discard,
+        NoLock,
+        Serializable,
+        Repeatable,
+        UpdLock,
+        XLock,
+        ReadPast,
+        NoWait,
+        TabLock,
+        TabLockX,
+        NoExpand,
+
+        /// <summary><c>INDEX</c>, whose argument list is captured for validation against the resolved table.</summary>
+        Index,
+
+        /// <summary><c>FORCESEEK</c> / <c>FORCESCAN</c>, whose own nested argument shape is skipped.</summary>
+        ForcedAccessPath,
+    }
+
+    /// <summary>
     /// Table hints accepted inside <c>WITH (...)</c> on a base-table /
-    /// view / table-variable source or after an UPDATE / DELETE target.
-    /// Case-insensitive. Membership-only; argument shapes are validated by
-    /// <see cref="ConsumeOneTableHint"/> (bare / <c>= literal</c> /
-    /// <c>(arg-list)</c>).
+    /// view / table-variable source or after an UPDATE / DELETE target,
+    /// each mapped to the modifier it sets. Case-insensitive. Argument
+    /// shapes are validated by <see cref="ConsumeOneTableHint"/> (bare /
+    /// <c>= literal</c> / <c>(arg-list)</c>).
     /// </summary>
     /// <remarks>
     /// Sourced from SQL Server's "Table Hints (Transact-SQL)" docs plus
@@ -39,16 +68,44 @@ internal sealed partial class Selection
     /// doesn't carry per-site rejection rules and real apps don't put it
     /// on regular tables.
     /// </remarks>
-    private static readonly FrozenSet<string> TableHintNames = new HashSet<string>
+    private static readonly FrozenDictionary<string, TableHintKind> TableHintNames = new Dictionary<string, TableHintKind>
     {
-        "NOLOCK", "READPAST", "READUNCOMMITTED", "READCOMMITTED", "READCOMMITTEDLOCK",
-        "REPEATABLEREAD", "SERIALIZABLE", "SNAPSHOT", "HOLDLOCK", "UPDLOCK", "XLOCK",
-        "TABLOCK", "TABLOCKX", "ROWLOCK", "PAGLOCK", "NOWAIT",
-        "KEEPIDENTITY", "KEEPDEFAULTS", "NOEXPAND",
-        "IGNORE_CONSTRAINTS", "IGNORE_TRIGGERS",
-        "FORCESEEK", "FORCESCAN", "INDEX", "SPATIAL_WINDOW_MAX_CELLS",
-        "READONLY", "REMOTE",
-    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+        ["NOLOCK"] = TableHintKind.NoLock,
+        ["READUNCOMMITTED"] = TableHintKind.NoLock,
+        ["HOLDLOCK"] = TableHintKind.Serializable,
+        ["SERIALIZABLE"] = TableHintKind.Serializable,
+        ["REPEATABLEREAD"] = TableHintKind.Repeatable,
+        ["UPDLOCK"] = TableHintKind.UpdLock,
+        ["XLOCK"] = TableHintKind.XLock,
+        ["READPAST"] = TableHintKind.ReadPast,
+        ["NOWAIT"] = TableHintKind.NoWait,
+        ["TABLOCK"] = TableHintKind.TabLock,
+        ["TABLOCKX"] = TableHintKind.TabLockX,
+        ["NOEXPAND"] = TableHintKind.NoExpand,
+        ["INDEX"] = TableHintKind.Index,
+        ["FORCESEEK"] = TableHintKind.ForcedAccessPath,
+        ["FORCESCAN"] = TableHintKind.ForcedAccessPath,
+        ["IGNORE_CONSTRAINTS"] = TableHintKind.Discard,
+        ["IGNORE_TRIGGERS"] = TableHintKind.Discard,
+        ["KEEPDEFAULTS"] = TableHintKind.Discard,
+        ["KEEPIDENTITY"] = TableHintKind.Discard,
+        ["PAGLOCK"] = TableHintKind.Discard,
+        ["READCOMMITTED"] = TableHintKind.Discard,
+        ["READCOMMITTEDLOCK"] = TableHintKind.Discard,
+        ["READONLY"] = TableHintKind.Discard,
+        ["REMOTE"] = TableHintKind.Discard,
+        ["ROWLOCK"] = TableHintKind.Discard,
+        ["SNAPSHOT"] = TableHintKind.Discard,
+        ["SPATIAL_WINDOW_MAX_CELLS"] = TableHintKind.Discard,
+    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Span-keyed view of <see cref="TableHintNames"/>. A hint name arrives as
+    /// a slice of the command text, so looking it up through the alternate key
+    /// keeps the parse from materializing a string per hint.
+    /// </summary>
+    private static readonly FrozenDictionary<string, TableHintKind>.AlternateLookup<ReadOnlySpan<char>> TableHintLookup =
+        TableHintNames.GetAlternateLookup<ReadOnlySpan<char>>();
 
     /// <summary>
     /// First-word vocabulary accepted inside <c>OPTION (...)</c>. Each entry
@@ -75,6 +132,13 @@ internal sealed partial class Selection
         "TABLE", "PARAMETERIZATION",
         "ORDER", "CONCAT",
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Span-keyed view of <see cref="OptionHintFirstWords"/>, for the same
+    /// reason <see cref="TableHintLookup"/> exists.
+    /// </summary>
+    private static readonly FrozenSet<string>.AlternateLookup<ReadOnlySpan<char>> OptionHintFirstWordLookup =
+        OptionHintFirstWords.GetAlternateLookup<ReadOnlySpan<char>>();
 
     /// <summary>
     /// Valid <c>OPTION (USE HINT('name'))</c> hint names — the contents of
@@ -262,7 +326,7 @@ internal sealed partial class Selection
             }
             var checkpoint = context.SaveCheckpoint();
             context.MoveNextRequired();
-            if (context.Token is not null && TableHintNames.Contains(context.Token.ToString()))
+            if (context.Token is not null && TableHintLookup.ContainsKey(context.Token.Source))
             {
                 ConsumeTableHintListBody(context, ref info);
                 return info;
@@ -394,7 +458,7 @@ internal sealed partial class Selection
         if (context.Token is null)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var sourceSpan = context.Token.Source;
-        if (!TableHintNames.Contains(sourceSpan.ToString()))
+        if (!TableHintLookup.TryGetValue(sourceSpan, out var kind))
             throw SimulatedSqlException.UnrecognizedTableHint(sourceSpan);
         // Recognize the phase-1b lock-affecting hints. NOLOCK / READUNCOMMITTED
         // skip S acquisition (dirty-read). HOLDLOCK / REPEATABLEREAD /
@@ -406,79 +470,48 @@ internal sealed partial class Selection
         // granularity. READPAST skips blocked rows instead of waiting, and
         // NOWAIT zeroes the lock timeout for the hinted table so a conflict
         // raises Msg 1222 at once. Everything else parses-and-discards.
-        if (sourceSpan.Equals("NOLOCK", StringComparison.OrdinalIgnoreCase) || sourceSpan.Equals("READUNCOMMITTED", StringComparison.OrdinalIgnoreCase))
+        switch (kind)
         {
-            info.NoLock = true;
-        }
-        else if (sourceSpan.Equals("HOLDLOCK", StringComparison.OrdinalIgnoreCase)
-            || sourceSpan.Equals("SERIALIZABLE", StringComparison.OrdinalIgnoreCase))
-        {
-            info.Serializable = true;
-        }
-        else if (sourceSpan.Equals("REPEATABLEREAD", StringComparison.OrdinalIgnoreCase))
-        {
-            info.Repeatable = true;
-        }
-        else if (sourceSpan.Equals("UPDLOCK", StringComparison.OrdinalIgnoreCase))
-        {
-            info.UpdLock = true;
-        }
-        else if (sourceSpan.Equals("XLOCK", StringComparison.OrdinalIgnoreCase))
-        {
-            info.XLock = true;
-        }
-        else if (sourceSpan.Equals("READPAST", StringComparison.OrdinalIgnoreCase))
-        {
-            info.ReadPast = true;
-        }
-        else if (sourceSpan.Equals("NOWAIT", StringComparison.OrdinalIgnoreCase))
-        {
-            info.NoWait = true;
-        }
-        else if (sourceSpan.Equals("TABLOCK", StringComparison.OrdinalIgnoreCase))
-        {
-            info.TabLock = true;
-        }
-        else if (sourceSpan.Equals("TABLOCKX", StringComparison.OrdinalIgnoreCase))
-        {
-            info.TabLockX = true;
-        }
-        else if (sourceSpan.Equals("NOEXPAND", StringComparison.OrdinalIgnoreCase))
-        {
-            info.NoExpand = true;
-        }
-        else if (sourceSpan.Equals("INDEX", StringComparison.OrdinalIgnoreCase))
-        {
-            info.IndexHint = true;
-            context.MoveNextRequired();
-            ConsumeIndexHintArguments(context, ref info);
-            return;
-        }
-        else if (sourceSpan.Equals("FORCESEEK", StringComparison.OrdinalIgnoreCase)
-            || sourceSpan.Equals("FORCESCAN", StringComparison.OrdinalIgnoreCase))
-        {
-            info.IndexHint = true;
-            context.MoveNextRequired();
-            if (context.Token is Operator { Character: '(' })
-            {
-                // FORCESEEK's nested form names an index —
-                // FORCESEEK(index_name(col [, …])). Peek that name so the
-                // FROM-source call site validates its existence exactly as it
-                // does for INDEX(name); real raises the same Msg 308 for both.
-                // Then rewind so the payload skip below stays the single
-                // consumer of the parenthesized run. FORCESCAN takes no
-                // arguments, so it never enters here.
-                var checkpoint = context.SaveCheckpoint();
-                context.MoveNextRequired();
-                if (context.Token is Name)
-                    CaptureOneIndexArgument(context, ref info);
-                context.RestoreCheckpoint(checkpoint);
+            case TableHintKind.NoLock: info.NoLock = true; break;
+            case TableHintKind.Serializable: info.Serializable = true; break;
+            case TableHintKind.Repeatable: info.Repeatable = true; break;
+            case TableHintKind.UpdLock: info.UpdLock = true; break;
+            case TableHintKind.XLock: info.XLock = true; break;
+            case TableHintKind.ReadPast: info.ReadPast = true; break;
+            case TableHintKind.NoWait: info.NoWait = true; break;
+            case TableHintKind.TabLock: info.TabLock = true; break;
+            case TableHintKind.TabLockX: info.TabLockX = true; break;
+            case TableHintKind.NoExpand: info.NoExpand = true; break;
 
-                SkipBalancedParens(context);
+            case TableHintKind.Index:
+                info.IndexHint = true;
                 context.MoveNextRequired();
-            }
+                ConsumeIndexHintArguments(context, ref info);
+                return;
 
-            return;
+            case TableHintKind.ForcedAccessPath:
+                info.IndexHint = true;
+                context.MoveNextRequired();
+                if (context.Token is Operator { Character: '(' })
+                {
+                    // FORCESEEK's nested form names an index —
+                    // FORCESEEK(index_name(col [, …])). Peek that name so the
+                    // FROM-source call site validates its existence exactly as it
+                    // does for INDEX(name); real raises the same Msg 308 for both.
+                    // Then rewind so the payload skip below stays the single
+                    // consumer of the parenthesized run. FORCESCAN takes no
+                    // arguments, so it never enters here.
+                    var checkpoint = context.SaveCheckpoint();
+                    context.MoveNextRequired();
+                    if (context.Token is Name)
+                        CaptureOneIndexArgument(context, ref info);
+                    context.RestoreCheckpoint(checkpoint);
+
+                    SkipBalancedParens(context);
+                    context.MoveNextRequired();
+                }
+
+                return;
         }
         context.MoveNextRequired();
         if (context.Token is Operator { Character: '=' })
@@ -622,7 +655,7 @@ internal sealed partial class Selection
                 return;
             }
         }
-        if (context.Token is null || !OptionHintFirstWords.Contains(context.Token.ToString()))
+        if (context.Token is null || !OptionHintFirstWordLookup.Contains(context.Token.Source))
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         while (context.Token is not (Operator { Character: ')' } or Operator { Character: ',' }))

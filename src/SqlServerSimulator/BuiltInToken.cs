@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Globalization;
 
 namespace SqlServerSimulator;
@@ -46,6 +47,35 @@ internal static class BuiltInToken
         CompareOptions.IgnoreCase | CompareOptions.IgnoreKanaType | CompareOptions.IgnoreWidth;
 
     /// <summary>
+    /// The character set over which the linguistic compare below and
+    /// <see cref="StringComparison.OrdinalIgnoreCase"/> are interchangeable.
+    /// </summary>
+    private static readonly SearchValues<char> ordinalComparableCharacters =
+        SearchValues.Create("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+
+    /// <summary>
+    /// Whether <paramref name="value"/> lies in the character range where an
+    /// ordinal-ignore-case compare answers what
+    /// <see cref="CompareInfo.Compare(string, string, CompareOptions)"/> under
+    /// <see cref="Options"/> answers, letting the cheaper comparison stand in.
+    /// </summary>
+    /// <remarks>
+    /// The two comparisons agree on ASCII alphanumerics because each such
+    /// character carries its own primary collation weight, case is the only
+    /// difference the options erase, and none of them participate in a
+    /// contraction, an expansion, or a zero weight. Every character outside
+    /// that range is a candidate to break one of those properties, and the
+    /// ones that do are not exotic: a fullwidth <c>Ｓ</c> matches an ASCII
+    /// <c>S</c> under <see cref="CompareOptions.IgnoreWidth"/>, and control
+    /// characters carry no weight at all, so an <c>a</c> followed by
+    /// U+0001 and an <c>a</c> followed by U+0002 compare equal
+    /// linguistically while an ordinal compare separates them. Both cases
+    /// land on the linguistic path.
+    /// </remarks>
+    private static bool IsOrdinalComparable(string value) =>
+        !value.AsSpan().ContainsAnyExcept(ordinalComparableCharacters);
+
+    /// <summary>
     /// Returns true when <paramref name="x"/> and <paramref name="y"/>
     /// match under the built-in-token compare options (CI + width- /
     /// kanatype-insensitive). Both arms accept <see langword="null"/>:
@@ -54,7 +84,16 @@ internal static class BuiltInToken
     public static bool Equals(string? x, string? y) =>
         x is null
             ? y is null
-            : y is not null && compareInfo.Compare(x, y, Options) == 0;
+            : y is not null && MatchesNonNull(x, y);
+
+    /// <summary>
+    /// The compare itself, on the cheaper path when
+    /// <see cref="IsOrdinalComparable"/> admits both arguments.
+    /// </summary>
+    private static bool MatchesNonNull(string x, string y) =>
+        IsOrdinalComparable(x) && IsOrdinalComparable(y)
+            ? x.Equals(y, StringComparison.OrdinalIgnoreCase)
+            : compareInfo.Compare(x, y, Options) == 0;
 
     /// <summary>
     /// Returns true when <paramref name="value"/> matches any of
@@ -67,9 +106,25 @@ internal static class BuiltInToken
     {
         if (value is null)
             return false;
+
+        // The whole option list is walked per call, so classify the one
+        // argument that varies once rather than per option.
+        if (!IsOrdinalComparable(value))
+        {
+            foreach (var option in options)
+            {
+                if (compareInfo.Compare(value, option, Options) == 0)
+                    return true;
+            }
+            return false;
+        }
+
         foreach (var option in options)
         {
-            if (compareInfo.Compare(value, option, Options) == 0)
+            var matched = IsOrdinalComparable(option)
+                ? value.Equals(option, StringComparison.OrdinalIgnoreCase)
+                : compareInfo.Compare(value, option, Options) == 0;
+            if (matched)
                 return true;
         }
         return false;
@@ -81,6 +136,13 @@ internal static class BuiltInToken
     /// hash to the same value. Required when a built-in-token-keyed type
     /// participates in a dictionary or hashset.
     /// </summary>
+    /// <remarks>
+    /// Stays on the linguistic path for every input, including the ones
+    /// <see cref="IsOrdinalComparable"/> admits: equality still reaches
+    /// across that boundary — a fullwidth <c>Ｓchema</c> equals an ASCII
+    /// <c>SCHEMA</c> — so only a hash that folds width and case alike keeps
+    /// the pair in the same bucket.
+    /// </remarks>
     public static int GetHashCode(string value) =>
         compareInfo.GetHashCode(value, Options);
 

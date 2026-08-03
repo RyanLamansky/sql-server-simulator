@@ -54,7 +54,8 @@ Hint-argument shapes recognized:
 | `name = value`  | `SPATIAL_WINDOW_MAX_CELLS = 1024`             |
 | `name(args)`    | `INDEX(IX_foo)`, `FORCESEEK(IX_foo(c1, c2))`  |
 
-Closed accept-list (case-insensitive, in `TableHintNames`):
+Closed accept-list (case-insensitive, in `TableHintNames`), which doubles as the modifier table — each name maps to the `TableHintInfo` field it sets, or to `Discard` where the simulator models no effect, so membership and dispatch stay one table and one lookup.
+A hint name arrives as a slice of the command text and is looked up through `TableHintLookup`, the set's `AlternateLookup<ReadOnlySpan<char>>`, so no string is materialized per hint:
 
 `NOLOCK`, `READPAST`, `READUNCOMMITTED`, `READCOMMITTED`, `READCOMMITTEDLOCK`, `REPEATABLEREAD`, `SERIALIZABLE`, `SNAPSHOT`, `HOLDLOCK`, `UPDLOCK`, `XLOCK`, `TABLOCK`, `TABLOCKX`, `ROWLOCK`, `PAGLOCK`, `NOWAIT`, `KEEPIDENTITY`, `KEEPDEFAULTS`, `NOEXPAND`, `IGNORE_CONSTRAINTS`, `IGNORE_TRIGGERS`, `FORCESEEK`, `FORCESCAN`, `INDEX`, `SPATIAL_WINDOW_MAX_CELLS`, `READONLY`, `REMOTE`.
 

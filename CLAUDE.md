@@ -122,6 +122,18 @@ Readonly struct, up to 4 inline slots (SQL Server's grammar limit).
 API: `Leaf`, `ImmediateQualifier` (null when unqualified — pair with `Collation.Baseline.Equals(name.ImmediateQualifier, "INSERTED")`, which folds null into `false`), `Count`, `ToString()`.
 5th segment → Msg 4104.
 
+### Matching a name against a fixed vocabulary
+Three matchers, in cost order: a `switch` over string constants or `string.Equals(…, Ordinal[IgnoreCase])` (~1 ns, and a miss against a differently-sized literal is only a length check), `BuiltInToken` (spec-defined tokens — an ASCII-alphanumeric shortcut over an invariant `CompareInfo`, see [`collations.md`](docs/claude/collations.md#fixed-tokens-builtintoken)), and a `Collation` (the database's own semantics, mandatory for user identifiers).
+**Pick by the semantics the site needs, then keep the shape simple** — the measured traps run the other way from intuition:
+
+- A short chain of ordinal compares **beats** a `Frozen*` lookup (~2 ns against ~8 ns for six names, since each miss is a length check), so don't convert one.
+  Hashing pays off at `ResolveBuiltIn`'s scale, not an accept-list's.
+- Uppercasing into a `stackalloc` span to reach a span `switch` (the SSS003 / SSS007 shape) costs more than the chain it replaces at accept-list size — `ToUpperInvariant` isn't free.
+  It earns its keep across `ResolveBuiltIn`'s ~300 entries.
+- What does cost: **materializing a string to feed a lookup**, when the token already exposes `Source` as a span (`Frozen*.GetAlternateLookup<ReadOnlySpan<char>>` is the fix), and **repeating a compare per row** that a parse-time discriminator settles once (`XmlMethodCall`'s `XmlMethod`, `ObjectId.ClassifyTypeFilter`).
+
+Because these compares sit behind the memo layers (`SourceColumnMemo`, the plan cache), none of it moves a realistic query measurably; treat it as allocation and clarity work, not throughput work.
+
 ### Exception factories
 `SimulatedSqlException` ctor is private; each error case is an `internal static` factory in a topical partial (`TypeErrors`, `SchemaErrors`, `ConstraintErrors`, `ResolutionErrors`, `QueryErrors`, `SyntaxErrors`).
 The number lands in `Data["HelpLink.EvtID"]`.

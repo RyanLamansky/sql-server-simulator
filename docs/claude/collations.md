@@ -288,6 +288,21 @@ Two identifier surfaces do **not** follow the database collation (both probe-con
 
 Related tokenizer rule: non-spacing combining marks are identifier *continuation* characters (`Tokenizer.IsIdentifierBodyChar`) — a decomposed spelling (`zzcafe` + U+0301) both tokenizes and resolves against a composed `zzcafé` table on the live server (probed); resolution comes free from the NFC step in hash canonicalization plus the inner equality.
 
+### Fixed tokens: `BuiltInToken`
+
+Spec-defined strings that no `ALTER DATABASE COLLATE` reaches — the `INSERTED` / `DELETED` pseudo-tables, `OBJECT_ID`'s type-filter codes, `sp_addextendedproperty`'s argument names and level-type values — match through `BuiltInToken` rather than through any `Collation`.
+Its comparison is invariant `CompareInfo` under `IgnoreCase | IgnoreKanaType | IgnoreWidth`, so those sites keep matching a wrong-case or fullwidth spelling (`'u'`, `ｉnserted`, `'ｓchema'`) even on a case-sensitive database — probe-confirmed, and covered by the regime-1 tests in `NameComparisonRegimeTests`.
+
+Most calls answer without reaching that comparison.
+When **both** operands consist only of ASCII alphanumerics, an ordinal-ignore-case compare gives the same answer and stands in; anything else falls back to the linguistic path.
+The equivalence holds over that range because each ASCII alphanumeric carries its own primary collation weight, case is the only difference the options erase, and none of them participate in a contraction, an expansion, or a zero weight.
+Both characters that break it are outside the range and both are load-bearing here, which is why the guard is alphanumerics rather than "is ASCII": a **fullwidth** `Ｓ` matches an ASCII `S` under `IgnoreWidth`, and a **control character** carries no weight at all, so `a` + U+0001 and `a` + U+0002 compare equal linguistically and unequal ordinally.
+`BuiltInTokenComparisonTests` pins the equivalence exhaustively over one- and two-character words and pins both fallback shapes.
+
+`GetHashCode` stays linguistic for every input, because equality reaches *across* the shortcut boundary — an in-range `SCHEMA` equals an out-of-range `ｓchema` — so only a width- and case-folding hash keeps the pair in one bucket.
+That is also why a `Frozen*` collection keyed by `BuiltInToken.Comparer` is the wrong shape for a small accept-list: its per-lookup linguistic hash costs more than walking the whole list of candidates now does (measured at roughly 62 ns against 36 ns for a twelve-entry walk).
+`ObjectId.ClassifyTypeFilter` is the pattern to copy where a value is matched against many codes — classify once into a discriminator, then dispatch on that.
+
 ## Symbol sort weighting (other SQL_\* / Windows / locale families)
 
 `CultureCollation.Compare` (the `CompareInfo`-routed comparer behind every collation **other than the default**) gives hyphen (`-`) and apostrophe (`'`) the **minimal-weight** treatment SQL Server applies, while every other symbol keeps a real primary weight:

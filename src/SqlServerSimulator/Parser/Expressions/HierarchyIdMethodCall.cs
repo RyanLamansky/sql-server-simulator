@@ -42,15 +42,25 @@ internal sealed class HierarchyIdMethodCall : Expression
     public static bool IsKnownMethodName(string name) =>
         TryGetMethod(name, out _);
 
+    /// <remarks>
+    /// A <c>switch</c> over string constants is an ordinal match, which is
+    /// the comparison this accept-list wants, and it reaches the answer in
+    /// one length-and-character dispatch rather than one compare per name —
+    /// worth the shape here because <see cref="Expression.ParsePostfix"/>
+    /// asks for every <c>.</c>-qualified name it parses, nearly all of which
+    /// are ordinary multipart references that match nothing.
+    /// </remarks>
     private static bool TryGetMethod(string name, out HierarchyIdMethod method)
     {
-        if (name.Equals("GetLevel", StringComparison.Ordinal)) { method = HierarchyIdMethod.GetLevel; return true; }
-        if (name.Equals("GetAncestor", StringComparison.Ordinal)) { method = HierarchyIdMethod.GetAncestor; return true; }
-        if (name.Equals("GetDescendant", StringComparison.Ordinal)) { method = HierarchyIdMethod.GetDescendant; return true; }
-        if (name.Equals("IsDescendantOf", StringComparison.Ordinal)) { method = HierarchyIdMethod.IsDescendantOf; return true; }
-        if (name.Equals("ToString", StringComparison.Ordinal)) { method = HierarchyIdMethod.ToStringMethod; return true; }
-        method = default;
-        return false;
+        switch (name)
+        {
+            case "GetAncestor": method = HierarchyIdMethod.GetAncestor; return true;
+            case "GetDescendant": method = HierarchyIdMethod.GetDescendant; return true;
+            case "GetLevel": method = HierarchyIdMethod.GetLevel; return true;
+            case "IsDescendantOf": method = HierarchyIdMethod.IsDescendantOf; return true;
+            case "ToString": method = HierarchyIdMethod.ToStringMethod; return true;
+            default: method = default; return false;
+        }
     }
 
     /// <summary>

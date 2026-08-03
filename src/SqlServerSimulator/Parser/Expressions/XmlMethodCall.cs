@@ -32,21 +32,23 @@ internal sealed class XmlMethodCall : Expression
     public readonly Expression Target;
 
     private readonly string methodName;
+    private readonly XmlMethod method;
     private readonly XmlQueryExpr? xquery;
     private readonly SqlType valueType;
     private readonly int? valueMaxLength;
 
-    private XmlMethodCall(Expression target, string methodName, XmlQueryExpr? xquery, SqlType valueType, int? valueMaxLength)
+    private XmlMethodCall(Expression target, string methodName, XmlMethod method, XmlQueryExpr? xquery, SqlType valueType, int? valueMaxLength)
     {
         this.Target = target;
         this.methodName = methodName;
+        this.method = method;
         this.xquery = xquery;
         this.valueType = valueType;
         this.valueMaxLength = valueMaxLength;
     }
 
     /// <summary>True when this is a <c>.nodes()</c> call (rowset-producing).</summary>
-    public bool IsNodes => this.methodName.Equals("nodes", StringComparison.Ordinal);
+    public bool IsNodes => this.method == XmlMethod.Nodes;
 
     /// <summary>The compiled XQuery argument, built at parse time.</summary>
     public XmlQueryExpr XQuery => this.xquery ?? throw new InvalidOperationException("XML method has no captured XQuery argument.");
@@ -57,11 +59,27 @@ internal sealed class XmlMethodCall : Expression
     /// method-call path instead of multipart-reference dispatch.
     /// </summary>
     public static bool IsKnownMethodName(string name) =>
-        name.Equals("value", StringComparison.Ordinal)
-        || name.Equals("nodes", StringComparison.Ordinal)
-        || name.Equals("query", StringComparison.Ordinal)
-        || name.Equals("exist", StringComparison.Ordinal)
-        || name.Equals("modify", StringComparison.Ordinal);
+        TryGetMethod(name, out _);
+
+    /// <summary>
+    /// Maps a written method name to its dispatch discriminator. Real spells
+    /// these lowercase and matches them ordinally, which is what a
+    /// <c>switch</c> over string constants does — in one dispatch rather than
+    /// one compare per name, which matters because the expression parser asks
+    /// for every <c>.</c>-qualified name it meets.
+    /// </summary>
+    private static bool TryGetMethod(string name, out XmlMethod method)
+    {
+        switch (name)
+        {
+            case "exist": method = XmlMethod.Exist; return true;
+            case "modify": method = XmlMethod.Modify; return true;
+            case "nodes": method = XmlMethod.Nodes; return true;
+            case "query": method = XmlMethod.Query; return true;
+            case "value": method = XmlMethod.Value; return true;
+            default: method = default; return false;
+        }
+    }
 
     /// <summary>
     /// Parses <c>expr.MethodName(args)</c>. Cursor enters on <c>(</c>; on
@@ -72,10 +90,13 @@ internal sealed class XmlMethodCall : Expression
     /// </summary>
     public static XmlMethodCall Parse(Expression target, string methodName, ParserContext context)
     {
+        if (!TryGetMethod(methodName, out var method))
+            throw new InvalidOperationException($"{methodName} is not an XML instance method.");
+
         // Reaching the expression parser at all means `.modify()` was written
         // somewhere a value is expected; real refuses the mutator there before
         // anything else, the SET-option gate included (probe-confirmed).
-        if (methodName.Equals("modify", StringComparison.Ordinal))
+        if (method == XmlMethod.Modify)
             throw SimulatedSqlException.XmlMutatorInValuePosition();
 
         // Evaluating an XQuery expression is one of the operations real gates
@@ -85,17 +106,13 @@ internal sealed class XmlMethodCall : Expression
         // for NUMERIC_ROUNDABORT). `.nodes()` alone is exempt; a `.value()` on
         // the node it produced is not, so gating the other four methods
         // reproduces both halves.
-        if (!context.Batch.CreateTimeBinding && !methodName.Equals("nodes", StringComparison.Ordinal)
+        if (!context.Batch.CreateTimeBinding && method != XmlMethod.Nodes
             && Simulation.IncorrectSetOptionNames(context) is { } setOptions)
         {
             throw SimulatedSqlException.IncorrectSetOptions(context.Batch.CurrentStatement.StatementVerb, setOptions);
         }
 
-        var isValue = methodName.Equals("value", StringComparison.Ordinal);
-        var isNodesOrValueOrQueryOrExist = isValue
-            || methodName.Equals("nodes", StringComparison.Ordinal)
-            || methodName.Equals("query", StringComparison.Ordinal)
-            || methodName.Equals("exist", StringComparison.Ordinal);
+        var isValue = method == XmlMethod.Value;
 
         context.MoveNextRequired();
         string? xqueryText = null;
@@ -103,9 +120,11 @@ internal sealed class XmlMethodCall : Expression
         int? valueMaxLength = null;
         if (context.Token is not Operator { Character: ')' })
         {
+            // Each of the four methods that reach here takes the XQuery
+            // expression as its first argument; `.modify()`, the one that
+            // doesn't, was refused above.
             var firstArg = Expression.Parse(context);
-            if (isNodesOrValueOrQueryOrExist)
-                xqueryText = ConstantString(firstArg, context, "XML method path");
+            xqueryText = ConstantString(firstArg, context, "XML method path");
 
             while (context.Token is Operator { Character: ',' })
             {
@@ -122,22 +141,22 @@ internal sealed class XmlMethodCall : Expression
         // once here — which is where real settles its static XQuery
         // diagnostics too.
         var xquery = xqueryText is null ? null : XmlQueryEngine.Compile(xqueryText, methodName);
-        return new XmlMethodCall(target, methodName, xquery, valueType, valueMaxLength);
+        return new XmlMethodCall(target, methodName, method, xquery, valueType, valueMaxLength);
     }
 
     public override SqlValue Run(RuntimeContext runtime)
     {
         // .nodes() is rowset-producing (handled in FROM/APPLY parse, never
         // here), so reaching Run means it appeared in scalar position.
-        if (this.methodName.Equals("nodes", StringComparison.Ordinal))
+        if (this.method == XmlMethod.Nodes)
             throw new NotSupportedException($"XML instance method '.{this.methodName}()' is not modeled.");
 
         var input = this.Target.Run(runtime);
-        switch (this.methodName)
+        switch (this.method)
         {
-            case "exist":
+            case XmlMethod.Exist:
                 return input.IsNull ? SqlValue.Null(SqlType.Bit) : SqlValue.FromBoolean(XmlQueryEngine.EvaluateExists(input.AsString, this.xquery!));
-            case "query":
+            case XmlMethod.Query:
                 return input.IsNull ? SqlValue.Null(SqlType.Xml) : SqlValue.FromXml(XmlQueryEngine.EvaluateQuery(input.AsString, this.xquery!));
             default:
                 if (input.IsNull)
@@ -155,11 +174,12 @@ internal sealed class XmlMethodCall : Expression
     /// <c>nodes</c> / <c>query</c> surface as <c>xml</c>.
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        this.methodName.Equals("value", StringComparison.Ordinal)
-            ? this.valueType
-            : this.methodName.Equals("exist", StringComparison.Ordinal)
-                ? SqlType.Bit
-                : SqlType.Xml;
+        this.method switch
+        {
+            XmlMethod.Value => this.valueType,
+            XmlMethod.Exist => SqlType.Bit,
+            _ => SqlType.Xml,
+        };
 
     internal override string DebugDisplay() => $"({this.Target.DebugDisplay()}).{this.methodName}(…)";
 
@@ -231,4 +251,17 @@ internal sealed class XmlMethodCall : Expression
         }
         return SqlType.GetByName(typeName, declaredMaxLength, declaredScale, 1, columnName: null);
     }
+}
+
+/// <summary>
+/// The five <c>xml</c> instance methods, resolved from the written name once
+/// at parse so evaluation dispatches on a discriminator rather than on text.
+/// </summary>
+internal enum XmlMethod : byte
+{
+    Exist,
+    Modify,
+    Nodes,
+    Query,
+    Value,
 }

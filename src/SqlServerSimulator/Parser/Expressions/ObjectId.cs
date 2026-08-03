@@ -76,14 +76,15 @@ internal sealed class ObjectId : Expression
             if (typeFilter.Length > 2)
                 return SqlValue.Null(SqlType.Int32);
             typeFilter = typeFilter.TrimEnd(' ');
-            // Modeled codes: 'U' (user table), 'FN' (scalar UDF), 'IF' (inline
-            // table-valued function), 'V' (view), 'P' (stored procedure),
-            // 'TR' (DML trigger), 'SN' (synonym), and the five constraint
-            // families. Other documented codes (TF / ...) return NULL pending
-            // those features.
-            if (!BuiltInToken.EqualsAny(typeFilter, "U", "FN", "IF", "V", "P", "TR", "SN", "PK", "UQ", "C", "D", "F"))
-                return SqlValue.Null(SqlType.Int32);
         }
+
+        // Classify the written code once. Every branch below then tests the
+        // discriminator instead of re-running the linguistic compare the code
+        // has to be matched with, which a single OBJECT_ID call would
+        // otherwise do a dozen times over.
+        var filter = ClassifyTypeFilter(typeFilter);
+        if (filter == ObjectTypeFilter.Unrecognized)
+            return SqlValue.Null(SqlType.Int32);
 
         var nameStr = nameValue.CoerceTo(SqlType.NVarchar).AsString;
         if (!TryParseObjectName(nameStr, out var parsed))
@@ -115,18 +116,18 @@ internal sealed class ObjectId : Expression
         // the kind-specific branches below, whose resolvers apply the redirect.
         if (runtime.Batch.TryResolveSynonym(parsed, out var synonym))
         {
-            return typeFilter is null || BuiltInToken.Equals(typeFilter, "SN")
+            return filter is ObjectTypeFilter.Any or ObjectTypeFilter.Synonym
                 ? Gate(synonym)
                 : SqlValue.Null(SqlType.Int32);
         }
-        if (typeFilter is not null && BuiltInToken.Equals(typeFilter, "SN"))
+        if (filter == ObjectTypeFilter.Synonym)
             return SqlValue.Null(SqlType.Int32);
 
-        // 'FN' / 'IF' / 'TF' / no filter: try function resolution. With a
-        // specific filter the function must match that kind (scalar vs.
-        // inline TVF vs. multi-statement TVF); without a filter, any kind
-        // matches.
-        if (typeFilter is null || BuiltInToken.EqualsAny(typeFilter, "FN", "IF", "TF"))
+        // 'FN' / 'IF' / no filter: try function resolution. With a specific
+        // filter the function must match that kind (scalar vs. inline TVF);
+        // without a filter, any kind matches. 'TF' isn't in the accept-list,
+        // so a multi-statement TVF answers only the no-filter form.
+        if (filter is ObjectTypeFilter.Any or ObjectTypeFilter.ScalarFunction or ObjectTypeFilter.InlineTableValuedFunction)
         {
             // TryResolveFunction takes 2-/3-part names only, because a bare
             // f() at a *call* site is Msg 195 on real. OBJECT_ID is a name
@@ -138,24 +139,23 @@ internal sealed class ObjectId : Expression
                 : parsed;
             if (runtime.Batch.TryResolveFunction(functionName, out var function))
             {
-                var kindMatches = typeFilter switch
+                var kindMatches = filter switch
                 {
-                    null => true,
-                    _ when BuiltInToken.Equals(typeFilter, "FN") => function is ScalarFunction,
-                    _ when BuiltInToken.Equals(typeFilter, "IF") => function is InlineTableValuedFunction,
-                    _ when BuiltInToken.Equals(typeFilter, "TF") => function is MultiStatementTableValuedFunction,
+                    ObjectTypeFilter.Any => true,
+                    ObjectTypeFilter.ScalarFunction => function is ScalarFunction,
+                    ObjectTypeFilter.InlineTableValuedFunction => function is InlineTableValuedFunction,
                     _ => false,
                 };
                 if (kindMatches)
                     return Gate(function);
             }
-            if (typeFilter is not null)
+            if (filter != ObjectTypeFilter.Any)
                 return SqlValue.Null(SqlType.Int32);
         }
 
         // 'V' / no filter: try view resolution before falling through to
         // tables. With a specific 'V' filter, a table miss returns NULL.
-        if (typeFilter is null || BuiltInToken.Equals(typeFilter, "V"))
+        if (filter is ObjectTypeFilter.Any or ObjectTypeFilter.View)
         {
             if (runtime.Batch.TryResolveView(parsed, out var view))
                 return Gate(view);
@@ -166,33 +166,33 @@ internal sealed class ObjectId : Expression
             // gates on OBJECT_ID('[sys].[database_query_store_options]').
             if (runtime.Batch.TryResolveCatalogView(parsed, out var catalogView, out _))
                 return SqlValue.FromInt32(catalogView.ObjectId);
-            if (typeFilter is not null)
+            if (filter != ObjectTypeFilter.Any)
                 return SqlValue.Null(SqlType.Int32);
         }
 
         // 'P' / no filter: try procedure resolution. Procs share the
         // object-name namespace with tables / views / functions, so the
         // no-filter form falls through here too.
-        if (typeFilter is null || BuiltInToken.Equals(typeFilter, "P"))
+        if (filter is ObjectTypeFilter.Any or ObjectTypeFilter.Procedure)
         {
             if (runtime.Batch.TryResolveProcedure(parsed, out var procedure))
                 return Gate(procedure);
-            if (typeFilter is not null)
+            if (filter != ObjectTypeFilter.Any)
                 return SqlValue.Null(SqlType.Int32);
         }
 
         // 'TR' / no filter: try DML trigger resolution. Triggers share the
         // object-name namespace, so the no-filter form falls through here too.
-        if (typeFilter is null || BuiltInToken.Equals(typeFilter, "TR"))
+        if (filter is ObjectTypeFilter.Any or ObjectTypeFilter.Trigger)
         {
             if (runtime.Batch.TryResolveTrigger(parsed, out var trigger))
                 return GateAs(runtime.Batch.DatabaseFor(trigger), trigger.ObjectId, trigger.Parent.ObjectId, trigger.Parent.SchemaId);
-            if (typeFilter is not null)
+            if (filter != ObjectTypeFilter.Any)
                 return SqlValue.Null(SqlType.Int32);
         }
 
         // 'U' filter or no filter: try table resolution.
-        if ((typeFilter is null || BuiltInToken.Equals(typeFilter, "U"))
+        if ((filter is ObjectTypeFilter.Any or ObjectTypeFilter.Table)
             && runtime.Batch.TryResolveTable(parsed, out var table))
         {
             return Gate(table);
@@ -202,10 +202,11 @@ internal sealed class ObjectId : Expression
         // (probe-confirmed for a DEFAULT, a CHECK and a PRIMARY KEY, qualified
         // or not), scoped to the schema of the table that owns it. Visibility
         // follows that table, the way a trigger's follows its parent.
-        if (typeFilter is null || BuiltInToken.EqualsAny(typeFilter, "PK", "UQ", "C", "D", "F"))
+        if (filter is ObjectTypeFilter.Any or ObjectTypeFilter.PrimaryKey or ObjectTypeFilter.Unique
+            or ObjectTypeFilter.Check or ObjectTypeFilter.Default or ObjectTypeFilter.ForeignKey)
         {
             if (ConstraintLookup.TryResolveByName(runtime.Batch, parsed, out var constraint)
-                && (typeFilter is null || BuiltInToken.Equals(typeFilter, constraint.TypeCode)))
+                && (filter == ObjectTypeFilter.Any || filter == ClassifyTypeFilter(constraint.TypeCode)))
             {
                 return GateAs(runtime.Batch.DatabaseFor(constraint.Table), constraint.ObjectId, constraint.Table.ObjectId, constraint.Table.SchemaId);
             }
@@ -214,6 +215,65 @@ internal sealed class ObjectId : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+
+    /// <summary>
+    /// The <c>OBJECT_ID(…, '&lt;code&gt;')</c> type filters the resolver
+    /// models: <c>'U'</c> (user table), <c>'FN'</c> (scalar UDF), <c>'IF'</c>
+    /// (inline table-valued function), <c>'V'</c> (view), <c>'P'</c> (stored
+    /// procedure), <c>'TR'</c> (DML trigger), <c>'SN'</c> (synonym), and the
+    /// five constraint families. Other documented codes (<c>'TF'</c> / …)
+    /// classify as <see cref="Unrecognized"/> and answer NULL pending those
+    /// features.
+    /// </summary>
+    private enum ObjectTypeFilter
+    {
+        /// <summary>A code outside the modeled set — the caller answers NULL.</summary>
+        Unrecognized,
+
+        /// <summary>No second argument was written, so every kind answers.</summary>
+        Any,
+        Check,
+        Default,
+        ForeignKey,
+        InlineTableValuedFunction,
+        PrimaryKey,
+        Procedure,
+        ScalarFunction,
+        Synonym,
+        Table,
+        Trigger,
+        Unique,
+        View,
+    }
+
+    /// <summary>
+    /// Resolves a written type code (or a missing one) to its filter.
+    /// </summary>
+    /// <remarks>
+    /// Real matches the code case-, width- and kanatype-insensitively, so the
+    /// comparison has to stay linguistic — which rules out both a <c>switch</c>
+    /// over string constants (ordinal) and a frozen dictionary (whose hash of
+    /// the same options costs more than this whole walk). Running the walk
+    /// once per call and dispatching on the result is what keeps it off the
+    /// per-branch path.
+    /// </remarks>
+    private static ObjectTypeFilter ClassifyTypeFilter(string? code) => code switch
+    {
+        null => ObjectTypeFilter.Any,
+        _ when BuiltInToken.Equals(code, "U") => ObjectTypeFilter.Table,
+        _ when BuiltInToken.Equals(code, "V") => ObjectTypeFilter.View,
+        _ when BuiltInToken.Equals(code, "P") => ObjectTypeFilter.Procedure,
+        _ when BuiltInToken.Equals(code, "FN") => ObjectTypeFilter.ScalarFunction,
+        _ when BuiltInToken.Equals(code, "IF") => ObjectTypeFilter.InlineTableValuedFunction,
+        _ when BuiltInToken.Equals(code, "TR") => ObjectTypeFilter.Trigger,
+        _ when BuiltInToken.Equals(code, "SN") => ObjectTypeFilter.Synonym,
+        _ when BuiltInToken.Equals(code, "PK") => ObjectTypeFilter.PrimaryKey,
+        _ when BuiltInToken.Equals(code, "UQ") => ObjectTypeFilter.Unique,
+        _ when BuiltInToken.Equals(code, "C") => ObjectTypeFilter.Check,
+        _ when BuiltInToken.Equals(code, "D") => ObjectTypeFilter.Default,
+        _ when BuiltInToken.Equals(code, "F") => ObjectTypeFilter.ForeignKey,
+        _ => ObjectTypeFilter.Unrecognized,
+    };
 
     // OBJECT_ID resolves a name against the current database at runtime,
     // independent of any table row — row-independent exactly when its
