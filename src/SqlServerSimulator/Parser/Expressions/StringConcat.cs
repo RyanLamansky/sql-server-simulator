@@ -76,6 +76,7 @@ internal sealed class StringConcat : Expression
     {
         var anyNational = false;
         var anyMax = false;
+        var anyUnspecified = false;
         var width = 0;
         var separatorWidth = 0;
         var collation = new CollationAccumulator();
@@ -86,12 +87,13 @@ internal sealed class StringConcat : Expression
             anyMax |= IsMaxForm(type);
             collation.Fold(type, this.kind);
             var argumentWidth = IsBareNullLiteral(this.arguments[i]) ? 0 : ArgumentWidth(type);
+            anyUnspecified |= argumentWidth == UnspecifiedWidth;
             if (this.kind == StringConcatKind.ConcatWs && i == 0)
-                separatorWidth = argumentWidth;
+                separatorWidth = Math.Max(0, argumentWidth);
             else
-                width += argumentWidth;
+                width += Math.Max(0, argumentWidth);
         }
-        return ResolveResultType(anyNational, anyMax, width + SeparatorTotal(separatorWidth), batch, collation);
+        return ResolveResultType(anyNational, anyMax, anyUnspecified, width + SeparatorTotal(separatorWidth), batch, collation);
     }
 
     // CONCAT / CONCAT_WS never return NULL — NULL arguments are skipped and an
@@ -113,6 +115,7 @@ internal sealed class StringConcat : Expression
         var values = new SqlValue[this.arguments.Length];
         var anyNational = false;
         var anyMax = false;
+        var anyUnspecified = false;
         var width = 0;
         var separatorWidth = 0;
         var collation = new CollationAccumulator();
@@ -123,12 +126,13 @@ internal sealed class StringConcat : Expression
             anyMax |= IsMaxForm(values[i].Type);
             collation.Fold(values[i].Type, this.kind);
             var argumentWidth = IsBareNullLiteral(this.arguments[i]) ? 0 : ArgumentWidth(values[i].Type);
+            anyUnspecified |= argumentWidth == UnspecifiedWidth;
             if (this.kind == StringConcatKind.ConcatWs && i == 0)
-                separatorWidth = argumentWidth;
+                separatorWidth = Math.Max(0, argumentWidth);
             else
-                width += argumentWidth;
+                width += Math.Max(0, argumentWidth);
         }
-        var resultType = ResolveResultType(anyNational, anyMax, width + SeparatorTotal(separatorWidth), runtime.Batch, collation);
+        var resultType = ResolveResultType(anyNational, anyMax, anyUnspecified, width + SeparatorTotal(separatorWidth), runtime.Batch, collation);
 
         if (this.kind == StringConcatKind.Concat)
         {
@@ -195,14 +199,27 @@ internal sealed class StringConcat : Expression
     /// <c>CONCAT('a',1,NULL,'b')</c> → <c>varchar(14)</c>,
     /// <c>CONCAT_WS('-','a','b','c')</c> → <c>varchar(5)</c>).
     /// </summary>
-    private static SqlType ResolveResultType(bool anyNational, bool anyMax, int width, BatchContext batch, CollationAccumulator collation)
+    /// <remarks>
+    /// <paramref name="anyUnspecified"/> — an argument carrying the
+    /// length-unspecified string form, which a bound ADO.NET / RPC string
+    /// parameter reaches the expression tree as — leaves the sum unusable, so
+    /// the result falls back to the family container the other length-deriving
+    /// scalars use for an unbounded operand (LEFT / STUFF / REPLICATE). Summing
+    /// such an argument as zero would project <c>nvarchar(1)</c> for a value of
+    /// any length, and a bounded COLMETADATA narrower than the ROW value's own
+    /// length prefix is a protocol error on the wire.
+    /// </remarks>
+    private static SqlType ResolveResultType(bool anyNational, bool anyMax, bool anyUnspecified, int width, BatchContext batch, CollationAccumulator collation)
     {
         var resolved = collation.Value ?? batch.CurrentDatabase.Collation;
         SqlType maxForm = anyNational ? SqlType.NVarcharMax : SqlType.VarcharMax;
         SqlType boundedForm = anyNational ? SqlType.NVarchar : SqlType.Varchar;
-        return anyMax
-            ? maxForm.WithCollation(resolved, collation.Rank)
-            : StringScalars.SizedResultType(boundedForm.WithCollation(resolved, collation.Rank), width, batch);
+        if (anyMax)
+            return maxForm.WithCollation(resolved, collation.Rank);
+        var family = boundedForm.WithCollation(resolved, collation.Rank);
+        return anyUnspecified
+            ? StringScalars.ContainerResultType(family, batch)
+            : StringScalars.SizedResultType(family, width, batch);
     }
 
     /// <summary>
@@ -268,6 +285,16 @@ internal sealed class StringConcat : Expression
         this.kind == StringConcatKind.ConcatWs ? separatorWidth * Math.Max(0, this.arguments.Length - 2) : 0;
 
     /// <summary>
+    /// The width an argument of unspecified declared length contributes —
+    /// no width at all, since none is known. Real never sees this case (every
+    /// operand it binds carries a declared length), but the simulator's
+    /// <c>varchar</c> / <c>nvarchar</c> types have a length-0 "size from the
+    /// value" form that a bound string parameter and the string-valued
+    /// container results carry, and it must not read as a width of zero.
+    /// </summary>
+    private const int UnspecifiedWidth = -1;
+
+    /// <summary>
     /// The maximum string width a single CONCAT / CONCAT_WS argument of
     /// <paramref name="type"/> contributes to the result length — probe-confirmed
     /// against SQL Server 2025 (2026-07-22). A string type contributes its
@@ -275,15 +302,17 @@ internal sealed class StringConcat : Expression
     /// implicit-conversion maxima (bit 1, tinyint 4, smallint 6, int 12,
     /// bigint 24, real / float 23, money / smallmoney 40, decimal / numeric 41,
     /// date / time / datetime / datetimeoffset / uniqueidentifier 40).
-    /// MAX-form arguments never drive the width — they route through
-    /// <see cref="IsMaxForm"/> and force a MAX result. A bare untyped NULL
-    /// literal contributes 0 (the caller special-cases it via
-    /// <see cref="Expression.IsBareNullLiteral"/>).
+    /// A var-family string of no declared length contributes
+    /// <see cref="UnspecifiedWidth"/>, which drives the whole result to the
+    /// family container. MAX-form arguments never drive the width — they route
+    /// through <see cref="IsMaxForm"/> and force a MAX result before the sum is
+    /// read. A bare untyped NULL literal contributes 0 (the caller
+    /// special-cases it via <see cref="Expression.IsBareNullLiteral"/>).
     /// </summary>
     private static int ArgumentWidth(SqlType type) => type switch
     {
-        VarcharSqlType v => v.length,
-        NVarcharSqlType nv => nv.length,
+        VarcharSqlType v => v.length > 0 ? v.length : UnspecifiedWidth,
+        NVarcharSqlType nv => nv.length > 0 ? nv.length : UnspecifiedWidth,
         CharSqlType c => c.length,
         NCharSqlType nc => nc.length,
         _ when type == SqlType.Bit => 1,

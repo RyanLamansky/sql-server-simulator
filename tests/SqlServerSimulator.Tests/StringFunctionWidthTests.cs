@@ -12,6 +12,12 @@ namespace SqlServerSimulator;
 /// through <c>SQL_VARIANT_PROPERTY(..., 'MaxLength')</c>, which reports the
 /// declared byte width (nvarchar doubles it).
 /// </summary>
+/// <remarks>
+/// One case can't be observed here: an argument of no declared width drives the
+/// whole result to the family container, and a <c>sql_variant</c> can't carry
+/// that form — it re-sizes the value on the way in. The container widths live in
+/// <c>StringLiteralWidthWireTests</c>, where COLMETADATA reports them directly.
+/// </remarks>
 [TestClass]
 public sealed class StringFunctionWidthTests
 {

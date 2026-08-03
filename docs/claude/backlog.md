@@ -99,38 +99,65 @@ Remaining phases, roughly in value order:
   Possible lever if paged drains ever matter: recognize index-supplied order in the `OFFSET/FETCH` path (real's plan shape) to skip the sort and bound the scan.
   Perf polish, not a fidelity gap.
 
+### sqllogictest differential sweep — surfaced gaps
+
+SQLite's sqllogictest corpus (7,195,342 query and 225,371 statement records across 622 `.test` scripts, cross-validated against several engines including SQL Server 2005 circa 2008, with per-engine `skipif mssql` / `onlyif mssql` directives) is staged at `.vs/sqllogictest/` (gitignored; provenance and re-download URL in its `README-provenance.md`).
+It is used in **differential mode**: a C# runner (`.vs/sqllogictest/runner/`, gitignored, usage in its `RUNNING.txt`) replays each record against the simulator in-process and the live local SQL Server 2025 side by side and diffs both directions.
+The stored expected results are 2008-era SQLite canonicalizations and are **not** the oracle — real is; the file tally is corroboration only (232,935 records where all three agree, 7 where both engines agree with each other and differ from the file).
+
+A pilot over 45 scripts (`select1..5`, all 12 `evidence/`, and a seeded sample of `index/` and `random/` recorded in `runner/pilot-phase2.txt`) covered 315,592 records at ~520 records/second, against a baseline of 206,380 exact and 26,560 order-insensitive matches.
+`select1..4` and every `index/` category ran clean; nearly every root below came from `random/expr` and `random/aggregates`, so a full sweep should be **weighted toward those 250 files** (~1 hour) rather than spread evenly over the ~4-6 hours the whole corpus costs.
+
+Two harness lessons worth carrying to any future differential runner, since both silently fabricate or inflate findings:
+a swallowed simulator exception reports as a *clean run*, which manufactures entries in the over-permissive class specifically (the simulator materializes a row-returning statement's error on the first `Read` rather than at `ExecuteReader`, so a loop that skips `Read` when `FieldCount == 0` never sees it);
+and a `statement` record that errors on both engines can still have applied a different prefix of its batch to each, so state divergence has to taint the rest of the script or every later mismatch reads as an independent wrong-answer bug.
+
+Roots surfaced (each reproduced minimally from a clean state, against both engines):
+
+- **One trailing garbage identifier after a completed clause is swallowed**: `SELECT a FROM t zzz qqq`, and the same after `WHERE` / `GROUP BY` / `ORDER BY` / a comma-FROM list, return rows where real raises Msg 102 at the second identifier.
+  Exactly one extra identifier is consumed, and the no-`FROM` path is already tight (`SELECT 1 zzz qqq` is Msg 102 on both).
+  This is the identifier half of the trailing-token rule [`grammar.md`](grammar.md) records as narrowed to value literals — now with concrete shapes.
+- **`DbDataReader.RecordsAffected` counts rows returned** rather than rows affected: 0 for an INSERT that affected one row, and the row count for a SELECT where SqlClient answers -1.
+  `ExecuteNonQuery` matches real exactly (-1 for DDL, N for DML), so only the reader path diverges — see [`data-reader.md`](data-reader.md).
+- **Real folds a comparison against the NULL literal at compile time and never evaluates the other operand**, while the simulator evaluates eagerly: `WHERE NULL > a*a*a*a*79` is 0 rows on real and Msg 8115 here, and `HAVING NULL <> b` is 0 rows on real and Msg 8121 here — real skips even the *binding* check.
+  A constant-false conjunct written first (`WHERE 1 = 0 AND a/0 > 1`) agrees on both.
+  Whether to model optimizer-visible short-circuiting is a judgement call, not just a fix.
+- **Msg 102 where real raises Msg 156 naming the keyword**, at a residue of sites (`NOT`, `NULL`, `INTO`, `OR`, `UPDATE`, `DELETE`, `INSERT`); the simulator already reports Msg 156 correctly elsewhere, so this is site-specific rather than a missing error.
+  Also `DROP INDEX <1-part>` is real's Msg 159, the simulator's Msg 102.
+- **Many-way joins do not scale**: `select5`'s 20-24-table equi-joins answer in milliseconds on real and exceed a 15-second `CommandTimeout` here, one of them running past a 40-second wall without honoring its own timeout.
+  Not a correctness gap, but it consumed roughly three quarters of the pilot's wall clock — see the join-strategy notes in [`joins.md`](joins.md).
+
+Closing those five surfaced further divergences, none of them touched, each probe-confirmed against SQL Server 2025 (2026-08-03):
+
+- **A `FROM`-less star is three behaviors real distinguishes and the simulator answers Msg 102 for all**: `SELECT *`, `SELECT 1, *` and `SELECT COUNT(*), *` are **Msg 263** ("Must specify table to select from."), `SELECT t.*` is **Msg 107**, and `EXISTS (SELECT *)` is legal.
+- **`<binary> <operator> <approximate>`** (`0x02 + CAST(2 AS real)`) is real's **Msg 206** in both operand orders for `+ - * /`; the simulator raises `NotSupportedException`.
+- **`STDEV` / `VAR` over `money`** is `float` on real; the simulator raises **Msg 529**.
+- **An integer literal padded past 12 characters is `numeric(significant_digits, 0)`**, not `int` — `SELECT 0000000000300` is `numeric(3, 0)` on real while the 11-character `00000000300` is `int`.
+  `NULLIF` inherits it, so `NULLIF(0000000000300, 1)` is `numeric(3, 0)` on real and `smallint` here; the rule belongs to the bare-literal tokenizer, not to NULLIF — see [`arithmetic.md`](arithmetic.md).
+- **Real answers a statement's binder errors together where the simulator raises the leading one alone** — `INSERT` reports 207 + 110, and 273 + 10709, as one multi-error response.
+  The module-body bind already gathers every error of a *body*; this is the same shape for a single statement — see [`programmable.md`](programmable.md).
+
+The sweep also produced a **data-loss repro for the parse-phase batch divergence** [`control-flow.md`](control-flow.md) already lists as accepted: `INSERT INTO t VALUES(3,'z'); SELECT ~~~ FROM;` leaves the row inserted here and rejects the whole batch on real (Msg 156, and Msg 159 for the `DROP INDEX` shape), so the accepted-divergence rationale — that real tooling never sends invalid batches — now has a measured cost in silent state divergence rather than only in error timing.
+Runtime errors (Msg 208 deferred name, Msg 8134) correctly leave earlier statements applied on both, so the divergence is specifically parse-phase.
+
 ### Django ORM test-suite shakedown — surfaced gaps
 
 Running Django 5.1's own ORM test apps over the wire (mssql-django 1.7 / pyodbc) against the endpoint is a high-yield real-application oracle (harness: the runner's own `test_*` database via real `CREATE`/`DROP DATABASE` — no configuration override needed since those ship — plus an incremental failing-SQL logger wrapping `mssql.base.CursorWrapper.execute`).
 **Give the `other` alias a database of its own, not a `TEST MIRROR`**: a mirror aliases the same database, so Django's `MultiDbTests` write through one connection while the `TestCase`'s atomic block holds locks on the other and the two self-block forever — `order_with_respect_to.test_database_routing` and `prefetch_related.MultiDbTests` both hang, on real SQL Server exactly as on the simulator, so it is a harness artifact and not an oracle signal.
 **The bar is parity with real, not absolute 100%**: many Django ORM tests fail on *real* SQL Server + mssql-django too (its own emulation limits), so the target is that the simulator fails exactly the tests real fails. Measured on a 20-app ORM slice (1021 tests): real fails 42, the simulator fails 43 — a **13-test sim-only delta** (the other 30 sim failures also fail on real). Compute the delta with `comm -23 <sorted sim FAIL/ERROR test names> <sorted real ones>`, not the raw sim count.
 
-Fixed across the passes (parity-closing): `SET NOCOUNT ON` count suppression (blocked every identity insert — [`control-flow.md`](control-flow.md) / the DONE-token contract); year-first slash/dot date parsing ([`casting.md`](casting.md)); `INSERT … VALUES (DEFAULT)` / `db_default` ([`dml.md`](dml.md)); the implicit-conversion cluster (varchar→temporal in DATEDIFF/DATEPART, varchar operand in numeric arithmetic, DATEADD `bigint` interval — [`casting.md`](casting.md) / [`arithmetic.md`](arithmetic.md)); universal non-string→varchar coercion in `LIKE`; `@ $ #` in unquoted identifier bodies ([`grammar.md`](grammar.md)).
 A `dbo.REGEXP_LIKE` built-in was **tried and reverted** — faking it as a built-in is a fidelity break, because on real the name resolves only when mssql-django's regex **CLR assembly** is installed. CLR scalar functions now ship, so the authentic path works: `EnableClr` + mssql-django's own `install_regex_clr` sequence loads `regex_clr.dll` and `dbo.REGEXP_LIKE(...)` evaluates (verified end-to-end against the real `regex_clr.dll`, with `clr_name` and MvID matching the live server byte-for-byte). See [`clr-assemblies.md`](clr-assemblies.md).
-The compatibility-level-170 keyword reservation that makes that unbracketed spelling a Msg 156 syntax error now ships too, alongside the native `REGEXP_*` family — see [`grammar.md`](grammar.md#compatibility-gated-reservation-regexp_like) and [`scalars.md`](scalars.md#the-native-regexp_-family-sql-server-2025).
 
 Re-measured 2026-07-29 on a 21-app ORM slice (**2069 tests**): **sim-only 0**, real-only 27, 74 failing on both.
 The runner is `runtests.py --settings=<sim|real> --parallel=1 --noinput -v2 <apps>` against a `ListenLocalAsync` host, with the delta taken **both** ways.
 
 **Widened 2026-08-02 to a 35-app slice weighted toward ORM SQL and schema emission** (`annotations backends bulk_create constraints custom_columns custom_lookups dates datetimes db_functions defer defer_regress distinct_on_fields expressions_case expressions_window field_defaults force_insert_update generic_relations indexes introspection m2m_through model_fields model_indexes nested_foreign_keys null_queries one_to_one order_with_respect_to pagination prefetch_related queryset_pickle select_for_update select_related signals transactions update update_only_fields`, **2402 tests**): sim-only **26**, real-only **23**, 49 failing on both.
-Of the 26, **15 closed in the same pass** (the `INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE` cluster, below); the rest are filed here.
+Of the 26, 15 closed in the same pass; the rest are filed here.
 `schema` (219 tests) was dropped from the measured slice for runtime — it is minutes-per-test on *both* sides over the wire, so it needs its own session rather than a place in a whole-slice run.
 Run the two sides **one at a time**: two runners against one endpoint share the `test_*` database and wedge each other on locks, which reads exactly like a simulator blocking bug.
 
-Roots this widening found and **fixed**:
-
-- **`INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE` / `CONSTRAINT_TABLE_USAGE` were missing** → Msg 208, which failed every `introspection` (6), `constraints` (3) and `indexes` (6) test, since `mssql-django`'s `get_relations` joins the first twice. Both ship — see [`catalog-views.md`](catalog-views.md).
-- **`NOWAIT` was a parse-and-discard table hint**, so `select_for_update(nowait=True)`'s `WITH (NOWAIT, ROWLOCK, UPDLOCK)` blocked forever instead of raising **Msg 1222** and the whole app hung. It now zeroes the lock timeout for the table it names (probe-confirmed per-table, not per-statement) — see [`locking.md`](locking.md#hint-surface).
-- **`READPAST` never fired beside `UPDLOCK` / `XLOCK`** (the skip was checked only on the read-committed probe path, not when the plan carries a row mode), so `select_for_update(skip_locked=True)` blocked too — see [`locking.md`](locking.md#hint-surface).
-- **The 128-character identifier limit counted the delimiters**, so the exactly-128-character table name Django's schema editor emits for a long model's implicit m2m table was Msg 103 and aborted the whole `backends` app at migrate time — see [`grammar.md`](grammar.md).
-- **A named `CONSTRAINT n …` clause after an unnamed inline key** (`c int NOT NULL UNIQUE CONSTRAINT ck CHECK (…)`) was Msg 102 — see [`constraints.md`](constraints.md).
-- **An inline `UNIQUE` / `PRIMARY KEY` as the batch's last token** (`ALTER TABLE t ADD c int NULL UNIQUE`, which CREATE TABLE always follows with a paren) was Msg 102 — see [`alter-table.md`](alter-table.md).
-
 Roots **filed** (still open):
 
-- **`SELECT CONCAT(?, ?)` over ODBC corrupts the TDS stream** — "Protocol error in TDS stream" on the read, and the connection is unusable afterwards, so the seven `model_fields.test_uuid.TestQuerying` tests that reach `mssql-django`'s `sqlserver_replace` all fail with Django's own "Cannot open a new connection in an atomic block".
-  Minimal repro: `pyodbc … .execute("SELECT CONCAT(?, ?) AS v", ('a','b'))`; **any** parameter argument triggers it (`CONCAT(?, 'x')` too), while `? + ?`, `CONCAT('a','b')`, `SELECT ? AS v`, `CAST(? AS nvarchar(max))` and the same CONCAT with `DECLARE`d variables or an explicit `EXEC sp_executesql` all pass, on the simulator as on real.
-  The shape points at COLMETADATA and ROW disagreeing on the result's MAX-ness: `StringConcat.GetSqlType` settles the width from the arguments' *static* types while `Run` re-settles it from the runtime ones, so a parameter whose prepared-statement type differs from its bound value flips one side to PLP and not the other.
 - **`DBCC CHECKIDENT` isn't parsed** → Msg 102 near `CHECKIDENT`, failing Django's `sql_flush` (`backends.base.test_operations.SqlFlushTests.test_execute_sql_flush_statements`, `backends.tests.LongNameTest.test_sequence_name_length_limits_flush`).
   The `RESEED` / `NORESEED` forms with `WITH NO_INFOMSGS`, and the informational row real prints, are the work.
 - **A `decimal` beyond .NET `decimal`'s range surfaces as `SqlServerSimulator: unhandled OverflowException`** (Msg 50000) rather than a modeled error — `model_fields.test_decimalfield`'s `max_digits=38` model. The 28-significant-digit ceiling is the documented backing-type quirk; the *unhandled-exception* surface is the part worth closing.
@@ -143,30 +170,15 @@ Getting there took eleven roots, and the pattern worth keeping is that failures 
 - **Qualifier-blindness in name resolution** was the single largest class — a leaf-only match binds to the wrong column whenever a join brings a same-named one into scope, silently. It was wrong in four resolvers ([`query.md`](query.md#order-by-term-resolution)).
 - The rest: outer-scope correlation from the select list, `UPDATE … SET` subqueries, parenthesized set-op branches, `OUTPUT … INTO` destination coercion, DISTINCT over a grouped projection, collation-aware `REPLACE` / `CHARINDEX`, aggregate re-homing across scopes, and `sys.time_zone_info`.
 
-The set-op ORDER BY binding this exposed (Msg 104 for a term that binds in the first branch's FROM scope but isn't projected, Msg 207 / 4104 for one that binds nowhere) ships — see [`query.md`](query.md#top-level-order-by-over-a-set-operation).
-The DISTINCT counterpart (qualified term leaf-matched against the output names) is fixed.
-
-The constant-term rejection that exposed (**Msg 408**, plus **Msg 1008** for a bare variable term, and **Msg 5308** / **5309** for the same folded constant inside `OVER` / `WITHIN GROUP`) ships — see [`query.md`](query.md#constant-terms-msg-408-and-bare-variables-msg-1008).
-
 **Over-permissive validation — the simulator *accepts* what real *rejects*.** This is the more dangerous divergence direction (an app query works on the simulator and breaks on real), and it is invisible to a sim-only failure list: surface it with the *reverse* delta `comm -13 <sim fails> <real fails>`, where real-only failures mean the simulator over-passes. **Whole-suite audits should always run the reverse delta — a green "matches real" claim requires both directions.**
 
-The aggregate / GROUP BY binding rules this exposed (Msg 8120 / 8121 / 8127 containment, then Msg 130 / 8117 / 144 / 164) all ship — see [`query.md`](query.md#aggregate--group-by-binding-rules) and `GroupByContainmentTests` / `AggregateBindingRuleTests`.
 Worth keeping from that round: the backlog's own statement of the Msg 164 rule was wrong until probed (it is **not** about non-determinism — `GROUP BY a + DATEPART(year, GETDATE())` is legal — but purely "contains at least one column of the query's own sources"), which is the argument for probing a rule before encoding it even when a prior entry states it confidently.
 
 Not sim bugs (**fail on real too** — leave alone): boolean-expression `=` comparison `WHERE (a<%s)=(b<%s)` → Msg 4145 on both; `CAST(<numeric> AS datetime2)` → Msg 529 on both (Django's DurationField tests expect it); most `get_or_create` `manual_pk`/duplicate IntegrityError tests (the savepoint-rollback-after-constraint pattern was probed identical to real). Not Django-specific: default-path string→date parsing is language-neutral, so `'1/2/3'` raises Msg 241 where real's `us_english` reads it mdy (deliberate — see [`casting.md`](casting.md)).
 
-### Result-set serialization: `FOR XML`
+### Result-set serialization: `FOR XML` / `FOR JSON`
 
-The JSON/XML *functions* (OPENJSON / JSON_VALUE / JSON_QUERY / JSON_MODIFY / JSON_OBJECT / JSON_ARRAY / etc.; the XML type + XQuery-subset methods — see [`json.md`](json.md), [`xml.md`](xml.md)) all ship.
-
-**`FOR JSON` ships** — PATH (fully, incl. dotted-alias nesting + all four options), AUTO including join-nesting, the probed value-formatting/escaping table, raw-embedding of nested FOR JSON / JSON_QUERY, Msg 13600 / 13601 / 13602 / 13605 / 13620.
-See [`json.md`](json.md#for-json-result-serialization).
-
-**`FOR XML` ships** — RAW / AUTO / PATH / EXPLICIT (PATH fully: `@attr` / element / `parent/child` nesting / the whole node-function set — `text()` / `data()` / `node()` / `*` / `comment()` / `processing-instruction(target)`, with Msg 6853 / 6854 / 6879 / 9322 — / unnamed-as-text / `PATH('')` row-tag omission / same-name concatenation; EXPLICIT's universal table with its directive set and Msg 6801 / 6802 / 6803 / 6804 / 6805 / 6806 / 6807 / 6812 / 6813 / 6815 / 6817 / 6820 / 6824 / 6825 / 6826 / 6827 / 6833 / 6834 / 6835 / 6859 / 3625), the `ELEMENTS [XSINIL|ABSENT]`, `BINARY BASE64`, `TYPE` and `ROOT[('name')]` options and the Msg 102 a repeat of any of them raises, the `WITH XMLNAMESPACES` prefix (declaration placement per mode, prefixed PATH / row / ROOT names, `DEFAULT`, and Msg 6868 / 6869 / 6870 / 6871 / 6872 / 6873 / 6874), AUTO's `dbobject` binary references and their Msg 6830 / 6831 split, AUTO over a set-operation result, the probed value-formatting (bit → `1`/`0`, scientific float, ISO dates, base64 binary, uppercase GUID) + position-dependent escaping table, NULL handling, the typed-vs-untyped result column and its empty-rowset asymmetry, node-embedding of every `xml`-typed column, the `_xHHHH_` **XML-name escaping** RAW / AUTO apply and the rejections PATH and the explicit row / ROOT names raise instead (Msg 6850 / 6846 / 6867 / 6849), the Msg 6819 refusal on an INSERT / SELECT INTO / assignment SELECT, and Msg 6800 / 6809 / 6851 / 6864 / 6852 / 6861 / 6829.
-AUTO's join-nesting heuristics (level order, computed-column placement, consecutive-row collapse) are tabulated in [`xml.md`](xml.md#auto-nesting-shared-with-for-json-auto) and shared with FOR JSON AUTO.
-See [`xml.md`](xml.md#for-xml-result-serialization).
-
-Not built yet within them:
+Both clauses ship (see [`xml.md`](xml.md#for-xml-result-serialization), [`json.md`](json.md#for-json-result-serialization)); these are the parts that don't:
 - **`XMLSCHEMA` / `XMLDATA`** (inline schema emission).
   EXPLICIT + `XMLSCHEMA` reports real's own Msg 3625 instead.
 - **One-row chunking** — real chunks the string across ~2033-char rows; the simulator returns it whole (shared by both clauses).
@@ -225,18 +237,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **A GROUP BY view's aggregate column is Msg 4403** where real reports **Msg 4406** — real splits by which column the write names, `SET <group-by column>` being 4403 and `SET <aggregate column>` 4406 since the aggregate is a derived field (probe-confirmed, through a chained view too).
   `RejectionReason` settles the whole view before any column is looked at, so the per-column gate never runs on a shape that already failed; letting the 4406 walk run first on an aggregate / DISTINCT body is the work.
   → [`programmable.md`](programmable.md#updatable-views-dml-through-views).
-Tracked elsewhere: the recursive-CTE construct restrictions (Msg 460 / 461 / 462 / 467) now ship — see [`ctes.md`](ctes.md#recursive-member-restrictions).
-A malformed JSON document now raises **Msg 13609** wherever real does, root-level scalars included, across `JSON_VALUE` / `JSON_QUERY` / `JSON_MODIFY` / `OPENJSON` / `ISJSON` — see [`json.md`](json.md#msg-13609--the-document-isnt-json-text).
-`JSON_MODIFY` now splices the document's own text instead of reserializing it, and a repeated property name resolves to the first occurrence everywhere (which is also what closed the `ArgumentException` `JsonNode.Parse` used to escape) — see [`json.md`](json.md#json_modify-edits-the-source-text) and [Duplicate property names](json.md#duplicate-property-names--the-reader-stops-at-the-first).
-Integer-literal typing and the Msg 8116 id / style argument gates that depend on it now ship too — see [`arithmetic.md`](arithmetic.md#integer-literals-past-ints-range-type-numericdigit_count-0) and [`scalars.md`](scalars.md#gated-argument-slots).
-So does compile-time binding of predicates: a cross-collation comparison / unification (Msg 468 / 457), a legacy-LOB string-scalar argument (Msg 8116) and an unknown column (Msg 207) now all report over an **empty** rowset and at CREATE of a module — see [`collations.md`](collations.md#compile-time-binding).
-That last one covers `HAVING MAX(nosuchcol) = 1`, whose name resolves in no scope at all.
-A module body now reports **every** binder error it contains rather than the first, with the shape violations behind them and Msg 455 last, and a bare `RETURN` in a scalar UDF raises **Msg 1075** while `NEWSEQUENTIALID()` in a function body raises **Msg 443** — see [`programmable.md`](programmable.md#create-time-body-binding).
-The dependency surfaces ship too — `sys.sql_expression_dependencies`, the `sys.dm_sql_referencing_entities` / `sys.dm_sql_referenced_entities` pair, the legacy `sys.sql_dependencies` / `sysdepends` pair and `sp_depends`, all computed on read from stored definition text, which is what makes real's own name-based refresh semantics (a DROP nulls the id, a recreate restores it, an `sp_rename` leaves the stale name) fall out — see [`catalog-views.md`](catalog-views.md#expression-dependencies).
-So does `CREATE CLUSTERED INDEX … INCLUDE (…)`'s **Msg 10601** — see [`indexes.md`](indexes.md#grammar).
-An unresolved collation now propagates as SQL Server's *No collation* label instead of throwing where it arises, so the Msg 457 / 451 split keys off the result family and the consuming operation reports its own Msg 4191 / 446 / 456 / 5335 — see [`collations.md`](collations.md#an-unresolved-collation-propagates--coercibilitynocollation).
-The function body-shape rules (Msg 455 / 444 / 443 / 1075) ship too — see [`programmable.md`](programmable.md#body-shape-rules--msg-455--444--443--1075).
-`JSON_MODIFY` now refuses the third-argument types real refuses (**Msg 8116**, bound while compiling), the JSON builders and aggregates escape `/` as `\/` the way real does, and the path grammar takes whitespace between all its tokens and reports **Msg 13607** with real's character, position and State — see [`json.md`](json.md#the-path-grammar).
 
 ## Fidelity gaps in shipped behavior
 
@@ -300,6 +300,11 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   The string-rendering paths format from the declared `SqlType` and are unaffected, and the same 28-digit ceiling already bounds the type's *value* range, so closing this means a decimal representation of the simulator's own rather than a change at the stamp.
 - **`DEGREES` / `RADIANS` over a `numeric` argument diverge from real in the last ~3 of the 18-digit result** — the simulator's `DecimalPi` constant carries less effective precision than real's conversion; surfaced while auditing the declared-scale stamp (2026-08-02), pre-existing and independent of it.
   Closing it means re-deriving the constant (or the multiply) at full `decimal` precision and diffing the two functions' probed answers across magnitudes.
+- **Declared string widths — four neighbours surfaced while fixing `CONCAT`'s width-less argument** (2026-08-03), all probe-confirmed against SQL Server 2025 and each independent of the others.
+  A **bound string parameter** carries the length-unspecified `varchar` / `nvarchar` form rather than the width its RPC declaration (or `DbParameter.Size`) names, so `SELECT @p` advertises the family container where real advertises the declared width and `CONCAT(?, ?)` over two `nvarchar(2)` parameters is `nvarchar(4000)` where real says `nvarchar(4)`; carrying the width also means carrying real's truncation of a longer value to it (`EXEC sp_executesql N'SELECT @a', N'@a nvarchar(2)', N'abcdef'` → `ab`), which is what makes it a change of substance rather than a type-stamp.
+  **`sys.columns.max_length` reports 1 for a container-typed expression** — a computed column or `SELECT … INTO` destination off `REPLACE` / `TRANSLATE` / a width-less `CONCAT` — where real reports 8000 / 4000; the value stores in full, only the reported width is wrong, and it comes from the length-0 form having no `max_length` mapping of its own.
+  **`REPLACE` drops MAX-ness**: its result is the bounded container whatever the input, so `REPLACE(<varchar(max)>, …)` advertises `varchar(8000)` where real carries `varchar(max)` — the other length-deriving scalars branch on `StringScalars.IsMaxForm` first and `REPLACE` doesn't.
+  And smallest, from the same probe: **`TRANSLATE` projects `nvarchar` for a `varchar` input** where real keeps `varchar`.
 - **`sys.database_permissions` has no seed rows** — a fresh real database already carries the grants every database starts with (`public` holding `CONNECT`, `VIEW ANY COLUMN` and `VIEW ANY DEFINITION`, a per-user `CONNECT`, and the `SELECT` grants on the system objects); the simulator's view projects only what `GRANT` / `DENY` explicitly added, so a tool that reads the starting grant set sees an empty one.
   Large: the seed set is per-principal and per-system-object, and `HAS_PERMS_BY_NAME` / the enforcement walk would have to agree with it.
   See [`permissions.md`](permissions.md).
@@ -315,8 +320,6 @@ Of the ~990 lines in fully-uncovered methods, ~376 are `DebugDisplay` / `ToStrin
   A PERSISTED computed column is accepted and does have a slot, so it takes the seek path.
   Left in place as a guard on the storage layout rather than deleted.
 - **`ClrAssemblyMetadata.ComputePublicKeyToken` / `DescribeReference`** — strong-named assembly identity and the assembly-reference description.
-
-Covered since the first measurement, each of which turned out to be hiding a behavior bug rather than just a missing test: `SqlBulkCopy` / TVP rows carrying the `time` / `smalldatetime` / `datetimeoffset` / ANSI-string / `xml` families (which is where the xml byte-order-mark strip surfaced), the BCP temporal family (DacFx writes `time` / `datetime2` / `datetimeoffset` at maximum width scaled to 7 digits, and `datetimeoffset` in UTC — reading them per-precision failed the entire table's data file, invisible while only precision-7 fixtures existed), `INFORMATION_SCHEMA.PARAMETERS` (no scalar-function return row, wrong `CHARACTER_MAXIMUM_LENGTH` rule, `sysname` not resolved to its base type), the DYNAMIC cursor's scroll directions (`DECLARE … CURSOR DYNAMIC` was treated as forward-only, `RELATIVE` was rejected outright, and the forward-only rejection used Msg 16925's wording instead of Msg 16911's), and the public `SimulatedDbParameterCollection` indexers plus `SimulatedSqlResultSet.HasRows`.
 
 Worth re-measuring after a large bundle rather than routinely, and worth acting on when it does run: **nothing this pass surfaced was merely an untested-but-correct path.**
 It found two pieces of dead code — a duplicated MERGE type resolver, and an unreachable ON-UPDATE-CASCADE branch whose stub threw an exception saying so — and every gap that was then covered turned out to be hiding a behavior bug.

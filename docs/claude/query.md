@@ -234,6 +234,32 @@ Sort keys decode only the ORDER BY columns off each row (`ComputeTopLevelOrderKe
 ## Aggregates
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT)` / `COUNT_BIG`, `SUM` / `AVG`, `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`.
 `AVG(int)` truncates; `AVG(decimal(p,s))` widens to `decimal(38, max(s,6))`.
+`SUM` / `AVG` also widen `real` to `float` and `smallmoney` to `money`, where `MIN` / `MAX` keep the operand's type — see [`arithmetic.md`](arithmetic.md#the-approximate-family-float--real).
+
+### Over a source-less SELECT
+
+A SELECT with no FROM clause reads **one synthesized row**, so an aggregate written over it collapses that row to a single group exactly as one over a one-row table would: `SELECT COUNT(*)` is 1 and `SELECT MIN(-57)` is -57 on real.
+`ParseInner`'s FROM-less exit routes such a query to the ordinary `BuildSqlProjection` over an *empty* source array whenever it carries an aggregate, a GROUP BY, a HAVING or a window, and `EnumerateJoinedRows` supplies that one row for a zero-length source array.
+The whole aggregate / grouping / window machinery — implicit empty group, `Aggregator` dispatch, DISTINCT, TOP / OFFSET / FETCH, ORDER BY, the Msg 130 / 144 / 164 binding rules, `SELECT … INTO` schema inference — then applies unchanged.
+The constant-row path (`BuildSynthesizedSqlRow`, which bakes the projection at parse time) still serves every other FROM-less SELECT, `SELECT 1` included; an aggregate cannot ride it, because an aggregate's value is not a property of its expression alone.
+
+The row count is where the shapes diverge, and each is probe-confirmed:
+
+| Shape | Real | Why |
+| --- | --- | --- |
+| `SELECT COUNT(*)` | `1` | one synthesized row, counted |
+| `SELECT COUNT(*) WHERE 1 = 0` | `0` | WHERE removes the row, the implicit empty group survives it |
+| `SELECT MIN(-57) WHERE 1 = 0` | `NULL` | same group, MIN of no rows |
+| `SELECT 1, COUNT(*) WHERE 1 = 0` | `1, 0` | a constant projects beside the aggregate; it is not a column, so no GROUP BY rule reaches it |
+| `SELECT COUNT(*) OVER () WHERE 1 = 0` | *no rows* | a window has no group to collapse to, so losing the row loses the result row |
+| `SELECT 1 HAVING 1 = 2` | *no rows* | HAVING alone makes it an aggregate query, and the predicate discards the group |
+| `SELECT COUNT(*) GROUP BY ()` | `1` | the empty grouping set is one group over the whole rowset |
+| `SELECT COUNT(*) GROUP BY 1` | **Msg 164** | a GROUP BY item naming no column, the rule that leaves `()` as the only form a source-less query accepts |
+
+A star with no FROM to expand against is real's **Msg 263** ("Must specify table to select from.") where the simulator reports Msg 102 at the star — `SELECT *` and `SELECT 1, *` alike, and `SELECT COUNT(*), *` reaches the same Msg 102 through the routing above.
+Real splits a *qualified* star off from that: `SELECT t.*` is Msg 107, the unmatched-column-prefix error, and an `EXISTS (SELECT *)` body is legal (its projection is discarded), so the three cases don't share one answer.
+
+Oracle: `SourcelessAggregateTests`.
 
 ## Outer-scope correlation in the select list
 

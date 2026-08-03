@@ -594,8 +594,17 @@ internal abstract class TwoSidedExpression : Expression
 
     private protected static SqlValue ApproximateArithmetic(SqlValue left, SqlValue right, char op)
     {
-        var resultIsReal = left.Type == SqlType.Real && right.Type == SqlType.Real;
-        SqlType resultType = resultIsReal ? SqlType.Real : SqlType.Float;
+        // The result type comes from the same promotion source of truth the
+        // projection schema reads, so the two can't disagree — real wins over
+        // every partner except float (`real + int` → real, `real + float` →
+        // float), and a mismatch here is what the row encoder rejects.
+        // Computation still runs in double whatever the result type, then
+        // rounds to single for a real result: probe-confirmed against SQL
+        // Server 2025 that `CAST(16777216 AS real) + CAST(1 AS bigint)` and
+        // `… + CAST(1 AS real)` return the same 0x4B800000, and `CAST(1 AS
+        // real) / 7` matches `CAST(CAST(1 AS float) / 7 AS real)` bit for bit.
+        var resultType = SqlType.PromoteForArithmetic(left.Type, right.Type, op);
+        var resultIsReal = resultType == SqlType.Real;
         if (left.IsNull || right.IsNull)
             return SqlValue.Null(resultType);
 

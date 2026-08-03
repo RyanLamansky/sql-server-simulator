@@ -1308,7 +1308,13 @@ internal sealed partial class Selection
                     intoTarget = BatchContext.ParseObjectName(context);
                     continue;
 
-                case ReservedKeyword { Keyword: Keyword.Where }:
+                // WHERE / GROUP BY / HAVING with no FROM clause. All three are
+                // legal against the one synthesized row a source-less SELECT
+                // reads (`SELECT COUNT(*) HAVING COUNT(*) > 0` → 1 row,
+                // `SELECT 1 GROUP BY ()` → 1 row, probe-confirmed), and
+                // ConsumeWhereAndOrderBy already reads them in grammar order
+                // from whichever of the three the cursor sits on.
+                case ReservedKeyword { Keyword: Keyword.Where or Keyword.Group or Keyword.Having }:
                     ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy);
                     goto ExitWhileTokenLoop;
 
@@ -1372,6 +1378,27 @@ internal sealed partial class Selection
             throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
         if (topWithTies && fromClause.OrderBy.Count == 0)
             throw SimulatedSqlException.TopWithTiesRequiresOrderBy();
+
+        // A source-less SELECT that aggregates, groups, filters groups or
+        // windows takes the ordinary projection builder over an empty source
+        // array rather than the constant-row path below: real reads such a
+        // query as one over a single synthesized row, so the whole aggregate /
+        // GROUP BY / HAVING / window machinery applies unchanged (probe-
+        // confirmed — `SELECT COUNT(*)` is 1, `SELECT COUNT(*) WHERE 1=0` is 0
+        // because the implicit empty group survives a WHERE that admits no row,
+        // and `SELECT COUNT(*) OVER () WHERE 1=0` is *no* rows because a window
+        // has no group to collapse to). EnumerateJoinedRows supplies that one
+        // row for an empty source array. Baking the projection at parse time —
+        // what the constant-row path does — cannot express any of this, since
+        // an aggregate's value isn't a property of the expression alone.
+        if (aggregates.Count > 0 || windows.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null)
+        {
+            return BuildSqlProjection(context.Batch, [], [], expressions, fromClause, distinct,
+                topExpression, topPercent, topWithTies, aggregates, windows,
+                context.OuterTypeResolver ?? outerTypeResolver, ResolveAssignmentMode(expressions),
+                intoTarget, context.ReadColumnSink, projectionDiscarded);
+        }
+
         // The FROM-less path bakes its projection values at parse time and
         // never plan-caches (BuildSynthesizedSqlRow disqualifies the batch),
         // so its counts resolve here once, exactly as its projection does.

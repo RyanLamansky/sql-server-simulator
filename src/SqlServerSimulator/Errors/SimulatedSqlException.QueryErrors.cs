@@ -430,6 +430,22 @@ partial class SimulatedSqlException
         new("The select list for the INSERT statement contains more items than the insert list. The number of SELECT values must match the number of INSERT columns.", 121, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 110: an <c>INSERT … VALUES</c> whose tuples are
+    /// wider than the statement's own column list. The VALUES counterpart of
+    /// Msg 121; the column-list-less form reports Msg 213 instead.
+    /// </summary>
+    internal static SimulatedSqlException FewerInsertColumnsThanValues() =>
+        new("There are fewer columns in the INSERT statement than values specified in the VALUES clause. The number of values in the VALUES clause must match the number of columns specified in the INSERT statement.", 110, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 109: an <c>INSERT … VALUES</c> whose tuples are
+    /// narrower than the statement's own column list. The VALUES counterpart of
+    /// Msg 120; the column-list-less form reports Msg 213 instead.
+    /// </summary>
+    internal static SimulatedSqlException MoreInsertColumnsThanValues() =>
+        new("There are more columns in the INSERT statement than values specified in the VALUES clause. The number of values in the VALUES clause must match the number of columns specified in the INSERT statement.", 109, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 239: a <c>WITH</c> prefix declares two or more
     /// CTEs with the same name in one statement.
     /// </summary>

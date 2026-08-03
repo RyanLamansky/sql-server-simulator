@@ -30,6 +30,35 @@ Every other operator errors, matching SQL Server: `- % & | ^` → **Msg 402** (`
 
 `BuildSynthesizedSqlRow` (FROM-less SELECT) runs each expression first (surfacing runtime-only errors with operator-name wording), then `GetSqlType` for schema, then bridges any mismatch via `CoerceTo` — required for mixed-type CASE/Coalesce without a FROM clause.
 
+## The approximate family (`float` / `real`)
+
+`real` is not a way-station on the road to `float`: it **wins over every arithmetic partner except `float`**, so `real + int`, `real * decimal(10, 2)`, `real / money` and `real - bit` are all `real`, in either operand order, and only a `float` on either side makes the result `float`.
+Probe-confirmed against SQL Server 2025 over the whole approximate row and column of the operator matrix (both approximate types × `int` / `bigint` / `smallint` / `tinyint` / `decimal` / `numeric` / `money` / `smallmoney` / `bit`, both orders, `+ - * /`).
+
+The **value** is computed in `double` whatever the result type, then rounded to single for a `real` result — real's own answer, not an approximation of it: `CAST(16777216 AS real) + CAST(1 AS bigint)` returns `0x4B800000` exactly as `… + CAST(1 AS real)` does (the `+1` falls off the end of single's mantissa), and `CAST(1 AS real) / 7` is bit-identical to `CAST(CAST(1 AS float) / 7 AS real)`.
+So one `double` computation plus a `(float)` narrowing reproduces both types, and the only thing that has to be got right is *which* type the result is.
+
+`ApproximateArithmetic` takes that result type from `SqlType.PromoteForArithmetic` rather than deciding it locally — the same single source of truth `TwoSidedExpression.GetSqlType` and `DecimalArithmetic` read.
+Deciding it locally is what broke: a former `left == Real && right == Real` test made `real + int` produce a `double` while the projection schema declared `real`, and the row encoder's `valueType == columnType` check surfaced that to the consumer as a raw `ArgumentException` — the mismatch this file's static/runtime-parity requirement exists to prevent.
+The FROM-less path hid it, since `BuildSynthesizedSqlRow` bridges a mismatch with a `CoerceTo`; only a read with a real FROM clause reached the encoder.
+`RealTypePromotionTests.Arithmetic_EveryNumericPair_RuntimeValueMatchesDeclaredType` walks every numeric pair × every operator through a table for exactly that reason: reaching the encoder *is* the parity assertion.
+
+**Modulo has no float form at all.**
+An approximate operand on either side raises, splitting the way the `bit` and binary pairs do: two approximate operands raise **Msg 8117** naming the **left** one (`"Operand data type real is invalid for modulo operator."` — for `real % float` as much as `real % real`, and `float % real` names `float`), while an approximate paired with any exact-numeric, string or binary partner raises **Msg 402** naming both in written order (`"The data types real and int are incompatible in the modulo operator."`).
+The gate lives in `PromoteForArithmetic` beside the `bit`-pair one, so it fires from the static path and the runtime path alike.
+Real's Msg 402 here beats the Msg 206 operand-type clash it reports for a binary partner under `+` — `0x02 % CAST(2 AS real)` is 402 while `0x02 + CAST(2 AS real)` is 206 (the latter unmodeled; see [Not modeled yet](#not-modeled-yet-approximate)).
+
+`SUM` and `AVG` are the one place `real` does **not** survive: both **widen it to `float`**, while `MIN` / `MAX` keep `real` and the statistical family (`STDEV` / `STDEVP` / `VAR` / `VARP`) was already `float` for every operand type.
+Accumulation is in `double`, each single widening exactly on the way in, which is what real does — `SUM` over `real` values `{16777216, 1, 1, 1, 1}` returns `16777220`, where a single-width running total would have stuck at `16777216`.
+Probed alongside it: `AVG(smallmoney)` reports **`money`**, not `smallmoney` (`SUM(smallmoney)` already did), so neither `SUM` nor `AVG` can produce `real` or `smallmoney` and the accumulator dispatch no longer carries arms for them.
+Oracle: `RealTypePromotionTests`.
+
+<a id="not-modeled-yet-approximate"></a>
+**Not modeled yet.**
+`<binary> <op> <approximate>` (`0x02 + CAST(2 AS real)`) is real's **Msg 206** operand-type clash in both orders and for `+ - * /`; the simulator raises `NotSupportedException` from the promotion dispatch instead.
+Modulo is unaffected — its own gate answers first, with real's Msg 402 — except in a FROM-less `SELECT`, where `BuildSynthesizedSqlRow` runs the value before the schema and a *binary left operand* reaches the runtime dispatch's unsupported-pair fallback first.
+`STDEV` / `VAR` over `money` is real's `float`; the simulator raises Msg 529 (`"Explicit conversion from data type money to float is not allowed."`) from the statistical aggregator's operand coercion.
+
 ## Integer arithmetic overflow
 SQL Server keeps the narrow integer type through arithmetic instead of widening, so a result outside the operand width raises **Msg 8115 St 2** (`"Arithmetic overflow error converting expression to data type {type}."`) rather than wrapping.
 Probe-confirmed across `+ - * / %`, unary minus and `ABS`, for `tinyint` / `smallint` / `int` / `bigint` alike — `cast(255 as tinyint) + cast(1 as tinyint)` raises naming `tinyint`, not `int`.
@@ -98,6 +127,25 @@ The fold is literal-only: unary minus over a `numeric(10, 0)` *variable* holding
 `Negate.Of` implements it at the one construction site in `Expression.ParsePrimary`.
 
 **Row counts.** `TOP` / `OFFSET` / `FETCH` accept any integer-family value and any exact numeric at **scale 0**, narrowing the operand to `bigint`, so a past-int row count is an ordinary accepted value; a fractional scale is still the grammar's **Msg 1060**, and a 20-digit literal overflows `bigint` with Msg 8115 naming it.
+
+### `NULLIF` narrows an integer literal
+
+An `int`-typed integer **literal** in `NULLIF`'s *first* slot is sized down to the narrowest integer type that holds its value — `tinyint` for `0`..`255`, `smallint` for `-32768`..`32767`, `int` otherwise.
+So `NULLIF(60, 76)` is `tinyint`, `NULLIF(-3, 78)` and `NULLIF(300, 4)` are `smallint`, and `NULLIF(99999999, 4)` stays `int`, where a bare `SELECT 60` is `int` like any other integer literal.
+Probe-confirmed against SQL Server 2025 through `sys.dm_exec_describe_first_result_set` and through `SELECT … INTO`, whose destination column is declared at the narrowed type — so the narrowing is real DDL, not just reported metadata.
+
+The rule reads the **first argument alone**.
+The second contributes nothing whatever it is: a wider literal (`NULLIF(1, 2147483648)` → `tinyint`), a `CAST`, a column, a variable, or a type that doesn't even compare.
+And it is `NULLIF`'s own — the `CASE` it is defined as, and every sibling value-selecting form (`COALESCE` / `ISNULL` / `IIF` / `CHOOSE` / `GREATEST` / `LEAST`), all leave the same `60` at `int` — which is why it can't ride the shared `PromoteBranches` seam.
+
+Only a **written literal** narrows, seen through the wrappers real's own fold sees through (parentheses, unary `+`, unary `-` to any depth, so `-(-60)` narrows to `tinyint`): `NULLIF(CAST(60 AS int), 76)` and `NULLIF(60 + 0, 76)` stay `int`.
+A literal whose own type isn't `int` keeps that type, so `NULLIF(60.0, 76)` is `numeric(3, 1)` and `NULLIF(2147483648, 1)` is `numeric(10, 0)` per the past-int-range rule above; the `-2147483648` negated-constant fold reaches the check already folded and narrows against int's range like any other int literal.
+
+`Expression.IntegerLiteralValue` walks the same wrappers `IntegerLiteralDigits` does but reports the signed value (in `long`, so `-(-2147483648)` reports out of range rather than wrapping), and `NullIf` settles the narrowed type at construction — it depends only on the syntax tree — so `Run` and `GetSqlType` read one answer and the surviving value is coerced to it.
+Oracle: `NullIfLiteralNarrowingTests`.
+
+**Divergence.** A literal written with enough leading zeros to exceed 12 characters is `numeric(significant_digits, 0)` on real rather than `int` (`SELECT 0000000000300` → `numeric(3, 0)`, while the 11-character `00000000300` is `int`), which `NULLIF` then inherits — `NULLIF(0000000000300, 1)` is `numeric(3, 0)` on real and `smallint` here.
+That is the bare-literal typing rule's, not `NULLIF`'s; the simulator types `0000000000300` as `int` at the tokenizer.
 
 ### Decimal-literal precision (leading zero, leading dot)
 A decimal literal's precision is its significant-digit count where an integer part of exactly `0` contributes nothing, plus the fractional digit count, floored at 1; scale is the fractional digit count.

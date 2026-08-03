@@ -337,7 +337,9 @@ The map composes through view-on-view chains so a renamed column at level 1 refe
 **DML routing**:
 - **INSERT**: `ProcessViewInsert` validates `BaseTable` is non-null (else Msg 4403 / Msg 4405 by `RejectionReason`), then routes to `ProcessHeapInsert(baseTable, context, destinationView)`.
   Column-name lookups in the explicit list translate through `BaseColumnOrdinals`; touching a `-1` ordinal raises **Msg 4406**.
-  Implicit column list (no `(cols)` after view name) expands to the view's writable projection columns mapped to base ordinals — derived columns and computed/identity/rowversion base columns drop out, defaults fire normally for unlisted base columns.
+  Implicit column list (no `(cols)` after view name) expands to the view's projection columns mapped to base ordinals — the base table's computed and identity columns drop out while a projected `rowversion` keeps its position, and defaults fire normally for unlisted base columns.
+  A projected **derived** column has no position to fill, so the column-list-less form is **Msg 4406** whatever the value count.
+  The resulting width is what the statement's value count is measured against — see [INSERT value counts](dml.md#insert-value-counts) for the Msg 213 / 110 / 109 split, which applies to a view target exactly as to a table.
   A `BaseTable`-less but `IsJoinUpdatable` view branches to [DML through a join view](#dml-through-a-join-view), which reads the column list off a parser checkpoint before it can name a target.
 - **UPDATE**: `ParseUpdate` resolves the leading identifier as a view, threads `leadingView` into `ResolveSetAssignments` (view-name → base-ordinal translation, same Msg 4406 path) and `ExecuteUpdateAgainstTable`.
   The heap scan gates `VisibilityCheck` before the user's WHERE — UPDATE through a filtered view only affects rows visible through the view.

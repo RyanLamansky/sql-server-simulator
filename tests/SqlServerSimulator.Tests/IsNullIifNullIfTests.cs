@@ -151,7 +151,9 @@ public sealed class IsNullIifNullIfTests
     [TestMethod]
     public void NullIf_NotEqual_ReturnsFirst()
     {
-        AreEqual(5, ExecuteScalar<int>("select nullif(5, 3)"));
+        // The int literal narrows to tinyint — NULLIF's own rule, covered in
+        // NullIfLiteralNarrowingTests.
+        AreEqual((byte)5, ExecuteScalar<byte>("select nullif(5, 3)"));
         AreEqual("abc", ExecuteScalar("select nullif('abc', 'def')"));
     }
 
@@ -165,8 +167,9 @@ public sealed class IsNullIifNullIfTests
     [TestMethod]
     public void NullIf_SecondNull_ReturnsFirst()
     {
-        // a non-null, b NULL → equality is UNKNOWN → ELSE branch returns a.
-        AreEqual(5, ExecuteScalar<int>("select nullif(5, cast(null as int))"));
+        // a non-null, b NULL → equality is UNKNOWN → ELSE branch returns a
+        // (narrowed to tinyint, as any int literal in that slot is).
+        AreEqual((byte)5, ExecuteScalar<byte>("select nullif(5, cast(null as int))"));
     }
 
     [TestMethod]

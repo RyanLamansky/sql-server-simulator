@@ -77,6 +77,55 @@ Probe-confirmed semantics (SQL Server 2025):
   `ResolveDmlTopCap` is always called when a limit is present (even at zero candidates) so the value errors fire regardless of match count.
 - **INSERT TOP** caps the inserted-row count across `VALUES` (multiple tuples), `SELECT`, and `EXEC` sources — applied to the buffered `sourceRows` list in `ProcessHeapInsert` (and the view / INSTEAD OF paths).
 
+## INSERT value counts
+
+### The positional column list
+
+An INSERT that writes no column list of its own is measured against a **positional list**: every column of the target *except* its identity and computed ones.
+Identity drops out whatever `IDENTITY_INSERT` says, which is why the ON case can never succeed without a column list — a matching count leaves the identity unsupplied (**Msg 545**) and one value more reports **Msg 8101**.
+
+`rowversion` and `GENERATED ALWAYS AS ROW START | END` columns **stay in** the list.
+They hold a position that has to be filled with the `DEFAULT` keyword, so against `t(a int, ts rowversion, b int)` the intuitive `INSERT INTO t VALUES (1, 2)` is Msg 213 rather than a two-column write, and `VALUES (1, DEFAULT, 2)` is the accepted form.
+A column carrying a `DEFAULT` *clause* likewise keeps its position — a default makes a column omissible from a column list, never from the positional one.
+
+A **view** target is measured against its own projection the same way, its base table's identity and computed columns dropping out and a projected `rowversion` keeping its slot.
+A view projecting a **derived** column (`x + 1 AS d`) has no position to fill, so the column-list-less form is **Msg 4406** whatever the value count.
+
+### Which diagnostic a mismatch reports
+
+| shape | too many values | too few values |
+| --- | --- | --- |
+| no column list, `VALUES` / `SELECT` | **Msg 8101** with an identity column, else **Msg 213** | **Msg 213** |
+| explicit column list, `VALUES` | **Msg 110** | **Msg 109** |
+| explicit column list, `SELECT` | **Msg 121** | **Msg 120** |
+| any shape, `EXEC` | **Msg 213** State 7 | **Msg 213** State 7 |
+
+Msg 213 is class 16 State 1; Msg 109 / 110 / 120 / 121 are class **15**.
+The no-column-list surplus reports the identity diagnostic for *any* excess, not merely one value's worth — real reads the extra value as an attempt to supply the identity, and names the table bare (`'ident'`) where the `OUTPUT … INTO` form of Msg 8101 names it schema-qualified.
+
+Multi-row `VALUES` whose tuples disagree with **each other** is **Msg 10709**, and it outranks the table's own arity rules: ragged tuples carry no single width to measure, so `(a) VALUES (1), (2, 3)` reports 10709 rather than 110.
+Tuples that agree with each other but not with the destination take the ordinary rules — `VALUES (1, 2), (3, 4)` into a one-column list is Msg 110.
+
+### Check order
+
+Arity settles first, then the auto-generated-column gate, then the identity gates — probe-confirmed at each step:
+
+1. **Arity** (the table above), which is why `(id, a) VALUES (1, 2, 3)` is Msg 110 and not the Msg 544 its identity reference would otherwise earn.
+2. **Msg 273** (`rowversion`) / **Msg 13536** (`GENERATED ALWAYS`) for a position holding anything but `DEFAULT`.
+   Naming either column in a column list is legal — the escape hatch each message's own text points at — so the check is per cell, and one tuple of a multi-row constructor supplying a real value is enough to raise.
+   A `SELECT` / `EXEC` source carries no `DEFAULT` keyword, so merely reaching such a column refuses.
+3. **Msg 339** (`DEFAULT` / NULL as an identity value), then **Msg 544** / **Msg 545** (the `IDENTITY_INSERT` gates).
+
+A computed column is refused for merely being named, whatever its cell holds — **Msg 271** even for `DEFAULT` — so it never reaches the per-cell scan.
+
+### Timing
+
+The whole family is settled while the statement **compiles**, not when it runs: it fires from an untaken `IF` branch, and it aborts a `CREATE PROCEDURE` whose body carries it, leaving the module uncreated (see [CREATE-time body binding](programmable.md)).
+`RejectValuesArityMismatch` therefore reads the *parsed* tuples rather than the evaluated rows and runs regardless of skip state.
+
+**Divergence:** real compiles a whole batch before executing any of it, so a bad-arity statement stops its predecessors from running too; the simulator dispatches statement by statement, so only the offending statement is inert.
+Real also reports a statement offending several rules at once as a multi-error response (an unknown column name *and* a bad count come back as Msg 207 then Msg 110; a ragged constructor into a rowversion table as Msg 273 then Msg 10709) — the simulator raises the leading error alone.
+
 ## `DEFAULT` as a `VALUES` element
 
 `INSERT INTO t (a, b) VALUES (1, DEFAULT)` — the `DEFAULT` keyword in an individual value cell, distinct from the whole-row `DEFAULT VALUES` form below.
@@ -97,6 +146,7 @@ Inserts a single row with every column defaulted.
 8-byte big-endian database-scoped monotonic counter; advances on every INSERT into a rowversion-bearing table and every UPDATE affecting one.
 Storage type name surfaces as `timestamp` in `information_schema` regardless of declaration.
 Explicit insert → Msg 273; explicit update → Msg 272; second column on a table → Msg 2738.
+The column keeps its position in an INSERT's positional column list and accepts the `DEFAULT` keyword there (and in a column list naming it) — see [INSERT value counts](#insert-value-counts).
 Outbound CAST: `varbinary(N)`/`binary(N)` copy 8 bytes; `bigint` reads big-endian.
 `Promote(RowVersion, Varbinary) → Varbinary` so EF's `WHERE [rv] = @originalRv` parameter works directly.
 EF `[Timestamp]` SaveChanges round-trips end-to-end.
@@ -131,7 +181,8 @@ Both funnel into one shared per-row encode loop (defaults / identity / rowversio
 
 **Full buffering**: source materializes to `List<SqlValue[]>` before any destination write — makes self-insert (`INSERT t SELECT … FROM t`) safe.
 
-Projection-count mismatch fires at parse time: too few SELECT columns → Msg 120 St 1 Cls 15; too many → Msg 121.
+Projection-count mismatch fires at parse time, and which error depends on whether the statement wrote a column list: with one, too few SELECT columns → Msg 120 St 1 Cls 15 and too many → Msg 121; without one, either direction → Msg 213 (or Msg 8101 for a surplus against a table carrying an identity).
+Full rules in [INSERT value counts](#insert-value-counts).
 Empty source → silent success, rows-affected 0.
 Mid-source constraint violations trigger statement-level rollback.
 EF doesn't emit `INSERT…SELECT` from SaveChanges; reachable from raw SQL and bulk-copy patterns.

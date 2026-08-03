@@ -40,15 +40,15 @@ partial class SimulatedSqlException
         new($"Must declare the table variable \"{name}\".", 1087, 15, 2);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 213 — fired when an OUTPUT INTO clause's
-    /// projection-column count doesn't match the target's column count
-    /// (probe-confirmed wording: <c>"Column name or number of supplied
-    /// values does not match table definition."</c>). Real SQL Server uses
-    /// the same Msg 213 for column-count / column-name mismatches in
-    /// regular INSERT shapes; the simulator reuses it for OUTPUT INTO
-    /// dispatch consistency.
+    /// Mimics SQL Server's Msg 213 — a positional value list measured against
+    /// the table definition rather than against a column list the statement
+    /// wrote itself. Raised by an <c>INSERT</c> with no column list whose
+    /// <c>VALUES</c> tuple or source <c>SELECT</c> is the wrong width, and by
+    /// an <c>OUTPUT … INTO</c> whose projection doesn't match its target.
+    /// The column-list forms report Msg 109 / 110 (VALUES) or Msg 120 / 121
+    /// (SELECT) instead.
     /// </summary>
-    internal static SimulatedSqlException OutputIntoColumnCountMismatch() =>
+    internal static SimulatedSqlException ColumnCountDoesNotMatchTableDefinition() =>
         new("Column name or number of supplied values does not match table definition.", 213, 16, 1);
 
     /// <summary>

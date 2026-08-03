@@ -277,7 +277,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextOptional();
             if (ordinals.Count != projectionColumnCount)
-                throw SimulatedSqlException.OutputIntoColumnCountMismatch();
+                throw SimulatedSqlException.ColumnCountDoesNotMatchTableDefinition();
             // An explicit list may not name the target's identity column, and
             // SET IDENTITY_INSERT on the target does not unlock it (probed).
             // The arity check above runs first, matching real's ordering.
@@ -307,12 +307,12 @@ partial class Simulation
             if (projectionColumnCount > fillable.Count)
             {
                 throw fillable.Count == targetTable.Columns.Length
-                    ? SimulatedSqlException.OutputIntoColumnCountMismatch()
+                    ? SimulatedSqlException.ColumnCountDoesNotMatchTableDefinition()
                     : SimulatedSqlException.ExplicitIdentityNeedsColumnList(QualifiedOutputTargetName(targetName, targetTable));
             }
 
             if (projectionColumnCount < fillable.Count)
-                throw SimulatedSqlException.OutputIntoColumnCountMismatch();
+                throw SimulatedSqlException.ColumnCountDoesNotMatchTableDefinition();
             columnOrdinals = [.. fillable];
         }
 

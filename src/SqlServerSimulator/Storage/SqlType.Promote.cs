@@ -418,6 +418,25 @@ internal abstract partial class SqlType
             };
         }
 
+        // Modulo has no float / real form at all — probe-confirmed against SQL
+        // Server 2025 across the whole approximate row and column. The split
+        // matches the bit and binary pairs above: two approximate operands
+        // raise Msg 8117 naming the LEFT one ("Operand data type real is
+        // invalid for modulo operator." for `real % float` as well as `real %
+        // real`), while an approximate paired with any exact-numeric, string or
+        // binary partner raises Msg 402 naming both in written order. A
+        // date/time partner is left to the promotion below, which reports the
+        // date pair's own error.
+        if (op == '%'
+            && (a.Category == SqlTypeCategory.Approximate || b.Category == SqlTypeCategory.Approximate)
+            && a.Category != SqlTypeCategory.DateTime
+            && b.Category != SqlTypeCategory.DateTime)
+        {
+            throw a.Category == b.Category
+                ? SimulatedSqlException.OperandDataTypeInvalid(a, "modulo")
+                : SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, "modulo");
+        }
+
         // Float / real win over everything else, same as the joint-envelope
         // path; no decimal-style scale dance needed.
         if (a.Category == SqlTypeCategory.Approximate || b.Category == SqlTypeCategory.Approximate)

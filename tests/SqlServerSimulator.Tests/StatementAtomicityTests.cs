@@ -151,8 +151,12 @@ public sealed class StatementAtomicityTests
             """).ExecuteNonQuery();
         var rv1 = (byte[])connection.CreateCommand("select rv from t where id = 1").ExecuteScalar()!;
 
+        // A duplicate-key insert: the row work starts (consuming a rowversion)
+        // before the PK check rolls it back. A statement refused while binding
+        // — a bad value count, or an explicit value for `rv` — would never
+        // reach the counter at all.
         _ = Throws<DbException>(() =>
-            _ = connection.CreateCommand("insert t values (1, 0x0000000000000000)").ExecuteNonQuery());
+            _ = connection.CreateCommand("insert t (id) values (1)").ExecuteNonQuery());
 
         _ = connection.CreateCommand("insert t (id) values (3)").ExecuteNonQuery();
         var rv3 = (byte[])connection.CreateCommand("select rv from t where id = 3").ExecuteScalar()!;

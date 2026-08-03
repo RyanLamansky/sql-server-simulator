@@ -30,6 +30,17 @@ public sealed class StringWidthAlgebraTests
     public void Concatenation_ProducesFullValue()
         => AreEqual("abcde", new Simulation().ExecuteScalar("select 'ab' + 'cde'"));
 
+    // CONCAT sums its arguments' declared widths, so an argument carrying no
+    // declared width (the container form REPLACE / TRANSLATE project) leaves
+    // nothing to sum and the whole result falls back to the container — the
+    // value materializes in full either way, and the declared width the wire
+    // then advertises is asserted in StringLiteralWidthWireTests.
+    [TestMethod]
+    [DataRow("select concat(replace('aaa', 'a', 'XY'), 'x')", "XYXYXYx")]
+    [DataRow("select concat_ws('-', replace('aaa', 'a', 'XY'), 'x')", "XYXYXY-x")]
+    public void ConcatOverContainerWidthArgument_MaterializesFullValue(string sql, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(sql));
+
     // A CASE that could yield either arm materializes the wider arm intact.
     [TestMethod]
     public void CaseUnification_MaterializesWiderArm()

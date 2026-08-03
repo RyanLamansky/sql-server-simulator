@@ -110,10 +110,12 @@ public sealed class AggregateTests
     }
 
     [TestMethod]
-    public void Sum_Real_AccumulatesViaDoubleAndNarrowsBack()
+    public void Sum_Real_AccumulatesAndReportsAsFloat()
     {
+        // SUM widens real to float — probe-confirmed against SQL Server 2025
+        // (MIN / MAX keep real; see RealTypePromotionTests).
         using var connection = Seeded("a real", "(1.5), (2.25), (0.25)");
-        AreEqual(4.0f, connection.CreateCommand("select sum(a) from t").ExecuteScalar());
+        AreEqual(4.0, connection.CreateCommand("select sum(a) from t").ExecuteScalar());
     }
 
     [TestMethod]

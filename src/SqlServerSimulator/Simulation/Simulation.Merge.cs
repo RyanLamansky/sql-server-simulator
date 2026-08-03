@@ -739,7 +739,7 @@ partial class Simulation
             // SQL Server's MERGE INTO does.
             if (sourceView is not null)
             {
-                columns = BuildImplicitInsertColumnsForView(sourceView, destinationTable, identityInsertOn: false);
+                columns = BuildMergeInsertColumnsForView(sourceView, destinationTable);
             }
             else
             {

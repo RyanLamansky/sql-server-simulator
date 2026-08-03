@@ -7,9 +7,10 @@ namespace SqlServerSimulator.Parser.Aggregators;
 /// (see <see cref="Expressions.AggregateExpression"/>'s GetSqlType): integer
 /// types accumulate at the result-type's width with overflow detection
 /// (Msg 8115); decimal types accumulate as .NET decimal (precision 28-29
-/// digits — the simulator's documented decimal limitation). float / real
-/// pass through .NET <see cref="double"/> arithmetic with infinity / NaN
-/// as observed. Empty input or all-NULL input → NULL of result type.
+/// digits — the simulator's documented decimal limitation). float and real
+/// alike sum in .NET <see cref="double"/> — real's result type is float, and
+/// each single widens exactly on the way in — with infinity / NaN as
+/// observed. Empty input or all-NULL input → NULL of result type.
 /// DISTINCT dedups via <see cref="HashSet{SqlValue}"/> on the operand
 /// before accumulation.
 /// </summary>
@@ -23,8 +24,8 @@ internal static class SumAggregator
     public static Aggregator Create(SqlType resultType, bool distinct) => resultType switch
     {
         var t when t == SqlType.Int32 || t == SqlType.BigInt => new LongSum(resultType, distinct),
-        var t when t == SqlType.Float || t == SqlType.Real => new DoubleSum(resultType, distinct),
-        var t when t == SqlType.Money || t == SqlType.SmallMoney || t is DecimalSqlType => new DecimalSum(resultType, distinct),
+        var t when t == SqlType.Float => new DoubleSum(resultType, distinct),
+        var t when t == SqlType.Money || t is DecimalSqlType => new DecimalSum(resultType, distinct),
         _ => throw new NotSupportedException($"SUM not supported for {resultType}."),
     };
 
@@ -44,23 +45,20 @@ internal static class SumAggregator
     private sealed class DecimalSum(SqlType resultType, bool distinct) : NumericAggregator<decimal>(resultType, distinct)
     {
         protected override decimal Extract(SqlValue value) =>
-            value.Type == SqlType.Money || value.Type == SqlType.SmallMoney ? value.AsMoney : value.AsDecimal;
+            value.Type == SqlType.Money ? value.AsMoney : value.AsDecimal;
 
         protected override decimal Finalize(decimal total, long count) => total;
 
         protected override SqlValue Wrap(decimal value, SqlType type) =>
-            type == SqlType.Money || type == SqlType.SmallMoney
-                ? SqlValue.FromMoney(type, value)
-                : SqlValue.FromDecimal(type, value);
+            type == SqlType.Money ? SqlValue.FromMoney(type, value) : SqlValue.FromDecimal(type, value);
     }
 
     private sealed class DoubleSum(SqlType resultType, bool distinct) : NumericAggregator<double>(resultType, distinct)
     {
-        protected override double Extract(SqlValue value) => this.ResultType == SqlType.Real ? value.AsSingle : value.AsDouble;
+        protected override double Extract(SqlValue value) => value.AsDouble;
 
         protected override double Finalize(double total, long count) => total;
 
-        protected override SqlValue Wrap(double value, SqlType type) =>
-            type == SqlType.Real ? SqlValue.FromSingle((float)value) : SqlValue.FromDouble(value);
+        protected override SqlValue Wrap(double value, SqlType type) => SqlValue.FromDouble(value);
     }
 }

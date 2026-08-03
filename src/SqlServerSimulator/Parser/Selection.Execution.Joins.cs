@@ -75,6 +75,14 @@ internal sealed partial class Selection
         Func<MultiPartName, SqlValue>? outerResolver)
     {
         var tuple = new byte[]?[sources.Length];
+
+        // A source-less SELECT reads one synthesized row — the row real's
+        // `SELECT COUNT(*)` counts and its WHERE filters. The tuple carries no
+        // slots, so every name in the query resolves through the outer scope
+        // (or is Msg 207), exactly as the constant-row path resolves them.
+        if (sources.Length == 0)
+            return [tuple];
+
         var memo = new SourceColumnMemo();
 
         // Cached self-referencing lambda, NOT a local function: a local

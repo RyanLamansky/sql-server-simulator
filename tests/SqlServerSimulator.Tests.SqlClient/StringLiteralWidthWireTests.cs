@@ -29,6 +29,28 @@ public sealed class StringLiteralWidthWireTests
         return reader.GetColumnSchema()[0].ColumnSize ?? -1;
     }
 
+    /// <summary>
+    /// The declared width and the first row's value for a statement carrying
+    /// bound string parameters, which SqlClient sends as an sp_executesql RPC.
+    /// Reading the value as well as the metadata is the point: a COLMETADATA
+    /// width narrower than the ROW value's own length prefix is what corrupts
+    /// the token stream, and only draining the row observes it.
+    /// </summary>
+    private async Task<(int ColumnSize, object? Value)> WidthAndValueAsync(string sql, params string[] parameterValues)
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand(sql, connection);
+        for (var i = 0; i < parameterValues.Length; i++)
+            _ = command.Parameters.AddWithValue($"@p{i}", parameterValues[i]);
+
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+        var size = reader.GetColumnSchema()[0].ColumnSize ?? -1;
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        return (size, reader.GetValue(0));
+    }
+
     // Bare literals: exact value width, empty floors to 1, over-cap widens to MAX.
     [TestMethod]
     [DataRow("select 'abc' as x", 3)]
@@ -104,4 +126,47 @@ public sealed class StringLiteralWidthWireTests
     [TestMethod]
     public async Task Replace_StaysContainerWidth()
         => AreEqual(8000, await ColumnSizeAsync("select replace('aaa', 'a', 'XY') as x"));
+
+    // A CONCAT argument of no declared width can't contribute to the sum, so
+    // the whole result falls back to the family container — probe-confirmed
+    // against SQL Server 2025, which answers 8000 / 4000 for these.
+    [TestMethod]
+    [DataRow("select concat(replace('aaa', 'a', 'XY'), 'x') as x", 8000)]
+    [DataRow("select concat_ws('-', replace('aaa', 'a', 'XY'), 'x') as x", 8000)]
+    [DataRow("select concat(replace(N'aaa', N'a', N'XY'), N'x') as x", 4000)]
+    public async Task Concat_ContainerWidthArgument_StaysContainerWidth(string sql, int expected)
+        => AreEqual(expected, await ColumnSizeAsync(sql));
+
+    // A MAX argument still decides the result ahead of any width, container included.
+    [TestMethod]
+    public async Task Concat_MaxArgumentBesideContainerWidthArgument_StaysMax()
+        => AreEqual(int.MaxValue, await ColumnSizeAsync("select concat(cast('a' as varchar(max)), replace('aaa', 'a', 'XY')) as x"));
+
+    /// <summary>
+    /// A bound string parameter reaches the expression tree with no declared
+    /// width, so a CONCAT over one has no per-argument width to sum. Summing it
+    /// as zero projected <c>nvarchar(1)</c> while the concatenation itself
+    /// produced the full value, and the resulting ROW length prefix overran the
+    /// declared maximum — "Protocol error in TDS stream" on the ODBC driver,
+    /// and a silently truncating read elsewhere.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select concat(@p0, @p1) as x", "ab")]
+    [DataRow("select concat_ws('-', @p0, @p1) as x", "a-b")]
+    public async Task Concat_BoundParameterArguments_DeclareContainerWidthAndReturnWholeValue(string sql, string expected)
+    {
+        var (columnSize, value) = await WidthAndValueAsync(sql, "a", "b");
+        AreEqual(4000, columnSize);
+        AreEqual(expected, value);
+    }
+
+    /// <summary>One bound parameter beside a literal is enough — the literal's
+    /// own width alone would have declared <c>nvarchar(1)</c>.</summary>
+    [TestMethod]
+    public async Task Concat_BoundParameterBesideLiteral_DeclaresContainerWidthAndReturnsWholeValue()
+    {
+        var (columnSize, value) = await WidthAndValueAsync("select concat(@p0, 'b') as x", "a");
+        AreEqual(4000, columnSize);
+        AreEqual("ab", value);
+    }
 }

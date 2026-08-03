@@ -282,19 +282,18 @@ internal sealed class AggregateExpression : Expression
     /// Maps <c>SUM</c>'s operand type to its result type per SQL Server's
     /// rules: integer family widens to <see cref="SqlType.Int32"/> for
     /// tinyint/smallint and stays at the operand type for int/bigint;
-    /// decimal becomes <c>decimal(38, s)</c> preserving scale; float and
-    /// money pass through. Probed against SQL Server 2025 — int does NOT
-    /// auto-widen to bigint, so an overflowing sum raises Msg 8115.
+    /// decimal becomes <c>decimal(38, s)</c> preserving scale; <c>real</c>
+    /// widens to <c>float</c>; float and money pass through. Probed against
+    /// SQL Server 2025 — int does NOT auto-widen to bigint, so an overflowing
+    /// sum raises Msg 8115.
     /// </summary>
     private static SqlType DeriveSumResultType(SqlType operandType) => operandType switch
     {
         var t when t == SqlType.TinyInt || t == SqlType.SmallInt => SqlType.Int32,
         var t when t == SqlType.Int32 => SqlType.Int32,
         var t when t == SqlType.BigInt => SqlType.BigInt,
-        var t when t == SqlType.Float => SqlType.Float,
-        var t when t == SqlType.Real => SqlType.Real,
-        var t when t == SqlType.Money => SqlType.Money,
-        var t when t == SqlType.SmallMoney => SqlType.Money,
+        var t when t == SqlType.Float || t == SqlType.Real => SqlType.Float,
+        var t when t == SqlType.Money || t == SqlType.SmallMoney => SqlType.Money,
         DecimalSqlType d => SqlType.GetDecimal(38, d.scale),
         _ => throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "sum"),
     };
@@ -303,17 +302,16 @@ internal sealed class AggregateExpression : Expression
     /// Maps <c>AVG</c>'s operand type to its result type per SQL Server's
     /// rules: integer family rounds-toward-zero in the operand's own type
     /// (<c>AVG(int)</c> → int, truncating); decimal widens to
-    /// <c>decimal(38, max(s, 6))</c>; float / real / money pass through.
+    /// <c>decimal(38, max(s, 6))</c>; float passes through and
+    /// <c>real</c> widens to it; both money types report <c>money</c>.
     /// </summary>
     private static SqlType DeriveAvgResultType(SqlType operandType) => operandType switch
     {
         var t when t == SqlType.TinyInt || t == SqlType.SmallInt => SqlType.Int32,
         var t when t == SqlType.Int32 => SqlType.Int32,
         var t when t == SqlType.BigInt => SqlType.BigInt,
-        var t when t == SqlType.Float => SqlType.Float,
-        var t when t == SqlType.Real => SqlType.Real,
-        var t when t == SqlType.Money => SqlType.Money,
-        var t when t == SqlType.SmallMoney => SqlType.SmallMoney,
+        var t when t == SqlType.Float || t == SqlType.Real => SqlType.Float,
+        var t when t == SqlType.Money || t == SqlType.SmallMoney => SqlType.Money,
         DecimalSqlType d => SqlType.GetDecimal(38, (byte)Math.Max((int)d.scale, 6)),
         _ => throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "avg"),
     };

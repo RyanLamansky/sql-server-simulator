@@ -97,16 +97,33 @@ public sealed class RowVersionTests
         AreEqual("273", ex.Data["HelpLink.EvtID"]);
     }
 
-    // Insert without column list: the simulator must skip rowversion when
-    // synthesizing the destination list (rowversion is auto-only).
+    // Insert without column list: a rowversion column keeps its position in
+    // the implicit list, so it has to be filled with the DEFAULT keyword —
+    // probe-confirmed that real reports Msg 213 for the value list that simply
+    // omits it, and Msg 273 for one supplying a real value.
     [TestMethod]
-    public void Insert_NoColumnList_AutoGeneratesAndDoesntFail()
+    public void Insert_NoColumnList_RowVersionOccupiesAPosition()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("""
-            create table t (id int, rv rowversion);
-            insert t values (1)
-            """);
+        _ = simulation.ExecuteNonQuery("create table t (id int, rv rowversion)");
+
+        _ = simulation.AssertSqlError("insert t values (1)", 213);
+        _ = simulation.AssertSqlError("insert t values (1, 0x0000000000000000)", 273);
+
+        _ = simulation.ExecuteNonQuery("insert t values (1, default)");
+        HasCount(1, ReadAllRowVersions(simulation.CreateCommand("select rv from t")));
+    }
+
+    // Naming the rowversion column is legal as long as its cell is DEFAULT —
+    // the escape hatch Msg 273's own text points at.
+    [TestMethod]
+    public void Insert_ColumnListNamingRowVersion_AcceptsDefault()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int, rv rowversion)");
+
+        _ = simulation.ExecuteNonQuery("insert t (id, rv) values (1, default)");
+        _ = simulation.AssertSqlError("insert t (id, rv) values (2, 0x0000000000000000)", 273);
 
         HasCount(1, ReadAllRowVersions(simulation.CreateCommand("select rv from t")));
     }

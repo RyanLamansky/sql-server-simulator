@@ -852,6 +852,28 @@ internal abstract class Expression
     };
 
     /// <summary>
+    /// The signed value of an <c>int</c>-typed integer literal, seen through
+    /// the same wrappers <see cref="IntegerLiteralDigits"/> walks (a leading
+    /// unary <c>+</c> never reaches the tree — <c>ParsePrimary</c> drops it),
+    /// or <see langword="null"/> when the expression is anything else: a
+    /// column, a variable, a <c>CAST</c>, an arithmetic result, or a literal
+    /// whose own type isn't <c>int</c> (a decimal literal, or an integer
+    /// literal past int's range, which is <c>numeric(digit_count, 0)</c>).
+    /// The negation is computed in <c>long</c> so <c>-(-2147483648)</c>
+    /// reports a value outside int's range rather than wrapping.
+    /// <para><c>NULLIF</c>'s result-narrowing rule is the one reader — see
+    /// <see cref="Expressions.NullIf"/>.</para>
+    /// </summary>
+    internal static long? IntegerLiteralValue(Expression expression) => expression switch
+    {
+        Value { IsLiteral: true, Constant: { IsNull: false } constant } when constant.Type == SqlType.Int32 => constant.AsInt32,
+        Parenthesized p => IntegerLiteralValue(p.Wrapped),
+        Negate n => IntegerLiteralValue(n.Operand) is long value ? -value : null,
+        NamedExpression named => IntegerLiteralValue(named.Inner),
+        _ => null,
+    };
+
+    /// <summary>
     /// True when <paramref name="expression"/> is (or wraps, through
     /// parentheses) the bare untyped <c>NULL</c> keyword. Distinct from
     /// <see cref="IsBareNullLiteral"/>: this excludes a typed NULL constant
