@@ -30,7 +30,17 @@ partial class Selection
     /// toward the depth, and exceeding 32 → Msg 217.
     /// </para>
     /// </remarks>
-    internal static Selection ForView(View view)
+    /// <param name="view">The view this source reads.</param>
+    /// <param name="pushedPredicates">
+    /// WHERE conjunct templates an enclosing statement pushed into this
+    /// reference (see <c>Selection.Execution.PredicatePushdown.cs</c>), carried
+    /// to the body parse — the earliest point a view's own projection is known.
+    /// Null for an ordinary reference. Every template is already reduced to
+    /// output-column slots and evaluated constants, which is what lets it cross
+    /// into the body's child batch (holding none of the caller's variables) and
+    /// what makes the wrapper safe to rebuild per push rather than per parse.
+    /// </param>
+    internal static Selection ForView(View view, List<BooleanExpression>? pushedPredicates = null)
     {
         var schema = new SqlType[view.OutputColumns.Length];
         var columnNames = new string[view.OutputColumns.Length];
@@ -45,6 +55,10 @@ partial class Selection
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             rowSource: (outerBatch, _) =>
-                outerBatch.Connection.Simulation.InvokeView(outerBatch, view));
+                outerBatch.Connection.Simulation.InvokeView(outerBatch, view, pushedPredicates))
+        {
+            PredicatePushdown = templates => ForView(
+                view, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates]),
+        };
     }
 }

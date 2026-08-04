@@ -209,6 +209,24 @@ internal sealed class FromSource(
     }
 
     /// <summary>
+    /// Returns a copy of this source reading through <paramref name="plan"/> —
+    /// its own body with an enclosing statement's WHERE conjunct pushed into it
+    /// (see <c>Selection.Execution.PredicatePushdown.cs</c>). Every other field
+    /// is preserved, including the ones later passes classify the source by
+    /// (<see cref="BackingView"/>, <see cref="LateralIsQueryBody"/>,
+    /// <see cref="MaterializeOnce"/>), since a pushed source is the same source
+    /// reading fewer rows.
+    /// </summary>
+    public FromSource WithPushedPlan(Selection plan) =>
+        new(this.Qualifier, this.ColumnNames, this.Columns, this.StoredSchema,
+            this.StorageOrdinals, this.LobStore, this.Rows,
+            lateralPlan: plan, backingTable: this.BackingTable, backingView: this.BackingView,
+            heapPlan: this.HeapPlan, materializeOnce: this.MaterializeOnce, isPlaceholder: this.IsPlaceholder,
+            backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
+            viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
+            lateralIsQueryBody: this.LateralIsQueryBody);
+
+    /// <summary>
     /// Returns a copy of this source with its deferred <see cref="LateralPlan"/>
     /// replaced by an already-materialized <paramref name="rows"/> list —
     /// clearing <see cref="LateralPlan"/> and <see cref="MaterializeOnce"/> so

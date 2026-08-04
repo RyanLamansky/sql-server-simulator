@@ -258,6 +258,13 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
+- **A view's `CREATE`-time errors carry no `Procedure` attribution** — real attributes *every* error raised inside a `CREATE VIEW` to the view being defined (probed 2026-08-04 for the syntax family Msg 156 / 102, the binder's Msg 207, the body-shape Msg 1033 / 4511, and even the Msg 2714 name collision), where the simulator leaves the field empty.
+  Functions already attribute, because their bodies go through `BindModuleBodyAtCreate`, which sets `BatchContext.ErrorProcedureName`; a view's body is parsed inline instead, so nothing sets it.
+  The batch-position check added alongside this attributes explicitly and is the one view-`CREATE` error that carries the name.
+  → [`programmable.md`](programmable.md#where-a-module-statement-may-sit-in-its-batch).
+- **The read-only-database gate doesn't reach every write statement** — `Database.IsReadOnly` refuses the DML row writes and the object-DDL family, but the `GRANT` / `REVOKE` / `DENY` family, `sp_rename`, `sp_addextendedproperty`, `ALTER SCHEMA … TRANSFER`, `ALTER INDEX` / `DROP INDEX` and the principal / assembly DDL carry no gate, where real raises **Msg 3906** for all of them (probe-confirmed for GRANT and `sp_addextendedproperty`).
+  Real also varies the Msg 3906 state at a few sites (`ALTER TABLE` reports state 12) where the simulator raises state 1 throughout.
+  → [`database-options.md`](database-options.md#read-only-databases).
 - **Skip-mode deferred name resolution — DML target tables not placeholder-continued** — the skip-mode parse-continuation fix substitutes placeholder metadata for a missing *FROM-clause table* or *schema-qualified function* so an un-taken branch parses to completion and is discarded whole (killing the orphaned-`ELSE` cascade — see [`control-flow.md`](control-flow.md)).
   Re-probed 2026-07-29: the **spurious Msg 208 is gone** — `IF 1=0 INSERT INTO missing SELECT * FROM other; SELECT 'after'` now returns `after`, as do the UPDATE and DELETE forms, so a dead branch with a missing DML target no longer breaks the following statement.
   What still reproduces is the **orphaned `ELSE`**: the bare (non-`BEGIN`/`END`) form `IF 1=0 INSERT INTO missing … ELSE SELECT 'else-ran'` raises **Msg 102** near `else` where real runs the ELSE, and a missing **MERGE** target raises Msg 102 near `;`.

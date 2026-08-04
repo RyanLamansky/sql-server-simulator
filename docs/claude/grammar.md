@@ -9,6 +9,10 @@ Two enforced exceptions match SQL Server's specific rules:
 - A `MERGE` not terminated by `;` raises **Msg 10713 St 1** (`A MERGE statement must be terminated by a semi-colon (;).`) regardless of whether another statement follows or the batch ends.
   The check sits at the dispatch site immediately after `ParseMerge` returns, before any cursor normalization.
 
+A third exception belongs to the module statements rather than to the separator grammar: `CREATE` / `ALTER` of a `VIEW`, `FUNCTION`, `TRIGGER`, `PROCEDURE` or `SCHEMA` must *open* its batch (**Msg 111**), and a `VIEW` or `FUNCTION` must additionally be its batch's *only* statement, since its body runs to the end of the batch (**Msg 156 / 102** at whatever follows).
+Procedures and triggers instead swallow a trailing statement into the body.
+See [Where a module statement may sit in its batch](programmable.md#where-a-module-statement-may-sit-in-its-batch).
+
 The dispatch loop drains optional `;`s at the top of each iteration and trusts each parser to leave `Token` at its first un-consumed token (the `ParserContext` lookahead-position contract).
 Parsers that historically ended on the last token they consumed (DBCC's closing `)`, SET-session-state's `ON`/`OFF`) get a one-token advance via `IsStatementBoundary` after dispatch — Token already at `;`, end-of-batch, or a recognized statement-starting keyword is left alone.
 

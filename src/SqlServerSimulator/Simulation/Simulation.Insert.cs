@@ -609,6 +609,7 @@ partial class Simulation
                     }
 
                     EnforceOutgoingForeignKeys(destinationTable, [rowValues], context, "INSERT");
+                    destinationTable.OwningDatabase?.RejectWriteWhenReadOnly();
                     var image = RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap);
                     // Key-range probe before the heap write, not after: a wait
                     // on a SERIALIZABLE reader's range can last until that

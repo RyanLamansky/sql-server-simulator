@@ -382,6 +382,126 @@ public sealed class JoinPredicatePushdownTests
         AreEqual(writtenFirst[0], reordered[0]);
     }
 
+    // ---- a correlated inner whose own FROM is a join ------------------------
+
+    /// <summary>
+    /// The pushdown's probe value may name a column that escapes the plan's own
+    /// FROM — the enclosing query's row, fixed for one execution of the inner
+    /// plan — so a correlated subquery reading through a join narrows the same
+    /// way a single-table one does. What matters here is that it still answers
+    /// identically: each customer's own lines, and NULL for the one with no
+    /// orders.
+    /// </summary>
+    [TestMethod]
+    public void CorrelatedSubqueryOverAJoin_TotalsPerOuterRow()
+    {
+        var rows = Rows(Sales(), """
+            select c.cust_id,
+                   (select sum(l.qty) from ord o join line l on l.ord_id = o.ord_id
+                    where o.cust_id = c.cust_id) as total
+            from cust c
+            order by c.cust_id
+            """);
+        HasCount(7, rows);
+        AreEqual("1|10", rows[0]);
+        AreEqual("2|26", rows[1]);
+        AreEqual("3|42", rows[2]);
+        AreEqual("4|58", rows[3]);
+        AreEqual("5|74", rows[4]);
+        AreEqual("6|90", rows[5]);
+        AreEqual("7|", rows[6]);
+    }
+
+    /// <summary>
+    /// …and agrees column for column with the grouped derived-table spelling of
+    /// the same question, which reads every source once.
+    /// </summary>
+    [TestMethod]
+    public void CorrelatedSubqueryOverAJoin_MatchesTheGroupedSpelling()
+    {
+        var sim = Sales();
+        var correlated = Rows(sim, """
+            select c.cust_id,
+                   (select sum(l.qty) from ord o join line l on l.ord_id = o.ord_id
+                    where o.cust_id = c.cust_id) as total
+            from cust c
+            order by c.cust_id
+            """);
+        var grouped = Rows(sim, """
+            select c.cust_id, g.total from cust c
+            left join (select o.cust_id, sum(l.qty) as total from ord o
+                       join line l on l.ord_id = o.ord_id group by o.cust_id) g
+              on g.cust_id = c.cust_id
+            order by c.cust_id
+            """);
+        AreEqual(string.Join(";", grouped), string.Join(";", correlated));
+    }
+
+    /// <summary>
+    /// Correlation through two levels: the innermost plan's probe names the
+    /// outermost query's column, reached through chained enclosing resolvers.
+    /// </summary>
+    [TestMethod]
+    public void DepthTwoCorrelatedSubqueryOverAJoin_TotalsPerOutermostRow()
+    {
+        var rows = Rows(Sales(), """
+            select c.cust_id,
+                   (select (select sum(l.qty) from ord o join line l on l.ord_id = o.ord_id
+                            where o.cust_id = c.cust_id)
+                    from region r where r.region_id = c.region_id) as total
+            from cust c
+            where c.cust_id in (2, 7)
+            order by c.cust_id
+            """);
+        HasCount(2, rows);
+        AreEqual("2|26", rows[0]);
+        AreEqual("7|", rows[1]);
+    }
+
+    /// <summary>
+    /// <c>EXISTS</c> over a joined inner: the customers who bought item 400.
+    /// </summary>
+    [TestMethod]
+    public void CorrelatedExistsOverAJoin_FiltersByMatch()
+    {
+        var rows = Rows(Sales(), """
+            select c.cust_id from cust c
+            where exists (select 1 from ord o join line l on l.ord_id = o.ord_id
+                          where o.cust_id = c.cust_id and l.item_id = 400)
+            order by c.cust_id
+            """);
+        AreEqual("2;3;4;5;6", string.Join(";", rows));
+    }
+
+    /// <summary>
+    /// <c>IN (SELECT …)</c> over a joined inner: only the customer whose lines
+    /// carry a quantity above 20.
+    /// </summary>
+    [TestMethod]
+    public void CorrelatedInOverAJoin_FiltersByMatch()
+    {
+        var rows = Rows(Sales(), """
+            select c.cust_id from cust c
+            where c.cust_id in (select o.cust_id from ord o join line l on l.ord_id = o.ord_id
+                                where o.cust_id = c.cust_id and l.qty > 20)
+            order by c.cust_id
+            """);
+        AreEqual("6", string.Join(";", rows));
+    }
+
+    /// <summary>
+    /// A WHERE conjunct equating two sources of the <em>same</em> query is not
+    /// an escaping value — it can't anchor a pushdown seek, since neither side
+    /// is readable before the join runs. Here it merely restates the ON, so
+    /// every order still counts.
+    /// </summary>
+    [TestMethod]
+    public void SiblingSourceEquality_KeepsEveryJoinedRow()
+        => AreEqual(12, Sales().ExecuteScalar("""
+            select count(*) from cust c join ord o on o.cust_id = c.cust_id
+            where c.cust_id = o.cust_id
+            """));
+
     /// <summary>
     /// The reorder is decided per execution off the seek's own candidate counts,
     /// so a replayed plan sees rows written between runs rather than the first

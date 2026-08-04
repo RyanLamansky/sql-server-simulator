@@ -1,3 +1,5 @@
+using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+
 namespace SqlServerSimulator;
 
 /// <summary>
@@ -11,6 +13,12 @@ namespace SqlServerSimulator;
 /// 10711 / 10714 / 5324). The EF SaveChanges single-clause shape is
 /// covered separately by <c>OutputClauseTests</c>. All probed against
 /// SQL Server 2025 (2026-05-13).
+/// <para>
+/// The <c>HashMatch_*</c> group re-asserts those same semantics over an
+/// unindexed target, where the match phase hashes the source by the ON's
+/// equality keys rather than scanning target × source or seeking the target
+/// per source row.
+/// </para>
 /// </summary>
 [TestClass]
 public sealed class MergeTests
@@ -645,6 +653,280 @@ public sealed class MergeTests
             """);
         Assert.AreEqual(100, sim.ExecuteScalar("select x from tgt where id = 1"));
         Assert.AreEqual(200, sim.ExecuteScalar("select x from tgt where id = 2"));
+    }
+
+    /// <summary>
+    /// An unindexed target can't be seeked per source row, so the match phase
+    /// hashes the source by the ON's equality keys and probes per target row
+    /// instead. Every semantic the target × source scan carried has to survive
+    /// that: which rows match, in which source order, and what the NOT MATCHED
+    /// branches see. Each test here uses a heap target (no PRIMARY KEY, no
+    /// index) so the seek path can't take the statement instead.
+    /// </summary>
+    [TestMethod]
+    public void HashMatch_UnindexedTarget_Upsert()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v int);
+            insert t values (1, 100), (2, 200);
+            merge t using (values (1, 11), (3, 33)) as s (id, v) on t.id = s.id
+            when matched then update set v = s.v
+            when not matched by target then insert (id, v) values (s.id, s.v);
+            """);
+        AreEqual(3, sim.ExecuteScalar("select count(*) from t"));
+        AreEqual(11, sim.ExecuteScalar("select v from t where id = 1"));
+        AreEqual(200, sim.ExecuteScalar("select v from t where id = 2"));
+        AreEqual(33, sim.ExecuteScalar("select v from t where id = 3"));
+    }
+
+    /// <inheritdoc cref="HashMatch_UnindexedTarget_Upsert"/>
+    [TestMethod]
+    public void HashMatch_MultiMatchUpdate_RaisesMsg8672()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (id int, v int);
+            insert t values (1, 100);
+            merge t using (values (1, 10), (1, 20)) as s (id, v) on t.id = s.id
+            when matched then update set v = s.v;
+            """, 8672);
+
+    /// <summary>
+    /// Msg 8672 fires while the match phase runs, before any mutation is queued
+    /// — so the target is untouched and no trigger fired, on the hashed path as
+    /// on the scan.
+    /// </summary>
+    [TestMethod]
+    public void HashMatch_MultiMatchUpdate_LeavesNoSideEffects()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int, v int); create table audit (v int); insert t values (1, 100)",
+            "create trigger tr on t after update as insert audit select v from inserted");
+        _ = sim.AssertSqlError("""
+            merge t using (values (1, 10), (1, 20)) as s (id, v) on t.id = s.id
+            when matched then update set v = s.v;
+            """, 8672);
+        AreEqual(100, sim.ExecuteScalar("select v from t where id = 1"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from audit"));
+    }
+
+    /// <inheritdoc cref="HashMatch_UnindexedTarget_Upsert"/>
+    [TestMethod]
+    public void HashMatch_MultiMatchDelete_DoesNotRaise()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v int);
+            insert t values (1, 100), (2, 200);
+            merge t using (values (1, 10), (1, 20)) as s (id, v) on t.id = s.id
+            when matched then delete;
+            """);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from t"));
+        AreEqual(200, sim.ExecuteScalar("select v from t where id = 2"));
+    }
+
+    /// <summary>
+    /// Several source rows matching one target row are collected in ascending
+    /// source order, and the first of them is the one the WHEN clause reads —
+    /// the bucket chain has to walk in build order for that to hold. (Real
+    /// leaves the pick unspecified for a multi-matched DELETE; the simulator
+    /// commits to first-source-wins, and the fast path must not change it.)
+    /// </summary>
+    [TestMethod]
+    public void HashMatch_MultipleMatches_FirstSourceRowDrivesTheClause()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v int);
+            insert t values (1, 100);
+            merge t using (values (1, 10), (1, 1)) as s (id, v) on t.id = s.id
+            when matched and s.v > 5 then delete;
+            """);
+        AreEqual(0, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    /// <summary>
+    /// A NULL key equi-matches nothing (<c>NULL = NULL</c> is UNKNOWN), on
+    /// either side: the NULL-keyed target row falls to WHEN NOT MATCHED BY
+    /// SOURCE and the NULL-keyed source row to WHEN NOT MATCHED BY TARGET.
+    /// </summary>
+    [TestMethod]
+    public void HashMatch_NullJoinKeys_NeverMatch()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v int);
+            insert t values (1, 100), (null, 99);
+            merge t using (values (1, 11), (null, 22)) as s (id, v) on t.id = s.id
+            when matched then update set v = s.v
+            when not matched by target then insert (id, v) values (s.id, s.v)
+            when not matched by source then update set v = -1;
+            """);
+        AreEqual(3, sim.ExecuteScalar("select count(*) from t"));
+        AreEqual(11, sim.ExecuteScalar("select v from t where id = 1"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from t where id is null and v = -1"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from t where id is null and v = 22"));
+    }
+
+    /// <summary>
+    /// The ON's non-equality conjuncts stay a residual filter re-checked per
+    /// probed pair, so a candidate the hash produced but the residual rejects is
+    /// no match at all — the target row falls to WHEN NOT MATCHED BY SOURCE.
+    /// </summary>
+    [TestMethod]
+    public void HashMatch_ResidualConjunct_FiltersProbedCandidates()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (k int, flag int, v int);
+            insert t values (1, 5, 100), (2, 5, 200);
+            merge t using (values (1, 1, 11), (2, 9, 22)) as s (k, flag, v) on t.k = s.k and t.flag > s.flag
+            when matched then update set v = s.v
+            when not matched by source then update set v = -1;
+            """);
+        AreEqual(11, sim.ExecuteScalar("select v from t where k = 1"));
+        AreEqual(-1, sim.ExecuteScalar("select v from t where k = 2"));
+    }
+
+    /// <inheritdoc cref="HashMatch_UnindexedTarget_Upsert"/>
+    [TestMethod]
+    public void HashMatch_CompositeKey_MatchesOnBothColumns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int, b int, v int);
+            insert t values (1, 1, 10), (1, 2, 20);
+            merge t using (values (1, 2, 99)) as s (a, b, v) on t.a = s.a and t.b = s.b
+            when matched then update set v = s.v;
+            """);
+        AreEqual(10, sim.ExecuteScalar("select v from t where a = 1 and b = 1"));
+        AreEqual(99, sim.ExecuteScalar("select v from t where a = 1 and b = 2"));
+    }
+
+    /// <summary>
+    /// Key values are coerced to the promotion type the <c>=</c> operator itself
+    /// would reach before hashing, so a bigint target column and an int source
+    /// column land in the same bucket.
+    /// </summary>
+    [TestMethod]
+    public void HashMatch_MixedNumericKeyTypes_Match()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id bigint, v int);
+            insert t values (1, 100), (2, 200);
+            merge t using (values (2, 22)) as s (id, v) on t.id = s.id
+            when matched then update set v = s.v;
+            """);
+        AreEqual(100, sim.ExecuteScalar("select v from t where id = 1"));
+        AreEqual(22, sim.ExecuteScalar("select v from t where id = 2"));
+    }
+
+    /// <summary>
+    /// String keys hash under the column's own collation, so a case-insensitive
+    /// collation matches the pair its <c>=</c> would — and a <c>char</c> key's
+    /// trailing-space padding is folded the same way equality folds it.
+    /// </summary>
+    [TestMethod]
+    public void HashMatch_StringKeys_FollowCollationAndPadding()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (k varchar(10), c char(5), v int);
+            insert t values ('abc', 'ab', 1), ('def', 'de', 2);
+            merge t using (values ('ABC', 'ab   ', 11)) as s (k, c, v) on t.k = s.k and t.c = s.c
+            when matched then update set v = s.v;
+            """);
+        AreEqual(11, sim.ExecuteScalar("select v from t where k = 'abc'"));
+        AreEqual(2, sim.ExecuteScalar("select v from t where k = 'def'"));
+    }
+
+    /// <summary>
+    /// An unqualified ON operand reads the target first and the source only when
+    /// the target has no such column — the same rule the runtime resolver
+    /// applies, so the two sides of a hashed key never swap.
+    /// </summary>
+    [TestMethod]
+    public void HashMatch_UnqualifiedOnOperands_ResolveTargetFirst()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v int);
+            insert t values (1, 100);
+            merge t using (values (1, 11), (2, 22)) as s (sid, sv) on id = sid
+            when matched then update set v = sv
+            when not matched by target then insert (id, v) values (sid, sv);
+            """);
+        AreEqual(11, sim.ExecuteScalar("select v from t where id = 1"));
+        AreEqual(22, sim.ExecuteScalar("select v from t where id = 2"));
+    }
+
+    /// <summary>
+    /// An ON with no <c>target = source</c> conjunct keeps the target × source
+    /// scan, which runs the whole predicate per pair.
+    /// </summary>
+    [TestMethod]
+    public void NonEquiOn_KeepsTheScanAndMatchesEveryPair()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v int);
+            insert t values (1, 1), (2, 2), (3, 3);
+            merge t using (values (2)) as s (id) on t.id < s.id
+            when matched then update set v = 0
+            when not matched by source then update set v = -1;
+            """);
+        AreEqual(0, sim.ExecuteScalar("select v from t where id = 1"));
+        AreEqual(-1, sim.ExecuteScalar("select v from t where id = 2"));
+        AreEqual(-1, sim.ExecuteScalar("select v from t where id = 3"));
+    }
+
+    /// <summary>
+    /// An equality between two columns of the <i>same</i> side isn't a key —
+    /// it's an ordinary filter, and stays one.
+    /// </summary>
+    [TestMethod]
+    public void OnEqualityWithinOneSide_StaysAFilter()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v int);
+            insert t values (1, 1), (2, 9);
+            merge t using (values (1, 11), (2, 22)) as s (id, v) on t.id = s.id and t.id = t.v
+            when matched then update set v = s.v
+            when not matched by source then update set v = -1;
+            """);
+        AreEqual(11, sim.ExecuteScalar("select v from t where id = 1"));
+        AreEqual(-1, sim.ExecuteScalar("select v from t where id = 2"));
+    }
+
+    /// <summary>
+    /// The source materializes once whatever the match strategy, so an empty
+    /// source leaves every target row to WHEN NOT MATCHED BY SOURCE and an empty
+    /// target leaves every source row to WHEN NOT MATCHED BY TARGET.
+    /// </summary>
+    [TestMethod]
+    public void HashMatch_EmptySides_TakeTheNotMatchedBranches()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int, v int);
+            create table empty_src (id int, v int);
+            insert t values (1, 1), (2, 2);
+            merge t using (select id, v from empty_src) as s on t.id = s.id
+            when matched then update set v = 0
+            when not matched by source then update set v = -1;
+            """);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t where v = -1"));
+
+        _ = sim.ExecuteNonQuery("""
+            create table t2 (id int, v int);
+            merge t2 using (values (1, 11), (2, 22)) as s (id, v) on t2.id = s.id
+            when matched then update set v = 0
+            when not matched by target then insert (id, v) values (s.id, s.v);
+            """);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t2"));
+        AreEqual(22, sim.ExecuteScalar("select v from t2 where id = 2"));
     }
 
     private const string MergeCorrelationSetup = """

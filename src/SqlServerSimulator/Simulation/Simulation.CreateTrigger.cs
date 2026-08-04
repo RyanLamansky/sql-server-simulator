@@ -44,6 +44,7 @@ partial class Simulation
         RejectQualifiedModuleName(triggerName, "TRIGGER");
         if (!context.Batch.TryResolveSchema(triggerName, out var triggerSchema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(triggerName.ImmediateQualifier ?? Database.DefaultSchemaName);
+        triggerSchema.Database.RejectWriteWhenReadOnly();
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
             throw SimulatedSqlException.SyntaxErrorNear(context);

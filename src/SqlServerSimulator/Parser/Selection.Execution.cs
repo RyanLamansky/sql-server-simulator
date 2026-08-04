@@ -954,13 +954,20 @@ internal sealed partial class Selection
                         : new TopSpec(ResolveRowCountLimit(topExpression, RowLimitKind.Top, batch), null, topWithTies);
                 var offsetCount = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, batch);
                 var fetchCount = ResolveRowCountLimit(fetchExpression, RowLimitKind.Fetch, batch);
+                // Push the WHERE conjuncts a deferred source's own body can
+                // apply into that body first, so the filter reaches its base
+                // scan (and the index seek there) instead of running only after
+                // the body produced every row. Before the materialization
+                // below, so a source that materializes materializes the
+                // narrowed rowset. Every pushed conjunct stays here as well.
+                var execSources = PushWhereIntoDeferredSources(sources, fromClause.Excluders, batch);
                 // Materialize the deferred sources whose rows can't change
                 // across this enumeration once per execution (before the
                 // projection paths build their resolver closures over the
                 // array), so a nested-loop join stops re-generating them per
                 // outer row and the equi-join hash path can key them.
                 // Correlated sources are left untouched.
-                var execSources = MaterializeUncorrelatedDeferredSources(sources, joins, batch, outerResolver);
+                execSources = MaterializeUncorrelatedDeferredSources(execSources, joins, batch, outerResolver);
                 return aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
                     ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver)
                     : windows.Count > 0
@@ -990,6 +997,21 @@ internal sealed partial class Selection
         selection.BranchFromSources = sources;
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
         (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
+        // A plain SELECT-project-filter body can carry an enclosing statement's
+        // WHERE conjunct: it applies its projection and its own WHERE to every
+        // row and nothing else, so an extra filter there is the same filter one
+        // level up. Anything that reads the row set as a whole — DISTINCT, a row
+        // limit, a grouping, a window, an ORDER BY the limit would pair with —
+        // would see a different row set and declines.
+        if (!distinct && aggregates.Count == 0 && windows.Count == 0
+            && fromClause.GroupingSets.Count == 0 && fromClause.Having is null
+            && orderBy.Count == 0 && !selection.HasTopOrOffsetOrFetch
+            && intoTarget is null && !isAssignmentOnly && sources.Length > 0)
+        {
+            var pushdownShape = new ProjectionPushdown(
+                outputSchema, outputColumnNames, sources, joins, expressions, fromClause.Excluders, orderBy);
+            selection.PredicatePushdown = templates => BuildPushedProjection(pushdownShape, templates);
+        }
         return selection;
     }
 
@@ -1299,6 +1321,56 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// The row-source passes a <b>joined UPDATE / DELETE</b> takes before it
+    /// enumerates its join tuples: the once-per-enumeration materialization of a
+    /// deferred source, then the WHERE narrowing of every source but the
+    /// mutation target. Returns <paramref name="sources"/> unchanged (no copy)
+    /// when neither applies; <paramref name="joins"/> is never rewritten, so the
+    /// written join order stands.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A joined mutation reads its whole row set through
+    /// <see cref="EnumerateJoinedRows"/> and writes nothing until that
+    /// enumeration is over — the loop only collects <c>(page, slot)</c>
+    /// addresses and computed values, and the commit phase applies them. A
+    /// source reading the mutation target therefore sees the pre-statement rows
+    /// however many times it runs, which is what makes running it once instead
+    /// of once per target row a pure cost reduction rather than a change of
+    /// answer, and is the direction real works anyway: probe-confirmed against
+    /// SQL Server 2025, <c>UPDATE t SET v = d.m FROM #t t JOIN (SELECT MAX(v) AS
+    /// m FROM #t) d ON 1 = 1</c> over <c>(10, 20, 30)</c> leaves every row at
+    /// <c>30</c> there, and the <c>NEWID()</c> gate the materialization already
+    /// carries is what keeps the shape real re-draws per row (five distinct
+    /// values over five target rows, probe-confirmed) re-executing.
+    /// </para>
+    /// <para>
+    /// The <b>target</b> source is left exactly as it enumerates. The write
+    /// pipeline reaches each affected row through an address side-channel keyed
+    /// by the <c>byte[]</c> instances that enumerator yields, and its lock / undo
+    /// bookkeeping is settled per row it touches; narrowing it would be a change
+    /// to the write path rather than to a read, so it stays out of this pass
+    /// (the single-table mutation seek in <c>SeekMutationTarget</c> is where that
+    /// question is answered). The narrowed-source-first reorder is declined
+    /// outright for the same reason — the target's slot is identified by index.
+    /// </para>
+    /// </remarks>
+    internal static FromSource[] PrepareMutationJoinSources(
+        FromSource[] sources, JoinSpec[] joins, BooleanExpression? where, int targetIndex, BatchContext batch)
+    {
+        // Skip mode commits nothing, so both passes are pure cost there — and
+        // the materializing execution would run a deferred body on behalf of a
+        // statement that never runs, which can raise where the per-outer-row
+        // execution never reached one (an empty target drives no rows). The
+        // join-view write path declines its whole enumeration for the same
+        // reason.
+        if (batch.IsSkipping)
+            return sources;
+        sources = MaterializeUncorrelatedDeferredSources(sources, joins, batch, outerResolver: null);
+        return where is null ? sources : NarrowMutationJoinSources(sources, where, targetIndex, batch);
+    }
+
+    /// <summary>
     /// Whether the deferred source at <paramref name="index"/> produces the same
     /// rows on every execution within one enumeration of
     /// <paramref name="sources"/>, so its plan can run once instead of once per
@@ -1433,6 +1505,13 @@ internal sealed partial class Selection
     {
         var buffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>();
 
+        // TOP (n) over a sort keeps only the n best rows rather than buffering
+        // and sorting the whole scan — see TopNRowHeap for the eligibility
+        // rules and the tie-at-the-boundary note.
+        var topN = TopNHeapCap(orderBy, distinct, top, offsetCount, fetchCount) is { } heapCapacity
+            ? new TopNRowHeap(heapCapacity, orderBy)
+            : null;
+
         // Hoisted per-row resolution scaffolding — see InnerStream above.
         var memo = new SourceColumnMemo();
         var currentTuple = default(byte[]?[])!;
@@ -1466,7 +1545,17 @@ internal sealed partial class Selection
                 projected[i] = expressions[i].Run(rowRuntime);
 
             var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, projectionSources, distinct, batch, resolveSource);
-            buffer.Add((projected, keys));
+            if (topN is not null)
+                topN.Offer(projected, keys);
+            else
+                buffer.Add((projected, keys));
+        }
+
+        if (topN is not null)
+        {
+            foreach (var row in topN.Drain())
+                yield return row;
+            yield break;
         }
 
         IEnumerable<(SqlValue[] Projected, SqlValue[] Keys)> filtered = buffer;

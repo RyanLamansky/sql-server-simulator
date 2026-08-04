@@ -140,6 +140,8 @@ partial class Simulation
         if (!context.Batch.TryResolveSchema(sequenceName, out var schema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(sequenceName.Count >= 2 ? sequenceName.ImmediateQualifier! : Database.DefaultSchemaName);
 
+        schema.Database.RejectWriteWhenReadOnly();
+
         var sequence = new Sequence(
             schema,
             sequenceName.Leaf,

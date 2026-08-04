@@ -256,6 +256,10 @@ partial class Simulation
         {
             if (!context.Batch.TryResolveSchema(tableName, out schema))
                 throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(tableName.Count >= 2 ? tableName.ImmediateQualifier! : Database.DefaultSchemaName);
+            // This branch is the permanent-table one — a #temp / ##temp target
+            // took the branch above and stays legal whatever the session's own
+            // database is set to.
+            schema.Database.RejectWriteWhenReadOnly();
             // sys and INFORMATION_SCHEMA exist in Database.Schemas to carry
             // their conventional schema_ids and host catalog views — they
             // aren't writable namespaces. Real SQL Server reports Msg 2760

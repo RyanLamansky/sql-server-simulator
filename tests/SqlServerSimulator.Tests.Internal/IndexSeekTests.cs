@@ -683,6 +683,180 @@ public sealed class IndexSeekTests
         HasCount(1, rows);
     }
 
+    // ---- a value side naming a column of a MULTI-source plan: classified as a
+    // sibling of that plan's own FROM (declines — it isn't readable before the
+    // join runs) or as an escape to the enclosing scope (seeks — the enclosing
+    // row is fixed for one execution of this plan, exactly like a variable). ----
+
+    /// <summary>
+    /// Parent / child / grandchild, every join column indexed, so a filter on
+    /// any of them can seek. <c>gc</c> holds ten rows per <c>ch</c> row so a
+    /// per-outer seek and a whole-table hash build are far apart.
+    /// </summary>
+    private const string OuterScopeSetup = """
+        create table p (id int not null primary key);
+        create table ch (id int not null primary key, p_id int not null, amt int not null);
+        create table gc (id int not null primary key, ch_id int not null, amt int not null);
+        create index ix_ch_p on ch (p_id);
+        create index ix_gc_ch on gc (ch_id);
+        declare @i int = 1, @j int = 0;
+        while @i <= 20 begin
+          insert p values (@i);
+          insert ch values (@i, @i, @i * 10);
+          set @j = 0;
+          while @j < 10 begin
+            insert gc values (@i * 100 + @j, @i, @j);
+            set @j += 1;
+          end
+          set @i += 1;
+        end
+        """;
+
+    /// <summary>
+    /// The cliff shape: a correlated SELECT-list subquery whose own FROM is a
+    /// join. The subquery's <c>ch.p_id = p.id</c> conjunct names a column of
+    /// the <em>enclosing</em> query, so it anchors a seek on <c>ch</c> — before
+    /// this classification the multi-source pushdown refused every column value
+    /// side and the join hash-built the whole child table once per outer row.
+    /// </summary>
+    [TestMethod]
+    public void CorrelatedSubqueryOverAJoin_SeeksTheOuterValue()
+    {
+        var (trace, rows) = Run(OuterScopeSetup, """
+            select (select sum(gc.amt) from ch join gc on gc.ch_id = ch.id where ch.p_id = p.id)
+            from p where p.id = 3
+            """);
+        Contains("Seek(ch)", trace);
+        HasCount(1, rows);
+        AreEqual(45, rows[0]);
+    }
+
+    /// <summary>
+    /// The same shape one level deeper: the innermost plan's value side names
+    /// the outermost query's column, which reaches it through chained outer
+    /// resolvers. The classification only asks "does this escape my own FROM",
+    /// so depth doesn't enter into it.
+    /// </summary>
+    [TestMethod]
+    public void DepthTwoCorrelation_SeeksTheOutermostValue()
+    {
+        var (trace, rows) = Run(OuterScopeSetup, """
+            select (select (select sum(gc.amt) from ch join gc on gc.ch_id = ch.id where ch.p_id = p.id)
+                    from p as mid where mid.id = p.id)
+            from p where p.id = 4
+            """);
+        Contains("Seek(ch)", trace);
+        HasCount(1, rows);
+        AreEqual(45, rows[0]);
+    }
+
+    /// <summary>
+    /// <c>EXISTS</c> over a joined inner narrows the same way, and the answer
+    /// is unchanged from the scan it replaces.
+    /// </summary>
+    [TestMethod]
+    public void CorrelatedExistsOverAJoin_SeeksTheOuterValue()
+    {
+        var (trace, rows) = Run(OuterScopeSetup, """
+            select p.id from p
+            where exists (select 1 from ch join gc on gc.ch_id = ch.id where ch.p_id = p.id and gc.amt = 7)
+              and p.id <= 3
+            """);
+        Contains("Seek(ch)", trace);
+        HasCount(3, rows);
+    }
+
+    /// <summary>
+    /// …as does <c>IN (SELECT …)</c> over one.
+    /// </summary>
+    [TestMethod]
+    public void CorrelatedInOverAJoin_SeeksTheOuterValue()
+    {
+        var (trace, rows) = Run(OuterScopeSetup, """
+            select p.id from p
+            where p.id in (select ch.p_id from ch join gc on gc.ch_id = ch.id where ch.p_id = p.id)
+              and p.id <= 2
+            """);
+        Contains("Seek(ch)", trace);
+        HasCount(2, rows);
+    }
+
+    /// <summary>
+    /// Two sources whose <em>indexed</em> column each carries the WHERE
+    /// equality, joined on an unindexed pair so the join itself can't seek —
+    /// any <c>Seek</c> here could only come from the WHERE pushdown.
+    /// </summary>
+    private const string SiblingSetup = """
+        create table s1 (id int not null primary key, k int not null, tag int not null);
+        create table s2 (id int not null primary key, k int not null, tag int not null);
+        create index ix_s1_k on s1 (k);
+        create index ix_s2_k on s2 (k);
+        insert s1 values (1, 7, 100), (2, 8, 200), (3, 4, 300);
+        insert s2 values (1, 7, 100), (2, 9, 200), (3, 1, 300);
+        create table drv (id int not null primary key);
+        insert drv values (1), (2)
+        """;
+
+    /// <summary>
+    /// A WHERE equating two sources of the SAME plan is a sibling reference on
+    /// both sides, so neither source narrows — the value isn't readable before
+    /// the join runs, and treating it as an enclosing-scope escape would seek
+    /// on whatever the (absent) outer resolver returned, here dropping the one
+    /// matching row.
+    /// </summary>
+    [TestMethod]
+    public void SiblingSourceColumn_DeclinesBothSides()
+    {
+        var (trace, rows) = Run(SiblingSetup, "select s1.id from s1 join s2 on s1.tag = s2.tag where s1.k = s2.k");
+        Contains("Scan(s1)", trace);
+        DoesNotContain("Seek(s1)", trace);
+        DoesNotContain("Seek(s2)", trace);
+        HasCount(1, rows);
+        AreEqual(1, rows[0]);
+    }
+
+    /// <summary>
+    /// The same decline on the range path, where mistaking a sibling for an
+    /// enclosing-scope value is visibly destructive even with no enclosing
+    /// scope at all: the probe would read as NULL, and a NULL range bound seeks
+    /// to <em>empty</em> (every comparison UNKNOWN) rather than declining, so
+    /// the matching row would vanish.
+    /// </summary>
+    [TestMethod]
+    public void SiblingSourceColumn_RangeBound_Declines()
+    {
+        var (trace, rows) = Run(SiblingSetup, "select s1.id from s1 join s2 on s1.tag = s2.tag where s1.k > s2.k");
+        Contains("Scan(s1)", trace);
+        DoesNotContain("Seek(s1)", trace);
+        DoesNotContain("Seek(s2)", trace);
+        HasCount(1, rows);
+        AreEqual(3, rows[0]);
+    }
+
+    /// <summary>
+    /// The sibling decline is decided against the plan's own FROM, not the name
+    /// alone: the inner query's <c>s2</c> shadows an <c>s2</c> the enclosing
+    /// query also reads, so <c>s1.k = s2.k</c> has to bind to the inner one and
+    /// stay residual. Reading it as an enclosing-scope escape would seek
+    /// <c>s1</c> on the <em>outer</em> row's <c>k</c> — a real value, so the
+    /// wrong rows rather than a declined probe — and the query would answer
+    /// nothing.
+    /// </summary>
+    [TestMethod]
+    public void ShadowedSiblingColumn_BindsToTheInnerPlan()
+    {
+        var (trace, rows) = Run(SiblingSetup, """
+            select drv.id from drv, s2
+            where s2.id = 2
+              and exists (select 1 from s1 join s2 on s1.tag = s2.tag
+                          where s1.k = s2.k and s1.tag = drv.id * 100)
+            """);
+        Contains("Scan(s1)", trace);
+        DoesNotContain("Seek(s1)", trace);
+        HasCount(1, rows);
+        AreEqual(1, rows[0]);
+    }
+
     // ---- incremental maintenance (no warm-up): the per-Heap cache applies the
     // mutation journal delta instead of rebuilding on every write. CacheReplay /
     // CacheBuild trace which path a seek took; CacheBuild means a full scan

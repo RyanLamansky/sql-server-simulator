@@ -227,6 +227,23 @@ An **unaliased** derived table is still accepted, where real requires the alias 
   Requires an ORDER BY (else **Msg 1062**); also forces the buffered path.
 - Both flags ride the existing TOP parse (`topPercent` / `topWithTies` on the projection build) and are honored by the buffered, windowed, and aggregate projection paths via `ComputeTopCap`.
 
+### Top-N heap
+
+A plain `TOP (n)` over an ORDER BY doesn't sort its buffer at all: `ProjectBuffered` feeds rows into a bounded max-heap of `n` entries (`TopNRowHeap` in `Selection.Execution.OrderBy.cs`) whose root is the worst row admitted, so once it is full a candidate is rejected on a single `CompareOrderKeys`.
+That turns the cap's cost from O(rows log rows) into O(rows) plus a sift for the few rows that get in — and it is **the operator shape real picks too**: its plan for `SELECT TOP (10) … ORDER BY <unindexed>` over 228k rows is a Clustered Index Scan under a *TopN Sort*.
+
+Eligible when there is an ORDER BY, the cap is a plain `TOP (n)` or `FETCH` resolving into `1 … 1024`, and nothing behind it needs the full ordered set: `PERCENT` and `WITH TIES` both read the total row count or the boundary row's neighbours, an `OFFSET` skips into the middle of the order, and `DISTINCT` has to dedupe the whole set before the cap means anything.
+Each of those keeps the full sort, and past the 1024 ceiling the per-row sift stops being cheaper than sorting once.
+
+**Ties at the boundary.**
+A candidate tying the root is rejected, so among rows with equal keys the earliest-scanned survive — a stable pick, where the full-sort path's `List<T>.Sort` is an unstable introsort.
+Real leaves it unspecified too (its TopN Sort carries no stability guarantee), so the two agree on every row whose key is strictly inside the window and may differ only on which members of a tie group *spanning* the boundary come back.
+No existing test depended on the old pick.
+
+Measured on `SELECT TOP (10) InvoiceLineID, UnitPrice, ExtendedPrice FROM Sales.InvoiceLines ORDER BY UnitPrice DESC, InvoiceLineID DESC` (228k rows, no index on the sort column): 338 ms → 122 ms median, 8.8× live → ~3.1×.
+The residual is not the cap — a bare `SELECT COUNT(*)` over the same table already costs ~70 ms here — but the scan, and real's own plan shows why it wins: 41 ms elapsed against **280 ms of CPU**, at `DegreeOfParallelism="8"`.
+Single-threaded, the simulator uses less CPU than real does for the same query; the gap is intra-query parallelism, which no top-N strategy reaches.
+
 ## `WINDOW w AS (…)` named-window clause (SQL Server 2022+)
 - A trailing `WINDOW name AS (<over-body>) [, …]` clause (between HAVING and ORDER BY) defines named windows an `OVER w` reference resolves to.
 - Every window kind reaches one — the ranking family (`ROW_NUMBER` / `RANK` / `DENSE_RANK` / `NTILE`), the distribution pair (`CUME_DIST` / `PERCENT_RANK`), the offset pair (`LAG` / `LEAD`), the value pair (`FIRST_VALUE` / `LAST_VALUE`), the ordered-set pair (`PERCENTILE_CONT` / `PERCENTILE_DISC`) and aggregate-OVER.

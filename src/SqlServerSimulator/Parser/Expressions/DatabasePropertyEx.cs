@@ -91,10 +91,10 @@ internal sealed class DatabasePropertyEx : Expression
             "SNAPSHOTISOLATIONSTATE" => SqlValue.FromInt32(db.AllowSnapshotIsolation ? 1 : 0),
             "SQLSORTORDER" => SqlValue.FromByte(SortIdFor(db.CollationName)),
             "STATUS" => SqlValue.FromNVarchar("ONLINE"),
-            // Updateability is always READ_WRITE (the simulator models no
-            // read-only databases at the DATABASEPROPERTYEX surface). SMO's
-            // database-properties preamble reads it as [IsUpdateable].
-            "UPDATEABILITY" => SqlValue.FromNVarchar("READ_WRITE"),
+            // The database's access mode, moved by ALTER DATABASE … SET
+            // { READ_ONLY | READ_WRITE }. SMO's database-properties preamble
+            // reads it as [IsUpdateable].
+            "UPDATEABILITY" => SqlValue.FromNVarchar(db.IsReadOnly ? "READ_ONLY" : "READ_WRITE"),
             "USERACCESS" => SqlValue.FromNVarchar("MULTI_USER"),
             "VERSION" => SqlValue.FromInt32(0),
             _ => SqlValue.Null(SqlType.SqlVariant),

@@ -45,6 +45,7 @@ partial class Simulation
         var typeName = BatchContext.ParseObjectName(context);
         if (!context.Batch.TryResolveSchema(typeName, out var schema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(typeName.ImmediateQualifier ?? Database.DefaultSchemaName);
+        schema.Database.RejectWriteWhenReadOnly();
         // Dual DDL gate for both type forms, in real's probed order: the
         // database-scope CREATE TYPE permission (Msg 262 state 1), then ALTER on
         // the target schema (Msg 2760).

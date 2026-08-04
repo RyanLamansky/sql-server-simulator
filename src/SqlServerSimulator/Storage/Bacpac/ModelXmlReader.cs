@@ -392,6 +392,13 @@ internal static class ModelXmlReader
         "IsAcceleratedDatabaseRecoveryOn" => $"ALTER DATABASE {bracketedDb} SET ACCELERATED_DATABASE_RECOVERY = {OnOff(value)};",
         "IsOptimizedLockingOn" => $"ALTER DATABASE {bracketedDb} SET OPTIMIZED_LOCKING = {OnOff(value)};",
         "IsReadCommittedSnapshot" => $"ALTER DATABASE {bracketedDb} SET READ_COMMITTED_SNAPSHOT {OnOff(value)};",
+        // The access mode is deliberately not emitted. DacFx omits it from
+        // SqlDatabaseOptions even when exporting a read-only database (verified
+        // against the WideWorldImporters and AdventureWorks models, neither of
+        // which carries the property), and this element is handled in phase 1 —
+        // before the schema and data load — so a READ_ONLY emitted here would
+        // refuse the rest of its own import. Carrying it wants a post-load hook.
+        "IsReadOnly" => null,
         // Enum-shaped options. RecoveryMode: 1=FULL, 2=BULK_LOGGED, 3=SIMPLE.
         "RecoveryMode" => $"ALTER DATABASE {bracketedDb} SET RECOVERY {RecoveryMode(value)};",
         // IsCursorDefaultScopeGlobal: True → GLOBAL, False → LOCAL.

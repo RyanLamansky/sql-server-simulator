@@ -34,6 +34,8 @@ partial class Simulation
         if (!context.Batch.TryResolveSchema(synonymName, out var schema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(synonymName.Count >= 2 ? synonymName.ImmediateQualifier! : Database.DefaultSchemaName);
 
+        schema.Database.RejectWriteWhenReadOnly();
+
         // Dual DDL gate, in real's probed order: the database-scope CREATE
         // SYNONYM permission (Msg 262 state 1), then ALTER on the target schema
         // (Msg 2760).

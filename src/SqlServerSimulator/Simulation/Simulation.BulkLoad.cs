@@ -254,6 +254,7 @@ partial class Simulation
             if (plan.CheckConstraints)
                 EnforceOutgoingForeignKeys(table, [rowValues], context, "INSERT");
 
+            table.OwningDatabase?.RejectWriteWhenReadOnly();
             var (pageIndex, slotIndex) = table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, storedValues, table.Heap), batch.CurrentUndoLog);
             if (IsLockableTable(table))
             {

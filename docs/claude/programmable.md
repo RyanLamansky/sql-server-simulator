@@ -1,5 +1,35 @@
 # Programmable objects — UDFs, TVFs, views
 
+## Where a module statement may sit in its batch
+
+Two rules, and which one a module kind gets follows from how its body ends.
+
+**Msg 111 — must be *first*.**
+`CREATE` / `ALTER` of a `VIEW`, `FUNCTION`, `TRIGGER`, `PROCEDURE` or `SCHEMA` has to open its batch, and since there is no `GO`, a batch is one `CommandText`.
+So `IF OBJECT_ID(…) IS NOT NULL DROP FUNCTION …; CREATE FUNCTION …` raises where two commands succeed (`ExecuteBatches` in the tests is the split), and a lone leading `;` doesn't count as a statement (probe-confirmed).
+Real's state byte identifies the kind: 4 / 5 for CREATE / ALTER FUNCTION, 6 / 7 for CREATE / ALTER TRIGGER, 9 / 10 for CREATE / ALTER VIEW, 12 for CREATE RULE, 13 for CREATE DEFAULT, 14 for CREATE SCHEMA, and 1 for the merged `'CREATE/ALTER PROCEDURE'` label.
+`CREATE OR ALTER` reports under the plain `CREATE` label and state — real names the statement by the verb it started with.
+
+**Msg 156 / 102 — a VIEW or FUNCTION must be its batch's *only* statement.**
+Their bodies run to the end of the batch, so a token left over after the body is an ordinary syntax error at that token: **Msg 156** class 15 state 1 naming the keyword when it is one (`Incorrect syntax near the keyword 'SELECT'.`), **Msg 102** otherwise, carrying the module's **unqualified** name as `Procedure` and the offending token's own line.
+It fires while the batch parses, so the module is *not* created (probe-confirmed by reading back `OBJECT_ID`).
+The keyword is echoed as the source spelled it — `select`, `SeLeCt` — not canonicalized.
+All four function shapes take the rule: scalar, multi-statement TVF, and the inline TVF in both its parenthesized and bare-`RETURN` forms.
+Trailing `;` separators (any number) and trailing comments are not statements and are accepted.
+
+**Procedures and triggers take no such check.**
+Their bodies are multi-statement and read to end-of-batch, so a trailing statement is *swallowed into the body* — probe-confirmed on real by executing the module and by reading `OBJECT_DEFINITION`, which shows the trailing statement inside the stored definition.
+
+`RejectStatementAfterModuleBody` in `Simulation.ModuleDefinition.cs` is the shared check, called from the view parser and from all three function tails once each has captured its body.
+All of the above probed against SQL Server 2025 on 2026-08-04.
+
+### Divergences
+
+- A **view's body errors carry no `Procedure` attribution**, where real attributes every error raised inside a `CREATE VIEW` to the view being defined — the syntax family (Msg 156 / 102), the binder family (Msg 207), the body-shape ones (Msg 1033 / 4511) and even the Msg 2714 name collision.
+  Functions already attribute, because their bodies go through `BindModuleBodyAtCreate`, which sets `BatchContext.ErrorProcedureName`; a view's body is parsed inline instead, so nothing sets it.
+  The trailing-statement check above attributes explicitly, so it is the one view-`CREATE` error that carries the name.
+  Note this also decides which error a trailing **non-keyword** token produces: the body's own parse is greedy and rejects it first, so `CREATE VIEW v AS SELECT 1 AS x` + `)` is Msg 102 from the body parser, with real's number and message but no attribution.
+
 ## CREATE-time body binding
 
 A module's body is **bound when the module is created**, and a binder error aborts the `CREATE` — the module isn't created, and an `ALTER` / `CREATE OR ALTER` leaves the previous body standing.
@@ -158,8 +188,7 @@ Probed against SQL Server 2025.
   Other codes (V / P / ...) route to the matching object kind.
 - **DROP FUNCTION [IF EXISTS] schema.name[, ...]**: same shape as DROP TABLE; missing target → **Msg 3701** with "function" wording variant.
 - **`ALTER FUNCTION` / `CREATE OR ALTER FUNCTION`** replace the definition in place across all three function kinds — see [Replacing a module](#replacing-a-module--alter--create-or-alter).
-- **Msg 111 batch-first rule** is enforced: `CREATE FUNCTION` must open its batch, and since there is no `GO`, a batch is one `CommandText` — so `IF OBJECT_ID(…) IS NOT NULL DROP FUNCTION …; CREATE FUNCTION …` raises where two commands succeed (`ExecuteBatches` in the tests is the split).
-  Real's state byte identifies the kind: 4 for CREATE FUNCTION, 5 for ALTER FUNCTION, 6 / 7 for CREATE / ALTER TRIGGER, 9 / 10 for CREATE / ALTER VIEW, 12 for CREATE RULE, 13 for CREATE DEFAULT, 14 for CREATE SCHEMA, and 1 for the merged `'CREATE/ALTER PROCEDURE'` label (probe-confirmed 2026-07-31; the simulator carries the ones it parses).
+- **Batch position**: `CREATE FUNCTION` must both open its batch (Msg 111) and be its only statement (Msg 156 / 102) — see [Where a module statement may sit in its batch](#where-a-module-statement-may-sit-in-its-batch).
 
 - **The body-shape rules apply**: Msg 455 (last statement must be `RETURN`), Msg 444 (a body `SELECT` returning to the client), Msg 443 (a side-effecting operator) and Msg 1075 (a bare `RETURN`) all refuse the `CREATE` — see [Body-shape rules](#body-shape-rules--msg-455--444--443--1075).
 
@@ -239,6 +268,8 @@ Probed against SQL Server 2025.
 `CREATE VIEW schema.name [(col_list)] [WITH SCHEMABINDING | ENCRYPTION | VIEW_METADATA] AS <SELECT> [WITH CHECK OPTION]`, referenced from FROM as `FROM schema.view [alias]` (or unqualified `FROM view`).
 Stored as `View` in `Schema.Views`.
 Body re-parsed per call inside a child `BatchContext`, returned as `Selection.ForView` wrapped in a `FromSource.LateralPlan`.
+A referencing statement's eligible WHERE conjuncts ride that wrapper into the body parse and are applied to the body plan, so a filter written above a view (or a chain of them) reaches the base scan underneath — see [`joins.md`](joins.md#where-pushdown-into-a-view--derived-table-body).
+Read-side only, and the stored definition is untouched, so the catalog and dependency surfaces see the body as written.
 Same 32-level recursion cap (Msg 217) as scalar UDFs / inline TVFs.
 Probed against SQL Server 2025.
 
@@ -596,9 +627,7 @@ Probed against SQL Server 2025 (2026-07-31).
   An `ALTER FUNCTION` body that writes a different kind (scalar ↔ inline TVF ↔ multi-statement TVF) is the same **Msg 2010**, and the stored function is left untouched.
   A T-SQL body over a CLR routine (or an `AS EXTERNAL NAME` body over a T-SQL one) takes the same branch by construction — the type codes differ, so the narrowing finds nothing of the declared kind.
 - **Bare `CREATE` on an existing name** stays **Msg 2714**.
-- **Msg 111 batch-first** applies with the ALTER label and its own state: `ALTER FUNCTION` 5, `ALTER TRIGGER` 7, `ALTER VIEW` 10.
-  `CREATE OR ALTER` reports under the plain `CREATE` label and state, never the ALTER one — real names the statement by the verb it started with.
-  `PROCEDURE` merges both verbs into the one `'CREATE/ALTER PROCEDURE'` label at state 1.
+- **Batch position** applies to the ALTER forms too, at their own states — see [Where a module statement may sit in its batch](#where-a-module-statement-may-sit-in-its-batch).
 
 **A database-qualified name is rejected** on every one of these statements, `CREATE` / `ALTER` / `CREATE OR ALTER` alike: **Msg 166** `'CREATE/ALTER {VIEW | FUNCTION | PROCEDURE | TRIGGER}' does not allow specifying the database name as a prefix to the object name.`
 Real always names the statement in that combined `CREATE/ALTER` form whichever verb was written, and rejects a prefix naming the *current* database as readily as any other (probe-confirmed).

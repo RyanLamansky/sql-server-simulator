@@ -124,6 +124,8 @@ partial class Simulation
             UnquotedString { ContextualKeyword: ContextualKeyword.Recursive_Triggers } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.RecursiveTriggers),
             UnquotedString { ContextualKeyword: ContextualKeyword.Trustworthy } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.Trustworthy),
             UnquotedString { ContextualKeyword: ContextualKeyword.Db_Chaining } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.CrossDatabaseChaining),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Read_Only } => TryParseAlterDatabaseSetAccessMode(context, target, readOnly: true),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Read_Write } => TryParseAlterDatabaseSetAccessMode(context, target, readOnly: false),
             UnquotedString unquoted when RecognizedDatabaseOptions.TryGetValue(unquoted.Value, out var kind) => ConsumeDatabaseOptionTail(context, kind),
             _ => false,
         };
@@ -140,10 +142,42 @@ partial class Simulation
         var requested = numericValue.AsInt32;
         if (context.Batch.IsSkipping)
             return true;
+
+        // The one SET option a read-only database refuses (probe-confirmed
+        // 2026-08-04): the level lives in the database's own metadata, so real
+        // raises Msg 3906 here while ALLOW_SNAPSHOT_ISOLATION /
+        // READ_COMMITTED_SNAPSHOT / RECURSIVE_TRIGGERS / ANSI_NULLS / RECOVERY —
+        // and READ_WRITE itself — all move freely.
+        target.RejectWriteWhenReadOnly();
         if (!Enum.IsDefined((CompatibilityLevel)requested))
             throw SimulatedSqlException.InvalidCompatibilityLevel();
 
         target.CompatibilityLevel = (CompatibilityLevel)requested;
+        return true;
+    }
+
+    /// <summary>
+    /// Parses <c>ALTER DATABASE name SET { READ_ONLY | READ_WRITE } [WITH &lt;termination&gt;]</c>
+    /// — the access-mode shape (a bare state, no <c>=</c>), sharing
+    /// <see cref="ConsumeAccessModeTail"/> with SINGLE_USER / MULTI_USER /
+    /// RESTRICTED_USER. Unlike those, this one is load-bearing:
+    /// <see cref="Database.IsReadOnly"/> gates every write to the database.
+    /// <para><c>master</c> and <c>tempdb</c> pin the option and raise
+    /// <strong>Msg 5058</strong> for either value asked for, at their own states
+    /// (5 and 4); <c>model</c> and <c>msdb</c> accept it. All probe-confirmed
+    /// against SQL Server 2025 (2026-08-04).</para>
+    /// </summary>
+    private static bool TryParseAlterDatabaseSetAccessMode(ParserContext context, Database target, bool readOnly)
+    {
+        if (!ConsumeAccessModeTail(context))
+            return false;
+        if (context.Batch.IsSkipping)
+            return true;
+
+        if (BuiltInToken.EqualsAny(target.Name, MasterDatabaseName, TempdbDatabaseName))
+            throw SimulatedSqlException.OptionCannotBeSetInDatabase(readOnly ? "READ_ONLY" : "READ_WRITE", target.Name);
+
+        target.IsReadOnly = readOnly;
         return true;
     }
 
@@ -588,6 +622,7 @@ partial class Simulation
         // ALTER SEQUENCE needs ALTER on the sequence (schema ALTER / object
         // CONTROL cover it) — Msg 15151, the same record a missing sequence
         // earns, naming the leaf (probe-confirmed).
+        sequence.Schema.Database.RejectWriteWhenReadOnly();
         if (!PermissionEnforcement.HasObjectAlter(
                 context.Batch, context.Batch.DatabaseFor(sequence), sequence.ObjectId, sequence.SchemaId))
         {
@@ -1001,6 +1036,7 @@ partial class Simulation
             // ALTER TABLE needs ALTER on the object (object-scope suffices —
             // probe M5b); a non-privileged principal gets Msg 1088 state 13.
             // Temp tables / table variables are session-owned and exempt.
+            alterTarget.OwningDatabase?.RejectWriteWhenReadOnly();
             if (!alterTarget.IsTableVariable
                 && !BatchContext.IsLocalTempName(alterTarget.Name)
                 && !BatchContext.IsGlobalTempName(alterTarget.Name)

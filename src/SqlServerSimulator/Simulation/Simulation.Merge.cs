@@ -1111,21 +1111,23 @@ partial class Simulation
         var pendingDeletes = new List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)>();
 
         // Phase A finds, per matched target row, the source rows it matches, then
-        // applies the WHEN MATCHED / WHEN NOT MATCHED BY SOURCE action. The
-        // target × source scan is O(target × source). When the ON carries a
-        // seekable target equality and the target isn't a view (whose column names
-        // don't map to the base heap), the inverted path seeks matching targets
-        // per source row instead — turning the match phase into O(source × log
-        // target). With no NOT MATCHED BY SOURCE clause it then touches only the
-        // matched targets; with one (which must visit every target to find the
-        // unmatched ones) it walks the heap once applying the precomputed matches,
-        // dropping the inner source loop either way.
+        // applies the WHEN MATCHED / WHEN NOT MATCHED BY SOURCE action. When the
+        // ON carries a seekable target equality and the target isn't a view
+        // (whose column names don't map to the base heap), the inverted path
+        // seeks matching targets per source row — turning the match phase into
+        // O(source × log target). With no NOT MATCHED BY SOURCE clause it then
+        // touches only the matched targets; with one (which must visit every
+        // target to find the unmatched ones) it walks the heap once applying the
+        // precomputed matches, dropping the inner source loop either way. An
+        // unindexed target keeps the heap walk, hashing the source by the ON's
+        // equality keys instead (below) so neither shape is O(target × source).
         var targetSeek = sourceView is null
             ? Selection.TryPrepareMergeTargetSeek(destinationTable, targetAlias, onPredicate, context.Batch)
             : null;
 
         if (targetSeek is not null)
         {
+            JoinDiagnostics.Sink?.Add("Merge:TargetSeek");
             var hasNotMatchedBySource = whenClauses.Any(c => c.Kind == WhenClauseKind.NotMatchedBySource);
 
             // Match phase: per source row, seek the matching target rows and group
@@ -1188,7 +1190,24 @@ partial class Simulation
         }
         else
         {
-            // Phase A: target × source scan.
+            // Phase A: per target row, the source rows it matches. The ON's
+            // `target.col = source.col` conjuncts hash the source once and probe
+            // per target row — O(target + source) — leaving the conjuncts that
+            // aren't such an equality as a residual re-checked per probed pair.
+            // With no such conjunct the match stays the target × source scan,
+            // running the whole ON per pair.
+            var matchPlan = TryPlanMergeMatch(onPredicate, new MergeSides(
+                context.Batch.CurrentDatabase.Collation, destinationTable, sourceView,
+                targetAlias, defaultTargetName, sourceAlias, sourceColumnNames, sourceSchema));
+            JoinDiagnostics.Sink?.Add(matchPlan is null
+                ? "Merge:Scan"
+                : $"Merge:HashMatch(keys={matchPlan.Keys.Length},residual={matchPlan.Residual.Length})");
+            // Built at the first target row that probes it, never ahead of one:
+            // an empty target (or one the view hides entirely) evaluates no ON
+            // at all on the scan path, so nothing the build could raise on a
+            // source row may fire before a target row asks.
+            MergeSourceHash? sourceHash = null;
+
             foreach (var (pageIndex, slotIndex, rowBytes) in destinationTable.Heap.EnumerateRowsWithAddress())
             {
                 var targetValues = DecodeFullRow(destinationTable, rowBytes);
@@ -1201,15 +1220,33 @@ partial class Simulation
                 if (sourceView?.VisibilityCheck is { } vis && !vis(targetValues, context.Batch))
                     continue;
 
-                // Find all matching source rows.
+                // Find all matching source rows, ascending source index either
+                // way — the bucket chain links in build order.
                 var matchedSources = new List<int>();
-                for (var si = 0; si < sourceRows.Count; si++)
+                if (matchPlan is not null && sourceRows.Count > 0)
                 {
-                    var pred = onPredicate.Run(new RuntimeContext(name => ResolveCombined(targetValues, sourceRows[si], name), context.Batch));
-                    if (pred == true)
+                    sourceHash ??= new MergeSourceHash(matchPlan.Keys, sourceRows);
+                    for (var si = sourceHash.FirstCandidate(targetValues); si >= 0; si = sourceHash.NextCandidate(si))
                     {
+                        if (matchPlan.Residual.Length > 0
+                            && !MergeResidualMatches(matchPlan.Residual, new RuntimeContext(name => ResolveCombined(targetValues, sourceRows[si], name), context.Batch)))
+                        {
+                            continue;
+                        }
                         matchedSources.Add(si);
                         sourceMatched[si] = true;
+                    }
+                }
+                else
+                {
+                    for (var si = 0; si < sourceRows.Count; si++)
+                    {
+                        var pred = onPredicate.Run(new RuntimeContext(name => ResolveCombined(targetValues, sourceRows[si], name), context.Batch));
+                        if (pred == true)
+                        {
+                            matchedSources.Add(si);
+                            sourceMatched[si] = true;
+                        }
                     }
                 }
 
@@ -1585,6 +1622,16 @@ partial class Simulation
 
         // Apply heap operations only for non-INSTEAD-OF actions.
         var lockableTable = IsLockableTable(destinationTable);
+
+        // A read-only database refuses the write, but only once one is actually
+        // due: a MERGE whose actions all decline completes quietly on real.
+        if ((!insteadOfDelete && pendingDeletes.Count > 0)
+            || (!insteadOfUpdate && pendingUpdates.Count > 0)
+            || (!insteadOfInsert && pendingInserts.Count > 0))
+        {
+            destinationTable.OwningDatabase?.RejectWriteWhenReadOnly();
+        }
+
         if (!insteadOfDelete)
         {
             foreach (var (page, slot, _, _) in pendingDeletes)
@@ -1888,4 +1935,252 @@ partial class Simulation
             _ => false,
         };
 
+    /// <summary>
+    /// One <c>ON</c> conjunct of the shape <c>&lt;target column&gt; =
+    /// &lt;source column&gt;</c>, reduced to the two row ordinals the match
+    /// phase reads plus the type both sides coerce to before hashing — the
+    /// promote-then-compare target the <c>=</c> operator itself reaches, so a
+    /// bucket hit means exactly what evaluating the conjunct would have said.
+    /// </summary>
+    private sealed class MergeEquiKey(int targetOrdinal, int sourceOrdinal, SqlType common)
+    {
+        public readonly int TargetOrdinal = targetOrdinal;
+        public readonly int SourceOrdinal = sourceOrdinal;
+        public readonly SqlType Common = common;
+    }
+
+    /// <summary>
+    /// The hashable shape of a MERGE's <c>ON</c>: one or more
+    /// <see cref="MergeEquiKey"/>s plus the conjuncts that aren't one, which are
+    /// re-checked per probed candidate pair.
+    /// </summary>
+    private sealed class MergeMatchPlan(MergeEquiKey[] keys, BooleanExpression[] residual)
+    {
+        public readonly MergeEquiKey[] Keys = keys;
+        public readonly BooleanExpression[] Residual = residual;
+    }
+
+    /// <summary>
+    /// The two name spaces a MERGE's <c>ON</c> binds against, and where each
+    /// side's columns are read from: an ordinal into the target's decoded heap
+    /// row or into the source's materialized value array. Consulted only while
+    /// planning the match phase — the runtime resolver keeps its own copy of
+    /// these rules, and <see cref="TryClassify"/> is written to agree with it.
+    /// </summary>
+    private sealed class MergeSides(
+        Collation collation,
+        HeapTable destinationTable,
+        View? sourceView,
+        string targetAlias,
+        string defaultTargetName,
+        string sourceAlias,
+        string[] sourceColumnNames,
+        SqlType[] sourceSchema)
+    {
+        /// <summary>
+        /// Decides which side of the MERGE a column reference reads and where in
+        /// that side's value array it sits, following exactly the rules the
+        /// runtime resolver applies: the target alias or the target's own name as
+        /// qualifier reads the target, the source alias reads the source, and an
+        /// unqualified name tries the target first. False for a name neither side
+        /// answers to (which the runtime resolver would reject) and for a view
+        /// target's derived projection (no base ordinal to read).
+        /// </summary>
+        public bool TryClassify(MultiPartName name, out bool isTarget, out int ordinal, out SqlType type)
+        {
+            if (collation.Equals(name.ImmediateQualifier, targetAlias) || collation.Equals(name.ImmediateQualifier, defaultTargetName))
+            {
+                if (TryLookupTargetColumn(collation, name.Leaf, destinationTable, sourceView, out ordinal, out type))
+                {
+                    isTarget = true;
+                    return true;
+                }
+            }
+            if (collation.Equals(name.ImmediateQualifier, sourceAlias) && this.TrySourceOrdinal(name.Leaf, out ordinal, out type))
+            {
+                isTarget = false;
+                return true;
+            }
+            if (name.Count == 1)
+            {
+                if (TryLookupTargetColumn(collation, name.Leaf, destinationTable, sourceView, out ordinal, out type))
+                {
+                    isTarget = true;
+                    return true;
+                }
+                if (this.TrySourceOrdinal(name.Leaf, out ordinal, out type))
+                {
+                    isTarget = false;
+                    return true;
+                }
+            }
+
+            isTarget = false;
+            ordinal = 0;
+            type = SqlType.Int32;
+            return false;
+        }
+
+        private bool TrySourceOrdinal(string columnName, out int ordinal, out SqlType type)
+        {
+            for (var i = 0; i < sourceColumnNames.Length; i++)
+            {
+                if (collation.Equals(sourceColumnNames[i], columnName))
+                {
+                    ordinal = i;
+                    type = sourceSchema[i];
+                    return true;
+                }
+            }
+            ordinal = 0;
+            type = SqlType.Int32;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Splits a MERGE's <c>ON</c> predicate into <c>target = source</c> equality
+    /// conjuncts (hashable keys) and a residual of everything else. Returns null
+    /// — signalling the caller's target × source scan — when no conjunct splits
+    /// cleanly across the two sides.
+    /// </summary>
+    private static MergeMatchPlan? TryPlanMergeMatch(BooleanExpression on, MergeSides sides)
+    {
+        var conjuncts = new List<BooleanExpression>();
+        on.CollectConjuncts(conjuncts);
+
+        var keys = new List<MergeEquiKey>();
+        var residual = new List<BooleanExpression>();
+        foreach (var conjunct in conjuncts)
+        {
+            if (TryExtractMergeEquiKey(conjunct, sides, out var key))
+                keys.Add(key);
+            else
+                residual.Add(conjunct);
+        }
+
+        return keys.Count == 0 ? null : new MergeMatchPlan([.. keys], [.. residual]);
+    }
+
+    /// <summary>
+    /// Recognizes one <c>ON</c> conjunct as an equality between a bare target
+    /// column and a bare source column. Declines — leaving the conjunct in the
+    /// residual, where it evaluates exactly as it always did — when either
+    /// operand is anything but a column reference (which keeps side
+    /// classification one exact name lookup, so a more complex operand can never
+    /// be misattributed), when both land on the same side, or when the pair's
+    /// types don't promote the way the runtime <c>=</c> would.
+    /// </summary>
+    private static bool TryExtractMergeEquiKey(BooleanExpression conjunct, MergeSides sides, out MergeEquiKey key)
+    {
+        key = null!;
+        if (!conjunct.TryGetEqualityOperands(out var a, out var b)
+            || a is not Parser.Expressions.Reference refA
+            || b is not Parser.Expressions.Reference refB)
+        {
+            return false;
+        }
+
+        if (!sides.TryClassify(refA.ReferencedName, out var aIsTarget, out var aOrdinal, out var aType)
+            || !sides.TryClassify(refB.ReferencedName, out var bIsTarget, out var bOrdinal, out var bType)
+            || aIsTarget == bIsTarget)
+        {
+            return false;
+        }
+
+        var (targetOrdinal, targetType, sourceOrdinal, sourceType) = aIsTarget
+            ? (aOrdinal, aType, bOrdinal, bType)
+            : (bOrdinal, bType, aOrdinal, aType);
+        if (!Selection.TryPromoteComparableKeyTypes(targetType, sourceType, out var common))
+            return false;
+
+        key = new MergeEquiKey(targetOrdinal, sourceOrdinal, common);
+        return true;
+    }
+
+    /// <summary>
+    /// True when every residual (non-equality) <c>ON</c> conjunct evaluates to
+    /// <c>true</c> for a probed pair — UNKNOWN and false both fail, matching the
+    /// <c>== true</c> gate the whole-predicate scan applies.
+    /// </summary>
+    private static bool MergeResidualMatches(BooleanExpression[] residual, RuntimeContext runtime)
+    {
+        foreach (var conjunct in residual)
+        {
+            if (conjunct.Run(runtime) != true)
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// The MERGE source hashed by the <c>ON</c>'s equality keys: a bucket per
+    /// distinct key value holding the head and tail of a forward-linked chain of
+    /// source indexes, so a probe walks its candidates in ascending source order
+    /// — the order the target × source scan discovers them in, which is what
+    /// first-source-wins and the Msg 8672 multi-match guard read. A source row
+    /// with a NULL in any key component joins no bucket (<c>NULL = NULL</c> is
+    /// UNKNOWN) but keeps its index, so it still reaches
+    /// <c>WHEN NOT MATCHED BY TARGET</c>.
+    /// </summary>
+    private sealed class MergeSourceHash
+    {
+        private readonly MergeEquiKey[] keys;
+        private readonly Dictionary<SqlValueKey, (int Head, int Tail)> buckets = [];
+        private readonly int[] next;
+        private readonly SqlValue[] scratch;
+
+        public MergeSourceHash(MergeEquiKey[] keys, List<SqlValue[]> sourceRows)
+        {
+            this.keys = keys;
+            this.next = new int[sourceRows.Count];
+            this.scratch = new SqlValue[keys.Length];
+            for (var si = 0; si < sourceRows.Count; si++)
+            {
+                this.next[si] = -1;
+                if (!this.TryComputeKey(sourceRows[si], targetSide: false))
+                    continue;
+
+                var probe = new SqlValueKey(this.scratch);
+                if (this.buckets.TryGetValue(probe, out var chain))
+                {
+                    this.next[chain.Tail] = si;
+                    this.buckets[probe] = (chain.Head, si);
+                }
+                else
+                {
+                    // Only a first occurrence stores the key, so only that path
+                    // pays for a stable copy of the scratch buffer.
+                    this.buckets[new SqlValueKey((SqlValue[])this.scratch.Clone())] = (si, si);
+                }
+            }
+        }
+
+        /// <summary>
+        /// The lowest-numbered source row whose key equals this target row's, or
+        /// -1 when a key component is NULL or no source row carries that key.
+        /// </summary>
+        public int FirstCandidate(SqlValue[] targetValues) =>
+            this.TryComputeKey(targetValues, targetSide: true) && this.buckets.TryGetValue(new SqlValueKey(this.scratch), out var chain)
+                ? chain.Head
+                : -1;
+
+        /// <summary>The next source row sharing <paramref name="sourceIndex"/>'s key, or -1.</summary>
+        public int NextCandidate(int sourceIndex) => this.next[sourceIndex];
+
+        // Fills the scratch buffer with one side's key values, each coerced to
+        // the key's promotion target so bucket equality is the `=` operator's.
+        // False the moment a component is NULL — that row equi-matches nothing.
+        private bool TryComputeKey(SqlValue[] row, bool targetSide)
+        {
+            for (var i = 0; i < this.keys.Length; i++)
+            {
+                var raw = row[targetSide ? this.keys[i].TargetOrdinal : this.keys[i].SourceOrdinal];
+                if (raw.IsNull)
+                    return false;
+                this.scratch[i] = raw.Type == this.keys[i].Common ? raw : raw.CoerceTo(this.keys[i].Common);
+            }
+            return true;
+        }
+    }
 }

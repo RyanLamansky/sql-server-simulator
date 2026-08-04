@@ -77,7 +77,13 @@ With ≥1 equi-key, RIGHT / FULL route straight to `HashEquiJoin` (their unmatch
 ### WHERE pushdown into every base-table source
 
 `NarrowJoinSources` (`Selection.Execution.IndexSeek.cs`, run by all three projectors — row, aggregate and window) attempts the single-source equality / range seek against the statement's WHERE excluders for **each** base-table FROM source, not just the leftmost.
-Probe values are restricted to non-column constants / variables (`MaybeApplyIndexSeek(…, allowCorrelatedColumnValue: false)`) because a not-yet-joined sibling column isn't resolvable pre-join, and the array is cloned rather than mutated, per the shared-plan contract in [`plan-cache.md`](plan-cache.md).
+The array is cloned rather than mutated, per the shared-plan contract in [`plan-cache.md`](plan-cache.md).
+
+A probe value naming a **column** is classified rather than refused outright, against the whole FROM the narrowed source belongs to (`MaybeApplyIndexSeek(…, planSources: sources)` → `IsEnclosingScopeReference`).
+A name resolving to a **sibling** source of that FROM declines — it isn't readable before the join runs.
+One resolving to **none** of them is what the per-row resolver hands to the enclosing scope (`ResolveAcrossTuple`'s fallback), so it is fixed for the duration of one execution of this plan — the plan being what re-executes per enclosing row — and anchors the seek exactly as a variable does.
+That classification is what seeks the inner side of a correlated subquery whose own FROM is a join, instead of hash-building it once per outer row: the WWI `SUM` over `Invoices ⋈ InvoiceLines` correlated to `Customers` went **79,316 ms → ~205 ms** (live 214 ms), matching the same body wrapped in a scalar UDF, whose `@c` parameter always passed the stability test.
+A single-table mutation keeps the flat refusal (`allowCorrelatedColumnValue: false`) — it has no enclosing scope to read a column from.
 
 **Narrowing any one source is semantics-preserving for every join kind**, because the matched conjuncts *stay* in the residual WHERE — the same invariant the comma→equi rewrite rests on.
 A tuple an outer join NULL-extends because the narrowed side lost its match reads that side's column as NULL, so the conjunct that justified the narrowing is UNKNOWN and the tuple is excluded — exactly as it excluded the matched-but-failing tuple before.
@@ -86,6 +92,34 @@ That covers the NULL-supplied side of LEFT / RIGHT / FULL and the unmatched-righ
 A narrowed source drops its `DataLockPlan`, so it is never re-seeked per outer row by the join; it becomes a small hash build side instead.
 Past the leftmost slot the pass skips a source whose lock plan owes a SERIALIZABLE / `HOLDLOCK` phantom fence — the fence is settled inside the seek attempt, so probing every source would change which key ranges a SERIALIZABLE reader locks and when.
 The leftmost slot keeps its long-standing unconditional attempt.
+
+A joined UPDATE / DELETE narrows through `NarrowMutationJoinSources`, the same pushdown restricted to its **non-target** sources and gated at every slot including the leftmost — see [`dml.md`](dml.md#joined-row-sources).
+
+### WHERE pushdown into a view / derived-table body
+
+A base-table source can be seeked where it stands; a source reading through a *query body* can't, because the filter above it never reaches the scan inside it.
+`PushWhereIntoDeferredSources` (`Selection.Execution.PredicatePushdown.cs`, run at the top of the row-source closure ahead of the materialization below, so all three projectors take it) moves the eligible top-level WHERE conjuncts **into** such a body, where the body's own passes — this one included — take them from there.
+Recursion needs no loop: the rebuilt body runs the same pass over its own FROM, which is what carries a filter down a chain of views.
+Measured on a five-deep chain of WWI views filtered on a key (`WHERE CustomerID = 90` over `Sales.Orders`): **177 ms → 1.6 ms**, and the inline nested-derived-table spelling of the same query **129 ms → 1.2 ms** (0.1× the live server).
+
+The **conjunct stays in the enclosing WHERE**, the same residual invariant the base-table pushdown above rests on — and here it is what makes the push safe for every join kind, because the pushable shapes are all NULL-rejecting.
+A tuple an outer join NULL-extends because the pushed side lost its match reads UNKNOWN for the very conjunct that justified the push, and is excluded exactly as the matched-but-failing tuple was.
+That is why `IS NULL` is *not* a pushable shape: pushing the anti-join idiom's `WHERE v.col IS NULL` would turn every row the body dropped into a NULL-extended match, which is the one way this rewrite can invent rows.
+
+**Eligible body** — a plain SELECT-project-filter: no DISTINCT, no TOP / OFFSET / FETCH, no GROUP BY / HAVING / aggregate, no window, no ORDER BY, not a set-op branch.
+Each reads the row set as a whole, so a filter one level up would see a different one.
+A join body qualifies (the conjunct lands in its WHERE and its own narrowing takes over), as does a body carrying its own WHERE — the pushed conjuncts append *after* it, so the body's own filter still decides first per row.
+That ordering is what keeps the push from changing which rows an operand is evaluated over: real, whose own pushdown carries no such guarantee, raises **Msg 245** for `SELECT code FROM (SELECT code FROM t WHERE ISNUMERIC(code) = 1) d WHERE code = 5` over a non-numeric row the inner filter excluded (probe-confirmed), where the simulator answers the row — the same answer it gave before the push existed.
+The eligibility is recorded at parse as a `PredicatePushdown` delegate on the plan, which is also how every non-body `LateralPlan` (a TVF, VALUES, OPENJSON, PIVOT, a catalog view, a linked-server query) declines: it carries none.
+
+**Eligible conjunct** — one whose every column operand resolves to *that* source (a sibling's column isn't in the body's scope, and an enclosing scope's could silently rebind to a same-named body column), in one of the shapes `BooleanExpression.TryRebindOperands` rebuilds: a comparison, a non-negated `BETWEEN`, or the equality family an `IN` list / OR-of-equalities decomposes into.
+Every other operand has to be row-independent, and is **evaluated once at the push**.
+That is what lets a conjunct cross into a view body, whose plan doesn't exist until the reference executes: the conjunct travels as a *template* whose column operands are output-column **ordinals** and whose value operands are already constants — the only two things a body parsed later (in a child `BatchContext` holding none of the caller's variables) can read.
+`Selection.ForView`'s wrapper carries the templates to that parse and applies them after the body binds and its permission check runs; the projection plan rebinds each ordinal to its own projection expression, declining an output column that is anything but a plain column projection (identity or rename).
+Every decline is silent — the conjunct simply stays where it was written.
+
+Cloned, never mutated, per the shared-plan contract in [`plan-cache.md`](plan-cache.md): the push builds a new `Selection` over the same parse-time tree and a new `FromSource` reading through it, both per execution.
+A view's *stored definition* is untouched, so `sp_helptext` and the dependency surfaces (which read `View.BodyText`, not plans) see the view as written.
 
 ### Narrowed-source-first reorder
 
@@ -120,10 +154,14 @@ The original equi-join win still stands — with ≥1 equi-key the inner is inde
 - Residual non-equi conjuncts are re-checked per probed candidate (a conjunct passes only when it evaluates to `true`, matching the streaming path's `== true` gate).
 - Falls back to the nested-loop operators below for non-equi ON predicates, the lateral / derived-table right sides the materialization pass below declines, CROSS / APPLY, and key-type pairs `SqlType.Promote` rejects (LOB, collation conflict, cross-category) — preserving their exact per-row error behavior.
 
+MERGE's own match phase hashes its source the same way when the target can't be seeked, over its two name spaces rather than a `FromSource[]`; the key-type rule is literally shared (`TryPromoteComparableKeyTypes`).
+See [`dml.md`](dml.md#match-strategies).
+
 ### Deferred sources materialize once per enumeration
 
 A `LateralPlan` source — a derived table, a CTE reference, a view, a catalog view, a TVF, `VALUES`, `OPENJSON` — is re-executed per left-side row by the streaming operators, and `TryPlanEquiJoin` rejects it outright (line "`sources[level].LateralPlan is not null`").
 The execution-time `MaterializeUncorrelatedDeferredSources` pass (`Selection.Execution.cs`, run at the top of the row-source closure before any projection path builds its resolver closures) replaces the ones whose rows can't change across one enumeration with a once-materialized `Rows` list, so the nested loop stops re-executing them and `TryPlanEquiJoin` keys them into the O(L + R) hash build.
+It runs *after* the WHERE pushdown above, so what a source materializes is already narrowed.
 It clones the array rather than mutating the plan's own `FromSource[]`, per the shared-plan contract in [`plan-cache.md`](plan-cache.md).
 
 Two kinds of source qualify:
@@ -149,6 +187,14 @@ The declining source's probing execution is discarded; `NEXT VALUE FOR`, the oth
 
 Measured on the WWI report shape `Customers JOIN (SELECT CustomerID, SUM(…) FROM Invoices JOIN InvoiceLines … GROUP BY CustomerID) agg ON …`: **77.6 s → 170 ms** (0.8× the live server), the CTE spelling of the same query **78.8 s → 165 ms**, and the same query written derived-table-first unchanged at ~148 ms.
 
+A joined UPDATE / DELETE takes this pass too, through `Selection.PrepareMutationJoinSources` — the same gates, the same volatility decline, and no reorder — see [`dml.md`](dml.md#joined-row-sources).
+It declines in skip mode: a skipped statement commits nothing, so the pass is pure cost there and the materializing execution would run a body on behalf of a statement that never runs.
+
+**Divergence — a body that raises is evaluated even when the left side is empty.**
+The pass runs the plan to completion before the join driver asks for a row, so `FROM <empty t> JOIN (<body that raises at runtime>) d ON …` raises where real, which never drives a row into the derived table, answers the empty rowset (probe-confirmed against SQL Server 2025, for both the SELECT and the joined-UPDATE spelling).
+A non-empty left side raises on both engines.
+Making the materialization demand-driven would close it, but the volatility gate samples `VolatileEvaluations` *around* the execution to decide whether the source may be reused at all, so the decision can't be deferred to the first demand without restructuring that gate.
+
 ### Nested-loop fallback
 
 INNER / CROSS / LEFT / CROSS APPLY / OUTER APPLY stream one upstream tuple at a time.
@@ -172,3 +218,5 @@ Most kinds log at the single `ApplyJoin` dispatch point; INNER / LEFT equi-joins
 A reordered chain logs one `Reorder(i,j,k,…)` entry naming the placement order in **written** source indices, so `Reorder(2,1,0)` reads "drive from the third-written source"; its absence means the written order stood.
 `Tests.Internal/JoinStrategyTests` reads it to assert the per-outer seek engages for a small filtered outer with an indexed inner, the hash build for a large outer or unindexed inner, the nested loop for non-equi / CROSS, and each condition that engages or declines the reorder — guarding against a silent fall-back to the O(L × R) loop, a perf regression the correctness suite wouldn't catch.
 The result-level counterpart is `Tests`' `JoinPredicatePushdownTests`, which pins the rows each shape produces either way.
+
+MERGE's match phase logs into the same sink (`Merge:TargetSeek` / `Merge:HashMatch(keys=N,residual=M)` / `Merge:Scan`), guarded by `Tests.Internal/MergeMatchStrategyTests` — see [`dml.md`](dml.md#match-strategies).

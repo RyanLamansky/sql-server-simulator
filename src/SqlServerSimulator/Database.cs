@@ -283,6 +283,40 @@ internal sealed class Database
     /// </remarks>
     public bool CrossDatabaseChaining;
 
+    /// <summary>
+    /// <c>READ_ONLY</c> per-database access mode, flipped by
+    /// <c>ALTER DATABASE … SET { READ_ONLY | READ_WRITE }</c> and surfaced as
+    /// <c>sys.databases.is_read_only</c> and
+    /// <c>DATABASEPROPERTYEX(name, 'Updateability')</c>. While set, every write
+    /// to this database raises <strong>Msg 3906</strong> through
+    /// <see cref="RejectWriteWhenReadOnly"/>.
+    /// </summary>
+    /// <remarks>
+    /// The flag is checked at the point a write actually happens, which is what
+    /// reproduces real's laziness (probe-confirmed against SQL Server 2025,
+    /// 2026-08-04): an <c>UPDATE</c> / <c>DELETE</c> matching no row, and an
+    /// <c>INSERT … SELECT</c> producing none, complete quietly, while an
+    /// <c>INSERT … VALUES</c> and every DDL statement raise. Writes to a table
+    /// belonging to no database — a <c>#temp</c> table, a table variable, a
+    /// table-valued parameter — are unaffected however the session's own
+    /// database is set, matching real's separate <c>tempdb</c>.
+    /// </remarks>
+    public bool IsReadOnly;
+
+    /// <summary>
+    /// Raises <strong>Msg 3906</strong> (<c>Failed to update database "&lt;n&gt;"
+    /// because the database is read-only.</c>) when this database is
+    /// <see cref="IsReadOnly"/>. Called from the write seams — the per-row DML
+    /// writes and the DDL statements' target resolution — so the error names
+    /// the database being written rather than the session's, which is what a
+    /// three-part write into a read-only database reports on real.
+    /// </summary>
+    public void RejectWriteWhenReadOnly()
+    {
+        if (this.IsReadOnly)
+            throw SimulatedSqlException.DatabaseIsReadOnly(this.Name);
+    }
+
     private int nextObjectId = 100;
 
     /// <summary>

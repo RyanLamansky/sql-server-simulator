@@ -344,6 +344,11 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
         }
+
+        // A read-only database refuses the drop, but only once the object
+        // is known to exist — real reports the ordinary not-found error first.
+        schema.Database.RejectWriteWhenReadOnly();
+
         // A DML trigger isn't a grantable securable of its own: real gates its
         // DROP on ALTER of the parent table / view (probe-confirmed).
         if (!PermissionEnforcement.HasObjectAlter(
@@ -376,6 +381,11 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropSequenceDoesNotExist(name.ToString());
         }
+
+        // A read-only database refuses the drop, but only once the object
+        // is known to exist — real reports the ordinary not-found error first.
+        schema.Database.RejectWriteWhenReadOnly();
+
         if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, existing.ObjectId))
             throw SimulatedSqlException.DropObjectPermissionDenied("sequence", name.Leaf);
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
@@ -411,6 +421,7 @@ partial class Simulation
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
         if (schema is not null && schema.AliasTypes.TryGetValue(name.Leaf, out _))
         {
+            schema.Database.RejectWriteWhenReadOnly();
             RejectUnauthorizedTypeDrop(context, schema, name);
             _ = schema.AliasTypes.TryRemove(name.Leaf, out _);
             RecordDdlEvent(context, "DROP_TYPE", schema.Name, name.Leaf, "TYPE");
@@ -422,6 +433,11 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.TypeDoesNotExist(name.ToString());
         }
+
+        // A read-only database refuses the drop, but only once the object
+        // is known to exist — real reports the ordinary not-found error first.
+        schema.Database.RejectWriteWhenReadOnly();
+
         RejectUnauthorizedTypeDrop(context, schema, name);
         context.Batch.AcquireStatementLock(tableType.SchemaLock, LockMode.SchemaModification);
         // Scan every procedure in every schema of the current database for
@@ -461,6 +477,11 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropProcedureDoesNotExist(name.ToString());
         }
+
+        // A read-only database refuses the drop, but only once the object
+        // is known to exist — real reports the ordinary not-found error first.
+        schema.Database.RejectWriteWhenReadOnly();
+
         if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, existing.ObjectId))
             throw SimulatedSqlException.DropObjectPermissionDenied("procedure", name.Leaf);
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
@@ -485,6 +506,11 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropViewDoesNotExist(name.ToString());
         }
+
+        // A read-only database refuses the drop, but only once the object
+        // is known to exist — real reports the ordinary not-found error first.
+        schema.Database.RejectWriteWhenReadOnly();
+
         if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, droppedView.ObjectId))
             throw SimulatedSqlException.DropObjectPermissionDenied("view", name.Leaf);
         context.Batch.AcquireStatementLock(droppedView.SchemaLock, LockMode.SchemaModification);
@@ -519,6 +545,11 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
         }
+
+        // A read-only database refuses the drop, but only once the object
+        // is known to exist — real reports the ordinary not-found error first.
+        schema.Database.RejectWriteWhenReadOnly();
+
         if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, existing.ObjectId))
             throw SimulatedSqlException.DropObjectPermissionDenied("function", name.Leaf);
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
@@ -563,6 +594,11 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropTableDoesNotExist(name.ToString());
         }
+        // A read-only database refuses the drop, once the table is known to
+        // exist. Temp tables live in tempdb and are exempt however the session's
+        // own database is set.
+        removedTable.OwningDatabase?.RejectWriteWhenReadOnly();
+
         // DROP TABLE needs ALTER on the schema or CONTROL on the table itself
         // (a plain object-scope ALTER is insufficient — probe M5b); a
         // non-privileged principal gets Msg 3701 sev 14 state 20. Temp tables

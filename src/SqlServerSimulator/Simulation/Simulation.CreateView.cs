@@ -156,6 +156,10 @@ partial class Simulation
             }
         }
 
+        // A view body runs to the end of its batch — anything past it is a
+        // syntax error at that token, before the view is created.
+        RejectStatementAfterModuleBody(context, viewName.Leaf);
+
         if (context.Batch.IsSkipping)
             return true;
 

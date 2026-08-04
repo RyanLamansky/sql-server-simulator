@@ -18,10 +18,19 @@ partial class Simulation
     /// against the shared <see cref="SimulatedDbConnection.NestingLevel"/>
     /// — exceeding 32 raises Msg 217.
     /// </summary>
-    internal IEnumerable<byte[]> InvokeView(BatchContext outerBatch, View view) =>
+    /// <param name="outerBatch">The batch whose statement referenced the view.</param>
+    /// <param name="view">The view to execute.</param>
+    /// <param name="pushedPredicates">
+    /// WHERE conjunct templates the referencing statement pushed into this
+    /// reference, applied to the body plan once it is parsed (a view's own
+    /// projection isn't known before that). Null for an ordinary reference; a
+    /// body whose shape can't take them keeps running unchanged.
+    /// </param>
+    internal IEnumerable<byte[]> InvokeView(
+        BatchContext outerBatch, View view, List<BooleanExpression>? pushedPredicates = null) =>
         outerBatch.Connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel
             ? throw SimulatedSqlException.MaximumNestingLevelExceeded()
-            : InvokeViewCore(outerBatch, view);
+            : InvokeViewCore(outerBatch, view, pushedPredicates);
 
     /// <summary>
     /// Parses a view's stored body and returns its plan without executing it —
@@ -97,7 +106,8 @@ partial class Simulation
         }
     }
 
-    private IEnumerable<byte[]> InvokeViewCore(BatchContext outerBatch, View view)
+    private IEnumerable<byte[]> InvokeViewCore(
+        BatchContext outerBatch, View view, List<BooleanExpression>? pushedPredicates)
     {
         var connection = outerBatch.Connection;
         using var bodyCommand = new SimulatedDbCommand(this, connection);
@@ -137,7 +147,16 @@ partial class Simulation
             // database: DB_CHAINING off breaks the chain at that boundary, so
             // the caller needs its own rights there (probe-confirmed).
             PermissionEnforcement.CheckCrossDatabaseReads(outerBatch, view.Schema.Database, bodySelection.ReferencedSecurables);
-            var resultSet = bodySelection.Execute(innerBatch, outerResolver: null);
+            // A referencing statement's pushed WHERE conjuncts land here, after
+            // the body bound (so its own errors report as they always did) and
+            // after the permission check (which reads the body as written). A
+            // body whose shape can't take them declines and runs unchanged; the
+            // conjuncts are still applied by the referencing statement either
+            // way, so this only ever narrows what the body produces.
+            var effective = pushedPredicates is null
+                ? bodySelection
+                : bodySelection.PredicatePushdown?.Invoke(pushedPredicates) ?? bodySelection;
+            var resultSet = effective.Execute(innerBatch, outerResolver: null);
             foreach (var rowBytes in resultSet.RowBytes)
                 yield return rowBytes;
         }

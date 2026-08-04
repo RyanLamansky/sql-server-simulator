@@ -60,6 +60,11 @@ partial class Simulation
         // A three-part target lands in the named database, so both the object
         // id and the owning-database stamp come from the resolved schema.
         var owningDatabase = schema?.Database;
+        // SELECT INTO creates the destination, so a read-only database refuses
+        // it whatever the source produces — including no rows at all
+        // (probe-confirmed). A #temp destination resolves no schema and stays
+        // legal.
+        owningDatabase?.RejectWriteWhenReadOnly();
         var destTable = new HeapTable(leaf, destColumns, (owningDatabase ?? batch.CurrentDatabase).AllocateObjectId())
         {
             OwningDatabase = owningDatabase,

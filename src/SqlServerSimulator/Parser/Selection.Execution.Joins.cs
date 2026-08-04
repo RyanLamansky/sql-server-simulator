@@ -578,31 +578,42 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// The promotion target two equated bare column references share, or false
-    /// when the runtime <c>=</c> wouldn't reach one — a LOB operand, a collation
-    /// conflict, or a pair <see cref="SqlType.Promote"/> rejects outright. A
-    /// declining pair keeps the streaming operators' exact per-row error
-    /// behavior instead of being hashed or reordered around.
+    /// The promotion target two equated bare column references share, resolved
+    /// against the join's sources. A declining pair keeps the streaming
+    /// operators' exact per-row error behavior instead of being hashed or
+    /// reordered around.
     /// </summary>
     private static bool TryPromoteEquiKeyTypes(
-        FromSource[] sources, Reference left, Reference right, [NotNullWhen(true)] out SqlType? common)
+        FromSource[] sources, Reference left, Reference right, [NotNullWhen(true)] out SqlType? common) =>
+        TryPromoteComparableKeyTypes(
+            ResolveColumnTypeAcrossSources(sources, left.ReferencedName, null),
+            ResolveColumnTypeAcrossSources(sources, right.ReferencedName, null),
+            out common);
+
+    /// <summary>
+    /// The promotion target two equated operand types share, or false when the
+    /// runtime <c>=</c> wouldn't reach one — a LOB operand, a collation conflict,
+    /// or a pair <see cref="SqlType.Promote"/> rejects outright. Shared by the
+    /// join planner and the MERGE match planner, which both need a hashed key
+    /// pair to mean exactly what evaluating the equality would have meant.
+    /// </summary>
+    internal static bool TryPromoteComparableKeyTypes(
+        SqlType left, SqlType right, [NotNullWhen(true)] out SqlType? common)
     {
         common = null;
-        var leftType = ResolveColumnTypeAcrossSources(sources, left.ReferencedName, null);
-        var rightType = ResolveColumnTypeAcrossSources(sources, right.ReferencedName, null);
-        if (leftType.IsLob || rightType.IsLob)
+        if (left.IsLob || right.IsLob)
         {
             return false;
         }
-        if (leftType.Category == SqlTypeCategory.String && rightType.Category == SqlTypeCategory.String
-            && Collation.Resolve(leftType, rightType) is null)
+        if (left.Category == SqlTypeCategory.String && right.Category == SqlTypeCategory.String
+            && Collation.Resolve(left, right) is null)
         {
             return false;
         }
 
         try
         {
-            common = SqlType.Promote(leftType, rightType);
+            common = SqlType.Promote(left, right);
         }
         catch (Exception ex) when (ex is NotSupportedException or SimulatedSqlException)
         {

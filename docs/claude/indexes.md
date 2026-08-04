@@ -104,6 +104,8 @@ The per-`Heap` cache is keyed by the leading ordinal and remembers the prefix (o
 
 This is the path that collapses a **correlated `EXISTS` / `IN` / scalar subquery** (and an unindexed-inner `APPLY`) from O(outer × inner) toward linear: the inner re-executes per outer row, but a per-table cache (keyed on the `Heap`, built lazily on first seek) persists across those calls.
 Measured: a correlated `EXISTS` over a 4000 × 16000-row pair dropped from ~1480 ms to ~5 ms, on par with live SQL Server.
+An inner reading through a **join** narrows the same way — the enclosing-scope value is stable for the inner plan's whole execution whether that plan has one source or several, which is a classification the multi-source pushdown makes rather than a second mechanism (see [`joins.md`](joins.md#where-pushdown-into-every-base-table-source)).
+A scan sitting under a **view or derived table** is reached the other way round: the enclosing WHERE's conjunct is pushed into the body first, and the seek here then sees it as the body's own (see [`joins.md`](joins.md#where-pushdown-into-a-view--derived-table-body)).
 
 The cache is **incrementally maintained**, not rebuilt on every write.
 The first seek against a heap builds its buckets from a full scan and activates the heap's bounded *mutation journal* (`Heap.ActivateSeekJournal`); thereafter a write appends a visible-row event (insert / delete / update, carrying the before/after row image) rather than invalidating the cache, and the next seek applies that delta (`Heap.SnapshotSeekJournalSince` → `CacheEntry.Apply`, traced as `CacheReplay`) instead of re-scanning.
@@ -220,6 +222,8 @@ Two properties make this a pure narrowing with no fidelity cost:
 
 Measured: 2 000 point `UPDATE`s by PK over a 20 000-row table ran ~5.4× faster than the same updates filtered on an unindexed column (0.85 vs 4.54 ms/op); the ratio grows with table size, since the scan is O(rows) and the seek amortizes to ~O(1).
 
+The **joined** (`… FROM <sources>`) form takes a different route: its target keeps the enumeration the write pipeline's address side-channel is keyed to, while its *other* sources go through the read path's own WHERE pushdown — see [`dml.md`](dml.md#joined-row-sources).
+
 ### MERGE target seeking (loop inversion)
 
 MERGE's Phase A is `target × source`: for each target row it scans every source row evaluating the `ON` predicate.
@@ -237,9 +241,10 @@ The apply phase then splits on whether a `WHEN NOT MATCHED BY SOURCE` clause is 
   `ApplyMergeMatched` is the shared apply helper for both passes (first-source-wins + the Msg 8672 multi-match guard).
 
 Phase B (`WHEN NOT MATCHED BY TARGET` → insert unmatched source rows) is unchanged.
-Inversion declines (keeping the `target × source` scan) when **either** the target is a **view** (its column names don't map to the base heap the seek source is built from) or the `ON` has no equality on a target leading key / index column — each a safe fallback to identical behavior.
-Measured: a 5-row upsert batch (`WHEN MATCHED UPDATE … WHEN NOT MATCHED INSERT`) into a 20 000-row PK target ran **~9.1× faster** than the same MERGE against a no-key target that falls back to the scan (4.4 vs 40.0 ms/merge).
-The BY-SOURCE-clause path wins by the source-row count (the factor the inner loop is dropped): a 3 900-row source reconciled against a 4 000-row PK target with a `WHEN NOT MATCHED BY SOURCE UPDATE` ran **~11.6× faster** than the same against a non-seekable `ON` (617 vs 7 171 ms; the equal PK-revalidation of the updated rows is paid on both sides, so the delta is the match phase alone).
+Inversion declines when **either** the target is a **view** (its column names don't map to the base heap the seek source is built from) or the `ON` has no equality on a target leading key / index column.
+It declines to the heap walk, which hashes the source by the `ON`'s equality keys rather than scanning `target × source` — see [`dml.md`](dml.md#match-strategies) — and only an `ON` with no `target = source` equality at all reaches the quadratic scan.
+Measured against the `target × source` scan, which is what a no-key target took before it hashed: a 5-row upsert batch (`WHEN MATCHED UPDATE … WHEN NOT MATCHED INSERT`) into a 20 000-row PK target ran **~9.1× faster** than the same MERGE against a no-key target (4.4 vs 40.0 ms/merge), and a 3 900-row source reconciled against a 4 000-row PK target with a `WHEN NOT MATCHED BY SOURCE UPDATE` ran **~11.6× faster** than the same against a non-seekable `ON` (617 vs 7 171 ms; the equal PK-revalidation of the updated rows is paid on both sides, so the delta is the match phase alone).
+Both controls now hash instead, so the remaining gap is the seek's — not the quadratic walk's.
 
 ## Storage
 

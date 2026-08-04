@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
@@ -128,6 +129,45 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// Enforces real's rule that a <c>VIEW</c> or <c>FUNCTION</c> body runs to
+    /// the end of its batch: the module statement must be the batch's
+    /// <em>only</em> statement, not merely its first. A token left over after
+    /// the body is a plain syntax error at that token —
+    /// <strong>Msg 156</strong> naming the keyword when it is one,
+    /// <strong>Msg 102</strong> otherwise (probe-confirmed against SQL Server
+    /// 2025, 2026-08-04, for scalar / inline-TVF / multi-statement-TVF
+    /// functions and views alike). The keyword is echoed as the source spelled
+    /// it, which <see cref="Token.ToString"/> already does.
+    /// <para>The error carries the module's <strong>unqualified</strong> name
+    /// as <c>Procedure</c> — real attributes it to the module being defined,
+    /// since it is that module's body parse that ran off the end — and the
+    /// offending token's own line, which the severity-15 branch of the dispatch
+    /// frame's diagnostics stamping supplies.</para>
+    /// <para>Trailing <c>;</c> separators (any number) and comments are not
+    /// statements and are accepted. Raised before the module is created: real
+    /// parses the batch first, so the object does not exist afterward
+    /// (probe-confirmed).</para>
+    /// <para><strong>Procedures and triggers take no such check</strong> —
+    /// their bodies are multi-statement and read to end-of-batch, so a trailing
+    /// statement is swallowed into the body on real exactly as it is here
+    /// (probe-confirmed via <c>OBJECT_DEFINITION</c> and by executing the
+    /// procedure).</para>
+    /// </summary>
+    private static void RejectStatementAfterModuleBody(ParserContext context, string moduleName)
+    {
+        while (context.Token is Operator { Character: ';' })
+            context.MoveNextOptional();
+        if (context.Token is not { } trailing)
+            return;
+
+        var error = trailing is ReservedKeyword keyword
+            ? SimulatedSqlException.SyntaxErrorNearKeyword(keyword)
+            : SimulatedSqlException.SyntaxErrorNear(trailing);
+        error.Errors[0].Procedure = moduleName;
+        throw error;
+    }
+
+    /// <summary>
     /// Resolves the schema a <c>CREATE</c> / <c>ALTER</c> / <c>CREATE OR
     /// ALTER</c> module statement targets. A schema that doesn't exist is
     /// <strong>Msg 2760</strong> on either create form but <strong>Msg
@@ -135,12 +175,24 @@ public sealed partial class Simulation
     /// follows from what the statement asserts: a create claims a namespace,
     /// while an alter claims an object that a missing schema can't hold.
     /// </summary>
-    private static Schema ResolveModuleSchema(ParserContext context, MultiPartName name, bool isAlter) =>
-        context.Batch.TryResolveSchema(name, out var schema)
-            ? schema
-            : throw (isAlter
+    /// <remarks>
+    /// Also the read-only gate for every module <c>CREATE</c> / <c>ALTER</c>:
+    /// a module is defined in exactly one place, and the resolved schema names
+    /// the database the definition would be written to — which is the database
+    /// real's Msg 3906 names, not the session's.
+    /// </remarks>
+    private static Schema ResolveModuleSchema(ParserContext context, MultiPartName name, bool isAlter)
+    {
+        if (!context.Batch.TryResolveSchema(name, out var schema))
+        {
+            throw isAlter
                 ? SimulatedSqlException.InvalidObjectName(name)
-                : SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(name.ImmediateQualifier ?? Database.DefaultSchemaName));
+                : SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(name.ImmediateQualifier ?? Database.DefaultSchemaName);
+        }
+
+        schema.Database.RejectWriteWhenReadOnly();
+        return schema;
+    }
 
     // ^(CREATE <ws>) OR (<ws>) ALTER — collapses a CREATE OR ALTER verb phrase
     // to a bare CREATE in the stored definition. SQL Server removes the OR /

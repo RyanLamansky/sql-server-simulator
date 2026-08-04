@@ -222,6 +222,11 @@ partial class Simulation
         var bodyText = commandText[bodyStart..bodyEnd];
         context.MoveNextOptional(); // consume END
 
+        // A function body runs to the end of its batch — anything past the
+        // closing END is a syntax error at that token, before the function is
+        // created.
+        RejectStatementAfterModuleBody(context, functionName.Leaf);
+
         if (context.Batch.IsSkipping || !hasResolvedColumns)
             return true;
 
@@ -400,6 +405,11 @@ partial class Simulation
         var bodyText = commandText[bodyStart..bodyEnd];
         context.MoveNextOptional(); // consume END
 
+        // A function body runs to the end of its batch — anything past the
+        // closing END is a syntax error at that token, before the function is
+        // created.
+        RejectStatementAfterModuleBody(context, functionName.Leaf);
+
         if (context.Batch.IsSkipping)
             return true;
 
@@ -495,6 +505,10 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextOptional();
         }
+
+        // An inline-TVF body runs to the end of its batch, in both the
+        // parenthesized and the bare-RETURN form.
+        RejectStatementAfterModuleBody(context, functionName.Leaf);
 
         if (context.Batch.IsSkipping)
             return true;

@@ -33,6 +33,14 @@ internal sealed partial class Selection
     /// side is restricted to side-effect-free, row-invariant shapes precisely
     /// so evaluating it once here and again in the residual WHERE is harmless.
     /// </para>
+    /// <para>
+    /// <paramref name="planSources"/> names the FROM the narrowed source belongs
+    /// to, so that a column reference on the value side can be classified as a
+    /// sibling of that FROM (declines) or an escape to the enclosing scope
+    /// (accepts) — see <see cref="IsEnclosingScopeReference"/>. Null means the
+    /// narrowed source is the whole FROM, which is every caller but
+    /// <see cref="NarrowJoinSources"/>.
+    /// </para>
     /// </summary>
     private static FromSource[] MaybeApplyIndexSeek(
         FromSource[] sources,
@@ -40,8 +48,8 @@ internal sealed partial class Selection
         List<BooleanExpression> excluders,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
-        bool allowCorrelatedColumnValue = true)
-        => MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver, allowCorrelatedColumnValue, out _);
+        FromSource[]? planSources = null)
+        => MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver, planSources, out _);
 
     /// <summary>
     /// The narrowing above, additionally reporting how many candidate row
@@ -58,7 +66,7 @@ internal sealed partial class Selection
         List<BooleanExpression> excluders,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
-        bool allowCorrelatedColumnValue,
+        FromSource[]? planSources,
         out int seekedCandidates)
     {
         seekedCandidates = -1;
@@ -78,8 +86,8 @@ internal sealed partial class Selection
         foreach (var excluder in excluders)
             excluder.CollectConjuncts(conjuncts);
 
-        var equalities = CollectColumnEqualities(source, conjuncts, allowCorrelatedColumnValue);
-        var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue);
+        var equalities = CollectColumnEqualities(source, conjuncts, allowCorrelatedColumnValue: true, planSources);
+        var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue: true, planSources);
 
         // A SERIALIZABLE / HOLDLOCK reader's phantom fence is settled here,
         // before any candidate address is read: the conjuncts that bound the
@@ -327,19 +335,19 @@ internal sealed partial class Selection
     // its value side(s). First writer wins per column; a redundant later
     // conjunct just stays as a residual filter.
     private static Dictionary<int, Expression[]> CollectColumnEqualities(
-        FromSource source, List<BooleanExpression> conjuncts, bool allowCorrelatedColumnValue)
+        FromSource source, List<BooleanExpression> conjuncts, bool allowCorrelatedColumnValue, FromSource[]? planSources = null)
     {
         var equalities = new Dictionary<int, Expression[]>();
         foreach (var conjunct in conjuncts)
         {
             if (conjunct.TryGetEqualityOperands(out var left, out var right))
             {
-                _ = TryRecordColumnEquality(source, left, right, equalities, allowCorrelatedColumnValue)
-                    || TryRecordColumnEquality(source, right, left, equalities, allowCorrelatedColumnValue);
+                _ = TryRecordColumnEquality(source, left, right, equalities, allowCorrelatedColumnValue, planSources)
+                    || TryRecordColumnEquality(source, right, left, equalities, allowCorrelatedColumnValue, planSources);
                 continue;
             }
             if (conjunct.TryGetEqualityFamily(out var family))
-                _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue);
+                _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue, planSources);
         }
 
         return equalities;
@@ -439,24 +447,24 @@ internal sealed partial class Selection
     // BETWEEN lo AND hi`, either operand order). First writer wins per side; a
     // redundant looser bound stays a residual filter.
     private static Dictionary<int, RangeBoundExprs> CollectRangeBounds(
-        FromSource source, List<BooleanExpression> conjuncts, bool allowCorrelatedColumnValue)
+        FromSource source, List<BooleanExpression> conjuncts, bool allowCorrelatedColumnValue, FromSource[]? planSources = null)
     {
         var bounds = new Dictionary<int, RangeBoundExprs>();
         foreach (var conjunct in conjuncts)
         {
             if (conjunct.TryGetRangeOperands(out var left, out var op, out var right))
             {
-                if (TryIdentifyIndexableColumn(source, left, out var leftOrd) && IsStableValueSide(right, source, allowCorrelatedColumnValue))
+                if (TryIdentifyIndexableColumn(source, left, out var leftOrd) && IsStableValueSide(right, source, allowCorrelatedColumnValue, planSources))
                     RecordBound(bounds, leftOrd, op, right);
-                else if (TryIdentifyIndexableColumn(source, right, out var rightOrd) && IsStableValueSide(left, source, allowCorrelatedColumnValue))
+                else if (TryIdentifyIndexableColumn(source, right, out var rightOrd) && IsStableValueSide(left, source, allowCorrelatedColumnValue, planSources))
                     RecordBound(bounds, rightOrd, FlipComparison(op), left);
                 continue;
             }
 
             if (conjunct.TryGetBetweenOperands(out var value, out var lower, out var upper)
                 && TryIdentifyIndexableColumn(source, value, out var betweenOrd)
-                && IsStableValueSide(lower, source, allowCorrelatedColumnValue)
-                && IsStableValueSide(upper, source, allowCorrelatedColumnValue))
+                && IsStableValueSide(lower, source, allowCorrelatedColumnValue, planSources)
+                && IsStableValueSide(upper, source, allowCorrelatedColumnValue, planSources))
             {
                 RecordBound(bounds, betweenOrd, RangeComparison.GreaterOrEqual, lower);
                 RecordBound(bounds, betweenOrd, RangeComparison.LessOrEqual, upper);
@@ -1236,9 +1244,14 @@ internal sealed partial class Selection
     /// same conjunct that excluded the matched-but-failing tuple before.
     /// </para>
     /// <para>
-    /// Probe values are restricted to non-column constants / variables
-    /// (<c>allowCorrelatedColumnValue: false</c>) — a not-yet-joined sibling
-    /// column isn't resolvable pre-join. Shrinking a driving rowset is what lets
+    /// The whole FROM is handed to the stability test (<c>planSources</c>) so a
+    /// probe value naming a column is classified rather than refused outright: a
+    /// <b>sibling</b> source's column declines (it isn't resolvable pre-join),
+    /// while one escaping to the enclosing scope anchors the seek like a
+    /// variable — it is fixed for this execution, since a correlated plan
+    /// re-executes per enclosing row. That is what seeks the inner side of a
+    /// correlated subquery whose own FROM is a join, instead of hash-building it
+    /// per outer row. Shrinking a driving rowset also lets
     /// <see cref="EquiJoinSeekOrHash"/> seek the inner per outer row for the
     /// common filter-then-join shape; a narrowed source that stays on the inner
     /// side becomes a small hash build instead.
@@ -1268,7 +1281,7 @@ internal sealed partial class Selection
             if (i > 0 && !IsSeekNarrowingTarget(sources[i]))
                 continue;
             var seeked = MaybeApplyIndexSeek(
-                [sources[i]], NoJoins, excluders, batch, outerResolver, allowCorrelatedColumnValue: false, out var candidates);
+                [sources[i]], NoJoins, excluders, batch, outerResolver, planSources: sources, out var candidates);
             if (ReferenceEquals(seeked[0], sources[i]))
                 continue;
             narrowed ??= (FromSource[])sources.Clone();
@@ -1285,6 +1298,45 @@ internal sealed partial class Selection
         return narrowed is null
             ? (sources, joins)
             : ReorderToDriveFromNarrowedSource(narrowed, joins, seekedCandidates!) ?? (narrowed, joins);
+    }
+
+    /// <summary>
+    /// The pushdown above, restricted to a joined UPDATE / DELETE's
+    /// <b>non-target</b> sources — the read side of a mutation, where a seek is
+    /// the same pure narrowing it is in a SELECT because the statement re-runs
+    /// its whole WHERE per join tuple, so a matched conjunct is still the filter
+    /// it was. See <see cref="PrepareMutationJoinSources"/> for why the target
+    /// slot and the reorder stay out.
+    /// <para>
+    /// Every source is gated by <see cref="IsSeekNarrowingTarget"/>, the
+    /// leftmost included — the read path's unconditional leftmost attempt is a
+    /// long-standing behavior of that path, and extending it to a mutation would
+    /// change which key ranges a SERIALIZABLE reader locks around a write. The
+    /// mutation's WHERE arrives as the single bound predicate the DML parser
+    /// produced rather than a conjunct list; the seek splits it itself.
+    /// </para>
+    /// </summary>
+    private static FromSource[] NarrowMutationJoinSources(
+        FromSource[] sources, BooleanExpression where, int targetIndex, BatchContext batch)
+    {
+        if (sources.Length < 2)
+            return sources;
+
+        List<BooleanExpression> excluders = [where];
+        FromSource[]? narrowed = null;
+        for (var i = 0; i < sources.Length; i++)
+        {
+            if (i == targetIndex || !IsSeekNarrowingTarget(sources[i]))
+                continue;
+            var seeked = MaybeApplyIndexSeek(
+                [sources[i]], NoJoins, excluders, batch, outerResolver: null, planSources: sources);
+            if (ReferenceEquals(seeked[0], sources[i]))
+                continue;
+            narrowed ??= (FromSource[])sources.Clone();
+            narrowed[i] = seeked[0];
+        }
+
+        return narrowed ?? sources;
     }
 
     /// <summary>
@@ -1552,9 +1604,10 @@ internal sealed partial class Selection
     // source. No evaluation happens here — only the value-side expression is
     // captured; it's run lazily (and once) when a prefix actually selects it.
     private static bool TryRecordColumnEquality(
-        FromSource source, Expression columnSide, Expression valueSide, Dictionary<int, Expression[]> equalities, bool allowCorrelatedColumnValue)
+        FromSource source, Expression columnSide, Expression valueSide, Dictionary<int, Expression[]> equalities,
+        bool allowCorrelatedColumnValue, FromSource[]? planSources = null)
         => TryIdentifyIndexableColumn(source, columnSide, out var storageOrdinal)
-            && IsStableValueSide(valueSide, source, allowCorrelatedColumnValue)
+            && IsStableValueSide(valueSide, source, allowCorrelatedColumnValue, planSources)
             && equalities.TryAdd(storageOrdinal, [valueSide]);
 
     // Records `column IN (v1, v2, ...)` (or the equivalent OR-of-equalities)
@@ -1567,7 +1620,8 @@ internal sealed partial class Selection
         FromSource source,
         List<(Expression Left, Expression Right)> family,
         Dictionary<int, Expression[]> equalities,
-        bool allowCorrelatedColumnValue)
+        bool allowCorrelatedColumnValue,
+        FromSource[]? planSources = null)
     {
         if (family.Count == 0)
             return false;
@@ -1577,8 +1631,8 @@ internal sealed partial class Selection
         for (var i = 0; i < family.Count; i++)
         {
             var (left, right) = family[i];
-            if (!TryExtractColumnAndValue(source, left, right, allowCorrelatedColumnValue, out var ord, out var value)
-                && !TryExtractColumnAndValue(source, right, left, allowCorrelatedColumnValue, out ord, out value))
+            if (!TryExtractColumnAndValue(source, left, right, allowCorrelatedColumnValue, planSources, out var ord, out var value)
+                && !TryExtractColumnAndValue(source, right, left, allowCorrelatedColumnValue, planSources, out ord, out value))
             {
                 return false;
             }
@@ -1596,11 +1650,12 @@ internal sealed partial class Selection
         Expression columnSide,
         Expression valueSide,
         bool allowCorrelatedColumnValue,
+        FromSource[]? planSources,
         out int storageOrdinal,
         [NotNullWhen(true)] out Expression? value)
     {
         if (TryIdentifyIndexableColumn(source, columnSide, out storageOrdinal)
-            && IsStableValueSide(valueSide, source, allowCorrelatedColumnValue))
+            && IsStableValueSide(valueSide, source, allowCorrelatedColumnValue, planSources))
         {
             value = valueSide;
             return true;
@@ -2154,18 +2209,23 @@ internal sealed partial class Selection
     // is harmless. Pure conversion wrappers (CAST / CONVERT / parens) are peeled
     // first — `id = CAST(@v AS bigint)` is as stable as `id = @v`, matching real
     // SQL Server keeping the cast sargable. The stable leaves are a literal, a
-    // session variable, or a column resolving to some OTHER source (an outer /
-    // correlated reference). An arithmetic node (which is how the parser
-    // represents a negative literal: `-1` is `0 - 1`) is stable when both its
-    // operands are — a deterministic operator over row-invariant operands is
+    // session variable, or a column reference that escapes to the enclosing
+    // scope (see IsEnclosingScopeReference). An arithmetic node (which is how the
+    // parser represents a negative literal: `-1` is `0 - 1`) is stable when both
+    // its operands are — a deterministic operator over row-invariant operands is
     // itself row-invariant, so `id = -1` / `id = @v + 1` seek too, and the
-    // recursion still excludes a column of THIS source or a non-deterministic /
-    // side-effecting function / subquery leaf (those decline).
-    // <paramref name="allowCorrelatedColumnValue"/> is false when narrowing a
-    // source of a multi-source FROM <i>before</i> the join runs: a not-yet-joined
-    // sibling column isn't resolvable then, so only literals / variables /
-    // parameters (and arithmetic over them) qualify as the probe value.
-    private static bool IsStableValueSide(Expression expression, FromSource source, bool allowCorrelatedColumnValue = true)
+    // recursion still excludes a column of the plan's own FROM or a
+    // non-deterministic / side-effecting function / subquery leaf (those
+    // decline).
+    // <paramref name="allowCorrelatedColumnValue"/> is false at a site with no
+    // enclosing scope to read a column from (a single-table mutation), where no
+    // column reference can be a probe value at all.
+    // <paramref name="planSources"/> is the whole FROM of the plan being
+    // narrowed, passed when narrowing ONE source of a multi-source FROM so a
+    // sibling's column is recognized as such; null means the narrowed source is
+    // the whole FROM.
+    private static bool IsStableValueSide(
+        Expression expression, FromSource source, bool allowCorrelatedColumnValue = true, FromSource[]? planSources = null)
     {
         while (expression.PureConversionOperand is { } inner)
             expression = inner;
@@ -2173,10 +2233,35 @@ internal sealed partial class Selection
         {
             Value => true,
             VariableReference => true,
-            Reference reference => allowCorrelatedColumnValue && FindSourceColumn([source], reference.ReferencedName).SourceIndex < 0,
-            TwoSidedExpression arithmetic => arithmetic.BothOperandsMatch(operand => IsStableValueSide(operand, source, allowCorrelatedColumnValue)),
-            Negate negate => IsStableValueSide(negate.Operand, source, allowCorrelatedColumnValue),
+            Reference reference => allowCorrelatedColumnValue && IsEnclosingScopeReference(reference, source, planSources),
+            TwoSidedExpression arithmetic => arithmetic.BothOperandsMatch(
+                operand => IsStableValueSide(operand, source, allowCorrelatedColumnValue, planSources)),
+            Negate negate => IsStableValueSide(negate.Operand, source, allowCorrelatedColumnValue, planSources),
             _ => false,
         };
     }
+
+    /// <summary>
+    /// Classifies a column reference on a seek's value side, which is what
+    /// decides whether that value is fixed for the whole narrowing.
+    /// <list type="bullet">
+    /// <item>It resolves in the plan's own FROM — the narrowed source itself or
+    /// a <b>sibling</b> of the same query — so it varies row by row and (for a
+    /// sibling) isn't even readable before the join runs. Declines.</item>
+    /// <item>It resolves in none of them, so at runtime
+    /// <see cref="ResolveAcrossTuple"/> hands it to the <b>enclosing scope's</b>
+    /// resolver — a correlated outer row, or the left row a join / <c>APPLY</c>
+    /// already buffered. That value is fixed for the duration of one execution
+    /// of this plan (the plan is what re-executes per enclosing row), so it can
+    /// anchor the seek exactly as a variable does. Accepts.</item>
+    /// </list>
+    /// The resolution runs against the same <see cref="FindSourceColumn"/> the
+    /// per-row resolver uses, so the two agree on which names are local by
+    /// construction. Whether an enclosing resolver is actually installed doesn't
+    /// enter into it: a name resolving nowhere would have failed to bind, and a
+    /// probe evaluated without a resolver reads NULL and simply declines the
+    /// seek.
+    /// </summary>
+    private static bool IsEnclosingScopeReference(Reference reference, FromSource source, FromSource[]? planSources)
+        => FindSourceColumn(planSources ?? [source], reference.ReferencedName).SourceIndex < 0;
 }

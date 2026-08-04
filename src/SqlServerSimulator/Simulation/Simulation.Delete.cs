@@ -292,6 +292,8 @@ partial class Simulation
             where = Selection.ParseAndBindPredicate(context, Selection.ColumnTypeResolverFor(sources));
         }
 
+        sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
+
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
         sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses);
 
@@ -392,6 +394,7 @@ partial class Simulation
         var captureVersions = Storage.VersionStore.IsVersioningEnabled(context.Batch.DatabaseFor(table)) && lockableTable;
         foreach (var (pageIndex, slotIndex, _) in deleted)
         {
+            table.OwningDatabase?.RejectWriteWhenReadOnly();
             if (lockableTable)
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
             var oldBytes = captureVersions ? table.Heap.ReadSlotBytes(pageIndex, slotIndex) : null;

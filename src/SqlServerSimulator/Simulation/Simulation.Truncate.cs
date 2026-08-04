@@ -67,6 +67,10 @@ partial class Simulation
         if (destination is null || !destination.TryGetValue(name.Leaf, out var table))
             throw SimulatedSqlException.CannotTruncateObjectDoesNotExist(name.Leaf);
 
+        // TRUNCATE deallocates pages, so a read-only database refuses it even
+        // when the table already holds no rows (probe-confirmed).
+        table.OwningDatabase?.RejectWriteWhenReadOnly();
+
         // TRUNCATE requires ALTER on the object; denial surfaces as Msg 1088
         // (its own double-quoted shape), not Msg 229.
         if (!isLocalTempTable && !isGlobalTempTable

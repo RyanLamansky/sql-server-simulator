@@ -5,7 +5,7 @@
 - **Target scan is seek-narrowed** when the single-table WHERE carries an indexable equality / IN / range (`Selection.SeekMutationTarget`), instead of walking the whole heap — the same per-`Heap` seek cache the SELECT path and FK enforcement use.
   The mutation loop re-runs the full WHERE per row (residual filter) and X-locks only the rows it commits, so it's a pure narrowing; positioned (`WHERE CURRENT OF`) mutations keep the scan.
   See [`indexes.md`](indexes.md#update--delete-target-seeking).
-  The multi-table (joined) UPDATE / DELETE form isn't seek-narrowed; `MERGE` is, via loop inversion (see its section below).
+  The multi-table (joined) form's **target** isn't seek-narrowed either — its *other* sources are, see [Joined row sources](#joined-row-sources) below; `MERGE` narrows its target via loop inversion (see its section below).
 - Multi-table syntax (`UPDATE alias SET ... FROM <sources> [WHERE]`, `DELETE FROM alias FROM <sources> [WHERE]`) — the EF7+ `ExecuteUpdate`/`ExecuteDelete` shape.
   Target identified by leading-identifier match against each source's `FromSource.Qualifier`; missing match → Msg 208.
 - **Joined UPDATE/DELETE: each unique target row processed exactly once.**
@@ -46,6 +46,31 @@
   The projection's type comes from the source table and need not match the target's — an ORM building a returning buffer with `SELECT TOP 0 CAST(id AS bigint) … INTO #tmp` then `OUTPUT INSERTED.id INTO #tmp` hands an int to a bigint column.
   Storing it raw reached the row encoder's type check as a bare `ArgumentException`; over the TDS wire that aborts the response mid-stream, so the client reports `HY000 "A severe error occurred"` and the connection dies rather than getting any usable error.
   Uncovered columns already coerced their DEFAULT the same way — this closes the covered-column half.
+
+### Joined row sources
+
+`ExecuteJoinedUpdate` / `ExecuteJoinedDelete` enumerate their join tuples through the same `Selection.EnumerateJoinedRows` a SELECT does, and reach it through `Selection.PrepareMutationJoinSources` — the read path's own two row-source passes, minus the reorder:
+
+- **Deferred sources materialize once per enumeration**, exactly as they do for a SELECT and under the same gates (non-APPLY, non-leftmost, query-body-only, and the `NEWID()` volatility decline) — see [`joins.md`](joins.md#deferred-sources-materialize-once-per-enumeration).
+  A derived table / CTE reference / view joined to the target stops re-executing per target row and keys into the O(L + R) hash path instead.
+  Measured on WWI's `UPDATE #t … FROM #t t JOIN (<grouped aggregate over Invoices ⋈ InvoiceLines>) d ON …` over **30** target rows: **6,297 ms → 164 ms** (live 64 ms), which is the derived body's own once-through cost plus the 30 writes.
+- **The WHERE narrows every source but the target** (`NarrowMutationJoinSources`), so a joined source carrying an indexable equality seeks before the join runs.
+  It is the same pure narrowing it is in a SELECT because the statement re-runs its whole WHERE per join tuple, so a matched conjunct is still the filter it was.
+  Every source is gated by the read path's `IsSeekNarrowingTarget` — the leftmost included, unlike the read path's unconditional leftmost attempt, since extending that to a mutation would change which key ranges a SERIALIZABLE reader locks around a write.
+- **No reorder.** The written join order stands; the target is identified by slot index.
+
+**The target source is left exactly as it enumerates.**
+The write pipeline reaches each affected row through an address side-channel keyed by the `byte[]` instances that enumerator yields, and settles its lock / undo bookkeeping per row it touches, so narrowing it would be a change to the write path rather than to a read.
+
+**Halloween** needs no separate protection here: the statement collects its whole affected-row set before it writes anything, so a source reading the target table reads the pre-statement rows however many times it runs — which is what makes running it once identical to running it per target row, and is what real does anyway.
+Probe-confirmed against SQL Server 2025: `UPDATE t SET v = d.m FROM #t t JOIN (SELECT MAX(v) AS m FROM #t) d ON 1 = 1` over `(10, 20, 30)` leaves every row at `30`, the CTE spelling and the grouped per-key spelling agree, `UPDATE t SET v = u.v FROM #t t JOIN #t u ON u.id = t.id + 1` reads the pre-update partner, and a `NEWID()` inside the joined source draws **once per target row** (five distinct values over five rows), which the volatility gate is what preserves.
+
+Both passes decline in **skip mode** (an un-taken `IF` / `WHILE` branch): nothing commits there, so they are pure cost — and the materializing execution would run a deferred body on behalf of a statement that never runs, raising where the per-outer-row execution never reached one (an empty target drives no rows at all).
+The materialization's one divergence, inherited from the read path, is in [`joins.md`](joins.md#deferred-sources-materialize-once-per-enumeration): a body that raises is evaluated even when the target is empty and real would never have driven a row into it.
+
+**Not wired yet: DML through a join view** (`Simulation.Update.JoinView.cs` / `Simulation.JoinViewDml.cs`).
+Its WHERE names the *view's* output columns and resolves through the per-level chain resolvers, not against the base `FromSource[]` — so the seek's name resolution against a base source could bind a view column name to a same-named base column, which is a correctness question rather than a perf one.
+The materialization half is sound there, but the chain's `WITH CHECK OPTION` probe re-enumerates the same sources per affected row, so the seam is two call sites rather than one.
 
 ## `TOP (expr) [PERCENT]` on UPDATE / DELETE / INSERT
 
@@ -270,15 +295,12 @@ Probe-confirmed schema-inference rules:
 
 1. **Materialize source** once into `List<SqlValue[]>` via the parse-time `Func<BatchContext, List<SqlValue[]>>` materializer.
    `VALUES`-form evaluates the tuple expressions; `SELECT`-form runs `Selection.Execute` and decodes via `RowDecoder`; the bare-table / view form iterates the underlying heap or view selection respectively, then runs `EvaluateComputedColumns` per row so source-side computed columns are observable from the ON predicate / SET / INSERT projections.
-2. **Phase A — target × source**: for each target heap row, enumerate source rows; ON evaluates with a combined resolver wired to both target alias and source alias.
+2. **Phase A — matching**: per target row, the source rows it matches; ON operands resolve through a combined resolver wired to both the target alias (and the target's own name) and the source alias.
    Multiple-match collection feeds the Msg 8672 guard.
    For each target with ≥ 1 match, walk WHEN MATCHED clauses; first clause whose `AND` is satisfied (or absent) wins.
    For each target with 0 matches, walk WHEN NOT MATCHED BY SOURCE clauses the same way.
    Action gets queued (`pendingInserts` / `pendingUpdates` / `pendingDeletes`) along with the `(page, slot)` address + pre-update and post-update row snapshots.
-   **Seek-accelerated when applicable**: when the ON carries a seekable target equality and the target isn't a view, the match phase inverts — it seeks matching targets per source row (`Selection.TryPrepareMergeTargetSeek`), re-running the full ON per candidate (residual filter), first-source-wins and heap order preserved.
-   With no WHEN NOT MATCHED BY SOURCE clause it then visits only matched targets; with one it walks the heap once applying the precomputed matches (BY-SOURCE for the rest) — dropping the inner source loop either way.
-   ~9× faster on a large target; see [`indexes.md`](indexes.md#merge-target-seeking-loop-inversion).
-   Declines to the full scan for a view target or a non-seekable ON.
+   Three strategies settle this phase — see [Match strategies](#match-strategies).
 3. **Phase B — unmatched sources**: for each source row that didn't match any target, the single WHEN NOT MATCHED BY TARGET clause's AND condition is evaluated; if true, queue an INSERT.
 4. **Phase C — commit**: PK / UNIQUE validation runs on the union of pending inserts + updates via `EnforceKeyConstraintsForUpdate` (inserts use sentinel `(-1, i)` addresses).
    If a violation surfaces, every queued mutation is abandoned and the statement-atomic undo log already captures the no-heap-writes state.
@@ -287,6 +309,33 @@ Probe-confirmed schema-inference rules:
    For each row, the unmatched side projects all-NULL.
 6. **Phase E — triggers**: INSERT triggers fire once with the combined inserted set, then UPDATE triggers once with both inserted + deleted, then DELETE triggers once with the deleted set.
    Order is probe-confirmed (INSERT → UPDATE → DELETE); each kind fires once total per MERGE, regardless of how many WHEN clauses contributed to that kind.
+
+### Match strategies
+
+Phase A settles on one of three, all producing the same matched-source list per target row — ascending source index, so first-source-wins, the Msg 8672 multi-match guard and heap-order application read identically whichever ran.
+The opt-in `JoinDiagnostics` trace records the choice (`Merge:TargetSeek` / `Merge:HashMatch(keys=N,residual=M)` / `Merge:Scan`), which is what `MergeMatchStrategyTests` guards.
+
+- **Target seek** — the ON carries a seekable target equality and the target isn't a view (whose column names don't map to the base heap).
+  The loop inverts: seek the matching targets per source row (`Selection.TryPrepareMergeTargetSeek`), re-running the full ON per candidate as a residual filter.
+  With no WHEN NOT MATCHED BY SOURCE clause it then visits only matched targets; with one it walks the heap once applying the precomputed matches (BY-SOURCE for the rest).
+  ~9× faster on a large target; see [`indexes.md`](indexes.md#merge-target-seeking-loop-inversion).
+- **Source hash** — no seekable target equality (an unindexed target, a `#temp` built by `SELECT … INTO`, a view target), but the ON has at least one `<target column> = <source column>` conjunct.
+  Those conjuncts become the hash keys: the source is hashed once into a bucket per distinct key value, and each target row probes with its own key values, so matching is O(target + source) rather than O(target × source).
+  A bucket is a forward-linked chain over source indexes, which is what keeps a probe's candidates in source order.
+  Everything the ON says beyond the keys stays a residual re-checked per probed pair.
+  Only a bare column reference on each side qualifies as a key, and the two sides are told apart by the resolver's own rules (target alias or the target's own name → target, source alias → source, unqualified → target first) so a hashed pair can never swap sides; a pair whose types wouldn't promote the way the runtime `=` promotes them (a LOB operand, a collation conflict) declines to the residual, and key values are coerced to that promotion type before hashing, so a bucket hit means exactly what evaluating the equality would have said.
+  A NULL in any key component equi-matches nothing (`NULL = NULL` is UNKNOWN) on either side — such a target row falls to WHEN NOT MATCHED BY SOURCE and such a source row to WHEN NOT MATCHED BY TARGET.
+  The hash builds at the first target row that probes it, never ahead of one, so an empty target (or one a view hides entirely) evaluates nothing and can raise nothing — the scan's own behavior.
+- **Target × source scan** — no equality splits across the two sides at all (`ON t.id < s.id`, `ON t.a = t.b`, an ON whose operands are computed).
+  The whole ON runs per pair.
+
+Measured on WideWorldImporters (`.vs/workload`, `merge.*` in `complex4-wwi.sql`), MERGE into a `SELECT … INTO`-built `#temp` — the shape with no index to seek:
+
+| target × source | scan | source hash | live |
+|---|---|---|---|
+| 1k × 2k | 557 ms | 8.8 ms | 11.6 ms |
+| 4k × 8k | 8,703 ms | 31.0 ms | 41.8 ms |
+| 36k × 73k | > 300,000 ms (timeout) | 122.3 ms | 506.5 ms |
 
 ### `$action` pseudo-column
 

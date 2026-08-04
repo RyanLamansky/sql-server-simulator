@@ -1,7 +1,7 @@
 # `ALTER DATABASE` SET-option surface
 
 Closed accept-list parser (`RecognizedDatabaseOptions` in `Simulation.Alter.cs`) covering every database-scope toggle SqlPackage emits from a bacpac's `SqlDatabaseOptions` element.
-Most options parse-and-discard; only the six "load-bearing" toggles (`COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `TRUSTWORTHY`, `DB_CHAINING`) drive actual behavior.
+Most options parse-and-discard; only the seven "load-bearing" toggles (`COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY` / `READ_WRITE`) drive actual behavior.
 
 ## Target database
 
@@ -28,6 +28,7 @@ The name also governs the `COLLATE` clause below.
 - `TARGET_RECOVERY_TIME`
 
 **`AccessMode`** (bare state, no `=`, with an optional termination clause): `SET {SINGLE_USER | MULTI_USER | RESTRICTED_USER} [WITH ROLLBACK IMMEDIATE | WITH ROLLBACK AFTER n [SECONDS] | WITH NO_WAIT]`.
+`READ_ONLY` / `READ_WRITE` take the same shape and the same termination clause but are load-bearing — see [Read-only databases](#read-only-databases).
 The state and the termination clause are both parse-and-discarded — the simulator has no connection-count access model, so it never actually restricts, and `WITH ROLLBACK …` never evicts.
 Load-bearing for `DROP DATABASE`: every ORM/app test-teardown runs `SET SINGLE_USER WITH ROLLBACK IMMEDIATE` immediately before the drop (Django/mssql-django).
 Parsed explicitly (`ConsumeAccessModeTail`) rather than scanned to a boundary, because `ROLLBACK` is itself a statement-starting keyword — only `WITH`/`ROLLBACK` tokenize as keywords, `IMMEDIATE`/`AFTER`/`SECONDS`/`NO_WAIT` are matched by text.
@@ -55,6 +56,8 @@ These dispatch to dedicated helpers rather than falling into the parse-and-disca
 - **`DB_CHAINING`** — toggles `Database.CrossDatabaseChaining`; an ownership chain crosses the database boundary only when *both* databases have it on.
   Surfaces as `sys.databases.is_db_chaining_on`.
   See [`permissions.md`](permissions.md#cross-database-references).
+- **`READ_ONLY` / `READ_WRITE`** — toggles `Database.IsReadOnly`, which refuses every write to that database.
+  See [Read-only databases](#read-only-databases).
 
 Both cross-database toggles take the bare `ON` / `OFF` shape (`SET TRUSTWORTHY = ON` is Msg 102, probe-confirmed), and each refuses a set of system databases whatever the value asked for:
 
@@ -66,6 +69,35 @@ Both cross-database toggles take the bare `ON` / `OFF` shape (`SET TRUSTWORTHY =
 `msdb` is the one system database real lets either flag move on.
 The **shipped defaults** match real (probe-confirmed): `master` / `tempdb` chained, `msdb` chained *and* trustworthy, `model` and every user database neither.
 Neither flag is inherited from `model` — a new database starts with both off, which real enforces structurally by refusing to set them on `model` at all.
+
+## Read-only databases
+
+`ALTER DATABASE <name> SET { READ_ONLY | READ_WRITE }` moves `Database.IsReadOnly`, projected by `sys.databases.is_read_only` and by `DATABASEPROPERTYEX(name, 'Updateability')` (`READ_ONLY` / `READ_WRITE`).
+Every write to a read-only database is **Msg 3906** class 16 state 1 — `Failed to update database "<n>" because the database is read-only.` — the identical wording for DML and DDL, probe-confirmed against SQL Server 2025 (2026-08-04).
+The error names the database that *would have been written*, so a three-part write out of another session database reports the target's name, the same rule the rowversion counter and trigger dispatch follow.
+
+**The check happens where the write happens**, which is what reproduces real's laziness.
+An `UPDATE` or `DELETE` matching no row, an `INSERT … SELECT` producing none, and a `MERGE` whose actions all decline complete quietly; an `INSERT … VALUES`, a `TRUNCATE` of an already-empty table, and every DDL statement raise.
+Writes to a table belonging to no database — a `#temp` table, a `##global` table, a table variable, a table-valued parameter — are unaffected however the session's own database is set, matching real's separate `tempdb`; `SELECT … INTO #t` reading a read-only table is legal, while `SELECT … INTO <permanent>` is not.
+
+Enforced at two kinds of seam: the per-row DML writes (INSERT / UPDATE / DELETE / MERGE / bulk load, keyed on `HeapTable.OwningDatabase`), and the DDL statements' own target resolution — the module `CREATE` / `ALTER` family through `ResolveModuleSchema`, plus `CREATE TABLE`, `SELECT … INTO`, `TRUNCATE`, `ALTER TABLE`, `CREATE INDEX`, `ALTER SEQUENCE`, the `CREATE` / `DROP` pairs for sequences, types and synonyms, and every `DROP` of a table, view, procedure, function, sequence, type or trigger.
+A `DROP` reports the ordinary not-found error first: real checks existence before the access mode.
+
+`master` and `tempdb` **pin** the option and raise **Msg 5058** class 16 for either value asked for — `Option '<READ_ONLY|READ_WRITE>' cannot be set in database '<n>'.` — at their own states, **5** for `master` and **4** for `tempdb`.
+`model` and `msdb` both accept it.
+
+`COMPATIBILITY_LEVEL` is the one `SET` option a read-only database itself refuses (Msg 3906, which real trails with a Msg 5069 the simulator omits like every other ALTER DATABASE failure).
+`ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `ANSI_NULLS`, `RECOVERY` — and `READ_WRITE` itself — all move freely on one, probe-confirmed by reading the flags back.
+
+**A bacpac import lands writable.**
+DacFx omits the access mode from `SqlDatabaseOptions` even when exporting a read-only database (verified against the WideWorldImporters and AdventureWorks models, neither of which carries the property), and an `IsReadOnly` property is deliberately not translated: the element is read in phase 1, before the schema and data load, so a `READ_ONLY` set there would refuse the rest of its own import.
+Carrying it wants a post-load hook.
+
+### Not modeled yet
+
+- Real varies the Msg 3906 **state** at a few sites (`ALTER TABLE` reports state 12); the simulator raises state 1 everywhere.
+- A read-only `GRANT` / `REVOKE` / `DENY`, `sp_rename`, `sp_addextendedproperty`, `ALTER SCHEMA … TRANSFER`, `ALTER INDEX` / `DROP INDEX`, and the `CREATE` / `DROP` of schemas, roles, users and assemblies carry no gate yet — real raises Msg 3906 for all of them.
+- The database-level `OFFLINE` / `EMERGENCY` / `RESTRICTED_USER` states real also refuses writes in stay parse-and-discard.
 
 ## `COLLATE` clause
 

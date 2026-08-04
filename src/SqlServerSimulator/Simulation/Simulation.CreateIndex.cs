@@ -174,6 +174,7 @@ partial class Simulation
         // CREATE INDEX is gated on ALTER of the table it lands on — Msg 1088
         // state 12, naming the table as written (probe-confirmed; the DROP /
         // ALTER INDEX forms use state 9).
+        table.OwningDatabase?.RejectWriteWhenReadOnly();
         if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(table), table.ObjectId, table.SchemaId))
             throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
 

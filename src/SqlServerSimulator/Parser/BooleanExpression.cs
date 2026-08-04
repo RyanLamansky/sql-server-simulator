@@ -1049,6 +1049,77 @@ internal abstract class BooleanExpression
     internal static BooleanExpression And(BooleanExpression left, BooleanExpression right) => new AndExpression([left, right]);
 
     /// <summary>
+    /// Rebuilds <paramref name="predicate"/> with each of its operands replaced
+    /// by <paramref name="rebind"/>'s result, or returns null when the predicate
+    /// isn't one of the rebuildable shapes or any one operand declines. Lets the
+    /// WHERE pushdown (<c>Selection.Execution.PredicatePushdown.cs</c>) move a
+    /// conjunct into a view / derived-table body, whose columns are the same
+    /// values under different names, without reaching into this hierarchy.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The shapes are exactly the ones the pushdown's residual invariant needs:
+    /// a comparison (<c>=</c> / <c>&lt;</c> / <c>&lt;=</c> / <c>&gt;</c> /
+    /// <c>&gt;=</c>), a non-negated <c>BETWEEN</c>, and the equality family an
+    /// <c>IN</c> list or an OR-of-equalities decomposes into. Every one of them
+    /// is NULL-rejecting, so the rebuilt predicate reads UNKNOWN — never TRUE —
+    /// over a row whose operand columns are all NULL. <c>IS NULL</c>,
+    /// <c>IS NOT DISTINCT FROM</c> and a mixed <c>OR</c> chain are absent for
+    /// that reason, not for lack of a constructor.
+    /// </para>
+    /// <para>
+    /// A predicate real settled while compiling declines outright: its operands
+    /// never run, so rebuilding one would run what real doesn't.
+    /// </para>
+    /// </remarks>
+    internal static BooleanExpression? TryRebindOperands(BooleanExpression predicate, Func<Expression, Expression?> rebind)
+    {
+        if (predicate.IsWrittenConstant || predicate.IsNeverTrue)
+            return null;
+
+        if (predicate.TryGetEqualityOperands(out var equalLeft, out var equalRight))
+        {
+            return rebind(equalLeft) is { } left && rebind(equalRight) is { } right
+                ? new EqualityExpression(left, right)
+                : null;
+        }
+
+        if (predicate.TryGetRangeOperands(out var rangeLeft, out var op, out var rangeRight))
+        {
+            return rebind(rangeLeft) is not { } left || rebind(rangeRight) is not { } right
+                ? null
+                : op switch
+                {
+                    RangeComparison.Greater => new GreaterThanExpression(left, right),
+                    RangeComparison.GreaterOrEqual => new GreaterThanOrEqualExpression(left, right),
+                    RangeComparison.Less => new LessThanExpression(left, right),
+                    _ => new LessThanOrEqualExpression(left, right),
+                };
+        }
+
+        if (predicate.TryGetBetweenOperands(out var value, out var lower, out var upper))
+        {
+            return rebind(value) is { } subject && rebind(lower) is { } low && rebind(upper) is { } high
+                ? new BetweenExpression(subject, low, high, negated: false)
+                : null;
+        }
+
+        if (predicate.TryGetEqualityFamily(out var pairs))
+        {
+            var equalities = new BooleanExpression[pairs.Count];
+            for (var i = 0; i < pairs.Count; i++)
+            {
+                if (rebind(pairs[i].Left) is not { } left || rebind(pairs[i].Right) is not { } right)
+                    return null;
+                equalities[i] = new EqualityExpression(left, right);
+            }
+            return equalities.Length == 1 ? equalities[0] : new OrExpression(equalities);
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Flattens a top-level <c>OR</c> chain into its individual disjunct terms,
     /// appending each to <paramref name="sink"/>. A non-<c>OR</c> predicate
     /// contributes itself. The mirror of <see cref="CollectConjuncts"/>, used to

@@ -568,6 +568,8 @@ partial class Simulation
             where = Selection.ParseAndBindPredicate(context, tupleTypeResolver);
         }
 
+        sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
+
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
         sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses);
 
@@ -715,6 +717,7 @@ partial class Simulation
         for (var i = 0; i < affected.Count; i++)
         {
             var (pageIndex, slotIndex, fullNew, _) = affected[i];
+            table.OwningDatabase?.RejectWriteWhenReadOnly();
             if (lockableTable)
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
             var newImage = RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap);

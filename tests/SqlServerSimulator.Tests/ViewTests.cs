@@ -24,10 +24,9 @@ public sealed class ViewTests
     [TestMethod]
     public void Create_And_Select_BasicView()
     {
-        using var reader = WithT1().ExecuteReader("""
-            create view dbo.v as select id, label from dbo.t1;
-            select id, label from dbo.v order by id
-            """);
+        using var reader = WithT1().ExecuteBatchesReader(
+            "create view dbo.v as select id, label from dbo.t1",
+            "select id, label from dbo.v order by id");
         var rows = new List<(int id, string label)>();
         while (reader.Read())
             rows.Add((reader.GetInt32(0), reader.GetString(1)));
@@ -38,10 +37,9 @@ public sealed class ViewTests
 
     [TestMethod]
     public void View_With_Column_Rename_List()
-        => Assert.AreEqual(1, WithT1().ExecuteScalar("""
-            create view dbo.v(the_id, the_label) as select id, label from dbo.t1;
-            select the_id from dbo.v order by the_id
-            """));
+        => Assert.AreEqual(1, WithT1().ExecuteBatchesScalar(
+            "create view dbo.v(the_id, the_label) as select id, label from dbo.t1",
+            "select the_id from dbo.v order by the_id"));
 
     [TestMethod]
     public void View_Rename_TooFew_Raises_Msg8158()
@@ -72,10 +70,9 @@ public sealed class ViewTests
     [TestMethod]
     public void View_Body_With_Top_And_OrderBy_Works()
     {
-        using var reader = WithT1().ExecuteReader("""
-            create view dbo.v as select top 2 id, label from dbo.t1 order by id;
-            select id from dbo.v order by id
-            """);
+        using var reader = WithT1().ExecuteBatchesReader(
+            "create view dbo.v as select top 2 id, label from dbo.t1 order by id",
+            "select id from dbo.v order by id");
         var ids = new List<int>();
         while (reader.Read())
             ids.Add(reader.GetInt32(0));
@@ -103,10 +100,9 @@ public sealed class ViewTests
     [TestMethod]
     public void View_Body_With_Aggregate_And_GroupBy()
     {
-        using var reader = WithT1().ExecuteReader("""
-            create view dbo.v as select tag, count(*) as cnt from dbo.t1 group by tag;
-            select tag, cnt from dbo.v order by tag
-            """);
+        using var reader = WithT1().ExecuteBatchesReader(
+            "create view dbo.v as select tag, count(*) as cnt from dbo.t1 group by tag",
+            "select tag, cnt from dbo.v order by tag");
         var rows = new List<(string, int)>();
         while (reader.Read())
             rows.Add((reader.GetString(0), reader.GetInt32(1)));
@@ -115,24 +111,21 @@ public sealed class ViewTests
 
     [TestMethod]
     public void View_With_Schemabinding_Encryption_Parse_And_Ignore()
-        => Assert.AreEqual(1, WithT1().ExecuteScalar("""
-            create view dbo.v with schemabinding, encryption as select id from dbo.t1;
-            select count(*) from dbo.v where id = 1
-            """));
+        => Assert.AreEqual(1, WithT1().ExecuteBatchesScalar(
+            "create view dbo.v with schemabinding, encryption as select id from dbo.t1",
+            "select count(*) from dbo.v where id = 1"));
 
     [TestMethod]
     public void View_With_Check_Option_Records_Bit_In_SysViews()
-        => Assert.IsTrue((bool)WithT1().ExecuteScalar("""
-            create view dbo.v as select id, label from dbo.t1 where tag = 'x' with check option;
-            select with_check_option from sys.views where name = 'v'
-            """)!);
+        => Assert.IsTrue((bool)WithT1().ExecuteBatchesScalar(
+            "create view dbo.v as select id, label from dbo.t1 where tag = 'x' with check option",
+            "select with_check_option from sys.views where name = 'v'")!);
 
     [TestMethod]
     public void Unqualified_View_Name_In_From_Resolves_Via_Dbo()
-        => Assert.AreEqual(4, WithT1().ExecuteScalar("""
-            create view dbo.v as select id from dbo.t1;
-            select count(*) from v
-            """));
+        => Assert.AreEqual(4, WithT1().ExecuteBatchesScalar(
+            "create view dbo.v as select id from dbo.t1",
+            "select count(*) from v"));
 
     [TestMethod]
     public void View_On_View()
@@ -148,10 +141,9 @@ public sealed class ViewTests
     public void Drop_View_Removes_It()
     {
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v as select id from dbo.t1;
-            drop view dbo.v
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v as select id from dbo.t1",
+            "drop view dbo.v");
         _ = simulation.AssertSqlError("select id from dbo.v", 208);
     }
 
@@ -177,10 +169,9 @@ public sealed class ViewTests
     [TestMethod]
     public void View_Body_NoFrom_Works()
     {
-        using var reader = new Simulation().ExecuteReader("""
-            create view dbo.v as select 1 as x, 'hi' as y;
-            select x, y from dbo.v
-            """);
+        using var reader = new Simulation().ExecuteBatchesReader(
+            "create view dbo.v as select 1 as x, 'hi' as y",
+            "select x, y from dbo.v");
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(1, reader.GetInt32(0));
         Assert.AreEqual("hi", reader.GetString(1));
@@ -189,10 +180,9 @@ public sealed class ViewTests
     [TestMethod]
     public void SysObjects_HasViewRow_WithTypeV()
     {
-        using var reader = WithT1().ExecuteReader("""
-            create view dbo.v as select id from dbo.t1;
-            select name, type, type_desc from sys.objects where name = 'v'
-            """);
+        using var reader = WithT1().ExecuteBatchesReader(
+            "create view dbo.v as select id from dbo.t1",
+            "select name, type, type_desc from sys.objects where name = 'v'");
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("v", reader.GetString(0));
         Assert.AreEqual("V ", reader.GetString(1));
@@ -218,10 +208,9 @@ public sealed class ViewTests
     [TestMethod]
     public void SysColumns_Emits_ViewOutputProjection()
     {
-        using var reader = WithT1().ExecuteReader("""
-            create view dbo.v as select id, label from dbo.t1;
-            select name, column_id from sys.columns where object_id = object_id('dbo.v', 'V') order by column_id
-            """);
+        using var reader = WithT1().ExecuteBatchesReader(
+            "create view dbo.v as select id, label from dbo.t1",
+            "select name, column_id from sys.columns where object_id = object_id('dbo.v', 'V') order by column_id");
         var cols = new List<(string name, int id)>();
         while (reader.Read())
             cols.Add((reader.GetString(0), reader.GetInt32(1)));
@@ -231,10 +220,9 @@ public sealed class ViewTests
     [TestMethod]
     public void InformationSchema_Views_Emits_ViewDefinition()
     {
-        using var reader = WithT1().ExecuteReader("""
-            create view dbo.v as select id from dbo.t1;
-            select table_name, check_option, is_updatable from information_schema.views where table_name = 'v'
-            """);
+        using var reader = WithT1().ExecuteBatchesReader(
+            "create view dbo.v as select id from dbo.t1",
+            "select table_name, check_option, is_updatable from information_schema.views where table_name = 'v'");
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("v", reader.GetString(0));
         Assert.AreEqual("NONE", reader.GetString(1));
@@ -244,10 +232,9 @@ public sealed class ViewTests
     [TestMethod]
     public void InformationSchema_Tables_Includes_Views_With_TableType_View()
     {
-        using var reader = WithT1().ExecuteReader("""
-            create view dbo.v as select id from dbo.t1;
-            select table_name, table_type from information_schema.tables where table_name in ('t1', 'v') order by table_name
-            """);
+        using var reader = WithT1().ExecuteBatchesReader(
+            "create view dbo.v as select id from dbo.t1",
+            "select table_name, table_type from information_schema.tables where table_name in ('t1', 'v') order by table_name");
         var rows = new List<(string name, string type)>();
         while (reader.Read())
             rows.Add((reader.GetString(0), reader.GetString(1)));
@@ -269,10 +256,9 @@ public sealed class ViewTests
     [TestMethod]
     public void View_WithAlias_RebindsColumnQualifier()
     {
-        using var reader = WithT1().ExecuteReader("""
-            create view dbo.v as select id, label from dbo.t1;
-            select c.id, c.label from dbo.v as c where c.id = 1
-            """);
+        using var reader = WithT1().ExecuteBatchesReader(
+            "create view dbo.v as select id, label from dbo.t1",
+            "select c.id, c.label from dbo.v as c where c.id = 1");
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(1, reader.GetInt32(0));
         Assert.AreEqual("a", reader.GetString(1));
@@ -282,10 +268,9 @@ public sealed class ViewTests
     public void Insert_Through_Simple_View_Writes_To_Base()
     {
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v as select id, label, tag from dbo.t1;
-            insert dbo.v(label, tag) values ('e','z')
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v as select id, label, tag from dbo.t1",
+            "insert dbo.v(label, tag) values ('e','z')");
         Assert.AreEqual("e", simulation.ExecuteScalar("select label from dbo.t1 where tag = 'z'"));
     }
 
@@ -293,10 +278,9 @@ public sealed class ViewTests
     public void Insert_Through_View_Without_ColumnList_UsesImplicitProjection()
     {
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v as select id, label, tag from dbo.t1;
-            insert dbo.v values ('e','z')
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v as select id, label, tag from dbo.t1",
+            "insert dbo.v values ('e','z')");
         Assert.AreEqual("e", simulation.ExecuteScalar("select label from dbo.t1 where tag = 'z'"));
     }
 
@@ -304,10 +288,9 @@ public sealed class ViewTests
     public void Update_Through_Simple_View_Writes_To_Base()
     {
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v as select id, label from dbo.t1;
-            update dbo.v set label = 'renamed' where id = 1
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v as select id, label from dbo.t1",
+            "update dbo.v set label = 'renamed' where id = 1");
         Assert.AreEqual("renamed", simulation.ExecuteScalar("select label from dbo.t1 where id = 1"));
     }
 
@@ -315,10 +298,9 @@ public sealed class ViewTests
     public void Delete_Through_Simple_View_Writes_To_Base()
     {
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v as select id, label from dbo.t1;
-            delete dbo.v where id = 1
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v as select id, label from dbo.t1",
+            "delete dbo.v where id = 1");
         Assert.AreEqual(0, simulation.ExecuteScalar("select count(*) from dbo.t1 where id = 1"));
     }
 
@@ -328,10 +310,9 @@ public sealed class ViewTests
         var simulation = WithT1();
         // Filter view to tag='x' rows only. UPDATE through view must affect
         // only the visible rows (label='a','b'), not the hidden ones.
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v as select id, label from dbo.t1 where tag = 'x';
-            update dbo.v set label = 'Q'
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v as select id, label from dbo.t1 where tag = 'x'",
+            "update dbo.v set label = 'Q'");
         using var reader = simulation.ExecuteReader("select label from dbo.t1 order by id");
         var labels = new List<string>();
         while (reader.Read())
@@ -343,10 +324,9 @@ public sealed class ViewTests
     public void Filtered_View_Delete_Limits_To_Visible_Rows()
     {
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v as select id, label from dbo.t1 where tag = 'x';
-            delete dbo.v
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v as select id, label from dbo.t1 where tag = 'x'",
+            "delete dbo.v");
         Assert.AreEqual(2, simulation.ExecuteScalar("select count(*) from dbo.t1"));
     }
 
@@ -357,10 +337,9 @@ public sealed class ViewTests
         // reads but does NOT constrain INSERTs unless WITH CHECK OPTION is
         // specified. The row is in the base but invisible through the view.
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v as select id, label, tag from dbo.t1 where tag = 'x';
-            insert dbo.v(label, tag) values ('outsider','z')
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v as select id, label, tag from dbo.t1 where tag = 'x'",
+            "insert dbo.v(label, tag) values ('outsider','z')");
         Assert.AreEqual("z", simulation.ExecuteScalar("select tag from dbo.t1 where label = 'outsider'"));
         Assert.IsNull(simulation.ExecuteScalar("select count(*) from dbo.v where label = 'outsider'") is int n && n > 0 ? (object?)"visible" : null);
     }
@@ -379,10 +358,9 @@ public sealed class ViewTests
     public void Insert_Through_CheckOption_View_Honoring_Predicate_Succeeds()
     {
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v as select id, label, tag from dbo.t1 where tag = 'x' with check option;
-            insert dbo.v(label,tag) values ('good','x')
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v as select id, label, tag from dbo.t1 where tag = 'x' with check option",
+            "insert dbo.v(label,tag) values ('good','x')");
         Assert.AreEqual("good", simulation.ExecuteScalar("select label from dbo.v where label = 'good'"));
     }
 
@@ -435,10 +413,9 @@ public sealed class ViewTests
     public void Insert_OnDerived_View_Touching_Only_Direct_Cols_Succeeds()
     {
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v as select id, label, len(label) as label_len from dbo.t1;
-            insert dbo.v(label) values ('newrow')
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v as select id, label, len(label) as label_len from dbo.t1",
+            "insert dbo.v(label) values ('newrow')");
         Assert.AreEqual("newrow", simulation.ExecuteScalar("select label from dbo.t1 where label='newrow'"));
     }
 
@@ -454,10 +431,9 @@ public sealed class ViewTests
     public void Delete_Through_Derived_View_Works()
     {
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v as select id, label, len(label) as label_len from dbo.t1;
-            delete dbo.v where id = 1
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v as select id, label, len(label) as label_len from dbo.t1",
+            "delete dbo.v where id = 1");
         Assert.AreEqual(0, simulation.ExecuteScalar("select count(*) from dbo.t1 where id = 1"));
     }
 
@@ -516,8 +492,9 @@ public sealed class ViewTests
     public void View_With_ColumnRename_Maps_To_Base_Correctly()
     {
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v(my_id, my_label, my_tag) as select id, label, tag from dbo.t1;
+        simulation.ExecuteBatches(
+            "create view dbo.v(my_id, my_label, my_tag) as select id, label, tag from dbo.t1",
+            """
             insert dbo.v(my_label, my_tag) values ('renamed','q');
             update dbo.v set my_label = 'updated_q' where my_tag = 'q'
             """);
@@ -528,10 +505,9 @@ public sealed class ViewTests
     public void Insert_Through_View_Auto_Generates_Identity()
     {
         var simulation = WithT1();
-        _ = simulation.ExecuteNonQuery("""
-            create view dbo.v as select id, label from dbo.t1;
-            insert dbo.v(label) values ('auto')
-            """);
+        simulation.ExecuteBatches(
+            "create view dbo.v as select id, label from dbo.t1",
+            "insert dbo.v(label) values ('auto')");
         // Identity column kicked in: the new row has the next id (5).
         Assert.AreEqual(5, simulation.ExecuteScalar("select id from dbo.t1 where label = 'auto'"));
     }

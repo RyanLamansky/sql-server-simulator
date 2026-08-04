@@ -1094,7 +1094,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromSystemName(db.CollationName),
                 zeroByte,
                 multiUser,
-                falseBit,
+                SqlValue.FromBoolean(db.IsReadOnly), // is_read_only
                 falseBit,
                 falseBit,
                 zeroByte,

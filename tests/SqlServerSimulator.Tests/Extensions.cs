@@ -49,9 +49,11 @@ static class Extensions
     /// Runs each <paramref name="batches"/> entry as its own ADO.NET command
     /// on a shared open connection. The split exists because CREATE/ALTER
     /// PROCEDURE / FUNCTION / VIEW / TRIGGER / SCHEMA must be the first
-    /// statement in a query batch (Msg 111) — passing multiple CREATE
-    /// statements through a single CommandText fails fast, so tests use this
-    /// helper to put each must-be-first statement in its own batch.
+    /// statement in a query batch (Msg 111) — and a VIEW or FUNCTION must be
+    /// its batch's <em>only</em> statement, since its body runs to the end of
+    /// the batch (Msg 156 / 102 at whatever follows). Passing several such
+    /// statements, or a trailing query, through a single CommandText fails
+    /// fast, so tests use this helper to give each one its own batch.
     /// </summary>
     public static void ExecuteBatches(this Simulation simulation, params ReadOnlySpan<string> batches)
     {
@@ -61,6 +63,43 @@ static class Extensions
             using var command = connection.CreateCommand(commandText);
             _ = command.ExecuteNonQuery();
         }
+    }
+
+    /// <summary>
+    /// <see cref="ExecuteBatches"/> whose <em>last</em> entry is the measured
+    /// one: every earlier entry runs for its effect, and the last one's first
+    /// column of its first row comes back. Keeps the one-expression test shape
+    /// available when the setup contains a statement that has to own its batch.
+    /// </summary>
+    public static object? ExecuteBatchesScalar(this Simulation simulation, params ReadOnlySpan<string> batches)
+    {
+        using var connection = simulation.CreateOpenConnection();
+        for (var i = 0; i < batches.Length - 1; i++)
+        {
+            using var setup = connection.CreateCommand(batches[i]);
+            _ = setup.ExecuteNonQuery();
+        }
+
+        using var command = connection.CreateCommand(batches[^1]);
+        return command.ExecuteScalar();
+    }
+
+    /// <summary>
+    /// Reader-returning <see cref="ExecuteBatchesScalar"/>: the earlier entries
+    /// run for their effect, the last one's rows come back. The connection
+    /// outlives the call so the reader stays usable, matching
+    /// <see cref="ExecuteReader"/>.
+    /// </summary>
+    public static DbDataReader ExecuteBatchesReader(this Simulation simulation, params ReadOnlySpan<string> batches)
+    {
+        var connection = simulation.CreateOpenConnection();
+        for (var i = 0; i < batches.Length - 1; i++)
+        {
+            using var setup = connection.CreateCommand(batches[i]);
+            _ = setup.ExecuteNonQuery();
+        }
+
+        return connection.CreateCommand(batches[^1]).ExecuteReader();
     }
 
     public static object? ExecuteScalar(this Simulation simulation, string commandText)

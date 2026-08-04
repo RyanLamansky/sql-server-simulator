@@ -78,6 +78,8 @@ enum ContextualKeyword
     Preceding,
     Range,
     Read_Committed_Snapshot,
+    Read_Only,
+    Read_Write,
     ReadOnly,
     Rebuild,
     Recompile,

@@ -87,7 +87,9 @@ public sealed class ObjectPropertyTests
 
     [TestMethod]
     public void IsSchemaBound_Returns0()
-        => AreEqual(0, new Simulation().ExecuteScalar("create view v as select 1 x; select objectproperty(object_id('v'), 'IsSchemaBound')"));
+        => AreEqual(0, new Simulation().ExecuteBatchesScalar(
+            "create view v as select 1 x",
+            "select objectproperty(object_id('v'), 'IsSchemaBound')"));
 
     /// <summary>
     /// IsSystemTable is 0 for every resolvable object and NULL for an

@@ -113,6 +113,35 @@ partial class SimulatedSqlException
         new("The Cross Database Chaining option cannot be set to the specified value on the specified database.", 5600, 16, 2);
 
     /// <summary>
+    /// Mimics SQL Server error 3906: a write reached a database whose access
+    /// mode is <c>READ_ONLY</c>. Probe-confirmed against SQL Server 2025
+    /// (2026-08-04) — class 16 state 1, with the database name in double
+    /// quotes, and the identical wording for DML and DDL alike. Real names the
+    /// database that would have been written, so a three-part write out of
+    /// another session database reports the target's name.
+    /// </summary>
+    /// <remarks>
+    /// Real varies the state at a few sites (<c>ALTER TABLE</c> reports state
+    /// 12) and follows the <c>ALTER DATABASE</c> refusal with a trailing Msg
+    /// 5069, both of which the simulator flattens the way it flattens the other
+    /// ALTER DATABASE failures above.
+    /// </remarks>
+    internal static SimulatedSqlException DatabaseIsReadOnly(string databaseName) =>
+        new($"Failed to update database \"{databaseName}\" because the database is read-only.", 3906, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5058: <c>ALTER DATABASE … SET</c> names an
+    /// option that database pins — <c>READ_ONLY</c> / <c>READ_WRITE</c> on
+    /// <c>master</c> or <c>tempdb</c>. Probe-confirmed against SQL Server 2025
+    /// (2026-08-04): class 16, state <strong>5</strong> for <c>master</c> and
+    /// <strong>4</strong> for <c>tempdb</c>, echoing the option asked for.
+    /// <c>model</c> and <c>msdb</c> both accept it.
+    /// </summary>
+    internal static SimulatedSqlException OptionCannotBeSetInDatabase(string option, string databaseName) =>
+        new($"Option '{option}' cannot be set in database '{databaseName}'.", 5058, 16,
+            Collation.Baseline.Equals(databaseName, Simulation.TempdbDatabaseName) ? (byte)4 : (byte)5);
+
+    /// <summary>
     /// Mimics SQL Server error 15664: a <c>sp_set_session_context</c> call
     /// targeted a key previously set with <c>@read_only = 1</c> in this
     /// session. Wording probe-confirmed against SQL Server 2025. Class 16 State 1.
