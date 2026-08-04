@@ -174,8 +174,8 @@ Real data (WWI `Sales.OrderLines`, index `(StockItemID, PickingCompletedWhen)`, 
 The pure `cust = @c` group lookup holds parity before/after the entry widens, and the AW `Person.Person` name-browse (`LastName = @l AND FirstName >= @a AND FirstName < @b`, 211-row group under RCSI) holds baseline parity via the group fallback.
 
 All three single-table projectors — non-aggregate (`ProjectSqlRows`), aggregate (`BuildAggregateProjectionRows`), and window (`ProjectWindowedRows`) — narrow a single-base-table source through the seek, so `SELECT COUNT(*) … WHERE indexedcol = x` and `SELECT … OVER (…) FROM t WHERE indexedcol = x` both seek like their non-aggregate counterpart (without this the window projector silently full-scanned even when its WHERE was perfectly sargable, the regression that made running-total-per-parent EF queries scan the table).
-They also push single-source WHERE equality predicates onto the **leftmost** source of a multi-source FROM before the join (`NarrowLeftmostJoinSource` — the leftmost is always preserved, so this never changes outer-join semantics), which shrinks the join's driving rowset.
-The INNER / LEFT equi-join operator then **seeks the inner side per outer row** when that rowset is small and the inner is indexed on the join key — see [`joins.md`](joins.md).
+They also push single-source WHERE equality / range predicates onto **every** base-table source of a multi-source FROM before the join (`NarrowJoinSources` — the matched conjuncts stay in the residual WHERE, so narrowing any one source is semantics-preserving for every join kind), and reorder a pure INNER equi-join chain to drive from the source the pushdown narrowed hardest.
+The INNER / LEFT equi-join operator then **seeks the inner side per outer row** when that rowset is small relative to the inner and the inner is indexed on the join key — see [`joins.md`](joins.md).
 
 ### ORDER BY elimination
 

@@ -1594,14 +1594,21 @@ internal abstract class BooleanExpression
     /// indifferent to the inner row's column values, including NULLs.
     /// Re-executes the inner plan per outer row, threading the caller's
     /// resolver as the inner's outer scope so correlated references resolve
-    /// up the chain.
+    /// up the chain; an inner plan that never reaches for that resolver runs
+    /// once per statement instead (see <see cref="UncorrelatedSubqueryCache"/>).
     /// </summary>
     private sealed class ExistsExpression(Selection inner) : BooleanExpression
     {
         public override bool? Run(RuntimeContext runtime)
         {
             PermissionEnforcement.CheckSubqueryReads(runtime.Batch, inner);
-            return inner.Execute(runtime.Batch, runtime.ResolveColumn).RowBytes.Any();
+            var memo = UncorrelatedSubqueryCache.Open(runtime, this);
+            if (memo.Result is { } cached)
+                return (bool)cached;
+
+            var any = inner.Execute(runtime.Batch, memo.ResolverFor(runtime)).RowBytes.Any();
+            memo.Remember(runtime, this, any);
+            return any;
         }
 
         internal override string DebugDisplay() => "EXISTS (...)";
@@ -1707,8 +1714,12 @@ internal abstract class BooleanExpression
     /// NULL LHS → UNKNOWN; non-NULL LHS with a match → true (NULLs in the
     /// list don't change the answer); non-NULL LHS with no match but at
     /// least one NULL row → UNKNOWN; non-NULL LHS, no match, no NULL row →
-    /// false. Re-executes the inner plan per outer row, threading the
-    /// caller's resolver for correlated references.
+    /// false. A correlated inner re-executes per outer row, threading the
+    /// caller's resolver; one that never reads the outer row runs once per
+    /// statement (see <see cref="UncorrelatedSubqueryCache"/>) and every later
+    /// row probes the materialized values — through a hash set when the two
+    /// sides promote within one type family, which turns the membership test
+    /// from a scan of the inner result into a single lookup.
     /// </summary>
     private sealed class InSubqueryExpression(Expression source, Selection inner, bool negated) : BooleanExpression
     {
@@ -1718,12 +1729,31 @@ internal abstract class BooleanExpression
             if (src.IsNull)
                 return null;
 
-            var sawNull = false;
             PermissionEnforcement.CheckSubqueryReads(runtime.Batch, inner);
+            var memo = UncorrelatedSubqueryCache.Open(runtime, this);
+            if (memo.Result is { } cached)
+                return this.Test((InnerColumnValues)cached, src);
+            if (memo.Probe is not { } probe)
+                return this.ScanPerRow(runtime, src);
+
+            var values = new InnerColumnValues(inner.Execute(runtime.Batch, probe.Resolver), src.Type);
+            memo.Remember(runtime, this, values);
+            return this.Test(values, src);
+        }
+
+        /// <summary>
+        /// The per-outer-row execution a correlated inner takes: stream the
+        /// inner result against this row's outer values, short-circuiting on
+        /// the first match.
+        /// </summary>
+        private bool? ScanPerRow(RuntimeContext runtime, SqlValue src)
+        {
+            var sawNull = false;
             var resultSet = inner.Execute(runtime.Batch, runtime.ResolveColumn);
+            var columns = RowDecoder.ColumnsFor(resultSet.Schema);
             foreach (var rowBytes in resultSet.RowBytes)
             {
-                var rowValue = RowDecoder.DecodeColumn(resultSet.Schema, rowBytes, 0);
+                var rowValue = RowDecoder.DecodeColumn(columns, rowBytes, 0);
                 if (rowValue.IsNull)
                 {
                     sawNull = true;
@@ -1735,6 +1765,31 @@ internal abstract class BooleanExpression
             return sawNull ? null : negated;
         }
 
+        /// <summary>
+        /// Tests one LHS value against an already-materialized inner result:
+        /// a hash lookup when the probe set covers this LHS type, otherwise the
+        /// same promote-and-compare walk <see cref="ScanPerRow"/> runs.
+        /// </summary>
+        private bool? Test(InnerColumnValues values, SqlValue src)
+        {
+            if (values.Hashed is { } hashed && ReferenceEquals(values.HashedFor, src.Type))
+            {
+                // The scan reaches this through CompareValuesPromoted once per
+                // value; the hashed path owes the same Msg 468 / 4191 gate.
+                RequireResolvableCollation(src.Type, values.ColumnType, "equal to");
+                return hashed.Contains(src.Type == values.Promoted ? src : src.CoerceTo(values.Promoted))
+                    ? !negated
+                    : values.SawNull ? null : negated;
+            }
+
+            foreach (var value in values.Values)
+            {
+                if (CompareValuesPromoted(src, value, "equal to", static (l, r) => l.Equals(r)) == true)
+                    return !negated;
+            }
+            return values.SawNull ? null : negated;
+        }
+
         internal override string DebugDisplay() => $"{source.DebugDisplay()} {(negated ? "NOT IN" : "IN")} (...)";
 
         // Only the LHS source is a reachable Expression operand; the subquery
@@ -1743,6 +1798,110 @@ internal abstract class BooleanExpression
 
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
             RequireResolvableCollation(source.GetSqlType(batch, resolveColumnType), inner.Schema[0], "equal to");
+    }
+
+    /// <summary>
+    /// The single-column rows of an <c>IN (SELECT …)</c> inner plan, decoded
+    /// once and held for the statement's remaining outer rows. NULL rows fold
+    /// into <see cref="SawNull"/> — they never match, and one of them is what
+    /// turns a miss into UNKNOWN.
+    /// </summary>
+    private sealed class InnerColumnValues
+    {
+        /// <summary>Every non-NULL inner value, in the order the plan produced them.</summary>
+        internal readonly SqlValue[] Values;
+
+        /// <summary>Whether any inner row was NULL.</summary>
+        internal readonly bool SawNull;
+
+        /// <summary>The inner projection's declared type, which every entry in <see cref="Values"/> carries.</summary>
+        internal readonly SqlType ColumnType;
+
+        /// <summary>The type both sides compare under once <see cref="Hashed"/> applies.</summary>
+        internal readonly SqlType Promoted;
+
+        /// <summary>
+        /// <see cref="Values"/> promoted to <see cref="Promoted"/> and hashed
+        /// for O(1) membership, or <see langword="null"/> when the pair doesn't
+        /// qualify (see <see cref="QualifiesForHashing"/>) — in which case the
+        /// caller walks <see cref="Values"/> instead.
+        /// </summary>
+        internal readonly HashSet<SqlValue>? Hashed;
+
+        /// <summary>The LHS type <see cref="Hashed"/> was built against; an LHS of any other type falls back to the walk.</summary>
+        internal readonly SqlType? HashedFor;
+
+        internal InnerColumnValues(SimulatedSqlResultSet resultSet, SqlType sourceType)
+        {
+            this.ColumnType = resultSet.Schema[0];
+            var columns = RowDecoder.ColumnsFor(resultSet.Schema);
+            var values = new List<SqlValue>();
+            foreach (var rowBytes in resultSet.RowBytes)
+            {
+                var value = RowDecoder.DecodeColumn(columns, rowBytes, 0);
+                if (value.IsNull)
+                    this.SawNull = true;
+                else
+                    values.Add(value);
+            }
+
+            this.Values = [.. values];
+            this.Promoted = this.ColumnType;
+            if (this.Values.Length == 0 || !QualifiesForHashing(sourceType, this.ColumnType))
+                return;
+
+            this.Promoted = SqlType.Promote(sourceType, this.ColumnType);
+            this.Hashed = BuildProbeSet(this.Values, this.Promoted);
+            if (this.Hashed is not null)
+                this.HashedFor = sourceType;
+        }
+
+        /// <summary>
+        /// Whether the two sides can be hashed against each other: promotion has
+        /// to stay inside one type family, so that coercing a value to the
+        /// common type is a widening rather than the value-dependent conversion
+        /// a cross-family pair (<c>int</c> against <c>varchar</c>) would run —
+        /// which the row-order walk has to keep raising where it raises today.
+        /// The <see cref="SqlTypeCategory.Other"/> family is excluded outright:
+        /// <c>sql_variant</c> carries its own per-value type, and the binary
+        /// types compare across declared lengths that their hash doesn't share.
+        /// </summary>
+        private static bool QualifiesForHashing(SqlType source, SqlType column) =>
+            source.Category == column.Category
+                && source.Category != SqlTypeCategory.Other
+                && !source.IsLob
+                && !column.IsLob;
+
+        /// <summary>
+        /// Hashes every value at <paramref name="promoted"/>, or gives up
+        /// (returning <see langword="null"/>) if any value won't sit there —
+        /// a value the promoted type can't hold has to raise where the
+        /// row-order walk would raise it, not while a probe set is being built.
+        /// </summary>
+        private static HashSet<SqlValue>? BuildProbeSet(SqlValue[] values, SqlType promoted)
+        {
+            var set = new HashSet<SqlValue>(values.Length);
+            foreach (var value in values)
+            {
+                SqlValue coerced;
+                try
+                {
+                    coerced = value.Type == promoted ? value : value.CoerceTo(promoted);
+                }
+                catch (SimulatedSqlException)
+                {
+                    return null;
+                }
+
+                // Equality and hash both key on the type instance, so a
+                // coercion that landed somewhere other than the promoted type
+                // would probe against a set it can't match.
+                if (coerced.Type != promoted)
+                    return null;
+                _ = set.Add(coerced);
+            }
+            return set;
+        }
     }
 
     /// <summary>
@@ -1768,19 +1927,36 @@ internal abstract class BooleanExpression
             var lhs = left.Run(runtime);
             var (operatorName, compare) = GetComparator(op);
 
-            var anyRow = false;
+            PermissionEnforcement.CheckSubqueryReads(runtime.Batch, inner);
+            var memo = UncorrelatedSubqueryCache.Open(runtime, this);
+            if (memo.Result is { } cached)
+                return this.Combine((SqlValue[])cached, lhs, operatorName, compare);
+
+            var resultSet = inner.Execute(runtime.Batch, memo.ResolverFor(runtime));
+            var columns = RowDecoder.ColumnsFor(resultSet.Schema);
+            var values = new List<SqlValue>();
+            foreach (var rowBytes in resultSet.RowBytes)
+                values.Add(RowDecoder.DecodeColumn(columns, rowBytes, 0));
+
+            var materialized = values.ToArray();
+            memo.Remember(runtime, this, materialized);
+            return this.Combine(materialized, lhs, operatorName, compare);
+        }
+
+        /// <summary>
+        /// Folds the per-row comparisons into the quantifier's answer. NULL
+        /// inner values reach <see cref="CompareValuesPromoted"/> like any
+        /// other, since it is their UNKNOWN result that taints the fold.
+        /// </summary>
+        private bool? Combine(SqlValue[] values, SqlValue lhs, string operatorName, Func<SqlValue, SqlValue, bool> compare)
+        {
             var sawUnknown = false;
             var sawDefinitiveTrue = false;
             var sawDefinitiveFalse = false;
 
-            PermissionEnforcement.CheckSubqueryReads(runtime.Batch, inner);
-            var resultSet = inner.Execute(runtime.Batch, runtime.ResolveColumn);
-            foreach (var rowBytes in resultSet.RowBytes)
+            foreach (var value in values)
             {
-                anyRow = true;
-                var rowValue = RowDecoder.DecodeColumn(resultSet.Schema, rowBytes, 0);
-
-                var perRow = CompareValuesPromoted(lhs, rowValue, operatorName, compare);
+                var perRow = CompareValuesPromoted(lhs, value, operatorName, compare);
                 if (perRow == true)
                     sawDefinitiveTrue = true;
                 else if (perRow == false)
@@ -1789,7 +1965,7 @@ internal abstract class BooleanExpression
                     sawUnknown = true;
             }
 
-            return !anyRow
+            return values.Length == 0
                 ? kind == QuantifiedKind.All
                 : kind == QuantifiedKind.All
                     ? (sawDefinitiveFalse ? false : sawUnknown ? null : true)

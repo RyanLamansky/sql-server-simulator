@@ -67,6 +67,10 @@ internal sealed class NextValueFor : Expression
         var batch = runtime.Batch;
         if (batch.SequenceRowCache.TryGetValue(this.Sequence, out var entry) && entry.Stamp == batch.CurrentRowStamp)
             return entry.Value;
+        // Advancing the sequence is both a side effect and a per-row-varying
+        // value, so an enclosing uncorrelated subquery declines to replay its
+        // result for the rest of the statement.
+        batch.Connection.VolatileEvaluations++;
         var value = this.Sequence.Advance();
         batch.SequenceRowCache[this.Sequence] = (batch.CurrentRowStamp, value);
         return value;

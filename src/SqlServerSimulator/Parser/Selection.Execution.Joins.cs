@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Storage;
 
@@ -567,8 +568,28 @@ internal sealed partial class Selection
         else if (sideA > 0 && sideB < 0) { leftRef = refB; rightRef = refA; }
         else { return false; }
 
-        var leftType = ResolveColumnTypeAcrossSources(sources, leftRef.ReferencedName, null);
-        var rightType = ResolveColumnTypeAcrossSources(sources, rightRef.ReferencedName, null);
+        if (!TryPromoteEquiKeyTypes(sources, leftRef, rightRef, out var common))
+        {
+            return false;
+        }
+
+        key = new EquiKey(leftRef, rightRef, common);
+        return true;
+    }
+
+    /// <summary>
+    /// The promotion target two equated bare column references share, or false
+    /// when the runtime <c>=</c> wouldn't reach one — a LOB operand, a collation
+    /// conflict, or a pair <see cref="SqlType.Promote"/> rejects outright. A
+    /// declining pair keeps the streaming operators' exact per-row error
+    /// behavior instead of being hashed or reordered around.
+    /// </summary>
+    private static bool TryPromoteEquiKeyTypes(
+        FromSource[] sources, Reference left, Reference right, [NotNullWhen(true)] out SqlType? common)
+    {
+        common = null;
+        var leftType = ResolveColumnTypeAcrossSources(sources, left.ReferencedName, null);
+        var rightType = ResolveColumnTypeAcrossSources(sources, right.ReferencedName, null);
         if (leftType.IsLob || rightType.IsLob)
         {
             return false;
@@ -579,7 +600,6 @@ internal sealed partial class Selection
             return false;
         }
 
-        SqlType common;
         try
         {
             common = SqlType.Promote(leftType, rightType);
@@ -589,7 +609,6 @@ internal sealed partial class Selection
             return false;
         }
 
-        key = new EquiKey(leftRef, rightRef, common);
         return true;
     }
 
@@ -669,27 +688,47 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Outer-row cap for choosing the per-outer index-seek strategy. A small
+    /// Outer-row count below which the per-outer index seek always wins. A small
     /// outer set joined to an indexed inner wins big from seeking the inner per
     /// outer row — the inner's per-<c>Heap</c> seek cache builds once and
     /// persists across outer rows and across query executions, whereas
     /// <see cref="HashEquiJoin"/> rebuilds its dictionary over the whole inner
-    /// every execution. Above the cap the hash build's O(L+R) wins (per-outer
-    /// seek-call overhead would dominate a large outer), so the join falls back.
+    /// every execution.
     /// </summary>
     private const int SeekOuterRowCap = 128;
 
     /// <summary>
+    /// How many outer rows <see cref="EquiJoinSeekOrHash"/> buffers before it
+    /// stops asking and hashes. The buffer holds one left-slot snapshot per row,
+    /// so this bounds the strategy choice's memory; past it the hash build's
+    /// O(L + R) is the safe answer whatever the inner's size.
+    /// </summary>
+    private const int SeekOuterBufferCap = 4096;
+
+    /// <summary>
+    /// Between <see cref="SeekOuterRowCap"/> and <see cref="SeekOuterBufferCap"/>
+    /// outer rows the seek still wins when the inner is this many times larger
+    /// than the outer: a seek costs a per-outer-row call, a hash costs one build
+    /// row per inner row, so the crossover is a ratio rather than an absolute
+    /// outer size. Deliberately conservative — the seek has to be clearly ahead
+    /// before a mid-sized outer takes it.
+    /// </summary>
+    private const int SeekInnerRowsPerOuterRow = 4;
+
+    /// <summary>
     /// INNER / LEFT equi-join that adaptively chooses between a per-outer index
     /// seek on the inner and the hash build. Buffers the outer up to
-    /// <see cref="SeekOuterRowCap"/>; if the outer stays small <b>and</b> the
-    /// inner is a base table the equality keys can seek (probed once on the
-    /// first outer row — the decline conditions are value-independent), it seeks
-    /// the inner per outer row and re-checks the full ON predicate as a residual
-    /// filter (result-transparent). Otherwise it replays the buffered outer rows
-    /// (then the remainder) into <see cref="HashEquiJoin"/>, so a large outer or
-    /// an unindexed inner never regresses. RIGHT / FULL stay on the hash path
-    /// (their unmatched-right tracking needs the inner materialized regardless).
+    /// <see cref="SeekOuterBufferCap"/>; if the outer is small enough to be
+    /// worth seeking (<see cref="SeekOuterRowCap"/> outright, or
+    /// <see cref="SeekInnerRowsPerOuterRow"/>× smaller than the inner table)
+    /// <b>and</b> the inner is a base table the equality keys can seek (probed
+    /// once on the first outer row — the decline conditions are
+    /// value-independent), it seeks the inner per outer row and re-checks the
+    /// full ON predicate as a residual filter (result-transparent). Otherwise it
+    /// replays the buffered outer rows (then the remainder) into
+    /// <see cref="HashEquiJoin"/>, so a large outer or an unindexed inner never
+    /// regresses. RIGHT / FULL stay on the hash path (their unmatched-right
+    /// tracking needs the inner materialized regardless).
     /// </summary>
     private static IEnumerable<byte[]?[]> EquiJoinSeekOrHash(
         IEnumerable<byte[]?[]> left,
@@ -721,7 +760,7 @@ internal sealed partial class Selection
             var snap = new byte[]?[level];
             Array.Copy(tuple, snap, level);
             buffer.Add(snap);
-            if (buffer.Count > SeekOuterRowCap)
+            if (buffer.Count > SeekOuterBufferCap)
             {
                 overflow = true;
                 break;
@@ -729,6 +768,14 @@ internal sealed partial class Selection
         }
 
         // Large outer: hash, replaying the buffered rows then the remainder.
+        // A mid-sized one hashes too unless the inner table is enough larger
+        // that per-outer seeks still beat building over all of it.
+        if (!overflow && buffer.Count > SeekOuterRowCap
+            && (long)buffer.Count * SeekInnerRowsPerOuterRow > right.BackingTable.Heap.RowCount)
+        {
+            overflow = true;
+        }
+
         if (overflow)
         {
             LogHash();

@@ -38,7 +38,13 @@ internal static class AverageAggregator
         protected override decimal Extract(SqlValue value) =>
             value.Type == SqlType.Money ? value.AsMoney : value.AsDecimal;
 
-        protected override decimal Finalize(decimal total, long count) => total / count;
+        // Real computes AVG as SUM / COUNT and so inherits division's own
+        // digit rule: the quotient truncates toward zero at the result scale
+        // rather than rounding (probe-confirmed — seven values summing to
+        // 4.00 average to 0.571428, and AVG(money) of $1.00 over seven rows
+        // is 0.1428). See DecimalMath.
+        protected override decimal Finalize(decimal total, long count) =>
+            DecimalMath.Truncating(total, count, this.ResultType is DecimalSqlType d ? d.scale : MoneySqlType.Scale);
 
         protected override SqlValue Wrap(decimal value, SqlType type) =>
             type == SqlType.Money ? SqlValue.FromMoney(type, value) : SqlValue.FromDecimal(type, value);

@@ -462,6 +462,9 @@ internal abstract class TwoSidedExpression : Expression
     /// the static <see cref="GetSqlType"/> path and this runtime path
     /// always agree on the schema. Integer / money operands canonicalize
     /// to their decimal equivalent before the .NET-decimal compute step.
+    /// Digits past the result scale round half away from zero for every
+    /// operator but division, which truncates toward zero — see
+    /// <see cref="DecimalMath"/>.
     /// </summary>
     private protected static SqlValue DecimalArithmetic(SqlValue left, SqlValue right, char op)
     {
@@ -483,7 +486,7 @@ internal abstract class TwoSidedExpression : Expression
                 '+' => l + r,
                 '-' => l - r,
                 '*' => l * r,
-                '/' => l / r,
+                '/' => DecimalMath.Truncating(l, r, resultScale),
                 '%' => l % r,
                 _ => throw new NotSupportedException($"Operator '{op}'."),
             };
@@ -497,34 +500,28 @@ internal abstract class TwoSidedExpression : Expression
             throw SimulatedSqlException.ArithmeticOverflowToNumeric();
         }
 
-        // .NET decimal.Round caps at 28 fractional digits; skip when the
-        // result-type scale is wider (the value can't have more fractional
-        // bits than .NET decimal stores).
-        var rounded = resultScale > 28 ? raw : decimal.Round(raw, resultScale, MidpointRounding.AwayFromZero);
+        // Every operator but division rounds half away from zero at the result
+        // scale; division truncated toward zero on the way out of the compute
+        // step above, so its digits are already settled. .NET decimal.Round
+        // caps at 28 fractional digits, so a wider result-type scale skips it
+        // too (the value can't have more fractional bits than decimal stores).
+        var settled = op == '/' || resultScale > 28 ? raw : decimal.Round(raw, resultScale, MidpointRounding.AwayFromZero);
         // Final overflow check against the result type's declared precision.
         // Cap integer-digit count at 28 for the same .NET-decimal-range
         // reason — values that fit .NET decimal can't exceed 28 integer
         // digits, so the overflow doesn't fire spuriously for high-precision
         // result types.
         var integerDigits = Math.Min(28, resultPrecision - resultScale);
-        var maxIntegerPart = Pow10Decimal(integerDigits) - 1;
-        return integerDigits < 28 && decimal.Abs(decimal.Truncate(rounded)) > maxIntegerPart
+        var maxIntegerPart = DecimalMath.Pow10(integerDigits) - 1;
+        return integerDigits < 28 && decimal.Abs(decimal.Truncate(settled)) > maxIntegerPart
             ? throw SimulatedSqlException.ArithmeticOverflowToNumeric()
-            : SqlValue.FromDecimal(resultType, rounded);
+            : SqlValue.FromDecimal(resultType, settled);
     }
 
     private static decimal ToDecimal(SqlValue v) =>
         v.Type is DecimalSqlType ? v.AsDecimal
         : SqlType.IsMoneyCategory(v.Type) ? v.AsMoney
         : SqlValue.AsInt64Widened(v);
-
-    private static decimal Pow10Decimal(int n)
-    {
-        var result = 1m;
-        for (var i = 0; i < n; i++)
-            result *= 10m;
-        return result;
-    }
 
     private protected static long ToInt64(SqlValue v) =>
         v.Type == SqlType.Bit ? (v.AsBoolean ? 1L : 0L)
@@ -559,7 +556,10 @@ internal abstract class TwoSidedExpression : Expression
     /// <c>$5 * 3 → money</c>). Same-money-pair preserves the wider of the
     /// two; mixed money / smallmoney widens to money. Math runs on the
     /// underlying decimal values; the result re-rounds half-away-from-zero
-    /// to scale 4 inside <see cref="SqlValue.FromMoney"/>.
+    /// to scale 4 inside <see cref="SqlValue.FromMoney"/> — except division,
+    /// which truncates toward zero at scale 4 the way the decimal family's
+    /// does (<c>$1.00 / 7</c> is real's <c>0.1428</c>), leaving that rounding
+    /// nothing to do.
     /// </summary>
     private protected static SqlValue MoneyArithmetic(SqlValue left, SqlValue right, char op)
     {
@@ -579,7 +579,7 @@ internal abstract class TwoSidedExpression : Expression
                 '+' => l + r,
                 '-' => l - r,
                 '*' => l * r,
-                '/' => r == 0m ? throw SimulatedSqlException.DivideByZero() : l / r,
+                '/' => r == 0m ? throw SimulatedSqlException.DivideByZero() : DecimalMath.Truncating(l, r, MoneySqlType.Scale),
                 '%' => r == 0m ? throw SimulatedSqlException.DivideByZero() : l % r,
                 _ => throw new NotSupportedException($"Operator '{op}' on money operands isn't implemented."),
             };

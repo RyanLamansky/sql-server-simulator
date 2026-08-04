@@ -48,7 +48,7 @@ internal sealed partial class Selection
         // defeats the seek (`customer.running_total` on AW dropped ~100× in
         // the workload bench).
         sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
-        sources = NarrowLeftmostJoinSource(sources, excluders, batch, outerResolver);
+        (sources, joins) = NarrowJoinSources(sources, joins, excluders, batch, outerResolver);
 
         // Step 1: buffer post-WHERE tuples. The same byte[]?[] instance is
         // reused across yields by EnumerateJoinedRows, so each entry is

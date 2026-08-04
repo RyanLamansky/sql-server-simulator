@@ -15,7 +15,13 @@ internal sealed class NewId : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
-    public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromGuid(Guid.NewGuid());
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        // A fresh draw per call is exactly what stops an enclosing uncorrelated
+        // subquery's result from being replayed for the rest of the statement.
+        runtime.Batch.Connection.VolatileEvaluations++;
+        return SqlValue.FromGuid(Guid.NewGuid());
+    }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.UniqueIdentifier;
 

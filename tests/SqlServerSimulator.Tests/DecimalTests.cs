@@ -157,6 +157,96 @@ public sealed class DecimalTests
     public void DecimalArithmetic_38CapForDivisionFloorsAtSix() =>
         AreEqual(1.000000m, ExecuteScalar("select cast(1 as decimal(38,30)) / cast(1 as decimal(38,30))"));
 
+    /// <summary>
+    /// Division truncates its quotient toward zero at the result scale where
+    /// every other operator rounds — and it does so at every cap depth, not
+    /// only where the 38-precision cap moved the scale. Expected values are
+    /// SQL Server 2025's own (probed 2026-08-04).
+    /// </summary>
+    [TestMethod]
+    // Uncapped (p = 9), capped by 4 (p = 42), capped by 1 (p = 39) and exactly
+    // at the boundary (p = 38) all drop the same 571428|571… tail.
+    [DataRow("cast(4.00 as decimal(5, 2)) / cast(7 as decimal(1, 0))", "0.571428")]
+    [DataRow("cast(4.00 as decimal(38, 2)) / cast(7 as decimal(1, 0))", "0.571428")]
+    [DataRow("cast(4.00 as decimal(35, 2)) / cast(7 as decimal(1, 0))", "0.571428")]
+    [DataRow("cast(4.00 as decimal(34, 2)) / cast(7 as decimal(1, 0))", "0.571428")]
+    // Truncation is toward zero, so a sign on either operand only moves the sign.
+    [DataRow("cast(-4.00 as decimal(38, 2)) / cast(7 as decimal(1, 0))", "-0.571428")]
+    [DataRow("cast(4.00 as decimal(38, 2)) / cast(-7 as decimal(1, 0))", "-0.571428")]
+    [DataRow("cast(-4.00 as decimal(38, 2)) / cast(-7 as decimal(1, 0))", "0.571428")]
+    [DataRow("cast(-4.00 as decimal(5, 2)) / cast(7 as decimal(1, 0))", "-0.571428")]
+    // An exact half at the cut drops too — this is truncation, not a rounding mode.
+    [DataRow("cast(1 as decimal(5, 0)) / cast(1600000 as decimal(7, 0))", "0.00000062")]
+    [DataRow("cast(3.00 as decimal(38, 2)) / cast(2000000 as decimal(7, 0))", "0.000001")]
+    // Above the 6-floor: scale 13 (capped from 21), 15 (uncapped) and 22.
+    [DataRow("cast(4.0000000000 as decimal(30, 10)) / cast(7.00000 as decimal(10, 5))", "0.5714285714285")]
+    [DataRow("cast(2.0000 as decimal(10, 4)) / cast(7.00000 as decimal(10, 5))", "0.285714285714285")]
+    [DataRow("cast(1.00 as decimal(5, 2)) / cast(7.00 as money)", "0.1428571428571428571428")]
+    // Literal operands take the same rule.
+    [DataRow("2.0/3.0", "0.666666")]
+    [DataRow("2/3.0", "0.666666")]
+    public void DecimalDivision_TruncatesTowardZeroAtTheResultScale(string expression, string expected) =>
+        AreEqual(expected, ExecuteScalar<decimal>($"select {expression}")
+            .ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// A result scale at .NET <see cref="decimal"/>'s own 28-digit ceiling
+    /// still reports real's digits: dividing first and truncating after would
+    /// hand .NET's rounding of the quotient (…6667) into the kept digits, so
+    /// the dividend is scaled up front instead.
+    /// </summary>
+    [TestMethod]
+    public void DecimalDivision_ResultScaleAtDecimalsCeiling_KeepsRealsDigits() =>
+        AreEqual(
+            "0.6666666666666666666666666666",
+            ExecuteScalar<decimal>("select cast(2 as decimal(38, 28)) / cast(3 as decimal(1, 0))")
+                .ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// The contrast case for the rule above: every operator but division
+    /// rounds half away from zero at the result scale, including on the capped
+    /// paths where the scale reduction is what forces digits away.
+    /// </summary>
+    [TestMethod]
+    // Multiply, capped from scale 36 to the 6-floor: an exact half rounds up,
+    // and a longer tail rounds to nearest, in both signs.
+    [DataRow("cast(1.500000000000000000 as decimal(38, 18)) * cast(1.000001000000000000 as decimal(38, 18))", "1.500002")]
+    [DataRow("cast(-1.500000000000000000 as decimal(38, 18)) * cast(1.000001000000000000 as decimal(38, 18))", "-1.500002")]
+    [DataRow("cast(1.000000900000000000 as decimal(38, 18)) * cast(1.000000900000000000 as decimal(38, 18))", "1.000002")]
+    [DataRow("cast(1.500000000000000000 as decimal(38, 18)) * cast(1.000000500000000000 as decimal(38, 18))", "1.500001")]
+    // Add / subtract, capped from scale 30 to 10.
+    [DataRow("cast(1.0000000000 as decimal(38, 10)) + cast(0.000000000050000000000000000000 as decimal(38, 30))", "1.0000000001")]
+    [DataRow("cast(-1.0000000000 as decimal(38, 10)) - cast(0.000000000090000000000000000000 as decimal(38, 30))", "-1.0000000001")]
+    public void DecimalArithmetic_EveryOperatorButDivisionRoundsHalfAwayFromZero(string expression, string expected) =>
+        AreEqual(expected, ExecuteScalar<decimal>($"select {expression}")
+            .ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// The 38-precision cap splits by operator family. Multiply and divide
+    /// reduce the scale by the whole excess down to a floor of
+    /// <c>min(scale, 6)</c>; add and subtract instead drop the carry digit
+    /// first and keep whatever scale fits beside the widest operand's integral
+    /// part, with no floor — so <c>decimal(38, 38) + decimal(38, 0)</c> is
+    /// scale 0 where the excess rule would say 6. Rendered strings, since the
+    /// declared scale is the point.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(1.00000000000000000005 as decimal(38, 20)) + cast(1.00000000000000000005 as decimal(38, 20))", "2.00000000000000000010")]
+    [DataRow("cast(1.0000000005 as decimal(38, 10)) + cast(0.000000000000000000000000000000 as decimal(38, 30))", "1.0000000005")]
+    [DataRow("cast(1.0000005 as decimal(38, 7)) + cast(1.0000005 as decimal(38, 7))", "2.0000010")]
+    [DataRow("cast(1.0005 as decimal(38, 4)) + cast(1.0005 as money)", "2.0010")]
+    [DataRow("cast(1.00005 as decimal(38, 5)) + cast(1.00000000000000000000000000000000005 as decimal(38, 35))", "2.00005")]
+    [DataRow("cast(0.5 as decimal(38, 38)) + cast(1 as decimal(38, 0))", "2")]
+    [DataRow("cast(1.0000000005 as decimal(38, 10)) - cast(0.0000000000 as decimal(38, 10))", "1.0000000005")]
+    // Multiply keeps the 6-floor whatever the excess would give (4 and 3 here).
+    [DataRow("cast(1.23456 as decimal(20, 5)) * cast(1.23456 as decimal(23, 5))", "1.524138")]
+    [DataRow("cast(1.23456789 as decimal(25, 8)) * cast(1.23456789 as decimal(25, 8))", "1.524158")]
+    // Divide above the floor keeps its reduced scale (14 → 7).
+    [DataRow("cast(1.234 as decimal(30, 3)) / cast(1.2345 as decimal(10, 4))", "0.9995949")]
+    public void DecimalArithmetic_38Cap_ReducesScalePerOperatorFamily(string expression, string expected) =>
+        AreEqual(expected, ExecuteScalar<decimal>($"select {expression}")
+            .ToString(System.Globalization.CultureInfo.InvariantCulture));
+
     [TestMethod]
     public void DecimalArithmetic_ChainedExpressionPropagatesScale() =>
         AreEqual(8.000000m, ExecuteScalar("select cast(2 as decimal(10,2)) * cast(2 as decimal(10,2)) * cast(2 as decimal(10,2))"));

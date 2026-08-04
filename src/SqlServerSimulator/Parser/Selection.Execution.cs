@@ -954,12 +954,13 @@ internal sealed partial class Selection
                         : new TopSpec(ResolveRowCountLimit(topExpression, RowLimitKind.Top, batch), null, topWithTies);
                 var offsetCount = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, batch);
                 var fetchCount = ResolveRowCountLimit(fetchExpression, RowLimitKind.Fetch, batch);
-                // Materialize provably-uncorrelated catalog-view sources once
-                // per execution (before the projection paths build their
-                // resolver closures over the array), so a nested-loop join
-                // stops re-generating them per outer row and the equi-join
-                // hash path can key them. Correlated sources are left untouched.
-                var execSources = MaterializeUncorrelatedDeferredSources(sources, batch);
+                // Materialize the deferred sources whose rows can't change
+                // across this enumeration once per execution (before the
+                // projection paths build their resolver closures over the
+                // array), so a nested-loop join stops re-generating them per
+                // outer row and the equi-join hash path can key them.
+                // Correlated sources are left untouched.
+                var execSources = MaterializeUncorrelatedDeferredSources(sources, joins, batch, outerResolver);
                 return aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
                     ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver)
                     : windows.Count > 0
@@ -1225,35 +1226,96 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Replaces every <see cref="FromSource.MaterializeOnce"/> source — a
-    /// provably-uncorrelated catalog view — with a copy whose rows are already
-    /// materialized into a re-enumerable list, executing each such plan exactly
-    /// once per query execution. Without this, a nested-loop join re-runs the
-    /// catalog view's row generator (regenerating every column of every table,
-    /// every type, etc.) for each outer row, so an <em>N</em>-column table's
-    /// per-column property-bag query costs O(outer × Σ joined-view sizes). After
-    /// materialization the source carries a plain <see cref="FromSource.Rows"/>
-    /// list, so <c>TryPlanEquiJoin</c> keys it into the O(L + R) hash path and
-    /// any residual nested loop re-scans the list instead of re-generating.
-    /// Correlated / lateral sources never set the flag, so APPLY, correlated
-    /// derived tables, VALUES, TVFs, and views keep their per-outer-row
-    /// execution untouched. Returns the input array unchanged (no copy) when no
-    /// source qualifies.
+    /// Replaces every deferred source whose rows are fixed for the duration of
+    /// this enumeration with a copy whose rows are already materialized into a
+    /// re-enumerable list, executing each such plan exactly once per query
+    /// execution instead of once per left-side row. After materialization the
+    /// source carries a plain <see cref="FromSource.Rows"/> list, so
+    /// <c>TryPlanEquiJoin</c> keys it into the O(L + R) hash path and any
+    /// residual nested loop re-scans the list instead of re-executing.
+    /// Returns the input array unchanged (no copy) when no source qualifies.
     /// </summary>
-    private static FromSource[] MaterializeUncorrelatedDeferredSources(FromSource[] sources, BatchContext batch)
+    /// <remarks>
+    /// <para>
+    /// Two kinds of source qualify, both decided by
+    /// <see cref="MaterializesOncePerEnumeration"/>. A
+    /// <see cref="FromSource.MaterializeOnce"/> catalog view is uncorrelated by
+    /// construction — its generator ignores the outer resolver — and qualifies
+    /// wherever it sits. Every other qualifying source is a
+    /// <em>non-leftmost, non-APPLY</em> source whose plan is a query body with
+    /// its own name scope: a derived table, a CTE reference or a view. SQL
+    /// Server requires <c>APPLY</c> for laterality, so such a body cannot read
+    /// a sibling FROM source (the simulator's parser reports Msg 207 where real
+    /// reports Msg 4104); it can read an <em>enclosing</em> statement's row, but
+    /// that row is fixed for one execution of this Selection — the enclosing
+    /// query re-executes the whole plan per enclosing row — so every
+    /// re-execution within one enumeration would return identical rows.
+    /// </para>
+    /// <para>
+    /// The leftmost source is left deferred: a fold range's leftmost slot
+    /// already executes its plan exactly once and streams, so materializing it
+    /// buys nothing and costs the buffer. The leftmost slot of a parenthesized
+    /// join group is skipped for the same reason.
+    /// </para>
+    /// <para>
+    /// A source whose rows a <em>generator</em> produces — a TVF, VALUES,
+    /// OPENJSON / OPENXML, STRING_SPLIT, PIVOT, a linked-server query — never
+    /// qualifies: its arguments are parsed in the enclosing FROM's scope, so
+    /// they can read a sibling source's column per row. Real rejects that shape
+    /// outright (Msg 4104 for <c>FROM t JOIN STRING_SPLIT(t.csv, ',') s ON …</c>,
+    /// probe-confirmed) while the simulator answers it, and materializing would
+    /// silently freeze the first row's argument values instead.
+    /// </para>
+    /// <para>
+    /// A per-call-varying built-in inside the plan declines the reuse, the same
+    /// <see cref="SimulatedDbConnection.VolatileEvaluations"/> gate the
+    /// uncorrelated-subquery memo applies (see
+    /// <see cref="UncorrelatedSubqueryCache"/>): probe-confirmed against SQL
+    /// Server 2025, a one-row <c>(SELECT TOP 1 NEWID() AS g FROM …)</c> joined
+    /// to a ten-row left side yields ten distinct values there, so replaying one
+    /// draw would be a fidelity regression. The declining source keeps its
+    /// per-row execution and the probing execution's rows are discarded —
+    /// <c>NEXT VALUE FOR</c>, the other counter-bumping built-in, is Msg 11719
+    /// on real inside any of these bodies, so the discarded execution's only
+    /// reachable side effect is an unobservable extra <c>NEWID()</c> draw.
+    /// </para>
+    /// </remarks>
+    private static FromSource[] MaterializeUncorrelatedDeferredSources(
+        FromSource[] sources, JoinSpec[] joins, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         FromSource[]? rewritten = null;
         for (var i = 0; i < sources.Length; i++)
         {
-            if (sources[i] is not { MaterializeOnce: true, LateralPlan: { } plan })
+            if (sources[i].LateralPlan is not { } plan || !MaterializesOncePerEnumeration(sources, joins, i))
                 continue;
-            // Uncorrelated by construction: the generator ignores the outer
-            // resolver, so a null resolver produces identical rows.
-            var materialized = new List<byte[]>(plan.Execute(batch, outerResolver: null).RowBytes);
+            var volatileEvaluationsAtStart = batch.Connection.VolatileEvaluations;
+            var materialized = new List<byte[]>(plan.Execute(batch, outerResolver).RowBytes);
+            if (batch.Connection.VolatileEvaluations != volatileEvaluationsAtStart)
+                continue;
             rewritten ??= (FromSource[])sources.Clone();
             rewritten[i] = sources[i].WithMaterializedRows(materialized);
         }
         return rewritten ?? sources;
+    }
+
+    /// <summary>
+    /// Whether the deferred source at <paramref name="index"/> produces the same
+    /// rows on every execution within one enumeration of
+    /// <paramref name="sources"/>, so its plan can run once instead of once per
+    /// left-side row. See <see cref="MaterializeUncorrelatedDeferredSources"/>
+    /// for the reasoning behind each clause.
+    /// </summary>
+    private static bool MaterializesOncePerEnumeration(FromSource[] sources, JoinSpec[] joins, int index)
+    {
+        var source = sources[index];
+        if (source.MaterializeOnce)
+            return true;
+        if (index == 0)
+            return false;
+        var join = joins[index - 1];
+        return join.Kind is not (JoinKind.CrossApply or JoinKind.OuterApply)
+            && join.GroupCount == 1
+            && (source.LateralIsQueryBody || source.BackingView is not null);
     }
 
     private static IEnumerable<SqlValue[]> ProjectSqlRows(
@@ -1283,7 +1345,7 @@ internal sealed partial class Selection
 
         if (!hasJoinGroup)
             sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
-        sources = NarrowLeftmostJoinSource(sources, excluders, batch, outerResolver);
+        (sources, joins) = NarrowJoinSources(sources, joins, excluders, batch, outerResolver);
         return !distinct && orderBy.Count == 0 && !top.RequiresBuffering
             ? ProjectStreaming(sources, joins, expressions, excluders, top.Count, offsetCount, fetchCount, batch, outerResolver)
             : ProjectBuffered(sources, joins, expressions, excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, batch, outerResolver);

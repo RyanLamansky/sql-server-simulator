@@ -11,12 +11,14 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Each <see cref="Run"/> re-executes the inner plan against the caller's
-/// outer-scope resolver, so correlated scalar subqueries see fresh outer-row
-/// values per evaluation. Cardinality enforcement is greedy: pull the first
-/// row, then check whether a second exists by advancing the enumerator one
-/// more time. If it does, raise Msg 512 immediately — no need to materialize
-/// the rest of the result set.
+/// A correlated subquery re-executes the inner plan against the caller's
+/// outer-scope resolver on each <see cref="Run"/>, so it sees fresh outer-row
+/// values per evaluation; one that never reads the outer row runs once per
+/// statement and replays its value (see <see cref="UncorrelatedSubqueryCache"/>
+/// for how the two are told apart). Cardinality enforcement is greedy: pull the
+/// first row, then check whether a second exists by advancing the enumerator
+/// one more time. If it does, raise Msg 512 immediately — no need to
+/// materialize the rest of the result set.
 /// </para>
 /// <para>
 /// <see cref="GetSqlType"/> reads the inner plan's static schema, so the
@@ -35,14 +37,29 @@ internal sealed class ScalarSubqueryExpression(Selection inner) : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         PermissionEnforcement.CheckSubqueryReads(runtime.Batch, this.Inner);
-        var resultSet = this.Inner.Execute(runtime.Batch, runtime.ResolveColumn);
-        using var enumerator = resultSet.RowBytes.GetEnumerator();
-        if (!enumerator.MoveNext())
-            return SqlValue.Null(resultSet.Schema[0]);
-        var firstRow = enumerator.Current;
-        return enumerator.MoveNext()
-            ? throw SimulatedSqlException.SubqueryReturnedMoreThanOneValue()
-            : RowDecoder.DecodeColumn(resultSet.Schema, firstRow, 0);
+        var memo = UncorrelatedSubqueryCache.Open(runtime, this);
+        if (memo.Result is { } cached)
+            return (SqlValue)cached;
+
+        var resultSet = this.Inner.Execute(runtime.Batch, memo.ResolverFor(runtime));
+        SqlValue value;
+        using (var enumerator = resultSet.RowBytes.GetEnumerator())
+        {
+            if (!enumerator.MoveNext())
+            {
+                value = SqlValue.Null(resultSet.Schema[0]);
+            }
+            else
+            {
+                var firstRow = enumerator.Current;
+                value = enumerator.MoveNext()
+                    ? throw SimulatedSqlException.SubqueryReturnedMoreThanOneValue()
+                    : RowDecoder.DecodeColumn(resultSet.Schema, firstRow, 0);
+            }
+        }
+
+        memo.Remember(runtime, this, value);
+        return value;
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Inner.Schema[0];

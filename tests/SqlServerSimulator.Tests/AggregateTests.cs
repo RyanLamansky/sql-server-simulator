@@ -519,6 +519,33 @@ public sealed class AggregateTests
         => AreEqual(2, new Simulation().ExecuteScalar(
             "create table t (v int); insert t values (1), (2), (3), (2), (1); select avg(distinct v) from t"));
 
+    /// <summary>
+    /// Real computes <c>AVG</c> as <c>SUM</c> / <c>COUNT</c>, so it inherits
+    /// division's own digit rule: the quotient truncates toward zero at the
+    /// result scale instead of rounding. Seven values summing to 4.00 average
+    /// to 0.571428 on SQL Server 2025 (probed 2026-08-04), not 0.571429 — and
+    /// the explicit <c>SUM(v) / COUNT(*)</c> spelling agrees, as it does there.
+    /// </summary>
+    [TestMethod]
+    [DataRow("decimal(18, 2)", "(1.00), (1.00), (1.00), (0.25), (0.25), (0.25), (0.25)", "avg(v)", "0.571428")]
+    [DataRow("decimal(18, 2)", "(1.00), (1.00), (1.00), (0.25), (0.25), (0.25), (0.25)", "sum(v) / count(*)", "0.571428")]
+    [DataRow("decimal(5, 2)", "(1.00), (1.00), (1.00), (0.25), (0.25), (0.25), (0.25)", "avg(v)", "0.571428")]
+    [DataRow("decimal(18, 2)", "(-1.00), (-1.00), (-1.00), (-0.25), (-0.25), (-0.25), (-0.25)", "avg(v)", "-0.571428")]
+    // An exact half at the cut drops rather than rounding up.
+    [DataRow("decimal(18, 6)", "(1.000001), (1.000002)", "avg(v)", "1.000001")]
+    [DataRow("decimal(18, 6)", "(-1.000001), (-1.000002)", "avg(v)", "-1.000001")]
+    // A column scale above 6 keeps its own scale and truncates there.
+    [DataRow("decimal(38, 10)", "(5.0), (0), (0), (0), (0), (0), (0)", "avg(v)", "0.7142857142")]
+    // money truncates at its scale of 4.
+    [DataRow("money", "(1.00), (0), (0), (0), (0), (0), (0)", "avg(v)", "0.1428")]
+    [DataRow("money", "(-1.00), (0), (0), (0), (0), (0), (0)", "avg(v)", "-0.1428")]
+    public void Avg_Decimal_TruncatesTheQuotientTowardZero(string columnType, string values, string expression, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar<decimal>($"""
+            create table t (v {columnType});
+            insert t values {values};
+            select {expression} from t
+            """).ToString(System.Globalization.CultureInfo.InvariantCulture));
+
     [TestMethod]
     public void Avg_Decimal_WidensScaleTo6()
     {

@@ -41,7 +41,27 @@ internal sealed partial class Selection
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
         bool allowCorrelatedColumnValue = true)
+        => MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver, allowCorrelatedColumnValue, out _);
+
+    /// <summary>
+    /// The narrowing above, additionally reporting how many candidate row
+    /// addresses the seek selected (<c>-1</c> when it declined and the source
+    /// keeps its full scan). The count is the seek's own pre-materialization
+    /// address list, so it costs nothing to report and bounds the row count
+    /// from above — the lock / snapshot materializer can still drop a
+    /// tombstoned or invisible candidate. <c>NarrowJoinSources</c> reads it to
+    /// pick which narrowed source drives a reordered join chain.
+    /// </summary>
+    private static FromSource[] MaybeApplyIndexSeek(
+        FromSource[] sources,
+        JoinSpec[] joins,
+        List<BooleanExpression> excluders,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        bool allowCorrelatedColumnValue,
+        out int seekedCandidates)
     {
+        seekedCandidates = -1;
         if (sources.Length != 1 || joins.Length != 0 || excluders.Count == 0)
             return sources;
         var source = sources[0];
@@ -96,12 +116,13 @@ internal sealed partial class Selection
         var snapshotXid = batch.ResolveSnapshotXidForRead(table);
 
         if (equalities.Count != 0
-            && TrySeekByLongestPrefix(source, table, plan, batch, snapshotXid, outerResolver, equalities, bounds, out var seekRows, out var width, out var rangeExtended))
+            && TrySeekByLongestPrefix(source, table, plan, batch, snapshotXid, outerResolver, equalities, bounds, out var seekRows, out var width, out var rangeExtended, out var equalityCandidates))
         {
             IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"SeekWidth({table.Name},{width})");
             if (rangeExtended)
                 IndexSeekDiagnostics.Sink?.Add($"PrefixRangeSeek({table.Name})");
+            seekedCandidates = equalityCandidates;
             return SeekedSource(source, seekRows);
         }
 
@@ -109,11 +130,12 @@ internal sealed partial class Selection
         // (col > v / col BETWEEN lo AND hi / a one-sided bound). The matched
         // bound conjunct(s) stay in the residual WHERE, so the range only
         // narrows the candidate set.
-        if (TrySeekByRange(source, table, plan, batch, snapshotXid, outerResolver, bounds, out var rangeRows))
+        if (TrySeekByRange(source, table, plan, batch, snapshotXid, outerResolver, bounds, out var rangeRows, out var rangeCandidates))
         {
             IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"RangeSeek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"SeekWidth({table.Name},1)");
+            seekedCandidates = rangeCandidates;
             return SeekedSource(source, rangeRows);
         }
 
@@ -363,14 +385,17 @@ internal sealed partial class Selection
         long? snapshotXid,
         Func<MultiPartName, SqlValue>? outerResolver,
         Dictionary<int, RangeBoundExprs> bounds,
-        out IEnumerable<byte[]> seekRows)
+        out IEnumerable<byte[]> seekRows,
+        out int candidateCount)
     {
         if (!TryComputeRangeCandidates(source, table, batch, outerResolver, bounds, out var candidates))
         {
             seekRows = [];
+            candidateCount = -1;
             return false;
         }
 
+        candidateCount = candidates.Count;
         seekRows = snapshotXid is { } sx
             ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
             : MaterializeWithLockChecks(table, batch, plan, candidates);
@@ -1196,29 +1221,331 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Pushes single-source WHERE equality predicates (<c>leftmostCol = literal /
-    /// variable</c>) down onto the leftmost FROM source of a multi-source query,
-    /// seeking it before the join runs. The leftmost source is always preserved
-    /// (never the NULL-supplied side of an outer join), so narrowing it can't
-    /// seeking it before the join runs. The leftmost source is always preserved
-    /// (never the NULL-supplied side of an outer join), so narrowing it can't
-    /// change join semantics, and the conjuncts stay in the residual WHERE.
-    /// Probe values are restricted to non-column constants/variables — a
-    /// not-yet-joined sibling column isn't resolvable pre-join. Shrinking the
-    /// driving rowset is what lets <see cref="EquiJoinSeekOrHash"/> seek the
-    /// inner per outer row for the common filter-then-join shape.
+    /// Pushes single-source WHERE equality / range predicates (<c>col = literal
+    /// / variable</c>, <c>col &gt; literal</c>, …) down onto <b>every</b>
+    /// base-table FROM source of a multi-source query, seeking each before the
+    /// join runs, and hands the result to
+    /// <see cref="ReorderToDriveFromNarrowedSource"/> when the narrowing landed
+    /// somewhere the written order doesn't drive from.
+    /// <para>
+    /// Narrowing one source is semantics-preserving for every join kind because
+    /// the matched conjuncts <b>stay</b> in the residual WHERE: a NULL-extended
+    /// tuple an outer join would emit because the narrowed side lost its match
+    /// is excluded by the very conjunct that justified the narrowing (a column
+    /// of a NULL-filled slot reads as NULL, so the conjunct is UNKNOWN) — the
+    /// same conjunct that excluded the matched-but-failing tuple before.
+    /// </para>
+    /// <para>
+    /// Probe values are restricted to non-column constants / variables
+    /// (<c>allowCorrelatedColumnValue: false</c>) — a not-yet-joined sibling
+    /// column isn't resolvable pre-join. Shrinking a driving rowset is what lets
+    /// <see cref="EquiJoinSeekOrHash"/> seek the inner per outer row for the
+    /// common filter-then-join shape; a narrowed source that stays on the inner
+    /// side becomes a small hash build instead.
+    /// </para>
+    /// <para>
+    /// A source carrying a SERIALIZABLE / <c>HOLDLOCK</c> phantom fence is left
+    /// alone past the leftmost slot: the fence is settled inside the seek
+    /// attempt, so probing every source would change which key ranges a
+    /// SERIALIZABLE reader locks and when. The leftmost slot keeps its
+    /// long-standing unconditional attempt.
+    /// </para>
     /// </summary>
-    private static FromSource[] NarrowLeftmostJoinSource(
-        FromSource[] sources, List<BooleanExpression> excluders, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    private static (FromSource[] Sources, JoinSpec[] Joins) NarrowJoinSources(
+        FromSource[] sources,
+        JoinSpec[] joins,
+        List<BooleanExpression> excluders,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver)
     {
         if (sources.Length < 2 || excluders.Count == 0)
-            return sources;
-        var seeked = MaybeApplyIndexSeek([sources[0]], NoJoins, excluders, batch, outerResolver, allowCorrelatedColumnValue: false);
-        if (ReferenceEquals(seeked[0], sources[0]))
-            return sources;
-        var result = (FromSource[])sources.Clone();
-        result[0] = seeked[0];
-        return result;
+            return (sources, joins);
+
+        FromSource[]? narrowed = null;
+        int[]? seekedCandidates = null;
+        for (var i = 0; i < sources.Length; i++)
+        {
+            if (i > 0 && !IsSeekNarrowingTarget(sources[i]))
+                continue;
+            var seeked = MaybeApplyIndexSeek(
+                [sources[i]], NoJoins, excluders, batch, outerResolver, allowCorrelatedColumnValue: false, out var candidates);
+            if (ReferenceEquals(seeked[0], sources[i]))
+                continue;
+            narrowed ??= (FromSource[])sources.Clone();
+            if (seekedCandidates is null)
+            {
+                seekedCandidates = new int[sources.Length];
+                Array.Fill(seekedCandidates, -1);
+            }
+
+            narrowed[i] = seeked[0];
+            seekedCandidates[i] = candidates;
+        }
+
+        return narrowed is null
+            ? (sources, joins)
+            : ReorderToDriveFromNarrowedSource(narrowed, joins, seekedCandidates!) ?? (narrowed, joins);
+    }
+
+    /// <summary>
+    /// Whether a non-leftmost source is eligible for the WHERE pushdown: a plain
+    /// base-table scan (a deferred / generated source has no heap to seek) whose
+    /// lock plan owes no SERIALIZABLE phantom fence and holds no tx-scoped row
+    /// lock (where the whole-table scan's locking is load-bearing and the seek
+    /// would decline anyway).
+    /// </summary>
+    private static bool IsSeekNarrowingTarget(FromSource source) =>
+        source.BackingTable is not null
+        && source.LateralPlan is null
+        && source.HeapPlan is { SerializableRangeMode: null, RowTxScoped: false };
+
+    /// <summary>
+    /// Reorders a <b>pure INNER equi-join chain</b> so it drives from the source
+    /// the WHERE narrowed hardest, instead of whichever source the query happens
+    /// to name first. Returns <c>null</c> — leaving the written order — for
+    /// anything outside that shape.
+    /// <para>
+    /// INNER joins commute and their ON conjuncts are WHERE-equivalent, so the
+    /// conjunction of every ON conjunct applied over the cross product is the
+    /// result whatever order the sources fold in: any permutation that keeps
+    /// each conjunct's two sources both placed by the step it attaches to
+    /// produces the same rows. Row <em>order</em> can change, which is legal
+    /// without an ORDER BY. Column resolution is name-based and rejects an
+    /// ambiguous unqualified name outright (Msg 209), so it is order-independent
+    /// too — the duplicate-qualifier guard below covers the one case where it
+    /// wouldn't be.
+    /// </para>
+    /// <para>
+    /// The reorder engages only when the best driver is a <em>non-leftmost</em>
+    /// narrowed source seeking at most <see cref="SeekOuterRowCap"/> rows — the
+    /// regime where <see cref="EquiJoinSeekOrHash"/> keeps seeking the next link
+    /// per outer row, which is what collapses a deep chain filtered in the
+    /// middle. A wider narrowing leaves the written order alone rather than
+    /// trading a small outer's per-outer seeks for a large one's hash probes.
+    /// </para>
+    /// <para>
+    /// Placement is greedy from the driver: at each step the sources connected
+    /// to the placed set by an ON equi-conjunct are the candidates, and a
+    /// candidate whose connecting columns cover one of its own unique keys wins
+    /// (that join can't multiply the driving set, so the outer stays inside the
+    /// seek cap for the next link); ties break on the written order. A
+    /// disconnected join graph declines entirely.
+    /// </para>
+    /// </summary>
+    private static (FromSource[] Sources, JoinSpec[] Joins)? ReorderToDriveFromNarrowedSource(
+        FromSource[] sources, JoinSpec[] joins, int[] seekedCandidates)
+    {
+        var driver = -1;
+        for (var i = 1; i < sources.Length; i++)
+        {
+            if (seekedCandidates[i] is < 0 or > SeekOuterRowCap)
+                continue;
+            if (driver < 0 || seekedCandidates[i] < seekedCandidates[driver])
+                driver = i;
+        }
+
+        // Nothing narrowed past the leftmost slot, or the leftmost narrowed at
+        // least as hard and already drives.
+        if (driver < 0 || (seekedCandidates[0] >= 0 && seekedCandidates[0] <= seekedCandidates[driver]))
+            return null;
+
+        foreach (var join in joins)
+        {
+            if (join.Kind != JoinKind.Inner || join.GroupCount != 1 || join.OnPredicate is null)
+                return null;
+        }
+
+        for (var i = 0; i < sources.Length; i++)
+        {
+            // A deferred plan's rows are produced per left-side row, so moving
+            // it would change how often it runs; a placeholder belongs to a
+            // skipped statement. Two sources sharing an exposed name would make
+            // a qualified reference bind to whichever comes first.
+            if (sources[i].LateralPlan is not null || sources[i].IsPlaceholder || sources[i].Qualifier is null)
+                return null;
+            for (var j = i + 1; j < sources.Length; j++)
+            {
+                if (BuiltInToken.Equals(sources[i].Qualifier, sources[j].Qualifier))
+                    return null;
+            }
+        }
+
+        var edges = new List<JoinEdge>();
+        var conjuncts = new List<BooleanExpression>();
+        foreach (var join in joins)
+        {
+            conjuncts.Clear();
+            join.OnPredicate!.CollectConjuncts(conjuncts);
+            foreach (var conjunct in conjuncts)
+            {
+                if (!TryExtractEquiEdge(conjunct, sources, out var edge))
+                    return null;
+                edges.Add(edge);
+            }
+        }
+
+        var count = sources.Length;
+        var order = new int[count];
+        var placedAt = new int[count];
+        Array.Fill(placedAt, -1);
+        order[0] = driver;
+        placedAt[driver] = 0;
+        for (var step = 1; step < count; step++)
+        {
+            var best = -1;
+            var bestPreservesRows = false;
+            for (var candidate = 0; candidate < count; candidate++)
+            {
+                if (placedAt[candidate] >= 0 || !ConnectsToPlacedSources(edges, placedAt, candidate))
+                    continue;
+                var preservesRows = JoinPreservesRowCount(sources, edges, placedAt, candidate);
+                if (best < 0 || (preservesRows && !bestPreservesRows))
+                    (best, bestPreservesRows) = (candidate, preservesRows);
+            }
+
+            if (best < 0)
+                return null;
+            order[step] = best;
+            placedAt[best] = step;
+        }
+
+        // Each conjunct attaches at the step that places the later of its two
+        // sources — which is the step that first makes both readable, whether
+        // that step's own source is one of them or the pair was completed
+        // earlier in the written order.
+        var stepPredicates = new BooleanExpression?[count];
+        foreach (var edge in edges)
+        {
+            var step = Math.Max(placedAt[edge.LeftSource], placedAt[edge.RightSource]);
+            stepPredicates[step] = stepPredicates[step] is { } existing
+                ? BooleanExpression.And(existing, edge.Conjunct)
+                : edge.Conjunct;
+        }
+
+        var reorderedSources = new FromSource[count];
+        var reorderedJoins = new JoinSpec[count - 1];
+        reorderedSources[0] = sources[order[0]];
+        for (var step = 1; step < count; step++)
+        {
+            if (stepPredicates[step] is not { } on)
+                return null;
+            reorderedSources[step] = sources[order[step]];
+            reorderedJoins[step - 1] = new JoinSpec(JoinKind.Inner, on);
+        }
+
+        JoinDiagnostics.Sink?.Add($"Reorder({string.Join(",", order)})");
+        return (reorderedSources, reorderedJoins);
+    }
+
+    /// <summary>
+    /// One ON equi-conjunct read as an undirected edge of the join graph: the
+    /// two <b>distinct</b> FROM sources it equates and the bare column reference
+    /// it reads from each. The conjunct rides along so the reorder can re-attach
+    /// it to whichever step completes the pair.
+    /// </summary>
+    private sealed class JoinEdge(
+        int leftSource, Reference leftColumn, int rightSource, Reference rightColumn, BooleanExpression conjunct)
+    {
+        public readonly int LeftSource = leftSource;
+        public readonly Reference LeftColumn = leftColumn;
+        public readonly int RightSource = rightSource;
+        public readonly Reference RightColumn = rightColumn;
+        public readonly BooleanExpression Conjunct = conjunct;
+    }
+
+    /// <summary>
+    /// Recognizes an ON conjunct of the form <c>sourceA.col = sourceB.col</c>
+    /// between two different FROM sources — the level-independent counterpart of
+    /// <see cref="TryExtractEquiKey"/>, which classifies relative to one join
+    /// level. Anything else (a single-source filter, a non-equality, a
+    /// computed operand, a key pair the runtime <c>=</c> couldn't promote)
+    /// declines, which declines the whole reorder.
+    /// </summary>
+    private static bool TryExtractEquiEdge(BooleanExpression conjunct, FromSource[] sources, [NotNullWhen(true)] out JoinEdge? edge)
+    {
+        edge = null;
+        if (!conjunct.TryGetEqualityOperands(out var a, out var b)
+            || a is not Reference refA || b is not Reference refB)
+        {
+            return false;
+        }
+
+        var (sourceA, _) = FindSourceColumn(sources, refA.ReferencedName);
+        var (sourceB, _) = FindSourceColumn(sources, refB.ReferencedName);
+        if (sourceA < 0 || sourceB < 0 || sourceA == sourceB || !TryPromoteEquiKeyTypes(sources, refA, refB, out _))
+            return false;
+
+        edge = new JoinEdge(sourceA, refA, sourceB, refB, conjunct);
+        return true;
+    }
+
+    private static bool ConnectsToPlacedSources(List<JoinEdge> edges, int[] placedAt, int candidate)
+    {
+        foreach (var edge in edges)
+        {
+            if ((edge.LeftSource == candidate && placedAt[edge.RightSource] >= 0)
+                || (edge.RightSource == candidate && placedAt[edge.LeftSource] >= 0))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether joining <paramref name="candidate"/> to the already-placed
+    /// sources can only match each driving row at most once — true when the
+    /// candidate's own columns in the connecting equi-conjuncts cover every key
+    /// column of one of its unique keys (a PRIMARY KEY / UNIQUE constraint, or
+    /// an enabled unfiltered unique index). Such a step leaves the driving row
+    /// count unchanged, which is what keeps a deep chain inside
+    /// <see cref="SeekOuterRowCap"/> long enough to seek every link.
+    /// </summary>
+    private static bool JoinPreservesRowCount(FromSource[] sources, List<JoinEdge> edges, int[] placedAt, int candidate)
+    {
+        var source = sources[candidate];
+        if (source.BackingTable is not { } table)
+            return false;
+
+        var ordinals = new HashSet<int>();
+        foreach (var edge in edges)
+        {
+            var own = edge.LeftSource == candidate && placedAt[edge.RightSource] >= 0 ? edge.LeftColumn
+                : edge.RightSource == candidate && placedAt[edge.LeftSource] >= 0 ? edge.RightColumn
+                : null;
+            if (own is not null && TryIdentifyIndexableColumn(source, own, out var ordinal))
+                _ = ordinals.Add(ordinal);
+        }
+
+        if (ordinals.Count == 0)
+            return false;
+        foreach (var key in table.KeyConstraints)
+        {
+            if (KeyColumnsCovered(key.StorageOrdinals, ordinals))
+                return true;
+        }
+
+        foreach (var index in table.Indexes)
+        {
+            if (index.IsUnique && !index.IsDisabled && index.Filter is null && KeyColumnsCovered(index.KeyStorageOrdinals, ordinals))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool KeyColumnsCovered(int[] keyOrdinals, HashSet<int> available)
+    {
+        if (keyOrdinals.Length == 0)
+            return false;
+        foreach (var ordinal in keyOrdinals)
+        {
+            if (!available.Contains(ordinal))
+                return false;
+        }
+
+        return true;
     }
 
     // Records `column = stableValue` for an indexable, non-LOB column of THIS
@@ -1318,14 +1645,17 @@ internal sealed partial class Selection
         Dictionary<int, RangeBoundExprs> bounds,
         out IEnumerable<byte[]> seekRows,
         out int width,
-        out bool rangeExtended)
+        out bool rangeExtended,
+        out int candidateCount)
     {
         if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var candidates, out width, out rangeExtended))
         {
             seekRows = [];
+            candidateCount = -1;
             return false;
         }
 
+        candidateCount = candidates.Count;
         seekRows = snapshotXid is { } sx
             ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
             : MaterializeWithLockChecks(table, batch, plan, candidates);
@@ -1831,10 +2161,10 @@ internal sealed partial class Selection
     // itself row-invariant, so `id = -1` / `id = @v + 1` seek too, and the
     // recursion still excludes a column of THIS source or a non-deterministic /
     // side-effecting function / subquery leaf (those decline).
-    // <paramref name="allowCorrelatedColumnValue"/> is false when narrowing the
-    // leftmost source of a multi-source FROM <i>before</i> the join runs: a
-    // not-yet-joined sibling column isn't resolvable then, so only literals /
-    // variables / parameters (and arithmetic over them) qualify as the probe value.
+    // <paramref name="allowCorrelatedColumnValue"/> is false when narrowing a
+    // source of a multi-source FROM <i>before</i> the join runs: a not-yet-joined
+    // sibling column isn't resolvable then, so only literals / variables /
+    // parameters (and arithmetic over them) qualify as the probe value.
     private static bool IsStableValueSide(Expression expression, FromSource source, bool allowCorrelatedColumnValue = true)
     {
         while (expression.PureConversionOperand is { } inner)

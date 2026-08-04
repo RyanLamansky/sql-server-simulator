@@ -126,6 +126,25 @@ public sealed class MoneyTests
         AreEqual(15m, ExecuteScalar("select $5 * 3"));
     }
 
+    /// <summary>
+    /// <c>money</c> divides the way the decimal family does: the quotient
+    /// truncates toward zero at money's scale of 4, while every other operator
+    /// rounds half away from zero there. SQL Server 2025's own values (probed
+    /// 2026-08-04) — <c>$1.00 / 7</c> is 0.1428, not the 0.1429 rounding gives.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(1.00 as money) / cast(7 as int)", "0.1428")]
+    [DataRow("cast(-1.00 as money) / cast(7 as int)", "-0.1428")]
+    [DataRow("cast(2.00 as money) / cast(3 as int)", "0.6666")]
+    [DataRow("cast(1.00 as money) / cast(7.00 as money)", "0.1428")]
+    [DataRow("cast(1.00 as smallmoney) / cast(7 as int)", "0.1428")]
+    // The contrast: multiplication and addition round.
+    [DataRow("cast(1.0001 as money) * cast(0.5555 as money)", "0.5556")]
+    [DataRow("cast(1.0001 as money) + cast(0.0002 as money)", "1.0003")]
+    public void MoneyArithmetic_DivisionTruncatesWhereTheOthersRound(string expression, string expected) =>
+        AreEqual(expected, ExecuteScalar<decimal>($"select {expression}")
+            .ToString(System.Globalization.CultureInfo.InvariantCulture));
+
     [TestMethod]
     public void Promote_MoneyAndStringInComparison()
     {

@@ -32,6 +32,19 @@ internal sealed class StatementContext
     public Dictionary<Expression, Storage.SqlValue>? StatementScopedValues;
 
     /// <summary>
+    /// Per-statement results of subquery plans that proved outer-independent on
+    /// their first execution, keyed by the consuming expression instance
+    /// (reference identity); see <see cref="UncorrelatedSubqueryCache"/> for the
+    /// entry shapes and the sentinel that marks a site as needing per-row
+    /// execution. Cleared by the dispatch loop at the top of each statement
+    /// iteration alongside the <see cref="UtcNow"/> refresh — the statement is
+    /// the scope over which the data a subquery reads is fixed. Lives here —
+    /// not on the expression — because a plan-cached <c>Selection</c> shares its
+    /// tree across concurrent command executions.
+    /// </summary>
+    public Dictionary<object, object>? SubqueryResults;
+
+    /// <summary>
     /// UTC timestamp captured at the top of each top-level statement and
     /// consumed by the current-time scalar functions (<c>GETDATE</c>,
     /// <c>GETUTCDATE</c>, <c>SYSDATETIME</c>, <c>SYSUTCDATETIME</c>,

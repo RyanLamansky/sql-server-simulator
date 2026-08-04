@@ -1825,6 +1825,7 @@ public sealed partial class Simulation
         context.XmlNamespaces = null;
         batch.CurrentStatement.UtcNow = DateTime.UtcNow;
         batch.CurrentStatement.StatementScopedValues = null;
+        batch.CurrentStatement.SubqueryResults = null;
 
         // WITH prefix applies to the immediately-following SELECT / INSERT /
         // UPDATE / DELETE / MERGE. ParseCteBindings sets context.CteBindings

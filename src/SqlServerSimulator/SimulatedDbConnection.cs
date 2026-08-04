@@ -472,6 +472,40 @@ public sealed class SimulatedDbConnection : DbConnection
     internal int LastErrorNumber;
 
     /// <summary>
+    /// Running count of built-in evaluations whose value can differ between two
+    /// evaluations inside one statement — <c>NEWID()</c> and
+    /// <c>NEXT VALUE FOR</c>, which draw or advance per call. Every other
+    /// candidate is already frozen for the statement's duration
+    /// (<c>RAND()</c> and the current-time family both live in
+    /// <see cref="Parser.StatementContext"/>), so they don't count here.
+    /// <para>
+    /// Read only as a before / after pair by
+    /// <see cref="Parser.UncorrelatedSubqueryCache"/>: a subquery plan whose
+    /// single execution moved this counter can't have its result replayed for
+    /// the rest of the statement, because real re-draws it per outer row —
+    /// probe-confirmed against SQL Server 2025, where
+    /// <c>(SELECT TOP 1 NEWID() FROM …)</c> read once per row across a 100-row
+    /// outer yields 100 distinct values. Lives on the session rather than the
+    /// batch so a draw inside a scalar-UDF body — which runs in a child
+    /// <see cref="Parser.BatchContext"/> sharing this connection — still
+    /// declines the enclosing subquery's cache.
+    /// </para>
+    /// </summary>
+    internal long VolatileEvaluations;
+
+    /// <summary>
+    /// Running count of subquery-plan executions on this session — one per
+    /// <c>EXISTS</c> / <c>IN (SELECT …)</c> / quantified / scalar-subquery
+    /// evaluation that actually ran its inner plan rather than reading a
+    /// statement-scoped result. Bumped by
+    /// <see cref="Parser.UncorrelatedSubqueryCache.Open"/>; the
+    /// difference across a command is what makes "ran once for the whole
+    /// statement" versus "ran once per outer row" directly assertable, the way
+    /// <see cref="Simulation.PlanCacheHits"/> does for the plan cache.
+    /// </summary>
+    internal long SubqueryPlanExecutions;
+
+    /// <summary>
     /// Current nesting depth of in-flight scalar UDF / stored-proc / trigger
     /// / view calls on this connection. Incremented when
     /// <c>Simulation.InvokeScalarFunction</c> enters a body, decremented when

@@ -502,13 +502,33 @@ internal abstract partial class SqlType
                 throw new NotSupportedException($"Decimal arithmetic operator '{op}' isn't supported.");
         }
 
-        // 38-precision cap: scale reduces by the excess, but never below
-        // min(originalScale, 6). For division s is always ≥ 6 so the floor
-        // effectively becomes 6; for the other operators the floor binds
-        // only when the original scale was already ≤ 6, preserving it.
+        // 38-precision cap, which splits by operator family.
+        //
+        // Multiply and divide reduce the scale by the whole excess, never
+        // below min(originalScale, 6) — for division s is always ≥ 6 so the
+        // floor effectively becomes 6, and for multiply it binds whenever the
+        // excess would take the scale under 6 (probe-confirmed against SQL
+        // Server 2025: decimal(20, 5) * decimal(23, 5) and decimal(25, 8) *
+        // decimal(25, 8) both land on decimal(38, 6) where the raw excess
+        // would give 4 and 3, while decimal(30, 3) / decimal(10, 4) keeps its
+        // above-floor scale 7).
+        //
+        // Add and subtract instead give the integral part everything it needs
+        // and hand the rest to the scale: the +1 carry digit is dropped first
+        // and there is no 6-floor, so the result scale is whatever is left
+        // beside the widest operand's integral part. Probe-confirmed:
+        // decimal(38, 20) + decimal(38, 20) keeps scale 20, decimal(38, 10) +
+        // decimal(38, 30) is decimal(38, 10), decimal(30, 20) + decimal(38, 30)
+        // is decimal(38, 28), and decimal(38, 38) + decimal(38, 0) is
+        // decimal(38, 0) — the excess rule would give 19 / 9 / 27 / 6.
+        //
+        // Modulo never reaches the cap: its precision is
+        // min(p1-s1, p2-s2) + max(s1, s2), which 38-wide operands bound at 38.
         if (p > 38)
         {
-            s = Math.Max(s - (p - 38), Math.Min(s, 6));
+            s = op is '+' or '-'
+                ? Math.Min(s, 38 - Math.Max(p1 - s1, p2 - s2))
+                : Math.Max(s - (p - 38), Math.Min(s, 6));
             p = 38;
         }
         if (s < 0) s = 0;

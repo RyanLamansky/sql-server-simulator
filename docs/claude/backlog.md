@@ -99,6 +99,22 @@ Remaining phases, roughly in value order:
   Possible lever if paged drains ever matter: recognize index-supplied order in the `OFFSET/FETCH` path (real's plan shape) to skip the sort and bound the scan.
   Perf polish, not a fidelity gap.
 
+### Complex-query execution — residuals of the subquery-hoisting / join-reorder work
+
+The complexity battery (`.vs/workload` `compare` subcommand, local-only) closed the per-outer-row re-execution cliffs — uncorrelated WHERE/select-list subqueries, `IN (SELECT …)`, and non-leftmost derived-table / CTE / view joins all run once per statement or enumeration — and added WHERE pushdown into every base-table source plus the narrowed-source-first INNER reorder (see [`subqueries.md`](subqueries.md) / [`joins.md`](joins.md)).
+What the bundle deliberately left per-row or declined, in measured-impact order:
+
+- **DML statements don't run the read-path passes** — `Simulation.Update.cs` / `Delete.cs` / `JoinViewDml.cs` call `EnumerateJoinedRows` directly, so `UPDATE … FROM t JOIN (SELECT … GROUP BY …) d ON …` keeps the per-row derived-body re-execution the read path lost, and neither the pushdown nor the reorder reaches an `UPDATE … FROM <chain>`.
+  Same fixes apply; kept out to bound the bundle's blast radius to reads.
+- **Correlated `EXISTS` / `IN` stay per-outer-row seeks** — a correlated equality subquery seeks per row (~2 µs/row), so a 73k-row outer runs ~10× live's hash semi-join; decorrelation to a semi-join is the lever.
+  The same drive-side choice loses when the inner is tiny: `x IN (SELECT … WHERE <3-row filter>)` probes 73k rows against a 3-value set where real drives from the 3 rows (~14×).
+- **Generator-backed FROM sources (TVF / `VALUES` / `OPENJSON` …) stay per-row** — their arguments bind in the enclosing FROM's scope, so materializing them needs either real's own Msg 4104 rejection of the correlated shape (see the over-permissive register) or a parse-time no-argument-reads-a-column flag.
+- **Reorder decline list, narrowable** — a single-source ON conjunct (`ON a.k = b.k AND b.flag = 1`) declines the whole reorder where it is WHERE-equivalent for an all-INNER chain and could attach at its source's step; a chain whose outer joins all follow the driving position could still commute its INNER prefix; a source narrowed to more than 128 rows never drives even where it would win.
+- **Window top-N constant factor** — `ROW_NUMBER() OVER (PARTITION BY …)` filtered to `rn = 1` over 73k rows runs ~5× live (live sorts 16-way parallel); range seeks (a date-range WHERE still scans) and the scan-bound year-aggregate reports (~2-3× live, intra-query parallelism territory) are the other steady-state gaps the battery re-confirmed.
+- **`Heap.RowCount` walks the page list** once per join level per execution to feed the seek-vs-hash ratio rule — O(pages), cheap at current sizes; a cached count on `Heap` removes it if it ever shows up.
+- **A subquery nested inside an APPLY body can't read the outer scope** — `CROSS APPLY (SELECT … WHERE EXISTS (SELECT 1 FROM o WHERE o.k = c.k))` raises Invalid column name where live answers (pre-existing, surfaced by the bundle's probing; sim-only failure, so over-restrictive).
+- **A leftmost derived table draws `NEWID()` once** where real draws per output row — the leftmost source has always executed exactly once; the bundle's `NEWID` gate covers only the sources it newly materializes.
+
 ### sqllogictest differential sweep — surfaced gaps
 
 The oracle itself — corpus, sharded runner, how to re-run and re-read it, and the traps that silently invalidate a run — is documented in [`sqllogictest.md`](sqllogictest.md).
@@ -223,6 +239,8 @@ Entries are verified against the simulator, so one that no longer reproduces is 
   CREATE-time body binding gathers the binder errors real gathers, and a conversion's legality isn't one of them.
   → [`programmable.md`](programmable.md#create-time-body-binding).
 - **An unreferenced CTE is accepted** where real raises **Msg 422** (probed 2026-08-02 while closing the subquery permission seams); nothing leaks — an unreferenced CTE's plan never executes — so this is a pure parse-acceptance divergence.
+- **A generator-backed FROM source reading a sibling column is answered** — `FROM t JOIN STRING_SPLIT(t.csv, ',') s ON …` correlates per row here where real raises **Msg 4104** (only APPLY grants laterality); probed 2026-08-04 while bounding the deferred-source materialization, which excludes generator sources for exactly this reason.
+- **`NEXT VALUE FOR` inside a derived table / CTE / view / UDF body is accepted** where real rejects the whole batch with **Msg 11719** at severity 15 (probed 2026-08-04); the sequence advances here, so the divergence leaks state, not just acceptance.
 - **Non-Framework CLR assemblies load** — real resolves every `AssemblyRef` against a fixed .NET Framework catalog and raises **Msg 6503** otherwise (probe-confirmed for .NET 10 and for .NET Standard 2.0); the simulator runs on .NET so all of them bind, which is also what lets the tests emit a fixture assembly without a Framework toolchain.
   → [`clr-assemblies.md`](clr-assemblies.md#divergences).
 - **A join view over a join view is Msg 4405** for the INSERT or UPDATE naming one base table that real accepts, flattening both levels (probe-confirmed).

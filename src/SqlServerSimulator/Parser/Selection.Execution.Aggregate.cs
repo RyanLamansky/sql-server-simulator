@@ -70,7 +70,7 @@ internal sealed partial class Selection
         // the WHERE-passing rows (e.g. SELECT SUM(x) ... WHERE indexedcol = @v
         // seeks instead of scanning the whole heap).
         sources = MaybeApplyIndexSeek(sources, joins, fromClause.Excluders, batch, outerResolver);
-        sources = NarrowLeftmostJoinSource(sources, fromClause.Excluders, batch, outerResolver);
+        (sources, joins) = NarrowJoinSources(sources, joins, fromClause.Excluders, batch, outerResolver);
 
         // Buffer WHERE-passing rows once. `EnumerateJoinedRows` mutates a
         // single shared tuple array in place across iterations, so each

@@ -139,13 +139,38 @@ Per-operator decimal scale rules differ from the joint-envelope rule used for no
 - `/`: `s = max(6, s1 + p2 + 1)`, `p = p1 - s1 + s2 + s`
 - `%`: `p = min(p1-s1, p2-s2) + max(s1, s2)`, `s = max(s1, s2)`
 
-When precision exceeds 38, scale reduces by the excess down to a floor of `min(originalScale, 6)`; precision clips to 38.
-The 6-floor stabilizes division (`s ≥ 6` always); for `+ - * %` it binds only when original scale was already ≤ 6.
+When precision exceeds 38 it clips to 38, and the scale gives way — but by a rule that splits by operator family.
+
+`*` and `/` reduce the scale by the whole excess, floored at `min(originalScale, 6)`.
+The floor stabilizes division (`s ≥ 6` always, so it is effectively 6) and binds for multiplication whenever the excess would take the scale under 6: `decimal(20, 5) * decimal(23, 5)` and `decimal(25, 8) * decimal(25, 8)` both land on `decimal(38, 6)` where the raw excess would give 4 and 3, while `decimal(30, 3) / decimal(10, 4)` keeps its above-floor reduced scale of 7.
+
+`+` and `-` instead give the integral part everything it needs and hand the rest to the scale: the formula's `+1` carry digit is dropped first and there is **no** 6-floor, so `s = min(s, 38 - max(p1-s1, p2-s2))`.
+`decimal(38, 20) + decimal(38, 20)` keeps scale 20, `decimal(38, 10) + decimal(38, 30)` is `decimal(38, 10)`, `decimal(30, 20) + decimal(38, 30)` is `decimal(38, 28)`, `decimal(38, 7) + decimal(38, 7)` is `decimal(38, 7)`, and `decimal(38, 38) + decimal(38, 0)` is `decimal(38, 0)` — where the excess rule would say 19 / 9 / 27 / 6 / 6.
+Probe-confirmed against SQL Server 2025; the common narrow-scale shapes (`decimal(38, 2) + decimal(38, 2)`) agree under either reading, which is why the divergence stayed hidden.
+
+`%` never reaches the cap at all: its precision is `min(p1-s1, p2-s2) + max(s1, s2)`, which 38-wide operands bound at 38.
 
 Integer/money operands canonicalize before formulas apply (bit→(1,0) … bigint→(19,0); money→(19,4); smallmoney→(10,4)).
 Pure integer-pair, pure money-pair, and float-involving arithmetic skip the decimal path (joint-envelope `Promote` instead).
 
 `SqlType.Promote` (joint-envelope, `scale = max(s1, s2); precision = min(38, max(p1-s1, p2-s2) + scale)`) stays the right rule for non-arithmetic uses.
+
+### Division truncates where every other operator rounds
+
+Those formulas settle *how many* fractional digits the result keeps; the digits past them are dropped by two different rules.
+Every operator but division rounds **half away from zero** at the result scale.
+Division **truncates toward zero** — and does so at every cap depth rather than only where the 38-precision cap moved the scale, which is what makes the uncapped `CAST(4.00 AS decimal(5, 2)) / 7` (`decimal(9, 6)`) return `0.571428` exactly as the capped `CAST(4.00 AS decimal(38, 2)) / 7` (`decimal(38, 6)`) does.
+Probe-confirmed against SQL Server 2025 (2026-08-04) across cap depths (uncapped, capped by 1, capped by 4, exactly at `p = 38`), scales (6 / 8 / 13 / 15 / 22 / 28) and both signs.
+
+An exact half at the cut drops too, so this is truncation rather than a rounding mode: `CAST(1 AS decimal(5, 0)) / 1600000` is `0.00000062`, and `CAST(3.00 AS decimal(38, 2)) / 2000000` is `0.000001`.
+The sign only moves the sign — `-4.00 / 7`, `4.00 / -7` and `-4.00 / -7` all cut at the same digit.
+
+`money` follows the same split at its fixed scale of 4 (`$1.00 / 7` is `0.1428`, `$2.00 / 3` is `0.6666`, while `$1.0001 * $0.5555` rounds to `0.5556`), and **`AVG` inherits it** — real computes `AVG` as `SUM` / `COUNT`, so seven values summing to `4.00` average to `0.571428`, `AVG(money)` of `$1.00` over seven rows is `0.1428`, and the explicit `SUM(v) / COUNT(*)` spelling agrees.
+`CAST` / `CONVERT` are untouched: a narrowing conversion still rounds (`CAST(CAST(0.5714285 AS decimal(10, 7)) AS decimal(10, 6))` is `0.571429`), so the truncation is arithmetic's, not the conversion's.
+
+`Storage/DecimalMath.cs` carries both halves of the rule: `Truncating(dividend, divisor, scale)` is the one seam `DecimalArithmetic`'s `/`, `MoneyArithmetic`'s `/` and `AverageAggregator`'s finalize all divide through.
+It scales the dividend up front rather than dividing and dropping digits after, because .NET's own division rounds at its 28-significant-digit ceiling and that rounding lands *inside* the kept digits once the result scale approaches 28 — `CAST(2 AS decimal(38, 28)) / 3` is real's `0.6666…6666` where the rounded quotient would truncate to `…6667`.
+The pre-scaling runs only where it can't overflow (a divisor of magnitude 1 or more can't grow the quotient past the scaled dividend); everything else falls back to dividing first and truncating after.
 
 ### The value carries the declared scale
 
