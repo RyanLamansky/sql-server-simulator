@@ -44,17 +44,23 @@ Each of these produced a wrong conclusion before it was understood, and each gen
 ## Capture and replay
 
 Once the differential count reaches zero, a live server is no longer needed to *supply* answers — only to detect that real has changed.
-The oracle then splits into two harnesses with different jobs:
+The oracle splits into two harnesses with different jobs:
 
-- **Capture** runs once in differential mode and writes a per-record reference: value rendering, CLR type, store type name, error number, rows-affected — everything the comparison discriminates on — canonicalized per the corpus's own sort modes so order-insensitive records don't flap.
-- **Replay** runs the simulator **in-process only**, with no client driver, server or database lifecycle, and diffs against that reference.
+- **Capture** is a differential run that also writes a per-script reference file: error number and kind, rows-affected, CLR and store type names, and the rendered values — everything the comparison discriminates on.
+  Values are stored in produced order rather than sort-canonicalized, because replay re-runs the same two-stage comparison (exact, then per the record's sort mode) and canonicalizing at capture would collapse the order-asserting and order-insensitive agreement classes into one.
+- **Replay** runs the simulator **in-process only**, with no client driver, server or database lifecycle, and diffs against that reference, parallelized across scripts inside the one process.
 
 Replay proves **self-consistency, not fidelity**: it catches simulator regressions, and cannot catch real changing or both engines being wrong together.
 Differential mode stays as the periodic check.
+The throughput gap is what makes replay the routine sweep: the differential run is ~87% server wait, and the same slice that takes a 16-shard differential sweep minutes takes an in-process 16-thread replay well under a minute, at two orders of magnitude more records per second.
 
-**Re-capture when a new SQL Server version ships**, not routinely, and stamp the captured build into the reference so a version difference surfaces as a mismatch rather than silently.
+A reference that no longer describes its script must refuse, not drift: every record carries a fingerprint of its SQL, and any mismatch — text, kind, line, skip state, or record count — abandons the script as stale rather than comparing misaligned slots.
+A bumped reference format version refuses old files the same way.
+
+**Re-capture when a new SQL Server version ships**, not routinely; the captured `@@VERSION` is stamped into the reference and echoed in every replay summary so a version difference surfaces rather than silently aging.
 A frozen reference is only dangerous when it outlives the behavior it recorded — which is exactly what happened to the corpus's own 2008 expectations.
-Anything still divergent at capture time is frozen in as permanent expected divergence, so reaching zero first is a precondition rather than a nicety; record known-irreducible cases as explicitly known-divergent rather than as expected values, so a change in that set stays visible.
+Anything still divergent at capture time is frozen in as permanent expected divergence, so reaching zero first is a precondition rather than a nicety; the capture records each such case in an explicit known-divergent register rather than as expected values.
+Replay reconciles every register entry: an identical divergence tallies as known-divergent-match and is not a finding, while one that *changed shape* — or a clean record that starts diverging — is always reported.
 
 **Replay is also the only honest profiling workload.**
 A sampled trace of a differential run attributes ~87% of wall time to waiting on the server, with under 4% of samples in simulator frames — so optimizing the simulator cannot meaningfully speed a differential sweep, and parallelism is what does (measured ~3,270 s to ~460 s at 16 shards).
