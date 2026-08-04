@@ -898,9 +898,19 @@ internal sealed partial class Selection
         // profile. A scratch-backed SqlValueKey is safe for transient
         // dictionary lookups (equality reads the components, nothing retains
         // them); only the build side's first-occurrence insert stores the key,
-        // so that one path clones the scratch into a stable array.
-        var rightRows = new List<byte[]>();
-        var next = new List<int>();
+        // and it hands the scratch itself over and takes a fresh one rather
+        // than cloning — one allocation per distinct key either way, without
+        // the clone helper's copy on top.
+        //
+        // The bucket chain is appended through a ref into the value slot, so a
+        // build row costs ONE hash-and-probe: the earlier shape asked
+        // TryGetValue and then wrote through the indexer, hashing every
+        // repeated key twice, which profiling put at a third of a 228k-row
+        // build's CPU. Both row lists are sized from the backing table's row
+        // count where there is one, which retires the doubling copies.
+        var expectedRows = right.BackingTable?.Heap.RowCount ?? 0;
+        var rightRows = expectedRows > 0 ? new List<byte[]>(expectedRows) : [];
+        var next = expectedRows > 0 ? new List<int>(expectedRows) : [];
         var buckets = new Dictionary<SqlValueKey, (int Head, int Tail)>();
         var keyScratch = new SqlValue[plan.Keys.Length];
         foreach (var row in right.Rows)
@@ -911,20 +921,26 @@ internal sealed partial class Selection
             next.Add(-1);
             if (TryComputeKeyInto(plan.Keys, runtime, rightSide: true, keyScratch, out var buildKey))
             {
-                if (buckets.TryGetValue(buildKey, out var chain))
+                ref var chain = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(buckets, buildKey, out var existed);
+                if (existed)
                 {
                     next[chain.Tail] = ordinal;
-                    buckets[buildKey] = (chain.Head, ordinal);
+                    chain.Tail = ordinal;
                 }
                 else
                 {
-                    buckets[new SqlValueKey((SqlValue[])keyScratch.Clone())] = (ordinal, ordinal);
+                    // The dictionary now holds the scratch array as its key;
+                    // take a fresh one so the next row doesn't overwrite it.
+                    chain = (ordinal, ordinal);
+                    keyScratch = new SqlValue[plan.Keys.Length];
                 }
             }
         }
         tuple[level] = null;
 
-        var matchedRight = new bool[rightRows.Count];
+        // Only RIGHT / FULL read the matched bitmap; INNER / LEFT would pay a
+        // write per emitted row for something nothing looks at.
+        var matchedRight = emitUnmatchedRight ? new bool[rightRows.Count] : [];
 
         foreach (var _ in left)
         {
@@ -938,7 +954,8 @@ internal sealed partial class Selection
                     if (ResidualMatches(plan.Residual, runtime))
                     {
                         matchedLeft = true;
-                        matchedRight[ordinal] = true;
+                        if (emitUnmatchedRight)
+                            matchedRight[ordinal] = true;
                         yield return tuple;
                     }
                 }

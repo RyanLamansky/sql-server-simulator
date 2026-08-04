@@ -98,10 +98,13 @@ Layout: `Storage/` (pages, types, row encoder/decoder, heap, constraints, lock m
 8KB heap pages.
 Rows encoded as bytes, navigated column-by-column without rehydrating; single-column reads via an array-typed schema take the `RowLayout` fast path (per-schema geometry cached by array identity in a `ConditionalWeakTable`, making `RowDecoder.DecodeColumn` O(1) vs two O(columns) walks — the per-row resolvers' path).
 Type-only `SqlType[]` schemas reach that same fast path through `RowDecoder.ColumnsFor`, which caches the `HeapColumn[]` conversion by schema-array identity — **never convert per call**: a fresh array defeats the layout cache's identity key and re-lays-out the geometry every read (measured at a third of result-drain CPU; the reader-cursor and subquery decode sites are the precedent consumers).
+The **write** side has the same rule and the same seam: `RowEncoder.EncodeRow` has an array-schema overload that routes through `ColumnsFor`, which overload resolution picks for every caller holding a `SqlType[]`; the span form builds the array *and* a column object per column, which on a row-at-a-time producer measures as the largest single allocation of a `SELECT … INTO`.
+`EncodeRow`'s own per-row scratch is `stackalloc` up to 64 columns and heap-allocated past it.
 Every non-NULL variable-length column carries a 1-byte inline/pointer marker.
 LOB-eligible types (`varchar/nvarchar/varbinary(MAX)`, `text`/`ntext`/`image`) flow through a parallel 8KB-LOB-page chain.
 Bounded `varchar/nvarchar/varbinary(N)` start inline; the encoder pushes the largest off-row greedily until the row fits 8060 bytes.
 Allocation is a flat page list (no IAM/PFS).
+`Heap.EnumerateRowsWithAddress` is the path **every** table scan runs, so it walks slots inline (one `HeapPage.TryReadLiveSlot` per row rather than a nested per-page enumerator plus four re-reads of the same 2-byte directory entry) and probes the forward-target set only when it holds something — its key is a tuple, and a `Count` test keeps that hash probe off the common scan; **don't re-add a layer here** (a nested per-page enumerator measures 71 ms against 11 ms inline on a 228k-row `COUNT(*)`, the floor under every scan-bound query) — see [`heap-storage.md`](docs/claude/heap-storage.md).
 
 ### Type system
 `SqlType` / `SqlValue` is the storage-layer pair.
@@ -119,6 +122,8 @@ A deferred source whose rows can't change across one enumeration — a **non-lef
 Column resolution is qualifier-aware via `FindSourceColumn` / `ResolveAcrossTuple`; ambiguous unqualified name → Msg 209.
 Per-row resolution goes through a per-enumeration `SourceColumnMemo` (name → (source, column), keyed by string reference identity — execution-scoped per the plan-cache shared-plan contract); un-memoized re-resolution was the largest CPU cost of scan-bound joins/aggregates.
 **Per-row resolver loops use the hoisted-scaffolding pattern**: one mutable-capture tuple slot + one cached *self-referencing lambda* (never a local function passed as its own `selfRecursive` argument — that allocates a delegate per resolution per row; 41% of profile bytes) + one `RuntimeContext` per loop; follow it in executor loops.
+The same rule reaches the *arrays* a per-row loop fills: a grouping key, a hash-join bucket key and a group's projection under a bounded `TOP (n)` are all written into reused scratch and copied out only where something retains them (a group's first row, a heap admission), which is one allocation per group rather than per row.
+The aggregate executor also accumulates straight off the enumeration for a single grouping set instead of buffering the rows first — real pipelines its Filter into its aggregate the same way, which is observable in *which* error a row raises — see [`query.md`](docs/claude/query.md#streaming-accumulation-and-where-an-error-surfaces).
 
 ### `MultiPartName`
 Readonly struct, up to 4 inline slots (SQL Server's grammar limit).

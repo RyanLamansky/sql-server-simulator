@@ -10,6 +10,18 @@ SHRINKDATABASE emits no result set; SHRINKFILE returns the per-file row with siz
 
 A versioning-on **autocommit** UPDATE/DELETE reclaims its superseded chains via a statement-end GC pass when no snapshot is open.
 
+**The scan walks slots inline.**
+`Heap.EnumerateRowsWithAddress` is the path every table scan in the engine runs, so it reads each slot directory entry **once** (`HeapPage.TryReadLiveSlot` returns liveness, payload and the forward bit together) and iterates slots itself rather than through a per-page enumerator.
+The individual accessors it replaces re-read the same 2-byte entry up to four times per row, and the nested iterator added a `MoveNext` per row on top.
+The forward-target set is probed only when it holds something — it is empty for any heap no `UPDATE` has relocated a row in, and its key is a tuple, so testing `Count` first keeps a hash probe off every scanned row.
+Both reads stay per row rather than being hoisted, so a heap mutated mid-enumeration is seen exactly as it was before.
+Measured on a 228k-row `SELECT COUNT(*)`: **71 ms → 11 ms**, which is the floor under every scan-bound query in the battery.
+
+**The reuse candidates are walked without snapshotting them.**
+`Heap.TryReuseReclaimablePage` runs on the insert path — once for every row the tail page can't hold, which on a bulk load is once per page — and the candidate set is a `ConcurrentDictionary`.
+Reading its `Keys` property takes *every* one of the dictionary's locks and copies the keys into a fresh collection; the walk enumerates the dictionary directly instead, which is the lock-free weakly-consistent enumeration the set was chosen for, and short-circuits on `IsEmpty` for the overwhelmingly common heap nothing has deleted from.
+Removing candidates mid-walk is what that enumerator supports, so the stale-index and exhausted-page removals stay where they were.
+
 **The live page counts are surfaced to the catalog**: `Heap.Pages.Count` (data pages) and `Heap.LobPages.Count` (LOB-chain pages) back `sys.allocation_units.total_pages` / `used_pages` / `data_pages`, and their per-database sum (`BuiltInResources.SumDataFilePages`) sizes `sys.database_files` / `sys.master_files` and `FILEPROPERTY(<db>_Data, 'SpaceUsed')`.
 Because reclaimed interior pages stay in `Pages` (only the tail trims), these counts reflect the peak concurrent working set, not a post-GC minimum — a divergence from real SQL Server's IAM-tracked allocation.
 See [`catalog-views.md`](catalog-views.md) for the self-consistency contract.

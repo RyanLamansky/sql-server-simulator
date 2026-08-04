@@ -330,6 +330,22 @@ internal sealed partial class Selection
             this.SiftDown();
         }
 
+        /// <summary>
+        /// <see cref="Offer"/> for a caller that reuses one pair of scratch
+        /// arrays across candidates: the heap copies whatever it admits, so a
+        /// rejected candidate costs no allocation at all. Worth it where the
+        /// candidates are groups — a 73k-group <c>TOP (5)</c> allocated a
+        /// projection and a key tuple per group to throw all but five away.
+        /// The copies are value-identical (<see cref="SqlValue"/> is a readonly
+        /// struct), so the rows are the ones <see cref="Offer"/> would hold.
+        /// </summary>
+        public void OfferCopying(SqlValue[] projected, SqlValue[] keys)
+        {
+            if (this.entries.Count >= capacity && CompareOrderKeys(keys, this.entries[0].Keys, orderBy) >= 0)
+                return;
+            this.Offer([.. projected], [.. keys]);
+        }
+
         /// <summary>The rows held, in ORDER BY order — repeated root removal fills the result back to front.</summary>
         public SqlValue[][] Drain()
         {

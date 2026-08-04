@@ -134,6 +134,26 @@ internal sealed partial class Selection
             return SeekedSource(source, seekRows);
         }
 
+        // No equality seek on the conjunction — try the union of seeks a
+        // cross-column OR conjunct offers (`a = 1 OR b = 2`, whose disjuncts
+        // seek separately and dedupe by row address). Ordered after the
+        // equality prefix so a conjunction that seeks on its own keeps its
+        // single access path, and before the range seek because equality
+        // probes are the narrower predicate: a read whose WHERE offers both
+        // takes the OR's point probes and leaves the bound residual.
+        if (TryComputeUnionCandidates(
+            source, table, batch, outerResolver, conjuncts, allowCorrelatedColumnValue: true, planSources,
+            out var unionCandidates, out var unionDisjuncts))
+        {
+            IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
+            IndexSeekDiagnostics.Sink?.Add($"UnionSeek({table.Name},{unionDisjuncts})");
+            IndexSeekDiagnostics.Sink?.Add($"UnionSeekCandidates({table.Name},{unionCandidates.Count})");
+            seekedCandidates = unionCandidates.Count;
+            return SeekedSource(source, snapshotXid is { } unionSx
+                ? MaterializeSnapshotCandidates(table, batch, unionSx, unionCandidates)
+                : MaterializeWithLockChecks(table, batch, plan, unionCandidates));
+        }
+
         // No equality seek — try a range seek on a leading key column
         // (col > v / col BETWEEN lo AND hi / a one-sided bound). The matched
         // bound conjunct(s) stay in the residual WHERE, so the range only
@@ -1896,6 +1916,181 @@ internal sealed partial class Selection
         }
     }
 
+    // The most probe tuples a union seek fires across all its disjuncts before
+    // declining. A wider OR is a different shape from the one the union serves
+    // (a handful of point predicates across a few columns), and the scan it
+    // falls back to is one pass rather than dozens of bucket lookups plus a
+    // dedup set. The count is an upper bound taken structurally — the product
+    // of a disjunct's per-column probe counts over EVERY column it records,
+    // rather than only the ones the chosen prefix ends up using — so the cap is
+    // settled before any probe evaluates.
+    private const int UnionSeekProbeCap = 64;
+
+    /// <summary>
+    /// Narrows a single-base-table scan to a <b>union of seeks</b> when a
+    /// top-level AND-conjunct is an <c>OR</c> whose every disjunct seeks on its
+    /// own: the cross-column disjunction (<c>WHERE a = 1 OR b = 2</c>) a
+    /// single-column equality family can't express, and which otherwise
+    /// full-scans however well indexed both columns are. Each disjunct fires its
+    /// own probe set through the same per-<c>Heap</c> cache a lone equality
+    /// would, and the candidates union by <b>row address</b> — the (page, slot)
+    /// pair every seek path already carries — so a row several disjuncts match
+    /// is read (and locked) once. Real unions two index seeks and dedupes the
+    /// same way.
+    /// <para>
+    /// Semantics are exact by construction: the whole original WHERE, the OR
+    /// included, stays in <c>excluders</c> as the residual filter, and each
+    /// disjunct's probe set selects a <b>superset</b> of the rows that disjunct
+    /// can match — so their union is a superset of the OR's match set, and the
+    /// residual drops the rest. NULLs need no special handling: a NULL probe
+    /// value is skipped as it is anywhere else, and a row whose columns are all
+    /// NULL matches no probe and reads UNKNOWN in the residual.
+    /// </para>
+    /// <para>
+    /// Declines, silently, to whatever the caller does next (a scan, or the
+    /// range seek): any disjunct with no stable-value equality on a seekable
+    /// non-LOB column of THIS source — an expression-wrapped column, a
+    /// non-indexed one, a bare range or <c>NOT</c> / <c>IS NULL</c> disjunct, a
+    /// column of another source, a sibling-referencing value side — or a total
+    /// probe count over <see cref="UnionSeekProbeCap"/>. A disjunct that is
+    /// itself an <c>AND</c> group is <em>not</em> a decline: its conjuncts
+    /// collect exactly as a WHERE's do, so the group seeks on whatever prefix
+    /// they cover and the rest of the group stays residual like everything else.
+    /// </para>
+    /// <para>
+    /// The claim is settled <b>structurally</b> and takes the first eligible OR
+    /// conjunct in written order, so which conjunct anchors the union can't ride
+    /// on runtime values (a correlated inner re-planned per outer row keeps one
+    /// access path). If that conjunct's probes then fail to anchor — a NULL or
+    /// cross-collation value side collapsing some disjunct's prefix — the read
+    /// scans rather than passing the claim on: a declined <em>probe</em> doesn't
+    /// mean the disjunct matches nothing, so its contribution can't be treated
+    /// as empty.
+    /// </para>
+    /// </summary>
+    private static bool TryComputeUnionCandidates(
+        FromSource source,
+        HeapTable table,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        List<BooleanExpression> conjuncts,
+        bool allowCorrelatedColumnValue,
+        FromSource[]? planSources,
+        [NotNullWhen(true)] out List<(int Page, int Slot)>? candidates,
+        out int disjunctCount)
+    {
+        candidates = null;
+        disjunctCount = 0;
+
+        var disjuncts = new List<BooleanExpression>();
+        foreach (var conjunct in conjuncts)
+        {
+            disjuncts.Clear();
+            conjunct.CollectDisjuncts(disjuncts);
+            if (disjuncts.Count < 2
+                || IsSingleColumnEqualityFamily(source, conjunct, allowCorrelatedColumnValue, planSources)
+                || !TryPlanUnionDisjuncts(source, table, disjuncts, allowCorrelatedColumnValue, planSources, out var planned))
+            {
+                continue;
+            }
+
+            disjunctCount = disjuncts.Count;
+            return TrySeekUnionDisjuncts(source, table, batch, outerResolver, planned, out candidates);
+        }
+
+        return false;
+    }
+
+    // True when this OR is the same-column equality family the IN-list path
+    // already claims (`a = 1 OR a = 2`, which CollectColumnEqualities records as
+    // one multi-value equality). It is the whole of the exclusivity between the
+    // two claim sites, and it is structural — so the answer doesn't ride on
+    // which seek the read actually took. A family spanning two columns
+    // (`a = 1 OR a = 2 OR b = 3`) is not one the IN path can record, and stays
+    // the union's.
+    private static bool IsSingleColumnEqualityFamily(
+        FromSource source, BooleanExpression conjunct, bool allowCorrelatedColumnValue, FromSource[]? planSources)
+        => conjunct.TryGetEqualityFamily(out var family)
+            && TryRecordEqualityFamily(source, family, [], allowCorrelatedColumnValue, planSources);
+
+    // The structural half of the union seek: every disjunct has to record an
+    // equality on some key / index leading column of this source, and the whole
+    // disjunction has to fit the probe cap. Collects each disjunct's own
+    // equality / bound maps (its conjuncts collected exactly as a WHERE's are,
+    // so an AND group inside the OR contributes all of its terms) for the seek
+    // half to run. No probe evaluates here.
+    private static bool TryPlanUnionDisjuncts(
+        FromSource source,
+        HeapTable table,
+        List<BooleanExpression> disjuncts,
+        bool allowCorrelatedColumnValue,
+        FromSource[]? planSources,
+        [NotNullWhen(true)] out List<(Dictionary<int, Expression[]> Equalities, Dictionary<int, RangeBoundExprs> Bounds)>? planned)
+    {
+        planned = null;
+        var totalProbes = 0;
+        var terms = new List<BooleanExpression>();
+        var perDisjunct = new List<(Dictionary<int, Expression[]> Equalities, Dictionary<int, RangeBoundExprs> Bounds)>(disjuncts.Count);
+        foreach (var disjunct in disjuncts)
+        {
+            terms.Clear();
+            disjunct.CollectConjuncts(terms);
+            var equalities = CollectColumnEqualities(source, terms, allowCorrelatedColumnValue, planSources);
+            if (!HasSeekableLeadingPrefix(table, equalities))
+                return false;
+
+            var probes = 1;
+            foreach (var values in equalities.Values)
+            {
+                if (values.Length > UnionSeekProbeCap)
+                    return false;
+                probes *= values.Length;
+                if (probes > UnionSeekProbeCap)
+                    return false;
+            }
+
+            totalProbes += probes;
+            if (totalProbes > UnionSeekProbeCap)
+                return false;
+            perDisjunct.Add((equalities, CollectRangeBounds(source, terms, allowCorrelatedColumnValue, planSources)));
+        }
+
+        planned = perDisjunct;
+        return true;
+    }
+
+    // The seek half: each planned disjunct runs through the same candidate core
+    // a lone equality conjunct does (prefix choice, cartesian probes, an
+    // optional range continuation), and the addresses union deduplicated by
+    // physical row — not by value, which a row matching two disjuncts on two
+    // columns would defeat. One disjunct that can't anchor its probes declines
+    // the whole union.
+    private static bool TrySeekUnionDisjuncts(
+        FromSource source,
+        HeapTable table,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        List<(Dictionary<int, Expression[]> Equalities, Dictionary<int, RangeBoundExprs> Bounds)> planned,
+        [NotNullWhen(true)] out List<(int Page, int Slot)>? candidates)
+    {
+        candidates = null;
+        var union = new List<(int Page, int Slot)>();
+        var seen = new HashSet<(int, int)>();
+        foreach (var (equalities, bounds) in planned)
+        {
+            if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var part, out _, out _))
+                return false;
+            foreach (var address in part)
+            {
+                if (seen.Add(address))
+                    union.Add(address);
+            }
+        }
+
+        candidates = union;
+        return true;
+    }
+
     // Evaluates a column's equality value side(s) into promoted probe components,
     // or null when none can anchor a seek: NULL values are skipped (never equal
     // under = ) and an empty result drops the column; cross-collation string
@@ -2042,6 +2237,13 @@ internal sealed partial class Selection
             && TryComputeEqualityCandidates(source, table, batch, outerResolver: null, equalities, bounds, out var eqCandidates, out _, out _))
         {
             return MaterializeMutationCandidates(table, eqCandidates);
+        }
+
+        if (TryComputeUnionCandidates(
+            source, table, batch, outerResolver: null, conjuncts, allowCorrelatedColumnValue: false, planSources: null,
+            out var unionCandidates, out _))
+        {
+            return MaterializeMutationCandidates(table, unionCandidates);
         }
 
         if (TryComputeRangeCandidates(source, table, batch, outerResolver: null, bounds, out var rangeCandidates))

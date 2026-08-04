@@ -89,6 +89,9 @@ A single-table mutation keeps the flat refusal (`allowCorrelatedColumnValue: fal
 A tuple an outer join NULL-extends because the narrowed side lost its match reads that side's column as NULL, so the conjunct that justified the narrowing is UNKNOWN and the tuple is excluded — exactly as it excluded the matched-but-failing tuple before.
 That covers the NULL-supplied side of LEFT / RIGHT / FULL and the unmatched-right tail alike.
 
+A source is narrowed by whichever seek shape its conjuncts offer, the cross-column `OR`'s [union of seeks](indexes.md#union-of-seeks-a-cross-column-or) included — that pass reports its deduped candidate count like any other seek, so an OR-narrowed non-leftmost source drives the reorder below on the same terms.
+A disjunct naming a **sibling** source (`t.a = 1 OR j.jid = 11`) declines it for the same reason a sibling probe value does.
+
 A narrowed source drops its `DataLockPlan`, so it is never re-seeked per outer row by the join; it becomes a small hash build side instead.
 Past the leftmost slot the pass skips a source whose lock plan owes a SERIALIZABLE / `HOLDLOCK` phantom fence — the fence is settled inside the seek attempt, so probing every source would change which key ranges a SERIALIZABLE reader locks and when.
 The leftmost slot keeps its long-standing unconditional attempt.
@@ -106,8 +109,10 @@ The **conjunct stays in the enclosing WHERE**, the same residual invariant the b
 A tuple an outer join NULL-extends because the pushed side lost its match reads UNKNOWN for the very conjunct that justified the push, and is excluded exactly as the matched-but-failing tuple was.
 That is why `IS NULL` is *not* a pushable shape: pushing the anti-join idiom's `WHERE v.col IS NULL` would turn every row the body dropped into a NULL-extended match, which is the one way this rewrite can invent rows.
 
-**Eligible body** — a plain SELECT-project-filter: no DISTINCT, no TOP / OFFSET / FETCH, no GROUP BY / HAVING / aggregate, no window, no ORDER BY, not a set-op branch.
+**Eligible body** — a plain SELECT-project-filter: no DISTINCT, no TOP / OFFSET / FETCH, no window, no ORDER BY, not a set-op branch.
 Each reads the row set as a whole, so a filter one level up would see a different one.
+A **`GROUP BY` body** qualifies too, for the conjuncts naming an output column that projects one of its **grouping columns** unchanged (`GroupingColumnProjections`): such a filter removes whole groups, and a group the enclosing statement was going to discard contributes to no other group's aggregate — nor to any other group's HAVING, which is evaluated per group.
+A grouping *expression* (`GROUP BY MONTH(d)`) is not such a column and declines, since the filter above names the expression's value rather than anything the body's rows carry; so does an aggregate output column.
 A join body qualifies (the conjunct lands in its WHERE and its own narrowing takes over), as does a body carrying its own WHERE — the pushed conjuncts append *after* it, so the body's own filter still decides first per row.
 That ordering is what keeps the push from changing which rows an operand is evaluated over: real, whose own pushdown carries no such guarantee, raises **Msg 245** for `SELECT code FROM (SELECT code FROM t WHERE ISNUMERIC(code) = 1) d WHERE code = 5` over a non-numeric row the inner filter excluded (probe-confirmed), where the simulator answers the row — the same answer it gave before the push existed.
 The eligibility is recorded at parse as a `PredicatePushdown` delegate on the plan, which is also how every non-body `LateralPlan` (a TVF, VALUES, OPENJSON, PIVOT, a catalog view, a linked-server query) declines: it carries none.
@@ -120,6 +125,32 @@ Every decline is silent — the conjunct simply stays where it was written.
 
 Cloned, never mutated, per the shared-plan contract in [`plan-cache.md`](plan-cache.md): the push builds a new `Selection` over the same parse-time tree and a new `FromSource` reading through it, both per execution.
 A view's *stored definition* is untouched, so `sp_helptext` and the dependency surfaces (which read `View.BodyText`, not plans) see the view as written.
+
+### Join-key reduction of a grouped body
+
+A filter written above a `GROUP BY` body reaches it by name; a filter written on the *other side of a join* to it doesn't, and the body then aggregates every group in the table for a join that can use one of them.
+`ReduceGroupedBodiesByJoinKeys` (same file, run between the push above and the materialization below) closes that: for a still-deferred grouped source equi-joined on one of its grouping columns, it collects the **distinct values the partner side carries in the joined column** and pushes them below the body's grouping as a membership predicate — real's semi-join reduction.
+Measured on WWI's `Customers c JOIN (SELECT CustomerID, SUM(…) FROM Invoices ⋈ InvoiceLines GROUP BY CustomerID) d ON d.CustomerID = c.CustomerID`: filtered to one customer **156 ms → 1.4 ms** (live 3.3 ms), filtered to thirty **200 ms → 31 ms** (live 61 ms), and the joined-UPDATE spelling of the same shape **164 ms → 10 ms** (live 63 ms).
+A partner whose keys are most of the table reduces to itself and is neutral — the WWI report shape filtered to 459 of 663 customers measures the same either way.
+
+**Legality.** The reduction is *implied by the join* rather than added to it, so unlike the pushdown above it needs no residual copy: the equi-join `ON` stays exactly as written, and for every surviving tuple the body's key equals the partner's, so a body row whose key no partner row carries can match nothing.
+The partner may itself be narrowed here by the enclosing WHERE (the same seek `NarrowJoinSources` applies, run here and discarded — that pass runs on its own later), which is sound for that pass's own reason: those conjuncts stay residual over the whole result, so a partner row they exclude belongs to no surviving tuple.
+A NULL partner key is left out of the set — NULL never equi-joins, so no body row it would have kept survives the join anyway.
+
+**The body must not be preserved by an outer join** (`BodyIsReducible`): dropping a row of a preserved side would drop a result row real returns, while dropping one from an inner or NULL-supplied side can only drop tuples the join or the WHERE discarded.
+So a `LEFT` join preserves everything left of the source it attaches, a `RIGHT` join preserves the source it attaches, `FULL` preserves both, and `APPLY` declines outright (its right side re-executes per outer row rather than reading a fixed rowset), as does a parenthesized join group.
+Each of those declines is pinned by a row-level test whose values real returns.
+
+**The partner has to be a cheap bounded read**: a re-enumerable rowset rather than another deferred body, carrying no `READPAST` (whose skip set is what the two reads would disagree about) and no lock plan whose footprint the extra read would change (a SERIALIZABLE phantom fence, tx-scoped row locks), and fitting the 1024-row cap — past which the reduction declines silently, since a key set that large neither narrows the body much nor stays cheap to carry.
+The probe **reads the partner ahead of the join**, which is one extra bounded read of a source the join reads again; for a read that reordering is invisible, and for a joined mutation the partner may be the target itself — where the pre-statement rows are what the enumeration reads however many times it runs (the Halloween reasoning in [`dml.md`](dml.md#joined-row-sources)).
+The two reads agree unless another session commits between them, the window READ COMMITTED already leaves open between any two reads of one statement — and `READPAST`, whose skip set makes disagreement the normal case rather than a race, is exactly what the gate above turns away.
+
+The key set travels as one more **template** (`KeySetMembership`) over the same seam the written conjuncts use, so it crosses into a view body's later parse and down a chain of bodies identically.
+It is written as a set rather than as the equality family an `IN` list decomposes into, so a body the filter can't seek pays one hash lookup per row instead of one comparison per key per row — and it still *exposes* that family, which is what lets the seek underneath the body probe once per key.
+Membership is the `=` operator's own semantics: both sides are coerced to the promotion target `TryPromoteComparableKeyTypes` settles for the joined pair, the same contract the equi-join hash buckets rest on.
+A grouped **view** reference reports its eligibility from the updatability rejection CREATE VIEW recorded (`Aggregate` / `GroupBy`) — the body isn't parsed until the reference executes, and that is the only shape metadata available before it is.
+
+A joined UPDATE / DELETE takes this pass too, through `Selection.PrepareMutationJoinSources`, with no DML-specific code: the pass only ever rewrites a deferred body's slot, which the mutation target — a base table the write pipeline addresses row by row — can never be.
 
 ### Narrowed-source-first reorder
 
@@ -150,6 +181,9 @@ The original equi-join win still stands — with ≥1 equi-key the inner is inde
 - Bucket keys reuse GROUP BY's collation-consistent `SqlValueKey`, coercing both sides to the `SqlType.Promote` common type so equality matches the `=` operator exactly.
 - Bucket membership is a forward-linked chain over row ordinals (`buckets[key] = (head, tail)` + one shared `next` list) rather than a `List<int>` per key — the per-key list allocations and growth churn were the hash build's dominant profiled cost on a 228k-row build side.
   Forward links keep probe emission in build order, byte-identical to the per-key-list behavior.
+  The chain is appended **through a ref into the value slot** (`CollectionsMarshal.GetValueRefOrAddDefault`), so a build row costs one hash-and-probe: asking `TryGetValue` and then writing through the indexer hashed every repeated key twice, a third of a 228k-row build's CPU.
+  Key computation writes into one reused scratch array; the first row of a key hands that array to the dictionary and takes a fresh one, so an allocation is paid per *distinct* key rather than per row.
+  Both row lists are sized from the backing table's row count where there is one, and the matched-right bitmap is allocated only for RIGHT / FULL, the two kinds that read it.
 - NULL keys are excluded (NULL = NULL is UNKNOWN) but retained for the unmatched-right tail of RIGHT / FULL.
 - Residual non-equi conjuncts are re-checked per probed candidate (a conjunct passes only when it evaluates to `true`, matching the streaming path's `== true` gate).
 - Falls back to the nested-loop operators below for non-equi ON predicates, the lateral / derived-table right sides the materialization pass below declines, CROSS / APPLY, and key-type pairs `SqlType.Promote` rejects (LOB, collation conflict, cross-category) — preserving their exact per-row error behavior.
@@ -161,7 +195,7 @@ See [`dml.md`](dml.md#match-strategies).
 
 A `LateralPlan` source — a derived table, a CTE reference, a view, a catalog view, a TVF, `VALUES`, `OPENJSON` — is re-executed per left-side row by the streaming operators, and `TryPlanEquiJoin` rejects it outright (line "`sources[level].LateralPlan is not null`").
 The execution-time `MaterializeUncorrelatedDeferredSources` pass (`Selection.Execution.cs`, run at the top of the row-source closure before any projection path builds its resolver closures) replaces the ones whose rows can't change across one enumeration with a once-materialized `Rows` list, so the nested loop stops re-executing them and `TryPlanEquiJoin` keys them into the O(L + R) hash build.
-It runs *after* the WHERE pushdown above, so what a source materializes is already narrowed.
+It runs *after* the WHERE pushdown and the join-key reduction above, so what a source materializes is already narrowed.
 It clones the array rather than mutating the plan's own `FromSource[]`, per the shared-plan contract in [`plan-cache.md`](plan-cache.md).
 
 Two kinds of source qualify:

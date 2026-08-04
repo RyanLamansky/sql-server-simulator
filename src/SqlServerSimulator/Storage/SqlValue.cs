@@ -931,6 +931,17 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
 
     public override int GetHashCode()
     {
+        // Fast path for a non-NULL value whose whole identity is (type,
+        // primitive) — every integer, bit, date/time and approximate type.
+        // Equality for those ends at the same pair, and a value with a null
+        // reference can never be equal to one carrying a reference (equal
+        // values share a type, and a type's storage shape is fixed), so the
+        // split is consistent. The general path below runs three rounds of the
+        // combiner plus a type-test chain, once per row wherever a join, a
+        // GROUP BY or a seek keys on the value.
+        if (this.reference is null && !this.IsNull && this.Type is not SqlVariantSqlType)
+            return HashCode.Combine(this.Type, this.IdentityPrimitive);
+
         var hash = new HashCode();
         hash.Add(this.Type);
         hash.Add(this.IsNull);

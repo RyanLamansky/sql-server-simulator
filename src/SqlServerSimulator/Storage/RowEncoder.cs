@@ -46,6 +46,13 @@ internal static class RowEncoder
     internal const int VarPointerSize = 1 + 4 + 4;
 
     /// <summary>
+    /// Column count up to which <see cref="EncodeRow(ReadOnlySpan{HeapColumn}, ReadOnlySpan{SqlValue}, Heap?)"/>'s
+    /// per-row scratch comes off the stack. Past it the scratch is heap
+    /// allocated, so a 1024-column table can't blow the frame.
+    /// </summary>
+    private const int StackScratchColumns = 64;
+
+    /// <summary>
     /// Encodes a row of values against a <see cref="SqlType"/>-only schema.
     /// LOB-eligibility is determined by <see cref="SqlType.IsLob"/> alone
     /// (i.e. <c>text</c>/<c>ntext</c>/<c>image</c>); MAX siblings of
@@ -62,6 +69,20 @@ internal static class RowEncoder
             columns[i] = new HeapColumn(string.Empty, schema[i], maxLength: null, nullable: true);
         return EncodeRow(columns, values, lobStore: null);
     }
+
+    /// <summary>
+    /// Array-schema form of
+    /// <see cref="EncodeRow(ReadOnlySpan{SqlType}, ReadOnlySpan{SqlValue})"/>,
+    /// which overload resolution binds every caller holding its schema as an
+    /// array to. It routes the conversion through
+    /// <see cref="RowDecoder.ColumnsFor"/>, so a result set encoding row after
+    /// row against one schema builds its <see cref="HeapColumn"/>[] once —
+    /// the span form rebuilt the array <em>and</em> a column object per column
+    /// on every row, which on a five-column, 73k-row <c>SELECT … INTO</c> was
+    /// the largest single allocation in the statement.
+    /// </summary>
+    public static byte[] EncodeRow(SqlType[] schema, ReadOnlySpan<SqlValue> values) =>
+        EncodeRow(RowDecoder.ColumnsFor(schema), values, lobStore: null);
 
     /// <summary>
     /// Encodes a row of values against a column-aware schema. When
@@ -116,14 +137,18 @@ internal static class RowEncoder
         var fixedSectionLength = 0;
         var varColumnCount = 0;
         var varDataLength = 0;
-        var varByteCounts = new int[n];
+        // Per-row scratch, taken off the stack for the column counts a table
+        // actually has: an INSERT-heavy statement paid two heap arrays per row
+        // for state that dies with the row. A wider schema falls back to the
+        // heap rather than growing the frame without bound.
+        var varByteCounts = n <= StackScratchColumns ? stackalloc int[n] : new int[n];
         // Pre-resolved off-row pointers for values pushed to a chain on
         // <paramref name="lobStore"/>: indexed by schema position; entry is
         // (chainHead, totalLength) when the value is non-NULL AND the encoder
         // chose to store it off-row (always for LOB-eligible columns when a
         // store is provided; for bounded var columns when the row otherwise
         // wouldn't fit).
-        var chainPointers = new (int Head, int Length)?[n];
+        var chainPointers = n <= StackScratchColumns ? stackalloc (int Head, int Length)?[n] : new (int Head, int Length)?[n];
         var bitsInRun = 0;
 
         for (var i = 0; i < n; i++)

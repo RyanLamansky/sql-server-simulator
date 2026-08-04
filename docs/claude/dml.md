@@ -2,7 +2,7 @@
 
 ## UPDATE / DELETE
 - Bare `UPDATE table SET ... [WHERE]` and `DELETE [FROM] table [WHERE]`.
-- **Target scan is seek-narrowed** when the single-table WHERE carries an indexable equality / IN / range (`Selection.SeekMutationTarget`), instead of walking the whole heap — the same per-`Heap` seek cache the SELECT path and FK enforcement use.
+- **Target scan is seek-narrowed** when the single-table WHERE carries an indexable equality / IN / cross-column OR / range (`Selection.SeekMutationTarget`), instead of walking the whole heap — the same per-`Heap` seek cache the SELECT path and FK enforcement use.
   The mutation loop re-runs the full WHERE per row (residual filter) and X-locks only the rows it commits, so it's a pure narrowing; positioned (`WHERE CURRENT OF`) mutations keep the scan.
   See [`indexes.md`](indexes.md#update--delete-target-seeking).
   The multi-table (joined) form's **target** isn't seek-narrowed either — its *other* sources are, see [Joined row sources](#joined-row-sources) below; `MERGE` narrows its target via loop inversion (see its section below).
@@ -54,6 +54,9 @@
 - **Deferred sources materialize once per enumeration**, exactly as they do for a SELECT and under the same gates (non-APPLY, non-leftmost, query-body-only, and the `NEWID()` volatility decline) — see [`joins.md`](joins.md#deferred-sources-materialize-once-per-enumeration).
   A derived table / CTE reference / view joined to the target stops re-executing per target row and keys into the O(L + R) hash path instead.
   Measured on WWI's `UPDATE #t … FROM #t t JOIN (<grouped aggregate over Invoices ⋈ InvoiceLines>) d ON …` over **30** target rows: **6,297 ms → 164 ms** (live 64 ms), which is the derived body's own once-through cost plus the 30 writes.
+- **A joined `GROUP BY` body is reduced to the join's key set** (`ReduceGroupedBodiesByJoinKeys`, run before the materialization so what materializes is the reduced body) — see [`joins.md`](joins.md#join-key-reduction-of-a-grouped-body) for the legality and the gates.
+  The pass reaches the mutation path unchanged: it only ever rewrites a *deferred body's* slot, which the target — a base table the write pipeline addresses row by row — can never be, and the partner side it reads for keys may well be the target, where the pre-statement rows are what the enumeration reads however many times it runs (the Halloween reasoning below).
+  The WWI `UPDATE #t … FROM #t t JOIN (<grouped aggregate>) d ON …` over 30 target rows measures **10 ms** (live 63 ms) with the aggregate covering 30 customers; a body the reduction declines pays the full 663-customer aggregate (~160 ms on the same shape).
 - **The WHERE narrows every source but the target** (`NarrowMutationJoinSources`), so a joined source carrying an indexable equality seeks before the join runs.
   It is the same pure narrowing it is in a SELECT because the statement re-runs its whole WHERE per join tuple, so a matched conjunct is still the filter it was.
   Every source is gated by the read path's `IsSeekNarrowingTarget` — the leftmost included, unlike the read path's unconditional leftmost attempt, since extending that to a mutation would change which key ranges a SERIALIZABLE reader locks around a write.
@@ -249,6 +252,10 @@ Probe-confirmed schema-inference rules:
   Destination's `IdentityState` starts fresh with the source's seed+increment and tracks the copied values via `ObserveExplicit`.
 - **Implementation**: `Selection.IntoTarget` + `Selection.DestColumnSchema` (a `HeapColumn[]`) are captured at parse time inside `ParseInner` and propagated through `CombineSetOps` / `ApplyTopLevelOrderBy`.
   `Simulation.SelectInto.cs:ExecuteSelectInto` creates the heap table, runs the Selection, encodes each row through `RowEncoder.EncodeRow`, appends to the dest's heap, and tracks the active transaction's undo log so a `ROLLBACK` unwinds both the table creation (for temp tables) and the row writes.
+- **The copy reads the result set's values, not its bytes.**
+  A FROM-bearing `SELECT` projects `SqlValue[]` rows; the copy reads `SimulatedSqlResultSet.RowValues`, taking those projected rows directly, and decodes only for the producers that genuinely emit encoded rows (a set operation, a view body, `OPENJSON`).
+  Routing through `RowBytes` would encode each projected row into a page image only to decode it straight back for values the projection had already computed.
+  The two are answer-for-answer identical (mutation-checked: putting the round trip back passes every test), and it is worth about a third of the statement — on a 73k-row joined copy, 164 MB down to 91 MB allocated.
 - **Schema rules + validation** live in `Selection.SelectInto.cs:ComputeIntoDestSchema`.
   Nullability uses `Expression.ResultIsNullable` (a virtual whose default is `true`, overridden per expression kind), threaded a `NullabilityContext` carrying the parsing batch plus the column nullability and column type resolvers — the type resolver is what tells string `+` from arithmetic `+`, and the batch is what evaluates the CASE family's folded conditions.
   Identity uses `UnwrapDirectRef` to drill through `NamedExpression` layers.

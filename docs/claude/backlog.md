@@ -99,21 +99,30 @@ Remaining phases, roughly in value order:
   Possible lever if paged drains ever matter: recognize index-supplied order in the `OFFSET/FETCH` path (real's plan shape) to skip the sort and bound the scan.
   Perf polish, not a fidelity gap.
 
-### Complex-query execution — residuals of the subquery-hoisting / join-reorder work
+### Complex-query execution — perf residuals
 
-The complexity battery (`.vs/workload` `compare` subcommand, local-only) closed the per-outer-row re-execution cliffs — uncorrelated WHERE/select-list subqueries, `IN (SELECT …)`, and non-leftmost derived-table / CTE / view joins all run once per statement or enumeration — and added WHERE pushdown into every base-table source plus the narrowed-source-first INNER reorder (see [`subqueries.md`](subqueries.md) / [`joins.md`](joins.md)).
-What the bundle deliberately left per-row or declined, in measured-impact order:
+The complexity batteries (`.vs/workload` `compare` subcommand + `complex*.sql`, local-only) are the standing measurement instrument; sub-4× ratios against the live reference are constant-factor or parallelism territory, larger ones name a missing execution strategy.
+Open residuals, in measured-impact order:
 
-- **DML statements don't run the read-path passes** — `Simulation.Update.cs` / `Delete.cs` / `JoinViewDml.cs` call `EnumerateJoinedRows` directly, so `UPDATE … FROM t JOIN (SELECT … GROUP BY …) d ON …` keeps the per-row derived-body re-execution the read path lost, and neither the pushdown nor the reorder reaches an `UPDATE … FROM <chain>`.
-  Same fixes apply; kept out to bound the bundle's blast radius to reads.
-- **Correlated `EXISTS` / `IN` stay per-outer-row seeks** — a correlated equality subquery seeks per row (~2 µs/row), so a 73k-row outer runs ~10× live's hash semi-join; decorrelation to a semi-join is the lever.
+- **DML through a join view bypasses the joined-source passes** — `JoinViewDml.cs` enumerates without the materialization/narrowing preparation `UPDATE`/`DELETE` take, and the **narrowed-source-first reorder is declined for every DML statement**; its WHERE names view output columns resolved through the chain resolvers, so wiring it is a name-resolution correctness question before a perf one.
+- **Correlated `EXISTS` / `IN` stay per-outer-row seeks** — a correlated equality subquery seeks per row (~2 µs/row), so a 73k-row outer runs ~3-10× live's hash semi-join; decorrelation to a semi-join is the lever.
   The same drive-side choice loses when the inner is tiny: `x IN (SELECT … WHERE <3-row filter>)` probes 73k rows against a 3-value set where real drives from the 3 rows (~14×).
+- **`COUNT(DISTINCT …)` per group over a big join sits at ~2× live** — the residual is the equi-join hash build over the 228k-row side plus per-group `HashSet` growth (measured 27% + 22% of the query), join-strategy / DISTINCT-equality work rather than aggregate-path work.
+  Build-side choice by estimated row count (build the smaller side) is the natural first lever.
 - **Generator-backed FROM sources (TVF / `VALUES` / `OPENJSON` …) stay per-row** — their arguments bind in the enclosing FROM's scope, so materializing them needs either real's own Msg 4104 rejection of the correlated shape (see the over-permissive register) or a parse-time no-argument-reads-a-column flag.
 - **Reorder decline list, narrowable** — a single-source ON conjunct (`ON a.k = b.k AND b.flag = 1`) declines the whole reorder where it is WHERE-equivalent for an all-INNER chain and could attach at its source's step; a chain whose outer joins all follow the driving position could still commute its INNER prefix; a source narrowed to more than 128 rows never drives even where it would win.
-- **Window top-N constant factor** — `ROW_NUMBER() OVER (PARTITION BY …)` filtered to `rn = 1` over 73k rows runs ~5× live (live sorts 16-way parallel); range seeks (a date-range WHERE still scans) and the scan-bound year-aggregate reports (~2-3× live, intra-query parallelism territory) are the other steady-state gaps the battery re-confirmed.
+- **Grouped-body key reduction declines expression groupings** — a body grouping on `MONTH(d)`-style expressions takes no join-key reduction (only plain grouping-column projections qualify), and `ROLLUP` / `CUBE` / `GROUPING SETS` streams still buffer where a single grouping set streams.
+- **Per-group window top-N still full-sorts** — `ROW_NUMBER() OVER (PARTITION BY …)` filtered to `rn = 1` over 73k rows runs ~5-8× live; the grouped-stream bounded heap covers `TOP … ORDER BY <aggregate>` but not the windowed filter shape.
+  Range seeks (a date-range WHERE still scans) remain the other missing seek strategy.
+- **The reader path encodes-then-decodes every top-level SELECT** — `DispatchOneStatementCore` and `ReplayCachedSelection` materialize `RowBytes.ToList()`, so a projecting SELECT encodes each row into a page image the reader decodes back cell by cell; the `SqlValue[]` row form and its `ValueArrayCursor` exist to skip exactly that and never reach a client (`SELECT … INTO` and the other internal consumers read `RowValues`).
+  ~170 B/emitted row product-wide, but changing it is a client-visible type-surface move that wants its own bundle and regression sweep.
+- **Intra-query parallelism is the systematic remainder** — the scan-bound shapes that survive every constant-factor pass (`daterange.*`, `conditional.agg_pivot`, `window.three_sorts`, `union.dedup_big`, the year-aggregating reports) sit at 1.5-3.5× live with real running DOP 8, and profiling shows the simulator using *less CPU* than real on several of them — the gap is parallel execution, not waste.
+  An unprofiled small neighbor: a `TOP (1000)` ordered by the PK over a wide table sits ~3× (`format.heavy_1000`).
 - **`Heap.RowCount` walks the page list** once per join level per execution to feed the seek-vs-hash ratio rule — O(pages), cheap at current sizes; a cached count on `Heap` removes it if it ever shows up.
-- **A subquery nested inside an APPLY body can't read the outer scope** — `CROSS APPLY (SELECT … WHERE EXISTS (SELECT 1 FROM o WHERE o.k = c.k))` raises Invalid column name where live answers (pre-existing, surfaced by the bundle's probing; sim-only failure, so over-restrictive).
-- **A leftmost derived table draws `NEWID()` once** where real draws per output row — the leftmost source has always executed exactly once; the bundle's `NEWID` gate covers only the sources it newly materializes.
+- **`HeapPage.InstallForward` trusts its 6-byte-minimum caller contract** — a slot extent under 6 bytes would be overwritten into its neighbor, but the row encoder's header (flags + fixed offset + column count + NULL bitmap) makes every emitted row ≥ 6 bytes, so the contract holds for everything SQL-reachable (synthetic sub-6-byte pages can violate it).
+  A debug assertion on the extent at the write site is cheap hardening if the encoder's floor ever changes.
+- **A subquery nested inside an APPLY body can't read the outer scope** — `CROSS APPLY (SELECT … WHERE EXISTS (SELECT 1 FROM o WHERE o.k = c.k))` raises Invalid column name where live answers (sim-only failure, so over-restrictive).
+- **A leftmost derived table draws `NEWID()` once** where real draws per output row — the leftmost source executes exactly once by construction; the deferred-source `NEWID` gate covers only the sources the materialization pass touches.
 
 ### sqllogictest differential sweep — surfaced gaps
 
@@ -241,6 +250,8 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **An unreferenced CTE is accepted** where real raises **Msg 422** (probed 2026-08-02 while closing the subquery permission seams); nothing leaks — an unreferenced CTE's plan never executes — so this is a pure parse-acceptance divergence.
 - **A generator-backed FROM source reading a sibling column is answered** — `FROM t JOIN STRING_SPLIT(t.csv, ',') s ON …` correlates per row here where real raises **Msg 4104** (only APPLY grants laterality); probed 2026-08-04 while bounding the deferred-source materialization, which excludes generator sources for exactly this reason.
 - **`NEXT VALUE FOR` inside a derived table / CTE / view / UDF body is accepted** where real rejects the whole batch with **Msg 11719** at severity 15 (probed 2026-08-04); the sequence advances here, so the divergence leaks state, not just acceptance.
+- **`LIKE` over-matches an `nvarchar` subject's trailing spaces** — `N'x  ' LIKE N'x'` matches here and not on real (probed 2026-08-04 while profiling the scan path), so a row real excludes comes back.
+  The companion divergence runs the other way — `LIKE` reads only the collation's case half, so an accent-insensitive column matches accent-sensitively, dropping rows real returns — and both close together in the LIKE matching engine → [`collations.md`](collations.md#known-gaps).
 - **Non-Framework CLR assemblies load** — real resolves every `AssemblyRef` against a fixed .NET Framework catalog and raises **Msg 6503** otherwise (probe-confirmed for .NET 10 and for .NET Standard 2.0); the simulator runs on .NET so all of them bind, which is also what lets the tests emit a fixture assembly without a Framework toolchain.
   → [`clr-assemblies.md`](clr-assemblies.md#divergences).
 - **A join view over a join view is Msg 4405** for the INSERT or UPDATE naming one base table that real accepts, flattening both levels (probe-confirmed).
@@ -343,6 +354,7 @@ Of the ~990 lines in fully-uncovered methods, ~376 are `DebugDisplay` / `ToStrin
   A PERSISTED computed column is accepted and does have a slot, so it takes the seek path.
   Left in place as a guard on the storage layout rather than deleted.
 - **`ClrAssemblyMetadata.ComputePublicKeyToken` / `DescribeReference`** — strong-named assembly identity and the assembly-reference description.
+- **Two of `LikePatternBuilder.Cache`'s key components can't be varied by any test** — the resolved-collation (case-sensitivity) and promotion-target components are per-expression-node constants in every shape reachable through SQL, so mutation-testing them catches nothing; they guard hypothetical future callers that rebind a node's collation or operand type between executions.
 
 Worth re-measuring after a large bundle rather than routinely, and worth acting on when it does run: **nothing this pass surfaced was merely an untested-but-correct path.**
 It found two pieces of dead code — a duplicated MERGE type resolver, and an unreachable ON-UPDATE-CASCADE branch whose stub threw an exception saying so — and every gap that was then covered turned out to be hiding a behavior bug.

@@ -148,6 +148,7 @@ Exactly two places discharge it:
 - **`Selection.SettleSerializablePhantomFence`**, called from `MaybeApplyIndexSeek` once the WHERE conjuncts have been collected and *before* any candidate address is read.
   It walks the table's keys then its indexes (so the choice doesn't ride on dictionary order), scoring each by how deep an **equality prefix** the conjuncts pin on it plus whether a range bound lands on the key column right after that prefix, and acquires the plan's range mode tx-scoped over the winning tuple interval.
   The longest prefix wins, a bound continuation breaks a tie, and an `IN` list collapses to the hull of its values per column.
+  Only *top-level* conjuncts are read, so a cross-column `OR` pins no interval and falls back to the table-S below even though the read itself narrows to a [union of seeks](indexes.md#union-of-seeks-a-cross-column-or) — narrowing which rows a read touches never narrows what it fences.
 - **`BatchContext.EnsureSerializableTableLock`**, which takes table-S tx-scoped instead.
   Reached from `WrapWithRowConflictChecks` (the un-narrowed scan's own iterator), from the ordered-scan path, and from `SettleSerializablePhantomFence` itself when no conjunct offers an interval.
   Idempotent per batch per table, since a source can be re-enumerated many times.

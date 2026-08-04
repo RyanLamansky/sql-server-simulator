@@ -58,6 +58,7 @@ The parallel `SqlValue.FromString(type, value)` similarly preserves the target t
   Replaces the old parse-time `PeelExplicitCollation` walk, which only caught explicit COLLATE postfixes.
   Conflict raises Msg 468 with operator name `"like"`.
   The resolved `Collation.CaseSensitive` flag flips `RegexOptions.IgnoreCase`.
+  Translating the pattern into that regex is memoized per node (`LikePatternBuilder.Cache`, shared with `PATINDEX`) — see [the pattern memo](#the-pattern-translation-is-memoized-per-node) below.
 - **String concat (`+`)** — `Add.StringConcatenation` hands the operand pair to `UnresolvedCollation.Settle`, which either settles it, marks the result unresolved, or raises (see [the propagation rules](#an-unresolved-collation-propagates--coercibilitynocollation)); the `varchar`-family raise is **Msg 457 State 1**, and real calls string `+` *add*.
   `TwoSidedExpression.GetSqlType` runs the same body so the projection schema's result type matches the runtime value's type — RowEncoder rejects mismatched instances, so the GetSqlType / Run paths must stay aligned.
 - **ANSI concat (`||`)** — `Concatenate.ResolveResultType` (shared by `Run` and `GetSqlType`) settles the same way naming the **`concat`** operator where `+` names `add` (probe-confirmed both ways).
@@ -65,6 +66,21 @@ The parallel `SqlValue.FromString(type, value)` similarly preserves the target t
   `ISNULL` is the exception that never conflicts: it takes its first argument's collation outright rather than unifying (probe-confirmed — `ISNULL(<CI col>, <CS col>)` returns the rowset), so an already-unresolved argument rides through it.
 - **`CONCAT` / `CONCAT_WS`** — `StringConcat.CollationAccumulator` left-folds the string arguments (`CONCAT_WS`'s separator participates like any other; non-string arguments stringify into the accumulated collation and contribute nothing), so the result carries a column's collation instead of the database default.
   An unresolvable fold marks the result rather than raising, for **both** string families — see [Msg 451](#msg-451--the-output-column-message) for where that lands.
+
+## The pattern translation is memoized per node
+
+`LIKE` / `NOT LIKE` / `PATINDEX` translate a SQL pattern into a .NET `Regex`, which is by far the expensive half of the predicate: building one parses the pattern, allocates a node tree and emits interpreter code, at roughly a microsecond and a few kilobytes.
+That ran once per row.
+`LikePatternBuilder.Cache` — one instance on each `LikeExpression` / `PatIndex` node — holds the last translation and its whole input: the **pattern text**, the **escape character**, and the resolved collation's **case sensitivity**.
+A literal or a parameter hands out the same pattern for every row of a statement, so one entry is enough; a per-row pattern column misses every time and rebuilds exactly as it did before, one reference compare later.
+
+On a 228k-row `WHERE Description LIKE 'USB%'` this is 285 ms and 782 MB down to 35 ms and 68 MB — the same scan reading the column and doing nothing else costs 23 ms and 68 MB, so the residual is the matching itself.
+
+The memo is read and written concurrently, because the plan cache shares a node across sessions: the entry is immutable and published through `Volatile`, and two threads racing to fill it build equivalent regexes.
+`Regex` matching is itself thread-safe.
+
+Two of the three key components are per-node stable in every shape reachable through SQL today — the escape character can vary per row (`… LIKE 'A_B' ESCAPE <expression>`), but the resolved collation can't, since every route to a second collation for one node (`COLLATE` postfix, a `CASE` over two differently-collated columns, a set operation) is settled statically or is a Msg 451 / 468 conflict.
+Case sensitivity stays in the key anyway: the memo's contract is the whole input, not the parts that happen to vary.
 
 ## Compile-time binding
 
@@ -568,6 +584,14 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
 
 ## Known gaps
 
+- **`LIKE` reads only the collation's case half.**
+  The match runs as a `CultureInvariant` regex whose `IgnoreCase` flag comes from `Collation.CaseSensitive`, so an **accent-insensitive** collation still matches accent-sensitively: over `N'ÜSB cable'` in a `Latin1_General_CI_AI` column, `LIKE N'USB%'` answers no on the simulator and yes on real (probe-confirmed).
+  The same holds for the KS / WS suffixes.
+  Closing it means matching through `CompareInfo` rather than a regex, which is a matching-engine change — the wildcard grammar has no `CompareInfo` equivalent, so it wants a purpose-built matcher.
+  Equality, `IN`, `BETWEEN`, grouping and `ORDER BY` all read the full collation; this is `LIKE` / `PATINDEX` only.
+- **`LIKE` grants trailing-space slack real doesn't grant an `nvarchar` subject.**
+  The anchored translation ends `[ ]*\z`, so `N'x  ' LIKE N'x'` is true on the simulator and false on real (probe-confirmed).
+  Real's slack comes from ANSI padding on the *stored* `char` / `varchar` value rather than from the match, so the fix is to drop the regex's slack and let the storage rules produce it — which wants its own probe across `char` / `varchar` / `nvarchar` and the `ANSI_PADDING` matrix before it moves.
 - **An unresolved collation reaching a consumer the marker model doesn't cover.**
   The catalog under [Msg 4191](#msg-4191--the-consuming-operation-reports) is what probing established; a value with no collation that reaches full-text, spatial, XML or the JSON builders isn't gated, and a conflict that survives to execution falls back to the left operand's collation rather than raising.
 - **`IN (SELECT <conflicted> …)` reports the subquery's Msg 451 where real reports the comparison's Msg 4191** (`equal to`), and `SET @v = (SELECT <conflicted varchar> …)` reports Msg 451 where real reports Msg 456.

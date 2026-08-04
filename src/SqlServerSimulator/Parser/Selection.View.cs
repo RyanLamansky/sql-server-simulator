@@ -59,6 +59,14 @@ partial class Selection
         {
             PredicatePushdown = templates => ForView(
                 view, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates]),
+            // Whether the body groups can't be known here — it isn't parsed
+            // until the reference executes — but CREATE VIEW already classified
+            // it: the updatability rejection names the aggregate / GROUP BY
+            // shapes, which is exactly the family a join's key set may reduce.
+            // The two are reported together, so a body that aggregates without
+            // grouping reaches the key collection and then declines the push.
+            PushdownIsGrouped = view.RejectionReason
+                is ViewUpdatabilityRejection.Aggregate or ViewUpdatabilityRejection.GroupBy,
         };
     }
 }

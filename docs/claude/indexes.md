@@ -92,7 +92,8 @@ Peeling pure conversions matches real SQL Server keeping `col = CAST(<const> AS 
 Every matched conjunct stays in WHERE as a residual filter, so the seek can only narrow the row source, never change results; the per-component key promotion / collation rules mirror the equi-join hash path exactly (`SqlType.Promote` + `CoerceTo` + collation-coercibility `Resolve` guard, applied column-by-column into a multi-value `SqlValueKey`).
 
 A WHERE conjunct of the shape `col IN (v1, v2, …)` — or its equivalent OR-of-equalities `col = v1 OR col = v2 OR …`, which EF Core emits for `Contains(...)` against a small list — decomposes through the same path via `BooleanExpression.TryGetEqualityFamily`.
-Every candidate must be a stable value and they must all anchor on the same column (mixed-column ORs like `a = 1 OR b = 2` fall through to scan); a single column's binding then becomes a **multi-value** equality.
+Every candidate must be a stable value and they must all anchor on the same column; a single column's binding then becomes a **multi-value** equality.
+A mixed-column OR (`a = 1 OR b = 2`) is not a family one column can hold and takes the [union of seeks](#union-of-seeks-a-cross-column-or) instead.
 Surviving probes are unioned into one promoted type (pairwise `SqlType.Promote` across candidates), NULL candidates are silently dropped (never equal under `=`), and the seek expands across the **cartesian product** of per-column probe arrays — so `a IN (1, 2) AND b = 3` fires two composite-prefix probes against the (a, b) cache and `a IN (1, 2) AND b IN (3, 4)` fires four.
 Each tuple is one hash lookup against the same per-Heap cache; a row can only sit in one bucket per probe column, so the unioned candidate stream contains no duplicates.
 `NOT IN` is an AND-of-inequalities (not a positive equality family) and declines.
@@ -106,6 +107,7 @@ This is the path that collapses a **correlated `EXISTS` / `IN` / scalar subquery
 Measured: a correlated `EXISTS` over a 4000 × 16000-row pair dropped from ~1480 ms to ~5 ms, on par with live SQL Server.
 An inner reading through a **join** narrows the same way — the enclosing-scope value is stable for the inner plan's whole execution whether that plan has one source or several, which is a classification the multi-source pushdown makes rather than a second mechanism (see [`joins.md`](joins.md#where-pushdown-into-every-base-table-source)).
 A scan sitting under a **view or derived table** is reached the other way round: the enclosing WHERE's conjunct is pushed into the body first, and the seek here then sees it as the body's own (see [`joins.md`](joins.md#where-pushdown-into-a-view--derived-table-body)).
+A scan under a **grouped** body is reached the same way by the join above it, whose partner keys arrive as an `IN` the seek probes once per key (see [`joins.md`](joins.md#join-key-reduction-of-a-grouped-body)).
 
 The cache is **incrementally maintained**, not rebuilt on every write.
 The first seek against a heap builds its buckets from a full scan and activates the heap's bounded *mutation journal* (`Heap.ActivateSeekJournal`); thereafter a write appends a visible-row event (insert / delete / update, carrying the before/after row image) rather than invalidating the cache, and the next seek applies that delta (`Heap.SnapshotSeekJournalSince` → `CacheEntry.Apply`, traced as `CacheReplay`) instead of re-scanning.
@@ -175,6 +177,36 @@ Measured — synthetic (100 000 rows, PK `(cust, seq)`, 200 groups × 500 rows):
 Real data (WWI `Sales.OrderLines`, index `(StockItemID, PickingCompletedWhen)`, hot item ≈ 5 000 rows): a six-month picking window dropped ~6.5 → ~1.2 ms/query (~5.6×).
 The pure `cust = @c` group lookup holds parity before/after the entry widens, and the AW `Person.Person` name-browse (`LastName = @l AND FirstName >= @a AND FirstName < @b`, 211-row group under RCSI) holds baseline parity via the group fallback.
 
+### Union of seeks: a cross-column `OR`
+
+A top-level conjunct that is an `OR` whose **every disjunct seeks on its own** narrows to a union of those seeks (`TryComputeUnionCandidates`, traced `UnionSeek(table,n)` alongside `Seek`, `n` being the disjunct count) rather than falling to a scan.
+`WHERE o.CustomerID = 90 OR o.SalespersonPersonID = 16` is the shape: both columns are indexed, but no single column's equality family can express the disjunction, so without the union pass the read scans however well indexed both sides are.
+Real unions two Index Seeks under a Concatenation and dedupes; this does the same by **row address** — each disjunct fires its own probe set through the same per-`Heap` cache a lone equality would, and the `(page, slot)` candidates union through a `HashSet`, so a row several disjuncts match is read (and locked) exactly once.
+Dedup by address rather than by value is what makes that hold when two disjuncts match one row on two different columns.
+
+Semantics are exact by construction, on the seek's own standing contract: the whole original WHERE — the OR included — stays as the residual filter, and each disjunct's probe set selects a **superset** of the rows that disjunct matches, so their union is a superset of the OR's match set and the residual drops the rest.
+NULLs need nothing special: a NULL probe value is skipped as anywhere else, and a row NULL in every disjunct's column matches no probe and reads UNKNOWN in the residual.
+
+A disjunct's conjuncts are collected exactly as a WHERE's are, so an `AND` group inside the OR (`a = 1 OR (b = 2 AND c = 3)`) is **not** a decline — the group seeks on whatever prefix its own terms cover (composite prefix and range continuation included) and its remaining terms stay residual like everything else.
+Mixed same/cross-column (`a = 1 OR a = 2 OR b = 3`) is just three disjunct probes.
+
+It declines — silently, to the range seek or the scan — when any disjunct records no stable-value equality on a seekable non-LOB column of *this* source: a bare range or `IS NULL` / `NOT` disjunct, an expression-wrapped column (`ABS(b) = 2`), a non-indexed column, a column of another source, a value side reading a sibling of the same FROM.
+That is what keeps the **catch-all** shape (`@p IS NULL OR col = @p`) a scan, as it is on real.
+It also declines over a **probe cap** of 64 across the whole disjunction — counted structurally (the product of a disjunct's per-column probe counts, over every column it records) before any probe evaluates, since past that the one-pass scan beats dozens of bucket lookups plus a dedup set.
+
+Two ordering rules make the choice deterministic rather than value-dependent:
+
+- The claim is **exclusive with the IN-family path**: an OR that anchors on one column *is* the IN list `CollectColumnEqualities` already records as a multi-value equality, and is skipped here by a structural test (`IsSingleColumnEqualityFamily`) that doesn't ask which seek actually ran.
+- The union is tried **after** the equality-prefix seek and **before** the range seek, and takes the first structurally eligible OR conjunct in written order.
+  So a WHERE that seeks on its own conjunction keeps that single access path (the OR stays purely residual), a WHERE offering both an OR and a range bound takes the OR's point probes, and a correlated inner re-planned per outer row keeps one access path whatever the outer values are.
+  If the claimed conjunct's probes then fail to anchor (a NULL or cross-collation value side collapsing some disjunct's prefix), the read scans rather than passing the claim on — a declined *probe* doesn't mean the disjunct matches nothing, so its contribution can't be treated as empty.
+
+Everything downstream composes because this is just another way a source gets seeked: it rides the same snapshot / RCSI materializer and per-row lock pipeline, sits behind the same tx-scoped-row-lock decline, reports its deduped candidate count so a union on a **non-leftmost** joined source drives the join reorder like any other narrowing, and serves the **mutation** path through the same candidate core (`SeekMutationTarget`, so an UPDATE / DELETE whose WHERE is a cross-column OR seeks its target).
+MERGE's per-source target seek doesn't take it yet — `TryPrepareMergeTargetSeek` settles its structural question once for the whole statement (`HasSeekableLeadingPrefix` over the `ON` conjuncts) and would need the union's own plan hoisted out of the per-source delegate.
+The SERIALIZABLE phantom fence is settled from the *top-level* conjuncts before any candidate address is read and a disjunction pins no interval on any one key, so a fenced reader keeps the whole-table S while its read still narrows — narrowing which rows a read touches never narrows what it fences (see [`locking.md`](locking.md#what-the-reader-takes)).
+
+Measured (WWI, `Sales.Orders`, `CustomerID = 90 OR SalespersonPersonID = 16`): ~39 ms → ~5.2 ms, against ~6.5 ms on live SQL Server.
+
 All three single-table projectors — non-aggregate (`ProjectSqlRows`), aggregate (`BuildAggregateProjectionRows`), and window (`ProjectWindowedRows`) — narrow a single-base-table source through the seek, so `SELECT COUNT(*) … WHERE indexedcol = x` and `SELECT … OVER (…) FROM t WHERE indexedcol = x` both seek like their non-aggregate counterpart (without this the window projector silently full-scanned even when its WHERE was perfectly sargable, the regression that made running-total-per-parent EF queries scan the table).
 They also push single-source WHERE equality / range predicates onto **every** base-table source of a multi-source FROM before the join (`NarrowJoinSources` — the matched conjuncts stay in the residual WHERE, so narrowing any one source is semantics-preserving for every join kind), and reorder a pure INNER equi-join chain to drive from the source the pushdown narrowed hardest.
 The INNER / LEFT equi-join operator then **seeks the inner side per outer row** when that rowset is small relative to the inner and the inner is indexed on the join key — see [`joins.md`](joins.md).
@@ -207,7 +239,7 @@ ORDER BY elimination is the one index optimization that's **observable if wrong*
 ### UPDATE / DELETE target seeking
 
 A single-table `UPDATE t SET … WHERE …` / `DELETE FROM t WHERE …` narrows its target scan through the same seek cache rather than walking the whole heap.
-`Selection.SeekMutationTarget(table, where, batch)` builds a minimal single-source view of the base table, runs the **equality** (longest-prefix, IN-list / OR-family, composite) and **single-column range** analysis the `SELECT` path uses, and returns the seek-narrowed `(page, slot, bytes)` candidates — or `null` when the WHERE carries nothing seekable, so the caller keeps its `Heap.EnumerateRowsWithAddress()` full scan.
+`Selection.SeekMutationTarget(table, where, batch)` builds a minimal single-source view of the base table, runs the **equality** (longest-prefix, IN-list / OR-family, composite), **cross-column `OR`** (the [union of seeks](#union-of-seeks-a-cross-column-or), in the same order the query path tries it) and **single-column range** analysis the `SELECT` path uses, and returns the seek-narrowed `(page, slot, bytes)` candidates — or `null` when the WHERE carries nothing seekable, so the caller keeps its `Heap.EnumerateRowsWithAddress()` full scan.
 The candidate cores (`TryComputeEqualityCandidates` / `TryComputeRangeCandidates`) are factored out of the query path's `TrySeekByLongestPrefix` / `TrySeekByRange`, which wrap them with the read-path lock / snapshot materializer; the mutation path wraps the same cores with `MaterializeMutationCandidates` (dedup + tombstone-skip, yielding heap addresses to rewrite).
 
 Two properties make this a pure narrowing with no fidelity cost:

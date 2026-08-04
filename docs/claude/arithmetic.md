@@ -48,6 +48,23 @@ Hex (`'0x05'`) likewise rejected.
 WHERE on a varchar column compared against int halts on the first unparseable row (not isolated as per-row UNKNOWN).
 SQL Server's lazy-IN quirk (unparseable IN-list value suppressed when another matches) isn't modeled.
 
+### The promotion conversion of a written operand is memoized
+
+`WHERE OrderDate >= '2015-01-01'` promotes to `date`, so the literal's conversion — `DateTimeParse`, the whole per-style grammar of [`casting.md`](casting.md) — runs once and is reused for every scanned row; per-row re-conversion measures at **65% of a 73k-row filtered `SELECT … INTO`'s CPU**, more than the join, the projection and the write together.
+
+`StringCoercionMemo`, one instance per operand slot of a `CompareExpression` (and three on a `BETWEEN`: subject, lower, upper), holds the last conversion keyed on the source string's *reference*, its declared type and the target type, all by reference.
+Reference identity is the right key and not merely a cheap approximation: a string is immutable, so an identical instance under an identical (source type, target type) pair is the same call to a function of nothing else.
+A literal or a parameter hands out one instance per statement, which is what makes a single entry enough; a per-row string operand (`WHERE dv = <varchar column>`) misses every row and converts exactly as before.
+
+Two gates keep it from costing anything where it can't pay:
+
+- **the source must be a string**, which is what makes the key sound — the payload behind a non-string value can be a `byte[]`, whose contents a reference test wouldn't cover;
+- **the target must not be a string**, because a string-to-string promotion re-tags the same instance and would allocate an entry per row on an operand that varies, while the non-string targets are the parses (the date/time grammar, decimal, `uniqueidentifier`).
+
+A failed conversion is never memoized, so Msg 241 still surfaces from the row that carries the bad text, as many times as it did before.
+Like the [LIKE pattern memo](collations.md#the-pattern-translation-is-memoized-per-node) the entry is immutable and published through `Volatile`, since a cached plan shares the node across sessions.
+`InExpression` doesn't carry one — a list of literals would thrash a single entry.
+
 ## `bit` operand pairs
 
 A `bit` paired with a `bit` has no arithmetic on real, and the rejection splits by operator the same way the binary pair does: `*` / `/` raise **Msg 8117** (`"Operand data type bit is invalid for multiply operator."`), while `+` / `-` / `%` raise **Msg 402** (`"The data types bit and bit are incompatible in the add operator."`, and the subtract / modulo wordings).
@@ -181,6 +198,10 @@ Because it sits in the factory every decimal-typed value passes through, one sta
 It matters wherever a surface writes the raw `decimal` instead of formatting from the declared type — [the JSON builders](json.md), `FOR JSON`, `FORMAT`, and `SimulatedDbDataReader.GetDecimal` / `GetValue` (SqlClient's readers hand back the declared scale too).
 Scale is invisible to `decimal` equality, comparison and hashing, so `GROUP BY` keys, `DISTINCT`, index seek keys and `SqlValue.Equals` are untouched; `CHECKSUM` renders its decimal input with `G29` so it keys off the numeric value the way real's does (`CHECKSUM(CAST(1 AS numeric(10, 2)))` equals `CHECKSUM(CAST(1 AS numeric(10, 0)))`).
 The TDS encoder already rescales to the declared scale from the column metadata, so the wire bytes don't move.
+
+The stamp's precision check bounds the value against the target's integer-digit count, which is a table lookup of the powers of ten .NET `decimal` can hold: computing that bound by repeated multiplication cost up to 28 decimal multiplies per coerced value, a seventh of a decimal-summing aggregate's whole CPU.
+The magnitude test reads the value directly rather than truncating first (`|trunc(v)| > 10^k - 1` and `|v| >= 10^k` agree for every `v`, since `10^k` is an integer and truncation towards zero never crosses it), and a target with 28 or more integer digits admits everything `decimal` can hold, so it skips the compare entirely.
+`SUM` over a decimal skips the coercion altogether where it provably changes nothing — the operand a decimal of the *same scale* and no more integer digits than the result type, which is the shape SQL Server's own `SUM(decimal(p, s)) → decimal(38, s)` rule produces — because a decimal `SqlValue` boxes its payload, so the discarded intermediate costs an allocation per accumulated row.
 
 The one thing that can't be carried is a declared scale past .NET `decimal`'s 28 fractional digits, or trailing zeros with no room beside the integer part — `numeric(38, 30)`, or `numeric(38, 20)` holding a 15-digit integer part — where the value settles at the widest representation available rather than failing.
 Probed against SQL Server 2025 through `JSON_ARRAY`, which writes the raw value: `+ - %` carry `max(s1, s2)`, `*` carries `s1 + s2`, `/` carries `max(6, s1 + p2 + 1)`, `SUM` keeps the column's scale, `AVG` promotes to `numeric(38, max(s, 6))`, `ROUND` / `ABS` / `SIGN` / `POWER` keep the operand's, and `CEILING` / `FLOOR` drop to `numeric(p, 0)`.

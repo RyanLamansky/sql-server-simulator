@@ -47,6 +47,19 @@ internal static class SumAggregator
         protected override decimal Extract(SqlValue value) =>
             value.Type == SqlType.Money ? value.AsMoney : value.AsDecimal;
 
+        // A decimal SqlValue boxes its payload, so the coercion the base class
+        // performs allocates once per accumulated row — and for the shape that
+        // dominates a decimal SUM (a decimal operand summed into a decimal of
+        // the same scale and at least as many integer digits) it changes
+        // nothing: no value of the source type rounds, and none can overflow
+        // the target's precision. Anything else takes the ordinary coercion.
+        protected override decimal ExtractCoerced(SqlValue value) =>
+            value.Type is DecimalSqlType source && this.ResultType is DecimalSqlType target
+            && source.scale == target.scale
+            && target.precision - target.scale >= source.precision - source.scale
+                ? value.AsDecimal
+                : base.ExtractCoerced(value);
+
         protected override decimal Finalize(decimal total, long count) => total;
 
         protected override SqlValue Wrap(decimal value, SqlType type) =>

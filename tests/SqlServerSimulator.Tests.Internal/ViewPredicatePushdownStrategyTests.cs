@@ -165,10 +165,15 @@ public sealed class ViewPredicatePushdownStrategyTests
             "select cust_id from vd where cust_id = 10",
             "create view vd as select distinct cust_id from ord"));
 
-    /// <summary>A grouped body declines — its rows are groups, not the base rows the filter would move onto.</summary>
+    /// <summary>
+    /// A grouped body takes a conjunct on a column it <em>groups by</em>: the
+    /// filter removes whole groups, so it moves below the grouping and reaches
+    /// the base seek. <c>GroupedBodyPushdownStrategyTests</c> owns the rest of
+    /// the grouped shapes (the expression-grouping decline included).
+    /// </summary>
     [TestMethod]
-    public void GroupedBody_KeepsItsScan() =>
-        DoesNotContain("Seek(ord)", SeekTrace(
+    public void GroupedBodyFilteredOnItsGroupingColumn_SeeksTheBaseTable() =>
+        Contains("Seek(ord)", SeekTrace(
             "select cust_id from vg where cust_id = 10",
             "create view vg as select cust_id, count(*) as n from ord group by cust_id"));
 

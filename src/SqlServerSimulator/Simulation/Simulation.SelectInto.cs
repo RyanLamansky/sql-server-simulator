@@ -91,18 +91,20 @@ partial class Simulation
         if ((isLocalTemp || isGlobalTemp) && batch.Connection.CurrentTransaction is { } tx)
             tx.UndoLog.RecordTempTableCreation(destination, leaf);
 
-        // Execute the SELECT and stream each row into the destination. The
-        // row bytes are encoded per Selection.Schema; decode to SqlValue[]
-        // then re-encode through the destination's HeapColumn[] (same types
-        // by construction, but the encoder needs the schema with nullability
-        // and LOB-store routing). Identity columns track source values via
-        // ObserveExplicit so the high-water mark survives the copy.
+        // Execute the SELECT and stream each row into the destination. Rows
+        // arrive as SqlValue[] and are encoded through the destination's own
+        // HeapColumn[] (same types by construction, but the encoder needs the
+        // schema with nullability and LOB-store routing). Reading the values
+        // rather than the bytes is what keeps a projecting SELECT from encoding
+        // a page image only for this loop to decode it straight back — the
+        // round trip landed on exactly the values the projection had computed.
+        // Identity columns track source values via ObserveExplicit so the
+        // high-water mark survives the copy.
         var resultSet = selection.Execute(batch);
         var rowCount = 0;
         var undoLog = batch.Connection.CurrentTransaction?.UndoLog;
-        foreach (var rowBytes in resultSet.RowBytes)
+        foreach (var sourceValues in resultSet.RowValues)
         {
-            var sourceValues = RowDecoder.DecodeRow(selection.Schema, rowBytes);
             for (var i = 0; i < destColumns.Length; i++)
             {
                 if (destColumns[i].Identity is { } identity && !sourceValues[i].IsNull)

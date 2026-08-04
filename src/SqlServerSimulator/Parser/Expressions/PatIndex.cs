@@ -24,6 +24,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/patindex-transact-sql</remarks>
 internal sealed class PatIndex : Expression
 {
+    private readonly LikePatternBuilder.Cache patterns = new(forPatIndex: true);
     private readonly Expression pattern;
     private readonly Expression subject;
 
@@ -59,7 +60,7 @@ internal sealed class PatIndex : Expression
             ? p.AsString
             : p.CoerceTo(s.Type).AsString;
 
-        var regex = LikePatternBuilder.BuildForPatIndex(patternString);
+        var regex = this.patterns.Get(patternString, escapeChar: null, caseSensitive: false);
         var subjectStr = s.AsString;
         var match = regex.Match(subjectStr);
         // Result position is code-unit-based under non-SC, codepoint-based

@@ -180,6 +180,62 @@ internal static class LikePatternBuilder
         return end + 1;
     }
 
+    /// <summary>
+    /// A one-entry memo over <see cref="BuildAnchored"/> / <see cref="BuildForPatIndex"/>,
+    /// held by the expression node that does the matching. Translating a pattern
+    /// builds a <see cref="Regex"/> — parse, node tree, interpreter code — which
+    /// costs roughly a microsecond and a few kilobytes; a predicate evaluated once
+    /// per row paid that per row, which dominated a scan (228k rows of
+    /// <c>WHERE Description LIKE 'USB%'</c>: 285 ms and 782 MB allocated, against
+    /// 23 ms and 68 MB for the same scan reading the column and nothing else).
+    /// <para>
+    /// One entry is enough because a pattern is a literal or a parameter at
+    /// essentially every call site, so it is the same string for every row of a
+    /// statement; a genuinely per-row pattern misses and rebuilds exactly as
+    /// before. The key is the whole input — pattern text, escape character and
+    /// case sensitivity — so a cached entry can only ever be returned for inputs
+    /// that would have rebuilt an identical regex.
+    /// </para>
+    /// <para>
+    /// A cached plan is shared across sessions, so the memo is read and written
+    /// concurrently. <see cref="Volatile"/> publishes a fully-initialized entry
+    /// and consumes it with acquire semantics; two threads racing to fill it
+    /// simply build equivalent regexes and one wins, which is why no lock is
+    /// taken. <see cref="Regex"/> itself is thread-safe for matching.
+    /// </para>
+    /// </summary>
+    internal sealed class Cache(bool forPatIndex)
+    {
+        private readonly bool forPatIndex = forPatIndex;
+        private Entry? memo;
+
+        public Regex Get(string pattern, char? escapeChar, bool caseSensitive)
+        {
+            var current = Volatile.Read(ref this.memo);
+            if (current is not null
+                && current.CaseSensitive == caseSensitive
+                && current.EscapeChar == escapeChar
+                && string.Equals(current.Pattern, pattern, StringComparison.Ordinal))
+            {
+                return current.Regex;
+            }
+
+            var built = this.forPatIndex
+                ? BuildForPatIndex(pattern, escapeChar)
+                : BuildAnchored(pattern, escapeChar, caseSensitive);
+            Volatile.Write(ref this.memo, new Entry(pattern, escapeChar, caseSensitive, built));
+            return built;
+        }
+
+        private sealed class Entry(string pattern, char? escapeChar, bool caseSensitive, Regex regex)
+        {
+            public readonly bool CaseSensitive = caseSensitive;
+            public readonly char? EscapeChar = escapeChar;
+            public readonly string Pattern = pattern;
+            public readonly Regex Regex = regex;
+        }
+    }
+
     private static bool StartsWithUnescapedPercent(string pattern, char? escapeChar) =>
         pattern.Length > 0 && pattern[0] == '%' && !(escapeChar.HasValue && pattern.Length >= 2 && pattern[0] == escapeChar.Value);
 

@@ -41,7 +41,7 @@ internal abstract class NumericAggregator<TAccumulator> : Aggregator
             return;
         try
         {
-            this.Accumulator = checked(this.Accumulator + Extract(value.CoerceTo(this.ResultType)));
+            this.Accumulator = checked(this.Accumulator + this.ExtractCoerced(value));
         }
         catch (OverflowException)
         {
@@ -60,9 +60,16 @@ internal abstract class NumericAggregator<TAccumulator> : Aggregator
     {
         if (value.IsNull)
             return;
-        this.Accumulator -= Extract(value.CoerceTo(this.ResultType));
+        this.Accumulator -= this.ExtractCoerced(value);
         this.Count--;
     }
+
+    /// <summary>
+    /// The accumulator-typed value of one operand, coerced to the result type
+    /// first. Overridable so a family whose coercion is a per-row allocation
+    /// can skip it where the crossing provably changes nothing.
+    /// </summary>
+    protected virtual TAccumulator ExtractCoerced(SqlValue value) => Extract(value.CoerceTo(this.ResultType));
 
     public sealed override SqlValue Result()
     {

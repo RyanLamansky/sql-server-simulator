@@ -722,6 +722,31 @@ internal sealed partial class Selection
         /// <see cref="OffsetExpression"/>.
         /// </summary>
         public Expression? FetchExpression;
+
+        /// <summary>
+        /// A copy carrying <paramref name="extra"/> appended to
+        /// <see cref="Excluders"/> — the shape the predicate pushdown hands to
+        /// the aggregate projector, which reads its grouping / HAVING state from
+        /// here. A copy rather than a mutation because the original belongs to
+        /// the cached plan (see <c>docs/claude/plan-cache.md</c>); the appended
+        /// conjuncts go <em>after</em> the body's own, so the body's WHERE still
+        /// decides first for every row it excluded before.
+        /// </summary>
+        public FromClause WithExtraExcluders(List<BooleanExpression> extra)
+        {
+            var copy = new FromClause
+            {
+                Having = this.Having,
+                OffsetExpression = this.OffsetExpression,
+                FetchExpression = this.FetchExpression,
+            };
+            copy.Excluders.AddRange(this.Excluders);
+            copy.Excluders.AddRange(extra);
+            copy.GroupingSets.AddRange(this.GroupingSets);
+            copy.AllGroupingExpressions.AddRange(this.AllGroupingExpressions);
+            copy.OrderBy.AddRange(this.OrderBy);
+            return copy;
+        }
     }
 
     /// <summary>

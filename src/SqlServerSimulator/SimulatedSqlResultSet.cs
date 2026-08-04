@@ -50,6 +50,18 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     public IEnumerable<byte[]> RowBytes => this.rowBytes
         ?? this.rowValues!.Select(values => RowEncoder.EncodeRow(this.schema, values));
 
+    /// <summary>
+    /// The mirror of <see cref="RowBytes"/> for the callers that want cells
+    /// rather than a page image — <c>SELECT … INTO</c>, which re-encodes each
+    /// row against the destination's own columns. Where the producer already
+    /// projected <see cref="SqlValue"/>[] this hands those rows over untouched,
+    /// so the statement stops paying an encode <em>and</em> a decode per row to
+    /// arrive back at the values the projection computed; a byte-producing
+    /// source decodes exactly as the caller used to.
+    /// </summary>
+    public IEnumerable<SqlValue[]> RowValues => this.rowValues
+        ?? this.rowBytes!.Select(bytes => RowDecoder.DecodeRow(this.schema, bytes));
+
     public override RowCursor CreateCursor() => this.rowValues is { } values
         ? new ValueArrayCursor(this.schema.Length, values.GetEnumerator())
         : new SqlValueCursor(this.schema, this.rowBytes!.GetEnumerator());

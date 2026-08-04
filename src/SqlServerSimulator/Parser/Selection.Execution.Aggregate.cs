@@ -55,12 +55,12 @@ internal sealed partial class Selection
             aggregateResultTypes[i] = aggregates[i].GetSqlType(batch, resolveColumnType);
         }
 
-        GroupState NewGroup(int keyArity)
+        GroupState NewGroup(SqlValue[] keyValues)
         {
             var freshAggregators = new Aggregator[aggregates.Count];
             for (var i = 0; i < aggregates.Count; i++)
                 freshAggregators[i] = Aggregator.Create(aggregates[i], aggregateOperandTypes[i], aggregateResultTypes[i]);
-            return new(keyValues: new SqlValue[keyArity], aggregators: freshAggregators);
+            return new(keyValues, freshAggregators);
         }
 
         // Narrow a single-base-table source by an equality seek when WHERE
@@ -72,22 +72,43 @@ internal sealed partial class Selection
         sources = MaybeApplyIndexSeek(sources, joins, fromClause.Excluders, batch, outerResolver);
         (sources, joins) = NarrowJoinSources(sources, joins, fromClause.Excluders, batch, outerResolver);
 
-        // Buffer WHERE-passing rows once. `EnumerateJoinedRows` mutates a
-        // single shared tuple array in place across iterations, so each
-        // accepted row gets snapshotted (the inner byte[] references are
-        // immutable, only the outer array slots get rewritten by the join
-        // driver). Captured snapshots are then iterated per grouping set.
+        // Effective grouping sets: parser-built list, or a single synthesized
+        // empty set when GROUP BY is absent (the implicit "all rows are one
+        // group" case for queries that have aggregates but no GROUP BY).
+        var effectiveSets = fromClause.GroupingSets;
+        if (effectiveSets.Count == 0)
+            effectiveSets = [[]];
+
         // Row-invariant resolution scaffolding is hoisted out of every per-row
         // loop below: `currentTuple` is a mutable capture rewritten per row,
         // and the resolver is a cached self-referencing lambda (see
         // EnumerateJoinedRows), so each loop allocates one closure + one
         // delegate + one RuntimeContext TOTAL instead of several per row —
         // per-row delegate churn dominated the allocation profile.
-        var buffered = new List<byte[]?[]>();
+        // `keyScratch` is the same idea for the grouping key, and
+        // `ungroupedState` the implicit whole-input group (see Accumulate).
+        var keyScratch = Array.Empty<SqlValue>();
+        var ungroupedState = default(GroupState);
         var currentTuple = default(byte[]?[])!;
         Func<MultiPartName, SqlValue> resolveColumn = null!;
         resolveColumn = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, resolveColumn, memo);
         var rowRuntime = new RuntimeContext(resolveColumn, batch);
+
+        // One grouping set — no GROUP BY at all, or a plain GROUP BY — reads
+        // each input row exactly once, so the groups are built straight off the
+        // enumeration and nothing is buffered. ROLLUP / CUBE / GROUPING SETS
+        // partition the same rows several ways and still buffer, since the
+        // second set can't re-read a stream the first consumed.
+        //
+        // Streaming is also what real does: its plan pipelines Filter into
+        // Stream/Hash Aggregate, so an aggregate operand that raises on an
+        // early row preempts a WHERE that would have raised on a later one
+        // (probe-confirmed — `SELECT SUM(1/a) … WHERE CAST(s AS int) > 0` over
+        // a table whose first row zeroes `a` and whose last row's `s` isn't
+        // numeric reports Msg 8134, not the conversion error).
+        var streaming = effectiveSets.Count == 1;
+        var streamedGroups = streaming ? NewGroupMap(effectiveSets[0]) : null;
+        var buffered = streaming ? null : new List<byte[]?[]>();
         foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
         {
             currentTuple = tuple;
@@ -100,22 +121,36 @@ internal sealed partial class Selection
                     break;
                 }
             }
-            if (include)
+            if (!include)
+                continue;
+
+            if (streamedGroups is not null)
             {
-                var snapshot = new byte[]?[tuple.Length];
-                Array.Copy(tuple, snapshot, tuple.Length);
-                buffered.Add(snapshot);
+                Accumulate(streamedGroups, effectiveSets[0], tuple, tupleIsShared: true);
+                continue;
             }
+
+            // `EnumerateJoinedRows` mutates a single shared tuple array in
+            // place across iterations, so each buffered row gets snapshotted
+            // (the inner byte[] references are immutable, only the outer array
+            // slots get rewritten by the join driver).
+            var snapshot = new byte[]?[tuple.Length];
+            Array.Copy(tuple, snapshot, tuple.Length);
+            buffered!.Add(snapshot);
         }
 
-        // Effective grouping sets: parser-built list, or a single synthesized
-        // empty set when GROUP BY is absent (the implicit "all rows are one
-        // group" case for queries that have aggregates but no GROUP BY).
-        var effectiveSets = fromClause.GroupingSets.Count > 0
-            ? (IReadOnlyList<Expression[]>)fromClause.GroupingSets
-            : [[]];
-
         var output = new List<(SqlValue[] OrderKeys, SqlValue[] Row)>();
+
+        // A small `TOP (n)` / `FETCH` over the sorted group stream keeps only
+        // the n best groups in a bounded heap instead of sorting every group —
+        // the same path the row-level projection takes, applied to the grouped
+        // stream. Ineligible shapes (PERCENT, WITH TIES, OFFSET, DISTINCT) fall
+        // back to the full sort below.
+        var topNGroups = TopNHeapCap(orderByItems, distinct, top, offsetCount, fetchCount) is { } topNCap
+            ? new TopNRowHeap(topNCap, orderByItems)
+            : null;
+        var projectionScratch = topNGroups is null ? [] : new SqlValue[expressions.Count];
+        var orderKeyScratch = topNGroups is null ? [] : new SqlValue[orderByItems.Count];
 
         // Window pass input. A window in a grouped SELECT spans the query's
         // *whole* grouped result — with ROLLUP / CUBE / GROUPING SETS that
@@ -203,89 +238,136 @@ internal sealed partial class Selection
 
         var orderRuntime = new RuntimeContext(ResolveOrderName, batch);
 
-        foreach (var groupingSet in effectiveSets)
+        // The group map one grouping set accumulates into. An empty set is the
+        // implicit whole-input group, which exists even over no rows — and is
+        // held aside so the accumulation loop reaches it directly instead of
+        // hashing the empty key once per input row (a sixth of an ungrouped
+        // aggregate's whole-table scan).
+        Dictionary<SqlValueKey, GroupState> NewGroupMap(Expression[] groupingSet)
         {
-            currentGroupingSet = groupingSet;
             var groups = new Dictionary<SqlValueKey, GroupState>();
+            ungroupedState = null;
             if (groupingSet.Length == 0)
-                groups[SqlValueKey.Empty] = NewGroup(0);
+                groups[SqlValueKey.Empty] = ungroupedState = NewGroup([]);
+            return groups;
+        }
 
-            foreach (var tuple in buffered)
+        // One input row into its group under one grouping set. The key tuple is
+        // computed into a reused scratch buffer and only copied out on the
+        // first row of a group — a per-row key array was one allocation per
+        // input row where the group count is what actually needs one. The
+        // scratch-backed key is handed to TryGetValue alone, which reads the
+        // components without retaining them; the stable copy is what the
+        // dictionary and the group state then share.
+        //
+        // `tupleIsShared` says the caller is handing over the join driver's own
+        // mutable tuple, so a retained representative has to be snapshotted.
+        void Accumulate(Dictionary<SqlValueKey, GroupState> groups, Expression[] groupingSet, byte[]?[] tuple, bool tupleIsShared)
+        {
+            GroupState state;
+            if (ungroupedState is { } wholeInput)
             {
-                currentTuple = tuple;
-                GroupState state;
-                if (groupingSet.Length == 0)
+                state = wholeInput;
+            }
+            else
+            {
+                if (keyScratch.Length != groupingSet.Length)
+                    keyScratch = new SqlValue[groupingSet.Length];
+                for (var i = 0; i < groupingSet.Length; i++)
+                    keyScratch[i] = groupingSet[i].Run(rowRuntime);
+                if (!groups.TryGetValue(new SqlValueKey(keyScratch), out state!))
                 {
-                    state = groups[SqlValueKey.Empty];
+                    var keyValues = new SqlValue[groupingSet.Length];
+                    Array.Copy(keyScratch, keyValues, groupingSet.Length);
+                    state = NewGroup(keyValues);
+                    groups[new SqlValueKey(keyValues)] = state;
+                }
+            }
+
+            // Keep the first row that lands in each group as a
+            // representative. Within a group every grouping expression is
+            // constant, so any projection / HAVING / ORDER BY column buried
+            // inside a grouping expression (e.g. OrderDate under
+            // GROUP BY MONTH(OrderDate)) resolves correctly against it.
+            if (state.Representative is null)
+            {
+                if (tupleIsShared)
+                {
+                    var representative = new byte[]?[tuple.Length];
+                    Array.Copy(tuple, representative, tuple.Length);
+                    state.Representative = representative;
                 }
                 else
                 {
-                    var keyValues = new SqlValue[groupingSet.Length];
-                    for (var i = 0; i < groupingSet.Length; i++)
-                        keyValues[i] = groupingSet[i].Run(rowRuntime);
-                    var key = new SqlValueKey(keyValues);
-                    if (!groups.TryGetValue(key, out state!))
+                    state.Representative = tuple;
+                }
+            }
+
+            for (var i = 0; i < aggregates.Count; i++)
+            {
+                var aggregate = aggregates[i];
+                // An arm real settled as unreachable while compiling never
+                // supplies a value, so its operand isn't evaluated and the
+                // aggregator stays at its empty result — which nothing
+                // reads, the arm holding it being unreachable.
+                if (aggregate.OperandUnreachable)
+                    continue;
+                if (aggregate.Kind == AggregateKind.StringAgg && state.Aggregators[i] is Aggregators.StringAggAggregator stringAgg)
+                {
+                    var separatorValue = aggregate.Separator!.Run(rowRuntime);
+                    Expressions.StringScalars.RejectLegacyLob(separatorValue, "string_agg", argumentIndex: 2);
+                    stringAgg.SetSeparator(separatorValue.IsNull ? string.Empty : separatorValue.AsString);
+
+                    if (aggregate.OrderBy is { } orderBy)
                     {
-                        state = NewGroup(groupingSet.Length);
-                        Array.Copy(keyValues, state.KeyValues, groupingSet.Length);
-                        groups[key] = state;
+                        var orderKeys = new SqlValue[orderBy.Count];
+                        for (var k = 0; k < orderBy.Count; k++)
+                            orderKeys[k] = orderBy[k].Expr!.Run(rowRuntime);
+                        stringAgg.AddOrdered(aggregate.Operand!.Run(rowRuntime), orderKeys);
+                        continue;
                     }
                 }
 
-                // Keep the first row that lands in each group as a
-                // representative. Within a group every grouping expression is
-                // constant, so any projection / HAVING / ORDER BY column buried
-                // inside a grouping expression (e.g. OrderDate under
-                // GROUP BY MONTH(OrderDate)) resolves correctly against it.
-                state.Representative ??= tuple;
-
-                for (var i = 0; i < aggregates.Count; i++)
+                // JSON_ARRAYAGG with an in-parens ORDER BY buffers each
+                // value + ORDER BY tuple; the aggregator sorts at Result.
+                if (aggregate.Kind == AggregateKind.JsonArrayAgg && aggregate.OrderBy is { } jsonOrderBy
+                    && state.Aggregators[i] is Aggregators.JsonArrayAggAggregator arrayAgg)
                 {
-                    var aggregate = aggregates[i];
-                    // An arm real settled as unreachable while compiling never
-                    // supplies a value, so its operand isn't evaluated and the
-                    // aggregator stays at its empty result — which nothing
-                    // reads, the arm holding it being unreachable.
-                    if (aggregate.OperandUnreachable)
-                        continue;
-                    if (aggregate.Kind == AggregateKind.StringAgg && state.Aggregators[i] is Aggregators.StringAggAggregator stringAgg)
-                    {
-                        var separatorValue = aggregate.Separator!.Run(rowRuntime);
-                        Expressions.StringScalars.RejectLegacyLob(separatorValue, "string_agg", argumentIndex: 2);
-                        stringAgg.SetSeparator(separatorValue.IsNull ? string.Empty : separatorValue.AsString);
+                    var orderKeys = new SqlValue[jsonOrderBy.Count];
+                    for (var k = 0; k < jsonOrderBy.Count; k++)
+                        orderKeys[k] = jsonOrderBy[k].Expr!.Run(rowRuntime);
+                    arrayAgg.AddOrdered(aggregate.Operand!.Run(rowRuntime), orderKeys);
+                    continue;
+                }
 
-                        if (aggregate.OrderBy is { } orderBy)
-                        {
-                            var orderKeys = new SqlValue[orderBy.Count];
-                            for (var k = 0; k < orderBy.Count; k++)
-                                orderKeys[k] = orderBy[k].Expr!.Run(rowRuntime);
-                            stringAgg.AddOrdered(aggregate.Operand!.Run(rowRuntime), orderKeys);
-                            continue;
-                        }
-                    }
+                // JSON_OBJECTAGG needs the per-row key set before the value
+                // is streamed; the value flows through the generic Add below.
+                if (aggregate.Kind == AggregateKind.JsonObjectAgg
+                    && state.Aggregators[i] is Aggregators.JsonObjectAggAggregator objectAgg)
+                {
+                    objectAgg.SetKey(aggregate.KeyExpression!.Run(rowRuntime));
+                }
 
-                    // JSON_ARRAYAGG with an in-parens ORDER BY buffers each
-                    // value + ORDER BY tuple; the aggregator sorts at Result.
-                    if (aggregate.Kind == AggregateKind.JsonArrayAgg && aggregate.OrderBy is { } jsonOrderBy
-                        && state.Aggregators[i] is Aggregators.JsonArrayAggAggregator arrayAgg)
-                    {
-                        var orderKeys = new SqlValue[jsonOrderBy.Count];
-                        for (var k = 0; k < jsonOrderBy.Count; k++)
-                            orderKeys[k] = jsonOrderBy[k].Expr!.Run(rowRuntime);
-                        arrayAgg.AddOrdered(aggregate.Operand!.Run(rowRuntime), orderKeys);
-                        continue;
-                    }
+                var operand = aggregate.CountsRowsOnly ? null : aggregate.Operand;
+                state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : operand.Run(rowRuntime));
+            }
+        }
 
-                    // JSON_OBJECTAGG needs the per-row key set before the value
-                    // is streamed; the value flows through the generic Add below.
-                    if (aggregate.Kind == AggregateKind.JsonObjectAgg
-                        && state.Aggregators[i] is Aggregators.JsonObjectAggAggregator objectAgg)
-                    {
-                        objectAgg.SetKey(aggregate.KeyExpression!.Run(rowRuntime));
-                    }
-
-                    var operand = aggregate.CountsRowsOnly ? null : aggregate.Operand;
-                    state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : operand.Run(rowRuntime));
+        foreach (var groupingSet in effectiveSets)
+        {
+            currentGroupingSet = groupingSet;
+            Dictionary<SqlValueKey, GroupState> groups;
+            if (streamedGroups is not null)
+            {
+                groups = streamedGroups;
+            }
+            else
+            {
+                groups = NewGroupMap(groupingSet);
+                foreach (var tuple in buffered!)
+                {
+                    currentTuple = tuple;
+                    Accumulate(groups, groupingSet, tuple, tupleIsShared: false);
                 }
             }
 
@@ -351,7 +433,10 @@ internal sealed partial class Selection
                     if (fromClause.Having is { } having && having.Run(groupRuntime) != true)
                         continue;
 
-                    var projected = new SqlValue[expressions.Count];
+                    // Under the bounded heap all but n of these groups are
+                    // dropped, so the projection and key tuple are computed into
+                    // reused scratch and only copied out on admission.
+                    var projected = topNGroups is null ? new SqlValue[expressions.Count] : projectionScratch;
                     for (var i = 0; i < expressions.Count; i++)
                         projected[i] = expressions[i].Run(groupRuntime);
 
@@ -362,7 +447,7 @@ internal sealed partial class Selection
                     // expression items (aggregates, grouped columns, aliases,
                     // grouping expressions) resolve through ResolveOrderName.
                     currentProjected = projected;
-                    var orderKeys = new SqlValue[orderByItems.Count];
+                    var orderKeys = topNGroups is null ? new SqlValue[orderByItems.Count] : orderKeyScratch;
                     for (var k = 0; k < orderByItems.Count; k++)
                     {
                         orderKeys[k] = orderByItems[k].IsOrdinal
@@ -370,7 +455,10 @@ internal sealed partial class Selection
                             : orderByItems[k].Expr!.Run(orderRuntime);
                     }
 
-                    output.Add((orderKeys, projected));
+                    if (topNGroups is not null)
+                        topNGroups.OfferCopying(projected, orderKeys);
+                    else
+                        output.Add((orderKeys, projected));
                 }
                 finally
                 {
@@ -446,7 +534,10 @@ internal sealed partial class Selection
                             : orderByItems[k].Expr!.Run(orderRuntime);
                     }
 
-                    output.Add((groupOrderKeys, projectedGroup));
+                    if (topNGroups is not null)
+                        topNGroups.Offer(projectedGroup, groupOrderKeys);
+                    else
+                        output.Add((groupOrderKeys, projectedGroup));
                 }
             }
             finally
@@ -455,6 +546,11 @@ internal sealed partial class Selection
                 batch.AllGroupingExpressions = savedAllForWindows;
             }
         }
+
+        // The bounded heap already holds exactly the rows the sort-then-cap
+        // below would have kept, in the same order, so it answers on its own.
+        if (topNGroups is not null)
+            return [.. topNGroups.Drain()];
 
         // DISTINCT dedupes the *grouped* projection, and does so before ORDER
         // BY and any row limiting: `SELECT DISTINCT YEAR(pubdate) … GROUP BY id,

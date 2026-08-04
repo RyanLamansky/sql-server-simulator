@@ -2378,4 +2378,360 @@ public sealed class IndexSeekTests
         DoesNotContain("CacheBuild", trace);
         AreEqual(999, Convert.ToInt32(ReadVal(c, "select v from tgt where id = 2")));
     }
+
+    // ---- union of seeks: one top-level conjunct that is an OR whose every
+    // disjunct seeks on its own (`a = 1 OR b = 2`, where a same-column equality
+    // family can't express the disjunction and the read otherwise full-scans
+    // however well indexed both columns are). Each disjunct probes separately,
+    // the candidates dedupe by row address, and the whole original WHERE stays
+    // residual — so every row assertion below carries the values SQL Server
+    // 2025 returned for the identical table. ----
+
+    private const string UnionT = """
+        create table t (id int not null primary key, a int null, b int null, c int null, v int not null);
+        create index ix_a on t (a);
+        create index ix_b on t (b);
+        create index ix_c on t (c);
+        insert t values
+          (1, 1, 9, 3, 100), (2, 9, 2, 3, 200), (3, 1, 2, 3, 300), (4, null, 2, 3, 400),
+          (5, 1, null, 3, 500), (6, null, null, 3, 600), (7, 2, 9, 9, 700), (8, 9, 9, 9, 800)
+        """;
+
+    // A union yields each disjunct's bucket in turn rather than heap order, and
+    // the strategy tests deliberately carry no ORDER BY (which would engage the
+    // ordered-scan path instead) — so the ids sort here.
+    private static string SortedIds(List<object?> rows) => string.Join(",", rows.Select(Convert.ToInt32).Order());
+
+    [TestMethod]
+    public void CrossColumnOr_UnionSeeks()
+    {
+        // Both columns are indexed and neither disjunct alone bounds the other,
+        // so the conjunction offers nothing to seek; the OR offers two probes.
+        var (trace, rows) = Run(UnionT, "select id from t where a = 1 or b = 2");
+        Contains("Seek(t)", trace);
+        Contains("UnionSeek(t,2)", trace);
+        Contains("UnionSeekCandidates(t,5)", trace);
+        DoesNotContain("Scan(t)", trace);
+        AreEqual("1,2,3,4,5", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void CrossColumnOr_RowMatchedByBothDisjuncts_ReadOnce()
+    {
+        // Every a = 1 row also carries c = 3, so the two probe sets overlap
+        // almost entirely: 3 candidates from `a` and 6 from `c`, 6 after the
+        // union deduplicates them by row address. That count is what the join
+        // reorder reads, and what a value-keyed union would get wrong.
+        var (trace, rows) = Run(UnionT, "select id from t where a = 1 or c = 3");
+        Contains("UnionSeek(t,2)", trace);
+        Contains("UnionSeekCandidates(t,6)", trace);
+        AreEqual("1,2,3,4,5,6", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void MixedSameAndCrossColumnOr_UnionSeeks()
+    {
+        // Two disjuncts on one column plus a third on another: not a family the
+        // IN path can record, and three probes for the union.
+        var (trace, rows) = Run(UnionT, "select id from t where a = 1 or a = 2 or b = 2");
+        Contains("UnionSeek(t,3)", trace);
+        AreEqual("1,2,3,4,5,7", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void SameColumnOr_StaysWithTheEqualityFamilySeek()
+    {
+        // The claim sites are exclusive: an OR that anchors on ONE column is the
+        // IN list the equality path already records as a multi-value probe.
+        var (trace, rows) = Run(UnionT, "select id from t where a = 1 or a = 9");
+        Contains("Seek(t)", trace);
+        DoesNotContain("UnionSeek(t,2)", trace);
+        AreEqual("1,2,3,5,8", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void SameColumnOr_BesideAnEqualityThatDeclined_StaysWithTheEqualityFamily()
+    {
+        // Where the exclusivity rule actually bites. `a = @n` claims the column
+        // first (first writer wins in the equality map) and then fails to anchor
+        // anything, so the conjunction has no prefix to seek — and the OR beside
+        // it is that same column's IN list, which belongs to the equality path
+        // whether or not that path seeked. Re-claiming it here would seek `a IN
+        // (1, 2)` as two probes behind a residual that is UNKNOWN for every row.
+        var (trace, rows) = Run(UnionT, "declare @n int = null; select id from t where a = @n and (a = 1 or a = 2)");
+        Contains("Scan(t)", trace);
+        DoesNotContain("UnionSeek(t,2)", trace);
+        IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void OrBesideARangeBound_TakesTheUnionRatherThanTheRange()
+    {
+        // Equality probes are the narrower predicate, so the union is tried
+        // ahead of the range seek and the bound stays residual.
+        var (trace, rows) = Run(UnionT, "select id from t where id > 2 and (a = 1 or b = 2)");
+        Contains("UnionSeek(t,2)", trace);
+        DoesNotContain("RangeSeek(t)", trace);
+        AreEqual("3,4,5", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void InList_StaysWithTheEqualityFamilySeek()
+    {
+        var (trace, rows) = Run(UnionT, "select id from t where a in (1, 2)");
+        Contains("Seek(t)", trace);
+        DoesNotContain("UnionSeek(t,1)", trace);
+        AreEqual("1,3,5,7", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void AndGroupInsideOr_UnionSeeks()
+    {
+        // A disjunct that is itself an AND collects its conjuncts exactly as a
+        // WHERE's are: it seeks on whatever prefix they cover (here b, or the
+        // (b) index) and the rest of the group stays residual.
+        var (trace, rows) = Run(UnionT, "select id from t where a = 2 or (b = 2 and c = 3)");
+        Contains("UnionSeek(t,2)", trace);
+        AreEqual("2,3,4,7", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void ConjunctionAlreadySeeks_KeepsTheEqualityPath()
+    {
+        // `c = 3` seeks on its own, so the read keeps that single access path
+        // and the OR stays purely residual — the ordering that makes the two
+        // paths deterministic rather than value-dependent.
+        var (trace, rows) = Run(UnionT, "select id from t where c = 3 and (a = 1 or b = 2)");
+        Contains("Seek(t)", trace);
+        DoesNotContain("UnionSeek(t,2)", trace);
+        AreEqual("1,2,3,4,5", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void UnionSeek_UnderRcsi_MaterializesThroughTheVersionStore()
+    {
+        var (trace, rows) = Run(
+            $"alter database simulated set read_committed_snapshot on; {UnionT}",
+            "select id from t where a = 1 or b = 2");
+        Contains("UnionSeek(t,2)", trace);
+        AreEqual("1,2,3,4,5", SortedIds(rows));
+    }
+
+    // ---- the union declines (full scan), values unchanged ----
+
+    [TestMethod]
+    public void OrWithUnindexedDisjunct_Scans()
+    {
+        var (trace, rows) = Run(UnionT, "select id from t where a = 1 or v = 700");
+        Contains("Scan(t)", trace);
+        DoesNotContain("UnionSeek(t,2)", trace);
+        AreEqual("1,3,5,7", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void OrWithRangeDisjunct_Scans()
+    {
+        // A bare range disjunct is not an equality probe; the union declines
+        // whole rather than mixing access shapes.
+        var (trace, rows) = Run(UnionT, "select id from t where a = 1 or b > 5");
+        Contains("Scan(t)", trace);
+        AreEqual("1,3,5,7,8", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void OrWithIsNullDisjunct_Scans()
+    {
+        // The catch-all shape (`@p IS NULL OR col = @p`) reduces to this and
+        // scans, as it does on real.
+        var (trace, rows) = Run(UnionT, "select id from t where b is null or a = 2");
+        Contains("Scan(t)", trace);
+        AreEqual("5,6,7", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void OrWithNegatedDisjunct_Scans()
+    {
+        var (trace, rows) = Run(UnionT, "select id from t where a = 1 or not (b = 2)");
+        Contains("Scan(t)", trace);
+        AreEqual("1,3,5,7,8", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void OrWithExpressionWrappedColumn_Scans()
+    {
+        var (trace, rows) = Run(UnionT, "select id from t where a = 1 or abs(b) = 2");
+        Contains("Scan(t)", trace);
+        AreEqual("1,2,3,4,5", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void NullProbeInOneDisjunct_Scans()
+    {
+        // A declined probe doesn't mean the disjunct matches nothing, so the
+        // union can't drop it and treat the rest as the whole answer — it hands
+        // the read back to the scan. (Here it would have been sound; the seek
+        // has no way to tell that apart from a collation-declined probe.)
+        var (trace, rows) = Run(UnionT, "declare @n int = null; select id from t where a = @n or b = 2");
+        Contains("Scan(t)", trace);
+        AreEqual("2,3,4", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void UnionSeek_AtTheProbeCap_Seeks()
+    {
+        // 32 probes per disjunct — the budget exactly, counted structurally
+        // across the whole disjunction rather than per disjunct.
+        var (trace, rows) = Run(UnionT, $"select id from t where a in ({InList(1, 101, 32)}) or b in ({InList(2, 201, 32)})");
+        Contains("UnionSeek(t,2)", trace);
+        AreEqual("1,2,3,4,5", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void UnionSeek_OverTheProbeCap_Scans()
+    {
+        var (trace, rows) = Run(UnionT, $"select id from t where a in ({InList(1, 101, 33)}) or b in ({InList(2, 201, 33)})");
+        Contains("Scan(t)", trace);
+        DoesNotContain("UnionSeek(t,2)", trace);
+        AreEqual("1,2,3,4,5", SortedIds(rows));
+    }
+
+    // `<anchor>, <fillerBase>, <fillerBase + 1>, …` — an IN list `count` values
+    // wide whose filler values match no row, so widening it walks the union's
+    // probe budget without moving the answer.
+    private static string InList(int anchor, int fillerBase, int count) =>
+        string.Join(", ", Enumerable.Range(0, count - 1).Select(i => fillerBase + i).Prepend(anchor));
+
+    [TestMethod]
+    public void RepeatableRead_DeclinesTheUnionSeek()
+    {
+        // Tx-scoped row locks keep the whole-table scan, which deliberately
+        // locks every row it reads — the union is a seek like any other here.
+        var (trace, rows) = Run(UnionT, "select id from t with (repeatableread) where a = 1 or b = 2");
+        Contains("Scan(t)", trace);
+        DoesNotContain("UnionSeek(t,2)", trace);
+        AreEqual("1,2,3,4,5", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void UpdlockHint_DeclinesTheUnionSeek()
+    {
+        var (trace, rows) = Run(UnionT, "select id from t with (updlock) where a = 1 or b = 2");
+        Contains("Scan(t)", trace);
+        DoesNotContain("UnionSeek(t,2)", trace);
+        AreEqual("1,2,3,4,5", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void Holdlock_UnionSeeksBehindItsPhantomFence()
+    {
+        // A HOLDLOCK / SERIALIZABLE reader owes a phantom fence but keeps no
+        // tx-scoped ROW locks, so it seeks — exactly as it does for a lone
+        // equality conjunct. The fence is settled from the top-level conjuncts
+        // before any candidate address is read, and a cross-column OR pins no
+        // key interval, so it falls back to the whole-table S (asserted through
+        // sys.dm_tran_locks in the public KeyRangeLockTests).
+        var (trace, rows) = Run(UnionT, "select id from t with (holdlock) where a = 1 or b = 2");
+        Contains("UnionSeek(t,2)", trace);
+        AreEqual("1,2,3,4,5", SortedIds(rows));
+    }
+
+    // ---- the union under a join: it narrows a non-leftmost source like any
+    // other seek, so the reorder reads its candidate count the same way. ----
+
+    private const string UnionJoinT = $"""
+        {UnionT};
+        create table j (jid int not null primary key, tid int not null);
+        insert j values (10, 1), (11, 2), (12, 3), (13, 7), (14, 8)
+        """;
+
+    [TestMethod]
+    public void UnionSeekOnANonLeftmostSource_DrivesTheReorder()
+    {
+        var (seeks, joins, rows) = RunJoined(
+            UnionJoinT, "select j.jid from j join t on t.id = j.tid where t.a = 1 or t.b = 2");
+        Contains("UnionSeek(t,2)", seeks);
+        Contains("Reorder(1,0)", joins);
+        AreEqual("10,11,12", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void OrNamingAnotherSource_Scans()
+    {
+        var (seeks, _, rows) = RunJoined(
+            UnionJoinT, "select j.jid from j join t on t.id = j.tid where t.a = 1 or j.jid = 11");
+        Contains("Scan(t)", seeks);
+        DoesNotContain("UnionSeek(t,2)", seeks);
+        AreEqual("10,11,12", SortedIds(rows));
+    }
+
+    [TestMethod]
+    public void OrWithSiblingValueSide_Scans()
+    {
+        // `t.b = j.jid` reads a sibling of the same FROM — not readable before
+        // the join runs, so it can't anchor a probe.
+        var (seeks, _, rows) = RunJoined(
+            UnionJoinT, "select j.jid from j join t on t.id = j.tid where t.a = 1 or t.b = j.jid");
+        Contains("Scan(t)", seeks);
+        DoesNotContain("UnionSeek(t,2)", seeks);
+        AreEqual("10,12", SortedIds(rows));
+    }
+
+    // Runs a joined query capturing both the seek and the join-strategy traces
+    // plus the first column of each row.
+    private static (List<string> Seeks, List<string> Joins, List<object?> Rows) RunJoined(string setup, string query)
+    {
+        var connection = new Simulation().CreateDbConnection();
+        connection.Open();
+        Exec(connection, setup);
+
+        IndexSeekDiagnostics.Sink = [];
+        JoinDiagnostics.Sink = [];
+        try
+        {
+            return (IndexSeekDiagnostics.Sink, JoinDiagnostics.Sink, ReadRows(connection, query));
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+            JoinDiagnostics.Sink = null;
+        }
+    }
+
+    // ---- the mutation path takes the same union (no lock wrapper: an UPDATE /
+    // DELETE X-locks only what it commits, so narrowing its candidate set can't
+    // change the footprint). ----
+
+    [TestMethod]
+    public void DeleteWithCrossColumnOr_SeeksItsTarget()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, UnionT);
+        var trace = ExecTraced(c, "delete t where a = 1 or b = 2");
+        AssertCacheResolved(trace);
+        AreEqual("6,7,8", Seq(ReadRows(c, "select id from t order by id")));
+    }
+
+    [TestMethod]
+    public void UpdateWithCrossColumnOr_SeeksItsTarget()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, UnionT);
+        var trace = ExecTraced(c, "update t set v = v + 1 where a = 2 or c = 9");
+        AssertCacheResolved(trace);
+        AreEqual("100,200,300,400,500,600,701,801", Seq(ReadRows(c, "select v from t order by id")));
+    }
+
+    [TestMethod]
+    public void DeleteWithNonSeekableOr_KeepsItsScan()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, UnionT);
+        var trace = ExecTraced(c, "delete t where a = 1 or v = 700");
+        DoesNotContain("CacheBuild", trace);
+        DoesNotContain("CacheReplay", trace);
+        AreEqual("2,4,6,8", Seq(ReadRows(c, "select id from t order by id")));
+    }
 }

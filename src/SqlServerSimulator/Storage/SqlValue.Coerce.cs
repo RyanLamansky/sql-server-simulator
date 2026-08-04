@@ -59,6 +59,14 @@ internal readonly partial struct SqlValue
             type == SqlType.Date || type == SqlType.DateTime || type == SqlType.SmallDateTime
             || type is DateTime2SqlType or TimeSqlType or DateTimeOffsetSqlType;
 
+        // decimal → decimal, hoisted ahead of the crossings below: a decimal
+        // column feeding a CASE arm and then a SUM takes this several times per
+        // row, and the general dispatch reaches its decimal branch only after a
+        // dozen type tests. Identical to that branch — see the
+        // <see cref="CoerceToDecimal"/> arm it duplicates.
+        if (target is DecimalSqlType hotDecimalTarget && this.Type is DecimalSqlType)
+            return FromDecimal(hotDecimalTarget, RoundAndOverflowCheck(this.AsDecimal, hotDecimalTarget));
+
         if (SqlType.IsIntegerCategory(this.Type) && SqlType.IsIntegerCategory(target))
         {
             var widened = this.Type == SqlType.Bit ? (this.AsBoolean ? 1L : 0L)
@@ -1331,23 +1339,40 @@ internal readonly partial struct SqlValue
         // value can't have more fractional digits than .NET decimal stores
         // anyway); skip the call.
         var rounded = target.scale > 28 ? value : decimal.Round(value, target.scale, MidpointRounding.AwayFromZero);
-        // Cap integer-digit count at 28 for the overflow check — Pow10Decimal
-        // would itself overflow .NET decimal beyond that. Values that fit
-        // .NET decimal can't exceed 28 integer digits anyway.
+        // Cap integer-digit count at 28 for the overflow check — a larger
+        // power of ten would itself overflow .NET decimal. Values that fit
+        // .NET decimal can't exceed 28 integer digits anyway, so a target
+        // that wide admits everything and needs no compare at all: the
+        // magnitude test is evaluated only below the cap, which also keeps
+        // the table lookup in range.
+        // |trunc(v)| > 10^k - 1 and |v| >= 10^k agree for every v (10^k is an
+        // integer, and truncation towards zero never crosses it), so the
+        // magnitude test reads the value directly rather than truncating first.
         var integerDigits = Math.Min(28, target.precision - target.scale);
-        var maxIntegerPart = Pow10Decimal(integerDigits) - 1;
-        return integerDigits < 28 && decimal.Abs(decimal.Truncate(rounded)) > maxIntegerPart
+        return integerDigits < 28 && decimal.Abs(rounded) >= Pow10Decimal[integerDigits]
             ? throw SimulatedSqlException.ArithmeticOverflowToNumeric()
             : rounded;
     }
 
-    private static decimal Pow10Decimal(int n)
-    {
-        var result = 1m;
-        for (var i = 0; i < n; i++)
-            result *= 10m;
-        return result;
-    }
+    /// <summary>
+    /// 10^0 … 10^28 — every power of ten .NET <see cref="decimal"/> can hold.
+    /// Read by the numeric overflow check, which runs on every conversion into
+    /// a <c>decimal</c> / <c>numeric</c> target: computing the bound by
+    /// repeated multiplication cost up to 28 decimal multiplies per coerced
+    /// value, which profiling put at a seventh of a decimal-summing aggregate's
+    /// whole CPU.
+    /// </summary>
+    private static readonly decimal[] Pow10Decimal =
+    [
+        1m, 10m, 100m, 1000m, 10000m, 100000m, 1000000m, 10000000m, 100000000m,
+        1000000000m, 10000000000m, 100000000000m, 1000000000000m, 10000000000000m,
+        100000000000000m, 1000000000000000m, 10000000000000000m, 100000000000000000m,
+        1000000000000000000m, 10000000000000000000m, 100000000000000000000m,
+        1000000000000000000000m, 10000000000000000000000m, 100000000000000000000000m,
+        1000000000000000000000000m, 10000000000000000000000000m,
+        100000000000000000000000000m, 1000000000000000000000000000m,
+        10000000000000000000000000000m,
+    ];
 
     /// <summary>
     /// Formats a decimal value with exactly <paramref name="scale"/> trailing

@@ -384,6 +384,27 @@ Sort keys decode only the ORDER BY columns off each row (`ComputeTopLevelOrderKe
 `AVG(int)` truncates; `AVG(decimal(p,s))` widens to `decimal(38, max(s,6))`.
 `SUM` / `AVG` also widen `real` to `float` and `smallmoney` to `money`, where `MIN` / `MAX` keep the operand's type — see [`arithmetic.md`](arithmetic.md#the-approximate-family-float--real).
 
+A filter written **above** a grouped body — and the key set of an equi-join to one — reaches *below* the grouping when it names a grouping column, so the aggregate runs over the groups the statement keeps rather than every group in the table: see [`joins.md`](joins.md#join-key-reduction-of-a-grouped-body).
+
+### Streaming accumulation, and where an error surfaces
+
+A query with **one grouping set** — no GROUP BY at all, or a plain GROUP BY — reads each input row exactly once and accumulates straight off the enumeration.
+`ROLLUP` / `CUBE` / `GROUPING SETS` partition the same rows several ways, so they still buffer the WHERE-passing rows: the second set can't re-read a stream the first consumed.
+
+That is also the shape real runs: its plan pipelines the Filter into the Stream / Hash Aggregate rather than materializing between them, so **an aggregate operand that raises on an early row preempts a WHERE that would have raised on a later one**.
+Over a table whose first row zeroes the divisor and whose last row's text isn't numeric, `SELECT SUM(1 / a) FROM t WHERE CAST(s AS int) > 0` reports **Msg 8134** (divide by zero), not the conversion error — probe-confirmed against SQL Server 2025, and the one observable difference the streaming shape makes.
+
+The scaffolding follows the hoisted-resolver pattern the row-level loops use: one resolver delegate and one `RuntimeContext` for the whole loop, one reused grouping-key scratch buffer (a stable copy is taken only on a group's first row), and a per-group representative row snapshotted once rather than a snapshot per input row.
+The representative is what a projection reaching the column *underneath* a grouping expression resolves against (`SELECT MONTH(d), MIN(d) … GROUP BY MONTH(d)`), so it has to be a copy: the join driver rewrites its tuple in place per row.
+
+Oracle: `GroupedAggregateStreamingTests`.
+
+### Top-N over the grouped stream
+
+A small `TOP (n)` / `FETCH` whose ORDER BY runs over the *groups* takes the same bounded heap the row-level projection does (see [Top-N heap](#top-n-heap) for the mechanism, the eligibility rules and the tie behaviour — they are the same rules, read against the grouped stream).
+`TOP (5) OrderID, COUNT(*) … GROUP BY OrderID ORDER BY N DESC` over 73k groups keeps five in a bounded heap rather than sorting all 73k.
+Under the heap the projection and key tuple are computed into reused scratch and copied only on admission, so the groups that lose cost no allocation at all — which is most of the win at that group count.
+
 ### Over a source-less SELECT
 
 A SELECT with no FROM clause reads **one synthesized row**, so an aggregate written over it collapses that row to a single group exactly as one over a one-row table would: `SELECT COUNT(*)` is 1 and `SELECT MIN(-57)` is -57 on real.

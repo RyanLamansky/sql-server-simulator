@@ -250,6 +250,30 @@ public sealed class KeyRangeLockTests
     }
 
     [TestMethod]
+    public async Task SerializableCrossColumnOr_NarrowsTheReadButStillFencesTheWholeTable()
+    {
+        // `a = 1 OR b = 2` narrows the read to a union of two seeks, one per
+        // disjunct. The fence is settled from the top-level conjuncts before any
+        // candidate is read, and a disjunction pins no interval on any one key —
+        // so it stays the whole-table S and a writer anywhere in the table
+        // waits. Narrowing which rows a read touches must never narrow what it
+        // fences.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table two (id int not null primary key, a int not null, b int not null);
+            create index ix_two_a on two (a);
+            create index ix_two_b on two (b);
+            insert two values (1, 1, 9), (2, 9, 2), (3, 5, 5)
+            """);
+        using var reader = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        AreEqual(2, reader.CreateCommand(
+            "set transaction isolation level serializable; begin tran; select count(*) from two where a = 1 or b = 2").ExecuteScalar());
+        await AssertBlocksUntil(reader, writer, "insert two values (999, 7, 7)", "rollback tran");
+    }
+
+    [TestMethod]
     public async Task SerializableWholeTableScan_FallsBackToWholeTable()
     {
         var sim = KeyedTable();

@@ -47,6 +47,16 @@ internal readonly struct SqlValueKey(SqlValue[] values) : IEquatable<SqlValueKey
 
     public override int GetHashCode()
     {
+        // Almost every key here is a single column — a join on one equality, a
+        // GROUP BY on one expression, a one-column seek. Hashing that through
+        // the general combiner cost more than the component hash it wraps, and
+        // this runs once per row on both the join's build and probe sides.
+        if (this.values.Length == 1)
+        {
+            var only = this.values[0];
+            return only.IsNull ? 0 : only.GetHashCode();
+        }
+
         var h = new HashCode();
         foreach (var v in this.values)
             h.Add(v.IsNull ? 0 : v.GetHashCode());

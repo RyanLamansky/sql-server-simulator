@@ -289,10 +289,27 @@ internal sealed class Heap
     /// hold the row. New rows always take a fresh, higher slot index, so reuse
     /// never aliases a <c>(page, slot)</c> any holder still references.
     /// </summary>
+    /// <remarks>
+    /// The walk enumerates the dictionary directly rather than reading its
+    /// <c>Keys</c> property: that property takes <em>every</em> one of the
+    /// dictionary's locks and copies the keys into a fresh collection, and this
+    /// runs on the insert path — once for each row that doesn't fit the tail
+    /// page, which on a bulk load is once per page. The direct enumerator is the
+    /// lock-free weakly-consistent one the set was chosen for, and the empty
+    /// test short-circuits the overwhelmingly common case of a heap nothing has
+    /// deleted from. Removing candidates while enumerating is what
+    /// <see cref="ConcurrentDictionary{TKey, TValue}"/>'s enumerator supports.
+    /// </remarks>
     private bool TryReuseReclaimablePage(ReadOnlySpan<byte> row, out int pageIndex)
     {
+        if (this.reclaimablePages.IsEmpty)
+        {
+            pageIndex = -1;
+            return false;
+        }
+
         var need = row.Length + 2;
-        foreach (var candidate in this.reclaimablePages.Keys)
+        foreach (var (candidate, _) in this.reclaimablePages)
         {
             if (candidate < 0 || candidate >= this.Pages.Count)
             {
@@ -429,16 +446,30 @@ internal sealed class Heap
     /// <see cref="UpdateAt"/> / <see cref="DeleteAt"/> through the visible
     /// row identity, which survives a forwarding UPDATE.
     /// </summary>
+    /// <remarks>
+    /// The slot walk is inline rather than delegated to
+    /// <see cref="HeapPage.EnumerateRowsWithSlots"/>: this is the path every
+    /// table scan in the engine runs, and the nested iterator's per-row
+    /// <c>MoveNext</c> plus the repeated slot-directory reads were together a
+    /// fifth of a scan's CPU. The forward-target set is probed only when it
+    /// holds something — it is empty for any heap no <c>UPDATE</c> has
+    /// relocated a row in, and its key is a tuple, so the <c>Count</c> test
+    /// keeps a hash probe off every scanned row. Both reads stay per row so a
+    /// heap mutated mid-enumeration is seen the same way it was before.
+    /// </remarks>
     public IEnumerable<(int PageIndex, int SlotIndex, byte[] Bytes)> EnumerateRowsWithAddress()
     {
         for (var p = 0; p < this.Pages.Count; p++)
         {
             var page = this.Pages[p];
-            foreach (var (slotIndex, raw) in page.EnumerateRowsWithSlots())
+            var slotCount = page.SlotCount;
+            for (var slotIndex = 0; slotIndex < slotCount; slotIndex++)
             {
-                if (this.ForwardTargets.Contains((p, slotIndex)))
+                if (!page.TryReadLiveSlot(slotIndex, out var raw, out var forwarded))
                     continue;
-                if (page.IsSlotForwarded(slotIndex))
+                if (this.ForwardTargets.Count > 0 && this.ForwardTargets.Contains((p, slotIndex)))
+                    continue;
+                if (forwarded)
                 {
                     var (tp, ts) = page.ReadForwardTarget(slotIndex);
                     yield return (p, slotIndex, this.Pages[tp].ReadSlotBytes(ts)!);

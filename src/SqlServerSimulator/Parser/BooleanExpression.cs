@@ -1702,6 +1702,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class BetweenExpression(Expression value, Expression lower, Expression upper, bool negated) : BooleanExpression
     {
+        private readonly StringCoercionMemo subjectPromotion = new(), lowerPromotion = new(), upperPromotion = new();
+
         internal override bool IsWrittenConstant =>
             value.IsWrittenConstant && lower.IsWrittenConstant && upper.IsWrittenConstant;
 
@@ -1721,7 +1723,9 @@ internal abstract class BooleanExpression
         public override bool? Run(RuntimeContext runtime)
         {
             var v = value.Run(runtime);
-            var ge = CompareValuesPromoted(v, lower.Run(runtime), "greater than or equal to", static (l, r) => l.CompareTo(r) >= 0);
+            var ge = CompareValuesPromoted(
+                v, lower.Run(runtime), "greater than or equal to", static (l, r) => l.CompareTo(r) >= 0,
+                this.subjectPromotion, this.lowerPromotion);
             // Real evaluates the range as the `value >= lower AND value <= upper`
             // it desugars to, left to right, and stops once the lower half
             // answers false — so `b BETWEEN 99999 AND b / 0` answers no rows
@@ -1731,7 +1735,9 @@ internal abstract class BooleanExpression
             // `CHECK (x BETWEEN NULL AND 5)` reject x = 10 rather than pass it.
             var inRange = ge == false
                 ? false
-                : CompareValuesPromoted(v, upper.Run(runtime), "less than or equal to", static (l, r) => l.CompareTo(r) <= 0) switch
+                : CompareValuesPromoted(
+                    v, upper.Run(runtime), "less than or equal to", static (l, r) => l.CompareTo(r) <= 0,
+                    this.subjectPromotion, this.upperPromotion) switch
                 {
                     false => false,
                     true => ge,
@@ -2124,6 +2130,7 @@ internal abstract class BooleanExpression
     private abstract class CompareExpression : BooleanExpression
     {
         protected readonly Expression left, right;
+        private readonly StringCoercionMemo leftPromotion = new(), rightPromotion = new();
 
         private protected CompareExpression(Expression left, Expression right)
         {
@@ -2144,7 +2151,13 @@ internal abstract class BooleanExpression
         /// message.
         /// </summary>
         protected bool? ComparePromoted(RuntimeContext runtime, Func<SqlValue, SqlValue, bool> compare) =>
-            CompareValuesPromoted(this.left.Run(runtime), this.right.Run(runtime), this.OperatorName, compare);
+            CompareValuesPromoted(
+                this.left.Run(runtime),
+                this.right.Run(runtime),
+                this.OperatorName,
+                compare,
+                this.leftPromotion,
+                this.rightPromotion);
 
         /// <summary>
         /// The name real SQL Server weaves into a Msg 402 / Msg 468 raised
@@ -2191,7 +2204,13 @@ internal abstract class BooleanExpression
     /// Same NULL / LOB / promotion rules as the
     /// <see cref="CompareExpression.ComparePromoted"/> path.
     /// </summary>
-    internal static bool? CompareValuesPromoted(SqlValue l, SqlValue r, string operatorName, Func<SqlValue, SqlValue, bool> compare)
+    internal static bool? CompareValuesPromoted(
+        SqlValue l,
+        SqlValue r,
+        string operatorName,
+        Func<SqlValue, SqlValue, bool> compare,
+        StringCoercionMemo? leftMemo = null,
+        StringCoercionMemo? rightMemo = null)
     {
         // Either operand sql_variant: real converts a base-typed side UP to
         // sql_variant (probe-confirmed as CONVERT_IMPLICIT(sql_variant, …) in
@@ -2232,8 +2251,15 @@ internal abstract class BooleanExpression
         if (l.Type == r.Type)
             return compare(l, r);
 
+        // A written operand — a literal date, a parameter — is the same string
+        // instance on every row, so the promotion coercion its side needs is one
+        // call memoized rather than one parse per row; see
+        // <see cref="StringCoercionMemo"/> for why identity is the right key and
+        // why a missing memo just means the old behavior.
         var common = SqlType.Promote(l.Type, r.Type);
-        return compare(l.CoerceTo(common), r.CoerceTo(common));
+        return compare(
+            leftMemo is null ? l.CoerceTo(common) : leftMemo.Coerce(l, common),
+            rightMemo is null ? r.CoerceTo(common) : rightMemo.Coerce(r, common));
     }
 
     private sealed class EqualityExpression(Expression left, Expression right) : CompareExpression(left, right)
@@ -2342,8 +2368,9 @@ internal abstract class BooleanExpression
     /// <summary>
     /// SQL Server <c>LIKE</c> / <c>NOT LIKE</c> with optional <c>ESCAPE</c>
     /// clause. Pattern translation flows through <see cref="LikePatternBuilder"/>
-    /// (shared with <c>PATINDEX</c>); the resulting regex is rebuilt per
-    /// evaluation, pre-compilation/caching is left for later. Trailing-space
+    /// (shared with <c>PATINDEX</c>), behind this node's own
+    /// <see cref="LikePatternBuilder.Cache"/> so a per-row predicate translates
+    /// its pattern once rather than once per row. Trailing-space
     /// behavior (subject's leftover U+0020 spaces accepted but pattern's must
     /// match) is encoded by anchoring the regex with <c>[ ]*$</c>. Wildcards
     /// inside <c>[...]</c> classes are taken literally; <c>[]</c> and reversed
@@ -2352,6 +2379,7 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class LikeExpression(Expression left, Expression right, Expression? escape, bool negated) : CompareExpression(left, right)
     {
+        private readonly LikePatternBuilder.Cache patterns = new(forPatIndex: false);
         private readonly Expression? escape = escape;
         private readonly bool negated = negated;
 
@@ -2399,7 +2427,7 @@ internal abstract class BooleanExpression
                     l.Type.Collation!.Name,
                     this.OperatorName);
 
-            var matched = LikePatternBuilder.BuildAnchored(r.AsString, escapeChar, resolved.Collation.CaseSensitive).IsMatch(l.AsString);
+            var matched = this.patterns.Get(r.AsString, escapeChar, resolved.Collation.CaseSensitive).IsMatch(l.AsString);
             return matched ^ this.negated;
         }
 

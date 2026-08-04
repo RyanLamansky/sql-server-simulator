@@ -103,4 +103,103 @@ public class HeapTests
         // Across however many pages the heap chose, EnumerateRows returns all 3 rows.
         AreEqual(3, heap.EnumerateRows().Count());
     }
+
+    /// <summary>
+    /// The scan reads each slot's directory entry once and walks slots inline
+    /// rather than through a per-page enumerator. These pin the three things
+    /// that walk has to keep straight: a tombstoned slot is skipped, a
+    /// forwarded row is surfaced once at its <em>original</em> address carrying
+    /// the relocated payload, and the relocation target is not surfaced a
+    /// second time where it physically sits.
+    /// </summary>
+    [TestMethod]
+    public void EnumerateRowsWithAddress_SkipsTombstonesAndFollowsForwardingOnce()
+    {
+        // Rows are at least as wide as the 6-byte forward pointer that
+        // replaces one in place; the row encoder never emits a narrower row.
+        var heap = new Heap();
+        var (firstPage, firstSlot) = heap.Insert([1, 1, 1, 1, 1, 1, 1, 1]);
+        var (secondPage, secondSlot) = heap.Insert([2, 2, 2, 2, 2, 2, 2, 2]);
+        var (thirdPage, thirdSlot) = heap.Insert([3, 3, 3, 3, 3, 3, 3, 3]);
+
+        heap.DeleteAt(secondPage, secondSlot);
+
+        // Growing the row past its slot extent relocates it and leaves a
+        // forwarding pointer at the original address.
+        var grown = new byte[HeapPage.MaxRowPayload / 2];
+        grown[0] = 9;
+        heap.UpdateAt(thirdPage, thirdSlot, grown);
+
+        var scanned = heap.EnumerateRowsWithAddress().ToList();
+        HasCount(2, scanned);
+        AreEqual((firstPage, firstSlot), (scanned[0].PageIndex, scanned[0].SlotIndex));
+        CollectionAssert.AreEqual(new byte[] { 1, 1, 1, 1, 1, 1, 1, 1 }, scanned[0].Bytes);
+        AreEqual((thirdPage, thirdSlot), (scanned[1].PageIndex, scanned[1].SlotIndex));
+        HasCount(grown.Length, scanned[1].Bytes);
+        AreEqual((byte)9, scanned[1].Bytes[0]);
+    }
+
+    /// <summary>
+    /// Delete-then-insert churn draws from the reclaimable-page candidates
+    /// instead of appending pages, which is what bounds <c>Pages.Count</c> by
+    /// the working set. The insert path consults that candidate set on every
+    /// row the tail page can't hold, so the walk has to stay correct as well as
+    /// cheap: it enumerates the concurrent set directly rather than snapshotting
+    /// its keys.
+    /// </summary>
+    [TestMethod]
+    public void DeleteInsertChurn_ReusesPagesInsteadOfAppending()
+    {
+        var connection = new Simulation().CreateDbConnection();
+        connection.Open();
+        Exec(connection, "create table t (id int not null primary key, pad char(400) not null)");
+        for (var i = 0; i < 200; i++)
+            Exec(connection, $"insert t values ({i}, 'x')");
+        var pagesWhenFull = HeapFor(connection, "t").Pages.Count;
+        IsGreaterThanOrEqualTo(2, pagesWhenFull, "Expected 200 padded rows to span several pages.");
+
+        for (var round = 0; round < 5; round++)
+        {
+            Exec(connection, "delete t");
+            for (var i = 0; i < 200; i++)
+                Exec(connection, $"insert t values ({i}, 'x')");
+        }
+
+        AreEqual(200, (int)Scalar(connection, "select count(*) from t")!);
+        IsLessThanOrEqualTo(
+            2 * pagesWhenFull,
+            HeapFor(connection, "t").Pages.Count,
+            $"Five rounds of full delete-and-refill should reuse the reclaimed pages, not append about 6x the {pagesWhenFull} a single fill needs.");
+    }
+
+    private static Heap HeapFor(SimulatedDbConnection connection, string table) =>
+        connection.CurrentDatabase.Schemas[Database.DefaultSchemaName].HeapTables[table].Heap;
+
+    private static void Exec(SimulatedDbConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        _ = command.ExecuteNonQuery();
+    }
+
+    private static object? Scalar(SimulatedDbConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return command.ExecuteScalar();
+    }
+
+    /// <summary>
+    /// The payload each scanned row carries is a copy: writing through it must
+    /// not reach the page, since every consumer of a scan holds the array.
+    /// </summary>
+    [TestMethod]
+    public void EnumerateRowsWithAddress_YieldsACopyOfThePagePayload()
+    {
+        var heap = new Heap();
+        _ = heap.Insert([7, 7, 7, 7, 7, 7, 7, 7]);
+        var (_, _, bytes) = heap.EnumerateRowsWithAddress().Single();
+        bytes[0] = 42;
+        CollectionAssert.AreEqual(new byte[] { 7, 7, 7, 7, 7, 7, 7, 7 }, heap.EnumerateRows().Single());
+    }
 }

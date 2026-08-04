@@ -961,6 +961,12 @@ internal sealed partial class Selection
                 // below, so a source that materializes materializes the
                 // narrowed rowset. Every pushed conjunct stays here as well.
                 var execSources = PushWhereIntoDeferredSources(sources, fromClause.Excluders, batch);
+                // Reduce a joined GROUP BY body to the key set its equi-join
+                // partner actually carries, so the body aggregates the groups
+                // the join can use instead of every group in the table. After
+                // the push (a body already filtered on its own output takes the
+                // reduction on top) and before the materialization below.
+                execSources = ReduceGroupedBodiesByJoinKeys(execSources, joins, fromClause.Excluders, batch, outerResolver);
                 // Materialize the deferred sources whose rows can't change
                 // across this enumeration once per execution (before the
                 // projection paths build their resolver closures over the
@@ -1003,14 +1009,29 @@ internal sealed partial class Selection
         // level up. Anything that reads the row set as a whole — DISTINCT, a row
         // limit, a grouping, a window, an ORDER BY the limit would pair with —
         // would see a different row set and declines.
-        if (!distinct && aggregates.Count == 0 && windows.Count == 0
-            && fromClause.GroupingSets.Count == 0 && fromClause.Having is null
-            && orderBy.Count == 0 && !selection.HasTopOrOffsetOrFetch
+        if (!distinct && windows.Count == 0 && orderBy.Count == 0 && !selection.HasTopOrOffsetOrFetch
             && intoTarget is null && !isAssignmentOnly && sources.Length > 0)
         {
-            var pushdownShape = new ProjectionPushdown(
-                outputSchema, outputColumnNames, sources, joins, expressions, fromClause.Excluders, orderBy);
-            selection.PredicatePushdown = templates => BuildPushedProjection(pushdownShape, templates);
+            if (aggregates.Count == 0 && fromClause.GroupingSets.Count == 0 && fromClause.Having is null)
+            {
+                var pushdownShape = new ProjectionPushdown(
+                    outputSchema, outputColumnNames, sources, joins, expressions, fromClause.Excluders, orderBy);
+                selection.PredicatePushdown = templates => BuildPushedProjection(pushdownShape, templates);
+            }
+            // A GROUP BY body takes a conjunct on a column it groups by: such a
+            // filter removes whole groups, and a group the enclosing statement
+            // discards anyway feeds no other group's aggregate or HAVING. The
+            // slots that qualify are computed once here; a body grouped only by
+            // expressions offers none and carries no delegate at all.
+            else if (fromClause.GroupingSets.Count > 0 && !resultIsProvablyEmpty
+                && GroupingColumnProjections(expressions, sources, fromClause) is { } groupingColumns)
+            {
+                var groupedShape = new AggregatePushdown(
+                    outputSchema, outputColumnNames, sources, joins, ResolveColumnType, expressions, fromClause,
+                    orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, groupingColumns);
+                selection.PredicatePushdown = templates => BuildPushedAggregate(groupedShape, templates);
+                selection.PushdownIsGrouped = true;
+            }
         }
         return selection;
     }
@@ -1366,6 +1387,14 @@ internal sealed partial class Selection
         // reason.
         if (batch.IsSkipping)
             return sources;
+        // The read path's grouped-body reduction, reached with the mutation's
+        // own WHERE: the pass only ever rewrites a deferred GROUP BY body's
+        // slot, which the target — a base table the write pipeline addresses
+        // row by row — can never be. It reads the partner side (which the
+        // target may well be) ahead of the enumeration, where the pre-statement
+        // rows are what a joined mutation reads however many times it runs.
+        List<BooleanExpression> excluders = where is null ? [] : [where];
+        sources = ReduceGroupedBodiesByJoinKeys(sources, joins, excluders, batch, outerResolver: null);
         sources = MaterializeUncorrelatedDeferredSources(sources, joins, batch, outerResolver: null);
         return where is null ? sources : NarrowMutationJoinSources(sources, where, targetIndex, batch);
     }

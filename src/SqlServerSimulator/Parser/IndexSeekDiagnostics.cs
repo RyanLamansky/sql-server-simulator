@@ -15,7 +15,12 @@ internal static class IndexSeekDiagnostics
 {
     /// <summary>
     /// Per-thread decision log: <c>Seek(table)</c> when a scan narrows to an
-    /// index seek, <c>Scan(table)</c> when an eligible single-base-table scan
+    /// index seek (with <c>UnionSeek(table,n)</c> +
+    /// <c>UnionSeekCandidates(table,k)</c> beside it when the narrowing came
+    /// from a cross-column <c>OR</c> whose <c>n</c> disjuncts each probed
+    /// separately, <c>k</c> being the candidate count after the probes are
+    /// deduplicated by row address — which is also what the join reorder reads),
+    /// <c>Scan(table)</c> when an eligible single-base-table scan
     /// keeps its full scan, <c>OrderedScan(table)</c> when an ORDER BY streams in
     /// key order instead of buffering + sorting (with <c>KeysetSeek(table)</c>
     /// when that ordered scan also positions past a keyset-pagination cursor),
