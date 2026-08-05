@@ -321,7 +321,8 @@ internal sealed class XmlStep(
     XmlNodeTestKind testKind,
     string localName,
     string namespaceUri,
-    XmlQueryExpr[] predicates)
+    XmlQueryExpr[] predicates,
+    bool schemaSingleton = false)
 {
     private readonly XmlAxis axis = axis;
     private readonly XmlNodeTestKind testKind = testKind;
@@ -329,13 +330,21 @@ internal sealed class XmlStep(
     private readonly string namespaceUri = namespaceUri;
     private readonly XmlQueryExpr[] predicates = predicates;
 
-    /// <summary>Static cardinality this step contributes per context node.</summary>
+    /// <summary>
+    /// Static cardinality this step contributes per context node. The
+    /// constructor's <c>schemaSingleton</c> flag is set when the receiver is
+    /// bound to an XML schema collection that declares this element name at
+    /// most once, which is how real narrows a named child step it would
+    /// otherwise type plural — see
+    /// <c>XmlSchemaCollection.SingletonElementNames</c>.
+    /// </summary>
     public readonly XmlOccurrence Occurrence = Narrow(
         axis switch
         {
             XmlAxis.Attribute => testKind == XmlNodeTestKind.Name ? XmlOccurrence.ZeroOrOne : XmlOccurrence.Many,
             XmlAxis.Parent => XmlOccurrence.ZeroOrOne,
             XmlAxis.Self => XmlOccurrence.ZeroOrOne,
+            XmlAxis.Child when testKind == XmlNodeTestKind.Name && schemaSingleton => XmlOccurrence.ZeroOrOne,
             _ => XmlOccurrence.Many,
         },
         predicates);

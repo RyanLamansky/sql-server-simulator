@@ -11,9 +11,9 @@ namespace SqlServerSimulator;
 /// <c>docs/claude/collations.md</c>.
 /// <para>
 /// Note the <c>cast(… as nvarchar(20)) collate …</c> shape used to build a
-/// multi-character subject: a bare parenthesized expression followed by a
-/// postfix <c>COLLATE</c> in a predicate position doesn't parse here yet, and
-/// the cast is transparent to everything these tests measure.
+/// multi-character subject: it predates the parenthesized-group form
+/// (<see cref="ParenthesizedCollateTests"/>) and is transparent to everything
+/// these tests measure, so it stays as written.
 /// </para>
 /// </summary>
 [TestClass]

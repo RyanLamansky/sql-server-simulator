@@ -7,20 +7,24 @@ namespace SqlServerSimulator;
 /// <c>byte[]</c> rows in the page-row format (the niche producers — set ops,
 /// TVFs, OPENJSON, views, …), or already-projected <see cref="SqlValue"/>[]
 /// rows (the FROM-bearing SELECT projection path). The <c>SqlValue[]</c> form
-/// lets the reader's cursor serve cells directly, skipping the
-/// encode-then-re-decode round-trip a projected SELECT would otherwise pay
-/// (the projection computes the values, and the cursor would decode them right
-/// back). <see cref="RowBytes"/> stays available for the byte-consuming paths
-/// (INSERT…SELECT, SELECT INTO, set-op operands, subqueries); it encodes the
-/// <see cref="SqlValue"/>[] form lazily, so those callers pay exactly what they
-/// did before and the reader path pays neither encode nor re-decode.
+/// travels to the client as it is — <see cref="MaterializeRows"/> keeps the
+/// producer's form at the statement boundary and <see cref="CreateCursor"/>
+/// serves its cells directly — so a projecting SELECT stops encoding each row
+/// into a page image the reader would decode straight back. The one thing the
+/// page image did that the values don't is the encoder's lossy narrowing of
+/// character data an ANSI code page can't carry, which
+/// <c>RowEncoder.StorageForm</c> applies per cell for the columns that can
+/// suffer it. <see cref="RowBytes"/> stays available for the byte-consuming
+/// paths (INSERT…SELECT, set-op operands, subqueries, FOR XML / FOR JSON,
+/// cursors); it encodes the <see cref="SqlValue"/>[] form lazily, so those
+/// callers pay exactly what they did before.
 /// </summary>
 internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
 {
     private readonly SqlType[] schema;
     private readonly string[] columnNames;
-    private readonly IEnumerable<byte[]>? rowBytes;
-    private readonly IEnumerable<SqlValue[]>? rowValues;
+    private IEnumerable<byte[]>? rowBytes;
+    private IEnumerable<SqlValue[]>? rowValues;
 
     /// <summary>
     /// <paramref name="recordsAffected"/> is set only by a DML statement whose
@@ -62,25 +66,51 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     public IEnumerable<SqlValue[]> RowValues => this.rowValues
         ?? this.rowBytes!.Select(bytes => RowDecoder.DecodeRow(this.schema, bytes));
 
+    /// <summary>
+    /// Drains the row sequence into a list, keeping whichever form the producer
+    /// yielded, and reports the row count. The dispatch loop calls this at the
+    /// statement boundary — statement atomicity requires the rows be produced
+    /// before the next statement runs, and <c>@@ROWCOUNT</c> requires the count
+    /// — so a projecting SELECT holds <see cref="SqlValue"/> rows from here to
+    /// the client instead of a page image it would decode straight back.
+    /// </summary>
+    public int MaterializeRows()
+    {
+        if (this.rowValues is { } values)
+        {
+            var list = values as List<SqlValue[]> ?? [.. values];
+            this.rowValues = list;
+            return list.Count;
+        }
+
+        var bytes = this.rowBytes as List<byte[]> ?? [.. this.rowBytes!];
+        this.rowBytes = bytes;
+        return bytes.Count;
+    }
+
     public override RowCursor CreateCursor() => this.rowValues is { } values
-        ? new ValueArrayCursor(this.schema.Length, values.GetEnumerator())
+        ? new ValueArrayCursor(this.schema, values.GetEnumerator())
         : new SqlValueCursor(this.schema, this.rowBytes!.GetEnumerator());
 
     /// <summary>
     /// Cursor over already-projected <see cref="SqlValue"/>[] rows — the
-    /// indexer returns the stored value directly, no per-cell decode. Shares
-    /// the peek-and-buffer <see cref="HasRows"/> shape with
+    /// indexer serves the stored value, no per-cell decode, past the one
+    /// narrowing the storage form would have applied (see
+    /// <c>RowEncoder.NarrowingColumns</c>: only a column whose ANSI code page
+    /// can fold a character carries any per-cell work, and most schemas carry
+    /// none at all). Shares the peek-and-buffer <see cref="HasRows"/> shape with
     /// <see cref="SqlValueCursor"/>.
     /// </summary>
-    private sealed class ValueArrayCursor(int fieldCount, IEnumerator<SqlValue[]> source) : RowCursor
+    private sealed class ValueArrayCursor(SqlType[] schema, IEnumerator<SqlValue[]> source) : RowCursor
     {
+        private readonly bool[]? narrowing = RowEncoder.NarrowingColumns(schema);
         private SqlValue[]? buffered;
         private SqlValue[]? current;
         private bool peeked;
         private bool sourceDone;
         private bool everHadRows;
 
-        public override int FieldCount => fieldCount;
+        public override int FieldCount => schema.Length;
 
         public override bool HasRows
         {
@@ -129,7 +159,9 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
 
         public override SqlValue this[int ordinal] => current is null
             ? throw new InvalidOperationException("No current row.")
-            : current[ordinal];
+            : narrowing is null || !narrowing[ordinal]
+                ? current[ordinal]
+                : RowEncoder.StorageForm(current[ordinal], schema[ordinal]);
 
         protected override void DisposeCore() => source.Dispose();
     }

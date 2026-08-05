@@ -1,3 +1,4 @@
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -66,7 +67,7 @@ internal sealed partial class Selection
         {
             throw SimulatedSqlException.StringSplitSeparatorMustBeSingleChar();
         }
-        var sepChar = sepValue.AsString[0];
+        var separatorString = sepValue.AsString;
 
         var inputValue = input.Run(runtime);
         if (inputValue.IsNull)
@@ -81,22 +82,32 @@ internal sealed partial class Selection
 
         // Empty-input behavior: probe shows STRING_SPLIT('', ',') returns one
         // row with an empty value, AND when enable_ordinal=1 the row's
-        // ordinal is 1. That falls out naturally from the split-and-emit
-        // loop below, since `''.Split(',')` yields a single empty element.
+        // ordinal is 1 — the loop below emits the tail segment unconditionally,
+        // so that falls out.
+        //
+        // The separator is matched under the collation the input and separator
+        // resolve to, so an accent-insensitive split on N'e' also splits at an
+        // é and a width-insensitive split on N' ' also splits at an ideographic
+        // space. What the split then *consumes* is one separator character, not
+        // however much of the input the match ate: splitting N'assb' on ß on
+        // real yields `a` and `sb`, where REPLACE of the same pair eats both
+        // units (probe-confirmed against SQL Server 2025).
+        var collation = StringScalars.CollationFor(batch, inputValue.Type, sepValue.Type);
         var ordinal = 1L;
         var start = 0;
-        for (var i = 0; i <= inputString.Length; i++)
+        while (true)
         {
-            if (i == inputString.Length || inputString[i] == sepChar)
-            {
-                var segment = inputString[start..i];
-                SqlValue[] values = emitOrdinal
-                    ? [SqlValue.FromString(valueColumnType, segment), SqlValue.FromInt64(ordinal)]
-                    : [SqlValue.FromString(valueColumnType, segment)];
-                yield return RowEncoder.EncodeRow(schema, values);
-                ordinal++;
-                start = i + 1;
-            }
+            var found = collation.IndexOf(inputString, separatorString, start, out _);
+            var end = found < 0 ? inputString.Length : found;
+            var segment = inputString[start..end];
+            SqlValue[] values = emitOrdinal
+                ? [SqlValue.FromString(valueColumnType, segment), SqlValue.FromInt64(ordinal)]
+                : [SqlValue.FromString(valueColumnType, segment)];
+            yield return RowEncoder.EncodeRow(schema, values);
+            if (found < 0)
+                yield break;
+            ordinal++;
+            start = found + separatorString.Length;
         }
     }
 

@@ -255,6 +255,41 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public NextValueForScope NextValueForRejection;
 
     /// <summary>
+    /// Applies <paramref name="scope"/> to <see cref="NextValueForRejection"/>
+    /// as a <em>floor</em> — it takes effect only when nothing stricter is
+    /// already in force, since <see cref="NextValueForScope"/> declares its
+    /// arms in real's own precedence order. Returns the previous value for the
+    /// caller to restore in a <c>finally</c>.
+    /// </summary>
+    public NextValueForScope EnterNextValueForScope(NextValueForScope scope)
+    {
+        var saved = this.NextValueForRejection;
+        if (saved == NextValueForScope.Allowed || scope < saved)
+            this.NextValueForRejection = scope;
+        return saved;
+    }
+
+    /// <summary>
+    /// How many <c>NEXT VALUE FOR</c> references have been parsed in a
+    /// position real accepts. Two of real's refusals are properties of the
+    /// whole statement rather than of the reference's own position — Msg
+    /// 11721 for a set operator and Msg 11723 for an <c>ORDER BY</c> — and
+    /// neither is known until after the select list has been read, so each is
+    /// settled by comparing a counter against a snapshot taken where the
+    /// statement began.
+    /// </summary>
+    public int SequenceDrawsParsed;
+
+    /// <summary>
+    /// The subset of <see cref="SequenceDrawsParsed"/> whose reference named
+    /// no <c>OVER</c> clause of its own. An <c>OVER</c> exempts a reference
+    /// from the <c>ORDER BY</c> refusal (Msg 11723) and from that one alone —
+    /// probe-confirmed that it exempts from none of the others, the set
+    /// operator's included — so the two checks read different counters.
+    /// </summary>
+    public int UnwindowedSequenceDrawsParsed;
+
+    /// <summary>
     /// True while an <c>UPDATE</c> / <c>DELETE</c>'s own <c>FROM</c> clause is
     /// parsed, where real leaves a derived table's <c>NEXT VALUE FOR</c> legal
     /// (probe-confirmed) although every other derived table refuses it.
@@ -616,28 +651,50 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
 
 /// <summary>
 /// The construct a <c>NEXT VALUE FOR</c> reference sits inside, and with it
-/// which of SQL Server's four refusals applies. Probed against SQL Server 2025
+/// which of SQL Server's refusals applies. Probed against SQL Server 2025
 /// (2026-08-05); each arm carries the message real raises, and every one of
 /// them is a <em>parse</em>-time refusal of the whole batch, so the sequence
 /// never advances and a <c>TRY</c> in the same batch never sees it.
+/// <para>
+/// <b>Declaration order is the precedence order</b>, lowest ordinal winning:
+/// a reference that sits under two restrictions at once reports the earlier
+/// arm. Every neighbouring pair was probed directly — a <c>DISTINCT</c>
+/// statement whose <c>WHERE</c> holds the reference is Msg 11721 not 11720, a
+/// <c>TOP</c> query whose <c>WHERE</c> holds it is 11720 not 11739, an
+/// aggregate argument inside a <c>CASE</c> is 11725 not 11741, and so on.
+/// <see cref="ParserContext.EnterNextValueForScope"/> is what applies the
+/// order, so a construct nested inside a stricter one never relaxes it.
+/// </para>
 /// </summary>
 internal enum NextValueForScope
 {
     /// <summary>A position real accepts: a bare projection, a <c>VALUES</c> tuple, a column <c>DEFAULT</c>, a stored procedure's own statement.</summary>
     Allowed,
 
-    /// <summary>A clause of the query — <c>TOP</c> / <c>OVER</c> / <c>OUTPUT</c> / <c>ON</c> / <c>WHERE</c> / <c>GROUP BY</c> / <c>HAVING</c> / <c>ORDER BY</c>. Msg 11720.</summary>
-    Clause,
-
     /// <summary>A nested query or stored expression — a derived table, a CTE, a subquery, an <c>APPLY</c> body, a view / function body, a computed column, a <c>CHECK</c> constraint, a table type's default. Msg 11719.</summary>
     Nested,
-
-    /// <summary>An arm of <c>CASE</c> / <c>COALESCE</c> / <c>IIF</c> / <c>ISNULL</c> / <c>NULLIF</c>. Msg 11741 — which names <c>CHOOSE</c> too, though real accepts that one.</summary>
-    Conditional,
 
     /// <summary>An aggregate's argument. Msg 11725.</summary>
     Aggregate,
 
     /// <summary>A statement that dedupes or combines rowsets — <c>DISTINCT</c>, <c>UNION</c>, <c>UNION ALL</c>, <c>EXCEPT</c>, <c>INTERSECT</c>. Msg 11721.</summary>
     Deduplicating,
+
+    /// <summary>A statement carrying an <c>ORDER BY</c>, where the reference names no <c>OVER</c> of its own. Msg 11723.</summary>
+    OrderedStatement,
+
+    /// <summary>A clause of the query — <c>TOP</c> / <c>OVER</c> / <c>OUTPUT</c> / <c>ON</c> / <c>WHERE</c> / <c>GROUP BY</c> / <c>HAVING</c> / <c>ORDER BY</c>. Msg 11720.</summary>
+    Clause,
+
+    /// <summary>A statement carrying a <c>TOP</c> or an <c>OFFSET</c>. Msg 11739.</summary>
+    RowLimited,
+
+    /// <summary>An arm of <c>CASE</c> / <c>COALESCE</c> / <c>IIF</c> / <c>ISNULL</c> / <c>NULLIF</c>. Msg 11741 — which names <c>CHOOSE</c> too, though real accepts that one.</summary>
+    Conditional,
+
+    /// <summary>A <c>MERGE</c> action's own expression. Msg 11742 — only a default constraint on the target may draw from a sequence there.</summary>
+    MergeAction,
+
+    /// <summary>A statement real declines to define the reference in at all, such as <c>PRINT</c>. Msg 11738.</summary>
+    Unsupported,
 }

@@ -130,7 +130,7 @@ partial class Simulation
             // real runs `CREATE PROCEDURE p AS SELECT NEXT VALUE FOR s` and the
             // proc draws a value per call.
             if (rejectsNextValueFor)
-                parser.NextValueForRejection = NextValueForScope.Nested;
+                _ = parser.EnterNextValueForScope(NextValueForScope.Nested);
             parser.MoveNextOptional();
             foreach (var _ in DispatchStatementsUntil(bindBatch, endKeyword: null))
             {

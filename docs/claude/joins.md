@@ -209,6 +209,9 @@ The *reference object* is recorded rather than its name, because the dotted part
 A nested `Selection` parse suspends the sink, so a derived table's own body never contributes.
 The check runs once the whole FROM is parsed, since a source may name a sibling written after it; a generator that types its arguments as it parses them raises Msg 207 from inside that parse first, so the source parse also catches Msg 207 and re-reports it as 4104 when the collected reference is qualified by a source already written to its left.
 
+**The two shapes the sink can't see** — a **derived table** whose body names a sibling (`FROM t JOIN (SELECT t.id AS x) d ON 1 = 1`) and a generator's **scalar-subquery argument** doing the same (`STRING_SPLIT((SELECT MAX(t.csv)), ',')`) — reach the same Msg 4104 through the general unbindable-name rule instead, since each is a nested scope that binds neither the sibling nor anything enclosing.
+See [Which error an unresolved name reports](schemas.md#which-error-an-unresolved-name-reports); the sink and that rule agree because they encode the same question.
+
 Real follows the 4104 with the argument's own type complaint (Msg 8116, "void type", for `STRING_SPLIT`); the simulator raises the leading error alone, as it does for every multi-error statement response.
 
 ### Deferred sources materialize once per enumeration

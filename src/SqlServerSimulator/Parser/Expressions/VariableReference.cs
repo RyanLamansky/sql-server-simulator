@@ -22,24 +22,26 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 internal sealed class VariableReference : Expression
 {
-    private readonly string variableName;
+    /// <summary>The name without its leading <c>@</c> — the Variables-dict key.</summary>
+    public readonly string VariableName;
+
     private readonly SqlType declaredType;
 
     public VariableReference(AtPrefixedString atPrefixed, ParserContext context)
     {
         // Strip the leading '@' to match the Variables-dict key convention.
         var raw = atPrefixed.Value;
-        this.variableName = raw.StartsWith('@') ? raw[1..] : raw;
+        this.VariableName = raw.StartsWith('@') ? raw[1..] : raw;
         // Parse-time validation (and capture of the declared type for
         // GetSqlType) — this is what raises Msg 137 if @v was never declared.
         this.declaredType = context.Batch.GetVariableSlot(raw).DeclaredType;
     }
 
-    public override SqlValue Run(RuntimeContext runtime) => runtime.Batch.Variables[this.variableName].Value;
+    public override SqlValue Run(RuntimeContext runtime) => runtime.Batch.Variables[this.VariableName].Value;
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.declaredType;
 
-    internal override string DebugDisplay() => $"@{this.variableName}";
+    internal override string DebugDisplay() => $"@{this.VariableName}";
 
     internal override bool ContainsVariableReference => true;
 

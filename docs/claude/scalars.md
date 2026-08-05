@@ -159,8 +159,9 @@ Basic one-arg conversions between a character and its code point.
   Unicode input is encoded first, so `ASCII(N'€')` returns 128 (CP1252's `€`); unrepresentable Unicode (emoji etc.) returns 63 via the encoder's `'?'` replacement fallback.
   The code page is the argument's, not always CP1252 — `ASCII` of a `Turkish_CI_AS` column holding `Ğ` is 208 — and under a DBCS code page the result is the *lead* byte of a two-byte character (`こ` under `Japanese_XJIS_140_CI_AS` → 130).
   Non-string inputs implicitly stringify *before* the first-char read, so `ASCII(65)` is 54 (the byte for `'6'`, the first char of `"65"`), not 65.
-**`REPLACE` and `CHARINDEX` compare under the collation their arguments resolve to** (`StringScalars.ComparisonFor`), so an explicit `COLLATE` on *any* argument decides the whole call: `REPLACE(name, 'r. r.', '' COLLATE …_CS_AS)` leaves a differently-cased match alone, which is how an ORM forces a case-sensitive replace on a case-insensitive database.
-Case sensitivity is the whole of the approximation — the comparison stays culture-based rather than routing through the collation's own comparer, matching the surrounding string scalars.
+**`REPLACE` and `CHARINDEX` search under the collation their arguments resolve to** (`StringScalars.CollationFor` → `Collation.IndexOf`), so an explicit `COLLATE` on *any* argument decides the whole call: `REPLACE(name, 'r. r.', '' COLLATE …_CS_AS)` leaves a differently-cased match alone, which is how an ORM forces a case-sensitive replace on a case-insensitive database.
+Every half the collation declares folds — case, accent, kanatype and width — and a match consumes as much of the subject as it ate rather than the needle's own length, so `REPLACE` over a decomposed `café` takes the combining mark with the letter.
+`TRANSLATE`, `STRING_SPLIT`'s separator and the `TRIM` family's character set read the same primitive; the whole model, including where the five callers' resume rules differ, is in [`collations.md`](collations.md#the-character-matching-string-scalars-search-under-the-collation-too).
 
 - **`UNICODE(input)`** returns `int`.
   Same input-handling shape as `ASCII`, but reads the .NET `char` directly rather than encoding it, so it is code-page independent.
@@ -199,7 +200,8 @@ Alternate / ANSI forms SQL Server 2025 accepts, each probed against the live ref
   A side keyword makes `chars FROM` mandatory — `TRIM(LEADING FROM x)` → **Msg 156** near FROM.
   NULL `chars` or source yields NULL; an empty set removes nothing.
 - **2-arg `LTRIM(x, chars)` / `RTRIM(x, chars)`** (SQL Server 2022+) strip any of the set's characters from the one side; NULL `chars` yields NULL.
-  The 1-arg forms keep their space-only behavior.
+- **Membership in an explicit set is decided by the collation** (`StringScalars.TrimUnderCollation`), so `TRIM(N'e' FROM N'café')` is `caf` under an `_AI` collation and `TRIM(N'E' FROM N'cafe')` is `caf` under a `_CI` one.
+  The **1-argument forms are not** — real strips U+0020 there and nothing else, so an ideographic space survives a bare `TRIM` under the very collation whose two-argument `N' '` set removes it (probe-confirmed; `StringScalars.TrimSpaces` is the separate body).
 - **`GREATEST` / `LEAST`** (`Parser/Expressions/GreatestLeast.cs`, `isLeast` flag) — horizontal max / min.
   All arguments promote to the single highest-precedence result type, NULLs are skipped, and the result is NULL only when every argument is NULL.
   The promotion is the CASE family's arm unification (`SqlType.PromoteBranches`), so an integer-literal argument sizes by its own digit count against a decimal sibling: `GREATEST(<decimal(9, 2) col>, 1)` stays `decimal(9, 2)` where `GREATEST(<decimal(9, 2) col>, 2147483647)` widens to `decimal(12, 2)`.
@@ -371,6 +373,7 @@ The types are column-only besides: a local variable declared `text` / `ntext` / 
   NULL → NULL.
   Projects `varchar(length)` — the `length` argument (default 10) clamped to 1..8000 when it is a constant, else the `varchar(8000)` container (probe-confirmed against SQL Server 2025: `STR(3.14159, 6, 2)` → `varchar(6)`, a variable length → `varchar(8000)`); the earlier length-0 container described as `varchar(8000)` for every call.
 - **`TRANSLATE(input, chars, translations)`** (`Parser/Expressions/StringScalarAdditions.cs`) — character-by-character substitution.
+  The input is walked one code unit at a time and each character looked up in `chars` under the collation the three arguments resolve to (`Collation.IndexOfElement`), with the substitution taken from the **position** the lookup reports — so a combining mark is its own character, and `TRANSLATE(N'café', N'e', N'Z')` is `cafZ` under an `_AI` collation and unchanged under an `_AS` one.
   The `chars` and `translations` arguments must have equal length; mismatch raises Msg 9819 via a dedicated `TranslateUnequalChars` factory.
   NULL on any operand → NULL.
   Result is the length family of `input`: a MAX-form input (`varchar(max)` / `nvarchar(max)` / `text` / `ntext`) projects `SqlType.NVarcharMax` so a large result streams as PLP; a bounded input keeps the length-0 `nvarchar` shape.
@@ -721,6 +724,8 @@ Yields one row per substring split on the single-character separator.
   `ContainsVariableReference` recurses through the common containers (`VariableReference` / `Parenthesized` / `Cast` / `TwoSidedExpression`); a variable buried in a less-common container is a residual coverage gap.
 - NULL `input` → zero rows; empty `input` → one row with empty value (and ordinal 1 in the ordinal-enabled form).
 - NULL / empty / multi-character `separator` → Msg 214 at runtime (probe-confirmed: validated before the input — NULL sep raises 214 even when input is also NULL).
+- The separator is **matched under the collation** the input and separator resolve to (`Collation.IndexOf`), so an accent-insensitive split on `N'e'` also splits at an `é` and a width-insensitive split on `N' '` also splits at an ideographic space.
+  What a split *consumes* is one separator character, not however much of the input the match ate — which is where it parts company with `REPLACE`; see [`collations.md`](collations.md#the-character-matching-string-scalars-search-under-the-collation-too).
 - Non-int third argument → Msg 8116; `enable_ordinal` literal outside {0, 1, NULL} → Msg 4199.
 - Composes with `CROSS APPLY` / `OUTER APPLY` via the lateral-dispatch fast path: `ParseLateralFromSource` recognizes `STRING_SPLIT` (and `OPENJSON`) by name and routes back through `ParseSingleFromSource` with the chained outer-type resolver that includes left-side sources (so `STRING_SPLIT(t.col, ',')` correctly resolves `t.col` against the APPLY's left side).
 - Input column type determines the `value` column's string family at parse time (`varchar` → `varchar`; `nvarchar` → `nvarchar`); non-string input maps to `nvarchar`.

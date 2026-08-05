@@ -78,6 +78,12 @@ internal sealed class StringEscape : Expression
 /// second and third arguments must have the same length — Msg 9819
 /// otherwise. NULL on any argument returns NULL. Result type is the
 /// input string type.
+/// <para>The per-character lookup runs under the collation the arguments
+/// resolve to, so <c>TRANSLATE(N'café', N'e', N'Z')</c> is <c>cafZ</c> under an
+/// <c>_AI</c> collation and unchanged under an <c>_AS</c> one. The input is
+/// walked one code unit at a time — a combining mark is its own character, so
+/// a decomposed <c>café</c> keeps its mark and only its base letter is
+/// substituted (probe-confirmed).</para>
 /// </summary>
 internal sealed class Translate : Expression
 {
@@ -114,11 +120,20 @@ internal sealed class Translate : Expression
         if (charsStr.Length != transStr.Length)
             throw SimulatedSqlException.TranslateUnequalChars();
         var inputStr = input.CoerceTo(SqlType.NVarchar).AsString;
+        // Each input character is looked up in the character list under the
+        // collation the three arguments resolve to, and the substitution is
+        // taken from the *position* the lookup reports — probe-confirmed
+        // against SQL Server 2025 that an explicit COLLATE on any of the three
+        // decides the whole call, and that the fold is the collation's own
+        // (case, accent, kanatype, width), not an ordinal match.
+        var matcher = new Collation.ElementMatcher(
+            StringScalars.CollationFor(runtime.Batch, input.Type, chars.Type, translations.Type),
+            charsStr);
         var sb = new StringBuilder(inputStr.Length);
-        foreach (var c in inputStr)
+        for (var i = 0; i < inputStr.Length; i++)
         {
-            var idx = charsStr.IndexOf(c, StringComparison.Ordinal);
-            _ = idx >= 0 ? sb.Append(transStr[idx]) : sb.Append(c);
+            var idx = matcher.IndexOf(inputStr.AsSpan(i, 1));
+            _ = idx >= 0 ? sb.Append(transStr[idx]) : sb.Append(inputStr[i]);
         }
         return SqlValue.FromString(resultType, sb.ToString());
     }

@@ -132,6 +132,9 @@ partial class Simulation
         // column reference type-checks correctly at parse time.
         var prevResolver = context.OuterTypeResolver;
         context.OuterTypeResolver = ResolveTypeBoth;
+        // ON is one of the eight clauses Msg 11720 names, and a MERGE's ON
+        // takes it like a join's (probe-confirmed).
+        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Clause);
         BooleanExpression onPredicate;
         try
         {
@@ -140,6 +143,7 @@ partial class Simulation
         finally
         {
             context.OuterTypeResolver = prevResolver;
+            context.NextValueForRejection = savedRejection;
         }
 
         // Compile-time bind of the ON predicate against the same two-sided
@@ -299,8 +303,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNearKeyword(withKeyword);
             // A MERGE's USING source is one of the derived-table shapes real
             // refuses NEXT VALUE FOR in (Msg 11719, probe-confirmed).
-            var savedRejection = context.NextValueForRejection;
-            context.NextValueForRejection = NextValueForScope.Nested;
+            var savedRejection = context.EnterNextValueForScope(NextValueForScope.Nested);
             Selection selection;
             try
             {
@@ -665,14 +668,31 @@ partial class Simulation
         BooleanExpression? searchCondition,
         HeapTable destinationTable,
         View? sourceView,
-        Func<MultiPartName, SqlType> resolveType) =>
-        context.Token switch
+        Func<MultiPartName, SqlType> resolveType)
+    {
+        // A MERGE action's own expressions get real's dedicated refusal
+        // (Msg 11742) rather than any of the query-shaped ones: the only
+        // sequence a MERGE may draw from is one a default constraint on the
+        // target names, which the insert path reaches without writing
+        // NEXT VALUE FOR at all. Probe-confirmed for both the UPDATE SET list
+        // and the INSERT VALUES tuple — and a CASE around the reference still
+        // reports Msg 11741, which is why this is a floor rather than a set.
+        var savedRejection = context.EnterNextValueForScope(NextValueForScope.MergeAction);
+        try
         {
-            ReservedKeyword { Keyword: Keyword.Insert } => ParseMergeInsertAction(context, kind, searchCondition, destinationTable, sourceView, resolveType),
-            ReservedKeyword { Keyword: Keyword.Update } => ParseMergeUpdateAction(context, kind, searchCondition, destinationTable, sourceView, resolveType),
-            ReservedKeyword { Keyword: Keyword.Delete } => ParseMergeDeleteAction(context, kind, searchCondition),
-            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-        };
+            return context.Token switch
+            {
+                ReservedKeyword { Keyword: Keyword.Insert } => ParseMergeInsertAction(context, kind, searchCondition, destinationTable, sourceView, resolveType),
+                ReservedKeyword { Keyword: Keyword.Update } => ParseMergeUpdateAction(context, kind, searchCondition, destinationTable, sourceView, resolveType),
+                ReservedKeyword { Keyword: Keyword.Delete } => ParseMergeDeleteAction(context, kind, searchCondition),
+                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+            };
+        }
+        finally
+        {
+            context.NextValueForRejection = savedRejection;
+        }
+    }
 
     private static WhenClause ParseMergeInsertAction(
         ParserContext context,

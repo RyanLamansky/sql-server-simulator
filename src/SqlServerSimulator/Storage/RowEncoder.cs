@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Text;
 
 namespace SqlServerSimulator.Storage;
 
@@ -51,6 +52,10 @@ internal static class RowEncoder
     /// allocated, so a 1024-column table can't blow the frame.
     /// </summary>
     private const int StackScratchColumns = 64;
+
+    /// <summary>Byte count up to which <see cref="StorageForm"/>'s single-value
+    /// scratch comes off the stack.</summary>
+    private const int StackScratchBytes = 256;
 
     /// <summary>
     /// Encodes a row of values against a <see cref="SqlType"/>-only schema.
@@ -365,6 +370,67 @@ internal static class RowEncoder
             ArrayPool<byte>.Shared.Return(rented);
         }
     }
+
+    /// <summary>
+    /// Marks the columns of <paramref name="schema"/> whose values a storage
+    /// round trip can change, or returns <see langword="null"/> when none can —
+    /// the answer for most schemas, which is what lets a consumer serving
+    /// already-projected <see cref="SqlValue"/> rows skip the question per cell.
+    /// </summary>
+    /// <remarks>
+    /// Every value factory normalizes its payload at construction — a
+    /// <c>time(3)</c> value is already quantized to its precision, a
+    /// <c>decimal(9, 2)</c> already carries scale 2, a <c>char(5)</c> is already
+    /// padded to five bytes — so <c>Decode(Encode(v))</c> returns <c>v</c>
+    /// unchanged for those families. The exception is the character data an ANSI
+    /// code page cannot represent: the <c>varchar</c> / <c>char</c> / <c>text</c>
+    /// encoders fold it to <c>?</c> on the way to bytes, which is SQL Server's
+    /// own lossy narrowing, and a <c>sql_variant</c> holding one of those
+    /// inherits it.
+    /// </remarks>
+    internal static bool[]? NarrowingColumns(SqlType[] schema)
+    {
+        bool[]? narrowing = null;
+        for (var i = 0; i < schema.Length; i++)
+        {
+            if (schema[i] is not (VarcharSqlType or CharSqlType or TextSqlType or SqlVariantSqlType))
+                continue;
+            narrowing ??= new bool[schema.Length];
+            narrowing[i] = true;
+        }
+
+        return narrowing;
+    }
+
+    /// <summary>
+    /// The value a storage round trip would return for <paramref name="value"/>
+    /// in a <paramref name="type"/> column: the encoder's own lossy narrowing
+    /// applied without a page image. Only called for a column
+    /// <see cref="NarrowingColumns"/> flagged, and it does no work past the
+    /// all-ASCII test in <see cref="CanNarrow"/> — every ANSI code page the
+    /// simulator stores through is ASCII-transparent, so an ASCII payload is
+    /// already its own storage form.
+    /// </summary>
+    internal static SqlValue StorageForm(SqlValue value, SqlType type)
+    {
+        if (value.IsNull || !CanNarrow(value, type))
+            return value;
+        var length = type.IsFixedLength ? type.FixedLength : type.GetVariableByteCount(value);
+        // Zero-filled, matching the row buffer the encoder writes into: a char(N)
+        // payload encoding to fewer than N bytes reads its tail back as NUL there
+        // too.
+        var buffer = length <= StackScratchBytes ? stackalloc byte[length] : new byte[length];
+        buffer.Clear();
+        _ = type.Encode(value, buffer);
+        return type.Decode(buffer);
+    }
+
+    /// <summary>Whether <paramref name="value"/> carries character data the
+    /// column's own code page would fold — directly, or inside a
+    /// <c>sql_variant</c>.</summary>
+    private static bool CanNarrow(SqlValue value, SqlType type) => type is SqlVariantSqlType
+        ? value.AsVariantInner is { IsNull: false } inner && CanNarrow(inner, inner.Type)
+        : type is VarcharSqlType or CharSqlType or TextSqlType && !Ascii.IsValid(value.AsString);
 
     /// <summary>
     /// Writes the encoded bytes for a single variable-length column's

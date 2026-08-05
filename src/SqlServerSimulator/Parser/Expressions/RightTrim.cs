@@ -32,11 +32,20 @@ internal sealed class RightTrim : Expression
             return SqlValue.Null(StringScalars.ResolveResultType(raw.Type, runtime.Batch));
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "rtrim");
         var chars = StringScalars.ResolveTrimCharacters(this.trimChars, runtime, "rtrim");
-        if (chars is null)
+        if (chars is not { } set)
+            return SqlValue.FromString(value.Type, StringScalars.TrimSpaces(value.AsString, leading: false, trailing: true));
+        if (set.IsNull)
             return SqlValue.Null(value.Type);
-        // An empty explicit set removes nothing (.NET's TrimEnd would treat an
-        // empty array as "trim whitespace", which is not the set semantics).
-        var trimmed = chars.Length == 0 ? value.AsString : value.AsString.TrimEnd(chars);
+        // An empty explicit set removes nothing.
+        var setString = set.AsString;
+        var trimmed = setString.Length == 0
+            ? value.AsString
+            : StringScalars.TrimUnderCollation(
+                value.AsString,
+                setString,
+                StringScalars.CollationFor(runtime.Batch, value.Type, set.Type),
+                leading: false,
+                trailing: true);
         return SqlValue.FromString(value.Type, trimmed);
     }
 

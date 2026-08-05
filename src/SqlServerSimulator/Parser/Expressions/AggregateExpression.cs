@@ -348,6 +348,22 @@ internal sealed class AggregateExpression : Expression
     /// </summary>
     public static AggregateExpression Parse(ParserContext context, AggregateKind kind)
     {
+        // Real refuses NEXT VALUE FOR anywhere in an aggregate's arguments
+        // with its own message (Msg 11725), ahead of the DISTINCT, TOP and
+        // CASE refusals the same statement may also earn — probe-confirmed.
+        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Aggregate);
+        try
+        {
+            return ParseArguments(context, kind);
+        }
+        finally
+        {
+            context.NextValueForRejection = savedRejection;
+        }
+    }
+
+    private static AggregateExpression ParseArguments(ParserContext context, AggregateKind kind)
+    {
         if (kind == AggregateKind.StringAgg)
             return ParseStringAgg(context);
         if (kind == AggregateKind.JsonArrayAgg)

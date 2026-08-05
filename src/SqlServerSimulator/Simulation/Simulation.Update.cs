@@ -132,7 +132,7 @@ partial class Simulation
         if (leadingTable is { } scopeTable)
         {
             var enclosing = savedOuterTypeResolver;
-            context.OuterTypeResolver = name => ResolveUpdateTargetColumnType(scopeTable, name, enclosing);
+            context.OuterTypeResolver = name => ResolveUpdateTargetColumnType(context.Batch, leadingIdent, scopeTable, name, enclosing);
         }
 
         while (true)
@@ -270,7 +270,7 @@ partial class Simulation
         // string-scalar argument and an unknown column all report here rather
         // than waiting for a row to reach the per-row resolver (so an empty
         // table and a module body at CREATE report them too).
-        var targetTypeResolver = Selection.TargetColumnTypeResolver(context.Batch, table, sourceView);
+        var targetTypeResolver = Selection.TargetColumnTypeResolver(context.Batch, targetName, table, sourceView);
         foreach (var (_, expr) in rawAssignments)
             UnresolvedCollation.RequireAssignable(expr.GetSqlType(context.Batch, targetTypeResolver));
 
@@ -536,12 +536,9 @@ partial class Simulation
         {
             context.AllowNextValueForInFromClause = savedAllowNextValueFor;
         }
+        var targetIndex = FindOrAppendMutationTarget(context, sourcesList, joinsList, leadingIdent, leadingTable);
         var sources = sourcesList.ToArray();
         var joins = joinsList.ToArray();
-
-        var targetIndex = FindMutationTargetIndex(context.Batch.CurrentDatabase.Collation, sources, leadingIdent.Leaf, leadingTable);
-        if (targetIndex < 0)
-            throw SimulatedSqlException.InvalidObjectName(leadingIdent);
 
         var table = sources[targetIndex].BackingTable
             ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
@@ -958,9 +955,10 @@ partial class Simulation
     /// name the target table; anything else falls through to the enclosing
     /// scope, which is null at statement level and raises Msg 207 there.
     /// </summary>
-    private static SqlType ResolveUpdateTargetColumnType(HeapTable table, MultiPartName name, Func<MultiPartName, SqlType>? enclosing)
+    private static SqlType ResolveUpdateTargetColumnType(BatchContext batch, MultiPartName targetName, HeapTable table, MultiPartName name, Func<MultiPartName, SqlType>? enclosing)
     {
-        if (name.ImmediateQualifier is null || BuiltInToken.Equals(name.ImmediateQualifier, table.Name))
+        var qualifierIsTarget = Selection.QualifierIsDmlTarget(batch.CurrentDatabase.Collation, targetName, name);
+        if (qualifierIsTarget)
         {
             foreach (var column in table.Columns)
             {
@@ -971,7 +969,9 @@ partial class Simulation
 
         return enclosing is not null
             ? enclosing(name)
-            : throw SimulatedSqlException.InvalidColumnName(name);
+            : qualifierIsTarget
+                ? throw SimulatedSqlException.InvalidColumnName(name)
+                : throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
     }
 
     private static List<(int Ordinal, Expression Expr)> ResolveSetAssignments(
@@ -1192,22 +1192,81 @@ partial class Simulation
     /// source's qualifier is the table name itself.
     /// </summary>
     /// <returns>The matching source's index in <paramref name="sources"/>, or -1 when no source matches.</returns>
-    private static int FindMutationTargetIndex(Collation collation, FromSource[] sources, string leadingIdent, HeapTable? leadingTable)
+    private static int FindMutationTargetIndex(Collation collation, List<FromSource> sources, string leadingIdent, HeapTable? leadingTable)
     {
-        for (var s = 0; s < sources.Length; s++)
+        for (var s = 0; s < sources.Count; s++)
         {
             if (sources[s].Qualifier is { } q && collation.Equals(q, leadingIdent))
                 return s;
         }
         if (leadingTable is not null)
         {
-            for (var s = 0; s < sources.Length; s++)
+            for (var s = 0; s < sources.Count; s++)
             {
                 if (ReferenceEquals(sources[s].BackingTable, leadingTable))
                     return s;
             }
         }
         return -1;
+    }
+
+    /// <summary>
+    /// Locates the mutation target, adding it to the FROM clause when the
+    /// clause introduced no source for it. Real binds such a target as an
+    /// additional, implicitly cross-joined source rather than refusing the
+    /// statement — <c>UPDATE u SET id = d.n FROM (SELECT 1 AS n) d</c> is
+    /// <c>u CROSS JOIN d</c>, with <c>u</c>'s own columns in scope for the SET
+    /// list, the WHERE, the OUTPUT clause and any correlated subquery.
+    /// Probe-confirmed against SQL Server 2025 (2026-08-05) for a parenthesized
+    /// derived table alone and joined to a table, two derived tables,
+    /// <c>d LEFT JOIN t</c>, <c>d CROSS APPLY (…)</c>, a plain unparenthesized
+    /// table (<c>UPDATE u SET id = u2.id FROM u2</c>), a schema-qualified
+    /// target, a <c>#temp</c> target, and the <c>DELETE t FROM …</c> /
+    /// <c>DELETE FROM t FROM …</c> spellings: each target row is written once
+    /// however many join rows it meets, so the cross join multiplies rows
+    /// examined, not rows affected.
+    /// <para>
+    /// The implicit source joins at the <em>tail</em>, leaving the written
+    /// FROM's own leftmost source and join tree untouched. A leading identifier
+    /// that named no table at all stays Msg 208 — an alias the FROM never
+    /// defined is real's error too.
+    /// </para>
+    /// </summary>
+    /// <returns>The target's index in <paramref name="sources"/>.</returns>
+    private static int FindOrAppendMutationTarget(
+        ParserContext context,
+        List<FromSource> sources,
+        List<JoinSpec> joins,
+        MultiPartName leadingIdent,
+        HeapTable? leadingTable)
+    {
+        var found = FindMutationTargetIndex(context.Batch.CurrentDatabase.Collation, sources, leadingIdent.Leaf, leadingTable);
+        if (found >= 0)
+            return found;
+        if (leadingTable is null)
+            throw SimulatedSqlException.InvalidObjectName(leadingIdent);
+
+        var columnNames = new string[leadingTable.Columns.Length];
+        for (var c = 0; c < columnNames.Length; c++)
+            columnNames[c] = leadingTable.Columns[c].Name;
+        // The same read plan an explicitly-written source of this table takes;
+        // the write lock the caller acquires afterwards is unchanged.
+        var plan = context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: false);
+        joins.Add(new JoinSpec(JoinKind.Cross, onPredicate: null));
+        sources.Add(new FromSource(
+            qualifier: leadingIdent.Leaf,
+            columnNames: columnNames,
+            columns: leadingTable.Columns,
+            storedSchema: leadingTable.StoredColumns,
+            storageOrdinals: leadingTable.StorageOrdinals,
+            lobStore: leadingTable.Heap,
+            rows: plan.NoLockReader
+                ? leadingTable.Rows
+                : BatchContext.WrapWithRowConflictChecks(leadingTable, context.Batch, plan),
+            backingTable: leadingTable,
+            heapPlan: plan,
+            autoElementName: leadingIdent.ToString()));
+        return sources.Count - 1;
     }
 
     /// <summary>

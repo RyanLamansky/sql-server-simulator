@@ -28,4 +28,12 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     public SqlValue Value = value;
 
     public readonly DbParameter? Parameter = parameter;
+
+    /// <summary>
+    /// The XML schema collection an <c>xml(&lt;collection&gt;)</c> declaration
+    /// bound this variable to, or null for untyped <c>xml</c> and every other
+    /// type. Read by an XML instance method against the variable, whose static
+    /// cardinality rules the binding narrows.
+    /// </summary>
+    public Schemas.XmlSchemaCollection? XmlSchemaCollection;
 }

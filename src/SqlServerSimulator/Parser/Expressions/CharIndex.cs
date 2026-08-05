@@ -5,8 +5,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <summary>
 /// SQL <c>CHARINDEX(needle, haystack [, start])</c>: 1-indexed position of
 /// the first occurrence of <c>needle</c> in <c>haystack</c> at or after
-/// <c>start</c>; returns 0 when not found. Comparison follows the default
-/// collation (case-insensitive).
+/// <c>start</c>; returns 0 when not found. The search runs under the collation
+/// the arguments resolve to — case, accent, kanatype and width all folding as
+/// the name declares — through <c>Collation.IndexOf</c>.
 /// </summary>
 /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/charindex-transact-sql</remarks>
 internal sealed class CharIndex : Expression
@@ -60,7 +61,7 @@ internal sealed class CharIndex : Expression
         if (startCu >= haystackStr.Length)
             return SqlValue.FromInt32(0);
 
-        var foundCu = haystackStr.IndexOf(needleStr, startCu, StringScalars.ComparisonFor(runtime.Batch, h.Type, n.Type));
+        var foundCu = StringScalars.CollationFor(runtime.Batch, h.Type, n.Type).IndexOf(haystackStr, needleStr, startCu, out _);
         return SqlValue.FromInt32(foundCu < 0
             ? 0
             : isSc

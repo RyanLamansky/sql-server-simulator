@@ -411,9 +411,10 @@ public sealed class SpatialMemberTests
     /// refuses both stay column references.
     /// </summary>
     /// <remarks>
-    /// The last two report Msg 207 where real reports Msg 4104 for any
-    /// unbindable multi-part name — a general column-resolution difference that
-    /// has nothing to do with the spatial reading.
+    /// The last two are the general unbindable-multi-part-name rule rather than
+    /// anything spatial: neither <c>id</c> nor <c>Location</c> qualifies a FROM
+    /// source, so both are Msg 4104 on the whole written identifier — the
+    /// four-part one included (probe-confirmed 2026-08-05).
     /// </remarks>
     [TestMethod]
     public void SpatialPropertyFormReportsRealsErrors()
@@ -421,7 +422,7 @@ public sealed class SpatialMemberTests
         var simulation = WithSpatialColumn();
         _ = simulation.AssertSqlError("select Location.Bogus from t", 6592);
         _ = simulation.AssertSqlError("select Location.Lat() from t", 6506);
-        _ = simulation.AssertSqlError("select id.Lat from t", 207);
-        _ = simulation.AssertSqlError("select dbo.t.Location.Lat from t", 207);
+        simulation.AssertSqlError("select id.Lat from t", 4104, "The multi-part identifier \"id.Lat\" could not be bound.");
+        simulation.AssertSqlError("select dbo.t.Location.Lat from t", 4104, "The multi-part identifier \"dbo.t.Location.Lat\" could not be bound.");
     }
 }

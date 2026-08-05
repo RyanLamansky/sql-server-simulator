@@ -33,6 +33,11 @@ It counts *slots* rather than live rows — a tombstone keeps its directory entr
 The 6-byte forward reference is written over the slot's existing payload, so a shorter extent would spill into the neighbouring slot.
 Every SQL-reachable row clears that floor (the encoder's header alone — flags, fixed offset, column count, NULL bitmap — is at least 6 bytes), so a `Debug.Assert` on `SlotExtent` is a tripwire on the encoder's minimum rather than a runtime check.
 
+**The encode is lossy in exactly one place, and the value form has to reproduce it.**
+`varchar` / `char` / `text` encode through their collation's ANSI code page, whose encoder fallback is `?`, so a character the page can't carry is lost on the way to bytes — a narrowing real SQL Server performs too.
+Every other family's value factory normalizes its payload at construction (`FromTime` quantizes to the declared precision, `FromDecimal` re-tags to the declared scale, `FromChar` pads by byte count, `FromDateTime` quantizes to 1/300 s, `FromMoney` scales to a long), so for those `Decode(Encode(v))` is the identity.
+`RowEncoder.NarrowingColumns` / `RowEncoder.StorageForm` are the pair that lets a consumer holding already-projected `SqlValue` rows apply that one narrowing without building a page image — see [`data-reader.md`](data-reader.md#the-row-form-the-reader-reads).
+
 **The live page counts are surfaced to the catalog**: `Heap.Pages.Count` (data pages) and `Heap.LobPages.Count` (LOB-chain pages) back `sys.allocation_units.total_pages` / `used_pages` / `data_pages`, and their per-database sum (`BuiltInResources.SumDataFilePages`) sizes `sys.database_files` / `sys.master_files` and `FILEPROPERTY(<db>_Data, 'SpaceUsed')`.
 Because reclaimed interior pages stay in `Pages` (only the tail trims), these counts reflect the peak concurrent working set, not a post-GC minimum — a divergence from real SQL Server's IAM-tracked allocation.
 See [`catalog-views.md`](catalog-views.md) for the self-consistency contract.

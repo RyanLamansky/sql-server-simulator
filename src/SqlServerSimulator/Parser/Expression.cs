@@ -265,7 +265,7 @@ internal abstract class Expression
             _ => new Value(doubleAtPrefixedString),
         },
         ReservedKeyword { Keyword: Keyword.Null } => new Value(),
-        ReservedKeyword { Keyword: Keyword.Case } => CaseExpression.ParseCase(context),
+        ReservedKeyword { Keyword: Keyword.Case } => ParseConditional(context, static c => CaseExpression.ParseCase(c)),
         // CURRENT_TIMESTAMP is a parens-less function in SQL Server's
         // grammar — it sits in the reserved-keyword space but never takes
         // an argument list. CURRENT_TIMESTAMP() with parens raises Msg 102
@@ -1163,6 +1163,29 @@ internal abstract class Expression
     private const int SubqueryNestingCost = 6;
 
     /// <summary>
+    /// Parses one of the conditional-family built-ins with
+    /// <c>NEXT VALUE FOR</c> refused inside it (real's Msg 11741, which names
+    /// <c>CASE</c> / <c>CHOOSE</c> / <c>COALESCE</c> / <c>IIF</c> /
+    /// <c>ISNULL</c> / <c>NULLIF</c>). The refusal covers every part of the
+    /// construct real does — a simple <c>CASE</c>'s input expression and its
+    /// <c>WHEN</c> operands as much as the <c>THEN</c> / <c>ELSE</c> arms
+    /// (probe-confirmed). <c>CHOOSE</c> is named in the message text but
+    /// <em>accepts</em> a reference on real, so it doesn't route through here.
+    /// </summary>
+    private static Expression ParseConditional(ParserContext context, Func<ParserContext, Expression> parse)
+    {
+        var saved = context.EnterNextValueForScope(NextValueForScope.Conditional);
+        try
+        {
+            return parse(context);
+        }
+        finally
+        {
+            context.NextValueForRejection = saved;
+        }
+    }
+
+    /// <summary>
     /// Parses a subquery body with <c>NEXT VALUE FOR</c> refused inside it
     /// (real's Msg 11719 — see <see cref="ParserContext.NextValueForRejection"/>).
     /// A subquery is one of the constructs real's message names, and the
@@ -1170,8 +1193,7 @@ internal abstract class Expression
     /// </summary>
     internal static Selection ParseSubqueryRejectingNextValueFor(ParserContext context)
     {
-        var saved = context.NextValueForRejection;
-        context.NextValueForRejection = NextValueForScope.Nested;
+        var saved = context.EnterNextValueForScope(NextValueForScope.Nested);
         try
         {
             return Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
@@ -1402,7 +1424,7 @@ internal abstract class Expression
                 "COT" => new TrigFunction(context, TrigKind.Cot),
                 "DAY" => new DatePart(context, DatePartKind.Day, "day"),
                 "EXP" => new Exp(context),
-                "IIF" => new Iif(context),
+                "IIF" => ParseConditional(context, static c => new Iif(c)),
                 "LAG" => WindowExpression.ParseLag(context),
                 "LEN" => new Length(context),
                 "LOG" => new Log(context),
@@ -1466,8 +1488,8 @@ internal abstract class Expression
                 "FORMAT" => new Format(context),
                 "ISDATE" => new IsDate(context),
                 "ISJSON" => new IsJson(context),
-                "ISNULL" => new IsNullExpression(context),
-                "NULLIF" => new NullIf(context),
+                "ISNULL" => ParseConditional(context, static c => new IsNullExpression(c)),
+                "NULLIF" => ParseConditional(context, static c => new NullIf(c)),
                 "SQUARE" => new TrigFunction(context, TrigKind.Square),
                 "STDEVP" => AggregateExpression.Parse(context, AggregateKind.StdevP),
                 _ => null
@@ -1498,7 +1520,7 @@ internal abstract class Expression
             {
                 "APP_NAME" => new AppName(context),
                 "CHECKSUM" => new Checksum(context, isBinary: false),
-                "COALESCE" => new Coalesce(context),
+                "COALESCE" => ParseConditional(context, static c => new Coalesce(c)),
                 "COL_NAME" => new ColName(context),
                 "COMPRESS" => new Compress(context),
                 "DATEDIFF" => new DateDiff.Standard(context),
@@ -1710,7 +1732,7 @@ internal abstract class Expression
                 "GET_FILESTREAM_TRANSACTION_CONTEXT" => new GetFilestreamTransactionContext(context),
                 _ => null
             },
-            _ => (Expression?)null
+            _ => null
         } ?? throw SimulatedSqlException.UnrecognizedBuiltInFunction(name);
 
     /// <summary>
@@ -1748,10 +1770,15 @@ internal abstract class Expression
         // message real reports here names NEXT VALUE FOR by name. Peek for
         // OVER via a save/restore so the outer loop's GetNextOptional resumes
         // at the correct token whether OVER is present or not.
+        // Count the draw for the two refusals a finished statement settles
+        // (Msg 11721 / 11723); only the ORDER BY one exempts an OVER, so the
+        // two counters part company here.
+        context.SequenceDrawsParsed++;
         var overCheckpoint = context.SaveCheckpoint();
         if (context.GetNextOptional() is not ReservedKeyword { Keyword: Keyword.Over })
         {
             context.RestoreCheckpoint(overCheckpoint);
+            context.UnwindowedSequenceDrawsParsed++;
             return nvf;
         }
         if (context.GetNextRequired() is not Operator { Character: '(' })

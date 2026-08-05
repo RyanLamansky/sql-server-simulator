@@ -512,6 +512,33 @@ partial class SimulatedSqlException
             11721, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 11723: <c>NEXT VALUE FOR</c> in a statement
+    /// that carries an <c>ORDER BY</c>, where the reference names no
+    /// <c>OVER</c> clause of its own. Probe-confirmed — an <c>OVER</c> is the
+    /// one thing that lifts this refusal, and it lifts no other one.
+    /// </summary>
+    internal static SimulatedSqlException NextValueForNotAllowedWithOrderBy() =>
+        new(
+            "NEXT VALUE FOR function cannot be used directly in a statement that contains an ORDER BY clause unless the OVER clause is specified.",
+            11723, 15, 1);
+
+    /// <summary>Mimics SQL Server error 11738: <c>NEXT VALUE FOR</c> in a statement real declines to define it in, such as <c>PRINT</c>. Probe-confirmed.</summary>
+    internal static SimulatedSqlException NextValueForNotAllowedInThisContext() =>
+        new("The use of NEXT VALUE FOR function is not allowed in this context.", 11738, 15, 1);
+
+    /// <summary>Mimics SQL Server error 11739: <c>NEXT VALUE FOR</c> in a row-limited statement (<c>TOP</c> or <c>OFFSET</c>). Probe-confirmed.</summary>
+    internal static SimulatedSqlException NextValueForNotAllowedWithRowLimit() =>
+        new(
+            "NEXT VALUE FOR function cannot be used if ROWCOUNT option has been set, or the query contains TOP or OFFSET.",
+            11739, 15, 1);
+
+    /// <summary>Mimics SQL Server error 11742: <c>NEXT VALUE FOR</c> written into a <c>MERGE</c> action. Probe-confirmed.</summary>
+    internal static SimulatedSqlException NextValueForNotAllowedInMergeAction() =>
+        new(
+            "NEXT VALUE FOR function can only be used with MERGE if it is defined within a default constraint on the target table for insert actions.",
+            11742, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 11726: <c>NEXT VALUE FOR</c> resolved to an
     /// object that isn't a sequence. Probe-confirmed: real SQL Server uses
     /// the qualified <c>schema.name</c> form in the message.

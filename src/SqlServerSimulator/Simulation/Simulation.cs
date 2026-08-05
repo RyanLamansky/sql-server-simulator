@@ -1049,11 +1049,12 @@ public sealed partial class Simulation
             // The cached plan is shared across principals; re-run the SELECT
             // permission check against the replaying session's current principal.
             PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
-            var rows = selection.Execute(batch).RowBytes.ToList();
-            connection.LastStatementRowCount = rows.Count;
+            var executed = selection.Execute(batch);
+            var rowCount = executed.MaterializeRows();
+            connection.LastStatementRowCount = rowCount;
             var replayed = selection.IsAssignmentOnly
-                ? new SimulatedNonQuery(rows.Count, countsRowsReturned: true)
-                : (SimulatedStatementOutcome)new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows) { ColumnNullability = selection.ColumnNullability, ColumnReportsNumeric = selection.ColumnReportsNumeric };
+                ? new SimulatedNonQuery(rowCount, countsRowsReturned: true)
+                : (SimulatedStatementOutcome)executed;
             // Replay bypasses the dispatch loop, so it stamps the NOCOUNT
             // suppression the loop's post-statement walk would have.
             replayed.CountSuppressed = connection.NoCount;
@@ -1950,12 +1951,15 @@ public sealed partial class Simulation
                     // statement's full row count for the next statement in
                     // the same batch (real SQL Server runs server-side and
                     // sets @@ROWCOUNT on completion; the simulator
-                    // materializes to mirror that).
-                    var rows = selection.Execute(batch).RowBytes.ToList();
-                    connection.LastStatementRowCount = rows.Count;
+                    // materializes to mirror that). The rows are held in
+                    // whichever form the plan produced — a projecting SELECT's
+                    // SqlValue rows travel to the reader as they are.
+                    var executed = selection.Execute(batch);
+                    var rowCount = executed.MaterializeRows();
+                    connection.LastStatementRowCount = rowCount;
                     outcome = selection.IsAssignmentOnly
-                        ? new SimulatedNonQuery(rows.Count, countsRowsReturned: true)
-                        : new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, rows) { ColumnNullability = selection.ColumnNullability, ColumnReportsNumeric = selection.ColumnReportsNumeric };
+                        ? new SimulatedNonQuery(rowCount, countsRowsReturned: true)
+                        : executed;
 
                     // Plan-cache promotion inline before the yield. Gates:
                     // top-level (BlockDepth == 0 → not inside IF / WHILE /

@@ -30,10 +30,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <see cref="Sequence.Advance"/>.</description></item>
 /// <item><description>Restricted contexts are gated at parse via
 /// <see cref="ParserContext.NextValueForRejection"/>, which carries which of
-/// real's four refusals applies — Msg 11720 for a query clause, Msg 11719 for
-/// a nested query or stored expression, Msg 11741 for a conditional arm,
-/// Msg 11725 for an aggregate argument, Msg 11721 for a deduplicating
-/// statement.</description></item>
+/// real's nine refusals applies — see <see cref="NextValueForScope"/>, whose
+/// declaration order is real's own precedence order.</description></item>
 /// </list>
 /// </para>
 /// </remarks>
@@ -77,11 +75,15 @@ internal sealed class NextValueFor : Expression
 
         throw scope switch
         {
-            NextValueForScope.Clause => SimulatedSqlException.NextValueForNotAllowedHere(),
             NextValueForScope.Nested => SimulatedSqlException.NextValueForNotAllowedNested(),
-            NextValueForScope.Conditional => SimulatedSqlException.NextValueForNotAllowedInConditional(),
             NextValueForScope.Aggregate => SimulatedSqlException.NextValueForNotAllowedInAggregate(),
-            _ => SimulatedSqlException.NextValueForNotAllowedWithDedup(),
+            NextValueForScope.Deduplicating => SimulatedSqlException.NextValueForNotAllowedWithDedup(),
+            NextValueForScope.OrderedStatement => SimulatedSqlException.NextValueForNotAllowedWithOrderBy(),
+            NextValueForScope.Clause => SimulatedSqlException.NextValueForNotAllowedHere(),
+            NextValueForScope.RowLimited => SimulatedSqlException.NextValueForNotAllowedWithRowLimit(),
+            NextValueForScope.Conditional => SimulatedSqlException.NextValueForNotAllowedInConditional(),
+            NextValueForScope.MergeAction => SimulatedSqlException.NextValueForNotAllowedInMergeAction(),
+            _ => SimulatedSqlException.NextValueForNotAllowedInThisContext(),
         };
     }
 

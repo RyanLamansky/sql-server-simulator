@@ -54,11 +54,12 @@ CREATE XML INDEX name ON table(col)
     [WITH (…)]
 ```
 
-- XSD text stored verbatim.
-  No XSD parsing; AW's 6 schema-collection payloads (with embedded namespaces, complex types, restrictions, sequences) round-trip as opaque strings.
+- XSD text stored verbatim; AW's 6 schema-collection payloads (with embedded namespaces, complex types, restrictions, sequences) round-trip byte-identically.
+  The one thing read out of the text is each element declaration's occurrence, which is what an XQuery path's static cardinality depends on — see [A schema collection narrows the cardinality](#a-schema-collection-narrows-the-cardinality).
+  Instance validation against the schema isn't modeled.
 - `WITH (…)` trailing options block parse-and-discards via `SkipBalancedParens`.
-- xml column-type positions: `xml`, `xml(name)`, `xml(CONTENT name)`, `xml(DOCUMENT name)` — the `CONTENT` / `DOCUMENT` discriminator parse-and-discards.
-  Detection happens in `ParseOneColumnIntoLists` via a peek (`PeekIsXmlSchemaArgument`) that distinguishes the schema-collection-name form from a length / MAX spec; matched only when the bare 1-part type name is `xml`.
+- xml type positions: `xml`, `xml(name)`, `xml(CONTENT name)`, `xml(DOCUMENT name)` — the `CONTENT` / `DOCUMENT` discriminator parse-and-discards.
+  Both a **column** declaration and a **`DECLARE @x`** take the form, off the same peek (`PeekIsXmlSchemaArgument`) that distinguishes the schema-collection-name form from a length / MAX spec; matched only when the bare 1-part type name is `xml`.
   Unknown schema collection → Msg 208.
 - Statement dispatch: `Xml` added to `ContextualKeyword` enum; CREATE / DROP routes match `UnquotedString { ContextualKeyword: ContextualKeyword.Xml }` and `ReservedKeyword { Keyword: Keyword.Primary }` (the PRIMARY XML INDEX form).
   `SCHEMA` is reserved, so the sub-keyword check uses `Keyword.Schema`.
@@ -225,6 +226,32 @@ That last row is why the `(…)[1]` wrapper is idiomatic in every `.value()` cal
 **Msg 2210** rides the same static typing: a sequence — a comma list or an `if`'s two branches — may not put nodes beside atomic values, and the message names the atomic type first whichever side wrote it (`Heterogeneous sequences are not allowed: found 'xs:string' and 'element(a,xdt:untyped) *'`).
 Two atomic types are fine, so `(1, "a")` reads.
 
+### A schema collection narrows the cardinality
+
+Binding a value to an XML schema collection changes exactly one thing about how an expression compiles: a **named child step whose element the collection declares at most once is a singleton**, where the same step over untyped `xml` is plural.
+That is what lets real read `(act:telephoneNumber)[1]/act:number` — the trailing step would otherwise make the path a sequence, and `.value()` would be Msg 2389.
+AdventureWorks' own `Person.vAdditionalContactInfo` is written that way, so the view doesn't create at all without this.
+
+`XmlSchemaCollection.GetSingletonElementNames()` reads the names out of the stored XSD (one `XmlReader` pass, cached until the text is reassigned, and an empty set for a text the reader can't get through — which leaves the value untyped rather than failing the query).
+The rule is name-keyed rather than type-aware:
+
+- Only a **local** declaration — an `xsd:element` inside a content model — carries an occurrence.
+  A **global** one, a direct child of `xsd:schema`, says nothing, because its cardinality comes from wherever it is referenced; in AdventureWorks' contact schema that is an unbounded `xsd:any` wildcard, and real accordingly types `/ci:AdditionalContactInfo/act:telephoneNumber` as a sequence.
+- A name declared plural **anywhere** in the collection loses singleton status everywhere.
+  That errs narrower than real, which resolves the declaration through the containing type: it can leave a path real accepts refused, never the reverse.
+
+Three receivers carry a binding, and the third is what the AdventureWorks view needs:
+
+| receiver | where the binding comes from |
+|---|---|
+| a column | `HeapColumn.XmlSchemaCollection`, resolved against the query scope's FROM sources |
+| a variable | `VariableSlot.XmlSchemaCollection`, from `DECLARE @x xml(<collection>)` |
+| a `.nodes()` row column | the binding of the `.nodes()` target, stamped on the produced column — each row is a node of that instance |
+
+Everything else — a literal, a `CAST`, an expression — is untyped, as on real.
+
+Only the cardinality is read out of the schema: instance **validation** against the XSD isn't modeled (see [Not modeled yet](#not-modeled-yet)), and neither is real's schema-derived static *type name*, so a Msg 2389 raised over a typed value still quotes `xdt:untypedAtomic` where real quotes (say) `xs:string`.
+
 ### Not modeled yet
 
 - The computed **`attribute name {…}`** and **`text {…}`** constructors in a read method (`NotSupportedException`; both ship in `.modify()`'s insert content, and the computed `element name {…}` ships in both), and the direct comment / processing-instruction forms (`<!-- c -->`, `<?pi d?>`); the direct element form ships.
@@ -236,6 +263,7 @@ Two atomic types are fine, so `(1, "a")` reads.
 - Named axis steps (`child::` / `descendant::` / …), `NotSupportedException`.
 - **Msg 2396** — real refuses a `.query()` whose result is a top-level attribute (`/r/a/@x`) and **Msg 2390** the same for `.value()`; the simulator serializes the attribute instead.
   `.value()`'s 2390 can't be modeled while a `.nodes()` row is re-parsed as a document, since that is what makes the legitimate `n.ref.value('@x', …)` a top-level attribute read.
+- **Instance validation against a bound schema collection**, and the schema-derived **static type name** — the binding is read for element occurrence alone (see [A schema collection narrows the cardinality](#a-schema-collection-narrows-the-cardinality)), so nothing checks an INSERT / UPDATE / `.modify()` edit against the XSD and a diagnostic over a typed value still quotes `xdt:untypedAtomic`.
 
 ### Divergences
 

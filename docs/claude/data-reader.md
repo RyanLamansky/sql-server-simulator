@@ -11,6 +11,36 @@ Typed accessors read `SqlValue` via the cursor indexer, unwrap via `As*` (no box
   `HasRows` sticky.
   `GetChar(int)` always raises `InvalidCastException`.
 
+## The row form the reader reads
+
+A result set holds its rows in one of two forms and the reader's cursor follows whichever it is.
+A **FROM-bearing SELECT projects `SqlValue[]` rows** — the projection computed the values — and those travel to the client as they are (`ValueArrayCursor`, whose indexer is an array read).
+The niche producers that genuinely emit encoded rows — a set operation, a view or TVF body, `OPENJSON` / `OPENXML`, the catalog procedures, a DML `OUTPUT` clause — keep the `byte[]` form and the reader decodes each accessed cell (`SqlValueCursor`).
+Both forms are lazy per cell, so a client that reads two columns of thirty pays for two either way.
+
+The dispatch loop settles the form once, at the statement boundary: `SimulatedSqlResultSet.MaterializeRows` drains the row sequence into a list **without converting it**, which is what statement atomicity and `@@ROWCOUNT` need and all they need.
+Materializing through `RowBytes` instead would encode every projected row into a page image the cursor decodes straight back, cell by cell.
+That round trip measures at 35-43% of the statement's total allocation across every shape measured (730 B/row on a 228k-row `SELECT *` of `Sales.InvoiceLines`).
+It bought one thing: the page image is *compact*, so a buffered result holds ~32 bytes per cell alive while the reader is open rather than the record's own width — see the trade, and the form gate that would settle it per statement, in [`backlog.md`](backlog.md#complex-query-execution--perf-residuals).
+
+**The one thing the page image did that the values don't is narrow.**
+`varchar` / `char` / `text` encode through their collation's ANSI code page, whose encoder fallback is `?`, so a character the page can't carry is lost on the way to bytes — SQL Server's own lossy narrowing, and the client sees `?` for `SELECT CAST(N'水' AS varchar(10))` on both engines.
+`RowEncoder.NarrowingColumns` marks the columns that can suffer it (those three families, plus a `sql_variant` holding one) and `RowEncoder.StorageForm` applies the type's own `Encode`/`Decode` pair to such a cell — exact by construction rather than by per-type reasoning.
+Every other family's value factory already normalizes at construction (`FromTime` quantizes to the declared precision, `FromDecimal` re-tags to the declared scale, `FromChar` pads by byte count, `FromDateTime` quantizes to 1/300 s), so their storage round trip is the identity and they are never flagged; neither is an ASCII payload of a flagged column, since every ANSI code page the simulator stores through is ASCII-transparent.
+
+## `GetDataTypeName` answers SqlClient, not the server
+
+This is a *client* surface, so it reports the name of the CLR-facing type a TDS token maps to rather than the name the server declares.
+Two of the simulator's own type names never reach a SqlClient consumer as written, and are mapped here — probed over SqlClient 7.0.2 against SQL Server 2025 (2026-08-05) through `GetDataTypeName`, `GetSchemaTable`'s `DataTypeName` / `ProviderType` / `ProviderSpecificDataType`, and `GetProviderSpecificFieldType`, all of which agree:
+
+- **`numeric` reads `decimal`.** The server genuinely distinguishes the two — `sys.dm_exec_describe_first_result_set` reports `numeric(2,1)` for `SELECT 1.0`, `numeric(9,2)` for `CAST(1.0 AS numeric(9,2))` and for a `numeric`-declared column, against `decimal(9,2)` for the `decimal` spellings — and the distinction still rides the wire, where mssql-jdbc's `getColumnTypeName` reads it off the NUMERICN (`0x6C`) / DECIMALN (`0x6A`) COLMETADATA token the listener writes.
+  SqlClient collapses both to `SqlDbType.Decimal`, whose type name is `decimal`, so an in-process consumer must see the collapsed name.
+  `SimulatedQueryResult.ColumnReportsNumeric` keeps carrying the split for the listener; `Tests.Internal`'s `DecimalTypeNameTests` is where it's pinned, since no public ADO.NET surface can observe it.
+- **`sysname` reads `nvarchar`.** It is an alias for `nvarchar(128)` and TDS carries the base type, so every producer of one reports `nvarchar` on real: a `sysname` column, the catalog views' `name` columns, the `TYPE_NAME` / `SCHEMA_NAME` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` / `DB_NAME` / `USER_NAME` / `SUSER_NAME` / `SUSER_SNAME` / `COL_NAME` / `FILE_NAME` / `FILEGROUP_NAME` / `INDEX_COL` family, `CURRENT_USER` / `SESSION_USER` / `SYSTEM_USER` / `USER`, `CAST(… AS sysname)` and a `sysname` variable.
+  `sysname` likewise carries the **national** string family into a promotion the way `nvarchar` does, so `TYPE_NAME(56) + ''` types as `nvarchar(129)` rather than falling to `varchar` (`SqlType.Promote`'s two `national` predicates).
+
+Everything else in the type matrix already matched: the whole numeric / character / binary / date-time family, `xml`, `sql_variant`, `hierarchyid`, `rowversion` (reported `timestamp`), and an alias type, which reports its base type's name on both.
+
 ## `RecordsAffected`
 
 Rows the batch's statements **changed**, summed — never rows a SELECT returned.

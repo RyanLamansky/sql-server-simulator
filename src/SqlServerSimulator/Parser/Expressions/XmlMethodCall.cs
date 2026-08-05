@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -31,13 +32,22 @@ internal sealed class XmlMethodCall : Expression
     /// <summary>The xml-valued expression the method is invoked on.</summary>
     public readonly Expression Target;
 
+    /// <summary>
+    /// The XML schema collection the target is bound to, or null when the
+    /// target is untyped <c>xml</c>. Read by the <c>.nodes()</c> FROM source,
+    /// which stamps it on the node column it produces so a <c>.value()</c>
+    /// against that column stays typed — the chain AdventureWorks'
+    /// <c>Person.vAdditionalContactInfo</c> reads through.
+    /// </summary>
+    public readonly XmlSchemaCollection? TargetSchemaCollection;
+
     private readonly string methodName;
     private readonly XmlMethod method;
     private readonly XmlQueryExpr? xquery;
     private readonly SqlType valueType;
     private readonly int? valueMaxLength;
 
-    private XmlMethodCall(Expression target, string methodName, XmlMethod method, XmlQueryExpr? xquery, SqlType valueType, int? valueMaxLength)
+    private XmlMethodCall(Expression target, string methodName, XmlMethod method, XmlQueryExpr? xquery, SqlType valueType, int? valueMaxLength, XmlSchemaCollection? targetSchemaCollection)
     {
         this.Target = target;
         this.methodName = methodName;
@@ -45,6 +55,7 @@ internal sealed class XmlMethodCall : Expression
         this.xquery = xquery;
         this.valueType = valueType;
         this.valueMaxLength = valueMaxLength;
+        this.TargetSchemaCollection = targetSchemaCollection;
     }
 
     /// <summary>True when this is a <c>.nodes()</c> call (rowset-producing).</summary>
@@ -139,9 +150,32 @@ internal sealed class XmlMethodCall : Expression
 
         // The argument is a compile-time literal, so the expression compiles
         // once here — which is where real settles its static XQuery
-        // diagnostics too.
-        var xquery = xqueryText is null ? null : XmlQueryEngine.Compile(xqueryText, methodName);
-        return new XmlMethodCall(target, methodName, method, xquery, valueType, valueMaxLength);
+        // diagnostics too. A typed receiver contributes its schema
+        // collection's singleton element names, which is the one input the
+        // static cardinality rules read out of the binding.
+        var collection = ResolveTargetSchemaCollection(target, context);
+        var xquery = xqueryText is null
+            ? null
+            : XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetSingletonElementNames());
+        return new XmlMethodCall(target, methodName, method, xquery, valueType, valueMaxLength, collection);
+    }
+
+    /// <summary>
+    /// Finds the XML schema collection the receiver is bound to, or null for
+    /// an untyped receiver. Two receivers carry a binding: a column of a
+    /// source in scope (including the node column a <c>.nodes()</c> source
+    /// produced, which inherits its own target's binding), and a local
+    /// variable declared <c>xml(&lt;collection&gt;)</c>. Everything else —
+    /// a literal, a CAST, an expression — is untyped, as it is on real.
+    /// </summary>
+    private static XmlSchemaCollection? ResolveTargetSchemaCollection(Expression target, ParserContext context)
+    {
+        if (target is VariableReference variable)
+            return context.Batch.GetVariableSlot(variable.VariableName).XmlSchemaCollection;
+        if (target is not Reference reference || context.ScopeSources is not { } sources)
+            return null;
+        var (sourceIndex, columnIndex) = Selection.FindSourceColumn(sources, reference.ReferencedName);
+        return sourceIndex < 0 ? null : sources[sourceIndex].Columns[columnIndex].XmlSchemaCollection;
     }
 
     public override SqlValue Run(RuntimeContext runtime)

@@ -98,29 +98,20 @@ internal sealed class Trim : Expression
         if (!SqlType.IsStringCategory(value.Type))
             throw SimulatedSqlException.InvalidArgumentDataType(value.Type.SqlServerName, sourceIndex, "Trim");
 
-        char[] chars;
-        if (charsValue is { } suppliedChars)
-        {
-            if (suppliedChars.IsNull)
-                return SqlValue.Null(value.Type);
-            chars = suppliedChars.AsString.ToCharArray();
-            // An empty trim-character set removes nothing.
-            if (chars.Length == 0)
-                return SqlValue.FromString(value.Type, value.AsString);
-        }
-        else
-        {
-            chars = [' '];
-        }
-
         var text = value.AsString;
-        var trimmed = this.side switch
-        {
-            TrimSide.Leading => text.TrimStart(chars),
-            TrimSide.Trailing => text.TrimEnd(chars),
-            _ => text.Trim(chars),
-        };
-        return SqlValue.FromString(value.Type, trimmed);
+        var leading = this.side != TrimSide.Trailing;
+        var trailing = this.side != TrimSide.Leading;
+        if (charsValue is not { } suppliedChars)
+            return SqlValue.FromString(value.Type, StringScalars.TrimSpaces(text, leading, trailing));
+        if (suppliedChars.IsNull)
+            return SqlValue.Null(value.Type);
+        var set = suppliedChars.AsString;
+        // An empty trim-character set removes nothing.
+        if (set.Length == 0)
+            return SqlValue.FromString(value.Type, text);
+
+        var collation = StringScalars.CollationFor(runtime.Batch, value.Type, suppliedChars.Type);
+        return SqlValue.FromString(value.Type, StringScalars.TrimUnderCollation(text, set, collation, leading, trailing));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)

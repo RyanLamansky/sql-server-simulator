@@ -1056,7 +1056,18 @@ partial class Simulation
         {
             context.MoveNextRequired();
             var computedStart = context.Token.StartIndex;
-            var computed = Expression.Parse(context);
+            // A computed column is another construct Msg 11719 names.
+            var savedComputedRejection = context.EnterNextValueForScope(NextValueForScope.Nested);
+            Expression computed;
+            try
+            {
+                computed = Expression.Parse(context);
+            }
+            finally
+            {
+                context.NextValueForRejection = savedComputedRejection;
+            }
+
             var computedDefinition = EnsureParenthesized(context.SourceTextFrom(computedStart));
             var (persisted, computedNullable) = ParseComputedSuffix(context);
             var computedIndex = heapColumns.Count;
@@ -1668,7 +1679,19 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         var predicateStart = context.Token!.StartIndex;
-        var predicate = BooleanExpression.Parse(context);
+        // A CHECK constraint is the first construct real's Msg 11719 names
+        // (probe-confirmed 2026-08-05 for the inline column form).
+        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Nested);
+        BooleanExpression predicate;
+        try
+        {
+            predicate = BooleanExpression.Parse(context);
+        }
+        finally
+        {
+            context.NextValueForRejection = savedRejection;
+        }
+
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         // Token sits on the closing `)`, so capture the original predicate text

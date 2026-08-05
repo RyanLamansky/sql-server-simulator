@@ -186,21 +186,63 @@ internal static class StringScalars
 
     /// <summary>
     /// Resolves the trim-character set for the two-argument <c>LTRIM</c> /
-    /// <c>RTRIM</c> forms. A missing second argument defaults to a single
-    /// space (the legacy one-argument behavior). A supplied set is evaluated
-    /// to its characters; a NULL argument returns <see langword="null"/> to
-    /// signal a NULL result (probe-confirmed against SQL Server 2025). The
-    /// characters form a set, not a substring. A legacy LOB set raises Msg 8116
-    /// naming argument 2, the position the character set occupies in both
-    /// functions.
+    /// <c>RTRIM</c> forms. A missing second argument returns
+    /// <see langword="null"/>, which is the caller's signal to take the legacy
+    /// one-argument space strip; a SQL NULL argument comes back as a NULL
+    /// <see cref="SqlValue"/> and makes the whole call NULL (probe-confirmed
+    /// against SQL Server 2025). A legacy LOB set raises Msg 8116 naming
+    /// argument 2, the position the character set occupies in both functions.
     /// </summary>
-    public static char[]? ResolveTrimCharacters(Expression? trimChars, RuntimeContext runtime, string functionLowerName)
+    public static SqlValue? ResolveTrimCharacters(Expression? trimChars, RuntimeContext runtime, string functionLowerName)
     {
         if (trimChars is null)
-            return [' '];
+            return null;
         var value = trimChars.Run(runtime);
         RejectLegacyLob(value, functionLowerName, argumentIndex: 2);
-        return value.IsNull ? null : value.AsString.ToCharArray();
+        return value;
+    }
+
+    /// <summary>
+    /// Strips the characters of <paramref name="set"/> from
+    /// <paramref name="text"/>, comparing each candidate character under
+    /// <paramref name="collation"/>. The set is a set, not a substring:
+    /// <c>TRIM('ab' FROM 'abxba')</c> is <c>x</c>.
+    /// <para>Probe-confirmed against SQL Server 2025 that the comparison is the
+    /// collation's — <c>TRIM(N'e' FROM N'café')</c> is <c>caf</c> under an
+    /// <c>_AI</c> collation, <c>TRIM(N'E' FROM N'cafe')</c> is <c>caf</c> under
+    /// a <c>_CI</c> one, and a set of <c>N' '</c> strips an ideographic space
+    /// under a width-insensitive one. The input is walked one code unit at a
+    /// time, so a combining mark is its own candidate.</para>
+    /// </summary>
+    public static string TrimUnderCollation(string text, string set, Collation collation, bool leading, bool trailing)
+    {
+        var matcher = new Collation.ElementMatcher(collation, set);
+        var start = 0;
+        var end = text.Length;
+        while (leading && start < end && matcher.IndexOf(text.AsSpan(start, 1)) >= 0)
+            start++;
+        while (trailing && end > start && matcher.IndexOf(text.AsSpan(end - 1, 1)) >= 0)
+            end--;
+        return text[start..end];
+    }
+
+    /// <summary>
+    /// The legacy one-argument <c>LTRIM</c> / <c>RTRIM</c> / <c>TRIM</c> strip,
+    /// which is <strong>not</strong> collation-driven: real removes U+0020 and
+    /// nothing else, so an ideographic space survives a bare <c>TRIM</c> even
+    /// under a width-insensitive collation where the two-argument form's
+    /// <c>N' '</c> set removes it (probe-confirmed — the one place the two
+    /// forms disagree).
+    /// </summary>
+    public static string TrimSpaces(string text, bool leading, bool trailing)
+    {
+        var start = 0;
+        var end = text.Length;
+        while (leading && start < end && text[start] == ' ')
+            start++;
+        while (trailing && end > start && text[end - 1] == ' ')
+            end--;
+        return text[start..end];
     }
 
     private static bool IsCoerceableToVarchar(SqlType type) =>
@@ -278,18 +320,21 @@ internal static class StringScalars
     }
 
     /// <summary>
-    /// The string comparison a searching scalar (<see cref="Replace"/>,
-    /// <see cref="CharIndex"/>) should use, given its operands. SQL Server
-    /// compares under the collation its arguments resolve to, so an explicit
+    /// The collation a character-matching scalar (<see cref="CharIndex"/>,
+    /// <see cref="Replace"/>, <see cref="Translate"/>, the <c>TRIM</c> family,
+    /// <c>STRING_SPLIT</c>) searches under, given its operands. SQL Server
+    /// matches under the collation its arguments resolve to, so an explicit
     /// <c>COLLATE</c> on <em>any</em> argument decides the whole call —
     /// `REPLACE(name, 'r. r.', '' COLLATE …_CS_AS)` leaves a differently-cased
     /// match alone (probe-confirmed, and the shape ORMs emit to force a
-    /// case-sensitive replace on a case-insensitive database).
+    /// case-sensitive replace on a case-insensitive database), and so does a
+    /// <c>COLLATE</c> written on <c>TRANSLATE</c>'s translation list or on
+    /// <c>STRING_SPLIT</c>'s separator.
     /// </summary>
     /// <remarks>
-    /// Case sensitivity is the whole of the approximation: the comparison stays
-    /// culture-based rather than routing through the collation's own comparer,
-    /// which is what the surrounding string scalars already do.
+    /// The resolved collation drives the whole comparison — case, accent,
+    /// kanatype and width — through <c>Collation.IndexOf</c>, the same
+    /// primitive <c>LIKE</c> matches literal runs with.
     /// <para>Allocation-free per call: the operand list is a
     /// <c>params ReadOnlySpan</c> rather than an array, and the fold carries a
     /// <c>(Collation, Coercibility)</c> accumulator through
@@ -297,7 +342,7 @@ internal static class StringScalars
     /// than synthesizing a throwaway <see cref="SqlType"/> per step — both
     /// would otherwise cost per row on a string-scalar hot path.</para>
     /// </remarks>
-    public static StringComparison ComparisonFor(BatchContext batch, params ReadOnlySpan<SqlType> operands)
+    public static Collation CollationFor(BatchContext batch, params ReadOnlySpan<SqlType> operands)
     {
         var resolved = operands.Length == 0 ? null : operands[0].Collation;
         var coercibility = operands.Length == 0 ? Coercibility.CoercibleDefault : operands[0].Coercibility;
@@ -315,9 +360,7 @@ internal static class StringScalars
             (resolved, coercibility) = (step.Collation, step.Coercibility);
         }
 
-        return (resolved ?? batch.CurrentDatabase.Collation).CaseSensitive
-            ? StringComparison.InvariantCulture
-            : StringComparison.InvariantCultureIgnoreCase;
+        return resolved ?? batch.CurrentDatabase.Collation;
     }
 
     /// <summary>

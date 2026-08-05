@@ -309,12 +309,46 @@ internal sealed partial class Selection
         // discarded before execution. Without a placeholder in scope, a genuine
         // missing column on a resolvable table stays a Msg 207 even in skip mode
         // (probe-confirmed: real SQL Server errors at compile time here).
-        return AnyPlaceholderSource(sources)
-            ? SqlType.Int32
-            : outerTypeResolver is not null
-                ? outerTypeResolver(name)
-                : throw SimulatedSqlException.InvalidColumnName(name);
+        if (AnyPlaceholderSource(sources))
+            return SqlType.Int32;
+        if (outerTypeResolver is null)
+            throw UnresolvedNameError(sources, name);
+        if (name.ImmediateQualifier is not { } qualifier || !QualifiesAnySource(sources, qualifier))
+            return outerTypeResolver(name);
+        try
+        {
+            return outerTypeResolver(name);
+        }
+        catch (SimulatedSqlException ex) when (ex.Number == MultiPartIdentifierNotBoundNumber)
+        {
+            // This scope exposes the qualifier, so the name is a known source's
+            // unknown column rather than an unbindable multi-part identifier —
+            // real splits the two errors exactly there. The outer scopes that
+            // couldn't answer classified it 4104 without knowing about this one.
+            throw SimulatedSqlException.InvalidColumnName(name);
+        }
     }
+
+    /// <summary>Msg 4104's number, so <see cref="ResolveColumnTypeAcrossSources"/>'s downgrade reads as what it matches.</summary>
+    private const int MultiPartIdentifierNotBoundNumber = 4104;
+
+    /// <summary>
+    /// The error for a name no scope could bind. Real splits by <em>what</em>
+    /// failed rather than where: a <b>qualified</b> name whose qualifier names
+    /// no source in scope is <b>Msg 4104</b> on the whole written identifier
+    /// (<c>SELECT zz.id FROM t</c>, and every sibling-scope shape — a derived
+    /// table naming a source beside it, a generator's scalar-subquery argument
+    /// doing the same), while a known qualifier's missing column
+    /// (<c>SELECT t.nosuch FROM t</c>) and any unqualified miss stay
+    /// <b>Msg 207</b> on the leaf. Probed against SQL Server 2025 (2026-08-05)
+    /// across the select list, WHERE, GROUP BY, ORDER BY, an ON predicate, a
+    /// scalar / IN subquery, a derived table, a FROM-less SELECT, a generator's
+    /// arguments and an <c>INSERT … SELECT</c>.
+    /// </summary>
+    private static SimulatedSqlException UnresolvedNameError(FromSource[] sources, MultiPartName name) =>
+        name.ImmediateQualifier is { } qualifier && !QualifiesAnySource(sources, qualifier)
+            ? SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString())
+            : SimulatedSqlException.InvalidColumnName(name);
 
     /// <summary>
     /// A column's declared type with its MAX-ness folded back in: a
@@ -356,17 +390,34 @@ internal sealed partial class Selection
         };
 
     /// <summary>
+    /// Whether <paramref name="name"/>'s qualifier — when it carries one — is
+    /// the single-table DML target <em>as written</em>. That is the only
+    /// qualifier such a statement admits: <c>UPDATE dbo.t SET id = t.id</c>,
+    /// <c>UPDATE t SET id = dbo.t.id</c> and <c>UPDATE v SET id = v.id</c> all
+    /// bind, while <c>UPDATE v SET id = t.id</c> does not — even though
+    /// <c>t</c> is the view's base table — and every other qualifier is
+    /// Msg 4104 whether or not its leaf names a real column (probed against
+    /// SQL Server 2025, 2026-08-05, for the SET list and the WHERE of both
+    /// <c>UPDATE</c> and <c>DELETE</c>).
+    /// </summary>
+    internal static bool QualifierIsDmlTarget(Collation collation, MultiPartName targetName, MultiPartName name) =>
+        name.ImmediateQualifier is not { } qualifier || collation.Equals(qualifier, targetName.Leaf);
+
+    /// <summary>
     /// The single-table DML counterpart: a compile-time resolver mirroring the
     /// per-row resolver an UPDATE / DELETE with no FROM clause builds — the
     /// name binds on its leaf against the target's columns, through the view's
-    /// own projection when the statement goes through one, and anything else
-    /// is Msg 207. Qualifiers are ignored on both sides, matching the per-row
-    /// resolver exactly.
+    /// own projection when the statement goes through one, and a leaf that
+    /// names nothing is Msg 207. A qualifier that isn't
+    /// <paramref name="targetName"/> is Msg 4104 ahead of the leaf lookup, per
+    /// <see cref="QualifierIsDmlTarget"/>.
     /// </summary>
-    internal static Func<MultiPartName, SqlType> TargetColumnTypeResolver(BatchContext batch, HeapTable table, Schemas.View? sourceView) =>
+    internal static Func<MultiPartName, SqlType> TargetColumnTypeResolver(BatchContext batch, MultiPartName targetName, HeapTable table, Schemas.View? sourceView) =>
         name =>
         {
             var collation = batch.CurrentDatabase.Collation;
+            if (!QualifierIsDmlTarget(collation, targetName, name))
+                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
             if (sourceView is not null)
             {
                 for (var v = 0; v < sourceView.OutputColumns.Length; v++)
@@ -401,6 +452,10 @@ internal sealed partial class Selection
     {
         var saved = context.OuterTypeResolver;
         context.OuterTypeResolver = resolveColumnType;
+        // A DML WHERE is one of the eight clauses real's Msg 11720 names, and
+        // it says so for an UPDATE / DELETE / MERGE as readily as for a SELECT
+        // (probe-confirmed 2026-08-05: `DELETE FROM t WHERE n = NEXT VALUE FOR s`).
+        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Clause);
         BooleanExpression predicate;
         try
         {
@@ -409,6 +464,7 @@ internal sealed partial class Selection
         finally
         {
             context.OuterTypeResolver = saved;
+            context.NextValueForRejection = savedRejection;
         }
         predicate.Bind(context.Batch, resolveColumnType);
         return BooleanExpression.SimplifyForFilter(predicate, context);
@@ -567,7 +623,7 @@ internal sealed partial class Selection
             // this is a bad column reference rather than an outer-bound
             // aggregate.
             if (outerTypeResolver is null)
-                throw SimulatedSqlException.InvalidColumnName(unresolved!.Value);
+                throw UnresolvedNameError(sources, unresolved!.Value);
             _ = outerTypeResolver(unresolved!.Value);
 
             // The aggregate reads only the enclosing query's columns, so it

@@ -312,8 +312,9 @@ internal abstract class BooleanExpression
     /// comparison). <see cref="LookaheadValueLhs"/> peeks the token
     /// immediately after the matching <c>)</c> and routes via the operator
     /// it finds: a comparison or arithmetic operator (= &lt; &gt; &lt;&gt;
-    /// != !&lt; !&gt; LIKE IS IN BETWEEN NOT + - * / % &amp; | ^) flips
-    /// into the value-LHS path (<see cref="Expression.Parse"/> handles
+    /// != !&lt; !&gt; LIKE IS IN BETWEEN NOT + - * / % &amp; | ^) — or a
+    /// <c>COLLATE</c> postfix, which only a character <em>value</em> takes —
+    /// flips into the value-LHS path (<see cref="Expression.Parse"/> handles
     /// <c>Parenthesized</c> via its own grouped-expression dispatch);
     /// anything else stays on the boolean-group path. DACFx emits the
     /// value-LHS shape in CHECK constraints (e.g. WWI's
@@ -392,8 +393,15 @@ internal abstract class BooleanExpression
                     if (--depth == 0)
                     {
                         context.MoveNextOptional();
+                        // COLLATE is a postfix only a character *value* takes, so
+                        // its presence settles the shape on its own — the predicate
+                        // it belongs to (`= 'x'`, `LIKE 'x%'`, `IN (…)`, `IS NULL`,
+                        // `BETWEEN`) comes after the collation name, out of this
+                        // one-token peek's reach. Real refuses the same postfix on a
+                        // parenthesized *boolean* (Msg 156 near 'COLLATE'), so
+                        // routing that shape here loses nothing it accepted.
                         var isValueLhs = context.Token is Operator { Character: '=' or '<' or '>' or '!' or '+' or '-' or '*' or '/' or '%' or '&' or '|' or '^' }
-                            or ReservedKeyword { Keyword: Keyword.Like or Keyword.Is or Keyword.In or Keyword.Between or Keyword.Not };
+                            or ReservedKeyword { Keyword: Keyword.Like or Keyword.Is or Keyword.In or Keyword.Between or Keyword.Not or Keyword.Collate };
                         context.RestoreCheckpoint(checkpoint);
                         return isValueLhs;
                     }

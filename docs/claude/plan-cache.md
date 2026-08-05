@@ -95,7 +95,7 @@ A cache hit short-circuits the full dispatch via `ReplayCachedSelection`:
 
 - New `BatchContext` for the incoming command (seeds `Variables` from parameters, allocates the same lock / undo / lifecycle scaffolding the standard path would).
 - `selection.Execute(batch)` runs the cached Selection.
-  `RowBytes.ToList()` materializes the rows, mirroring the standard path's `LastStatementRowCount` accounting.
+  `MaterializeRows()` drains them, mirroring the standard path's `LastStatementRowCount` accounting — and, like the standard path, keeping the producer's own row form (see [`data-reader.md`](data-reader.md#the-row-form-the-reader-reads)).
 - Outcome shape: `SimulatedSqlResultSet` (the only shape we cache — assignment-only Selections never cache).
 - `WriteBackOutputParameters` and `FlushPrintMessages` run, same as the standard path.
 

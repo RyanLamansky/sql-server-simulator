@@ -37,14 +37,37 @@ internal sealed partial class Selection
     /// expression; on return it sits just past the closing <c>)</c> of the
     /// column-alias list.
     /// </summary>
-    private static FromSource ParseXmlNodesSource(ParserContext context)
+    private static FromSource ParseXmlNodesSource(ParserContext context, FromSource[] leftSources)
     {
-        if (Expression.Parse(context) is not XmlMethodCall { IsNodes: true } nodesCall)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        // The xml target names a column of the APPLY's left side, so install
+        // that scope for the target's parse — which is what lets the method
+        // call find the column's xml(<collection>) binding and stay typed.
+        var savedScopeSources = context.ScopeSources;
+        context.ScopeSources = leftSources;
+        XmlMethodCall nodesCall;
+        try
+        {
+            if (Expression.Parse(context) is not XmlMethodCall { IsNodes: true } parsed)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            nodesCall = parsed;
+        }
+        finally
+        {
+            context.ScopeSources = savedScopeSources;
+        }
 
         var (alias, columnName) = ConsumeNodesAlias(context);
         var plan = FromXmlNodes(nodesCall.Target, nodesCall.XQuery, columnName);
-        HeapColumn[] columns = [new(columnName, SqlType.Xml, maxLength: null, nullable: true)];
+        // Each row's value is a node of the target instance, so it carries the
+        // target's schema binding — real types a `.value()` against it the
+        // same way it types one against the column itself.
+        HeapColumn[] columns =
+        [
+            new(columnName, SqlType.Xml, maxLength: null, nullable: true)
+            {
+                XmlSchemaCollection = nodesCall.TargetSchemaCollection,
+            },
+        ];
         return new FromSource(
             qualifier: alias,
             columnNames: [columnName],

@@ -90,7 +90,7 @@ partial class Simulation
                 continue;
             }
 
-            var (declaredType, declaredMaxLength) = ParseDeclareTypeSpec(context, variableName);
+            var (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName);
 
             // Optional initializer.
             var initialValue = SqlValue.Null(declaredType);
@@ -106,7 +106,10 @@ partial class Simulation
                 }
             }
 
-            context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, initialValue, parameter: null);
+            context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, initialValue, parameter: null)
+            {
+                XmlSchemaCollection = xmlSchemaCollection,
+            };
             sawScalar = true;
         } while (context.Token is Operator { Character: ',' });
 
@@ -122,7 +125,7 @@ partial class Simulation
     /// max-length) is captured by length-bearing singleton variants of the
     /// type itself when applicable.
     /// </summary>
-    private static (SqlType Type, int? MaxLength) ParseDeclareTypeSpec(ParserContext context, string variableName)
+    private static (SqlType Type, int? MaxLength, XmlSchemaCollection? XmlSchemaCollection) ParseDeclareTypeSpec(ParserContext context, string variableName)
     {
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
 
@@ -132,8 +135,21 @@ partial class Simulation
         context.MoveNextOptional();
         int? declaredMaxLength = null;
         int? declaredScale = null;
+        XmlSchemaCollection? xmlSchemaCollection = null;
         if (context.Token is Operator { Character: '(' })
         {
+            // `DECLARE @x xml(<collection>)` — the parens hold a name, not a
+            // length, exactly as they do on a column declaration. Real takes
+            // the CONTENT / DOCUMENT forms here too.
+            if (qualifiedTypeName.Count == 1
+                && context.Batch.CurrentDatabase.Collation.Equals(typeName.Value, "xml")
+                && PeekIsXmlSchemaArgument(context))
+            {
+                xmlSchemaCollection = ParseXmlSchemaCollectionArgument(context);
+                context.MoveNextOptional();
+                return (SqlType.Xml, null, xmlSchemaCollection);
+            }
+
             var lengthToken = context.GetNextRequired();
             declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
                 ? numericValue.AsInt32
@@ -168,7 +184,7 @@ partial class Simulation
         // ever sees one through a variable.
         return resolved == SqlType.Text || resolved == SqlType.NText || resolved == SqlType.Image
             ? throw SimulatedSqlException.LegacyLobTypeInvalidForLocals()
-            : (resolved, maxLength);
+            : (resolved, maxLength, xmlSchemaCollection);
     }
 
     /// <summary>

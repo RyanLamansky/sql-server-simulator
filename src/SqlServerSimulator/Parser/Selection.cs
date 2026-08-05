@@ -457,6 +457,8 @@ internal sealed partial class Selection
         // so a branch pair that can't settle one collation reports Msg 451
         // there — unless the whole result feeds an assignment target (which
         // supplies the collation) or an EXISTS (whose projection is discarded).
+        var sequenceDrawsBefore = context.SequenceDrawsParsed;
+        var unwindowedSequenceDrawsBefore = context.UnwindowedSequenceDrawsParsed;
         var combined = ParseUnionExceptChain(
             context, depth, outerTypeResolver, !context.ProjectionDiscarded && !context.InInsertSourceSelect);
 
@@ -469,10 +471,18 @@ internal sealed partial class Selection
         {
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
+            // The ORDER BY a set-op chain carries applies to the combined
+            // result, so it earns real's Msg 11723 for any sequence draw in
+            // any branch — settled here for the same reason the branch-level
+            // check exists, the clause following everything it judges.
+            if (context.UnwindowedSequenceDrawsParsed > unwindowedSequenceDrawsBefore)
+                throw SimulatedSqlException.NextValueForNotAllowedWithOrderBy();
             var orderBy = new List<OrderBySpec>();
             ParseOrderByItems(context, orderBy);
             var topLevelTail = new FromClause();
             ConsumeOffsetFetch(context, topLevelTail);
+            if (topLevelTail.OffsetExpression is not null && context.SequenceDrawsParsed > sequenceDrawsBefore)
+                throw SimulatedSqlException.NextValueForNotAllowedWithRowLimit();
             combined = ApplyTopLevelOrderBy(combined, orderBy, topLevelTail.OffsetExpression, topLevelTail.FetchExpression);
         }
 
@@ -533,9 +543,24 @@ internal sealed partial class Selection
     /// </summary>
     private static Selection ParseUnionExceptChain(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool namesOwnCollation)
     {
+        var savedRejection = context.NextValueForRejection;
+        var sequenceDrawsBefore = context.SequenceDrawsParsed;
+        try
+        {
+            return ParseUnionExceptChainCore(context, depth, outerTypeResolver, namesOwnCollation, sequenceDrawsBefore);
+        }
+        finally
+        {
+            context.NextValueForRejection = savedRejection;
+        }
+    }
+
+    private static Selection ParseUnionExceptChainCore(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool namesOwnCollation, int sequenceDrawsBefore)
+    {
         var left = ParseIntersectChain(context, depth, outerTypeResolver, isFirstBranch: true, namesOwnCollation);
         while (context.Token is ReservedKeyword { Keyword: Keyword.Union or Keyword.Except } op)
         {
+            RejectSequenceDrawUnderSetOperator(context, sequenceDrawsBefore);
             SetOpKind kind;
             if (op.Keyword == Keyword.Union)
             {
@@ -564,6 +589,21 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Raises real's Msg 11721 at the set operator itself when the branch
+    /// already parsed drew from a sequence. The operator is read after that
+    /// branch, so the refusal it earns can only be settled here; the branches
+    /// that follow get the same refusal eagerly, since by then the operator is
+    /// in hand. An <c>OVER</c> does not exempt a reference from this one
+    /// (probe-confirmed) — only from the <c>ORDER BY</c> refusal.
+    /// </summary>
+    private static void RejectSequenceDrawUnderSetOperator(ParserContext context, int sequenceDrawsBefore)
+    {
+        if (context.SequenceDrawsParsed > sequenceDrawsBefore)
+            throw SimulatedSqlException.NextValueForNotAllowedWithDedup();
+        _ = context.EnterNextValueForScope(NextValueForScope.Deduplicating);
+    }
+
+    /// <summary>
     /// Notes a UNION / INTERSECT / EXCEPT for the indexed-view battery
     /// (Msg 10116) and for a function body's Msg 444 state, which real reports
     /// as 2 for a set-op chain even when no branch reads a table. Recorded at
@@ -583,9 +623,24 @@ internal sealed partial class Selection
     /// </summary>
     internal static Selection ParseIntersectChain(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool isFirstBranch, bool namesOwnCollation)
     {
+        var savedRejection = context.NextValueForRejection;
+        var sequenceDrawsBefore = context.SequenceDrawsParsed;
+        try
+        {
+            return ParseIntersectChainCore(context, depth, outerTypeResolver, isFirstBranch, namesOwnCollation, sequenceDrawsBefore);
+        }
+        finally
+        {
+            context.NextValueForRejection = savedRejection;
+        }
+    }
+
+    private static Selection ParseIntersectChainCore(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool isFirstBranch, bool namesOwnCollation, int sequenceDrawsBefore)
+    {
         var left = ParseSetOpBranch(context, depth, outerTypeResolver, allowOrderBy: isFirstBranch, namesOwnCollation);
         while (context.Token is ReservedKeyword { Keyword: Keyword.Intersect })
         {
+            RejectSequenceDrawUnderSetOperator(context, sequenceDrawsBefore);
             context.MoveNextRequired();
             var right = ParseSetOpBranch(context, depth, outerTypeResolver, allowOrderBy: false, namesOwnCollation);
             RecordSetOperationShape(context);
@@ -656,6 +711,9 @@ internal sealed partial class Selection
         // collector for its duration.
         var savedFromSourceColumnSink = context.FromSourceColumnSink;
         context.FromSourceColumnSink = null;
+        // DISTINCT / TOP raise the branch's NEXT VALUE FOR refusal floor
+        // inside ParseInner; the frame that installed it comes back here.
+        var savedNextValueForRejection = context.NextValueForRejection;
         var aggregates = new List<AggregateExpression>();
         var windows = new List<WindowExpression>();
         var savedEnclosingAggregateCollector = context.EnclosingAggregateCollector;
@@ -674,6 +732,7 @@ internal sealed partial class Selection
             context.OuterTypeResolver = savedOuterTypeResolver;
             context.ScopeSources = savedScopeSources;
             context.FromSourceColumnSink = savedFromSourceColumnSink;
+            context.NextValueForRejection = savedNextValueForRejection;
         }
     }
 
@@ -975,8 +1034,7 @@ internal sealed partial class Selection
             // Rejecting the prefix here also keeps ParsePrimary on its
             // stops-before-any-binary-operator path — a sign would otherwise
             // absorb the following multiplicative chain, star included.
-            var savedRejectInTop = context.NextValueForRejection;
-            context.NextValueForRejection = NextValueForScope.Clause;
+            var savedRejectInTop = context.EnterNextValueForScope(NextValueForScope.Clause);
             try
             {
                 context.RecursiveBranchConstructs.TopOrOffset = true;
@@ -1014,6 +1072,24 @@ internal sealed partial class Selection
             else
                 _ = ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch);
         }
+
+        // Both quantifiers precede the select list, so real's statement-level
+        // NEXT VALUE FOR refusals for them are in force before anything can
+        // draw from a sequence: Msg 11721 for DISTINCT, Msg 11739 for TOP.
+        // The floor holds for this branch's whole parse and is lifted by
+        // ParseSingleSelectStatement, which owns the branch's context frame.
+        // (An OFFSET earns Msg 11739 too, but it can only follow an ORDER BY,
+        // whose Msg 11723 outranks it — so it needs no separate gate.)
+        if (distinct)
+            _ = context.EnterNextValueForScope(NextValueForScope.Deduplicating);
+        else if (topExpression is not null)
+            _ = context.EnterNextValueForScope(NextValueForScope.RowLimited);
+
+        // Msg 11723 is a property of the finished statement rather than of the
+        // reference's own position, so it is settled below against this
+        // snapshot once the ORDER BY has been read.
+        var sequenceDrawsBefore = context.SequenceDrawsParsed;
+        var unwindowedSequenceDrawsBefore = context.UnwindowedSequenceDrawsParsed;
 
         List<Expression> expressions = [];
         var fromClause = new FromClause();
@@ -1352,6 +1428,7 @@ internal sealed partial class Selection
 
                     if (topExpression is not null && fromClause.OffsetExpression is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
+                    RejectSequenceDrawUnderOrderBy(context, fromClause, sequenceDrawsBefore, unwindowedSequenceDrawsBefore);
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, sources);
                     JoinSpec[] joinArray = [.. joins];
                     var plan = BuildSqlProjection(context.Batch, [.. sources], joinArray, expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink, projectionDiscarded);
@@ -1446,6 +1523,7 @@ internal sealed partial class Selection
             throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
         if (topWithTies && fromClause.OrderBy.Count == 0)
             throw SimulatedSqlException.TopWithTiesRequiresOrderBy();
+        RejectSequenceDrawUnderOrderBy(context, fromClause, sequenceDrawsBefore, unwindowedSequenceDrawsBefore);
 
         // A source-less SELECT that aggregates, groups, filters groups or
         // windows takes the ordinary projection builder over an empty source
@@ -1467,6 +1545,17 @@ internal sealed partial class Selection
                 intoTarget, context.ReadColumnSink, projectionDiscarded);
         }
 
+        // A set operator one token past this branch refuses the whole statement
+        // (Msg 11721) without real drawing anything, and the bake below would
+        // draw while evaluating. The chain parser settles the same refusal, but
+        // only after this branch has been built — so a FROM-less branch that
+        // drew has to look the one token ahead itself.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect }
+            && context.SequenceDrawsParsed > sequenceDrawsBefore)
+        {
+            throw SimulatedSqlException.NextValueForNotAllowedWithDedup();
+        }
+
         // The FROM-less path bakes its projection values at parse time and
         // never plan-caches (BuildSynthesizedSqlRow disqualifies the batch),
         // so its counts resolve here once, exactly as its projection does.
@@ -1480,6 +1569,29 @@ internal sealed partial class Selection
             ResolveRowCountLimit(fromClause.FetchExpression, RowLimitKind.Fetch, context.Batch),
             ResolveAssignmentMode(expressions), intoTarget, context.OuterTypeResolver ?? outerTypeResolver,
             context.SubqueriesParsed > subqueriesBeforeProjection);
+    }
+
+    /// <summary>
+    /// Raises real's Msg 11723 when the finished query spec carries an
+    /// <c>ORDER BY</c> and drew from a sequence somewhere the reference's own
+    /// position allows. Real settles this one against the whole statement
+    /// rather than the reference's position, and it outranks both the
+    /// clause refusal (a <c>WHERE</c> reference in an ordered statement is
+    /// 11723, not 11720) and the row-limit one — but not <c>DISTINCT</c>'s,
+    /// which is why the counter only ever reaches here when nothing stricter
+    /// already threw. A reference carrying its own <c>OVER</c> never counts:
+    /// that is the one exemption real's message names, and the one exemption
+    /// it grants anywhere (probe-confirmed 2026-08-05).
+    /// </summary>
+    private static void RejectSequenceDrawUnderOrderBy(ParserContext context, FromClause fromClause, int sequenceDrawsBefore, int unwindowedSequenceDrawsBefore)
+    {
+        if (fromClause.OrderBy.Count > 0 && context.UnwindowedSequenceDrawsParsed > unwindowedSequenceDrawsBefore)
+            throw SimulatedSqlException.NextValueForNotAllowedWithOrderBy();
+        // An OFFSET can only follow an ORDER BY, so this is reached only for a
+        // draw the OVER exemption carried past the check above — real refuses
+        // that one too, since the OVER lifts the ORDER BY refusal alone.
+        if (fromClause.OffsetExpression is not null && context.SequenceDrawsParsed > sequenceDrawsBefore)
+            throw SimulatedSqlException.NextValueForNotAllowedWithRowLimit();
     }
 
     /// <summary>
@@ -1764,8 +1876,7 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
                 // An ON predicate rejects NEXT VALUE FOR (Msg 11720), like the
                 // other clauses real names in that message.
-                var savedRejectInOn = context.NextValueForRejection;
-                context.NextValueForRejection = NextValueForScope.Clause;
+                var savedRejectInOn = context.EnterNextValueForScope(NextValueForScope.Clause);
                 try
                 {
                     on = ParseOnPredicateWithScope(context, sources, outerTypeResolver);
@@ -1870,7 +1981,7 @@ internal sealed partial class Selection
     {
         var saved = context.NextValueForRejection;
         if (!context.AllowNextValueForInFromClause)
-            context.NextValueForRejection = NextValueForScope.Nested;
+            _ = context.EnterNextValueForScope(NextValueForScope.Nested);
         try
         {
             return Selection.Parse(context, depth, outerTypeResolver);
@@ -2086,7 +2197,7 @@ internal sealed partial class Selection
                 if (followedByParen)
                 {
                     context.RestoreCheckpoint(afterNameCheckpoint);
-                    return ParseXmlNodesSource(context);
+                    return ParseXmlNodesSource(context, leftSnapshotForName);
                 }
             }
 
@@ -3203,7 +3314,7 @@ internal sealed partial class Selection
         var savedAllowsWindows = context.AllowsWindowExpressions;
         var savedRejectNextValueFor = context.NextValueForRejection;
         context.AllowsWindowExpressions = false;
-        context.NextValueForRejection = NextValueForScope.Clause;
+        _ = context.EnterNextValueForScope(NextValueForScope.Clause);
         try
         {
             while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -3253,7 +3364,7 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             // ORDER BY rejects NEXT VALUE FOR (Msg 11720), but allows windowed
             // functions. Toggle just the sequence flag for the duration.
-            context.NextValueForRejection = NextValueForScope.Clause;
+            _ = context.EnterNextValueForScope(NextValueForScope.Clause);
             try
             {
                 ParseOrderByItems(context, fromClause.OrderBy);
@@ -3870,10 +3981,15 @@ internal sealed partial class Selection
         foreach (var expression in expressions)
             expression.VisitColumnReferences(_ => referencesOuterColumns = true);
 
+        // A FROM-less SELECT holds no sources, so every name it can't hand to an
+        // enclosing scope is unbindable — which makes a *qualified* one Msg 4104
+        // and an unqualified one Msg 207, the split UnresolvedNameError carries.
+        // This is the path a derived table over no FROM takes, so it is what
+        // reports a body that names a sibling FROM source.
         SqlType TypeResolver(MultiPartName column) =>
             outerTypeResolver is not null
                 ? outerTypeResolver(column)
-                : throw SimulatedSqlException.InvalidColumnName(column);
+                : throw UnresolvedNameError([], column);
 
         var parseRuntime = new RuntimeContext(column => throw SimulatedSqlException.InvalidColumnName(column), parseBatch);
         for (var i = 0; i < expressions.Count; i++)

@@ -53,7 +53,7 @@ partial class Simulation
         // (probe-confirmed, with the error attributed to the module).
         var savedRejection = context.NextValueForRejection;
         if (rejectsNextValueFor)
-            context.NextValueForRejection = NextValueForScope.Nested;
+            _ = context.EnterNextValueForScope(NextValueForScope.Nested);
         try
         {
             if (context.Token is ReservedKeyword { Keyword: Keyword.With })
@@ -189,8 +189,7 @@ partial class Simulation
             // Real refuses NEXT VALUE FOR inside a common table expression by
             // name (Msg 11719, probe-confirmed) — over the body's whole parse,
             // not merely its clauses.
-            var savedRejection = context.NextValueForRejection;
-            context.NextValueForRejection = NextValueForScope.Nested;
+            var savedRejection = context.EnterNextValueForScope(NextValueForScope.Nested);
             Selection body;
             try
             {

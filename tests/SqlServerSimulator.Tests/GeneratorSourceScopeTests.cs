@@ -198,4 +198,50 @@ public sealed class GeneratorSourceScopeTests
     [TestMethod]
     public void Generator_ReadingAnEnclosingAlias_Answers()
         => AreEqual(6, WithGenerators().ExecuteScalar("select sum(n) from (select (select count(*) from t u join string_split(o.csv, ',') s on 1 = 1) as n from t o) x"));
+
+    // ---- what the sink can't see: a nested query body -----------------------
+
+    /// <summary>
+    /// N1.16 — a <b>derived table</b> naming a sibling. Its body owns a name
+    /// scope of its own, so the reference never reaches the FROM-source
+    /// collector; real refuses it as the same Msg 4104 whatever position the
+    /// sibling is written in, and whether or not the leaf exists.
+    /// </summary>
+    [TestMethod]
+    public void DerivedTable_NamingASibling_IsMsg4104()
+    {
+        var sim = WithGenerators();
+        Msg4104(sim, "select * from t join (select t.id as x) d on 1 = 1", "t.id");
+        Msg4104(sim, "select * from t, (select t.id as x) d", "t.id");
+        Msg4104(sim, "select * from (select t.id as x) d join t on 1 = 1", "t.id");
+        Msg4104(sim, "select * from t join (select t.nosuch as x) d on 1 = 1", "t.nosuch");
+        Msg4104(sim, "select * from t join (select zz.id as x) d on 1 = 1", "zz.id");
+    }
+
+    /// <summary>N1.16 — the same body under <c>APPLY</c> answers, which is the point of the split.</summary>
+    [TestMethod]
+    public void DerivedTable_UnderApply_Answers()
+        => AreEqual(2, WithGenerators().ExecuteScalar("select count(*) from t cross apply (select t.id as x) d"));
+
+    /// <summary>
+    /// N1.22 — a sibling reference buried in a generator's <b>scalar-subquery
+    /// argument</b>. The subquery is a scope of its own for the same reason, so
+    /// this too arrives as an unbindable name rather than through the sink.
+    /// </summary>
+    [TestMethod]
+    public void Generator_ScalarSubqueryArgument_NamingASibling_IsMsg4104()
+    {
+        var sim = WithGenerators();
+        Msg4104(sim, "select * from t join string_split((select max(t.csv)), ',') g on 1 = 1", "t.csv");
+        Msg4104(sim, "select * from t join openjson((select max(t.j))) g on 1 = 1", "t.j");
+        Msg4104(sim, "select * from t join generate_series(1, (select max(t.id))) g on 1 = 1", "t.id");
+        Msg4104(sim, "select * from t join dbo.tvf((select max(t.id))) g on 1 = 1", "t.id");
+        Msg4104(sim, "select * from t join (select (select max(t.id)) as x) d on 1 = 1", "t.id");
+    }
+
+    /// <summary>N1.22 — an argument whose subquery reads nothing local still answers.</summary>
+    [TestMethod]
+    public void Generator_ScalarSubqueryArgument_ReadingNoSibling_Answers()
+        => AreEqual(2, WithGenerators().ExecuteScalar(
+            "select count(*) from t join string_split((select max(csv) from t u), ',') g on 1 = 1"));
 }

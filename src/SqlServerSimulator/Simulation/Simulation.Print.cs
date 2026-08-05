@@ -34,7 +34,22 @@ partial class Simulation
     {
         var context = batch.Parser;
         context.MoveNextRequired(); // consume PRINT
-        var expression = Expression.Parse(context);
+        // PRINT is one of the statements real declines to define a sequence
+        // draw in at all, and it says so with its own catch-all message
+        // (Msg 11738, probe-confirmed) rather than any of the query-shaped
+        // ones — though a CASE wrapped around the reference still reports
+        // Msg 11741, which is what makes this a floor rather than a set.
+        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Unsupported);
+        Expression expression;
+        try
+        {
+            expression = Expression.Parse(context);
+        }
+        finally
+        {
+            context.NextValueForRejection = savedRejection;
+        }
+
         if (batch.IsSkipping)
             return;
         var value = expression.Run(new RuntimeContext(NoColumnResolver, batch));

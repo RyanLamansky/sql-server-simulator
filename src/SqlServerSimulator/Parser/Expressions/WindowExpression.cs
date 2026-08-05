@@ -731,8 +731,7 @@ internal sealed class WindowExpression : Expression
 
         // An OVER body rejects NEXT VALUE FOR (Msg 11720) — real names OVER
         // alongside WHERE / ORDER BY / the rest in that message.
-        var saved = context.NextValueForRejection;
-        context.NextValueForRejection = NextValueForScope.Clause;
+        var saved = context.EnterNextValueForScope(NextValueForScope.Clause);
         try
         {
             return ParseExpressionList(context);
@@ -943,8 +942,7 @@ internal sealed class WindowExpression : Expression
     {
         // Same Msg 11720 rejection as PARTITION BY — this list is only ever an
         // OVER body's ORDER BY, and real names OVER in that message.
-        var saved = context.NextValueForRejection;
-        context.NextValueForRejection = NextValueForScope.Clause;
+        var saved = context.EnterNextValueForScope(NextValueForScope.Clause);
         try
         {
             return ParseOrderByListCore(context);

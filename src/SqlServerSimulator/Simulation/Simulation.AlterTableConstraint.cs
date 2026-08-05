@@ -77,7 +77,17 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         var predicateStart = context.Token!.StartIndex;
-        var predicate = BooleanExpression.Parse(context);
+        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Nested);
+        BooleanExpression predicate;
+        try
+        {
+            predicate = BooleanExpression.Parse(context);
+        }
+        finally
+        {
+            context.NextValueForRejection = savedRejection;
+        }
+
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var definition = $"({context.SourceTextFrom(predicateStart)})";

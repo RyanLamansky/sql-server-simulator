@@ -47,6 +47,18 @@
   Storing it raw reached the row encoder's type check as a bare `ArgumentException`; over the TDS wire that aborts the response mid-stream, so the client reports `HY000 "A severe error occurred"` and the connection dies rather than getting any usable error.
   Uncovered columns already coerced their DEFAULT the same way — this closes the covered-column half.
 
+### A target the FROM clause never names
+
+The FROM clause needn't introduce a source for the target at all: real binds one it doesn't as an **additional, implicitly cross-joined source**, so `UPDATE u SET id = d.n FROM (SELECT 1 AS n) d` is `u CROSS JOIN d`, and `u`'s own columns stay in scope for the SET list, the WHERE, the OUTPUT clause and any correlated subquery.
+Probe-confirmed against SQL Server 2025 (2026-08-05) for a parenthesized derived table alone and joined to a table, two derived tables, `d LEFT JOIN t`, `d CROSS APPLY (…)`, a plain unparenthesized table (`UPDATE u SET id = u2.id FROM u2`), a schema-qualified target, a `#temp` target and both `DELETE t FROM …` / `DELETE FROM t FROM …` spellings.
+
+The cross join multiplies rows **examined**, not rows affected: two target rows against a one-row FROM report two affected, each written once, exactly as a written `FROM u JOIN …` would.
+
+`FindOrAppendMutationTarget` (`Simulation.Update.cs`, shared with the DELETE path) is the seam.
+On a miss it appends the target as a `FromSource` built the way an explicitly-written heap source is — same read plan, same row-conflict wrapping — behind a `JoinKind.Cross` `JoinSpec`, and joins it at the **tail** so the written FROM keeps its own leftmost source and join tree.
+A leading identifier that named no table at all stays **Msg 208**: an alias the FROM never defined is real's error too.
+A FROM source *aliased* as the target's name still wins the match, so `UPDATE u … FROM (SELECT 1 AS n) u` keeps binding to the derived table (real then reports its own missing column; the simulator's derived-table-target rejection is unchanged).
+
 ### Joined row sources
 
 `ExecuteJoinedUpdate` / `ExecuteJoinedDelete` enumerate their join tuples through the same `Selection.EnumerateJoinedRows` a SELECT does, and reach it through `Selection.PrepareMutationJoinSources` — the read path's own two row-source passes, minus the reorder:
@@ -256,6 +268,7 @@ Probe-confirmed schema-inference rules:
   A FROM-bearing `SELECT` projects `SqlValue[]` rows; the copy reads `SimulatedSqlResultSet.RowValues`, taking those projected rows directly, and decodes only for the producers that genuinely emit encoded rows (a set operation, a view body, `OPENJSON`).
   Routing through `RowBytes` would encode each projected row into a page image only to decode it straight back for values the projection had already computed.
   The two are answer-for-answer identical (mutation-checked: putting the round trip back passes every test), and it is worth about a third of the statement — on a 73k-row joined copy, 164 MB down to 91 MB allocated.
+  The reader path reaches the same rows the same way, through the cursor rather than through `RowValues` — see [`data-reader.md`](data-reader.md#the-row-form-the-reader-reads), which is also where the storage-form narrowing the encode round trip carries is described.
 - **Schema rules + validation** live in `Selection.SelectInto.cs:ComputeIntoDestSchema`.
   Nullability uses `Expression.ResultIsNullable` (a virtual whose default is `true`, overridden per expression kind), threaded a `NullabilityContext` carrying the parsing batch plus the column nullability and column type resolvers — the type resolver is what tells string `+` from arithmetic `+`, and the batch is what evaluates the CASE family's folded conditions.
   Identity uses `UnwrapDirectRef` to drill through `NamedExpression` layers.

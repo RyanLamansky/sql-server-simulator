@@ -20,6 +20,11 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class NullIfLiteralNarrowingTests
 {
+    /// <remarks>
+    /// The decimal-family rows read <c>decimal</c> because that is what this
+    /// client surface answers for both names — the narrowing under test is the
+    /// integer-width one, not the decimal-vs-numeric split.
+    /// </remarks>
     private static string DeclaredType(string expression)
     {
         using var connection = new Simulation().CreateOpenConnection();
@@ -75,9 +80,9 @@ public sealed class NullIfLiteralNarrowingTests
     [DataRow("nullif(cast(60 as tinyint), 76)", "tinyint")]
     [DataRow("nullif(cast(60 as bigint), 76)", "bigint")]
     [DataRow("nullif(cast(60 as real), 76)", "real")]
-    [DataRow("nullif(60.0, 76)", "numeric")]
-    [DataRow("nullif(2147483648, 1)", "numeric")]
-    [DataRow("nullif(-2147483649, 1)", "numeric")]
+    [DataRow("nullif(60.0, 76)", "decimal")]
+    [DataRow("nullif(2147483648, 1)", "decimal")]
+    [DataRow("nullif(-2147483649, 1)", "decimal")]
     [DataRow("nullif('a', 'b')", "varchar")]
     public void OnlyAWrittenIntLiteralNarrows(string expression, string expected) =>
         AreEqual(expected, DeclaredType(expression));

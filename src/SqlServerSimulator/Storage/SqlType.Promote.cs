@@ -233,7 +233,10 @@ internal abstract partial class SqlType
             return a.Precedence >= b.Precedence ? a : b;
         }
 
-        var national = a is NVarcharSqlType or NCharSqlType || b is NVarcharSqlType or NCharSqlType;
+        // sysname is nvarchar(128) under an alias, so it carries the national
+        // family into a promotion the way an nvarchar does (probe-confirmed:
+        // real types `TYPE_NAME(56) + ''` as nvarchar(129)).
+        var national = a is NVarcharSqlType or NCharSqlType or SystemNameSqlType || b is NVarcharSqlType or NCharSqlType or SystemNameSqlType;
         var fixedLength = a is CharSqlType or NCharSqlType && b is CharSqlType or NCharSqlType;
         var resolved = Collation.Resolve(a, b);
         var (collation, coercibility) = resolved
@@ -668,8 +671,8 @@ internal abstract partial class SqlType
     /// </summary>
     private static SqlType StringConcatResult(SqlType a, SqlType b)
     {
-        var national = a is NVarcharSqlType or NCharSqlType
-            || b is NVarcharSqlType or NCharSqlType
+        var national = a is NVarcharSqlType or NCharSqlType or SystemNameSqlType
+            || b is NVarcharSqlType or NCharSqlType or SystemNameSqlType
             || a == NText || b == NText;
 
         // Resolve the result collation via SQL Server's collation-coercibility

@@ -121,7 +121,7 @@ partial class Simulation
             if (context.Token is ReservedKeyword { Keyword: Keyword.Current })
                 positionedCursor = ParseWhereCurrentOf(context, table, assignedColumns: null, sourceView);
             else
-                where = Selection.ParseAndBindPredicate(context, Selection.TargetColumnTypeResolver(context.Batch, table, sourceView));
+                where = Selection.ParseAndBindPredicate(context, Selection.TargetColumnTypeResolver(context.Batch, targetName, table, sourceView));
         }
 
         // DELETE reads the target when it has a WHERE clause — real then
@@ -270,12 +270,9 @@ partial class Simulation
         {
             context.AllowNextValueForInFromClause = savedAllowNextValueFor;
         }
+        var targetIndex = FindOrAppendMutationTarget(context, sourcesList, joinsList, leadingIdent, leadingTable);
         var sources = sourcesList.ToArray();
         var joins = joinsList.ToArray();
-
-        var targetIndex = FindMutationTargetIndex(context.Batch.CurrentDatabase.Collation, sources, leadingIdent.Leaf, leadingTable);
-        if (targetIndex < 0)
-            throw SimulatedSqlException.InvalidObjectName(leadingIdent);
 
         var table = sources[targetIndex].BackingTable
             ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");

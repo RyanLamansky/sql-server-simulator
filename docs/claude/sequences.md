@@ -103,12 +103,35 @@ Projecting it unconditionally reported one increment ahead of real after any use
 
 ## Where `NEXT VALUE FOR` is rejected
 
-Two of real's refusals ship, both at parse — which is what keeps the sequence from advancing, since the batch never runs.
-`ParserContext.NextValueForRejection` carries which one applies (`NextValueForScope`), each construct's parse sets it for its own duration, and `NextValueFor`'s constructor consumes it.
+Real refuses a sequence draw with **nine** different messages, and all nine ship — every one at parse, which is what keeps the sequence from advancing, since the batch never runs.
+`ParserContext.NextValueForRejection` carries which one applies (`NextValueForScope`), each construct's parse raises it as a *floor* through `ParserContext.EnterNextValueForScope` for its own duration, and `NextValueFor`'s constructor consumes it.
 
-**Msg 11720** covers all eight clauses its own text names — `TOP`, `OVER`, `OUTPUT`, `ON`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`.
+**`NextValueForScope`'s declaration order is real's precedence order.**
+A reference under two restrictions at once reports the earlier arm, which is why the floor is a min rather than a set: a `DISTINCT` statement whose `WHERE` holds the reference is Msg 11721, not the `WHERE`'s own 11720.
+Every neighbouring pair below was probed directly (SQL Server 2025, 2026-08-05).
 
-**Msg 11719** covers the nested-query and stored-expression family, severity 15 state 1 (probed against SQL Server 2025, 2026-08-05):
+| # | Msg | the reference sits in | probed refusals |
+|---|---|---|---|
+| 1 | **11719** | a nested query or stored expression | derived table, CTE, subquery, `EXISTS` / `APPLY` body, view / function body, **CHECK constraint**, **computed column**, a `MERGE`'s `USING` derived table |
+| 2 | **11725** | an aggregate's argument | `SUM` / `MAX` / `MIN` / `COUNT` / `STRING_AGG`, `DISTINCT` argument, the reference nested inside a larger argument expression |
+| 3 | **11721** | a statement that dedupes or combines rowsets | `DISTINCT`, `UNION`, `UNION ALL`, `EXCEPT`, `INTERSECT` — in *either* branch; a nested query's own `DISTINCT` doesn't count |
+| 4 | **11723** | a statement carrying an `ORDER BY`, the reference naming no `OVER` | the select list, or a clause of the same statement |
+| 5 | **11720** | one of the eight clauses its own text names | `TOP`, `OVER`, `OUTPUT`, `ON` (a `MERGE`'s as well as a join's), `WHERE` (an `UPDATE` / `DELETE`'s as well as a `SELECT`'s), `GROUP BY`, `HAVING`, `ORDER BY` |
+| 6 | **11739** | a statement carrying a `TOP` or an `OFFSET` | either clause, whatever the reference's own position |
+| 7 | **11741** | an arm of the conditional family | `CASE` (simple and searched — input expression, `WHEN` operand, `THEN`, `ELSE`), `IIF`, `COALESCE`, `ISNULL`, `NULLIF` |
+| 8 | **11742** | a `MERGE` action's own expression | a `WHEN MATCHED … UPDATE SET`, a `WHEN NOT MATCHED … INSERT … VALUES` |
+| 9 | **11738** | a statement real declines to define it in at all | `PRINT` |
+
+**`CHOOSE` is named in Msg 11741's text and accepts a reference anyway** — in the index slot as much as a value slot (probe-confirmed), so it doesn't route through the refusal.
+
+**An `OVER` on the reference lifts exactly one refusal, #4.**
+`SELECT NEXT VALUE FOR s OVER (ORDER BY id) FROM t ORDER BY id` runs; the same reference under a `DISTINCT`, an aggregate, a `CASE`, a restricted clause or a `TOP` / `OFFSET` is refused as it would be without the `OVER`.
+
+Two of the refusals are properties of the *finished statement* rather than of the reference's position, and neither is knowable when the reference parses — a set operator and an `ORDER BY` both sit past the select list.
+Those are settled by comparing `ParserContext.SequenceDrawsParsed` / `UnwindowedSequenceDrawsParsed` against a snapshot taken where the statement began: at each set operator as it is consumed (and eagerly for every branch after it), and once the query spec's `ORDER BY` / `OFFSET` have been read.
+A **FROM-less** first branch of a set operation looks the one token ahead itself, because its projection would otherwise be *baked* — evaluated at parse — before the operator refused the statement, and real draws nothing there.
+
+**Msg 11719**'s own family, severity 15 state 1 (probed against SQL Server 2025, 2026-08-05):
 
 | context | probe |
 |---|---|
@@ -126,13 +149,20 @@ Two of real's refusals ship, both at parse — which is what keeps the sequence 
 
 A sequence rejected this way is untouched: real reports the same `current_value` afterwards as before, and so does the simulator.
 
-**The positions that stay legal** are a bare `SELECT`, a `VALUES` tuple, a projection over a FROM source, a column `DEFAULT`, and a stored **procedure's** own statements (a procedure is not one of the module kinds real names — N2.25, it draws a value per call).
+**The positions that stay legal** are a bare `SELECT`, a `VALUES` tuple, a projection over a FROM source, a column `DEFAULT` (including the one a `MERGE`'s insert action reaches without writing `NEXT VALUE FOR` at all), an `UPDATE`'s SET list, a `SET` / `DECLARE` initializer, an `IF` / `WHILE` condition, a `CHOOSE` argument, and a stored **procedure's** own statements (a procedure is not one of the module kinds real names — N2.25, it draws a value per call).
 One more is legal and looks like it shouldn't be: **a joined `UPDATE` / `DELETE`'s own FROM-clause derived table**.
 Probed both spellings — `UPDATE t SET … FROM (SELECT NEXT VALUE FOR s AS n) d` and the `JOIN` form — run and draw their value on real, where the identical derived table under a `SELECT`, an `INSERT … SELECT` or a `MERGE … USING` is refused (N2b.01-03 against N2b.04-05).
 `ParserContext.AllowNextValueForInFromClause`, set around the mutation's `ParseSourcesAndJoins`, is that exemption.
+Such a derived table is *uncorrelated*, so real evaluates it **once** for the whole statement — every target row takes the same value, and the sequence advances by one.
 
-**Not built yet**: the three remaining refusals — **Msg 11741** for a `CASE` / `COALESCE` / `IIF` / `ISNULL` / `NULLIF` arm (real's message names `CHOOSE` too but accepts one — N2.14), **Msg 11725** for an aggregate's argument, and **Msg 11721** for a statement carrying `DISTINCT` or a set operator.
-All three are probed; each still advances the sequence here.
+### Divergences
+
+Each is a case where both engines refuse and only the message differs, except the last.
+
+- A reference sitting in a **restricted clause** (Msg 11720) or a **conditional arm** (Msg 11741) in a statement that *also* carries an `ORDER BY` reports its own message where real reports Msg 11723.
+  Those two refusals fire where the reference parses, which is before the `ORDER BY` is read; `DISTINCT` and `TOP` are known by then and do report real's message.
+- A `NEXT VALUE FOR` inside a **windowed aggregate**'s argument (`SUM(NEXT VALUE FOR s) OVER ()`) reports Msg 11725 where real reports 11720, since the trailing `OVER` is read after the argument.
+- **`SET ROWCOUNT` isn't modeled** at all (it parses and is discarded — see [`grammar.md`](grammar.md)), so the third trigger of Msg 11739 doesn't fire; the `TOP` and `OFFSET` triggers do.
 
 ### A parse that isn't going to run draws nothing
 

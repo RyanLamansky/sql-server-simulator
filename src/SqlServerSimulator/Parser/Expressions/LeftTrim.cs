@@ -33,11 +33,20 @@ internal sealed class LeftTrim : Expression
             return SqlValue.Null(StringScalars.ResolveResultType(raw.Type, runtime.Batch));
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "ltrim");
         var chars = StringScalars.ResolveTrimCharacters(this.trimChars, runtime, "ltrim");
-        if (chars is null)
+        if (chars is not { } set)
+            return SqlValue.FromString(value.Type, StringScalars.TrimSpaces(value.AsString, leading: true, trailing: false));
+        if (set.IsNull)
             return SqlValue.Null(value.Type);
-        // An empty explicit set removes nothing (.NET's TrimStart would treat
-        // an empty array as "trim whitespace", which is not the set semantics).
-        var trimmed = chars.Length == 0 ? value.AsString : value.AsString.TrimStart(chars);
+        // An empty explicit set removes nothing.
+        var setString = set.AsString;
+        var trimmed = setString.Length == 0
+            ? value.AsString
+            : StringScalars.TrimUnderCollation(
+                value.AsString,
+                setString,
+                StringScalars.CollationFor(runtime.Batch, value.Type, set.Type),
+                leading: true,
+                trailing: false);
         return SqlValue.FromString(value.Type, trimmed);
     }
 

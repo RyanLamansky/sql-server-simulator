@@ -277,14 +277,58 @@ public sealed class DataReaderTests
         AreEqual(typeof(byte[]), reader.GetFieldType(0));
     }
 
+    /// <summary>
+    /// <c>sysname</c> is an alias for <c>nvarchar(128)</c> and TDS carries the
+    /// base type, so a SqlClient consumer never sees the alias name: real
+    /// answers <c>nvarchar</c> for a <c>sysname</c> column, for every scalar in
+    /// the <c>TYPE_NAME</c> / <c>SCHEMA_NAME</c> / <c>DB_NAME</c> /
+    /// <c>USER_NAME</c> family, for <c>CURRENT_USER</c> and its siblings, and
+    /// for <c>CAST(… AS sysname)</c> (probed over SqlClient 7.0.2, 2026-08-05,
+    /// across <c>GetDataTypeName</c> and <c>GetSchemaTable</c>).
+    /// </summary>
     [TestMethod]
     public void SysName_FieldTypeAndDataTypeName_ViaSystemTable()
     {
         // sysname can't be declared in user CREATE TABLE; the systypes
         // catalog table exposes it via the "name" column.
         using var reader = new Simulation().ExecuteReader("select name from systypes");
-        AreEqual("sysname", reader.GetDataTypeName(0));
+        AreEqual("nvarchar", reader.GetDataTypeName(0));
         AreEqual(typeof(string), reader.GetFieldType(0));
+    }
+
+    /// <summary>
+    /// The rest of the <c>sysname</c>-producing surface reports the same
+    /// <c>nvarchar</c>, and a <c>sysname</c> operand carries the national
+    /// family into a concatenation the way an <c>nvarchar</c> does (real types
+    /// <c>TYPE_NAME(56) + ''</c> as <c>nvarchar(129)</c>).
+    /// </summary>
+    [TestMethod]
+    public void SysNameProducersAllReportNvarchar()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select type_name(56) as a, schema_name(1) as b, db_name() as c, user_name() as d,"
+            + " current_user as e, cast('x' as sysname) as f, type_name(56) + '' as g");
+        for (var i = 0; i < reader.FieldCount; i++)
+            AreEqual("nvarchar", reader.GetDataTypeName(i));
+    }
+
+    /// <summary>
+    /// A <c>decimal</c>-family column reports <c>decimal</c> whatever its
+    /// origin. The server does distinguish <c>numeric</c> from <c>decimal</c>
+    /// and the simulator carries that onto the wire, but SqlClient maps both
+    /// TDS tokens to <see cref="System.Data.SqlDbType.Decimal"/> and answers
+    /// <c>decimal</c> for both — so an in-process consumer must see the same
+    /// (probed over SqlClient 7.0.2, 2026-08-05). The name split itself is
+    /// pinned in <c>Tests.Internal/DecimalTypeNameTests</c>.
+    /// </summary>
+    [TestMethod]
+    public void DecimalFamily_AlwaysReportsDecimal_MatchingSqlClient()
+    {
+        using var reader = new Simulation().ExecuteReader(
+            "select 1.0 as a, 1.0 + 2.0 as b, cast(1.0 as numeric(9,2)) as c, cast(1.0 as decimal(9,2)) as d,"
+            + " convert(numeric(9,2), 1.0) as e");
+        for (var i = 0; i < reader.FieldCount; i++)
+            AreEqual("decimal", reader.GetDataTypeName(i));
     }
 
     [TestMethod]

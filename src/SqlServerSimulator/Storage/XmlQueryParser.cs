@@ -17,7 +17,12 @@ namespace SqlServerSimulator.Storage;
 /// continue a name, so <c>@a-1</c> is the attribute named <c>a-1</c> and a
 /// subtraction needs the space real needs (probe-confirmed).
 /// </remarks>
-internal sealed class XmlQueryParser(string text, string? defaultNamespace, Dictionary<string, string> prefixes, string method)
+internal sealed class XmlQueryParser(
+    string text,
+    string? defaultNamespace,
+    Dictionary<string, string> prefixes,
+    string method,
+    IReadOnlySet<string>? schemaSingletonElements = null)
 {
     /// <summary>The XQuery namespace an unprefixed function name lives in.</summary>
     private const string FunctionNamespace = "http://www.w3.org/2004/07/xpath-functions";
@@ -26,6 +31,14 @@ internal sealed class XmlQueryParser(string text, string? defaultNamespace, Dict
     private readonly string? defaultNamespace = defaultNamespace;
     private readonly Dictionary<string, string> prefixes = prefixes;
     private readonly string method = method;
+
+    /// <summary>
+    /// The element names the receiver's XML schema collection declares at
+    /// most once, or null for an untyped receiver. A named child step whose
+    /// name is in here is a singleton to the static type checker, which is
+    /// what makes <c>.value()</c> accept a schema-typed path real accepts.
+    /// </summary>
+    private readonly IReadOnlySet<string>? schemaSingletonElements = schemaSingletonElements;
 
     /// <summary>The <c>$</c>-variable bindings in scope, innermost last.</summary>
     private readonly List<XmlVariableBinding> scope = [];
@@ -525,7 +538,9 @@ internal sealed class XmlQueryParser(string text, string? defaultNamespace, Dict
         }
 
         var (local, uri) = this.ResolveName(name, axis == XmlAxis.Attribute);
-        return new XmlStep(axis, XmlNodeTestKind.Name, local, uri, this.ParsePredicates());
+        return new XmlStep(
+            axis, XmlNodeTestKind.Name, local, uri, this.ParsePredicates(),
+            this.schemaSingletonElements?.Contains(local) == true);
     }
 
     private XmlQueryExpr[] ParsePredicates()

@@ -9,7 +9,7 @@ namespace SqlServerSimulator;
 /// Shared rules: qualifier-aware resolution (Msg 209 on ambiguity), ON-predicate 3VL
 /// semantics, parser rejections. RIGHT / FULL accept a non-correlated or
 /// outer-correlated derived-table right side; lateral correlation to the left side
-/// is rejected (Msg 207 at parse time, vs real SQL Server's Msg 4104).
+/// is rejected with real's Msg 4104, though at runtime rather than bind time.
 /// </summary>
 [TestClass]
 public sealed class JoinTests
@@ -406,19 +406,18 @@ public sealed class JoinTests
     [TestMethod]
     public void RightJoin_DerivedTableRight_LateralCorrelationToLeft_Rejected()
     {
-        // Real SQL Server raises Msg 4104 ("multi-part identifier could not be bound")
-        // at bind-time; the simulator raises Msg 207 ("Invalid column name 'id'") at
-        // runtime because Reference.Run is the resolution point — the derived-table
-        // parse doesn't see the left-side snapshot resolver, so resolution falls through
-        // to the (null at top-level) outer resolver and fails on the first inner row.
-        // Different code + bind-vs-runtime timing, same end state (rejection).
-        _ = new Simulation().AssertSqlError("""
+        // A non-APPLY derived table's body binds in a scope holding none of the
+        // FROM's own sources, so `a.id` names a qualifier that isn't there —
+        // real's Msg 4104 on the written identifier, matched verbatim
+        // (probe-confirmed 2026-08-05). The simulator's rejection arrives at
+        // runtime rather than bind time; the message is the same either way.
+        new Simulation().AssertSqlError("""
             create table a (id int);
             create table b (id int);
             insert a values (1), (2);
             insert b values (1), (2), (3);
             select a.id, bx.id from a right join (select id from b where b.id = a.id) bx on a.id = bx.id
-            """, 207);
+            """, 4104, "The multi-part identifier \"a.id\" could not be bound.");
     }
 
     /// <summary>

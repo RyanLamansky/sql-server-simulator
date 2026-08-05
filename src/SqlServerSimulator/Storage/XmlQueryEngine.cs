@@ -40,14 +40,18 @@ internal static class XmlQueryEngine
     /// <summary>
     /// Compiles an XQuery argument — prolog included — for the named method
     /// (<c>value</c> / <c>nodes</c> / <c>query</c> / <c>exist</c>), which the
-    /// diagnostics quote.
+    /// diagnostics quote. <paramref name="schemaSingletonElements"/> carries
+    /// the receiver's XML schema collection's singleton element names when the
+    /// receiver is typed, and is null for untyped <c>xml</c>; it is the one
+    /// thing the schema binding changes about compilation, since real's static
+    /// cardinality is what the typed and untyped paths disagree on.
     /// </summary>
-    public static XmlQueryExpr Compile(string xquery, string method)
+    public static XmlQueryExpr Compile(string xquery, string method, IReadOnlySet<string>? schemaSingletonElements = null)
     {
         var (defaultNamespace, prefixes, body) = ParsePrologAndBody(xquery);
         if (body.Length == 0)
             throw SimulatedSqlException.XQueryExpressionMissing();
-        var parser = new XmlQueryParser(body, defaultNamespace, prefixes, method);
+        var parser = new XmlQueryParser(body, defaultNamespace, prefixes, method, schemaSingletonElements);
         var compiled = parser.ParseBody();
 
         // A node constructor is legal in query() and exist(), which hand the

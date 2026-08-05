@@ -67,9 +67,8 @@ internal sealed class LikeMatcher
 
     private readonly Collation collation;
 
+    /// <summary>Non-null exactly when the collation matches linguistically rather than by code unit; the matching itself goes through <see cref="Collation.IsPrefix"/>.</summary>
     private readonly CompareInfo? compareInfo;
-
-    private readonly CompareOptions options;
 
     private readonly SurrogateMatching surrogates;
 
@@ -102,9 +101,7 @@ internal sealed class LikeMatcher
     {
         this.segments = segments;
         this.collation = collation;
-        var linguistic = collation.LinguisticMatching;
-        this.compareInfo = linguistic?.Info;
-        this.options = linguistic?.Options ?? CompareOptions.None;
+        this.compareInfo = collation.LinguisticMatching?.Info;
         this.surrogates = collation.SurrogateMatching;
         this.caseSensitive = collation.CaseSensitive;
         this.asciiEligible = asciiEligible;
@@ -237,11 +234,11 @@ internal sealed class LikeMatcher
     /// <summary>
     /// How much of the subject at <paramref name="pos"/> the literal run
     /// consumes, or <c>-1</c> when it doesn't match there. The linguistic path
-    /// takes <see cref="CompareInfo"/>'s own match length — which respects
-    /// collation elements, so an accent-insensitive <c>e</c> swallows a
-    /// following combining mark — and then requires that length to land on a
-    /// character boundary, which is what keeps a bare <c>e</c> from matching
-    /// the base of <c>e</c> + U+0301 under an accent-sensitive collation.
+    /// takes the collation's own match length — which respects collation
+    /// elements, so an accent-insensitive <c>e</c> swallows a following
+    /// combining mark — and then requires that length to land on a character
+    /// boundary, which is what keeps a bare <c>e</c> from matching the base of
+    /// <c>e</c> + U+0301 under an accent-sensitive collation.
     /// </summary>
     private int MatchLiteral(ReadOnlySpan<char> s, int pos, string run, bool ascii)
     {
@@ -252,17 +249,16 @@ internal sealed class LikeMatcher
         // attaches. One extra character is classified past the run so a mark
         // sitting right after it sends the match down the linguistic path,
         // where the character-boundary rule refuses it.
-        if (this.compareInfo is null
+        var ordinalPath = this.compareInfo is null
             || ascii
-            || (this.asciiEligible && IsPrintableAscii(rest[..Math.Min(run.Length + 1, rest.Length)])))
-        {
-            return rest.StartsWith(run, this.caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase)
+            || (this.asciiEligible && IsPrintableAscii(rest[..Math.Min(run.Length + 1, rest.Length)]));
+        return ordinalPath
+            ? rest.StartsWith(run, this.caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase)
                 ? run.Length
+                : -1
+            : this.collation.IsPrefix(rest, run, out var matched) && IsCharacterBoundary(s, pos + matched)
+                ? matched
                 : -1;
-        }
-
-        var matches = this.compareInfo.IsPrefix(rest, run, this.options, out var matched);
-        return matches && IsCharacterBoundary(s, pos + matched) ? matched : -1;
     }
 
     /// <summary>

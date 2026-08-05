@@ -199,17 +199,40 @@ public sealed class SimulatedDbDataReader : DbDataReader
 
     /// <inheritdoc/>
     /// <remarks>
-    /// A <c>decimal(p, s)</c> column projected from a numeric-named source
-    /// (a decimal/numeric literal, <c>CAST … AS numeric</c>, or arithmetic /
-    /// function carrying one) reports <c>numeric</c> — SQL Server's own type
-    /// name for that origin; the two share one storage type, so the
-    /// distinction is carried as result metadata (<c>ColumnReportsNumeric</c>),
-    /// not on the <see cref="SqlType"/>.
+    /// <para>
+    /// This is a <em>client</em> surface, so it answers what SqlClient answers
+    /// rather than what the server declares, and SqlClient reports the name of
+    /// the CLR-facing type its TDS token maps to. Two of the simulator's type
+    /// names never reach a SqlClient consumer as written and are mapped here
+    /// (probe-confirmed against SQL Server 2025 over SqlClient, 2026-08-05):
+    /// </para>
+    /// <list type="bullet">
+    /// <item><c>numeric</c> reads <c>decimal</c>. The server genuinely
+    /// distinguishes the two — <c>sys.dm_exec_describe_first_result_set</c>
+    /// reports <c>numeric(2,1)</c> for <c>SELECT 1.0</c> and <c>decimal(9,2)</c>
+    /// for <c>CAST(1.0 AS decimal(9,2))</c> — and the distinction still rides
+    /// the wire, where mssql-jdbc's <c>getColumnTypeName</c> reads it off the
+    /// NUMERICN / DECIMALN token. SqlClient collapses both to
+    /// <see cref="System.Data.SqlDbType.Decimal"/>, so an in-process consumer
+    /// must see the collapsed name (<c>SELECT 1.0</c>, <c>1.0 + 2.0</c>,
+    /// <c>CAST(1.0 AS numeric(9,2))</c> and a <c>numeric</c>-declared column all
+    /// report <c>decimal</c> there).</item>
+    /// <item><c>sysname</c> reads <c>nvarchar</c>: it is an alias for
+    /// <c>nvarchar(128)</c>, and TDS carries the base type, so every producer of
+    /// one — the catalog views' <c>name</c> columns, <c>TYPE_NAME</c> /
+    /// <c>SCHEMA_NAME</c> / <c>OBJECT_NAME</c> / <c>DB_NAME</c> /
+    /// <c>USER_NAME</c> / <c>COL_NAME</c> and the rest of that family,
+    /// <c>CURRENT_USER</c> and its siblings, <c>CAST(… AS sysname)</c>, a
+    /// <c>sysname</c> variable and a <c>sysname</c> column — reports
+    /// <c>nvarchar</c> on real.</item>
+    /// </list>
+    /// <para>
+    /// <c>ColumnReportsNumeric</c> stays on the result for the TDS listener,
+    /// which writes the token real writes.
+    /// </para>
     /// </remarks>
     public override string GetDataTypeName(int ordinal) =>
-        this.currentResult?.ColumnReportsNumeric is { } reportsNumeric && ordinal < reportsNumeric.Length && reportsNumeric[ordinal]
-            ? "numeric"
-            : CurrentSchema[ordinal].SqlServerName;
+        CurrentSchema[ordinal] is var type && type == SqlType.SystemName ? "nvarchar" : type.SqlServerName;
 
     /// <summary>
     /// Mirrors SqlClient's polymorphic <c>GetDateTime</c>: a <c>date</c> column

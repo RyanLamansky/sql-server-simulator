@@ -25,6 +25,25 @@ Probed against SQL Server 2025.
   Both `Schema` entries exist in `Database.Schemas` to carry their conventional ids and to be reachable from `sys.schemas`, but their `HeapTables` dicts stay empty — catalog views live in a separate `Simulation.CatalogViews` registry.
 - **Error wording**: Msg 208 wraps the qualified name in single quotes (`Invalid object name 'badschema.t'.`); Msg 3701 (DROP) does the same; Msg 4701 (TRUNCATE) carries only the leaf (probe-confirmed asymmetric — distinct error path).
 
+## Which error an unresolved name reports
+
+A column reference that binds nowhere reports one of two errors, and SQL Server picks by **what** failed rather than where:
+
+- the name is **qualified** and its qualifier names no source in scope → **Msg 4104**, quoting the whole written identifier (`The multi-part identifier "zz.id" could not be bound.`);
+- a known qualifier's missing column, or any unqualified miss → **Msg 207** on the leaf alone (`Invalid column name 'nosuch'.`).
+
+So `SELECT zz.id FROM t` is 4104 while `SELECT t.nosuch FROM t` is 207, and an **alias shadows the table name** — `SELECT * FROM t x WHERE t.id = 1` is 4104 because `t` no longer qualifies anything.
+Probed against SQL Server 2025 (2026-08-05) across the select list, WHERE, GROUP BY, ORDER BY, a JOIN `ON`, a scalar / `IN` subquery, a FROM-less SELECT, an aggregate operand, an `INSERT … SELECT`, and both clauses of `UPDATE` / `DELETE`; the 4-part spelling is quoted whole (`dbo.t.Location.Lat`).
+
+`Selection.UnresolvedNameError(sources, name)` is the single decision, asking `QualifiesAnySource`.
+It is reached from the four places a scope chain bottoms out: `ResolveColumnTypeAcrossSources` (the compile-time walk), `ResolveAcrossTuple` (its per-row counterpart, which is what an `ORDER BY` term resolved per row goes through), `BuildSynthesizedSqlRow`'s type resolver (a FROM-less SELECT, which holds no sources at all, so every qualified miss there is 4104), and `RehomeAggregatesOverOuterScope` (a FROM-less aggregate operand).
+The compile-time walk also **downgrades**: a scope whose own sources expose the qualifier catches an outer scope's 4104 for that name and re-reports it as 207, since the outer scopes classified it without knowing about this one.
+
+**Single-table DML narrows it further.** An `UPDATE` / `DELETE` with no FROM clause admits exactly one qualifier — the target **as written** — so `UPDATE dbo.t SET id = t.id`, `UPDATE t SET id = dbo.t.id` and `UPDATE v SET id = v.id` all bind while `UPDATE t SET id = zz.id` is 4104 *even though `id` is a real column*, and `UPDATE v SET id = t.id` is 4104 too though `t` is the view's own base table.
+`Selection.QualifierIsDmlTarget` is that check, applied ahead of the leaf lookup in `TargetColumnTypeResolver` and in `ResolveUpdateTargetColumnType` (the SET list's parse-time scope).
+
+Not yet: the SET list's own **left-hand side** (`UPDATE t SET zz.id = 5`) drops its qualifier at the parse, and an `INSERT … VALUES (zz.id)` expression reports 207 — both are Msg 4104 on real.
+
 ## `USE <db>`
 `USE <name>` (bare or bracketed) switches the connection's `CurrentDatabase` to the named database.
 Routes through `Simulation.Use.cs` / `ParseUseStatement`.

@@ -37,9 +37,13 @@ internal sealed partial class Selection
         var (s, c) = memo.Find(sources, name);
         if (s == -1)
         {
+            // The runtime counterpart of ResolveColumnTypeAcrossSources's split:
+            // a name no scope binds is Msg 4104 when its qualifier names none of
+            // them and Msg 207 otherwise. This is the site a deferred binding
+            // reaches — an ORDER BY term resolved per row, most visibly.
             return outerResolver is not null
                 ? outerResolver(name)
-                : throw SimulatedSqlException.InvalidColumnName(name);
+                : throw UnresolvedNameError(sources, name);
         }
 
         var bytes = tuple[s];

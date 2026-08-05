@@ -26,8 +26,8 @@ namespace SqlServerSimulator;
 /// </list>
 /// These assert precision/scale/value via <c>INFORMATION_SCHEMA</c> (the
 /// storage type name is always <c>decimal</c> there, regardless of the
-/// reported numeric-vs-decimal name — that name is asserted separately in
-/// <see cref="DecimalTypeNameTests"/>).
+/// reported numeric-vs-decimal name, which rides the wire only and is asserted
+/// separately in <c>Tests.Internal</c>'s <c>DecimalTypeNameTests</c>).
 /// </summary>
 [TestClass]
 public sealed class LiteralTypePromotionTests

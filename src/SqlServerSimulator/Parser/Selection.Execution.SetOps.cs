@@ -388,9 +388,7 @@ internal sealed partial class Selection
             {
                 if (FindSourceColumn(sources, name).SourceIndex >= 0)
                     return;
-                throw name.ImmediateQualifier is { } qualifier && !QualifiesAnySource(sources, qualifier)
-                    ? SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString())
-                    : SimulatedSqlException.InvalidColumnName(name);
+                throw UnresolvedNameError(sources, name);
             });
 
             if (term is Expressions.Reference projected && ProjectionSourceOrdinalOf(projected.ReferencedName, projectionSources) >= 0)

@@ -114,6 +114,40 @@ Only the `%`-then-literal shape classifies the *whole* subject, because that is 
 
 Measured on the WWI battery: `UPPER(Description) LIKE 'USB%'` over 228k rows runs **36.7 ms** against the regex engine's 93 ms, and `StockItemName LIKE '%shark%'` 0.14 ms against ~1 ms.
 
+## The character-matching string scalars search under the collation too
+
+`CHARINDEX`, `REPLACE`, `TRANSLATE`, `STRING_SPLIT` (its separator) and the `TRIM` / `LTRIM` / `RTRIM` family (their character set) all match through one primitive, `Collation.IndexOf` in `Collation.Matching.cs`, so the collation decides them the way it decides `=` and `LIKE`.
+Which collation is the arguments' own resolution (`StringScalars.CollationFor`), so an explicit `COLLATE` on **any** argument decides the whole call — including `REPLACE`'s replacement and `TRANSLATE`'s translation list, neither of which is ever compared.
+The whole model below is probe-confirmed against SQL Server 2025; the matrix lives in `StringScalarCollationTests`, each case naming its probe row.
+
+**Every half the name declares folds.**
+`CHARINDEX(N'e', N'café')` is 4 under `_AI` and 0 under `_AS`; `TRANSLATE(N'cafe', N'E', N'Z')` is `cafZ` under `_CI` and unchanged under `_CS`; a fullwidth `ａ` finds a halfwidth `a` unless the name carries `_WS`, and hiragana finds katakana unless it carries `_KS`.
+A binary collation folds nothing.
+Before this, the five scalars folded **case only** (`CHARINDEX` / `REPLACE`) or nothing at all (`TRANSLATE` / `STRING_SPLIT` / `TRIM`), so `PATINDEX(N'%e%', s)` found `café` where `CHARINDEX(N'e', s)` didn't.
+
+**How much of the subject a match consumes is not the needle's length.**
+An accent-insensitive `e` matches a decomposed `e` + U+0301 and eats both code units, so `REPLACE` over a decomposed `café` comes back as a four-character `cafX`.
+Each caller applies its own rule to that length, and they genuinely differ:
+
+| scalar | resumes at |
+|---|---|
+| `REPLACE` | past the whole match — `REPLACE(N'assb', NCHAR(0x00DF), N'Q')` on real is `aQb` |
+| `STRING_SPLIT` | one separator character past the match's **start** — the same pair splits into `a` and `sb` |
+| `CHARINDEX` | reports the match's start; the position counts UTF-16 units, codepoints under `_SC_` |
+
+**`TRANSLATE` and the `TRIM` family ask a different question**: they walk their input one code unit at a time and ask whether the *character set* holds that character, which is `Collation.IndexOfElement` — a search whose subject is the set.
+So a combining mark is its own candidate (a decomposed `café` keeps its mark and only the base letter is substituted or stripped), and `TRANSLATE` substitutes by the **position** the search reports rather than by a member index.
+
+**A weightless needle is not found.**
+An empty string, and a bare combining mark under an accent-insensitive collation, match at every position with zero length as far as `CompareInfo` is concerned; real reports not-found for both, so the match length is what the miss is keyed on rather than a special case per caller (`CHARINDEX(N'', N'abc')` and `CHARINDEX(NCHAR(0x0301), N'abc')` are each 0).
+
+**The one-argument `TRIM` / `LTRIM` / `RTRIM` forms are not collation-driven.**
+Real strips U+0020 there and nothing else, so an ideographic space survives a bare `TRIM` under the very collation whose two-argument `N' '` set removes it — the one place the two forms disagree, and the reason `StringScalars.TrimSpaces` sits beside `TrimUnderCollation`.
+
+`Collation.IsPrefix` is the same primitive's anchored form, and `LikeMatcher`'s literal runs go through it — which is what makes `CompareInfo`'s one lossy corner a single fix rather than two.
+`IndexOf` and `IsPrefix` silently drop the case level once `CompareOptions.IgnoreNonSpace` is set, where `Compare` keeps it, so under a `_CS_AI` collation they report `N'E'` as matching `N'é'`; a hit is re-read through `Compare` when the collation is case-sensitive, and the search resumes one position on if the re-read rejects it.
+The [ordinal fast path](#cost-and-the-ordinal-fast-path) carries over unchanged: an all-printable-ASCII needle against an all-printable-ASCII subject takes a vectorized ordinal `IndexOf` under the same `PrintableAsciiFoldsCaseOnly` proof, which is every call under an ASCII workload.
+
 ## The pattern compilation is memoized per node
 
 `LIKE` / `NOT LIKE` / `PATINDEX` compile a SQL pattern into a `LikeMatcher`: the pattern is walked, the segment list built, and each character class's printable-ASCII bitmap filled with 95 collation comparisons.
@@ -158,6 +192,17 @@ Non-string inner raises Msg 447 at runtime (real SQL Server raises at bind time 
 
 Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-confirmed).
 Unknown collation name raises Msg 448 at parse time.
+
+### The postfix on a parenthesized group, in a predicate
+
+`WHERE (a + b) COLLATE X LIKE 'ab%'` reaches the boolean grammar's one ambiguous position: a leading `(` at the predicate-atom level is either a grouped sub-predicate (`WHERE (col = 5) AND …`) or a parens-wrapped *value* on a comparison's left (`WHERE (a + b) = 5`), and `BooleanExpression.LookaheadValueLhs` decides by peeking the single token past the matching `)`.
+`COLLATE` belongs in that token set: only a character **value** takes the postfix, and the comparison it belongs to (`= 'x'`, `LIKE 'x%'`, `IN (…)`, `IS NULL`, `BETWEEN`) sits past the collation name, out of the one-token peek's reach — so without it the whole shape read as a boolean group and reported Msg 4145 at the `)`.
+
+Real accepts it in every predicate position — WHERE, HAVING, a JOIN `ON`, a CHECK constraint — over any value expression the parens can hold, a `CASE` and a scalar subquery included, and against every comparison form (probe-confirmed 2026-08-05, including `NOT LIKE` / `NOT IN` / `NOT BETWEEN` and a leading `NOT`).
+It refuses the same postfix on a parenthesized *boolean* — **Msg 156** near `COLLATE`, the way it refuses `(a = 'a') LIKE 'x'` (Msg 156) and `(a = 'a') + 1` (Msg 102) — so routing that spelling down the value path costs nothing real accepted.
+The simulator reports Msg 4145 rather than Msg 156 / 102 for all three of those, which is a message divergence inside a shape both engines reject.
+
+The disambiguation's other guards are untouched: a top-level `,` inside the parens still routes to the boolean-group path so a row constructor reports its own Msg 4145 at the comma, and a second `COLLATE` is the Msg 156 above.
 
 The pseudo-collations **`catalog_default`** and **`database_default`** resolve before the name lookup: `catalog_default` → `Collation.Catalog` (the fixed metadata collation), `database_default` → `context.Batch.CurrentDatabase.Collation` (resolved at parse time to the active database).
 SMO's system-configuration query uses `name COLLATE catalog_default` to normalize catalog string columns.
@@ -634,13 +679,22 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
 
 ## Known gaps
 
-- **A ligature doesn't expand in a `LIKE` literal run.**
-  Real answers yes to `N'ß' LIKE N'ss'` and `N'æ' LIKE N'ae'`; the simulator answers no, because the match runs through `CompareInfo`, which holds a ligature apart from its expansion.
-  Under `Latin1_General_CI_AS` this keeps LIKE and `=` in agreement (the simulator's `=` says no there too, which is its own divergence from real); under the **default** `SQL_Latin1_General_CP1_CI_AS` the two disagree, because [the byte-exact body](#sql_latin1_general_cp1_ci_as--byte-exact-sort) expands ligatures for `=` and the matcher reads the inner culture body.
-  Closing it wants an expansion-aware prefix comparison, which `CompareInfo` doesn't expose — the natural shape is a candidate-length walk over `Collation.Equals`, and that lands on the failure path, which is the per-row hot path of every scan.
-- **A zero-weight character is equal to nothing on real and to the empty string here.**
-  `N'x' + NCHAR(0x00AD) = N'x'` (soft hyphen) is false on real and true here — `CompareInfo` gives the character no weight where real gives it one.
-  `LIKE` is unaffected: it counts characters, so `N'x' + NCHAR(0x00AD) LIKE N'x'` answers no in both.
+- **A ligature doesn't expand.**
+  Real treats a ligature as equal to its expansion at the primary level and the simulator doesn't, because every linguistic path runs through `CompareInfo`, which holds the two apart.
+  The probed set is the same under `Latin1_General_CI_AS` / `_CS_AS` / `_CI_AI`, the default `SQL_Latin1_General_CP1_CI_AS`, `Latin1_General_100_CI_AS` and `Japanese_CI_AS`, and empty under every binary collation:
+  `Æ`→`AE`, `æ`→`ae`, `Þ`→`TH`, `þ`→`th`, `ß`→`ss`, `Ĳ`→`IJ`, `ĳ`→`ij`, `Œ`→`OE`, `œ`→`oe`, `Ǉ`→`LJ`, `ǈ`→`Lj`, `Ǌ`→`NJ`, `ǋ`→`Nj`, `Ǳ`→`DZ`, `ǲ`→`Dz`, `ﬀ`→`ff`, `ﬁ`→`fi`, `ﬂ`→`fl`, `ﬃ`→`ffi`, `ﬄ`→`ffl`, `ﬆ`→`st`.
+  Nearby characters that look like members and are **not**: `ẞ` (U+1E9E) doesn't fold to `SS`, `ﬅ` (U+FB05) doesn't fold to `st`, and `№` / `™` / `½` / `ﬓ` don't fold at all; `ŀ` / `ŉ` / `Ǆ` / `ǅ` fold only under `_AI`, since their expansion carries a mark, and `Ȱ`→`db` only from `Latin1_General_100_*` on.
+  The expansion reaches every consumer real drives through the collation — `=`, `<`, `BETWEEN`, `IN`, `DISTINCT`, `GROUP BY`, `ORDER BY` (where the ligature ties with its expansion), `LIKE` and `PATINDEX` literal runs, and the [character-matching scalars](#the-character-matching-string-scalars-search-under-the-collation-too) — but **not** `LIKE`'s `_` or a character class, where a ligature is one character and half of it matches nothing (`N'ß' LIKE N'[s]'` is 0 on real).
+  Storage family decides for the default collation: `SQL_Latin1_General_CP1_CI_AS` expands for `nvarchar` everywhere and for `varchar` **nowhere** (its varchar sort order 52 gives the ligature a tertiary instead, so `'ss' < 'ß'`), and the simulator's [byte-exact body](#sql_latin1_general_cp1_ci_as--byte-exact-sort) already reproduces that for `=` / sort / hash — which is why the default collation's `=` and its `LIKE` disagree on `N'ß'` today while `Latin1_General_CI_AS` has them agreeing with each other and both wrong.
+  Closing it wants an expansion pre-pass under `Collation.Compare` / `Equals` / `GetHashCode` **and** under the matching seam, with the search's endpoints required to land on source-character boundaries so half a ligature still matches nothing; the hash has to move with the equality or the seek caches break.
+- **A character real gives a weight to that `CompareInfo` ignores.**
+  `N'x' + NCHAR(0x00AD) = N'x'` (soft hyphen) is false on real and true here, and so is the whole family — the C0 controls U+0001..U+001F, U+200B, U+2007, U+00A0, U+2028, U+2029 and U+E0001, plus U+00AD and U+200C on the pre-100 names only (`Latin1_General_100_CI_AS` ignores both, as `CompareInfo` does).
+  The ones real ignores too, so both engines agree: U+034F, U+0488, U+180B, U+200D, U+200E, U+200F, U+202A, U+202D, U+202F, U+2060, U+2061, U+FE00, U+FEFF.
+  The reverse direction exists as well: real holds `N'x' + NCHAR(0x00A0)` apart from `N'x '` and `CompareInfo` folds them, so a `TRIM(N' ' FROM …)` here removes an NBSP real keeps.
+  Every consumer the collation drives sees it — `=`, `LIKE`, and the [character-matching scalars](#the-character-matching-string-scalars-search-under-the-collation-too) alike; `LIKE`'s `_` is unaffected, since it counts characters (`N'x' + NCHAR(0x00AD) LIKE N'x'` answers no in both).
+- **A standalone combining mark matches any other standalone mark on real.**
+  `TRANSLATE(NCHAR(0x0308) + …, NCHAR(0x0301), N'd')` substitutes on real and doesn't here, and the same equivalence shows up in `TRIM`'s character set, in `REPLACE`'s pattern and in a `STRING_SPLIT` separator — real appears to compare the marks at a weight level `CompareInfo` doesn't expose, since a mark attached to a base letter stays distinct in both engines.
+  A differential fuzz of the five scalars against live (3,000 random cases per seed over an alphabet holding three bare marks) puts the whole class at ~1% of cases; with the marks removed from the alphabet the same fuzz is 0.2%, and every remaining case is the ligature or zero-weight entry above.
 - **An unresolved collation reaching a consumer the marker model doesn't cover.**
   The catalog under [Msg 4191](#msg-4191--the-consuming-operation-reports) is what probing established; a value with no collation that reaches full-text, spatial, XML or the JSON builders isn't gated, and a conflict that survives to execution falls back to the left operand's collation rather than raising.
 - **`IN (SELECT <conflicted> …)` reports the subquery's Msg 451 where real reports the comparison's Msg 4191** (`equal to`), and `SET @v = (SELECT <conflicted varchar> …)` reports Msg 451 where real reports Msg 456.
