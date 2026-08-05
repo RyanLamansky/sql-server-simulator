@@ -13,6 +13,8 @@ internal sealed class Lower(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
+    internal override bool ParallelSafe => this.source.ParallelSafe;
+
     [SuppressMessage("Globalization", "CA1308:Normalize strings to uppercase",
         Justification = "SQL LOWER lowercases user-facing data; the rule's normalization concern doesn't apply here.")]
     public override SqlValue Run(RuntimeContext runtime)

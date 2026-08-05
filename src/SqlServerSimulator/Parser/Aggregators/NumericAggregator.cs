@@ -45,7 +45,7 @@ internal abstract class NumericAggregator<TAccumulator> : Aggregator
         }
         catch (OverflowException)
         {
-            throw SimulatedSqlException.ArithmeticOverflow(this.ResultType.ToString()!);
+            throw this.AccumulatorOverflow();
         }
         this.Count++;
     }
@@ -65,6 +65,41 @@ internal abstract class NumericAggregator<TAccumulator> : Aggregator
     }
 
     /// <summary>
+    /// Exact for the <see cref="long"/> and <see cref="decimal"/> accumulators
+    /// the parallel gate admits — integer and decimal addition is associative,
+    /// so a partitioned total is the serial total. A DISTINCT accumulator
+    /// replays the other side's members through <see cref="Add"/> rather than
+    /// adding totals, since a value present on both sides must be counted once.
+    /// <para>
+    /// The <see cref="double"/> accumulator is <b>not</b> exact under
+    /// re-association and the gate never admits it; the overflow guard here is
+    /// what catches a partitioned total that overflows where the serial one
+    /// would have — the serial re-run then reports whatever real reports.
+    /// </para>
+    /// </summary>
+    public sealed override bool TryMergeFrom(Aggregator other)
+    {
+        var source = (NumericAggregator<TAccumulator>)other;
+        if (this.distinct)
+        {
+            foreach (var value in source.seen!)
+                this.Add(value);
+            return true;
+        }
+
+        try
+        {
+            this.Accumulator = checked(this.Accumulator + source.Accumulator);
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+        this.Count += source.Count;
+        return true;
+    }
+
+    /// <summary>
     /// The accumulator-typed value of one operand, coerced to the result type
     /// first. Overridable so a family whose coercion is a per-row allocation
     /// can skip it where the crossing provably changes nothing.
@@ -81,9 +116,20 @@ internal abstract class NumericAggregator<TAccumulator> : Aggregator
         }
         catch (OverflowException)
         {
-            throw SimulatedSqlException.ArithmeticOverflow(this.ResultType.ToString()!);
+            throw this.AccumulatorOverflow();
         }
     }
+
+    /// <summary>
+    /// A running total that outgrew its accumulator. For an integer or float
+    /// family that is real's own Msg 8115; for a decimal one it never is —
+    /// real's <c>numeric</c> reaches 38 digits, so a total that overflowed a
+    /// .NET decimal at 29 is one real would have carried.
+    /// </summary>
+    private Exception AccumulatorOverflow() =>
+        this.ResultType is DecimalSqlType && this.Accumulator is decimal
+            ? DecimalCeiling.Exceeded($"accumulating a running {this.ResultType} total")
+            : SimulatedSqlException.ArithmeticOverflow(this.ResultType.ToString()!);
 
     /// <summary>Pulls the accumulator-typed value out of a coerced <see cref="SqlValue"/>.</summary>
     protected abstract TAccumulator Extract(SqlValue value);

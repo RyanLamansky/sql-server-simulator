@@ -330,7 +330,16 @@ internal abstract class BooleanExpression
                 return ParseComparison(Expression.Parse(context), context);
 
             context.MoveNextRequired();
-            var inner = ParseOr(context);
+            BooleanExpression inner;
+            context.BooleanGroupDepth++;
+            try
+            {
+                inner = ParseOr(context);
+            }
+            finally
+            {
+                context.BooleanGroupDepth--;
+            }
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextOptional(); // closing `)` is the predicate's last meaningful token; what follows may be end-of-input
@@ -534,12 +543,12 @@ internal abstract class BooleanExpression
             // was expected (IF / WHERE / HAVING / ON / CASE-WHEN / CHECK). Probe-
             // confirmed (2026-05-11) that real SQL Server raises Msg 4145 here,
             // not Msg 102 — the wording specifically calls out non-boolean type.
-            // The "near 'X'" suffix is the current token (the one that should have
-            // been a comparison op); for paren-wrapped value cases like
-            // `IF (1) select`, real SQL Server reports the post-paren token where
-            // the simulator reports the in-paren token, a minor positional gap.
+            // The "near 'X'" suffix is the token following the whole non-boolean
+            // expression — which the factory reads off the context, since the
+            // parens of a paren-wrapped value (`IF (1) PRINT 'x'`) were consumed
+            // on the way in and real names what follows them.
             default:
-                throw SimulatedSqlException.NonBooleanInConditionContext(context.Token);
+                throw SimulatedSqlException.NonBooleanInConditionContext(context);
         }
 
         // Quantified comparison: <op> {ANY|SOME|ALL} (SELECT ...). Probe-
@@ -916,6 +925,48 @@ internal abstract class BooleanExpression
     internal abstract void VisitOperandExpressions(Action<Expression> visitor);
 
     /// <summary>
+    /// The predicate half of <see cref="Expression.ParallelSafe"/> — true when
+    /// this predicate may be evaluated on a worker thread while the statement
+    /// that owns it executes. Default is <b>deny</b>, so the subquery-bearing
+    /// predicates (<c>EXISTS</c>, <c>IN (SELECT …)</c>, <c>ANY</c> / <c>ALL</c>)
+    /// and every predicate kind nobody has proved decline without needing to
+    /// name themselves.
+    /// <para>
+    /// The nesting operators (<c>AND</c> / <c>OR</c> / <c>NOT</c>) recurse
+    /// through their <see cref="BooleanExpression"/> operands directly rather
+    /// than through <see cref="VisitOperandExpressions"/>: that walk flattens
+    /// to Expression leaves, so an <c>EXISTS</c> operand — which carries no
+    /// Expression leaves at all — would contribute nothing and read as safe.
+    /// </para>
+    /// </summary>
+    internal virtual bool ParallelSafe => false;
+
+    /// <summary>
+    /// <see cref="ParallelSafe"/> answered from this predicate's own
+    /// Expression operands, for the leaf kinds that carry no nested predicate.
+    /// </summary>
+    private protected bool OperandExpressionsParallelSafe
+    {
+        get
+        {
+            var safe = true;
+            this.VisitOperandExpressions(operand => safe = safe && operand.ParallelSafe);
+            return safe;
+        }
+    }
+
+    /// <summary><see cref="ParallelSafe"/> folded over a predicate array.</summary>
+    private protected static bool AllParallelSafe(BooleanExpression[] operands)
+    {
+        foreach (var operand in operands)
+        {
+            if (!operand.ParallelSafe)
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
     /// The operands still standing after compile-time folding — the tree real
     /// SQL Server runs its GROUP BY containment pass over, which is why
     /// <c>HAVING NULL &lt;&gt; b</c> and <c>HAVING 1 = 0 AND b &gt; 1</c> report
@@ -1267,6 +1318,8 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() =>
             $"{value switch { true => "TRUE", false => "FALSE", _ => "UNKNOWN" }} /* {folded.DebugDisplay()} */";
 
+        internal override bool ParallelSafe => folded.ParallelSafe;
+
         internal override void VisitOperandExpressions(Action<Expression> visitor) => folded.VisitOperandExpressions(visitor);
 
         // The fold took these out of the tree before the containment pass ran.
@@ -1305,6 +1358,8 @@ internal abstract class BooleanExpression
 
         internal override string DebugDisplay() => $"FALSE /* {inner.DebugDisplay()} */";
 
+        internal override bool ParallelSafe => inner.ParallelSafe;
+
         internal override void VisitOperandExpressions(Action<Expression> visitor) => inner.VisitOperandExpressions(visitor);
 
         internal override void VisitSurvivingOperandExpressions(Action<Expression> visitor) =>
@@ -1326,6 +1381,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class AndExpression(BooleanExpression[] operands) : BooleanExpression
     {
+        internal override bool ParallelSafe => AllParallelSafe(operands);
+
         internal override bool IsWrittenConstant => AllWrittenConstant(operands);
 
         // One conjunct that can't be TRUE is enough: AND is TRUE only when
@@ -1421,6 +1478,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class OrExpression(BooleanExpression[] operands) : BooleanExpression
     {
+        internal override bool ParallelSafe => AllParallelSafe(operands);
+
         internal override bool IsWrittenConstant => AllWrittenConstant(operands);
 
         // The mirror of AND's pair: OR is TRUE as soon as any operand is (so it
@@ -1536,6 +1595,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class IsNullExpression(Expression source, bool negated) : BooleanExpression
     {
+        internal override bool ParallelSafe => source.ParallelSafe;
+
         internal override bool IsWrittenConstant => source.IsWrittenConstant;
 
         public override bool? Run(RuntimeContext runtime) =>
@@ -1566,6 +1627,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class DistinctFromExpression(Expression left, Expression right, bool negated) : BooleanExpression
     {
+        internal override bool ParallelSafe => this.OperandExpressionsParallelSafe;
+
         internal override bool IsWrittenConstant => left.IsWrittenConstant && right.IsWrittenConstant;
 
         public override bool? Run(RuntimeContext runtime)
@@ -1608,6 +1671,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class InExpression(Expression source, Expression[] candidates, bool negated, bool selfReferenced) : BooleanExpression
     {
+        internal override bool ParallelSafe => this.OperandExpressionsParallelSafe;
+
         internal override bool IsWrittenConstant => source.IsWrittenConstant && AllWrittenConstant(candidates);
 
         // A NULL constant among the elements contributes an UNKNOWN equality to
@@ -1760,6 +1825,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private sealed class BetweenExpression(Expression value, Expression lower, Expression upper, bool negated) : BooleanExpression
     {
+        internal override bool ParallelSafe => this.OperandExpressionsParallelSafe;
+
         private readonly StringCoercionMemo subjectPromotion = new(), lowerPromotion = new(), upperPromotion = new();
 
         internal override bool IsWrittenConstant =>
@@ -2310,6 +2377,8 @@ internal abstract class BooleanExpression
 
         internal override string DebugDisplay() => $"NOT {inner.DebugDisplay()}";
 
+        internal override bool ParallelSafe => inner.ParallelSafe;
+
         internal override void VisitOperandExpressions(Action<Expression> visitor) => inner.VisitOperandExpressions(visitor);
 
         // A fold under a NOT still took its operands out of the tree — real
@@ -2331,6 +2400,8 @@ internal abstract class BooleanExpression
     /// </summary>
     private abstract class CompareExpression : BooleanExpression
     {
+        internal override bool ParallelSafe => this.OperandExpressionsParallelSafe;
+
         protected readonly Expression left, right;
         private readonly StringCoercionMemo leftPromotion = new(), rightPromotion = new();
 

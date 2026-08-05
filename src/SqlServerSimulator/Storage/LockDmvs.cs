@@ -260,7 +260,7 @@ internal static class LockDmvs
             return null;
         foreach (var hold in resource.Holders)
         {
-            if (ReferenceEquals(hold.Owner, waiter))
+            if (ReferenceEquals(hold.Owner, waiter.Session))
                 continue;
             if (LockManager.IsCompatible(hold.Mode, mode))
                 continue;

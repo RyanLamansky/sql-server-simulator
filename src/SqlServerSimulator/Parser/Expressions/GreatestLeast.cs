@@ -65,6 +65,8 @@ internal sealed class GreatestLeast : Expression
         }
     }
 
+    internal override bool ParallelSafe => AllParallelSafe(this.arguments);
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var values = new SqlValue[this.arguments.Length];

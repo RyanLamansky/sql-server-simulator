@@ -64,6 +64,8 @@ internal sealed class ConvertExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
+    internal override bool ParallelSafe => this.source.ParallelSafe && this.style?.ParallelSafe != false;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         int? styleCode = null;
@@ -123,7 +125,7 @@ internal sealed class ConvertExpression : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        Cast.ResultStringType(this.targetType, this.source.GetSqlType(batch, resolveColumnType), batch.CurrentDatabase.Collation) ?? this.targetType;
+        Cast.RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, batch.CurrentDatabase.Collation);
 
     internal override bool ResultReportsNumeric => this.targetReportsNumeric;
 
@@ -133,7 +135,7 @@ internal sealed class ConvertExpression : Expression
     /// aggregate whose argument is wrapped in CONVERT looked reference-free to
     /// callers that walk references.
     /// </summary>
-    internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.source.VisitColumnReferences(visit);
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => this.source.VisitColumnReferences(visit);
 
     internal override string DebugDisplay() =>
         this.style is null

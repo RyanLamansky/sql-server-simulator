@@ -55,6 +55,8 @@ internal sealed class Negate(Expression operand) : Expression
     private static Expression Unwrap(Expression expression) =>
         expression is Parenthesized p ? Unwrap(p.Wrapped) : expression;
 
+    internal override bool ParallelSafe => this.Operand.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = this.Operand.Run(runtime);
@@ -113,7 +115,7 @@ internal sealed class Negate(Expression operand) : Expression
 
     internal override bool ResultReportsNumeric => this.Operand.ResultReportsNumeric;
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit) =>
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) =>
         this.Operand.VisitColumnReferences(visit);
 
     internal override bool ContainsVariableReference => this.Operand.ContainsVariableReference;

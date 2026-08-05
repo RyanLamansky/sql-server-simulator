@@ -15,6 +15,18 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException InvalidColumnName(MultiPartName name) => InvalidColumnName(name.Leaf);
 
     /// <summary>
+    /// The refusal a column reference takes where the statement offers no
+    /// column scope at all — a <c>VALUES</c> constructor's cells being the
+    /// reachable case. Real splits the two shapes: an unqualified name is
+    /// Msg 207 on its leaf, a qualified one Msg 4104 on the whole dotted form
+    /// (probed 2026-08-05: <c>INSERT INTO t (id, v) VALUES (zz.id, 1)</c> and
+    /// <c>… VALUES (t.id, 1)</c> both report 4104, the target's own name
+    /// included).
+    /// </summary>
+    internal static SimulatedSqlException UnboundColumnReference(MultiPartName name) =>
+        name.Count > 1 ? MultiPartIdentifierCouldNotBeBound(name.ToString()) : InvalidColumnName(name.Leaf);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 209 — fired when an unqualified column
     /// reference matches columns in more than one source after a JOIN.
     /// The fix is to add a qualifier (table or alias prefix) disambiguating

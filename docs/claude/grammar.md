@@ -270,6 +270,28 @@ The binary spelling is the one exception that reads the value, which is why an o
 The slot also clips, at limits consistent with one shared 258-byte buffer: a character body at **129 UTF-16 code units** (counted after escapes collapse, and splitting a surrogate pair rather than rounding down to a whole character), a binary value at **258 bytes**, and any source-spelled token at **128 characters**.
 Real reaches that last clip through a 200-digit numeric literal — which the simulator's `decimal` backing can't represent — and precedes it with a Msg 103 for the over-long token that the simulator doesn't raise for non-identifiers.
 
+## What a syntax error names at end of batch
+
+Real names the **last token it consumed**, never an empty slot — probed against SQL Server 2025 (2026-08-05) over the whole family, Msg 102 and Msg 4145 alike:
+
+| Batch | Reported |
+| --- | --- |
+| `SELECT abs(-1` | Msg 102 `near '1'` |
+| `SELECT (1` | Msg 102 `near '1'` |
+| `SELECT 1 WHERE 1 IN (1` | Msg 102 `near '1'` |
+| `SELECT * FROM (SELECT 1 AS a` | Msg 102 `near 'a'` |
+| `SELECT 1 FROM` / `SELECT 1 ORDER BY` | Msg 102 `near 'FROM'` / `near 'BY'` |
+| `IF 'abc'` | Msg 4145 `near 'abc'` |
+
+`ParserContext.LastToken` carries it: `MoveNext` stashes the token it is leaving behind whenever the input runs out, and the Msg 102 / Msg 4145 factories fall back to it once `Token` is null.
+
+An **argument list or parenthesized expression the batch never closed** is refused rather than treated as closed.
+The check sits at the postfix loop's call arm and in the grouped-expression parser: both promise to leave the cursor on the construct's `)`, and anything else there would otherwise be swallowed by the loop's next advance — the swallow that admits `SELECT abs(-1` and `SELECT abs(-1 x` without it.
+A window function is the one exception the check names: the bare `OVER w` named-window reference ends on the window's name.
+
+**Msg 4145's own near-token is the token following the whole non-boolean expression**, parentheses included — `IF ((1)) PRINT 'x'` names `'PRINT'`, while `SELECT 1 WHERE (1)` names `')'` because nothing follows it.
+The simulator's predicate grammar consumes a boolean group's parens on the way in, so the factory steps back over one closer per still-open group (against a checkpoint, leaving the failing parse's cursor where it was) before reading the name.
+
 ## Divergences
 
 - **Multi-statement-TVF bodies treat a `SET QUOTED_IDENTIFIER` as top-level** rather than rejecting it (real SQL Server disallows `SET QUOTED_IDENTIFIER` inside a function body).

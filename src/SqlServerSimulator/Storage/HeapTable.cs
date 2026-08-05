@@ -318,15 +318,21 @@ internal sealed class HeapTable : SchemaObject
     };
 
     /// <summary>
-    /// Non-null on global temp tables (<c>##foo</c>): the connection that ran
+    /// Non-null on global temp tables (<c>##foo</c>): the session that ran
     /// the <c>CREATE TABLE</c>. Used by <see cref="SimulatedDbConnection.Dispose"/>
     /// to auto-drop the owner's <c>##</c> tables at session close — probe-
     /// confirmed against SQL Server 2025 (with pooling disabled) that the drop
     /// fires unconditionally on owner-disconnect, regardless of other sessions
     /// having referenced or currently referencing the table. Always null for
     /// local temps, table variables, and regular tables.
+    /// <para>
+    /// The session token rather than the connection: the simulation-wide
+    /// <see cref="Simulation.GlobalTempTables"/> dictionary reaches this field,
+    /// so a connection here would be pinned by its own <c>##temp</c> and could
+    /// never be reclaimed after an application dropped it without disposing.
+    /// </para>
     /// </summary>
-    public SimulatedDbConnection? OwnerConnection;
+    public SessionToken? OwnerSession;
 
     /// <summary>
     /// The <see cref="Database"/> this table is registered in, stamped when it

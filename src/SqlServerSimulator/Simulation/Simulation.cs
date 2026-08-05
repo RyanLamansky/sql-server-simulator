@@ -29,6 +29,9 @@ public sealed partial class Simulation
     public Simulation()
     {
         RandomNumberGenerator.Fill(this.newSequentialIdAnchor);
+        // The lock manager sweeps abandoned sessions before every acquisition,
+        // which is what unblocks a live session waiting on a leaked one's lock.
+        this.LockManager.OwningSimulation = this;
         // Every instance ships with the four SQL Server system databases
         // (master = 1, tempdb = 2, model = 3, msdb = 4), present from
         // construction so `USE master`, `master.sys.*` three-part reads,
@@ -512,7 +515,7 @@ public sealed partial class Simulation
     /// Global temp tables (<c>##foo</c>) — instance-wide, visible to every
     /// connection on this <see cref="Simulation"/>. Created by any session via
     /// <c>CREATE TABLE ##foo</c>; the creating connection is stamped on
-    /// <see cref="HeapTable.OwnerConnection"/> and used by
+    /// <see cref="HeapTable.OwnerSession"/> and used by
     /// <see cref="SimulatedDbConnection.Dispose"/> to auto-drop the entry at
     /// session close. Any session can DROP / TRUNCATE / SELECT / DML a
     /// <c>##foo</c> regardless of ownership — probe-confirmed against SQL
@@ -578,7 +581,15 @@ public sealed partial class Simulation
     /// counter: one stamp reaches every database, so a snapshot open anywhere
     /// pins history everywhere.
     /// </summary>
-    internal readonly ConcurrentDictionary<SimulatedDbTransaction, byte> ActiveSnapshotTxs = new();
+    /// <remarks>
+    /// Keyed by <see cref="SessionToken"/> and valued by a copy of the three
+    /// facts its readers need, rather than by the transaction: a transaction
+    /// holds its connection (ADO.NET requires it to), so a simulation-wide
+    /// dictionary of transactions would pin every session that ever opened a
+    /// snapshot. One entry per session is exact — a session has at most one
+    /// current transaction.
+    /// </remarks>
+    internal readonly ConcurrentDictionary<SessionToken, ActiveSnapshotRegistration> ActiveSnapshotTxs = new();
 
     /// <summary>
     /// Random 12-byte tail (raw bytes [4..15] of the produced GUID) for
@@ -599,39 +610,172 @@ public sealed partial class Simulation
     private int nextSpid = 50;
 
     /// <summary>
-    /// Live connection registry. Each <see cref="SimulatedDbConnection"/>
-    /// registers itself at construction and deregisters in
-    /// <see cref="SimulatedDbConnection.Dispose"/>. The
-    /// <c>sys.dm_tran_locks</c> / <c>sys.dm_os_waiting_tasks</c> DMVs
-    /// enumerate this list to surface waiter rows (waiters' state is on
-    /// the connection's <see cref="SimulatedDbConnection.WaitingOnResource"/>,
-    /// not on the resource itself).
+    /// Live session registry — one <see cref="SessionToken"/> per
+    /// <see cref="SimulatedDbConnection"/>, added at construction and removed
+    /// when the connection is disposed or its session reclaimed. The
+    /// <c>sys.dm_tran_locks</c> / <c>sys.dm_os_waiting_tasks</c> DMVs and the
+    /// <c>sp_who</c> family enumerate it to surface waiter rows (a waiter's
+    /// state lives on its token's <see cref="SessionToken.WaitingOnResource"/>,
+    /// not on the resource).
     /// </summary>
-    internal readonly HashSet<SimulatedDbConnection> Connections = new(ReferenceEqualityComparer.Instance);
+    /// <remarks>
+    /// Tokens, not connections: holding the connection here would keep every
+    /// abandoned one alive forever, which is the whole reason the state it
+    /// leaked behind could never be reclaimed. A token weighs a handful of
+    /// fields and reaches its connection only weakly.
+    /// </remarks>
+    internal readonly HashSet<SessionToken> Sessions = new(ReferenceEqualityComparer.Instance);
 
-    /// <summary>Registers a connection at construction time.</summary>
+    /// <summary>Registers a connection's session at construction time.</summary>
     internal void RegisterConnection(SimulatedDbConnection connection)
     {
-        lock (this.Connections)
-            _ = this.Connections.Add(connection);
+        lock (this.Sessions)
+            _ = this.Sessions.Add(connection.Session);
     }
 
-    /// <summary>Unregisters a connection at dispose time.</summary>
+    /// <summary>Unregisters a session at dispose / reclaim time.</summary>
     internal void UnregisterConnection(SimulatedDbConnection connection)
     {
-        lock (this.Connections)
-            _ = this.Connections.Remove(connection);
+        lock (this.Sessions)
+            _ = this.Sessions.Remove(connection.Session);
     }
 
     /// <summary>
-    /// Snapshot of currently-registered connections. The caller iterates
-    /// the snapshot rather than the live set so concurrent open / dispose
-    /// during enumeration is safe.
+    /// Snapshot of the sessions whose connection is still resolvable. The
+    /// caller iterates the snapshot rather than the live set so concurrent
+    /// open / dispose during enumeration is safe. A session whose connection
+    /// has been collected but whose teardown hasn't been drained yet still
+    /// resolves (its token's weak reference tracks resurrection), so a
+    /// leaked session keeps reporting through <c>sp_who</c> for exactly as
+    /// long as it keeps holding locks.
     /// </summary>
     internal SimulatedDbConnection[] SnapshotConnections()
     {
-        lock (this.Connections)
-            return [.. this.Connections];
+        SessionToken[] tokens;
+        lock (this.Sessions)
+            tokens = [.. this.Sessions];
+        var live = new List<SimulatedDbConnection>(tokens.Length);
+        foreach (var token in tokens)
+        {
+            if (token.TryResolveOwner() is { } connection)
+                live.Add(connection);
+        }
+        return [.. live];
+    }
+
+    /// <summary>
+    /// Sessions whose connection was finalized without a <c>Dispose</c>,
+    /// waiting for a normal worker thread to tear them down. The connection's
+    /// finalizer resurrects it into this queue rather than doing the work
+    /// there: a teardown rolls a transaction back, releases locks and pulses
+    /// the lock manager's gate, none of which belongs on the finalizer thread.
+    /// </summary>
+    private readonly ConcurrentQueue<SimulatedDbConnection> abandonedSessions = new();
+
+    /// <summary>
+    /// Called from <see cref="SimulatedDbConnection.Dispose(bool)"/>'s
+    /// finalizer arm. Enqueuing <c>this</c> from a finalizer resurrects the
+    /// object, which is the point — the teardown needs the session state the
+    /// connection still holds (its open transaction, its session application
+    /// locks, its <c>##temp</c> ownership).
+    /// </summary>
+    internal void EnqueueAbandonedSession(SimulatedDbConnection connection) =>
+        this.abandonedSessions.Enqueue(connection);
+
+    /// <summary>
+    /// Test-observable: how many sessions this simulation has reclaimed.
+    /// </summary>
+    internal int SessionsReclaimed;
+
+    /// <summary>
+    /// Tears down every session whose connection was abandoned without a
+    /// <c>Dispose</c>, and returns how many this call reclaimed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Reclamation runs the connection's own <c>Dispose</c> path, so an open
+    /// transaction rolls back through the transaction's own machinery
+    /// (releasing its locks, discarding its version-store entries, unpinning
+    /// the snapshot), session application locks release through the same bulk
+    /// release <c>Close</c> uses, <c>##global</c> temp tables the session owned
+    /// drop under the same ownership rule, cursors deallocate, and the SPID
+    /// retires from <see cref="Sessions"/>. Nothing here is a parallel
+    /// implementation of any of that.
+    /// </para>
+    /// <para>
+    /// A session that is mid-statement is skipped and re-queued. In practice
+    /// the case can't arise — the executing thread's stack holds the
+    /// connection, so it isn't collectable — but the check is what makes that
+    /// an assertion rather than an assumption, and it costs one field read.
+    /// It reads the session thread's own marker, which a parallel-aggregate
+    /// worker never writes.
+    /// </para>
+    /// <para>
+    /// Timing is nondeterministic, as real's is: real SqlClient's finalizer
+    /// closes the socket at some GC's discretion and the server resets the
+    /// session then. Here the trigger is the same GC plus the next call to
+    /// this method — from a new connection, from a lock acquisition, or from
+    /// the version-store collector.
+    /// </para>
+    /// </remarks>
+    internal int ReclaimAbandonedSessions()
+    {
+        if (this.abandonedSessions.IsEmpty)
+            return 0;
+        // One sweep at a time. A teardown rolls its transaction back, which
+        // runs the version-store collector, which sweeps — so without this the
+        // drain would re-enter itself once per queued session and recurse as
+        // deep as the queue is long. A concurrent caller declining is right
+        // too: the sweep is opportunistic, and whoever is already in it will
+        // reach the same entries.
+        if (Interlocked.CompareExchange(ref this.reclaimInProgress, 1, 0) != 0)
+            return 0;
+        try
+        {
+            return this.DrainAbandonedSessions();
+        }
+        finally
+        {
+            Volatile.Write(ref this.reclaimInProgress, 0);
+        }
+    }
+
+    private int reclaimInProgress;
+
+    /// <summary>Body of <see cref="ReclaimAbandonedSessions"/>, run by the
+    /// single sweeper that won the gate above.</summary>
+    private int DrainAbandonedSessions()
+    {
+        var reclaimed = 0;
+        // Bounded by the queue length observed on entry so a teardown that
+        // re-queues a mid-statement session can't spin here.
+        for (var remaining = this.abandonedSessions.Count; remaining > 0; remaining--)
+        {
+            // CA2000 wants every dequeued connection disposed on every path,
+            // but two paths deliberately hand it back instead: one whose
+            // session is already torn down, and one that is mid-statement and
+            // gets re-queued. Disposing on either would be the bug.
+#pragma warning disable CA2000
+            if (!this.abandonedSessions.TryDequeue(out var connection))
+                break;
+#pragma warning restore CA2000
+            if (connection.Session.Reclaimed)
+                continue;
+            if (connection.Session.CurrentExecutingThreadId is not null)
+            {
+                this.abandonedSessions.Enqueue(connection);
+                continue;
+            }
+            // The session's own Close + Dispose, not a cleanup routine of its
+            // own: an abandoned session has to end exactly the way a closed one
+            // does, and the moment the two paths diverge one of them starts
+            // leaking what the other releases.
+            using (connection)
+                connection.Close();
+            reclaimed++;
+        }
+        _ = Interlocked.Add(ref this.SessionsReclaimed, reclaimed);
+        return reclaimed;
     }
 
     /// <summary>
@@ -672,6 +816,16 @@ public sealed partial class Simulation
     private readonly ConcurrentDictionary<PlanCacheKey, PlanCacheEntry> planCache = new();
 
     private const int PlanCacheCapacity = 1024;
+
+    /// <summary>
+    /// Per-instance memo of tokenized command texts, shared by every parse
+    /// this simulation runs — batches, module bodies, stored expressions.
+    /// Where <see cref="planCache"/> skips parsing for the one statement kind
+    /// that produces a re-executable plan, this skips <em>tokenizing</em> for
+    /// every statement kind, including the DML that parses and executes in one
+    /// pass. See <see cref="TokenMemo"/> for why it needs no invalidation.
+    /// </summary>
+    internal readonly TokenMemo TokenMemo = new();
 
     /// <summary>Test-observable: total hits on the plan cache since
     /// construction. Incremented after a key match against a non-stale
@@ -726,11 +880,13 @@ public sealed partial class Simulation
             HashCode.Combine(this.CommandText, this.DatabaseName, this.ParameterSignature, this.QuotedIdentifiers);
     }
 
-    /// <summary>Cache entry: the parsed <see cref="Selection"/> plus the
-    /// <see cref="SchemaVersion"/> active when it was parsed.</summary>
-    private sealed class PlanCacheEntry(Selection plan, long schemaVersionAtParse)
+    /// <summary>Cache entry: the batch's parsed <see cref="Selection"/>s in
+    /// dispatch order, plus the <see cref="SchemaVersion"/> active when they
+    /// were parsed. Usually one; a batch of several top-level SELECTs caches
+    /// as the sequence it is.</summary>
+    private sealed class PlanCacheEntry(Selection[] plans, long schemaVersionAtParse)
     {
-        public readonly Selection Plan = plan;
+        public readonly Selection[] Plans = plans;
         public readonly long SchemaVersionAtParse = schemaVersionAtParse;
     }
 
@@ -840,6 +996,37 @@ public sealed partial class Simulation
     /// </param>
     internal IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommand(SimulatedDbCommand command, bool continueOnError = true)
     {
+        // Counted for the whole enumeration, which is what makes it a measure
+        // of load rather than of arrival: a reader held open is a statement
+        // still in flight. Child batches (proc / UDF / dynamic-SQL bodies)
+        // don't re-enter here, so one execution counts once.
+        _ = Interlocked.Increment(ref this.statementsInFlight);
+        try
+        {
+            foreach (var outcome in this.CreateResultSetsForCommandCore(command, continueOnError))
+                yield return outcome;
+        }
+        finally
+        {
+            _ = Interlocked.Decrement(ref this.statementsInFlight);
+        }
+    }
+
+    private int statementsInFlight;
+
+    /// <summary>
+    /// How many command executions are currently in flight across every
+    /// session of this simulation. Read by the parallel grouped accumulation
+    /// (<c>Selection.Execution.AggregateParallel.cs</c>) to size — or refuse —
+    /// its fan-out: intra-query parallelism is the right trade for an engine
+    /// with idle cores and the wrong one for a saturated engine, where the
+    /// workers only take cores the other sessions were using. Measured both
+    /// ways on the concurrent workload drivers.
+    /// </summary>
+    internal int StatementsInFlight => Volatile.Read(ref this.statementsInFlight);
+
+    private IEnumerable<SimulatedStatementOutcome> CreateResultSetsForCommandCore(SimulatedDbCommand command, bool continueOnError)
+    {
         // Fresh cancellation scope per top-level execution, so a Cancel() /
         // attention that fired against a previous command on this connection
         // doesn't bleed into this one. Child batches (proc / UDF / dynamic-SQL
@@ -878,7 +1065,7 @@ public sealed partial class Simulation
             && entry.SchemaVersionAtParse == schemaVersionAtStart)
         {
             _ = Interlocked.Increment(ref this.PlanCacheHits);
-            foreach (var outcome in ReplayCachedSelection(command, entry.Plan))
+            foreach (var outcome in ReplayCachedSelections(command, entry.Plans))
                 yield return outcome;
             yield break;
         }
@@ -952,13 +1139,14 @@ public sealed partial class Simulation
     /// iterator. The caller is responsible for the upstream gates (block
     /// depth, first statement, no session-scoped references, parser at EOB).
     /// </summary>
-    internal void TryPromoteSelectionToPlanCache(BatchContext batch, Selection selection)
+    internal void TryPromoteSelectionsToPlanCache(BatchContext batch)
     {
+        if (batch.PlanCacheSequence is not { Count: > 0 } plans) return;
         if (batch.PlanCacheCommandText is not { } text) return;
         if (batch.PlanCacheDatabaseName is not { } dbName) return;
         if (batch.PlanCacheParameterSignature is not { } paramSig) return;
         if (Volatile.Read(ref this.SchemaVersion) != batch.PlanCacheSchemaVersion) return;
-        // A cacheable batch is a single SELECT (no SET can precede it), so the
+        // A cacheable batch is SELECTs only (no SET can be among them), so the
         // connection's live setting still equals the value at parse.
         var key = new PlanCacheKey(text, dbName, paramSig, batch.Connection.QuotedIdentifiers);
         // Refresh-in-place semantics: when a DDL has invalidated the prior
@@ -966,7 +1154,47 @@ public sealed partial class Simulation
         // dictionary. The capacity cap therefore only gates fresh keys, not
         // re-cached versions of an already-tracked one.
         if (this.planCache.ContainsKey(key) || this.planCache.Count < PlanCacheCapacity)
-            this.planCache[key] = new PlanCacheEntry(selection, batch.PlanCacheSchemaVersion);
+            this.planCache[key] = new PlanCacheEntry([.. plans], batch.PlanCacheSchemaVersion);
+    }
+
+    /// <summary>
+    /// Whether the statement just parsed is the batch's last: nothing remains
+    /// but statement separators. Probes forward from the parser's lookahead
+    /// position and restores it, so the caller's cursor is untouched.
+    /// <para>
+    /// The separator tolerance is what admits the <c>SELECT … ;</c> form every
+    /// client that terminates its statements emits. A bare <c>Token is null</c>
+    /// test would decline those, and declining them is the difference between
+    /// a cache that serves an ORM and one that serves only text with no
+    /// trailing punctuation.
+    /// </para>
+    /// </summary>
+    private static bool IsAtEndOfBatch(ParserContext context)
+    {
+        if (context.Token is null)
+            return true;
+        if (context.Token is not Operator { Character: ';' })
+            return false;
+        var checkpoint = context.SaveCheckpoint();
+        try
+        {
+            while (context.Token is Operator { Character: ';' })
+                context.MoveNextOptional();
+            return context.Token is null;
+        }
+        catch (SimulatedSqlException)
+        {
+            // Text the tokenizer refuses lies past the separators. That is not
+            // the end of the batch, and raising from here would report the
+            // error ahead of the result set this statement has already
+            // produced — the dispatch loop reaches the same text a moment
+            // later and reports it in its own place.
+            return false;
+        }
+        finally
+        {
+            context.RestoreCheckpoint(checkpoint);
+        }
     }
 
     /// <summary>
@@ -1025,40 +1253,50 @@ public sealed partial class Simulation
     }
 
     /// <summary>
-    /// Replays a cached <see cref="Selection"/> against a fresh
+    /// Replays a cached batch's <see cref="Selection"/> sequence against a fresh
     /// <see cref="BatchContext"/> for the incoming command, mirroring the
     /// SELECT arm of <see cref="DispatchOneStatementCore"/> for outcome
     /// shape (result-set vs assignment-only NonQuery) and for
     /// <see cref="SimulatedDbConnection.LastStatementRowCount"/>
     /// maintenance. Bypasses tokenization and parsing entirely.
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> ReplayCachedSelection(SimulatedDbCommand command, Selection selection)
+    private static IEnumerable<SimulatedStatementOutcome> ReplayCachedSelections(SimulatedDbCommand command, Selection[] selections)
     {
         var batch = new BatchContext(command);
         try
         {
-            // Replay bypasses the dispatch loop, so stamp the per-statement
-            // frame the way the loop's top-of-iteration would: without this a
-            // replayed GETDATE() reads default(DateTime) rather than now.
-            // (StatementScopedValues starts null on a fresh frame — no clear
-            // needed.) StartLine mirrors the single-statement dispatch value
-            // for ERROR_LINE parity.
-            batch.CurrentStatement.UtcNow = DateTime.UtcNow;
-            batch.CurrentStatement.StartLine = 1;
             var connection = batch.Connection;
-            // The cached plan is shared across principals; re-run the SELECT
-            // permission check against the replaying session's current principal.
-            PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
-            var executed = selection.Execute(batch);
-            var rowCount = executed.MaterializeRows();
-            connection.LastStatementRowCount = rowCount;
-            var replayed = selection.IsAssignmentOnly
-                ? new SimulatedNonQuery(rowCount, countsRowsReturned: true)
-                : (SimulatedStatementOutcome)executed;
-            // Replay bypasses the dispatch loop, so it stamps the NOCOUNT
-            // suppression the loop's post-statement walk would have.
-            replayed.CountSuppressed = connection.NoCount;
-            yield return replayed;
+            foreach (var selection in selections)
+            {
+                // Replay bypasses the dispatch loop, so each statement stamps
+                // the per-statement frame the loop's top-of-iteration would.
+                // Without the clock a replayed GETDATE() reads
+                // default(DateTime) rather than now; without the per-statement
+                // clears a second statement would read the first's frozen
+                // RAND() draw and cached subquery results. StartLine mirrors
+                // the single-statement dispatch value for ERROR_LINE parity.
+                batch.CurrentStatement.UtcNow = DateTime.UtcNow;
+                batch.CurrentStatement.StartLine = 1;
+                batch.CurrentStatement.StatementScopedValues = null;
+                batch.CurrentStatement.SubqueryResults = null;
+                batch.RcsiStatementSnapshotXid = null;
+                batch.BumpRowStamp();
+                // The cached plan is shared across principals; re-run the
+                // SELECT permission check against the replaying session's
+                // current principal.
+                PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
+                var executed = selection.Execute(batch);
+                var rowCount = executed.MaterializeRows();
+                connection.LastStatementRowCount = rowCount;
+                var replayed = selection.IsAssignmentOnly
+                    ? new SimulatedNonQuery(rowCount, countsRowsReturned: true)
+                    : (SimulatedStatementOutcome)executed;
+                // Replay bypasses the dispatch loop, so it stamps the NOCOUNT
+                // suppression the loop's post-statement walk would have.
+                replayed.CountSuppressed = connection.NoCount;
+                yield return replayed;
+            }
+
             WriteBackOutputParameters(batch);
         }
         finally
@@ -1368,6 +1606,8 @@ public sealed partial class Simulation
                 requireSemicolonBeforeCte = true;
                 atBatchStart = false;
                 batch.HasDispatchedStatement = true;
+                if (!nestedBlock)
+                    batch.TopLevelStatementsDispatched++;
 
                 // Non-progress guard: a statement dispatch that consumed zero
                 // tokens would re-dispatch the same position forever. Normal
@@ -1520,6 +1760,13 @@ public sealed partial class Simulation
                 // path and the TRY-caught path observe the same rollback.
                 if (ex.Class == 13)
                     connection.CurrentTransaction?.Rollback();
+                // The transaction-aborting error class does the same, for the
+                // same reason and at the same point: real rolls the whole
+                // stack back (@@TRANCOUNT 2 reads 0 afterwards, not 1) before
+                // the error reaches anyone. Unlike the deadlock victim it also
+                // refuses to be caught, so the TRY-frame arm below skips it.
+                if (ex.AbortsTransaction)
+                    connection.CurrentTransaction?.Rollback();
                 // Deferred name resolution: real SQL Server binds object /
                 // column names lazily, so an un-taken IF / WHILE branch (or a
                 // block skipped after BREAK / CONTINUE / RETURN) that names a
@@ -1559,8 +1806,16 @@ public sealed partial class Simulation
                     // so those keep propagating from the arm below.
                     bindErrors.Add(ex);
                     gatheredBindError = true;
+
+                    // An illegal explicit conversion ends the report where it
+                    // is: real gathers name-resolution errors across the whole
+                    // body but stops at a Msg 529, so a body whose first
+                    // statement carries one reports it alone even when a later
+                    // statement names a missing column (probed 2026-08-05).
+                    if (ex.Number == 529)
+                        batch.BatchAborted = true;
                 }
-                else if (batch.TryFrameDepth > 0)
+                else if (batch.TryFrameDepth > 0 && !ex.AbortsTransaction)
                 {
                     caught = ex;
                 }
@@ -1823,6 +2078,7 @@ public sealed partial class Simulation
         // statement. Clear at the top of every iteration; a WITH prefix below
         // repopulates.
         context.CteBindings = null;
+        context.CtePrefixLeadsSelectStatement = false;
         context.XmlNamespaces = null;
         batch.CurrentStatement.UtcNow = DateTime.UtcNow;
         batch.CurrentStatement.StatementScopedValues = null;
@@ -1837,6 +2093,7 @@ public sealed partial class Simulation
             if (requireSemicolonBeforeCte)
                 throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
             ParseCteBindings(context);
+            context.CtePrefixLeadsSelectStatement = context.Token is ReservedKeyword { Keyword: Keyword.Select };
         }
 
         // SET FMTONLY ON: SELECT returns its metadata with zero rows and every
@@ -1961,22 +2218,29 @@ public sealed partial class Simulation
                         ? new SimulatedNonQuery(rowCount, countsRowsReturned: true)
                         : executed;
 
-                    // Plan-cache promotion inline before the yield. Gates:
-                    // top-level (BlockDepth == 0 → not inside IF / WHILE /
-                    // BEGIN…END / TRY/CATCH); first top-level statement
-                    // (!HasDispatchedStatement, which the outer dispatch
-                    // loop sets AFTER this method returns); shape (not
+                    // Plan-cache accumulation and promotion, inline before the
+                    // yield. Gates: top-level (BlockDepth == 0 → not inside
+                    // IF / WHILE / BEGIN…END / TRY/CATCH); shape (not
                     // assignment-only — those yield NonQuery and aren't worth
-                    // caching); no session-scoped table reference; parser at
-                    // EOB (no trailing statements). The promote helper then
-                    // re-checks schema version and cap before adding.
+                    // caching); no session-scoped table reference.
+                    //
+                    // A qualifying SELECT joins the batch's candidate
+                    // sequence; the batch is promoted at the LAST statement,
+                    // which is the one that finds nothing but separators left.
+                    // Comparing the sequence's length against the count of
+                    // top-level statements dispatched is what proves no other
+                    // statement kind ran: the loop counts this statement only
+                    // after this method returns, hence the +1.
                     if (batch.BlockDepth == 0
-                        && !batch.HasDispatchedStatement
                         && !selection.IsAssignmentOnly
-                        && !batch.HasSessionScopedReference
-                        && context.Token is null)
+                        && !batch.HasSessionScopedReference)
                     {
-                        TryPromoteSelectionToPlanCache(batch, selection);
+                        (batch.PlanCacheSequence ??= []).Add(selection);
+                        if (batch.PlanCacheSequence.Count == batch.TopLevelStatementsDispatched + 1
+                            && IsAtEndOfBatch(context))
+                        {
+                            TryPromoteSelectionsToPlanCache(batch);
+                        }
                     }
                     yield return outcome;
                     break;
@@ -2459,7 +2723,7 @@ public sealed partial class Simulation
                     var tx = context.Connection.CurrentTransaction
                         ?? throw SimulatedSqlException.NoCorrespondingBeginRollback();
                     if (!tx.Savepoints.TryGetValue(name, out var marker))
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                        throw SimulatedSqlException.CannotRollBackUnknownSavepoint(name);
                     tx.UndoLog.RollbackTo(marker);
                     return true;
                 }

@@ -118,6 +118,9 @@ That is what a client sees from real — probe-confirmed through SqlClient, whos
 A body's own `TRY` / `CATCH` shields none of them (probe-confirmed): binding precedes any of it running, so the gather is checked ahead of the TRY-frame path in the dispatch loop.
 Procedures, triggers, scalar UDFs and multi-statement TVFs all report their run this way, and an `ALTER` reports it while leaving the previous body standing.
 
+**An illegal explicit conversion ends the report where it is.** Real gathers name-resolution errors across the whole body but stops at a **Msg 529**, so a body whose first statement carries one reports it alone even when a later statement names a missing column, while a name error found first reports with the conversion behind it (probed 2026-08-05).
+The conversion itself is settled from the two types — see [`casting.md`](casting.md#conversion-legality-is-settled-while-compiling) — so it reaches the bind through the same projection typing every other binder error does.
+
 **Severity 15 is real's parse phase and preempts the whole report**: a body with a bad column on one line and an undeclared variable on the next reports only Msg 137, and Msg 195 / 156 / 1075 behave the same.
 The simulator reproduces that by letting a severity-15 error propagate on sight rather than gathering it — with one guard.
 The walk resumes from a recovery scan, and a scan that stopped on a keyword rather than a separator can be pointing inside the statement that failed; a severity-15 error raised from such a position is more likely a diagnostic against a fragment than against the body, so it is dropped and the gathered errors are reported instead (`BatchContext.BindResumedCleanly`).

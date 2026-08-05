@@ -42,6 +42,8 @@ internal sealed class Substring : Expression
             : SimulatedSqlException.SyntaxErrorNear(context);
     }
 
+    internal override bool ParallelSafe => this.source.ParallelSafe && this.start.ParallelSafe && this.length.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var s = source.Run(runtime);

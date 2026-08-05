@@ -231,7 +231,7 @@ internal sealed partial class Selection
     /// a decimal branch. Returns <see langword="null"/> when no column is an
     /// integer literal (the common case), so most plans carry no extra array.
     /// </summary>
-    internal static int[]? LiteralDigitsOf(IReadOnlyList<Expression> expressions)
+    internal static int[]? LiteralDigitsOf(List<Expression> expressions)
     {
         int[]? digits = null;
         for (var i = 0; i < expressions.Count; i++)
@@ -359,7 +359,7 @@ internal sealed partial class Selection
     /// <c>ORDER BY zz + 1</c> over <c>SELECT id + 1 AS zz … UNION …</c> with
     /// Msg 207 on <c>zz</c>, so the alias never enters the binding walk.
     /// A term's subquery binds in its own scope, which its own parse already
-    /// did — <see cref="Expression.VisitColumnReferences"/> not descending into
+    /// did — <see cref="Expression.VisitColumnReferences(Action{MultiPartName})"/> not descending into
     /// one is what keeps this walk out of it.
     /// A constant term (<c>ORDER BY 'x'</c>) never reaches this walk — the
     /// ORDER BY parser rejects it with Msg 408 for both the set-op and the

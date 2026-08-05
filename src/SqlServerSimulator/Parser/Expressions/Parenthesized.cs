@@ -12,13 +12,15 @@ internal sealed class Parenthesized(Expression wrapped) : Expression
     /// <summary>The expression nested inside the parentheses. Exposed so callers (notably <see cref="Expression.IsBareNullLiteral"/>) can peer through paren wrappers.</summary>
     public readonly Expression Wrapped = wrapped;
 
+    internal override bool ParallelSafe => this.Wrapped.ParallelSafe;
+
     public override Storage.SqlValue Run(RuntimeContext runtime) => this.Wrapped.Run(runtime);
 
     public override Storage.SqlType GetSqlType(BatchContext batch, Func<MultiPartName, Storage.SqlType> resolveColumnType) => this.Wrapped.GetSqlType(batch, resolveColumnType);
 
     internal override string DebugDisplay() => $"( {this.Wrapped.DebugDisplay()} )";
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.Wrapped.VisitColumnReferences(visit);
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => this.Wrapped.VisitColumnReferences(visit);
 
     internal override bool ContainsVariableReference => this.Wrapped.ContainsVariableReference;
 

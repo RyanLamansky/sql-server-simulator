@@ -105,6 +105,6 @@ internal sealed class Numeric : Token
 
         // Past .NET `decimal`'s 28-29 significant digits — the documented
         // backing-type limit, not a SQL Server behavior.
-        throw new NotSupportedException($"Simulated command tokenizer couldn't parse {number} as a number.");
+        throw Storage.DecimalCeiling.Exceeded($"reading the literal {number}");
     }
 }

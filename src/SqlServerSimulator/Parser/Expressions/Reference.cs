@@ -42,9 +42,22 @@ internal sealed class Reference : Expression
         this.ReferencedName = new MultiPartName(qualifier).WithAddedPart(column);
     }
 
+    /// <summary>
+    /// Constructs a reference from an already-assembled name. Used by the
+    /// <c>UPDATE … SET</c> parser, whose assignment target carries the same
+    /// 1- to 4-segment grammar a read does and desugars a compound operator
+    /// (<c>SET t.v += 1</c>) into a read of the same name.
+    /// </summary>
+    public Reference(MultiPartName name)
+    {
+        this.ReferencedName = name;
+    }
+
     public override string Name => this.ReferencedName.Leaf;
 
     public void AddMultiPartComponent(Name next) => this.ReferencedName = this.ReferencedName.WithAddedPart(next.Value);
+
+    internal override bool ParallelSafe => true;
 
     public override SqlValue Run(RuntimeContext runtime) => runtime.ResolveColumn(this.ReferencedName);
 
@@ -54,5 +67,5 @@ internal sealed class Reference : Expression
 
     internal override bool ResultIsNullable(NullabilityContext context) => context.ColumnIsNullable(this.ReferencedName);
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit) => visit(this.ReferencedName);
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => visit.OnReference(this.ReferencedName);
 }

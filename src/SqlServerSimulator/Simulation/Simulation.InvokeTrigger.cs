@@ -182,7 +182,7 @@ partial class Simulation
         List<SqlValue[]>? insertedRows,
         List<SqlValue[]>? deletedRows,
         int affectedRowCount,
-        IReadOnlyList<int>? updatedColumnOrdinals = null)
+        List<int>? updatedColumnOrdinals = null)
     {
         Trigger? matched = null;
         var targetDatabase = outerBatch.DatabaseFor(parent);

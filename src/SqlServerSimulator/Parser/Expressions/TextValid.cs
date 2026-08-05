@@ -62,7 +62,7 @@ internal sealed class TextValid : Expression
 
     internal override string DebugDisplay() => $"TEXTVALID({this.nameArg.DebugDisplay()}, {this.pointerArg.DebugDisplay()})";
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit)
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit)
     {
         this.nameArg.VisitColumnReferences(visit);
         this.pointerArg.VisitColumnReferences(visit);

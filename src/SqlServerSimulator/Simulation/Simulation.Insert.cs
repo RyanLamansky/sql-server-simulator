@@ -774,7 +774,7 @@ partial class Simulation
     /// </summary>
     private static List<SqlValue[]> EvaluateParsedTuples(List<Expression[]> tuples, BatchContext batch, out long[] tupleStamps)
     {
-        var runtime = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch);
+        var runtime = new RuntimeContext(name => throw SimulatedSqlException.UnboundColumnReference(name), batch);
         var rows = new List<SqlValue[]>(tuples.Count);
         tupleStamps = new long[tuples.Count];
         var tupleIndex = 0;

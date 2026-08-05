@@ -169,6 +169,8 @@ internal sealed class Value : Expression
     public static Value FromAtAtOptions(ParserContext context) =>
         NonLiteral(SqlValue.FromInt32(context.QuotedIdentifiers ? 5432 : 5432 & ~256));
 
+    internal override bool ParallelSafe => true;
+
     public override SqlValue Run(RuntimeContext runtime) => this.Constant;
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Constant.Type;

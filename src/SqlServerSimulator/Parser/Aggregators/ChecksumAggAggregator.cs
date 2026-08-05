@@ -38,5 +38,15 @@ internal sealed class ChecksumAggAggregator : Aggregator
         this.folded ^= value.GetHashCode();
     }
 
+    /// <summary>
+    /// Exact — XOR is associative and commutative, which is the whole point of
+    /// the fold: any partition of the same multiset produces the same value.
+    /// </summary>
+    public override bool TryMergeFrom(Aggregator other)
+    {
+        this.folded ^= ((ChecksumAggAggregator)other).folded;
+        return true;
+    }
+
     public override SqlValue Result() => SqlValue.FromInt32(this.folded);
 }

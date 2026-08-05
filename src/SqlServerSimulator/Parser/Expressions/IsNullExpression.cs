@@ -31,6 +31,8 @@ internal sealed class IsNullExpression : Expression
             throw SimulatedSqlException.FunctionRequiresNArguments("isnull", 2);
     }
 
+    internal override bool ParallelSafe => this.check.ParallelSafe && this.replacement.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var primary = this.check.Run(runtime);

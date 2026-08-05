@@ -36,7 +36,7 @@ partial class Simulation
     internal IEnumerable<SimulatedStatementOutcome> InvokeProcedure(
         BatchContext outerBatch,
         Procedure procedure,
-        IReadOnlyList<ProcArgument> arguments,
+        List<ProcArgument> arguments,
         string? returnCodeVariableName,
         Synonym? viaSynonym = null)
     {

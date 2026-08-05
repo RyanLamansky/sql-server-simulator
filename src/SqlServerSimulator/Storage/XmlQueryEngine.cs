@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Text;
 using System.Xml;
 using System.Xml.XPath;
@@ -46,7 +47,7 @@ internal static class XmlQueryEngine
     /// thing the schema binding changes about compilation, since real's static
     /// cardinality is what the typed and untyped paths disagree on.
     /// </summary>
-    public static XmlQueryExpr Compile(string xquery, string method, IReadOnlySet<string>? schemaSingletonElements = null)
+    public static XmlQueryExpr Compile(string xquery, string method, FrozenSet<string>? schemaSingletonElements = null)
     {
         var (defaultNamespace, prefixes, body) = ParsePrologAndBody(xquery);
         if (body.Length == 0)

@@ -45,7 +45,19 @@ internal sealed class DecimalSqlType(byte precision, byte scale) : SqlType(SqlTy
         var d = value.AsDecimal;
         destination[0] = d >= 0 ? (byte)0x01 : (byte)0x00;
 
-        var scaled = decimal.Truncate(decimal.Multiply(decimal.Abs(d), Pow10(this.scale)));
+        decimal scaled;
+        try
+        {
+            scaled = decimal.Truncate(decimal.Multiply(decimal.Abs(d), Pow10(this.scale)));
+        }
+        catch (OverflowException)
+        {
+            // The scaled mantissa needs more than a .NET decimal's 96 bits, so
+            // the value has no storage form here at all — the backing-type
+            // ceiling rather than anything real would refuse.
+            throw DecimalCeiling.Exceeded($"storing {d} as {this}");
+        }
+
         // .NET decimal exposes its 96-bit mantissa via GetBits — three int32s
         // representing low/mid/high. Width budget for 1-9 / 10-19 / 20-28
         // precisions is 4 / 8 / 12 mantissa bytes, all of which fit; p 29-38

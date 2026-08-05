@@ -486,6 +486,16 @@ internal abstract class Expression
                         // ResolveBuiltIn / ParseCall leave context.Token at the
                         // closing ). The next loop iteration's GetNextOptional
                         // advances past it; advancing here would skip an extra token.
+                        // Anything else means the argument list never closed —
+                        // the token would otherwise be swallowed by that advance,
+                        // which is how `SELECT abs(-1` and `SELECT abs(-1 x` used
+                        // to run. Real answers Msg 102 naming the offending token,
+                        // and the last token of the batch when the input simply
+                        // ended (probed 2026-08-05). A window function is the one
+                        // shape whose last token needn't be a paren: the bare
+                        // `OVER w` named-window reference ends on the name.
+                        if (context.Token is not Operator { Character: ')' } && expression is not WindowExpression)
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
                         continue;
                     }
                 // OVER following an aggregate function call promotes the
@@ -1030,7 +1040,25 @@ internal abstract class Expression
     /// the runtime error at INSERT instead. New overrides can be added as
     /// applications surface the gap.
     /// </remarks>
-    internal virtual void VisitColumnReferences(Action<MultiPartName> visit) { }
+    internal void VisitColumnReferences(Action<MultiPartName> visit) =>
+        this.VisitColumnReferences(new ColumnReferenceVisitor(visit, coversSubtree: null));
+
+    /// <summary>
+    /// The walk's node boundary: every recursion into a child goes through
+    /// here, so <see cref="ColumnReferenceVisitor.CoversSubtree"/> is asked
+    /// once per node and a subtree it answers for is never entered.
+    /// </summary>
+    internal void VisitColumnReferences(ColumnReferenceVisitor visit)
+    {
+        if (visit.CoversSubtree?.Invoke(this) != true)
+            this.VisitColumnReferencesCore(visit);
+    }
+
+    /// <summary>
+    /// Per-subclass recursion; call the boundary above for children rather
+    /// than this directly. Default implementation is empty.
+    /// </summary>
+    internal virtual void VisitColumnReferencesCore(ColumnReferenceVisitor visit) { }
 
     /// <summary>
     /// True when this expression's parse tree contains a
@@ -1043,7 +1071,7 @@ internal abstract class Expression
     /// <c>1 + 0</c>. A runtime-eval probe can't see the variable (its slot is
     /// declared in the batch), so the detection is a static parse-tree walk.
     /// Default is <see langword="false"/>; the same common-container subclasses
-    /// that override <see cref="VisitColumnReferences"/> (plus
+    /// that override <see cref="VisitColumnReferences(Action{MultiPartName})"/> (plus
     /// <see cref="VariableReference"/> itself) recurse here, so a
     /// variable buried in a less-common container is a residual coverage gap.
     /// </summary>
@@ -1076,6 +1104,55 @@ internal abstract class Expression
     /// direction is to under-claim.
     /// </summary>
     internal virtual bool IsRowIndependent => false;
+
+    /// <summary>
+    /// True when this expression may be evaluated on a worker thread while the
+    /// statement that owns it is executing — it reads only the row handed to it
+    /// plus immutable plan and database state, writes nothing on the
+    /// <see cref="BatchContext"/> or the connection, and drives no machinery
+    /// (subquery execution, module invocation, sequence bookkeeping) that is
+    /// single-writer by construction. Consumed by the parallel grouped
+    /// accumulation in <c>Selection.Execution.AggregateParallel.cs</c>, which
+    /// declines the whole statement when any consumer-side expression answers
+    /// <see langword="false"/>.
+    /// <para>
+    /// The default is <b>deny</b>, and deliberately so: an unrecognized node
+    /// declines rather than being assumed pure, so a built-in added later is
+    /// safe until someone proves otherwise. Nodes opt in one at a time and
+    /// prove their operands do too. Coverage therefore grows with use — an
+    /// absent override costs a serial execution, never a wrong answer.
+    /// </para>
+    /// </summary>
+    internal virtual bool ParallelSafe => false;
+
+    /// <summary>
+    /// <see cref="ParallelSafe"/> folded over an operand array — the shape the
+    /// variadic nodes (<c>COALESCE</c>, <c>CONCAT</c>, <c>GREATEST</c> /
+    /// <c>LEAST</c>, a <c>CASE</c>'s arms) answer with.
+    /// </summary>
+    private protected static bool AllParallelSafe(Expression[] operands)
+    {
+        foreach (var operand in operands)
+        {
+            if (!operand.ParallelSafe)
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// <see cref="ParallelSafe"/> folded over a predicate array — a searched
+    /// <c>CASE</c>'s <c>WHEN</c> conditions.
+    /// </summary>
+    private protected static bool AllParallelSafe(BooleanExpression[] predicates)
+    {
+        foreach (var predicate in predicates)
+        {
+            if (!predicate.ParallelSafe)
+                return false;
+        }
+        return true;
+    }
 
     /// <summary>
     /// True when real SQL Server folds this expression to a constant at
@@ -1238,7 +1315,10 @@ internal abstract class Expression
                         : (Expression)new ScalarSubqueryExpression(inner);
             }
 
-            return new Parenthesized(Expression.Parse(context));
+            var grouped = Expression.Parse(context);
+            return context.Token is not Operator { Character: ')' }
+                ? throw SimulatedSqlException.SyntaxErrorNear(context)
+                : new Parenthesized(grouped);
         }
         finally
         {

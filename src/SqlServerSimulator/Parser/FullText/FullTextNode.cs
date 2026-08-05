@@ -149,7 +149,7 @@ internal sealed class FullTextTermNode : FullTextNode
         return true;
     }
 
-    private IReadOnlyList<int> PositionsOfElement(FullTextDocument document, int elementIndex)
+    private List<int> PositionsOfElement(FullTextDocument document, int elementIndex)
     {
         var element = this.elements[elementIndex];
         return this.prefixes[elementIndex] ? document.Prefixed(element)

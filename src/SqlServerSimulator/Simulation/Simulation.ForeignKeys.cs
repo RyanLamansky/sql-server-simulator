@@ -85,7 +85,7 @@ partial class Simulation
 
     private static void ApplyFkActionForKeySet(
         ForeignKey fk,
-        IReadOnlyList<SqlValue[]> affectedParentOldRows,
+        List<SqlValue[]> affectedParentOldRows,
         ReferentialAction action,
         ParserContext context,
         string verb,
@@ -212,7 +212,7 @@ partial class Simulation
     // does have a slot). A parent key holding a NULL has no children to match,
     // which a referenced UNIQUE column reaches.
     private static IEnumerable<(int PageIndex, int SlotIndex, SqlValue[] ChildFull, int ParentIndex)> MatchChildRowsToParents(
-        ForeignKey fk, IReadOnlyList<SqlValue[]> parentKeyRows)
+        ForeignKey fk, List<SqlValue[]> parentKeyRows)
     {
         if (!TryMapFkColumnsToStorage(fk.ChildTable, fk.ChildColumnOrdinals, out var childStorageOrdinals, out var commons))
             throw new InvalidOperationException($"FOREIGN KEY '{fk.Name}' has a child column that is not physically stored.");

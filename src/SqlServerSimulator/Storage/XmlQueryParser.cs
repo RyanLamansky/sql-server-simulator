@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Globalization;
 using System.Text;
 
@@ -22,7 +23,7 @@ internal sealed class XmlQueryParser(
     string? defaultNamespace,
     Dictionary<string, string> prefixes,
     string method,
-    IReadOnlySet<string>? schemaSingletonElements = null)
+    FrozenSet<string>? schemaSingletonElements = null)
 {
     /// <summary>The XQuery namespace an unprefixed function name lives in.</summary>
     private const string FunctionNamespace = "http://www.w3.org/2004/07/xpath-functions";
@@ -38,7 +39,7 @@ internal sealed class XmlQueryParser(
     /// name is in here is a singleton to the static type checker, which is
     /// what makes <c>.value()</c> accept a schema-typed path real accepts.
     /// </summary>
-    private readonly IReadOnlySet<string>? schemaSingletonElements = schemaSingletonElements;
+    private readonly FrozenSet<string>? schemaSingletonElements = schemaSingletonElements;
 
     /// <summary>The <c>$</c>-variable bindings in scope, innermost last.</summary>
     private readonly List<XmlVariableBinding> scope = [];

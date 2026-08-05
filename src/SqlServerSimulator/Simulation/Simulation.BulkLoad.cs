@@ -147,7 +147,7 @@ partial class Simulation
     /// client and are populated server-side, exactly as for INSERT.</item>
     /// </list>
     /// </remarks>
-    internal int ExecuteBulkInsert(BulkInsertPlan plan, IReadOnlyList<SqlValue[]> rows, SimulatedDbConnection connection)
+    internal int ExecuteBulkInsert(BulkInsertPlan plan, List<SqlValue[]> rows, SimulatedDbConnection connection)
     {
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100
@@ -159,7 +159,7 @@ partial class Simulation
         return outcome.RecordsAffected;
     }
 
-    private SimulatedNonQuery BulkInsertRows(BulkInsertPlan plan, IReadOnlyList<SqlValue[]> rows, ParserContext context)
+    private SimulatedNonQuery BulkInsertRows(BulkInsertPlan plan, List<SqlValue[]> rows, ParserContext context)
     {
         var batch = context.Batch;
         var table = plan.Table;

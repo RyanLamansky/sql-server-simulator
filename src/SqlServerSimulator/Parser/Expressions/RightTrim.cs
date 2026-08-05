@@ -24,6 +24,8 @@ internal sealed class RightTrim : Expression
         }
     }
 
+    internal override bool ParallelSafe => this.source.ParallelSafe && this.trimChars?.ParallelSafe != false;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var raw = source.Run(runtime);

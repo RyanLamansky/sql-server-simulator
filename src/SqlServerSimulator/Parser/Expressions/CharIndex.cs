@@ -26,6 +26,8 @@ internal sealed class CharIndex : Expression
             this.start = Parse(context.MoveNextRequiredReturnSelf());
     }
 
+    internal override bool ParallelSafe => this.needle.ParallelSafe && this.haystack.ParallelSafe && this.start?.ParallelSafe != false;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var n = needle.Run(runtime);

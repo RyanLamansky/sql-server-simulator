@@ -42,6 +42,30 @@ Two related rejections fire earlier and differ from real in *which* error, not i
 Other hints (`OPTIMIZE FOR`, `RECOMPILE`, etc.) → `NotSupportedException`.
 EF emits non-recursive CTEs in some shapes (TPC inheritance, certain Distinct/OrderBy/Skip patterns); recursive CTEs only via raw SQL.
 
+## An unread prefix — Msg 422
+
+Real refuses a `WITH` prefix on exactly one statement shape: a bare
+`SELECT <expression list>` — no FROM, WHERE, ORDER BY, TOP, DISTINCT, INTO, set operator, subquery, `FOR JSON` / `FOR XML` or `OPTION` clause.
+**Msg 422** class 16 state 4, `"Common table expression defined but not used."`, naming no CTE.
+Probed against SQL Server 2025 (2026-08-05):
+
+| Statement | Real |
+| --- | --- |
+| `WITH c AS (…) SELECT 1` | Msg 422 |
+| `WITH c AS (…) SELECT 1, 2` / `SELECT getdate()` / `SELECT NULL` / `SELECT @v = 1` | Msg 422 |
+| `WITH c1 AS (…), c2 AS (SELECT * FROM c1) SELECT 1` | Msg 422 — a CTE reading a CTE is not a use of the prefix |
+| `WITH c AS (…) SELECT 1 WHERE 1 = 1` / `ORDER BY 1` / `TOP 1 1` / `DISTINCT 1` | runs |
+| `WITH c AS (…) SELECT 1 UNION SELECT 2` / `SELECT (SELECT MAX(a) FROM t)` | runs |
+| `WITH c AS (…) SELECT 1 FOR JSON PATH` / `OPTION (MAXDOP 1)` | runs |
+| `WITH c1 AS (…), c2 AS (…), c3 AS (…) SELECT * FROM c1` | runs — one read is enough for the whole prefix |
+| `WITH c AS (…) INSERT … / UPDATE … / DELETE … / MERGE … / SELECT … INTO …` | runs |
+
+That shape can name no CTE — it has no FROM and no subquery — so the diagnostic is settled from the statement's shape alone, at the point the outermost query expression finishes parsing.
+A stored body that parses outside the dispatch loop (a view, an inline TVF, a cursor declaration) never asks the question, which is what keeps those accepting the shape as real does; a procedure's body dispatches statements of its own, so its bare-projection statement raises at `CREATE` like real's.
+
+One divergence remains: real doesn't bind an unread CTE's body at all, so `WITH c AS (SELECT * FROM nosuchtable) SELECT 1` is Msg 422 there and Msg 208 here.
+Both refuse.
+
 ## Where a prefix may appear
 
 A **statement** may carry one, and so may a **stored body** — but a *parenthesized query* may not, on real or here.

@@ -1886,7 +1886,7 @@ partial class SimulatedSqlException
     /// against SQL Server 2025; blocker enumeration order matches PK /
     /// UQ → FK → CHECK → DEFAULT → index in the simulator.
     /// </summary>
-    internal static SimulatedSqlException DropColumnHasDependenciesMixed(string columnName, IReadOnlyList<(string Name, bool IsIndex)> blockers)
+    internal static SimulatedSqlException DropColumnHasDependenciesMixed(string columnName, List<(string Name, bool IsIndex)> blockers)
     {
         var sb = new System.Text.StringBuilder();
         for (var i = 0; i < blockers.Count; i++)
@@ -1940,7 +1940,7 @@ partial class SimulatedSqlException
     /// indexes, <c>The column</c> for computed-column dependencies.
     /// Probe-confirmed verbatim against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException AlterColumnHasDependencies(string columnName, IReadOnlyList<(string Name, AlterColumnBlockerKind Kind)> blockers)
+    internal static SimulatedSqlException AlterColumnHasDependencies(string columnName, List<(string Name, AlterColumnBlockerKind Kind)> blockers)
     {
         var sb = new System.Text.StringBuilder();
         for (var i = 0; i < blockers.Count; i++)

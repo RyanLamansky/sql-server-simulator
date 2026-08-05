@@ -119,6 +119,23 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool TerminatesBatch { get; private init; }
 
     /// <summary>
+    /// When <see langword="true"/>, raising this error rolls the session's
+    /// whole transaction stack back and cannot be intercepted by a
+    /// <c>BEGIN TRY</c> frame — SQL Server's transaction-aborting error class,
+    /// distinct from the far commoner statement-aborting one that leaves
+    /// <c>@@TRANCOUNT</c> alone. Probe-confirmed against SQL Server 2025
+    /// (2026-08-05) for the RANGE-frame ORDER BY diagnostic (Msg 8728): a
+    /// transaction opened in an earlier batch reads <c>@@TRANCOUNT</c> 0 and
+    /// <c>XACT_STATE()</c> 0 afterwards, its writes are undone, a surrounding
+    /// <c>BEGIN TRY</c> never reaches its <c>CATCH</c>, and the statements
+    /// after it in the batch never run — while the neighbouring bind and
+    /// runtime errors (Msg 207 / 208 / 306 / 4104 / 4194 / 8120 / 8134) all
+    /// leave the transaction standing. Internal — never part of the public
+    /// <c>SqlException</c>-shaped surface.
+    /// </summary>
+    internal bool AbortsTransaction { get; private init; }
+
+    /// <summary>
     /// Guards <see cref="ResolveDiagnostics"/> against re-stamping. An error
     /// born inside a nested body (procedure / dynamic-SQL batch) is resolved at
     /// its own dispatch frame's catch boundary; as it propagates outward each

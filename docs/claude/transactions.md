@@ -24,4 +24,21 @@ A fourth arrives over the network: TDS Transaction Manager requests map onto the
   The undo log is per-connection and its entries reference their `Heap` directly, so a write through a three-part name rolls back with the rest of the transaction with no extra routing; `@@TRANCOUNT` / `XACT_STATE()` never reflect the crossing (probe-confirmed).
   What *is* per-database — the rowversion counter, the version store's commit-Xid counter, trigger dispatch — follows the target table rather than the session; see the cross-database-writes section of [`schemas.md`](schemas.md#cross-database-writes).
 
+## The transaction-aborting error class
+
+Almost every error is statement-aborting: it ends its statement, leaves `@@TRANCOUNT` where it was, and a `BEGIN TRY` frame catches it.
+A small class is different — it rolls the session's whole transaction stack back before anyone sees it, refuses to be caught, and takes the rest of the batch with it.
+`SimulatedSqlException.AbortsTransaction` marks a factory as belonging to it; the statement dispatcher rolls the session's transaction back at the same point it already does for a deadlock victim (class 13), and skips the TRY-frame arm.
+
+**Msg 8728** (a RANGE-framed window ordering by a MAX-typed expression — see [`query.md`](query.md#range-frame-order-by-msg-8728)) is the modeled member.
+Probed against SQL Server 2025 (2026-08-05), with a transaction opened in an earlier batch:
+
+- `@@TRANCOUNT` 1 → 0 and `XACT_STATE()` 1 → 0, and a row inserted inside the transaction is gone afterwards.
+- `@@TRANCOUNT` 2 → **0**, not 1 — the whole stack, not one level.
+- A surrounding `BEGIN TRY` never reaches its `CATCH`, and a `PRINT` after the failing statement in the same batch never runs.
+- The neighbours all leave the transaction standing at 1: Msg 8134 (divide by zero), 208 (invalid object), 207 (invalid column), 306 (legacy LOB sorted), 4104 (multi-part identifier), 8120 (not in GROUP BY), 4194 (RANGE numeric offset).
+
+Real settles Msg 8728 while *compiling*, so on real it also fires inside a branch the batch never takes (`IF 1 = 0 BEGIN <the query> END` raises and the batch never starts).
+The simulator raises it while parsing the statement, which reaches the same place for the shapes that matter and additionally fires under the dispatch loop's skip mode.
+
 Not modeled: `BEGIN DISTRIBUTED TRANSACTION` → `NotSupportedException` at dispatch; `BEGIN TRANSACTION <name> WITH MARK 'm'` → Msg 319 at parse (bare named transactions ship).

@@ -48,6 +48,8 @@ internal abstract class DateDiff : Expression
     /// </summary>
     protected abstract SqlValue WrapResult(long diff);
 
+    internal override bool ParallelSafe => this.start.ParallelSafe && this.end.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var startVal = DatePartKinds.CoerceDateArgumentImplicit(this.start.Run(runtime));

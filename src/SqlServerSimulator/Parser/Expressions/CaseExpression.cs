@@ -96,6 +96,13 @@ internal sealed class CaseExpression : Expression
     internal static CaseExpression CreateSimple(Expression input, Expression[] compareValues, Expression[] thens, Expression? elseBranch) =>
         new(input, searchedWhens: null, compareValues, thens, elseBranch, noArmReachable: false);
 
+    internal override bool ParallelSafe =>
+        this.input?.ParallelSafe != false
+        && this.elseBranch?.ParallelSafe != false
+        && AllParallelSafe(this.thens)
+        && (this.compareValues is null || AllParallelSafe(this.compareValues))
+        && (this.searchedWhens is null || AllParallelSafe(this.searchedWhens));
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var raw = this.input is null ? FindSearchedMatch(runtime) : FindSimpleMatch(runtime);

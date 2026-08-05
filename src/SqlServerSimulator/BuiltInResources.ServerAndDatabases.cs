@@ -1210,9 +1210,7 @@ internal static partial class BuiltInResources
     {
         _ = database;
         var simulation = batch.Connection.Simulation;
-        SimulatedDbConnection[] connections;
-        lock (simulation.Connections)
-            connections = [.. simulation.Connections];
+        var connections = simulation.SnapshotConnections();
 
         var emptyName = SqlValue.FromNVarchar(string.Empty);
         var nullName = SqlValue.Null(SqlType.NVarchar);

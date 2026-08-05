@@ -74,6 +74,8 @@ internal sealed class Trim : Expression
         }
     }
 
+    internal override bool ParallelSafe => this.source.ParallelSafe && this.trimChars?.ParallelSafe != false;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         // Argument numbering follows the written order, so the bare `TRIM(x)`

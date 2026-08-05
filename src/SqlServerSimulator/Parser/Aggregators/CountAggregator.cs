@@ -52,6 +52,29 @@ internal sealed class CountAggregator(bool isStar, bool isBigCount, bool distinc
         this.count--;
     }
 
+    /// <summary>
+    /// Exact for both forms: a plain count adds, and a DISTINCT count replays
+    /// the other side's members through <see cref="Add"/>, which counts only
+    /// the ones this side hadn't seen. Set union is order-free, so the merged
+    /// count is the serial count.
+    /// </summary>
+    public override bool TryMergeFrom(Aggregator other)
+    {
+        var source = (CountAggregator)other;
+        if (this.seen is { } mine)
+        {
+            foreach (var value in source.seen!)
+            {
+                if (mine.Add(value))
+                    this.count++;
+            }
+            return true;
+        }
+
+        this.count += source.count;
+        return true;
+    }
+
     public override SqlValue Result() => isBigCount
         ? SqlValue.FromInt64(this.count)
         : this.count > int.MaxValue

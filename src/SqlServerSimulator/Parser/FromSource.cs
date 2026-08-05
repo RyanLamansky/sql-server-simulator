@@ -44,9 +44,24 @@ internal sealed class FromSource(
     Database? backingCatalogDatabase = null,
     Synonym? viaSynonym = null,
     string? autoElementName = null,
-    bool lateralIsQueryBody = false)
+    bool lateralIsQueryBody = false,
+    string? writtenObjectName = null)
 {
     public readonly string? Qualifier = qualifier;
+
+    /// <summary>
+    /// The object this source names, spelled as the FROM clause wrote it and
+    /// with any alias ignored — <c>g1</c>, <c>dbo.g1</c>, <c>@t</c>. Null for a
+    /// source that has no object of its own (a derived table, a CTE, a table
+    /// value constructor), where the alias is the only name there is.
+    /// <para>
+    /// Read by the GROUP BY containment diagnostics, which name the object
+    /// rather than the alias: <c>SELECT a FROM g1 AS x GROUP BY b</c> reports
+    /// <c>'g1.a'</c> on real, and a derived table's own <c>'z.a'</c>
+    /// (probed 2026-08-05).
+    /// </para>
+    /// </summary>
+    public readonly string? WrittenObjectName = writtenObjectName;
 
     /// <summary>
     /// The name <c>FOR XML AUTO</c> / <c>FOR JSON AUTO</c> gives this source's
@@ -224,7 +239,7 @@ internal sealed class FromSource(
             heapPlan: this.HeapPlan, materializeOnce: this.MaterializeOnce, isPlaceholder: this.IsPlaceholder,
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
-            lateralIsQueryBody: this.LateralIsQueryBody);
+            lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName);
 
     /// <summary>
     /// Returns a copy of this source reading <paramref name="rows"/> — the same
@@ -241,7 +256,7 @@ internal sealed class FromSource(
             heapPlan: this.HeapPlan, materializeOnce: this.MaterializeOnce, isPlaceholder: this.IsPlaceholder,
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
-            lateralIsQueryBody: this.LateralIsQueryBody);
+            lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName);
 
     /// <summary>
     /// Returns a copy of this source with its deferred <see cref="LateralPlan"/>
@@ -250,12 +265,12 @@ internal sealed class FromSource(
     /// downstream join planning treats it as a plain re-enumerable row source.
     /// Column metadata, qualifier, and storage layout are preserved unchanged.
     /// </summary>
-    public FromSource WithMaterializedRows(IEnumerable<byte[]> rows) =>
+    public FromSource WithMaterializedRows(List<byte[]> rows) =>
         new(this.Qualifier, this.ColumnNames, this.Columns, this.StoredSchema,
             this.StorageOrdinals, this.LobStore, rows,
             lateralPlan: null, backingTable: this.BackingTable, backingView: this.BackingView,
             heapPlan: this.HeapPlan, materializeOnce: false, viaSynonym: this.ViaSynonym,
-            autoElementName: this.AutoElementName);
+            autoElementName: this.AutoElementName, writtenObjectName: this.WrittenObjectName);
 }
 
 /// <summary>

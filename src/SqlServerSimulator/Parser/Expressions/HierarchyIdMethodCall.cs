@@ -283,7 +283,7 @@ internal sealed class HierarchyIdMethodCall : Expression
 
     internal override bool ResultIsNullable(NullabilityContext context) => true;
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit)
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit)
     {
         this.target.VisitColumnReferences(visit);
         foreach (var a in this.arguments)

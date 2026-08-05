@@ -103,6 +103,8 @@ internal sealed class StringConcat : Expression
     // exposed by go-mssqldb / tedious COLMETADATA fNullable).
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
+    internal override bool ParallelSafe => AllParallelSafe(this.arguments);
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         // Resolve result type from runtime argument types: any national-string

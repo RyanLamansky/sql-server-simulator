@@ -83,5 +83,5 @@ internal sealed class XmlModify : Expression
 
     internal override string DebugDisplay() => $"{this.instanceName}.modify(…)";
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.instance.VisitColumnReferences(visit);
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => this.instance.VisitColumnReferences(visit);
 }

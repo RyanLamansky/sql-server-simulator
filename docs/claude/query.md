@@ -399,6 +399,47 @@ The representative is what a projection reaching the column *underneath* a group
 
 Oracle: `GroupedAggregateStreamingTests`.
 
+### Parallel grouped accumulation (built, proven, **off by default**)
+
+`Selection.Execution.AggregateParallel.cs` forks the streaming path's per-row *consumer* work — the WHERE excluders, the grouping-key evaluation, the aggregate operands, and the column decoding all three trigger — across worker threads while the calling thread keeps producing the row stream.
+`AggregateDiagnostics.EnableParallelAccumulation` admits it and is **false**, so shipped behaviour is the serial path, unchanged.
+
+**Why the partition boundary sits there.** Real runs these shapes at DOP 8 while the simulator runs on one core, which is the systematic remainder behind the surviving scan-bound ratios.
+A heap-page partition reaches only a single-table scan, and the shapes that actually cost are two-table joins, where partitioning the *driving* side would multiply the hash build by the degree of parallelism.
+So `EnumerateJoinedRows` is untouched and stays on the calling thread, and one mechanism then covers a scan and a join alike.
+The ceiling is Amdahl over that producer: a bare `COUNT(*)` over the 228k-row `Invoices ⋈ InvoiceLines` join costs ~70 ms of producer on its own, which is the floor for every query reading it.
+
+**Locking and MVCC are untouched.** Every lock probe, snapshot-Xid allocation and version-store read lives inside `BatchContext.WrapWithRowConflictChecks`, which is part of the enumerator — so isolation level, lock footprint and acquisition order are byte-identical and no isolation gate is needed.
+Row bytes are safe to hand across threads because `HeapPage.TryReadLiveSlot` already returns a private copy of every scanned row.
+
+**Engagement gates**, all of which must hold; a decline is today's serial path:
+
+| Gate | Rule |
+| --- | --- |
+| scope | top-level only (`outerResolver is null`), one grouping set, no window function, not nested inside another parallel accumulation |
+| size | past 16,384 rows *enumerated*, decided mid-stream so no cardinality estimate has to exist |
+| group density | fewer than one group per 8 prefix rows — every worker builds its own map, so a `GROUP BY` over 73k groups pays the merge on nearly every row and measured as a regression |
+| sources | every FROM source a plain base table, and every non-persisted computed column's own expression `ParallelSafe` |
+| aggregates | only the exact merges: `COUNT` / `COUNT_BIG` / `APPROX_COUNT_DISTINCT` / `MIN` / `MAX` / `CHECKSUM_AGG`, and `SUM` / `AVG` whose accumulator is `long` or `decimal` — `DISTINCT` included |
+| expressions | `Expression.ParallelSafe` / `BooleanExpression.ParallelSafe`, a **default-deny** virtual opted into node by node |
+| ambient load | the fan-out's share shrinks with `Simulation.StatementsInFlight`, and a process-wide budget caps outstanding workers at `Environment.ProcessorCount` |
+
+`SUM` / `AVG` over `float` / `real`, the statistical family, `STRING_AGG` and the JSON aggregates are declined outright: their merges re-associate or depend on arrival order.
+Real's own DOP-8 plan is nondeterministic on exactly those, and the simulator chooses a determinism real doesn't offer rather than reproducing the nondeterminism.
+
+**The error rule.** On any exception — a worker's row, or the producer's own once workers exist — the attempt is cancelled, every partial group is discarded, and the statement **re-runs serially from scratch**.
+The re-run is the canonical row order and raises the canonical error, so the probe-pinned preemption semantic above survives verbatim, by construction rather than by argument.
+
+**Serial order stays observable where it is observable.** Blocks go round-robin to fixed per-worker queues, so each worker sees rows in increasing order; the merge then keeps the lower-ordinal group's key tuple and representative row (`GroupState.FirstRowOrdinal`).
+That reproduces the serial answer where a group's identity is coarser than its rendering — a case-insensitive collation buckets `'abc'` with `'ABC'` and projects whichever arrived first.
+What ordinals can't settle — a `MIN` / `MAX` tie between values that compare equal and render differently — `Aggregator.TryMergeFrom` declines, which re-runs serially.
+
+**Why it is off.** Measured on the in-container SQL Server 2025 (same silicon), the fan-out is worth **1.2-2.4×** on a single-session battery: `conditional.agg_pivot` 160 → 79 ms, `json.value_70k` 106 → 44 ms, `funcwrap.upper_scan` 36 → 20 ms, `having.profitable_items` 64 → 23 ms.
+On the **concurrent** workload driver it is a loss: WideWorldImporters gains ~13% throughput, but AdventureWorks loses ~25-30% — and does so even across a phase in which the fan-out never engages again, so a handful of forks costs the process persistently.
+Thread lifetime (a retiring pool, and a 1 ms idle timeout) and block-allocation size were both ruled out by measurement; the mechanism of that residual cost is unexplained, and explaining it is the gate on ever flipping the default.
+
+Oracle: `ParallelAggregateTests` — serial-vs-parallel equality on every admitted kind and the boundary shapes, the error re-run, and each gate's decline read off the `AggregateDiagnostics` trace.
+
 ### Top-N over the grouped stream
 
 A small `TOP (n)` / `FETCH` whose ORDER BY runs over the *groups* takes the same bounded heap the row-level projection does (see [Top-N heap](#top-n-heap) for the mechanism, the eligibility rules and the tie behaviour — they are the same rules, read against the grouped stream).
@@ -515,6 +556,34 @@ Residual permissiveness: an *outer* column reference counts like a local one, so
 Closing that needs source resolution, not a parse-time count.
 Also, `STRING_AGG`'s `WITHIN GROUP (ORDER BY …)` and the JSON aggregates' key expression are parsed *after* the aggregate registers, so an aggregate or subquery hidden there escapes the Msg 130 bracket.
 
+## GROUP BY containment
+
+Msg 8120 (select list) / 8121 (HAVING) / 8127 (ORDER BY): outside an aggregate, every column reference has to be covered by the GROUP BY clause.
+A **bare** grouping column covers references to that column anywhere.
+A grouping **expression** covers a projection *sub-expression that matches it* — not the columns it happens to name.
+Probed against SQL Server 2025 (2026-08-05):
+
+| Statement (over `GROUP BY a + 1` unless shown) | Real |
+| --- | --- |
+| `SELECT a + 1` | runs |
+| `SELECT (a + 1) * 2` | runs |
+| `SELECT ((a + 1))`, `GROUP BY (a + 1)` | runs — parens are transparent |
+| `SELECT CAST(a + 1 AS bigint)` | runs — the match is on the inner node |
+| `SELECT YEAR(d) * 100 + MONTH(d)` over `GROUP BY YEAR(d), MONTH(d)` | runs |
+| `SELECT a + 1 FROM t AS x GROUP BY x.a + 1` | runs — the qualifier's spelling doesn't enter it |
+| `SELECT a` | Msg 8120 |
+| `SELECT a + 0` | Msg 8120 — structural, not algebraic |
+| `SELECT 1 + a` | Msg 8120 — operand order counts |
+| `SELECT a + 1` over `GROUP BY a + 1.0` | Msg 8120 — the literal's type counts |
+| `SELECT a + b` over `GROUP BY b + a` | Msg 8120, once per column |
+
+The walk carries the covering predicate down the tree (`ColumnReferenceVisitor.CoversSubtree`), so it stops the moment a node matches a grouping expression and every reference that reaches the check is one nothing covered.
+A node's identity is its `DebugDisplay()` with qualifiers dropped, compared case-insensitively; the normalization is applied to both sides, so it can only *merge* keys — the cost is the occasional over-permissive match across a join, which is the safe direction.
+
+The message names the object the FROM clause **wrote**, not the alias: `SELECT a, b FROM t AS x GROUP BY a` reports `'t.b'`, a self-join reports the table twice, a schema-qualified source keeps its schema (`'dbo.t.b'`), and a source with no object of its own falls back to its alias (a derived table `'z.b'`, a CTE `'c.b'`, a table variable `'@t.b'`) — all probed 2026-08-05.
+
+The traversal's own reach is the limit: only the composite expression kinds that override `VisitColumnReferencesCore` are descended (arithmetic, concatenation, parentheses, CAST / CONVERT, COLLATE, negation, and the length / spatial / hierarchyid / XML members), so a column buried in a `CASE` arm or a scalar function's argument is never visited — see the over-permissive register in [`backlog.md`](backlog.md#over-permissive-register).
+
 ## DISTINCT over a grouped query
 
 `DISTINCT` dedupes the **grouped** projection, before ORDER BY and before any row limit.
@@ -623,6 +692,36 @@ Cross-aggregate Msg 8711 isn't modeled (EF doesn't emit).
   Divergence: with no ORDER BY the row order a `ROWS` frame counts along is unspecified, and real doesn't run it in the emitted order for every bound pair — a frame ending at `UNBOUNDED FOLLOWING` counts opposite to the rows it emits (probe-confirmed), which the simulator's straight partition-order walk doesn't reproduce.
   The `PRECEDING`-anchored bounds, which is what the shape is written for, match.
 - Errors: `STRING_AGG OVER` → Msg 4113; `COUNT(DISTINCT) OVER` / `SUM(DISTINCT) OVER` → Msg 10759; windowed function in WHERE/HAVING/GROUP BY/ON → Msg 4108.
+
+### RANGE-frame ORDER BY (Msg 8728)
+
+A window whose frame is `RANGE` may not order by an expression of a MAX (LOB) type — `varchar(max)`, `nvarchar(max)`, `varbinary(max)` — and real answers **Msg 8728** class 16 state 1, "ORDER BY list of RANGE window frame cannot contain expressions of LOB type."
+Probed against SQL Server 2025 (2026-08-05); the line it draws is narrow enough that the accepted neighbours are the more informative half:
+
+| Shape | Real |
+| --- | --- |
+| `SUM(n) OVER (ORDER BY <max col>)` — the default frame an ORDER BY confers | Msg 8728 |
+| `… RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` written out | Msg 8728 |
+| `… ROWS UNBOUNDED PRECEDING` — same ordering, other frame kind | accepted |
+| `MAX` / `COUNT(*)` / `FIRST_VALUE` / `LAST_VALUE` / **`CUME_DIST`** over a max-typed ordering | Msg 8728 |
+| `ROW_NUMBER` / `RANK` / `DENSE_RANK` / `NTILE` / `PERCENT_RANK` / `LAG` / `LEAD` over the same | accepted |
+| `PARTITION BY <max col> ORDER BY <int col>` | accepted |
+| statement-level `ORDER BY <max col>` | accepted |
+| `ORDER BY <int col>, <max col>` — any position in the list | Msg 8728 |
+| `ORDER BY <max col> + N'x'` — a computed expression of the type | Msg 8728 |
+| `WINDOW w AS (ORDER BY <max col>)` | Msg 8728 |
+| `ORDER BY CAST(<max col> AS nvarchar(50))` | accepted |
+| over an empty rowset | Msg 8728 |
+
+`CUME_DIST` is the surprise: it is the one ranking-shaped function that carries a RANGE frame, which is why `WindowExpression.HasRangeFrame` names it alongside the aggregate windows and the value pair.
+`text` / `ntext` / `image` reach **Msg 306** and `xml` **Msg 305** on real ahead of this check, so the gate matches only the three MAX forms; a term whose static type this parse can't settle declines the check rather than reporting an error at a position that never had one.
+
+Msg 8728 is also a member of the **transaction-aborting** error class — it rolls the session's whole transaction stack back and a `BEGIN TRY` can't catch it.
+See [`transactions.md`](transactions.md#the-transaction-aborting-error-class) for the probed evidence and the neighbours that don't behave that way.
+
+**Not modeled yet:** the sibling size rule, **Msg 8729** ("ORDER BY list of RANGE window frame has total size of N bytes. Largest size supported is 900 bytes."), which fires when the RANGE ORDER BY list's declared byte widths sum past 900 — `nvarchar(450)` (900 bytes) passes, `nvarchar(451)` (902) and `varchar(8000)` don't, two keys sum, and the LOB check wins when both apply.
+It is transaction-aborting in the same way.
+Closing it wants a declared-byte-width answer for an arbitrary expression's `SqlType`, which the length-unspecified container forms (see the declared-string-widths entry in [`backlog.md`](backlog.md)) don't currently give — and a wrong width there would refuse a query real accepts.
 
 ### Bounded per-partition `ROW_NUMBER()` selection
 

@@ -12,7 +12,7 @@ This surface is what makes **EF Core 9/10's `Database.Migrate()` work end-to-end
   `APPLOCK_MODE`, `sp_releaseapplock`'s not-held check, and the `sys.dm_tran_locks` APPLICATION rows read the ledgers; the manager holds enforce conflicts.
 - **Transaction-owned acquires ride `SimulatedDbTransaction.HeldLocks`** (the generic tx-scoped release list) for their manager release at COMMIT / ROLLBACK; `TransactionAppLocks` clears alongside in `ReleaseAllLocks`.
   An explicit `sp_releaseapplock` retires one matching `HeldLocks` entry so transaction end doesn't double-release.
-  Session-owned locks release at `Close()` / `Dispose()` (`ReleaseSessionAppLocks`, idempotent).
+  Session-owned locks release at `Close()` / `Dispose()` (`ReleaseSessionAppLocks`, idempotent) — including the `Close()` + `Dispose()` an abandoned session's reclamation runs, so a connection dropped without disposing stops holding them (see [`locking.md`](locking.md#abandoned-session-reclamation)).
 - **`LockManager.TryAcquire`** is the non-throwing acquire core added for this feature (the throwing `Acquire` wraps it): outcomes Granted / GrantedAfterWait / TimedOut / Deadlocked map to sp_getapplock's return codes.
   It reuses the full existing machinery — compatibility matrix, re-entrance counting, same-thread + cross-thread deadlock detection, gate waits.
 - Modes map 1:1 onto existing `LockMode` members: Shared, Update, IntentShared, IntentExclusive, Exclusive.

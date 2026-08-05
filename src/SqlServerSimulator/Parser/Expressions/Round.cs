@@ -33,6 +33,8 @@ internal sealed class Round : Expression
             this.function = Parse(context.MoveNextRequiredReturnSelf());
     }
 
+    internal override bool ParallelSafe => this.value.ParallelSafe && this.length.ParallelSafe && this.function?.ParallelSafe != false;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var v = MathScalars.CoerceImplicit(this.value.Run(runtime));

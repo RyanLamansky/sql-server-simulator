@@ -86,7 +86,7 @@ internal sealed partial class TdsSession
         {
             var rows = TdsBulkLoadReader.ReadRows(message.Payload);
             var affected = simulation.ExecuteBulkInsert(plan, rows, this.connection!);
-            this.WriteDatabaseChangeIfAny(writer);
+            this.WriteSessionEnvChangesIfAny(writer);
             writer.WriteDone(Tds.DoneCount, affected);
         }
         catch (SimulatedSqlException ex)

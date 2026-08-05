@@ -13,6 +13,8 @@ internal sealed class Upper(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
+    internal override bool ParallelSafe => this.source.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var raw = source.Run(runtime);

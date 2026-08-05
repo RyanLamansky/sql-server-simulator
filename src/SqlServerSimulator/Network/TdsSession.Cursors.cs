@@ -537,7 +537,7 @@ internal sealed partial class TdsSession
     private void CompleteCursorRpc(TdsTokenWriter writer, bool moreRequests, bool error)
     {
         if (!moreRequests)
-            this.WriteDatabaseChangeIfAny(writer);
+            this.WriteSessionEnvChangesIfAny(writer);
         var status = (ushort)((error ? Tds.DoneError : 0) | (moreRequests ? Tds.DoneMore : Tds.DoneFinal));
         writer.WriteDoneToken(Tds.TokenDoneProc, status, 0);
     }

@@ -13,6 +13,13 @@
   The simulator dedupes by `(page, slot)` via a side-channel byte[]→address map.
   LEFT JOIN with no right-side match still surfaces the target (RHS sees NULL).
   The same dedupe carries **UPDATE through a view over a join** — real accepts one whose SET list lands entirely in a single base table, and the join-multiplied target updates once there too — see [`programmable.md`](programmable.md#dml-through-a-join-view).
+- **A SET assignment target admits one qualifier: the write target as written.**
+  The leading name, its alias when it has one, and any schema / database prefix in front of it (`UPDATE t SET dbo.t.v = 5` binds; `UPDATE a SET t.v = 5 FROM t a` does not, the alias having hidden the table name).
+  Everything else is **Msg 4104** naming the whole dotted form, ahead of the leaf lookup and whether or not the leaf names a real column; a matching qualifier with an unknown leaf is the ordinary Msg 207.
+  A joined UPDATE writes only its target, so a join source's column is Msg 4104 there too, and a MERGE's own alias hides its table name the same way.
+  A fifth segment is Msg 4104 with the whole name, from `MultiPartName` itself.
+  Probed against SQL Server 2025 (2026-08-05); oracle `DmlTargetQualifierTests`.
+- **A `VALUES` cell has no column scope at all**, so every qualified reference in one is Msg 4104 — the insert target's own name included (`INSERT INTO t (id, v) VALUES (t.id, 1)`) — while an unqualified unknown name stays Msg 207.
 - **OUTPUT** supported only when the leading identifier resolves to a real table name; OUTPUT + alias-form multi-source → `NotSupportedException` (EF doesn't combine those).
 - **Multi-column SET evaluates RHS against pre-update snapshot** — `UPDATE t SET a = 100, b = a + 1` over `(a=10, b=20)` → `(a=100, b=11)`.
   Scalar subquery RHS sees pre-update state.

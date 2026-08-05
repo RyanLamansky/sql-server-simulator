@@ -192,7 +192,7 @@ partial class Simulation
     private void BindProcedureBodyAtCreate(
         ParserContext outerContext,
         string procedureName,
-        IReadOnlyList<ProcedureParameter> parameters,
+        List<ProcedureParameter> parameters,
         string bodyText,
         int bodyLineOffset)
     {
@@ -232,7 +232,7 @@ partial class Simulation
     private void BindScalarFunctionBodyAtCreate(
         ParserContext outerContext,
         string functionName,
-        IReadOnlyList<UdfParameter> parameters,
+        List<UdfParameter> parameters,
         SqlType returnType,
         string bodyText,
         int bodyLineOffset)
@@ -253,7 +253,7 @@ partial class Simulation
     private void BindMultiStatementTvfBodyAtCreate(
         ParserContext outerContext,
         string functionName,
-        IReadOnlyList<UdfParameter> parameters,
+        List<UdfParameter> parameters,
         string returnVariableName,
         HeapColumn[] outputColumns,
         KeyConstraint[] keyConstraints,
@@ -301,7 +301,7 @@ partial class Simulation
     /// Seeds a function's declared parameters as typed NULL variable slots, so
     /// a body reference to <c>@p</c> binds instead of raising Msg 137.
     /// </summary>
-    private static Dictionary<string, VariableSlot> SeedFunctionParameters(IReadOnlyList<UdfParameter> parameters)
+    private static Dictionary<string, VariableSlot> SeedFunctionParameters(List<UdfParameter> parameters)
     {
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         foreach (var param in parameters)

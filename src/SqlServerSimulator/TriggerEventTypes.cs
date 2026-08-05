@@ -414,6 +414,6 @@ internal static class TriggerEventTypes
     /// The leaf events reachable under <paramref name="group"/> (ascending type
     /// order). Empty for a non-group type.
     /// </summary>
-    internal static IReadOnlyList<TriggerEventType> LeafClosure(int group) =>
+    internal static TriggerEventType[] LeafClosure(int group) =>
         LeafClosureByGroup.TryGetValue(group, out var leaves) ? leaves : [];
 }

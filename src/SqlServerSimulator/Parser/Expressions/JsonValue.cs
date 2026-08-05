@@ -32,6 +32,8 @@ internal sealed class JsonValue : Expression
         this.pathInput = Parse(context.MoveNextRequiredReturnSelf());
     }
 
+    internal override bool ParallelSafe => this.jsonInput.ParallelSafe && this.pathInput.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var jsonValue = this.jsonInput.Run(runtime);

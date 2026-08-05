@@ -79,6 +79,38 @@ public sealed class TransactionManagerFBeginXactTests
         AreEqual(2UL, envs[0].OldDescriptor);
     }
 
+    [TestMethod]
+    public void Begin_OnAnOpenTransaction_Nests()
+    {
+        // Real nests a TM begin onto an open transaction — the parallel-
+        // transaction refusal is SqlClient's client-side rule, not the
+        // server's. A manual-commit driver that lost track of a transaction the
+        // engine ended sends exactly this, and it must not fault the session.
+        using var fixture = new TmFixture();
+        _ = fixture.Run(Begin(isolation: 2));
+        var response = fixture.Run(Begin(isolation: 2));
+
+        IsFalse(ContainsErrorToken(response), "a nested TM begin faulted");
+        AreEqual(2, fixture.TranCount);
+    }
+
+    [TestMethod]
+    public void CommitOrRollback_AfterTheEngineEndedTheTransaction_IsAccepted()
+    {
+        // A transaction-aborting error (Msg 8728) rolls the whole stack back
+        // underneath the TM layer. The client hasn't heard yet, so its commit /
+        // rollback still arrives, and it must find nothing left to do rather
+        // than a completed transaction to re-finish.
+        foreach (var requestType in new[] { Tds.TmCommitTransaction, Tds.TmRollbackTransaction })
+        {
+            using var fixture = new TmFixture();
+            _ = fixture.Run(Begin(isolation: 2));
+            fixture.EndTransactionInTheEngine();
+            var response = fixture.Run(CommitOrRollback(requestType, beginNext: false));
+            IsFalse(ContainsErrorToken(response), $"TM request {requestType} faulted after an engine-ended transaction");
+        }
+    }
+
     // --- request builders -------------------------------------------------
 
     // ALL_HEADERS length 4 (empty) so SkipAllHeaders lands on the request body.
@@ -155,6 +187,15 @@ public sealed class TransactionManagerFBeginXactTests
             this.connection = simulation.CreateDbConnection();
             this.connection.Open();
         }
+
+        /// <summary>Session nesting depth as the engine sees it.</summary>
+        public int TranCount => this.connection.CurrentTransaction?.TranCount ?? 0;
+
+        /// <summary>
+        /// Ends the session's transaction the way a transaction-aborting error
+        /// does — through the engine, behind the TM layer's back.
+        /// </summary>
+        public void EndTransactionInTheEngine() => this.connection.CurrentTransaction?.Rollback();
 
         public byte[] Run(TdsMessage message)
         {

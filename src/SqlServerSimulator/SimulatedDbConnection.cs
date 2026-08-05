@@ -22,10 +22,25 @@ public sealed class SimulatedDbConnection : DbConnection
     internal SimulatedDbConnection(Simulation simulation)
     {
         this.Simulation = simulation;
-        this.Spid = simulation.AllocateSpid();
+        this.Session = new SessionToken(simulation.AllocateSpid())
+        {
+            Owner = new WeakReference<SimulatedDbConnection>(this, trackResurrection: true),
+        };
         this.CurrentDatabase = ResolveInitialDatabase(simulation);
         simulation.RegisterConnection(this);
+        // Opening a session is the cheapest already-taken path there is, so it
+        // carries the sweep that reclaims sessions whose connection was
+        // abandoned without a Dispose.
+        _ = simulation.ReclaimAbandonedSessions();
     }
+
+    /// <summary>
+    /// This session's identity as every shared structure records it — lock
+    /// holds, <c>##temp</c> ownership, the active-SNAPSHOT registry and the
+    /// simulation's session list all name the token rather than the connection.
+    /// See <see cref="SessionToken"/> for why the indirection is one-way.
+    /// </summary>
+    internal readonly SessionToken Session;
 
     /// <summary>
     /// The session's security identity: original login, base database
@@ -88,7 +103,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// in <c>@@SPID</c> / <c>sys.dm_exec_sessions.session_id</c> if those
     /// are ever projected.
     /// </summary>
-    internal readonly int Spid;
+    internal int Spid => this.Session.Spid;
 
     /// <summary>
     /// Session-scoped <c>@@LOCK_TIMEOUT</c>. Default is <c>-1</c> (wait
@@ -360,8 +375,14 @@ public sealed class SimulatedDbConnection : DbConnection
     /// conflicting holder whose <see cref="CurrentExecutingThreadId"/>
     /// matches the caller's thread can't release without the caller
     /// releasing first, so Msg 1205 fires immediately instead of waiting.
+    /// Lives on <see cref="Session"/> because the lock manager reads it about
+    /// other sessions, where only their tokens are in hand.
     /// </summary>
-    internal int? CurrentExecutingThreadId;
+    internal int? CurrentExecutingThreadId
+    {
+        get => this.Session.CurrentExecutingThreadId;
+        set => this.Session.CurrentExecutingThreadId = value;
+    }
 
     /// <summary>
     /// Resource this connection is currently blocked waiting to acquire,
@@ -373,7 +394,11 @@ public sealed class SimulatedDbConnection : DbConnection
     /// the snapshot is consistent) to spot a wait-for-graph cycle that
     /// includes this connection.
     /// </summary>
-    internal LockResource? WaitingOnResource;
+    internal LockResource? WaitingOnResource
+    {
+        get => this.Session.WaitingOnResource;
+        set => this.Session.WaitingOnResource = value;
+    }
 
     /// <summary>
     /// Mode this connection is currently waiting to acquire on
@@ -382,7 +407,11 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <c>LCK_M_&lt;mode&gt;</c> (e.g. <c>LCK_M_X</c>, <c>LCK_M_S</c>) and
     /// through <c>sys.dm_tran_locks.request_mode</c> for WAIT-status rows.
     /// </summary>
-    internal LockMode? WaitingForMode;
+    internal LockMode? WaitingForMode
+    {
+        get => this.Session.WaitingForMode;
+        set => this.Session.WaitingForMode = value;
+    }
 
     /// <summary>
     /// The database this session is pointed at. Defaults to the entry named
@@ -844,7 +873,7 @@ public sealed class SimulatedDbConnection : DbConnection
     {
         var manager = this.Simulation.LockManager;
         for (var i = this.SessionAppLocks.Count - 1; i >= 0; i--)
-            manager.Release(this.SessionAppLocks[i].LockResource, this.SessionAppLocks[i].Mode, this);
+            manager.Release(this.SessionAppLocks[i].LockResource, this.SessionAppLocks[i].Mode, this.Session);
         this.SessionAppLocks.Clear();
     }
 
@@ -861,10 +890,29 @@ public sealed class SimulatedDbConnection : DbConnection
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// The <paramref name="disposing"/> <see langword="false"/> arm is the
+    /// finalizer's — <see cref="System.ComponentModel.Component"/> already
+    /// gives every connection one, so a connection an application opened and
+    /// dropped without disposing reaches this method at some GC's discretion.
+    /// It hands itself to the simulation's abandoned-session queue (which
+    /// resurrects it) instead of tearing down here: the teardown rolls a
+    /// transaction back and pulses the lock manager's gate, and neither
+    /// belongs on the finalizer thread. Real SqlClient's finalizer closes the
+    /// socket the same way and the server resets the session; without this
+    /// arm the session's locks, <c>##temp</c> tables and version-store pin
+    /// would be held for the life of the process.
+    /// </remarks>
     protected override void Dispose(bool disposing)
     {
-        if (disposing)
+        if (!disposing)
         {
+            if (!this.Session.Reclaimed)
+                this.Simulation.EnqueueAbandonedSession(this);
+        }
+        else
+        {
+            this.Session.Reclaimed = true;
             this.CurrentTransaction?.Dispose();
             this.executionCancellation.Dispose();
             this.ReleaseSessionAppLocks();
@@ -891,7 +939,7 @@ public sealed class SimulatedDbConnection : DbConnection
             foreach (var name in this.Simulation.GlobalTempTables.Keys)
             {
                 if (this.Simulation.GlobalTempTables.TryGetValue(name, out var table)
-                    && ReferenceEquals(table.OwnerConnection, this))
+                    && ReferenceEquals(table.OwnerSession, this.Session))
                 {
                     _ = this.Simulation.GlobalTempTables.TryRemove(name, out _);
                 }

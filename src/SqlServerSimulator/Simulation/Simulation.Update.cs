@@ -140,38 +140,50 @@ partial class Simulation
             if (context.GetNextRequired() is not StringToken first)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
-            string columnName;
-            Expression lhsForCompound;
-            var afterName = context.GetNextRequired();
-            if (afterName is Operator { Character: '.' })
+            // The assignment target carries the same multi-part grammar a read
+            // does — `t.col`, `schema.t.col`, `db.schema.t.col` all bind, and a
+            // fifth segment is Msg 4104 from WithAddedPart.
+            var setTarget = new MultiPartName(first.Value);
+            context.MoveNextRequired();
+            while (context.Token is Operator { Character: '.' })
             {
-                if (context.GetNextRequired() is not StringToken col)
+                if (context.GetNextRequired() is not StringToken part)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                columnName = col.Value;
-                lhsForCompound = new Reference(first.Value, col.Value);
+                setTarget = setTarget.WithAddedPart(part.Value);
                 context.MoveNextRequired();
-
-                // `col.modify('…')` is the mutator form of a SET clause — the
-                // whole clause, with no assignment operator. Only a one-part
-                // column name carries it: real answers Msg 102 for
-                // `t.col.modify(…)`, which falls out of the assignment-operator
-                // check below since the three-part shape lands here instead.
-                if (XmlMethodCall.IsKnownMethodName(columnName) && context.Token is Operator { Character: '(' })
-                {
-                    rawAssignments.Add(ParseXmlMutatorSetClause(context, first.Value, columnName));
-                    if (context.Token is Operator { Character: ',' })
-                        continue;
-                    break;
-                }
             }
-            else
+
+            var columnName = setTarget.Leaf;
+
+            // `col.modify('…')` is the mutator form of a SET clause — the
+            // whole clause, with no assignment operator. Only a one-part
+            // column name carries it: real answers Msg 102 for
+            // `t.col.modify(…)`, which falls out of the assignment-operator
+            // check below since the three-part shape lands here instead.
+            if (setTarget.Count == 2 && XmlMethodCall.IsKnownMethodName(columnName) && context.Token is Operator { Character: '(' })
             {
-                columnName = first.Value;
-                lhsForCompound = new Reference(columnName);
+                rawAssignments.Add(ParseXmlMutatorSetClause(context, setTarget[0], columnName));
+                if (context.Token is Operator { Character: ',' })
+                    continue;
+                break;
             }
 
             if (TryConsumeAssignmentOperator(context) is not char assignOp)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
+
+            // The only qualifier an assignment target admits is the write
+            // target as written — the leading name, alias included. Real
+            // reports every other one as Msg 4104 naming the whole dotted
+            // form, ahead of the leaf lookup, whether the leaf names a real
+            // column or not, and whether the statement joins or not (probed
+            // against SQL Server 2025, 2026-08-05: `UPDATE t SET zz.id = 5`,
+            // `UPDATE a SET t.id = 5 FROM t a`, `UPDATE a SET b.w = 1 FROM t a
+            // JOIN u b …`, `UPDATE v SET t.id = 5` through a view, and
+            // `MERGE t AS a … UPDATE SET t.v = 1`).
+            if (!Selection.QualifierIsDmlTarget(context.CurrentDatabase.Collation, leadingIdent, setTarget))
+                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(setTarget.ToString());
+
+            var lhsForCompound = new Reference(setTarget);
 
             context.MoveNextRequired();
             var rhs = Expression.Parse(context);

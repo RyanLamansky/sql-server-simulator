@@ -58,6 +58,8 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
             : type.WithCollation(collation, Coercibility.Explicit);
     }
 
+    internal override bool ParallelSafe => this.Inner.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = this.Inner.Run(runtime);
@@ -85,7 +87,7 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
 
     internal override string DebugDisplay() => $"{this.Inner.DebugDisplay()} COLLATE {this.ResolvedCollation.Name}";
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.Inner.VisitColumnReferences(visit);
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => this.Inner.VisitColumnReferences(visit);
 
     internal override bool IsRowIndependent => this.Inner.IsRowIndependent;
 

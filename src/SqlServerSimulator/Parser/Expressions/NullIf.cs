@@ -84,6 +84,8 @@ internal sealed class NullIf : Expression
         _ => null,
     };
 
+    internal override bool ParallelSafe => this.a.ParallelSafe && this.b.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var av = this.a.Run(runtime);

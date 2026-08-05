@@ -43,6 +43,29 @@ internal abstract class Aggregator
         throw new NotSupportedException($"{this.GetType().Name} does not support incremental removal.");
 
     /// <summary>
+    /// Folds <paramref name="other"/>'s accumulated state into this one, so a
+    /// group whose rows were split across two accumulators reads as if one
+    /// accumulator had seen them all. <paramref name="other"/> must be the same
+    /// concrete kind, built from the same <see cref="AggregateExpression"/>;
+    /// it is dead afterwards.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when the fold is <b>exact</b> — the merged state
+    /// is the state a single serial pass over the concatenated rows would have
+    /// reached, value for value. <see langword="false"/> when it isn't, which
+    /// aborts the parallel attempt and re-runs the statement serially.
+    /// </returns>
+    /// <remarks>
+    /// The default is <see langword="false"/>: a kind whose merge is inexact
+    /// (the <c>double</c>-accumulating statistical family, where partial sums
+    /// re-associate) or order-dependent (<c>STRING_AGG</c>, the JSON
+    /// aggregates) declines by saying nothing. The engagement gate in
+    /// <c>Selection.Execution.AggregateParallel.cs</c> refuses those kinds up
+    /// front so the decline costs no work; this default is the second net.
+    /// </remarks>
+    public virtual bool TryMergeFrom(Aggregator other) => false;
+
+    /// <summary>
     /// Builds a fresh aggregator for the given expression. Caller supplies
     /// the operand's resolved type (some aggregators use it to choose an
     /// accumulator) and the aggregate's overall result type (used to size

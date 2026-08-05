@@ -73,6 +73,39 @@ internal sealed class MinMaxAggregator : Aggregator
             bag[value] = n - 1;
     }
 
+    /// <summary>
+    /// Exact whenever the two extremes are ordered, and whenever a tie is
+    /// between values a serial scan could not have told apart. A tie between
+    /// values that compare equal but render differently — <c>'abc'</c> against
+    /// <c>'ABC'</c> under a case-insensitive collation, a trailing-space
+    /// varchar, a decimal carrying a different scale — is where serial order
+    /// becomes observable (a running extreme keeps the <em>first</em> of a tie,
+    /// and a merge has no scan order to consult), so it declines and the
+    /// statement re-runs serially.
+    /// </summary>
+    public override bool TryMergeFrom(Aggregator other)
+    {
+        var source = (MinMaxAggregator)other;
+        if (this.multiset is not null || source.multiset is not null)
+            return false;
+        if (!source.sawAny)
+            return true;
+        if (!this.sawAny)
+        {
+            this.current = source.current;
+            this.sawAny = true;
+            return true;
+        }
+
+        var cmp = source.current.CompareTo(this.current);
+        if ((this.isMax && cmp > 0) || (!this.isMax && cmp < 0))
+        {
+            this.current = source.current;
+            return true;
+        }
+        return cmp != 0 || this.current.IsIdenticalTo(source.current);
+    }
+
     public override SqlValue Result()
     {
         if (this.multiset is { } bag)

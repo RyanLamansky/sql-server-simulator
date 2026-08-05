@@ -30,6 +30,8 @@ internal sealed class DateAdd : Expression
         this.source = Parse(context.MoveNextRequiredReturnSelf());
     }
 
+    internal override bool ParallelSafe => this.number.ParallelSafe && this.source.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = DatePartKinds.CoerceDateArgumentImplicit(source.Run(runtime));

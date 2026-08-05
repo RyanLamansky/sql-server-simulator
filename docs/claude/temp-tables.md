@@ -42,9 +42,10 @@ Lifecycle, cross-conn isolation, and Msg 208 from other sessions all probe-confi
 ## Global temp tables (`##foo`)
 Instance-wide `ConcurrentDictionary<string, HeapTable> GlobalTempTables` on `Simulation`; routed by `BatchContext.TryResolveTable` via `IsGlobalTempName` (leading `##`, length ≥ 2 — bare `##` is a valid name, probe-confirmed).
 Any session can SELECT / INSERT / UPDATE / DELETE / DROP / TRUNCATE a `##foo` regardless of which session created it.
-Cross-session visibility, the creating session's identity tracked via `HeapTable.OwnerConnection`, and owner-disconnect auto-drop all probe-confirmed against SQL Server 2025 (pooling disabled — the prior probe with default `SqlConnection` pooling masked the auto-drop because `Close()` returned the connection to the pool rather than disconnecting).
+Cross-session visibility, the creating session's identity tracked via `HeapTable.OwnerSession`, and owner-disconnect auto-drop all probe-confirmed against SQL Server 2025 (pooling disabled — the prior probe with default `SqlConnection` pooling masked the auto-drop because `Close()` returned the connection to the pool rather than disconnecting).
 
-- **Auto-drop on owner disconnect**: `SimulatedDbConnection.Dispose` walks `Simulation.GlobalTempTables` and removes every entry whose `OwnerConnection` references this connection.
+- **Auto-drop on owner disconnect**: `SimulatedDbConnection.Dispose` walks `Simulation.GlobalTempTables` and removes every entry whose `OwnerSession` is this connection's.
+  The stamp is the session token rather than the connection so a `##temp` doesn't pin the session that created it — a connection abandoned without a `Dispose` drops its `##temp` tables through the same walk when its session is reclaimed (see [`locking.md`](locking.md#abandoned-session-reclamation)).
   Probe-confirmed against SQL Server 2025 that the drop fires unconditionally on owner-disconnect, regardless of other sessions' prior or in-flight references — Microsoft Learn's "dropped when all tasks have stopped referencing" wording is misleading.
   A non-owner session mid-statement at the moment of owner-disconnect observes Msg 208 on its next reference to the table; no reference counting modeled (or needed).
 - **Multi-part qualifiers** (`tempdb..##q`, `tempdb.dbo.##q`) accepted and routed the same as bare `##q` — `BatchContext.TryResolveTable`'s `##` arm ignores qualifier segments, same convention as `#foo`.

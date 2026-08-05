@@ -344,6 +344,11 @@ Commit (7) / rollback (8) map to the transaction object and answer ENVCHANGE 9 /
 `SqlTransaction.Save(name)` (9) and `Rollback(name)` route through SQL text (`SAVE TRANSACTION` / `ROLLBACK TRANSACTION [name]`, bracket-escaped); rollback-to-savepoint keeps the transaction alive so no transaction ENVCHANGE is emitted (fBeginXact isn't meaningful there).
 **Names in TM requests are B_VARBYTE** — the length prefix counts UTF-16 *bytes*, unlike the char-counted B_VARCHAR elsewhere (SqlClient writes `name.Length * 2`); misreading it as B_VARCHAR overruns the payload on every savepoint call.
 
+**When the engine ends the transaction underneath the TM layer** — a transaction-aborting error (Msg 8728; see [`transactions.md`](transactions.md#the-transaction-aborting-error-class)), a deadlock victim, a SNAPSHOT update conflict — the response emits the rollback ENVCHANGE (`WriteTransactionEndIfAny`, on the same per-final-DONE seam that reports a mid-message `USE`) and the session drops its handle on the transaction.
+Two consequences, both matching what a live ODBC session shows: the driver reads the ENVCHANGE as "open the next one", so `@@TRANCOUNT` reads **1** on the following statement where the same session over sqlcmd reads 0; and a commit / rollback the client had already decided to send finds nothing left to do rather than a completed transaction to re-finish.
+A **begin arriving on an open transaction nests** (`@@TRANCOUNT` rises) rather than raising — the parallel-transaction refusal is SqlClient's client-side rule, not the server's, and a manual-commit driver that lost track does send one.
+Oracle: `TransactionManagerFBeginXactTests` (Tests.Internal).
+
 ## Type wire codec
 
 Nullable wire variants throughout (INTN 0x26, BITN 0x68, FLTN 0x6D, MONEYN 0x6E, DATETIMN 0x6F, DECIMALN 0x6A, GUIDN 0x24) — legal for non-nullable data.

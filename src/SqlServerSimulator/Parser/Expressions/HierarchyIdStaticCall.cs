@@ -79,6 +79,6 @@ internal sealed class HierarchyIdStaticCall : Expression
     internal override bool ResultIsNullable(NullabilityContext context) =>
         this.argument is not null && this.argument.ResultIsNullable(context);
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit) =>
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) =>
         this.argument?.VisitColumnReferences(visit);
 }

@@ -71,7 +71,7 @@ partial class Simulation
             UsesAnsiNulls = batch.Connection.AnsiNulls,
         };
         if (isGlobalTemp)
-            destTable.OwnerConnection = batch.Connection;
+            destTable.OwnerSession = batch.Connection.Session;
         // SELECT INTO creates a table, so it collides with every name in the
         // shared object namespace — a synonym, view or procedure of that name
         // raises Msg 2714 just as another table would (probe-confirmed).

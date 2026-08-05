@@ -2310,7 +2310,7 @@ internal sealed partial class Selection
     // per-row lock / conflict check (RC probe, READPAST skip, NOLOCK pass-through
     // — exactly what the full scan applies, but only to the seeked rows).
     private static IEnumerable<byte[]> MaterializeWithLockChecks(
-        HeapTable table, BatchContext batch, DataLockPlan plan, IReadOnlyList<(int Page, int Slot)> candidates)
+        HeapTable table, BatchContext batch, DataLockPlan plan, List<(int Page, int Slot)> candidates)
     {
         // Dedup + tombstone-skip mirror the full scan's EnumerateRowsWithAddress
         // (which skips tombstoned / forward-target slots and yields each row once)
@@ -2478,7 +2478,7 @@ internal sealed partial class Selection
     // live-key verify (the mutation loop's full-predicate re-check is the residual
     // filter, exactly as the query path leans on its residual WHERE).
     private static IEnumerable<(int Page, int Slot, byte[] Bytes)> MaterializeMutationCandidates(
-        HeapTable table, IReadOnlyList<(int Page, int Slot)> candidates)
+        HeapTable table, List<(int Page, int Slot)> candidates)
     {
         var seen = new HashSet<(int, int)>();
         foreach (var (page, slot) in candidates)
@@ -2507,7 +2507,7 @@ internal sealed partial class Selection
     // The matched equality conjuncts stay in the residual WHERE, so any candidate
     // whose resolved version doesn't actually match the probe is filtered there.
     private static IEnumerable<byte[]> MaterializeSnapshotCandidates(
-        HeapTable table, BatchContext batch, long snapshotXid, IReadOnlyList<(int Page, int Slot)> bucketCandidates)
+        HeapTable table, BatchContext batch, long snapshotXid, List<(int Page, int Slot)> bucketCandidates)
     {
         var tx = batch.Connection.CurrentTransaction;
         var seen = new HashSet<(int, int)>();

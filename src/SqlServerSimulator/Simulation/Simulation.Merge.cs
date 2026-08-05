@@ -199,7 +199,7 @@ partial class Simulation
     /// UPDATE / DELETE). Denials surface as Msg 229. The source read is not
     /// separately checked — a documented gap.
     /// </summary>
-    private static void CheckMergePermissions(BatchContext batch, MultiPartName destinationName, SchemaObject destination, IReadOnlyList<WhenClause> whenClauses)
+    private static void CheckMergePermissions(BatchContext batch, MultiPartName destinationName, SchemaObject destination, List<WhenClause> whenClauses)
     {
         var target = PermissionEnforcement.SecurableFor(batch, destinationName, destination);
         if (!PermissionEnforcement.Applies(batch, batch.DatabaseFor(target)))
@@ -280,11 +280,11 @@ partial class Simulation
             var tuples = ParseValuesTuples(context);
             sourceSchema = new SqlType[tuples[0].Length];
             for (var i = 0; i < tuples[0].Length; i++)
-                sourceSchema[i] = tuples[0][i].GetSqlType(context.Batch, name => throw SimulatedSqlException.InvalidColumnName(name));
+                sourceSchema[i] = tuples[0][i].GetSqlType(context.Batch, name => throw SimulatedSqlException.UnboundColumnReference(name));
             selectionColumnNames = new string[tuples[0].Length];
             materialize = batch =>
             {
-                var runtime = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch);
+                var runtime = new RuntimeContext(name => throw SimulatedSqlException.UnboundColumnReference(name), batch);
                 var rows = new List<SqlValue[]>(tuples.Count);
                 foreach (var tuple in tuples)
                 {
@@ -656,7 +656,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
 
-            clauses.Add(ParseMergeAction(context, kind, searchCondition, destinationTable, sourceView, ResolveType));
+            clauses.Add(ParseMergeAction(context, kind, searchCondition, destinationTable, sourceView, targetAlias, ResolveType));
         }
 
         return clauses.Count == 0 ? throw SimulatedSqlException.SyntaxErrorNear(context) : clauses;
@@ -668,6 +668,7 @@ partial class Simulation
         BooleanExpression? searchCondition,
         HeapTable destinationTable,
         View? sourceView,
+        string targetAlias,
         Func<MultiPartName, SqlType> resolveType)
     {
         // A MERGE action's own expressions get real's dedicated refusal
@@ -683,7 +684,7 @@ partial class Simulation
             return context.Token switch
             {
                 ReservedKeyword { Keyword: Keyword.Insert } => ParseMergeInsertAction(context, kind, searchCondition, destinationTable, sourceView, resolveType),
-                ReservedKeyword { Keyword: Keyword.Update } => ParseMergeUpdateAction(context, kind, searchCondition, destinationTable, sourceView, resolveType),
+                ReservedKeyword { Keyword: Keyword.Update } => ParseMergeUpdateAction(context, kind, searchCondition, destinationTable, sourceView, targetAlias, resolveType),
                 ReservedKeyword { Keyword: Keyword.Delete } => ParseMergeDeleteAction(context, kind, searchCondition),
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
@@ -801,6 +802,7 @@ partial class Simulation
         BooleanExpression? searchCondition,
         HeapTable destinationTable,
         View? sourceView,
+        string targetAlias,
         Func<MultiPartName, SqlType> resolveType)
     {
         if (kind == WhenClauseKind.NotMatchedByTarget)
@@ -818,22 +820,30 @@ partial class Simulation
             {
                 if (context.GetNextRequired() is not StringToken first)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                string columnName;
-                var afterName = context.GetNextRequired();
-                if (afterName is Operator { Character: '.' })
+                var setTarget = new MultiPartName(first.Value);
+                context.MoveNextRequired();
+                while (context.Token is Operator { Character: '.' })
                 {
-                    if (context.GetNextRequired() is not StringToken col)
+                    if (context.GetNextRequired() is not StringToken part)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
-                    columnName = col.Value;
+                    setTarget = setTarget.WithAddedPart(part.Value);
                     context.MoveNextRequired();
                 }
-                else
-                {
-                    columnName = first.Value;
-                }
 
+                var columnName = setTarget.Leaf;
                 if (context.Token is not Operator { Character: '=' })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
+
+                // The assignment target admits only the merge target as
+                // written — its alias when one was given, so
+                // `MERGE t AS a … UPDATE SET t.v = 1` is Msg 4104 even though
+                // `t` is the base table (probed 2026-08-05).
+                if (setTarget.ImmediateQualifier is { } setQualifier
+                    && !context.Batch.CurrentDatabase.Collation.Equals(setQualifier, targetAlias))
+                {
+                    throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(setTarget.ToString());
+                }
+
                 context.MoveNextRequired();
                 var rhs = Expression.Parse(context);
 

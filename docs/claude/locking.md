@@ -94,7 +94,7 @@ The hinted tables are recorded on the `BatchContext` when the source's data lock
 
 ## Lock-owner / lock-scope model
 
-Lock owner is always the `SimulatedDbConnection`.
+Lock owner is always the session — a `SessionToken`, reached from a connection as `connection.Session` (see [Abandoned-session reclamation](#abandoned-session-reclamation) for why the recorded owner is the token and not the connection).
 Scope (when the lock releases) depends on the mode and surrounding transaction state:
 
 | Acquired at                   | Scope                                 |
@@ -119,6 +119,57 @@ A concurrent writer of the held row blocks on the U-X conflict; a positioned UPD
 Statement-scoped locks live in `BatchContext.StatementSchemaLocks` and release in `DispatchOneStatement`'s `finally`.
 Transaction-scoped locks live in `SimulatedDbTransaction.HeldLocks` and release in `Commit()` / `Rollback()` / dispose-implicit-rollback.
 Savepoint partial rollbacks (`ROLLBACK TRAN <savepoint>`) do NOT release locks — matches real SQL Server (probe-confirmed).
+
+## Abandoned-session reclamation
+
+Without reclamation, an application that opens a `SimulatedDbConnection` and drops it without disposing leaks its whole session forever: an open transaction kept its locks and pinned the MVCC version store, `##global` temp tables lingered, session application locks stayed held, and the SPID accumulated.
+Real SqlClient's own finalizer eventually closes such a connection and the server resets the session, so the divergence ran in the over-permissive-adjacent direction — state real releases stayed held here, and a second session real would unblock stayed blocked.
+
+### Why the connection could never be collected
+
+With the registries holding strong references, nothing is collectable and no finalizer can ever fire — the resource itself is the pin.
+Three *global* structures held the connection strongly, and each held exactly the connections that had leaked something worth reclaiming:
+
+| Structure | Path to the connection | Pinned |
+| --- | --- | --- |
+| `LockResource.Hold.Owner` | `Database` → `Schema` → `HeapTable` → row / range / table `LockResource` → holder | every lock- or session-app-lock-holding session |
+| `HeapTable.OwnerConnection` | `Simulation.GlobalTempTables` → table | every `##temp` owner |
+| `Simulation.ActiveSnapshotTxs` | set → `SimulatedDbTransaction` → its `Connection` | every open-snapshot session |
+
+`Simulation.Connections` held one too, but weakening it alone accomplishes nothing: the resource *is* the pin.
+
+### The one-way `SessionToken`
+
+Each connection owns a `SessionToken` — a handful of fields carrying the SPID, the wait edge (`WaitingOnResource` / `WaitingForMode`) and the executing-thread marker the lock manager reads about *other* sessions.
+Every shared structure names the token instead: `LockResource.Hold.Owner`, `HeapTable.OwnerSession`, and `Simulation.Sessions` (which replaced `Connections`).
+`ActiveSnapshotTxs` is keyed by token and valued by an `ActiveSnapshotRegistration` copying the three facts its readers need (`transaction_id`, snapshot Xid, SPID) rather than by the transaction, because a transaction holds its connection and ADO.NET's `DbTransaction.Connection` contract requires that it keep doing so.
+The only path back is `SessionToken.Owner`, a **resurrection-tracking weak reference**.
+
+### The sweep
+
+`System.ComponentModel.Component` already gives every `DbConnection` a finalizer, so an abandoned connection reaches `Dispose(disposing: false)` at some GC's discretion.
+That arm hands the connection to `Simulation`'s abandoned-session queue — enqueuing `this` from a finalizer **resurrects** it, which is the point: the teardown needs the state the connection still holds.
+`Simulation.ReclaimAbandonedSessions()` drains the queue on a normal worker thread and runs the session's **own `Close()` + `Dispose()`**, so the open transaction rolls back through the transaction's own machinery, application locks release through the same bulk release `Close` uses, `##temp` tables drop under the same ownership rule, cursors deallocate, and the token retires from `Sessions`.
+No parallel cleanup implementation exists, deliberately: the moment the two paths diverge one of them starts leaking what the other releases.
+
+Sweep triggers, all on paths already being taken:
+
+- **`CreateDbConnection()`** — a new session opening.
+- **`LockManager.TryAcquire`**, gate-free at entry behind a cheap empty-queue check — this is what stops a live session blocking on a leaked one's lock.
+- **`VersionStore.RunGarbageCollection`** — a leaked SNAPSHOT registration would otherwise pin every later version.
+
+One sweep runs at a time (`Interlocked` gate): a teardown rolls its transaction back, which runs the version-store collector, which sweeps, so an unguarded drain would re-enter itself once per queued session.
+A session whose token still reports a `CurrentExecutingThreadId` is skipped and re-queued.
+In practice that can't happen — the executing thread's stack holds the connection, so it isn't collectable, and a parallel-aggregate worker thread never writes that marker (only the dispatcher on the session's own thread does) — but the check makes it an assertion rather than an assumption.
+
+### Timing, and what a leaked session still reports
+
+Reclamation is GC-nondeterministic, as real's is: real's client finalizer closes the socket when a collection gets to it and the server resets the session then.
+Here the same collection is the first half and the next sweep trigger is the second, so a leaked session's locks survive some unspecified interval either way.
+Across that interval the session keeps reporting: the token's weak reference tracks resurrection, so `sp_who`, `sys.dm_exec_sessions` and `sys.dm_tran_locks` list it for exactly as long as it holds anything — a row that vanished before its locks did would be a lie.
+A connection disposed properly never enters the queue at all (`Component.Dispose()` suppresses finalization).
+
+Oracle: `AbandonedSessionReclamationTests` (Tests.Internal), one test per state kind plus the mid-statement rule, the `sp_who` window, the idempotence rule, and one end-to-end `GC.Collect()` test that fails if any global reference is reintroduced.
 
 ## Row-lock storage
 

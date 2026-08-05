@@ -119,7 +119,13 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException SyntaxErrorNearKeyword(string keyword) => new($"Incorrect syntax near the keyword '{keyword}'.", 156, 15, 1);
 
-    internal static SimulatedSqlException SyntaxErrorNear(ParserContext context) => SyntaxErrorNear(context.Token);
+    /// <summary>
+    /// Msg 102 naming the parser's current token, falling back to the last
+    /// token the batch produced once the input has run out — real names the
+    /// token it last consumed rather than an empty slot (probed 2026-08-05:
+    /// <c>SELECT 1 WHERE 1 IN (1</c> → <c>near '1'</c>).
+    /// </summary>
+    internal static SimulatedSqlException SyntaxErrorNear(ParserContext context) => SyntaxErrorNear(context.Token ?? context.LastToken);
 
     /// <summary>
     /// Mimics SQL Server error 102, naming the offending token. The name comes
@@ -220,6 +226,22 @@ partial class SimulatedSqlException
         new("The ROLLBACK TRANSACTION request has no corresponding BEGIN TRANSACTION.", 3903, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 6401: <c>ROLLBACK TRANSACTION &lt;name&gt;</c>
+    /// inside an open transaction that carries no savepoint (and no
+    /// transaction) by that name. Probe-confirmed against SQL Server 2025
+    /// (2026-08-05): Class 16, State 1, and the name is echoed exactly as
+    /// written. With no transaction open at all it is Msg 3903 instead.
+    /// </summary>
+    /// <remarks>
+    /// Reached by every client that rolls back to a savepoint it believes it
+    /// took — a transaction-aborting error discards the savepoints along with
+    /// the transaction, and Django's <c>atomic</c> block hits exactly this on
+    /// the way out (see the Django notes in <c>docs/claude/backlog.md</c>).
+    /// </remarks>
+    internal static SimulatedSqlException CannotRollBackUnknownSavepoint(string name) =>
+        new($"Cannot roll back {name}. No transaction or savepoint of that name was found.", 6401, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 319: a CTE-prefixed statement (a <c>WITH</c>
     /// clause introducing a common table expression) followed another
     /// statement with no <c>;</c> separator. Probe-confirmed verbatim text /
@@ -309,12 +331,39 @@ partial class SimulatedSqlException
     /// expression instead of a Boolean expression — e.g.
     /// <c>IF 1</c>, <c>IF NULL</c>, <c>IF (cast(null as bit))</c>,
     /// <c>IF 'abc'</c>. Probe-confirmed against SQL Server 2025 (2026-05-11):
-    /// Class 15, State 1, exact wording verbatim. The "near 'X'" suffix
-    /// is whatever token follows the cond — usually a statement-starting
-    /// keyword like <c>'select'</c> or a paren.
+    /// Class 15, State 1, exact wording verbatim.
+    /// <para>
+    /// The "near 'X'" suffix is the token following the whole non-boolean
+    /// expression, closing parentheses included, and the last token of the
+    /// batch once nothing follows (probed 2026-08-05: <c>IF 'abc'</c> →
+    /// <c>near 'abc'</c>, <c>IF ((1)) PRINT 'x'</c> → <c>near 'PRINT'</c>,
+    /// <c>SELECT 1 WHERE (1)</c> → <c>near ')'</c>). The parser has already
+    /// consumed the opening parens of a paren-wrapped value by the time the
+    /// slot is judged, so the matching closers are stepped over here — one per
+    /// boolean group still open — against a checkpoint, leaving the failing
+    /// parse's cursor where it was.
+    /// </para>
     /// </summary>
-    internal static SimulatedSqlException NonBooleanInConditionContext(Token? nextToken) =>
-        new($"An expression of non-boolean type specified in a context where a condition is expected, near '{nextToken}'.", 4145, 15, 1);
+    internal static SimulatedSqlException NonBooleanInConditionContext(ParserContext context) =>
+        new($"An expression of non-boolean type specified in a context where a condition is expected, near '{TokenAfterOpenBooleanGroups(context)?.ErrorText}'.", 4145, 15, 1);
+
+    private static Token? TokenAfterOpenBooleanGroups(ParserContext context)
+    {
+        if (context.Token is not Operator { Character: ')' } || context.BooleanGroupDepth == 0)
+            return context.Token ?? context.LastToken;
+
+        var checkpoint = context.SaveCheckpoint();
+        try
+        {
+            for (var remaining = context.BooleanGroupDepth; remaining > 0 && context.Token is Operator { Character: ')' }; remaining--)
+                context.MoveNextOptional();
+            return context.Token ?? context.LastToken;
+        }
+        finally
+        {
+            context.RestoreCheckpoint(checkpoint);
+        }
+    }
 
     /// <summary>
     /// Mimics SQL Server error 135: a <c>BREAK</c> statement appeared outside

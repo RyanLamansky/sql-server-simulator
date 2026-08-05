@@ -104,9 +104,9 @@ internal sealed class LockResource
     /// acquires bump <see cref="Count"/> instead of appending a second
     /// entry.
     /// </summary>
-    public struct Hold(SimulatedDbConnection owner, LockMode mode, int count)
+    public struct Hold(SessionToken owner, LockMode mode, int count)
     {
-        public readonly SimulatedDbConnection Owner = owner;
+        public readonly SessionToken Owner = owner;
         public readonly LockMode Mode = mode;
         public int Count = count;
     }
@@ -154,7 +154,7 @@ internal sealed class LockResource
 /// <para>
 /// Same-thread immediate-deadlock detection (Msg 1205): when an acquire
 /// finds a conflict, the holder list is scanned for any holder whose
-/// <see cref="SimulatedDbConnection.CurrentExecutingThreadId"/> equals
+/// <see cref="SessionToken.CurrentExecutingThreadId"/> equals
 /// the caller's managed thread id. If found, the wait is short-circuited
 /// since that thread can't release the conflicting hold while it's also
 /// the requester. The caller is the victim (per "always-the-requester"
@@ -163,7 +163,7 @@ internal sealed class LockResource
 /// <para>
 /// Cross-thread cycle detection: when an acquire would block, the
 /// detector walks the wait-for graph starting at each conflicting
-/// holder's <see cref="SimulatedDbConnection.WaitingOnResource"/>. If any
+/// holder's <see cref="SessionToken.WaitingOnResource"/>. If any
 /// walk reaches the caller's connection, a cycle exists; caller becomes
 /// the victim. The walker reads <c>WaitingOnResource</c> + resource
 /// holders under the gate, so the snapshot is consistent.
@@ -199,6 +199,23 @@ internal sealed class LockManager
     internal readonly object gate = new();
 
     /// <summary>
+    /// The simulation this manager coordinates, assigned right after
+    /// construction. Present so an acquisition can sweep the abandoned
+    /// sessions before it decides whether it conflicts — a leaked session's
+    /// locks are exactly what a live one would otherwise block on forever.
+    /// </summary>
+    internal Simulation? OwningSimulation;
+
+    /// <summary>
+    /// Drains the simulation's abandoned-session queue, if there is anything
+    /// in it, <em>before</em> the gate is taken. Gate-free on purpose: a
+    /// teardown rolls a transaction back and releases that session's locks,
+    /// which re-enters this manager, and running it under a caller's gate
+    /// frame would nest that work inside an unrelated acquisition.
+    /// </summary>
+    private void SweepAbandonedSessions() => _ = this.OwningSimulation?.ReclaimAbandonedSessions();
+
+    /// <summary>
     /// Acquires <paramref name="mode"/> on <paramref name="resource"/>
     /// for <paramref name="owner"/>, blocking up to
     /// <paramref name="timeoutMillis"/> if the request conflicts with
@@ -211,7 +228,7 @@ internal sealed class LockManager
     /// Msg 1205 (deadlock) on same-thread conflict or detected
     /// waiter-graph cycle; Msg 1222 (lock timeout) if the wait elapses.
     /// </exception>
-    public void Acquire(LockResource resource, LockMode mode, SimulatedDbConnection owner, int timeoutMillis)
+    public void Acquire(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis)
     {
         switch (this.TryAcquire(resource, mode, owner, timeoutMillis))
         {
@@ -233,8 +250,9 @@ internal sealed class LockManager
     /// Distinguishes <see cref="LockAcquireOutcome.GrantedAfterWait"/> from
     /// an immediate grant for sp_getapplock's return-code 1.
     /// </summary>
-    public LockAcquireOutcome TryAcquire(LockResource resource, LockMode mode, SimulatedDbConnection owner, int timeoutMillis)
+    public LockAcquireOutcome TryAcquire(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis)
     {
+        this.SweepAbandonedSessions();
         lock (this.gate)
         {
             // Same-owner / same-mode re-entrance: bump the existing hold's
@@ -312,7 +330,7 @@ internal sealed class LockManager
     /// if yes, the reader can either wait (the default) or skip
     /// (<c>READPAST</c>).
     /// </summary>
-    public bool HasIncompatibleHolderOtherThan(LockResource resource, LockMode probedMode, SimulatedDbConnection excludingOwner)
+    public bool HasIncompatibleHolderOtherThan(LockResource resource, LockMode probedMode, SessionToken excludingOwner)
     {
         lock (this.gate)
         {
@@ -334,7 +352,7 @@ internal sealed class LockManager
     /// holder entry and pulses every waiter on this manager's gate so
     /// each waiter re-checks compatibility.
     /// </summary>
-    public void Release(LockResource resource, LockMode mode, SimulatedDbConnection owner)
+    public void Release(LockResource resource, LockMode mode, SessionToken owner)
     {
         lock (this.gate)
         {
@@ -374,7 +392,7 @@ internal sealed class LockManager
     /// re-entrance is handled in <see cref="Acquire"/>). Appends a new
     /// hold on success.
     /// </summary>
-    private static bool TryGrant(LockResource resource, LockMode mode, SimulatedDbConnection owner)
+    private static bool TryGrant(LockResource resource, LockMode mode, SessionToken owner)
     {
         foreach (var hold in resource.Holders)
         {
@@ -407,11 +425,11 @@ internal sealed class LockManager
 
     /// <summary>
     /// True if any conflicting holder's
-    /// <see cref="SimulatedDbConnection.CurrentExecutingThreadId"/>
+    /// <see cref="SessionToken.CurrentExecutingThreadId"/>
     /// equals the caller's current managed thread id — those threads
     /// can't make progress while this one is the requester.
     /// </summary>
-    private static bool IsConflictingHolderOnSameThread(LockResource resource, LockMode mode, SimulatedDbConnection owner)
+    private static bool IsConflictingHolderOnSameThread(LockResource resource, LockMode mode, SessionToken owner)
     {
         var myThread = Environment.CurrentManagedThreadId;
         foreach (var hold in resource.Holders)
@@ -431,12 +449,12 @@ internal sealed class LockManager
     /// true when a path leads back to <paramref name="caller"/>, which
     /// is a textbook deadlock cycle (caller → resource → conflicting
     /// holder → … → caller). Reads <see cref="LockResource.Holders"/>
-    /// and <see cref="SimulatedDbConnection.WaitingOnResource"/> under
+    /// and <see cref="SessionToken.WaitingOnResource"/> under
     /// the manager's gate — consistent snapshot.
     /// </summary>
-    private static bool WouldCreateCycle(LockResource resource, LockMode mode, SimulatedDbConnection caller)
+    private static bool WouldCreateCycle(LockResource resource, LockMode mode, SessionToken caller)
     {
-        var visited = new HashSet<SimulatedDbConnection>(ReferenceEqualityComparer.Instance);
+        var visited = new HashSet<SessionToken>(ReferenceEqualityComparer.Instance);
         foreach (var hold in resource.Holders)
         {
             if (ReferenceEquals(hold.Owner, caller))
@@ -455,7 +473,7 @@ internal sealed class LockManager
     /// connections to break finite cycles in the walk (degenerate
     /// cycles within the holder set itself).
     /// </summary>
-    private static bool WalkBack(SimulatedDbConnection blocker, SimulatedDbConnection target, HashSet<SimulatedDbConnection> visited)
+    private static bool WalkBack(SessionToken blocker, SessionToken target, HashSet<SessionToken> visited)
     {
         if (!visited.Add(blocker))
             return false;

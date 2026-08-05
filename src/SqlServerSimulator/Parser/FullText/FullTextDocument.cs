@@ -68,11 +68,11 @@ internal sealed class FullTextDocument
     }
 
     /// <summary>Positions of an exact term, or an empty list.</summary>
-    public IReadOnlyList<int> Exact(string term) =>
+    public List<int> Exact(string term) =>
         this.exactPositions.TryGetValue(term, out var positions) ? positions : [];
 
     /// <summary>Positions whose term stems to <paramref name="stem"/>.</summary>
-    public IReadOnlyList<int> Stemmed(string stem) =>
+    public List<int> Stemmed(string stem) =>
         this.stemPositions.TryGetValue(stem, out var positions) ? positions : [];
 
     /// <summary>

@@ -21,6 +21,8 @@ internal sealed class Length(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
+    internal override bool ParallelSafe => this.source.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var raw = source.Run(runtime);
@@ -46,5 +48,5 @@ internal sealed class Length(ParserContext context) : Expression
 
     internal override string DebugDisplay() => $"LEN({source.DebugDisplay()})";
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit) => source.VisitColumnReferences(visit);
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => source.VisitColumnReferences(visit);
 }

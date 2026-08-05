@@ -37,6 +37,8 @@ internal sealed class VariableReference : Expression
         this.declaredType = context.Batch.GetVariableSlot(raw).DeclaredType;
     }
 
+    internal override bool ParallelSafe => true;
+
     public override SqlValue Run(RuntimeContext runtime) => runtime.Batch.Variables[this.VariableName].Value;
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.declaredType;

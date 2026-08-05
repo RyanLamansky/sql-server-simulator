@@ -57,6 +57,8 @@ internal sealed class Iif : Expression
             throw SimulatedSqlException.AllResultsInCaseAreNull();
     }
 
+    internal override bool ParallelSafe => this.condition.ParallelSafe && this.trueValue.ParallelSafe && this.falseValue.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var picked = this.condition.Run(runtime) == true

@@ -78,7 +78,7 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
 
     internal override string DebugDisplay() => $"{left.DebugDisplay()} || {right.DebugDisplay()}";
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit)
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit)
     {
         left.VisitColumnReferences(visit);
         right.VisitColumnReferences(visit);

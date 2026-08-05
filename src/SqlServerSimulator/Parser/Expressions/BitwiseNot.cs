@@ -54,7 +54,7 @@ internal sealed class BitwiseNot : Expression
     internal override bool ResultIsNullable(NullabilityContext context) =>
         this.operand.ResultIsNullable(context);
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit) =>
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) =>
         this.operand.VisitColumnReferences(visit);
 
     internal override bool ContainsVariableReference => this.operand.ContainsVariableReference;

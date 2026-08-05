@@ -1238,7 +1238,7 @@ internal readonly partial struct SqlValue
 
     private SqlValue CoerceToDecimal(DecimalSqlType target) => this.Type switch
     {
-        _ when SqlType.IsStringCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(ParseDecimal(this.AsString, this.Type), target)),
+        _ when SqlType.IsStringCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(ParseDecimal(this.AsString, this.Type, target), target)),
         _ when SqlType.IsIntegerCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(AsInt64Widened(this), target)),
         DecimalSqlType => FromDecimal(target, RoundAndOverflowCheck(this.AsDecimal, target)),
         _ when SqlType.IsMoneyCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(this.AsMoney, target)),
@@ -1338,7 +1338,14 @@ internal readonly partial struct SqlValue
         // larger declared scale, no actual rounding is needed (the input
         // value can't have more fractional digits than .NET decimal stores
         // anyway); skip the call.
-        var rounded = target.scale > 28 ? value : decimal.Round(value, target.scale, MidpointRounding.AwayFromZero);
+        // Rounding only has work to do when the value carries more fractional
+        // digits than the target declares. Asking .NET to round to a *wider*
+        // scale makes it re-scale the mantissa, which overflows on a value
+        // whose digits already fill the type — and there is nothing to round.
+        var rounded = target.scale > 28 || value.Scale <= target.scale
+            ? value
+            : decimal.Round(value, target.scale, MidpointRounding.AwayFromZero);
+
         // Cap integer-digit count at 28 for the overflow check — a larger
         // power of ten would itself overflow .NET decimal. Values that fit
         // .NET decimal can't exceed 28 integer digits anyway, so a target
@@ -1390,16 +1397,58 @@ internal readonly partial struct SqlValue
     /// only strings raise Msg 8114 (not 0 — verified against SQL Server 2025;
     /// distinct from float, where empty → 0).
     /// </summary>
-    private static decimal ParseDecimal(string source, SqlType sourceType)
+    private static decimal ParseDecimal(string source, SqlType sourceType, DecimalSqlType target)
     {
         var trimmed = source.Trim();
-        return decimal.TryParse(
+        if (decimal.TryParse(
             trimmed,
             System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowLeadingSign,
             System.Globalization.CultureInfo.InvariantCulture,
-            out var d)
-                ? d
-                : throw SimulatedSqlException.ConvertingDataTypeError(sourceType, "numeric");
+            out var d))
+        {
+            return d;
+        }
+
+        // A plain-digit text .NET decimal can't hold is a magnitude question,
+        // not a syntax one: real reads the number and judges it against the
+        // target's own precision, so a text wider than the target could ever
+        // hold is Msg 8115 and everything the target would have held is the
+        // simulator's 28-digit ceiling. Scientific notation is not that shape —
+        // real answers Msg 8114 for `'1e40'` where it answers Msg 8115 for the
+        // same magnitude written out (probed 2026-08-05).
+        var integerDigits = PlainIntegerDigitCount(trimmed);
+        if (integerDigits < 0)
+            throw SimulatedSqlException.ConvertingDataTypeError(sourceType, "numeric");
+        if (integerDigits > target.precision - target.scale)
+            throw SimulatedSqlException.ArithmeticOverflowConverting(sourceType, "numeric", state: integerDigits > 38 ? (byte)6 : (byte)8);
+        throw DecimalCeiling.Exceeded($"converting the string '{trimmed}' to {target}");
+    }
+
+    /// <summary>
+    /// The number of integer digits an optionally-signed plain decimal text
+    /// carries, leading zeros excluded, or -1 when the text is anything else
+    /// (an exponent, a stray character, an empty string). Only asked once a
+    /// parse has already failed, so it never runs on the conversion hot path.
+    /// </summary>
+    private static int PlainIntegerDigitCount(string text)
+    {
+        var i = text.Length > 0 && text[0] is '+' or '-' ? 1 : 0;
+        var digits = 0;
+        var seenDigit = false;
+        for (; i < text.Length && char.IsAsciiDigit(text[i]); i++)
+        {
+            seenDigit = true;
+            if (digits > 0 || text[i] != '0')
+                digits++;
+        }
+
+        if (i < text.Length && text[i] == '.')
+        {
+            for (i++; i < text.Length && char.IsAsciiDigit(text[i]); i++)
+                seenDigit = true;
+        }
+
+        return i == text.Length && seenDigit ? digits : -1;
     }
 
     private SqlValue CoerceToUniqueIdentifier() => this.Type switch

@@ -236,7 +236,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     private void UnregisterActiveSnapshot()
     {
         if (this.SnapshotXid is not null)
-            _ = this.simulation.ActiveSnapshotTxs.TryRemove(this, out _);
+            _ = this.simulation.ActiveSnapshotTxs.TryRemove(this.Connection.Session, out _);
     }
 
     private void RestoreSessionIsolation()
@@ -260,7 +260,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         for (var i = this.HeldLocks.Count - 1; i >= 0; i--)
         {
             var (resource, mode) = this.HeldLocks[i];
-            manager.Release(resource, mode, this.Connection);
+            manager.Release(resource, mode, this.Connection.Session);
         }
         this.HeldLocks.Clear();
         // Transaction-owned application locks release with the transaction —

@@ -12,6 +12,8 @@ internal sealed class Sign(ParserContext context) : Expression
 {
     private readonly Expression source = Parse(context);
 
+    internal override bool ParallelSafe => this.source.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var v = MathScalars.CoerceImplicit(this.source.Run(runtime));

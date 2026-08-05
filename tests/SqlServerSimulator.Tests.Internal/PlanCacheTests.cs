@@ -3,15 +3,18 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Guards the per-<see cref="Simulation"/> plan cache for single-SELECT
-/// command batches (the EF-query shape). Every parse-and-replay path here
-/// is observable through the internal <see cref="Simulation.PlanCacheHits"/>
-/// / <see cref="Simulation.PlanCacheMisses"/> / <see cref="Simulation.PlanCacheCount"/>
-/// counters, which gate on cache-key matching plus schema-version validation;
-/// the cache is bypassed entirely for batches that aren't a single top-level
-/// SELECT (multi-statement, mixed DDL+DML, reference a #temp / ##gtemp /
-/// table-variable, or whose parameters' DbType can't be inferred — TVP
-/// structured binding).
+/// Guards the per-<see cref="Simulation"/> plan cache, which stores the
+/// <see cref="Parser.Selection"/> sequence of a batch whose every top-level
+/// statement is a SELECT (the EF-query shape, and any batch of several).
+/// Every parse-and-replay path here is observable through the internal
+/// <see cref="Simulation.PlanCacheHits"/> / <see cref="Simulation.PlanCacheMisses"/>
+/// / <see cref="Simulation.PlanCacheCount"/> counters, which gate on cache-key
+/// matching plus schema-version validation; the cache is bypassed entirely for
+/// batches carrying a statement kind with no re-executable plan (DML, SET,
+/// DDL, control flow), referencing a #temp / ##gtemp / table-variable, or
+/// whose parameters' DbType can't be inferred — TVP structured binding.
+/// Statement kinds the cache declines still reuse their tokenization; see
+/// <see cref="TokenMemoTests"/>.
 /// </summary>
 [TestClass]
 public sealed class PlanCacheTests
@@ -164,31 +167,144 @@ public sealed class PlanCacheTests
         }
     }
 
-    [TestMethod]
-    public void MultiStatementBatch_NotCached()
+    /// <summary>
+    /// Runs a batch, returning each statement's rows as a list of
+    /// first-column values — enough to compare a cached replay against an
+    /// uncached run statement for statement.
+    /// </summary>
+    private static List<List<object>> RunBatch(SimulatedDbConnection connection, string sql)
     {
-        // Two top-level SELECT statements in one CommandText: the second
-        // statement's dispatch clears the candidate (the cache only models
-        // single-statement batches).
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        using var reader = command.ExecuteReader();
+        var sets = new List<List<object>>();
+        do
+        {
+            var rows = new List<object>();
+            while (reader.Read())
+                rows.Add(reader.GetValue(0));
+            sets.Add(rows);
+        }
+        while (reader.NextResult());
+        return sets;
+    }
+
+    [TestMethod]
+    public void MultiSelectBatch_CachesAsOneSequence()
+    {
+        // Two top-level SELECTs in one CommandText cache as the sequence they
+        // are: one entry, and the replay reproduces both result sets in order.
         var (sim, connection) = OpenWithTable();
         using (connection)
         {
             var entriesBefore = sim.PlanCacheCount;
-            using var command = connection.CreateCommand();
-            command.CommandText = "select val from t; select id from t;";
-            using (var reader = command.ExecuteReader())
-            {
-                while (reader.Read())
-                {
-                    // drain first result set
-                }
-                _ = reader.NextResult();
-                while (reader.Read())
-                {
-                    // drain second
-                }
-            }
+            var hitsBefore = sim.PlanCacheHits;
+            const string sql = "select val from t; select id from t;";
+            var first = RunBatch(connection, sql);
+            AreEqual(entriesBefore + 1, sim.PlanCacheCount);
+            AreEqual(hitsBefore, sim.PlanCacheHits);
+
+            var replayed = RunBatch(connection, sql);
+            AreEqual(hitsBefore + 1, sim.PlanCacheHits);
+            AreEqual(entriesBefore + 1, sim.PlanCacheCount);
+            HasCount(2, replayed);
+            CollectionAssert.AreEqual(first[0], replayed[0]);
+            CollectionAssert.AreEqual(first[1], replayed[1]);
+        }
+    }
+
+    [TestMethod]
+    public void TrailingSemicolon_Caches()
+    {
+        // The end-of-batch probe tolerates separators, so the terminated form
+        // every client that punctuates its statements emits caches like the
+        // bare one.
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        {
+            var hitsBefore = sim.PlanCacheHits;
+            AreEqual(3, RunCount(connection, "select val from t;"));
+            AreEqual(hitsBefore, sim.PlanCacheHits);
+            AreEqual(3, RunCount(connection, "select val from t;"));
+            AreEqual(hitsBefore + 1, sim.PlanCacheHits);
+        }
+    }
+
+    [TestMethod]
+    public void MixedBatch_SelectThenInsert_NotCached()
+    {
+        // A statement kind with no re-executable plan among the batch's
+        // statements declines the whole batch: the top-level statement count
+        // outruns the collected plan sequence.
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        {
+            var entriesBefore = sim.PlanCacheCount;
+            _ = RunBatch(connection, "select val from t; insert t values (4, 40);");
+            _ = RunBatch(connection, "select val from t; insert t values (5, 50);");
             AreEqual(entriesBefore, sim.PlanCacheCount);
+        }
+    }
+
+    [TestMethod]
+    public void MixedBatch_SetThenSelect_NotCached()
+    {
+        // The EF modification-batch prefix. SET carries a session effect, not
+        // a plan, so a batch containing one is declined however cacheable the
+        // SELECT after it would be alone.
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        {
+            var entriesBefore = sim.PlanCacheCount;
+            const string sql = "set nocount on; select val from t;";
+            _ = RunBatch(connection, sql);
+            _ = RunBatch(connection, sql);
+            AreEqual(entriesBefore, sim.PlanCacheCount);
+        }
+    }
+
+    [TestMethod]
+    public void MultiSelectBatch_ReplayRefreshesPerStatementState()
+    {
+        // The replay loop stamps each statement's own frame rather than the
+        // batch's: two statements reading the same statement-scoped built-in
+        // must see two draws, exactly as the dispatch loop's top-of-iteration
+        // clear gives them on the uncached run.
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        {
+            const string sql = "select rand() from t; select rand() from t;";
+            var uncached = RunBatch(connection, sql);
+            var missesBefore = sim.PlanCacheMisses;
+            var cached = RunBatch(connection, sql);
+            AreEqual(missesBefore, sim.PlanCacheMisses, "second run should have hit the cache");
+
+            // Within one statement the draw is frozen; across the two it is
+            // not — on the cached path just as on the uncached one.
+            foreach (var run in new[] { uncached, cached })
+            {
+                HasCount(2, run);
+                AreEqual(1, run[0].Distinct().Count(), "draw is per statement, not per row");
+                AreEqual(1, run[1].Distinct().Count(), "draw is per statement, not per row");
+                AreNotEqual(run[0][0], run[1][0], "each statement draws its own value");
+            }
+        }
+    }
+
+    [TestMethod]
+    public void MultiSelectBatch_ReplayKeepsRowCountPerStatement()
+    {
+        // @@ROWCOUNT is maintained statement by statement through the replay
+        // loop, so a following batch reads the last statement's count.
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        {
+            const string sql = "select val from t where id > 1; select id from t;";
+            _ = RunBatch(connection, sql);
+            var hitsBefore = sim.PlanCacheHits;
+            _ = RunBatch(connection, sql);
+            AreEqual(hitsBefore + 1, sim.PlanCacheHits);
+            AreEqual(3, RunBatch(connection, "select @@rowcount")[0][0]);
         }
     }
 

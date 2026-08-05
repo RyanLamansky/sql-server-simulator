@@ -639,14 +639,14 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         {
             _ = this.FlushInfoMessages(writer);
             WriteErrors(writer, ex);
-            this.WriteDatabaseChangeIfAny(writer);
+            this.WriteSessionEnvChangesIfAny(writer);
             writer.WriteDone(Tds.DoneError, 0);
         }
         catch (NotSupportedException ex)
         {
             _ = this.FlushInfoMessages(writer);
             writer.WriteErrorOrInfo(Tds.TokenError, 50000, 1, 16, $"SqlServerSimulator: {ex.Message}", "SIMULATED", "", 1);
-            this.WriteDatabaseChangeIfAny(writer);
+            this.WriteSessionEnvChangesIfAny(writer);
             writer.WriteDone(Tds.DoneError, 0);
         }
 #pragma warning disable CA1031 // Deliberate: an unmodeled statement must not cost the whole session — see IsRecoverableStatementFault.
@@ -654,7 +654,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         {
             _ = this.FlushInfoMessages(writer);
             WriteUnexpectedStatementFault(writer, ex);
-            this.WriteDatabaseChangeIfAny(writer);
+            this.WriteSessionEnvChangesIfAny(writer);
             writer.WriteDone(Tds.DoneError, 0);
         }
 #pragma warning restore CA1031
@@ -663,7 +663,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// <summary>
     /// The session database when the current batch / RPC message began, for
     /// detecting a mid-message <c>USE</c>. Emitted as ENVCHANGE type 1 +
-    /// INFO 5701 via <see cref="WriteDatabaseChangeIfAny"/>, which must run
+    /// INFO 5701 via <see cref="WriteSessionEnvChangesIfAny"/>, which must run
     /// BEFORE the response's final DONE: SqlClient's token reader stalls
     /// until command timeout on an ENVCHANGE that arrives after the last
     /// DONE (probe-confirmed 2026-07-15 — the SSMS freeze on
@@ -673,21 +673,46 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     private string? databaseAtMessageStart;
 
     /// <summary>
-    /// Writes the database-change ENVCHANGE + INFO 5701 when the session
-    /// database differs from <see cref="databaseAtMessageStart"/>, matching
-    /// real SQL Server's token order for <c>USE</c> (ENVCHANGE, then INFO,
-    /// then the statement's DONE). Idempotent — the first call records the
-    /// new baseline, so the multiple call sites (per-final-DONE seams and
-    /// error paths) emit at most once per change.
+    /// Writes the session-state ENVCHANGEs a message may have earned: the
+    /// database-change ENVCHANGE + INFO 5701 when the session database differs
+    /// from <see cref="databaseAtMessageStart"/> (matching real's token order
+    /// for <c>USE</c> — ENVCHANGE, then INFO, then the statement's DONE), and
+    /// the transaction-ended ENVCHANGE when the engine ended the session's
+    /// transaction underneath the TM layer. Idempotent — each arm records its
+    /// new baseline, so the several call sites (per-final-DONE seams and error
+    /// paths) emit at most once per change.
     /// </summary>
-    private void WriteDatabaseChangeIfAny(TdsTokenWriter writer)
+    private void WriteSessionEnvChangesIfAny(TdsTokenWriter writer)
     {
+        this.WriteTransactionEndIfAny(writer);
         var current = this.connection!.Database;
         if (this.databaseAtMessageStart is null || string.Equals(current, this.databaseAtMessageStart, StringComparison.Ordinal))
             return;
         writer.WriteEnvChange(Tds.EnvDatabase, current, this.databaseAtMessageStart);
         writer.WriteErrorOrInfo(Tds.TokenInfo, 5701, 2, 0, $"Changed database context to '{current}'.", "SIMULATED", "", 1);
         this.databaseAtMessageStart = current;
+    }
+
+    /// <summary>
+    /// Notices a transaction the <em>engine</em> ended during this message — a
+    /// transaction-aborting error (Msg 8728) rolls the whole stack back, and so
+    /// do a deadlock victim and a SNAPSHOT update conflict — and drops the
+    /// session's handle on it, so the client's next commit or rollback finds
+    /// nothing to re-finish rather than a completed transaction.
+    /// </summary>
+    /// <remarks>
+    /// The ENVCHANGE is what makes a manual-commit driver open the next
+    /// transaction, which is why real reports <c>@@TRANCOUNT</c> 1 rather than
+    /// 0 on the statement after the abort over ODBC where the same session over
+    /// sqlcmd reports 0 (probe-confirmed both ways, 2026-08-05).
+    /// </remarks>
+    private void WriteTransactionEndIfAny(TdsTokenWriter writer)
+    {
+        if (this.transaction is null)
+            return;
+        this.ForgetTransactionEndedByEngine();
+        if (this.transactionEndedByEngine)
+            writer.WriteEnvChangeTransaction(Tds.EnvRollbackTransaction, this.lastTransactionDescriptor);
     }
 
     /// <summary>
@@ -735,7 +760,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 procScopeDepth--;
                 var procStatus = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
                 if ((procStatus & Tds.DoneMore) == 0)
-                    this.WriteDatabaseChangeIfAny(writer);
+                    this.WriteSessionEnvChangesIfAny(writer);
                 writer.WriteReturnStatus(0);
                 writer.WriteDoneToken(Tds.TokenDoneProc, procStatus, 0);
                 continue;
@@ -780,7 +805,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 if (query.CountSuppressed != true)
                     queryStatus |= Tds.DoneCount;
                 if ((queryStatus & Tds.DoneMore) == 0)
-                    this.WriteDatabaseChangeIfAny(writer);
+                    this.WriteSessionEnvChangesIfAny(writer);
                 // CurCmd tells the client whether that count is rows returned
                 // or rows affected. A DML statement's OUTPUT clause makes the
                 // statement tabular without making its count a SELECT's, so it
@@ -800,7 +825,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 hasOutcome = outcomes.MoveNext();
                 var status = (ushort)(this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow) | Tds.DoneError);
                 if ((status & Tds.DoneMore) == 0)
-                    this.WriteDatabaseChangeIfAny(writer);
+                    this.WriteSessionEnvChangesIfAny(writer);
                 writer.WriteDoneToken(effectiveDoneToken, status, 0);
             }
             else
@@ -821,7 +846,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     status |= Tds.DoneCount;
 
                 if ((status & Tds.DoneMore) == 0)
-                    this.WriteDatabaseChangeIfAny(writer);
+                    this.WriteSessionEnvChangesIfAny(writer);
                 // Real keeps the row count in the token and only clears the
                 // flag, so a suppressed count still goes out as the number.
                 writer.WriteDoneToken(
@@ -839,7 +864,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var flushedTrailing = this.FlushInfoMessages(writer);
         if (!trailingTokensFollow && (flushedTrailing || !anyOutcome))
         {
-            this.WriteDatabaseChangeIfAny(writer);
+            this.WriteSessionEnvChangesIfAny(writer);
             writer.WriteDoneToken(doneToken, Tds.DoneFinal, 0);
         }
 

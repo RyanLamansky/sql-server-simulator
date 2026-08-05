@@ -45,6 +45,8 @@ internal sealed class DatePart : Expression
         this.source = Parse(context);
     }
 
+    internal override bool ParallelSafe => this.source.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = DatePartKinds.CoerceDateArgumentImplicit(source.Run(runtime));

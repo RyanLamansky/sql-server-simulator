@@ -978,7 +978,7 @@ partial class Simulation
 
     /// <summary>
     /// Returns true when a computed-column expression references the named
-    /// column. Structural walk via <see cref="Expression.VisitColumnReferences"/>
+    /// column. Structural walk via <see cref="Expression.VisitColumnReferences(Action{MultiPartName})"/>
     /// — same shape <see cref="CheckPredicateReferencesColumn"/> uses.
     /// </summary>
     private static bool ComputedReferencesColumn(Collation collation, Expression computed, string columnName)

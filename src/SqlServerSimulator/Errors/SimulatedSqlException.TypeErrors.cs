@@ -249,6 +249,19 @@ partial class SimulatedSqlException
     /// expression source-word matches what real SQL Server emits when the
     /// overflow happens in the integer-to-target widening path.
     /// </summary>
+    /// <summary>
+    /// Mimics SQL Server error 8115 naming both ends — the shape a conversion
+    /// out of a character source reports when the number it read is wider than
+    /// the destination's precision (probed 2026-08-05:
+    /// <c>CAST('123456789012345678901234567890' AS decimal(20, 0))</c> reads
+    /// "Arithmetic overflow error converting varchar to data type numeric.").
+    /// The state splits the two ways a number can be too wide: 6 when it
+    /// exceeds <c>numeric</c>'s own 38-digit maximum, 8 when it merely exceeds
+    /// the declared target's.
+    /// </summary>
+    internal static SimulatedSqlException ArithmeticOverflowConverting(SqlType source, string targetWord, byte state) =>
+        new($"Arithmetic overflow error converting {FamilyRootName(source)} to data type {targetWord}.", 8115, 16, state);
+
     internal static SimulatedSqlException ArithmeticOverflowToTarget(string targetTypeName) =>
         new($"Arithmetic overflow error converting numeric to data type {targetTypeName}.", 8115, 16, 8);
 

@@ -55,7 +55,7 @@ internal static class MessageFormatter
     /// and returns the resulting message. Throws <see cref="SimulatedSqlException"/>
     /// (Msg 2786 / 2787) on invalid specifiers or arg-type mismatches.
     /// </summary>
-    public static string Format(string format, IReadOnlyList<SqlValue> arguments)
+    public static string Format(string format, List<SqlValue> arguments)
     {
         var output = new StringBuilder(format.Length);
         var argIndex = 0;
@@ -227,7 +227,7 @@ internal static class MessageFormatter
     /// the caller can decide whether to skip precision/width truncation.
     /// Type mismatch raises Msg 2786.
     /// </summary>
-    private static (string text, bool isNullArg) TakeStringArg(IReadOnlyList<SqlValue> arguments, ref int argIndex, int oneBasedIndex)
+    private static (string text, bool isNullArg) TakeStringArg(List<SqlValue> arguments, ref int argIndex, int oneBasedIndex)
     {
         if (argIndex >= arguments.Count)
         {
@@ -251,7 +251,7 @@ internal static class MessageFormatter
     /// <c>(0, isNullArg: true)</c> on NULL/missing so the caller renders
     /// <c>(null)</c>.
     /// </summary>
-    private static (long value, bool isNullArg) TakeIntArg(IReadOnlyList<SqlValue> arguments, ref int argIndex, int oneBasedIndex, bool acceptInt64)
+    private static (long value, bool isNullArg) TakeIntArg(List<SqlValue> arguments, ref int argIndex, int oneBasedIndex, bool acceptInt64)
     {
         if (argIndex >= arguments.Count)
         {

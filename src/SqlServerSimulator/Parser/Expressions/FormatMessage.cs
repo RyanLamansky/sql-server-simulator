@@ -127,7 +127,7 @@ internal sealed class FormatMessage : Expression
     /// diagnostic. Throws Msg 2748 when a consumed argument's type is
     /// fundamentally disallowed as a substitution parameter.
     /// </summary>
-    private static bool TryRender(string format, IReadOnlyList<SqlValue> args, out string result)
+    private static bool TryRender(string format, SqlValue[] args, out string result)
     {
         result = string.Empty;
 
@@ -244,7 +244,7 @@ internal sealed class FormatMessage : Expression
         return true;
     }
 
-    private static bool TryRenderSpecifier(char type, IReadOnlyList<SqlValue> args, ref int argIndex, bool leftAlign, bool zeroPad, bool forceSign, bool spaceSign, bool altForm, int width, int precision, bool isInt64, out string piece)
+    private static bool TryRenderSpecifier(char type, SqlValue[] args, ref int argIndex, bool leftAlign, bool zeroPad, bool forceSign, bool spaceSign, bool altForm, int width, int precision, bool isInt64, out string piece)
     {
         piece = string.Empty;
         switch (type)
@@ -320,11 +320,11 @@ internal sealed class FormatMessage : Expression
     /// A supported-but-non-string argument yields <c>false</c> (terse
     /// diagnostic); a disallowed type throws Msg 2748.
     /// </summary>
-    private static bool TryTakeString(IReadOnlyList<SqlValue> args, ref int argIndex, out string text, out bool isNull)
+    private static bool TryTakeString(SqlValue[] args, ref int argIndex, out string text, out bool isNull)
     {
         text = string.Empty;
         isNull = false;
-        if (argIndex >= args.Count)
+        if (argIndex >= args.Length)
         {
             argIndex++;
             isNull = true;
@@ -343,11 +343,11 @@ internal sealed class FormatMessage : Expression
         return true;
     }
 
-    private static bool TryTakeInt(IReadOnlyList<SqlValue> args, ref int argIndex, bool acceptInt64, out long value, out bool isNull)
+    private static bool TryTakeInt(SqlValue[] args, ref int argIndex, bool acceptInt64, out long value, out bool isNull)
     {
         value = 0;
         isNull = false;
-        if (argIndex >= args.Count)
+        if (argIndex >= args.Length)
         {
             argIndex++;
             isNull = true;
@@ -380,7 +380,7 @@ internal sealed class FormatMessage : Expression
     /// The <c>*</c> width consumer — no NULL slot semantics (a NULL/missing
     /// width just surfaces the terse diagnostic).
     /// </summary>
-    private static bool TryTakeInt(IReadOnlyList<SqlValue> args, ref int argIndex, bool acceptInt64, out long value)
+    private static bool TryTakeInt(SqlValue[] args, ref int argIndex, bool acceptInt64, out long value)
     {
         if (!TryTakeInt(args, ref argIndex, acceptInt64, out value, out var isNull) || isNull)
         {

@@ -42,6 +42,43 @@ internal sealed partial class Selection
         int? fetchCount,
         bool distinct,
         BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+        => BuildAggregateProjectionRowsCore(
+               sources, joins, resolveColumnType, expressions, fromClause, outputColumnNames, orderByItems,
+               aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount,
+               distinct, batch, outerResolver, allowParallel: true)
+           ?? BuildAggregateProjectionRowsCore(
+               sources, joins, resolveColumnType, expressions, fromClause, outputColumnNames, orderByItems,
+               aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount,
+               distinct, batch, outerResolver, allowParallel: false)!;
+
+    /// <summary>
+    /// The executor proper. Returns <see langword="null"/> — and only when
+    /// <paramref name="allowParallel"/> was set — to say that the parallel
+    /// accumulation was abandoned and the statement has to run again serially:
+    /// a worker raised, a merge proved inexact, or the producer raised once
+    /// workers existed. The re-run is the canonical row order, so whatever the
+    /// abandoned attempt saw is discarded rather than reported. See
+    /// <c>Selection.Execution.AggregateParallel.cs</c>.
+    /// </summary>
+    private static List<SqlValue[]>? BuildAggregateProjectionRowsCore(
+        FromSource[] sources,
+        JoinSpec[] joins,
+        Func<MultiPartName, SqlType> resolveColumnType,
+        List<Expression> expressions,
+        FromClause fromClause,
+        string[] outputColumnNames,
+        List<OrderBySpec> orderByItems,
+        List<AggregateExpression> aggregates,
+        List<WindowExpression> windows,
+        SqlType[] windowOperandTypes,
+        SqlType[] windowResultTypes,
+        TopSpec top,
+        int? offsetCount,
+        int? fetchCount,
+        bool distinct,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        bool allowParallel)
     {
         if (top.Count == 0 && top.Percent is null)
             return [];
@@ -109,34 +146,93 @@ internal sealed partial class Selection
         var streaming = effectiveSets.Count == 1;
         var streamedGroups = streaming ? NewGroupMap(effectiveSets[0]) : null;
         var buffered = streaming ? null : new List<byte[]?[]>();
-        foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
+
+        // Past ParallelRowThreshold rows the per-row consumer work — WHERE,
+        // grouping key, aggregate operands, and the decoding all three trigger
+        // — forks across worker threads while this thread keeps producing the
+        // stream. Deciding mid-stream needs no cardinality estimate and leaves
+        // a small query paying nothing; the prefix's groups are already in
+        // `streamedGroups` and take part in the merge. See
+        // Selection.Execution.AggregateParallel.cs for the gates, the
+        // merge contract and the error rule.
+        ParallelGroupedAccumulation? parallel = null;
+        var parallelConsidered = !allowParallel || !streaming || windows.Count > 0;
+        var enumeratedRows = 0L;
+        try
         {
-            currentTuple = tuple;
-            var include = true;
-            foreach (var excluder in fromClause.Excluders)
+            foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
             {
-                if (excluder.Run(rowRuntime) != true)
+                var rowOrdinal = enumeratedRows++;
+                if (parallel is not null)
                 {
-                    include = false;
-                    break;
+                    parallel.Offer(tuple, rowOrdinal);
+                    continue;
                 }
-            }
-            if (!include)
-                continue;
 
-            if (streamedGroups is not null)
+                // Judged on rows *enumerated*, not on rows the WHERE kept: a
+                // filter that keeps almost nothing still costs a full read, and
+                // that read is exactly what the fork is meant to share.
+                if (!parallelConsidered && enumeratedRows >= ParallelRowThreshold)
+                {
+                    parallelConsidered = true;
+                    parallel = ParallelGroupedAccumulation.TryEngage(
+                        sources, effectiveSets[0], fromClause.Excluders, aggregates, aggregateResultTypes,
+                        batch, NewGroup, outerResolver, (int)enumeratedRows, streamedGroups!.Count);
+                    if (parallel is not null)
+                    {
+                        parallel.Offer(tuple, rowOrdinal);
+                        continue;
+                    }
+                }
+
+                currentTuple = tuple;
+                var include = true;
+                foreach (var excluder in fromClause.Excluders)
+                {
+                    if (excluder.Run(rowRuntime) != true)
+                    {
+                        include = false;
+                        break;
+                    }
+                }
+                if (!include)
+                    continue;
+
+                if (streamedGroups is not null)
+                {
+                    Accumulate(streamedGroups, effectiveSets[0], tuple, tupleIsShared: true);
+                    continue;
+                }
+
+                // `EnumerateJoinedRows` mutates a single shared tuple array in
+                // place across iterations, so each buffered row gets snapshotted
+                // (the inner byte[] references are immutable, only the outer array
+                // slots get rewritten by the join driver).
+                var snapshot = new byte[]?[tuple.Length];
+                Array.Copy(tuple, snapshot, tuple.Length);
+                buffered!.Add(snapshot);
+            }
+
+            if (parallel is not null && !parallel.TryComplete(streamedGroups!))
             {
-                Accumulate(streamedGroups, effectiveSets[0], tuple, tupleIsShared: true);
-                continue;
+                AggregateDiagnostics.Sink?.Add("Aggregate:SerialRerun(merge)");
+                return null;
             }
-
-            // `EnumerateJoinedRows` mutates a single shared tuple array in
-            // place across iterations, so each buffered row gets snapshotted
-            // (the inner byte[] references are immutable, only the outer array
-            // slots get rewritten by the join driver).
-            var snapshot = new byte[]?[tuple.Length];
-            Array.Copy(tuple, snapshot, tuple.Length);
-            buffered!.Add(snapshot);
+        }
+#pragma warning disable CA1031 // Deliberate: the catch is the parallel path's whole error contract — every kind is discarded and re-raised, in order, by the serial re-run below.
+        catch (Exception) when (parallel is not null)
+        {
+            // Whatever raised — a worker's row, or this thread's own — the
+            // serial re-run is the canonical order and reports the canonical
+            // error, so this attempt is discarded whole.
+            parallel.Cancel();
+            AggregateDiagnostics.Sink?.Add("Aggregate:SerialRerun(error)");
+            return null;
+        }
+#pragma warning restore CA1031
+        finally
+        {
+            parallel?.Dispose();
         }
 
         var output = new List<(SqlValue[] OrderKeys, SqlValue[] Row)>();
@@ -581,7 +677,7 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Per-group state inside <see cref="BuildAggregateProjectionRows"/>: the
+    /// Per-group state inside <c>BuildAggregateProjectionRows</c>: the
     /// resolved key tuple (used to populate non-aggregate projection slots
     /// from the GROUP BY's column references) plus one aggregator per
     /// <see cref="AggregateExpression"/> in the projection.
@@ -596,5 +692,19 @@ internal sealed partial class Selection
         /// buried inside a grouping expression (constant within the group).
         /// </summary>
         public byte[]?[]? Representative;
+
+        /// <summary>
+        /// Ordinal of the input row that created this group, counted from the
+        /// start of the enumeration. Written only by the parallel accumulation
+        /// (<c>Selection.Execution.AggregateParallel.cs</c>), whose merge uses
+        /// it to keep the lower-ordinal group's <see cref="KeyValues"/> and
+        /// <see cref="Representative"/> — both of which are the creating row's
+        /// and are observable when the key's equality is coarser than its
+        /// rendering (a case-insensitive collation groups <c>'abc'</c> with
+        /// <c>'ABC'</c> and projects whichever row arrived first). The serial
+        /// path leaves it at zero and never reads it, its scan order being
+        /// the answer by construction.
+        /// </summary>
+        public long FirstRowOrdinal;
     }
 }

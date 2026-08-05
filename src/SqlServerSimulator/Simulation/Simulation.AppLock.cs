@@ -80,7 +80,7 @@ public partial class Simulation
         var resourceName = AppLock.NormalizeResource(args.Resource.CoerceTo(SqlType.NVarchar).AsString);
         var resource = batch.CurrentDatabase.GetOrCreateApplicationLock(principalId, resourceName);
 
-        var outcome = connection.Simulation.LockManager.TryAcquire(resource, mode, connection, timeout);
+        var outcome = connection.Simulation.LockManager.TryAcquire(resource, mode, connection.Session, timeout);
         var code = outcome switch
         {
             LockAcquireOutcome.Granted => 0,
@@ -163,7 +163,7 @@ public partial class Simulation
             throw SimulatedSqlException.CannotReleaseAppLockNotHeld(principalName, resourceName);
 
         var hold = ledger[bestIndex];
-        connection.Simulation.LockManager.Release(hold.LockResource, hold.Mode, connection);
+        connection.Simulation.LockManager.Release(hold.LockResource, hold.Mode, connection.Session);
         ledger.RemoveAt(bestIndex);
         if (isTransaction)
         {

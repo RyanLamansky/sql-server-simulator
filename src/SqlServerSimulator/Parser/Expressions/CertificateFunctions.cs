@@ -53,7 +53,7 @@ internal sealed class CertificateFunction : Expression
         ? $"CERTENCODED({this.certId.DebugDisplay()})"
         : $"CERTPRIVATEKEY({this.certId.DebugDisplay()}, …)";
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit)
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit)
     {
         this.certId.VisitColumnReferences(visit);
         this.password?.VisitColumnReferences(visit);

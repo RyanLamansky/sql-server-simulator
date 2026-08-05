@@ -700,7 +700,7 @@ internal sealed class SpatialMethodCall : Expression
         ? $"({this.target.DebugDisplay()}).{this.memberName}(…)"
         : $"({this.target.DebugDisplay()}).{this.memberName}";
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit)
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit)
     {
         this.target.VisitColumnReferences(visit);
         foreach (var argument in this.arguments)

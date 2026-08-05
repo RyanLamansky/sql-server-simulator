@@ -27,6 +27,8 @@ internal sealed class Replace : Expression
         this.newValue = Parse(context.MoveNextRequiredReturnSelf());
     }
 
+    internal override bool ParallelSafe => this.input.ParallelSafe && this.oldValue.ParallelSafe && this.newValue.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var rawInput = input.Run(runtime);

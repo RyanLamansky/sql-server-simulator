@@ -273,6 +273,11 @@ internal static class VersionStore
     /// </summary>
     internal static void RunGarbageCollection(Simulation simulation, Database database)
     {
+        // A session abandoned mid-SNAPSHOT still holds its registration, so its
+        // stamp would keep every later version pinned. Reclaiming first is what
+        // lets the cutoff below advance past it — the same reason real's
+        // version store shrinks once a dead client's session is reset.
+        _ = simulation.ReclaimAbandonedSessions();
         var cutoff = OldestActiveSnapshotXid(simulation);
         foreach (var schema in database.Schemas.Values)
         {
@@ -363,8 +368,8 @@ internal static class VersionStore
         var min = long.MaxValue;
         foreach (var kv in simulation.ActiveSnapshotTxs)
         {
-            if (kv.Key.SnapshotXid is { } xid && xid < min)
-                min = xid;
+            if (kv.Value.SnapshotXid < min)
+                min = kv.Value.SnapshotXid;
         }
         return min == long.MaxValue ? simulation.CurrentTransactionCommitId : min;
     }

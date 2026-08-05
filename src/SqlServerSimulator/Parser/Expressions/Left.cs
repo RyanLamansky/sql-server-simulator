@@ -20,6 +20,8 @@ internal sealed class Left : Expression
         this.count = Parse(context.MoveNextRequiredReturnSelf());
     }
 
+    internal override bool ParallelSafe => this.source.ParallelSafe && this.count.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var rawSource = source.Run(runtime);

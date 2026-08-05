@@ -157,55 +157,71 @@ internal sealed partial class Selection
     /// <summary>
     /// Enforces the GROUP BY containment rule (Msg 8120 / 8121 / 8127): outside
     /// an aggregate, a column reference must resolve to a bare GROUP BY column.
-    /// <see cref="Expression.VisitColumnReferences"/> already skips
+    /// <see cref="Expression.VisitColumnReferences(Action{MultiPartName})"/> already skips
     /// aggregate-internal columns (an <see cref="AggregateExpression"/> doesn't
     /// visit its operand), so it yields exactly the bare, non-aggregated
-    /// references. Columns that appear only <em>inside</em> a compound GROUP BY
-    /// expression (<c>GROUP BY a+b</c>) are the conservative seam: SQL Server
-    /// licenses <c>SELECT a+b</c> but rejects a bare <c>SELECT a</c>, and
-    /// telling those apart needs sub-expression structural matching we don't do,
-    /// so such a reference is left unflagged rather than risk a false positive on
-    /// the valid <c>SELECT (a+b)*2</c> shape. A reference to a column absent from
-    /// GROUP BY entirely is unambiguously invalid and raised. A reference that
-    /// doesn't resolve against these sources (correlated / outer) is not this
-    /// query's grouping concern.
+    /// references. A reference that doesn't resolve against these sources
+    /// (correlated / outer) is not this query's grouping concern.
+    /// <para>
+    /// A GROUP BY <em>expression</em> covers a projection sub-expression that
+    /// matches it, not the columns it happens to name: real licenses
+    /// <c>SELECT a + 1</c>, <c>SELECT (a + 1) * 2</c> and
+    /// <c>SELECT YEAR(d) * 100 + MONTH(d)</c> against the matching clauses and
+    /// refuses <c>SELECT a</c>, <c>SELECT a + 0</c> and <c>SELECT 1 + a</c>
+    /// against <c>GROUP BY a + 1</c> — the match is structural, not algebraic
+    /// (probed 2026-08-05). The walk is stopped at a matching node by
+    /// <see cref="ColumnReferenceVisitor.CoversSubtree"/>, so every reference
+    /// that reaches <c>Check</c> is one no grouping expression covered.
+    /// </para>
     /// </summary>
     private static void ValidateGroupByReferences(FromSource[] sources, List<Expression> expressions, List<OrderBySpec> orderBy, string[] outputColumnNames, FromClause fromClause, List<WindowExpression> windows)
     {
         var groupedBare = new HashSet<(int Source, int Column)>();
-        var groupedComponent = new HashSet<(int Source, int Column)>();
+        var groupingKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var grouping in fromClause.AllGroupingExpressions)
         {
-            if (grouping is Reference bare)
+            // Parentheses are not part of the grouping key: `GROUP BY (region)`
+            // groups by the column, not by a compound expression.
+            var peeled = grouping;
+            while (peeled is Parenthesized paren)
+                peeled = paren.Wrapped;
+
+            if (peeled is Reference bare)
             {
                 if (TryResolveSourceColumn(sources, bare.ReferencedName) is { } id)
                     _ = groupedBare.Add(id);
             }
             else
             {
-                grouping.VisitColumnReferences(name =>
-                {
-                    if (TryResolveSourceColumn(sources, name) is { } id)
-                        _ = groupedComponent.Add(id);
-                });
+                _ = groupingKeys.Add(GroupingKey(peeled));
             }
         }
+
+        var coversSubtree = groupingKeys.Count == 0
+            ? null
+            : (Func<Expression, bool>)(node => node is not Reference && groupingKeys.Contains(GroupingKey(node)));
 
         void Check(MultiPartName name, Func<string, SimulatedSqlException> error)
         {
-            if (TryResolveSourceColumn(sources, name) is not { } id
-                || groupedBare.Contains(id) || groupedComponent.Contains(id))
-            {
+            if (TryResolveSourceColumn(sources, name) is not { } id || groupedBare.Contains(id))
                 return;
-            }
 
+            // Real names the object the FROM clause wrote — the alias is not
+            // it, so `SELECT a FROM g1 AS x GROUP BY b` reports 'g1.a' — and
+            // falls back to the alias where the source has no object of its own
+            // (a derived table reports 'z.a', a CTE 'c.a'; probed 2026-08-05).
             var source = sources[id.Source];
             var column = source.ColumnNames[id.Column];
-            throw error(source.Qualifier is { } qualifier ? $"{qualifier}.{column}" : column);
+            var qualifier = source.WrittenObjectName ?? source.Qualifier;
+            throw error(qualifier is null ? column : $"{qualifier}.{column}");
         }
 
+        ColumnReferenceVisitor VisitorFor(Func<string, SimulatedSqlException> error) =>
+            new(name => Check(name, error), coversSubtree);
+
+        var selectVisitor = VisitorFor(SimulatedSqlException.ColumnNotInGroupByForSelect);
         foreach (var expression in expressions)
-            expression.VisitColumnReferences(name => Check(name, SimulatedSqlException.ColumnNotInGroupByForSelect));
+            expression.VisitColumnReferences(selectVisitor);
 
         // A window in an aggregate query runs over the *grouped* rows, so its
         // own operand and PARTITION BY / ORDER BY expressions are group-level
@@ -221,8 +237,7 @@ internal sealed partial class Selection
         // covered identically.
         foreach (var window in windows)
         {
-            void CheckWindowOperand(Expression? operand) =>
-                operand?.VisitColumnReferences(name => Check(name, SimulatedSqlException.ColumnNotInGroupByForSelect));
+            void CheckWindowOperand(Expression? operand) => operand?.VisitColumnReferences(selectVisitor);
 
             CheckWindowOperand(window.Operand);
             CheckWindowOperand(window.AggregateInfo?.Operand);
@@ -237,12 +252,11 @@ internal sealed partial class Selection
         // post-fold tree, so a HAVING conjunct it settled while compiling takes
         // its columns out of the check (`HAVING NULL <> b` and
         // `HAVING 1 = 0 AND b > 1` both answer no rows over an ungrouped `b`).
-        fromClause.Having?.VisitSurvivingOperandExpressions(op =>
-            op.VisitColumnReferences(name => Check(name, SimulatedSqlException.ColumnNotInGroupByForHaving)));
+        var havingVisitor = VisitorFor(SimulatedSqlException.ColumnNotInGroupByForHaving);
+        fromClause.Having?.VisitSurvivingOperandExpressions(op => op.VisitColumnReferences(havingVisitor));
 
-        foreach (var item in orderBy)
-        {
-            item.Expr?.VisitColumnReferences(name =>
+        var orderByVisitor = new ColumnReferenceVisitor(
+            name =>
             {
                 // ORDER BY resolves an unqualified SELECT-output alias before a
                 // source column — an alias names an already-validated projection,
@@ -257,8 +271,61 @@ internal sealed partial class Selection
                 }
 
                 Check(name, SimulatedSqlException.ColumnNotInGroupByForOrderBy);
-            });
+            },
+            coversSubtree);
+        foreach (var item in orderBy)
+            item.Expr?.VisitColumnReferences(orderByVisitor);
+    }
+
+    /// <summary>
+    /// The structural identity a GROUP BY expression is matched on: the node's
+    /// own rendering with every qualifier dropped, so a projection and a
+    /// grouping clause that spell the same column differently still match
+    /// (<c>SELECT a + 1 FROM t AS x GROUP BY x.a + 1</c> runs on real). The
+    /// normalization can only merge keys, never split them, so what it costs is
+    /// the occasional over-permissive match across a join — the safe direction,
+    /// since the alternative is refusing a query real accepts.
+    /// <para>
+    /// Parentheses are transparent to the match (<c>GROUP BY (a + 1)</c> covers
+    /// <c>SELECT a + 1</c> and the reverse), so a grouping key is peeled before
+    /// it is rendered; the projection side needs no peeling because the walk
+    /// descends through the wrapper and meets the inner node in its own right.
+    /// </para>
+    /// </summary>
+    private static string GroupingKey(Expression expression)
+    {
+        var peeled = expression;
+        while (peeled is Parenthesized paren)
+            peeled = paren.Wrapped;
+        return StripQualifiers(peeled.DebugDisplay());
+    }
+
+    /// <summary>
+    /// Removes every <c>&lt;identifier&gt;.</c> prefix from a rendered
+    /// expression. A run has to start with a letter or <c>_</c> to qualify, so
+    /// the <c>.</c> of a numeric literal survives.
+    /// </summary>
+    private static string StripQualifiers(string display)
+    {
+        if (!display.Contains('.', StringComparison.Ordinal))
+            return display;
+
+        var result = new System.Text.StringBuilder(display.Length);
+        for (var i = 0; i < display.Length; i++)
+        {
+            var start = i;
+            if (char.IsLetter(display[i]) || display[i] == '_')
+            {
+                while (i < display.Length && (char.IsLetterOrDigit(display[i]) || display[i] is '_' or '$' or '#' or '@'))
+                    i++;
+                if (i < display.Length && display[i] == '.')
+                    continue;
+            }
+
+            _ = result.Append(display.AsSpan(start, i - start + (i < display.Length ? 1 : 0)));
         }
+
+        return result.ToString();
     }
 
     /// <summary>

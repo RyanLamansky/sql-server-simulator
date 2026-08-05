@@ -64,6 +64,8 @@ internal sealed class Cast : Expression
     internal static bool ReportsNumeric(Name typeName) =>
         typeName.Span.Equals("numeric", StringComparison.OrdinalIgnoreCase);
 
+    internal override bool ParallelSafe => this.source.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var sourceValue = this.source.Run(runtime);
@@ -82,7 +84,18 @@ internal sealed class Cast : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResultStringType(this.targetType, this.source.GetSqlType(batch, resolveColumnType), batch.CurrentDatabase.Collation) ?? this.targetType;
+        RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, batch.CurrentDatabase.Collation);
+
+    /// <summary>
+    /// The compile-time half of Msg 529, shared by CAST and CONVERT: real
+    /// settles conversion legality from the two types while it compiles, so
+    /// the diagnostic is due here rather than at the first row. Returns the
+    /// result type so the two callers stay one expression each.
+    /// </summary>
+    internal static SqlType RejectIllegalConversion(Expression source, SqlType sourceType, SqlType targetType, Collation dbCollation) =>
+        source is not Value { IsUntypedNull: true } && IsIllegalExplicitConversion(sourceType, targetType)
+            ? throw SimulatedSqlException.ExplicitConversionNotAllowed(sourceType, targetType)
+            : ResultStringType(targetType, sourceType, dbCollation) ?? targetType;
 
     internal override bool ResultReportsNumeric => this.targetReportsNumeric;
 
@@ -141,7 +154,7 @@ internal sealed class Cast : Expression
     internal override string DebugDisplay() =>
         $"{(this.tryMode ? "TRY_CAST" : "CAST")}({source.DebugDisplay()} AS {targetType})";
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit) => this.source.VisitColumnReferences(visit);
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => this.source.VisitColumnReferences(visit);
 
     internal override bool ContainsVariableReference => this.source.ContainsVariableReference;
 
@@ -237,6 +250,101 @@ internal sealed class Cast : Expression
         source == SqlType.Text || source == SqlType.NText
             ? !SqlType.IsStringCategory(target)
             : source == SqlType.Image && target is not (VarbinarySqlType or BinarySqlType or ImageSqlType);
+
+    /// <summary>
+    /// Whether real refuses this explicit conversion outright — Msg 529, which
+    /// it settles from the two <em>types</em> while compiling, before any value
+    /// exists. That is why the gate sits on
+    /// <see cref="GetSqlType(BatchContext, Func{MultiPartName, SqlType})"/> as
+    /// well as on the value path: a typed NULL raises it, an empty rowset
+    /// raises it, and a module body carrying one refuses its own
+    /// <c>CREATE</c>.
+    /// <para>
+    /// The table is the probed one (SQL Server 2025, 2026-08-05: every ordered
+    /// pair of the 28 common type names, 284 refusals). Reading it by source
+    /// family:
+    /// </para>
+    /// <list type="bullet">
+    /// <item>A <b>numeric</b> source (integer / decimal / money / float / real)
+    /// reaches <c>datetime</c> and <c>smalldatetime</c> — the day-count
+    /// conversions — but not <c>date</c>, <c>time</c>, <c>datetime2</c> or
+    /// <c>datetimeoffset</c>.</item>
+    /// <item>A <b>date/time</b> source runs the same rule backwards, with
+    /// <c>datetime</c> / <c>smalldatetime</c> the only two that convert to a
+    /// number; <c>date</c> and <c>time</c> additionally refuse each other,
+    /// having no part in common.</item>
+    /// <item><b><c>uniqueidentifier</c></b> and <b><c>xml</c></b> convert only
+    /// to and from the string and binary families (<c>xml</c> refusing
+    /// <c>sql_variant</c> as well, which <c>uniqueidentifier</c> accepts).</item>
+    /// <item>A <b>binary</b> source reinterprets its bytes as any fixed-width
+    /// value but not as <c>float</c> / <c>real</c>.</item>
+    /// <item>Every source but the ANSI string family refuses <c>image</c>, and
+    /// every source but a string refuses <c>text</c> / <c>ntext</c> — the
+    /// mirror of the legacy-LOB allow-lists above.</item>
+    /// </list>
+    /// Types outside that grid (<c>rowversion</c>, <c>hierarchyid</c>, the
+    /// spatial pair, alias types) are not in the table and keep whatever the
+    /// value path decides.
+    /// </summary>
+    internal static bool IsIllegalExplicitConversion(SqlType source, SqlType target)
+    {
+        if (source == target)
+            return false;
+        if (source == SqlType.Text || source == SqlType.NText || source == SqlType.Image)
+            return IsRejectedLegacyLobConversion(source, target);
+
+        // The legacy LOB targets take the mirror of those allow-lists: only a
+        // character source reaches text / ntext (xml, which converts to every
+        // other string type, does not), and only an ANSI-character or binary
+        // one reaches image.
+        if (target == SqlType.Text || target == SqlType.NText)
+            return !IsAnsiOrUnicodeString(source);
+        if (target == SqlType.Image)
+            return !IsAnsiString(source) && source is not (BinarySqlType or VarbinarySqlType);
+
+        if (IsNumeric(source))
+            return IsDateOnlyOrTimeFamily(target) || target == SqlType.UniqueIdentifier || target is XmlSqlType;
+
+        // A legacy datetime / smalldatetime is the one date/time source that
+        // converts to a number, and the only one a number reaches.
+        if (IsDateTimeFamily(source))
+        {
+            var legacyDateTime = source == SqlType.DateTime || source == SqlType.SmallDateTime;
+            return (!legacyDateTime && (IsNumeric(target) || IsIncompatibleDatePart(source, target)))
+                || target == SqlType.UniqueIdentifier
+                || target is XmlSqlType;
+        }
+
+        if (source == SqlType.UniqueIdentifier)
+            return IsNumeric(target) || IsDateTimeFamily(target) || target is XmlSqlType;
+        if (source is XmlSqlType)
+            return IsNumeric(target) || IsDateTimeFamily(target) || target == SqlType.UniqueIdentifier || target is SqlVariantSqlType;
+        if (source is SqlVariantSqlType)
+            return target is XmlSqlType;
+        return source is BinarySqlType or VarbinarySqlType && (target == SqlType.Float || target == SqlType.Real);
+    }
+
+    /// <summary>The two date/time parts that share nothing: a whole-day value
+    /// and a within-day one convert to every other member of the family but
+    /// not to each other.</summary>
+    private static bool IsIncompatibleDatePart(SqlType source, SqlType target) =>
+        (source == SqlType.Date && target is TimeSqlType) || (source is TimeSqlType && target == SqlType.Date);
+
+    private static bool IsNumeric(SqlType type) =>
+        SqlType.IsIntegerCategory(type) || type is DecimalSqlType || SqlType.IsMoneyCategory(type)
+        || type == SqlType.Float || type == SqlType.Real;
+
+    private static bool IsDateTimeFamily(SqlType type) =>
+        type == SqlType.Date || type == SqlType.DateTime || type == SqlType.SmallDateTime
+        || type is DateTime2SqlType or TimeSqlType or DateTimeOffsetSqlType;
+
+    private static bool IsDateOnlyOrTimeFamily(SqlType type) =>
+        type == SqlType.Date || type is DateTime2SqlType or TimeSqlType or DateTimeOffsetSqlType;
+
+    private static bool IsAnsiString(SqlType type) => type is CharSqlType or VarcharSqlType;
+
+    private static bool IsAnsiOrUnicodeString(SqlType type) =>
+        IsAnsiString(type) || type is NCharSqlType or NVarcharSqlType;
 
     internal static SqlValue ApplyCoercion(SqlValue value, SqlType targetType, int? targetMaxLength, Collation? budgetCollation = null)
     {

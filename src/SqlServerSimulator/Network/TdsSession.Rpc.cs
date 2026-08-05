@@ -71,7 +71,7 @@ internal sealed partial class TdsSession
                 _ = this.FlushInfoMessages(writer);
                 WriteErrors(writer, ex);
                 if (!moreRequests)
-                    this.WriteDatabaseChangeIfAny(writer);
+                    this.WriteSessionEnvChangesIfAny(writer);
                 writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
             }
             catch (NotSupportedException ex)
@@ -79,7 +79,7 @@ internal sealed partial class TdsSession
                 _ = this.FlushInfoMessages(writer);
                 writer.WriteErrorOrInfo(Tds.TokenError, 50000, 1, 16, $"SqlServerSimulator: {ex.Message}", "SIMULATED", "", 1);
                 if (!moreRequests)
-                    this.WriteDatabaseChangeIfAny(writer);
+                    this.WriteSessionEnvChangesIfAny(writer);
                 writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
             }
 #pragma warning disable CA1031 // Deliberate: an unmodeled statement must not cost the whole session — see IsRecoverableStatementFault.
@@ -88,7 +88,7 @@ internal sealed partial class TdsSession
                 _ = this.FlushInfoMessages(writer);
                 WriteUnexpectedStatementFault(writer, ex);
                 if (!moreRequests)
-                    this.WriteDatabaseChangeIfAny(writer);
+                    this.WriteSessionEnvChangesIfAny(writer);
                 writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
             }
 #pragma warning restore CA1031
@@ -224,7 +224,7 @@ internal sealed partial class TdsSession
         WriteOutputReturnValues(writer, outputs);
 
         if (!moreRequests)
-            this.WriteDatabaseChangeIfAny(writer);
+            this.WriteSessionEnvChangesIfAny(writer);
         writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0);
     }
 
@@ -260,7 +260,7 @@ internal sealed partial class TdsSession
         WriteOutputReturnValues(writer, outputs);
 
         if (!moreRequests)
-            this.WriteDatabaseChangeIfAny(writer);
+            this.WriteSessionEnvChangesIfAny(writer);
         writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0);
     }
 

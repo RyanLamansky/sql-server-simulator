@@ -26,6 +26,41 @@ internal sealed partial class TdsSession
     private byte lastTmIsolation;
 
     /// <summary>
+    /// Set when the engine ended the session's transaction underneath this
+    /// layer — a transaction-aborting error (Msg 8728), a deadlock victim, a
+    /// SNAPSHOT update conflict. The client is told through the ENVCHANGE
+    /// <see cref="WriteTransactionEndIfAny"/> writes, but a manual-commit
+    /// driver still sends its commit / rollback afterwards, and that request
+    /// must find nothing left to do rather than a completed transaction to
+    /// re-finish or a missing one to complain about.
+    /// </summary>
+    private bool transactionEndedByEngine;
+
+    /// <summary>
+    /// Drops the session's handle on a transaction the engine has already
+    /// finished, remembering that it existed. Idempotent, and a no-op for the
+    /// ordinary case where the session's transaction is still the connection's.
+    /// </summary>
+    private void ForgetTransactionEndedByEngine()
+    {
+        if (this.transaction is not { } opened || ReferenceEquals(this.connection!.CurrentTransaction, opened))
+            return;
+        this.transaction = null;
+        this.transactionEndedByEngine = true;
+    }
+
+    /// <summary>
+    /// Nests a Transaction Manager begin on an already-open transaction, the
+    /// way real's <c>BEGIN TRANSACTION</c> nests: one more level to unwind, and
+    /// only the outermost commit commits.
+    /// </summary>
+    private static SimulatedDbTransaction NestTransaction(SimulatedDbTransaction open)
+    {
+        open.TranCount++;
+        return open;
+    }
+
+    /// <summary>
     /// Handles a Transaction Manager request (begin / commit / rollback /
     /// save), mapping it onto the session connection's transaction API.
     /// SqlClient sends these for the <c>SqlTransaction</c> object model;
@@ -62,7 +97,17 @@ internal sealed partial class TdsSession
                 case Tds.TmBeginTransaction:
                     {
                         this.lastTmIsolation = offset < payload.Length ? payload[offset] : (byte)0;
-                        this.transaction = this.connection!.BeginTransaction(MapIsolationLevel(this.lastTmIsolation));
+                        this.ForgetTransactionEndedByEngine();
+                        // A begin arriving while a transaction is already open
+                        // nests on real — @@TRANCOUNT rises, the isolation of
+                        // the outer one stands. The parallel-transaction
+                        // refusal is SqlClient's own client-side rule, not the
+                        // server's, and a manual-commit driver that lost track
+                        // of an engine-ended transaction does send one.
+                        this.transaction = this.connection!.CurrentTransaction is { } open
+                            ? NestTransaction(open)
+                            : this.connection.BeginTransaction(MapIsolationLevel(this.lastTmIsolation));
+                        this.transactionEndedByEngine = false;
                         writer.WriteEnvChangeTransaction(Tds.EnvBeginTransaction, ++this.lastTransactionDescriptor);
                         writer.WriteDone(Tds.DoneFinal, 0);
                         break;
@@ -78,11 +123,13 @@ internal sealed partial class TdsSession
                         // dropping the follow-on begin desyncs the driver.
                         _ = ReadTransactionName(payload, ref offset);
                         var beginNext = ReadBeginXactFlag(payload, ref offset);
-                        if (this.transaction is null)
+                        this.ForgetTransactionEndedByEngine();
+                        if (this.transaction is null && !this.transactionEndedByEngine)
                             throw new InvalidOperationException("The Transaction Manager commit request has no corresponding BEGIN TRANSACTION.");
 
-                        this.transaction.Commit();
+                        this.transaction?.Commit();
                         this.transaction = null;
+                        this.transactionEndedByEngine = false;
                         writer.WriteEnvChangeTransaction(Tds.EnvCommitTransaction, this.lastTransactionDescriptor);
                         this.BeginFollowOnTransactionIfRequested(beginNext, writer);
                         writer.WriteDone(Tds.DoneFinal, 0);
@@ -98,13 +145,15 @@ internal sealed partial class TdsSession
                         // set (ODBC manual-commit), opens the next one.
                         var name = ReadTransactionName(payload, ref offset);
                         var beginNext = ReadBeginXactFlag(payload, ref offset);
+                        this.ForgetTransactionEndedByEngine();
                         if (name.Length == 0)
                         {
-                            if (this.transaction is null)
+                            if (this.transaction is null && !this.transactionEndedByEngine)
                                 throw new InvalidOperationException("The Transaction Manager rollback request has no corresponding BEGIN TRANSACTION.");
 
-                            this.transaction.Rollback();
+                            this.transaction?.Rollback();
                             this.transaction = null;
+                            this.transactionEndedByEngine = false;
                             writer.WriteEnvChangeTransaction(Tds.EnvRollbackTransaction, this.lastTransactionDescriptor);
                             this.BeginFollowOnTransactionIfRequested(beginNext, writer);
                         }

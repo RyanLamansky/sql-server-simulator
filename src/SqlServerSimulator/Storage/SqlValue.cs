@@ -542,9 +542,21 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     private static decimal AtScale(decimal value, int scale)
     {
         var current = value.Scale;
-        return current == scale ? value
-            : current > scale ? decimal.Round(value, scale, MidpointRounding.AwayFromZero)
-            : value + new decimal(lo: 0, mid: 0, hi: 0, isNegative: false, scale: (byte)Math.Min(scale, 28));
+        if (current == scale)
+            return value;
+        if (current > scale)
+            return decimal.Round(value, scale, MidpointRounding.AwayFromZero);
+        try
+        {
+            return value + new decimal(lo: 0, mid: 0, hi: 0, isNegative: false, scale: (byte)Math.Min(scale, 28));
+        }
+        catch (OverflowException)
+        {
+            // The trailing zeros wouldn't fit beside the integer part — the
+            // widest representation available is the value as it stands, which
+            // is the same number written with fewer of them.
+            return value;
+        }
     }
 
     /// <summary>
@@ -926,6 +938,37 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                 },
                 _ => throw new NotSupportedException($"Comparison for {this.Type} isn't implemented yet."),
             };
+
+    /// <summary>
+    /// Stricter than <see cref="Equals(SqlValue)"/>: true when the two values
+    /// would <em>render</em> identically, not merely compare equal. Case,
+    /// trailing spaces, a decimal's declared scale and a
+    /// <c>datetimeoffset</c>'s written offset are all part of identity here
+    /// and none of them is part of equality.
+    /// </summary>
+    /// <remarks>
+    /// Consumed by the parallel grouped accumulation's <c>MIN</c> / <c>MAX</c>
+    /// merge: a tie between two values that compare equal is only mergeable
+    /// when the serial scan could not have told them apart, since a serial scan
+    /// keeps the first-encountered of a tie and a merge has no scan order to
+    /// consult. An answer of <see langword="false"/> costs a serial re-run,
+    /// never a wrong result, so the conservative direction is to under-claim.
+    /// </remarks>
+    internal bool IsIdenticalTo(SqlValue other) =>
+        this.Type == other.Type
+        && this.IsNull == other.IsNull
+        && (this.IsNull
+            || (this.primitive == other.primitive && ReferenceRendersEqual(this.reference, other.reference)));
+
+    private static bool ReferenceRendersEqual(object? a, object? b) => (a, b) switch
+    {
+        (null, null) => true,
+        (string x, string y) => string.Equals(x, y, StringComparison.Ordinal),
+        (decimal x, decimal y) => x == y && x.Scale == y.Scale,
+        (DateTimeOffset x, DateTimeOffset y) => x.EqualsExact(y),
+        (byte[] x, byte[] y) => x.AsSpan().SequenceEqual(y),
+        _ => Equals(a, b),
+    };
 
     public override bool Equals(object? obj) => obj is SqlValue other && this.Equals(other);
 

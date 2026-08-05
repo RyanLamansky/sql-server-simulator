@@ -462,6 +462,11 @@ internal sealed partial class Selection
         var combined = ParseUnionExceptChain(
             context, depth, outerTypeResolver, !context.ProjectionDiscarded && !context.InInsertSourceSelect);
 
+        // Msg 422 is settled against the shape of the whole statement, so the
+        // bare-projection flag is read before the clauses below can consume
+        // anything more (each of which real accepts as a use of the prefix).
+        var bareProjectionStatement = context.LastQuerySpecIsBareProjection;
+
         // Top-level ORDER BY: applies to the combined result (post-set-op).
         // ORDER BY references within set-op chains use the first branch's
         // column names. Top-level OFFSET/FETCH (post-chain) attaches here
@@ -484,28 +489,49 @@ internal sealed partial class Selection
             if (topLevelTail.OffsetExpression is not null && context.SequenceDrawsParsed > sequenceDrawsBefore)
                 throw SimulatedSqlException.NextValueForNotAllowedWithRowLimit();
             combined = ApplyTopLevelOrderBy(combined, orderBy, topLevelTail.OffsetExpression, topLevelTail.FetchExpression);
+            bareProjectionStatement = false;
         }
 
         // Trailing FOR JSON { PATH | AUTO } [, options]: wraps the combined
         // result in a single-column JSON-string serializer. Sits where FOR XML
         // / FOR BROWSE do (after ORDER BY / OFFSET-FETCH, before OPTION); a
         // non-JSON FOR clause is left in place for the downstream Msg 102.
+        var beforeForClauses = combined;
         combined = ParseOptionalForJson(context, combined, depth);
 
         // Trailing FOR XML { RAW | AUTO | PATH } [, ELEMENTS …] [, ROOT …]:
         // wraps the result in a single-column xml serializer. Sits in the same
         // slot; a non-XML FOR clause is left in place for the downstream Msg 102.
         combined = ParseOptionalForXml(context, combined, depth);
+        if (!ReferenceEquals(combined, beforeForClauses))
+            bareProjectionStatement = false;
 
         // OPTION (hint [, …]) — statement-level hint clause. Parsed as a
         // closed-list per Selection.Hints.cs; MAXRECURSION applies to in-
         // scope recursive CTEs, everything else recognized is discarded
         // (the simulator has nothing to dispatch on a hint against).
         if (context.Token is ReservedKeyword { Keyword: Keyword.Option })
+        {
             ParseOptionClause(context);
+            bareProjectionStatement = false;
+        }
 
         if (ownsSecurableSink)
         {
+            // Msg 422 — a WITH prefix whose statement is a bare
+            // `SELECT <expression list>`. Real's refusal is that narrow: the
+            // same prefix over `SELECT 1 WHERE 1 = 1`, `SELECT 1 ORDER BY 1`,
+            // `SELECT TOP 1 1`, `SELECT DISTINCT 1`, `SELECT 1 UNION SELECT 2`,
+            // `SELECT (SELECT MAX(a) FROM t)`, `SELECT 1 FOR JSON PATH`,
+            // `SELECT 1 OPTION (MAXDOP 1)` and every INSERT / UPDATE / DELETE /
+            // MERGE / SELECT … INTO form is accepted, and only one CTE anywhere
+            // in the prefix has to go unused for the bare shape to raise
+            // (probed 2026-08-05). A bare projection can name no CTE — it has
+            // no FROM and no subquery — so the shape settles the diagnostic on
+            // its own.
+            if (bareProjectionStatement && context.CtePrefixLeadsSelectStatement && context.CteBindings is { Count: > 0 })
+                throw SimulatedSqlException.CteDefinedButNotUsed();
+
             if (context.SecurableSink is { Count: > 0 } sink)
                 combined.ReferencedSecurables = sink;
             if (context.ReadColumnSink is { Count: > 0 } readColumns)
@@ -614,6 +640,10 @@ internal sealed partial class Selection
     {
         if (context.IndexedViewShapeCollector is { } shape)
             shape.HasSetOperation = true;
+
+        // A combined result is no longer a bare projection however bare each
+        // branch was, and the last branch's own parse is what set the flag.
+        context.LastQuerySpecIsBareProjection = false;
         FunctionBodyShape.NoteRowsetRead(context);
     }
 
@@ -1001,6 +1031,10 @@ internal sealed partial class Selection
         var topPercent = false;
         var topWithTies = false;
 
+        // Only the FROM-less bare-projection return below sets this back;
+        // every other shape this method builds leaves it cleared.
+        context.LastQuerySpecIsBareProjection = false;
+
         var firstToken = context.GetNextRequired();
 
         // DISTINCT/ALL appear before TOP. SQL Server rejects `TOP n DISTINCT`
@@ -1107,7 +1141,7 @@ internal sealed partial class Selection
         // re-parsing. A FROM-less SELECT skips all of this.
         List<FromSource>? preParsedSources = null;
         List<JoinSpec>? preParsedJoins = null;
-        (int Index, Token? Token) afterSources = default;
+        ParserContext.Checkpoint afterSources = default;
         if (FindOwnFromClause(context) is { } fromCheckpoint)
         {
             var selectListStart = context.SaveCheckpoint();
@@ -1561,6 +1595,16 @@ internal sealed partial class Selection
         // so its counts resolve here once, exactly as its projection does.
         // The synthesized shape yields at most one row, so PERCENT collapses to
         // "1 row when pct > 0, else none".
+        var containsSubquery = context.SubqueriesParsed > subqueriesBeforeProjection;
+        context.LastQuerySpecIsBareProjection = !distinct
+            && topExpression is null
+            && intoTarget is null
+            && !containsSubquery
+            && fromClause.Excluders.Count == 0
+            && fromClause.OrderBy.Count == 0
+            && fromClause.OffsetExpression is null
+            && fromClause.FetchExpression is null;
+
         return BuildSynthesizedSqlRow(context.Batch, expressions, fromClause.Excluders, fromClause.OrderBy,
             topPercent
                 ? (topExpression is not null && ResolveTopPercentValue(topExpression, context.Batch) > 0 ? 1 : 0)
@@ -1568,7 +1612,7 @@ internal sealed partial class Selection
             ResolveRowCountLimit(fromClause.OffsetExpression, RowLimitKind.Offset, context.Batch),
             ResolveRowCountLimit(fromClause.FetchExpression, RowLimitKind.Fetch, context.Batch),
             ResolveAssignmentMode(expressions), intoTarget, context.OuterTypeResolver ?? outerTypeResolver,
-            context.SubqueriesParsed > subqueriesBeforeProjection);
+            containsSubquery);
     }
 
     /// <summary>
@@ -1675,7 +1719,7 @@ internal sealed partial class Selection
     /// a closing paren that drops depth below zero means the enclosing
     /// subquery ended first.
     /// </remarks>
-    private static (int Index, Token? Token)? FindOwnFromClause(ParserContext context)
+    private static ParserContext.Checkpoint? FindOwnFromClause(ParserContext context)
     {
         var start = context.SaveCheckpoint();
         try
@@ -2057,8 +2101,8 @@ internal sealed partial class Selection
     /// </para>
     /// </summary>
     private static void RejectSiblingReferences(
-        IReadOnlyList<Reference> siblingCandidates,
-        IReadOnlyList<FromSource> sources,
+        List<Reference> siblingCandidates,
+        List<FromSource> sources,
         Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         foreach (var candidate in siblingCandidates)
@@ -2088,7 +2132,7 @@ internal sealed partial class Selection
         }
     }
 
-    private static bool SomeSourceCarriesColumn(IReadOnlyList<FromSource> sources, string leaf)
+    private static bool SomeSourceCarriesColumn(List<FromSource> sources, string leaf)
     {
         foreach (var source in sources)
         {
@@ -2719,7 +2763,8 @@ internal sealed partial class Selection
                     backingTable: heapTable,
                     heapPlan: temporalRowSource is null ? heapPlan : null,
                     viaSynonym: heapSynonym,
-                    autoElementName: heapAlias ?? objectName.ToString());
+                    autoElementName: heapAlias ?? objectName.ToString(),
+                    writtenObjectName: objectName.ToString());
 
             // Table-variable source: <c>FROM @t [alias]</c>. Routes through
             // BatchContext.TableVariables instead of the regular schema dict;
@@ -2743,7 +2788,8 @@ internal sealed partial class Selection
                     storageOrdinals: tvTable.StorageOrdinals,
                     lobStore: tvTable.Heap,
                     rows: tvTable.Rows,
-                    backingTable: tvTable);
+                    backingTable: tvTable,
+                    writtenObjectName: tvName.Leaf);
 
             case Operator { Character: '(' }:
                 var afterOpenParen = context.GetNextRequired();
@@ -2797,6 +2843,14 @@ internal sealed partial class Selection
                 var derivedColumns = new HeapColumn[derivedSelection.Schema.Length];
                 for (var ci = 0; ci < derivedColumns.Length; ci++)
                     derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: true);
+
+                // A body that never closed its paren is Msg 102 naming what the
+                // parse stopped on — the last token of the batch when the input
+                // simply ended (probed 2026-08-05: `SELECT * FROM (SELECT 1 AS a`
+                // reports `near 'a'`). Checked before the alias, whose own
+                // diagnostic below assumes a closing paren was there to name.
+                if (context.Token is not Operator { Character: ')' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
 
                 // A derived table has no native name, so the alias is
                 // mandatory: real reports Msg 102 near the closing ')' when
@@ -3379,6 +3433,10 @@ internal sealed partial class Selection
         // All `OVER w` references (projection and ORDER BY) and the WINDOW
         // definitions are now parsed — bind each pending reference.
         ResolvePendingNamedWindows(context);
+
+        // Every window's frame and ORDER BY are final here, which is what the
+        // RANGE-frame LOB gate (Msg 8728) needs to read.
+        Expressions.WindowExpression.ValidateRangeFrameOrderBy(context);
     }
 
     /// <summary>

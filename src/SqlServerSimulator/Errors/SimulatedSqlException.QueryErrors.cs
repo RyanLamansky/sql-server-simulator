@@ -453,6 +453,16 @@ partial class SimulatedSqlException
         new($"Duplicate common table expression name '{name}' was specified.", 239, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 422: a <c>WITH</c> prefix whose statement is a
+    /// bare <c>SELECT &lt;expression list&gt;</c> — the one shape real refuses,
+    /// naming no CTE and reporting at State 4 (probed 2026-08-05). Any clause
+    /// at all on the statement, or a DML target, and real accepts the prefix
+    /// however many of its CTEs go unread.
+    /// </summary>
+    internal static SimulatedSqlException CteDefinedButNotUsed() =>
+        new("Common table expression defined but not used.", 422, 16, 4);
+
+    /// <summary>
     /// Mimics SQL Server error 8158: a column-rename list has fewer names
     /// than the rowset it renames produces — a CTE / view body projection or
     /// a table-value-constructor derived table with more columns than its
@@ -486,7 +496,7 @@ partial class SimulatedSqlException
     /// <c>(SELECT 1, 2) s</c> reports columns 1 and 2), so the whole run is
     /// reproduced for <c>Errors</c> and <c>Message</c> parity.
     /// </summary>
-    internal static SimulatedSqlException NoColumnNamesSpecified(IReadOnlyList<int> columnPositions, string alias)
+    internal static SimulatedSqlException NoColumnNamesSpecified(List<int> columnPositions, string alias)
     {
         var errors = new SimulatedError[columnPositions.Count];
         var lines = new string[columnPositions.Count];
@@ -751,6 +761,20 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ConstantNotAllowedInOrderedAggregate() =>
         new("Windowed functions, aggregates and NEXT VALUE FOR functions do not support constants as ORDER BY clause expressions.", 5309, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 8728 — a window whose frame is <c>RANGE</c>
+    /// (written, or the default an <c>ORDER BY</c> confers on a frame-taking
+    /// function) orders by an expression of a MAX / LOB type. Probe-confirmed
+    /// against SQL Server 2025 (2026-08-05): Class 16, State 1, verbatim
+    /// wording, and it is one of the rare errors that rolls the whole
+    /// transaction back — hence <see cref="SimulatedSqlException.AbortsTransaction"/>.
+    /// </summary>
+    internal static SimulatedSqlException RangeFrameOrderByCannotContainLobType() =>
+        new("ORDER BY list of RANGE window frame cannot contain expressions of LOB type.", 8728, 16, 1)
+        {
+            AbortsTransaction = true,
+        };
 
     /// <summary>
     /// Mimics SQL Server's Msg 8133 — every result expression in a

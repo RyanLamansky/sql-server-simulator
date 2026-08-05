@@ -200,12 +200,12 @@ partial class Simulation
         // an inline column-level CHECK that references any column other than
         // its owning column — table-level CHECK has no such restriction.
         // Walk each inline predicate's Expression operands structurally via
-        // <see cref="Expression.VisitColumnReferences"/> and reject any peer
+        // <see cref="Expression.VisitColumnReferences(Action{MultiPartName})"/> and reject any peer
         // reference. Coverage is limited to the common container subclasses
         // (Reference, Parenthesized, TwoSidedExpression, Cast, Length) — peer
         // refs buried in less-common containers escape detection here and
         // surface at INSERT instead (fidelity gap documented on
-        // <see cref="Expression.VisitColumnReferences"/>).
+        // <see cref="Expression.VisitColumnReferences(Action{MultiPartName})"/>).
         foreach (var pending in pendingChecks)
         {
             if (pending.InlineColumn is not { } owningColumn)
@@ -338,7 +338,7 @@ partial class Simulation
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };
         if (isGlobalTempTable)
-            heapTable.OwnerConnection = context.Batch.Connection;
+            heapTable.OwnerSession = context.Batch.Connection.Session;
         if (!destination.TryAdd(heapTable.Name, heapTable))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
         // A local temp created inside a module body (proc / trigger / dynamic
@@ -1781,7 +1781,7 @@ partial class Simulation
     /// one, from the inline and the table-level form alike (probe-confirmed).
     /// </summary>
     internal static bool IsPendingPrimaryKeyOrdinal(
-        IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
         int ordinal)
     {
         foreach (var pending in pendingKeys)
@@ -1807,14 +1807,14 @@ partial class Simulation
     /// itself never arrives here: the parser raises Msg 8183 first.
     /// Probe-confirmed to beat Msg 8141, so callers run this walk ahead of the
     /// peer-reference gate. Reference enumeration shares
-    /// <see cref="Expression.VisitColumnReferences"/> with that gate and so
+    /// <see cref="Expression.VisitColumnReferences(Action{MultiPartName})"/> with that gate and so
     /// inherits its container-coverage limits.
     /// </summary>
     internal static void RejectChecksOverNonPersistedComputedColumns(
         Collation collation,
         string tableName,
-        IReadOnlyList<HeapColumn?> columns,
-        IReadOnlyList<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks)
+        List<HeapColumn?> columns,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks)
     {
         foreach (var pending in pendingChecks)
             RejectCheckOverNonPersistedComputedColumn(collation, tableName, columns, pending.Predicate);

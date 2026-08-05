@@ -132,15 +132,13 @@ internal static class VersionStoreDmvs
         var zeroFloat = SqlValue.FromDouble(0);
         foreach (var kv in batch.Connection.Simulation.ActiveSnapshotTxs)
         {
-            var tx = kv.Key;
-            if (tx.SnapshotXid is not { } xid)
-                continue;
+            var registration = kv.Value;
             yield return
             [
-                SqlValue.FromInt64(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(tx)),
-                SqlValue.FromInt64(xid),
+                SqlValue.FromInt64(registration.TransactionId),
+                SqlValue.FromInt64(registration.SnapshotXid),
                 nullBigInt,
-                SqlValue.FromInt32(tx.Connection.Spid),
+                SqlValue.FromInt32(registration.Spid),
                 trueBit,
                 nullBigInt,
                 zeroInt,

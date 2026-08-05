@@ -435,6 +435,27 @@ internal sealed class BatchContext
     public long PlanCacheSchemaVersion;
 
     /// <summary>
+    /// The row-returning <see cref="Selection"/>s this batch's top-level
+    /// statements have parsed, in dispatch order — the candidate cache entry
+    /// for a batch that turns out to be nothing but SELECTs. Appended by the
+    /// SELECT arm; allocated on first append, so a batch that never reaches it
+    /// costs nothing.
+    /// </summary>
+    public List<Selection>? PlanCacheSequence;
+
+    /// <summary>
+    /// Top-level statements dispatched by this batch, counted by the dispatch
+    /// loop. Compared against <see cref="PlanCacheSequence"/>'s length at the
+    /// promotion site: equal counts mean every statement the batch ran was an
+    /// admitted SELECT, and any other statement kind — a <c>SET</c>, a DML
+    /// write, a <c>BEGIN…END</c> block, an <c>EXEC</c> — advances the counter
+    /// without contributing a plan and so declines the whole batch. Counting
+    /// is what keeps the eligibility rule in one place instead of a decline
+    /// call in every one of the dispatch switch's forty arms.
+    /// </summary>
+    public int TopLevelStatementsDispatched;
+
+    /// <summary>
     /// Active error context inside a <c>CATCH</c> block — set when the
     /// associated <c>TRY</c> body's dispatch caught a
     /// <see cref="SimulatedSqlException"/>, cleared when the enclosing
@@ -724,6 +745,16 @@ internal sealed class BatchContext
     public IReadOnlyList<Expression>? AllGroupingExpressions;
 
     /// <summary>
+    /// How many parallel grouped accumulations this batch has open
+    /// (<c>Selection.Execution.AggregateParallel.cs</c>). The engagement gate
+    /// requires zero, so an aggregate reached from inside another aggregate's
+    /// row stream — a derived table over a grouped body is the shape — stays
+    /// serial rather than forking a second worker set. Bumped and restored by
+    /// the parallel path itself, always on the thread that owns the batch.
+    /// </summary>
+    public int ParallelAggregateDepth;
+
+    /// <summary>
     /// Schema-stability and schema-modification locks acquired during the
     /// current statement's dispatch. Each successful TryResolve*-side
     /// acquisition (Sch-S on the resolved schema object) and each DDL-side
@@ -763,7 +794,7 @@ internal sealed class BatchContext
     public void AcquireStatementLock(LockResource resource, LockMode mode, bool noWait = false)
     {
         var connection = this.Connection;
-        connection.Simulation.LockManager.Acquire(resource, mode, connection, noWait ? 0 : connection.LockTimeoutMillis);
+        connection.Simulation.LockManager.Acquire(resource, mode, connection.Session, noWait ? 0 : connection.LockTimeoutMillis);
         this.StatementSchemaLocks.Add((resource, mode));
     }
 
@@ -784,7 +815,7 @@ internal sealed class BatchContext
     public void AcquireTransactionLock(LockResource resource, LockMode mode, bool noWait = false)
     {
         var connection = this.Connection;
-        connection.Simulation.LockManager.Acquire(resource, mode, connection, noWait ? 0 : connection.LockTimeoutMillis);
+        connection.Simulation.LockManager.Acquire(resource, mode, connection.Session, noWait ? 0 : connection.LockTimeoutMillis);
         if (connection.CurrentTransaction is { } tx)
             tx.HeldLocks.Add((resource, mode));
         else
@@ -989,7 +1020,7 @@ internal sealed class BatchContext
         if (connection.CurrentTransaction is { } tx && tx.EscalatedTables.Contains(table))
             return;
         var resource = table.GetOrCreateRowLock(pageIndex, slotIndex);
-        connection.Simulation.LockManager.Acquire(resource, mode, connection, this.LockTimeoutFor(table));
+        connection.Simulation.LockManager.Acquire(resource, mode, connection.Session, this.LockTimeoutFor(table));
         if (connection.CurrentTransaction is { } activeTx)
         {
             activeTx.HeldLocks.Add((resource, mode));
@@ -1020,7 +1051,7 @@ internal sealed class BatchContext
         // Acquire table-X first; if this throws (timeout / deadlock), the
         // partial state stays consistent — escalation didn't happen, the
         // already-held row locks remain.
-        manager.Acquire(table.TableDataLock, LockMode.Exclusive, connection, connection.LockTimeoutMillis);
+        manager.Acquire(table.TableDataLock, LockMode.Exclusive, connection.Session, connection.LockTimeoutMillis);
         tx.HeldLocks.Add((table.TableDataLock, LockMode.Exclusive));
         _ = tx.EscalatedTables.Add(table);
         // Now release every row-lock entry on this table.
@@ -1034,7 +1065,7 @@ internal sealed class BatchContext
                 continue;
             if (!IsRowLockOf(table, resource))
                 continue;
-            manager.Release(resource, mode, connection);
+            manager.Release(resource, mode, connection.Session);
             tx.HeldLocks.RemoveAt(i);
         }
         tx.RowLockCountsByTable[table] = 0;
@@ -1145,13 +1176,13 @@ internal sealed class BatchContext
 
             if (!decodable
                 || !range.Contains(probe.AsSpan(0, ordinals.Length))
-                || !manager.HasIncompatibleHolderOtherThan(resource, LockMode.RangeInsertNull, connection))
+                || !manager.HasIncompatibleHolderOtherThan(resource, LockMode.RangeInsertNull, connection.Session))
             {
                 continue;
             }
 
-            manager.Acquire(resource, LockMode.RangeInsertNull, connection, connection.LockTimeoutMillis);
-            manager.Release(resource, LockMode.RangeInsertNull, connection);
+            manager.Acquire(resource, LockMode.RangeInsertNull, connection.Session, connection.LockTimeoutMillis);
+            manager.Release(resource, LockMode.RangeInsertNull, connection.Session);
         }
     }
 
@@ -1233,8 +1264,12 @@ internal sealed class BatchContext
             {
                 if (tx.SnapshotXid is null)
                 {
-                    tx.SnapshotXid = simulation.CurrentTransactionCommitId;
-                    simulation.ActiveSnapshotTxs[tx] = 0;
+                    var snapshotXid = simulation.CurrentTransactionCommitId;
+                    tx.SnapshotXid = snapshotXid;
+                    simulation.ActiveSnapshotTxs[connection.Session] = new ActiveSnapshotRegistration(
+                        System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(tx),
+                        snapshotXid,
+                        connection.Spid);
                 }
                 return tx.SnapshotXid;
             }
@@ -1286,7 +1321,7 @@ internal sealed class BatchContext
             // this pair most often meets is another UPDLOCK reader's row-U.
             if (plan.SkipBlockedRows
                 && table.RowLocks.TryGetValue((pageIndex, slotIndex), out var held)
-                && this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(held, mode, this.Connection))
+                && this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(held, mode, this.Connection.Session))
             {
                 return false;
             }
@@ -1313,15 +1348,15 @@ internal sealed class BatchContext
         if (!table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource))
             return true;
         var manager = connection.Simulation.LockManager;
-        if (!manager.HasIncompatibleHolderOtherThan(resource, LockMode.Shared, connection))
+        if (!manager.HasIncompatibleHolderOtherThan(resource, LockMode.Shared, connection.Session))
             return true;
         if (plan.SkipBlockedRows)
             return false;
         // Wait for the row's writers to drain. Transient acquire-release
         // matches real SQL Server's RC pattern: "block until committed,
         // then release immediately."
-        manager.Acquire(resource, LockMode.Shared, connection, this.LockTimeoutFor(table));
-        manager.Release(resource, LockMode.Shared, connection);
+        manager.Acquire(resource, LockMode.Shared, connection.Session, this.LockTimeoutFor(table));
+        manager.Release(resource, LockMode.Shared, connection.Session);
         return true;
     }
 
@@ -1342,7 +1377,7 @@ internal sealed class BatchContext
         for (var i = this.StatementSchemaLocks.Count - 1; i >= 0; i--)
         {
             var (resource, mode) = this.StatementSchemaLocks[i];
-            manager.Release(resource, mode, connection);
+            manager.Release(resource, mode, connection.Session);
         }
         this.StatementSchemaLocks.Clear();
         this.noWaitTables.Clear();

@@ -207,6 +207,27 @@ The one thing that can't be carried is a declared scale past .NET `decimal`'s 28
 Probed against SQL Server 2025 through `JSON_ARRAY`, which writes the raw value: `+ - %` carry `max(s1, s2)`, `*` carries `s1 + s2`, `/` carries `max(6, s1 + p2 + 1)`, `SUM` keeps the column's scale, `AVG` promotes to `numeric(38, max(s, 6))`, `ROUND` / `ABS` / `SIGN` / `POWER` keep the operand's, and `CEILING` / `FLOOR` drop to `numeric(p, 0)`.
 Oracle: `DecimalTests`, `MoneyTests`, `JsonBuilderTests`, and `TypeRoundTripTests` for the wire reader.
 
+### The 28-digit ceiling has one error surface
+
+SQL Server carries 38 significant digits; the .NET `decimal` behind every value here carries 28-29.
+A value real represents happily can therefore have no representation at all, which is a **gap, not a SQL Server behavior** — so every path that reaches it raises `DecimalCeiling.Exceeded`, a `NotSupportedException` naming the ceiling and the operation that met it, rather than a `SimulatedSqlException` claiming real refused the statement.
+The covered paths: a **literal** (`Numeric`'s tokenizer branch), a **string conversion** (`SqlValue.ParseDecimal`), **arithmetic** (`TwoSidedExpression.RejectDecimalOverflow`), a **running aggregate total** (`NumericAggregator`), and the **row encode** that scales a value to its declared scale (`DecimalType.Encode`).
+
+Where real's own error is due it still fires, and the split is probed (2026-08-05):
+
+| Statement | Answer |
+| --- | --- |
+| `CAST('<30 digits>' AS decimal(38, 0))` | ceiling — real converts it, and SqlClient is what then refuses to hand it to a .NET caller |
+| `CAST('<40 digits>' AS decimal(38, 0))` | Msg 8115 state 6 — wider than `numeric`'s own 38 |
+| `CAST('<30 digits>' AS decimal(20, 0))` | Msg 8115 state 8 — wider than the declared target |
+| `CAST('1e40' AS decimal(38, 0))` / `CAST('abc' AS …)` | Msg 8114 — scientific notation past range is a read failure, not an overflow |
+| `SELECT <39- or 40-digit literal>` | Msg 1007 |
+| `CAST(1e28 AS decimal(38, 0)) * 10` | ceiling — real computes it |
+
+Arithmetic tells the two apart by re-estimating the magnitude in `double`, whose ~15 significant digits are ample to separate 10^29 from 10^38.
+A **widening** to a declared scale is the one place that degrades instead of raising: the trailing zeros settle at the widest representation available, which is the same number written with fewer of them (the quirk the section above describes).
+Oracle: `DecimalCeilingTests`.
+
 ### Integer literals size by digit count against a decimal
 SQL Server types an integer **literal** as `numeric(digit_count, 0)` — not `int`'s fixed precision 10 — when it is unified with a decimal/numeric partner, so `10.0/3` is `numeric(8, 6)`, not `numeric(14, 12)` (the `3` contributes `(1, 0)`; `10.0/CAST(3 AS int)` keeps `(14, 12)` since a non-literal `int` stays `(10, 0)`).
 The rule is literal-specific and pervasive — it fires across `/ * + -`, `CASE`, `COALESCE` / `IIF`, and set ops — but only when the partner is decimal-category: `3 + 4` and `SELECT 1 UNION SELECT 2` stay `int`, and a money/float partner ignores the digit count (`$10.00/3` stays `money`).

@@ -177,6 +177,88 @@ internal sealed class WindowExpression : Expression
     }
 
     /// <summary>
+    /// True when this window's frame is <c>RANGE</c> — written that way, or the
+    /// default frame an <c>ORDER BY</c> confers on a function that takes one.
+    /// Which kinds take a default frame is probe-confirmed against SQL Server
+    /// 2025 (2026-08-05) by the Msg 8728 diagnostic below, which fires exactly
+    /// where a RANGE frame exists: the aggregate windows, the value pair, and
+    /// — the surprise — <c>CUME_DIST</c>, while <c>ROW_NUMBER</c> /
+    /// <c>RANK</c> / <c>DENSE_RANK</c> / <c>NTILE</c> / <c>PERCENT_RANK</c> and
+    /// the <c>LAG</c> / <c>LEAD</c> pair carry no frame at all. The percentile
+    /// pair is excluded because its <see cref="OrderBy"/> holds the mandatory
+    /// <c>WITHIN GROUP</c> ordering rather than an <c>OVER</c> one.
+    /// </summary>
+    private bool HasRangeFrame => this.Frame is { } frame
+        ? frame.IsRange
+        : this.OrderBy.Length > 0
+            && this.Kind is WindowKind.Aggregate or WindowKind.FirstValue or WindowKind.LastValue or WindowKind.CumeDist;
+
+    /// <summary>
+    /// Applies real's Msg 8728 gate to every window this query block parsed:
+    /// a RANGE-framed window may not order by a MAX-typed (LOB) expression.
+    /// Real settles this while compiling, so it fires over an empty rowset and
+    /// inside a branch the statement never takes; the simulator matches by
+    /// running here, once the trailing <c>WINDOW</c> clause has patched every
+    /// <c>OVER w</c> reference and each window's ORDER BY is final.
+    /// </summary>
+    /// <remarks>
+    /// Real reaches the same message through <c>PARTITION BY</c> only when the
+    /// ORDER BY list carries the LOB — a LOB partition key beside an ordinary
+    /// ordering key is legal (probe-confirmed). <c>text</c> / <c>ntext</c> /
+    /// <c>image</c> take Msg 306 and <c>xml</c> Msg 305 ahead of this check on
+    /// real, so only the three MAX forms are matched here.
+    /// </remarks>
+    internal static void ValidateRangeFrameOrderBy(ParserContext context)
+    {
+        if (context.WindowCollector is not { Count: > 0 } windows)
+            return;
+        foreach (var window in windows)
+        {
+            if (!window.HasRangeFrame)
+                continue;
+            foreach (var term in window.OrderBy)
+            {
+                if (term.Expr is { } expression && IsMaxFormType(TermType(context, expression)))
+                    throw SimulatedSqlException.RangeFrameOrderByCannotContainLobType();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Static type of one <c>OVER (ORDER BY …)</c> term, or <c>null</c> when
+    /// the term names something this parse can't type yet. Declining to answer
+    /// declines the Msg 8728 check for that term rather than surfacing a new
+    /// error at a position that never reported one.
+    /// </summary>
+    private static SqlType? TermType(ParserContext context, Expression expression)
+    {
+        var resolver = context.OuterTypeResolver;
+        if (resolver is null)
+            return null;
+        try
+        {
+            return expression.GetSqlType(context.Batch, resolver);
+        }
+        catch (NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// True for the three MAX forms real classifies as LOB in the Msg 8728
+    /// diagnostic — <c>varchar(max)</c>, <c>nvarchar(max)</c>,
+    /// <c>varbinary(max)</c>.
+    /// </summary>
+    private static bool IsMaxFormType(SqlType? type) => type switch
+    {
+        VarcharSqlType v => v.length == SqlType.MaxLengthSentinel,
+        NVarcharSqlType n => n.length == SqlType.MaxLengthSentinel,
+        VarbinarySqlType b => b.length == SqlType.MaxLengthSentinel,
+        _ => false,
+    };
+
+    /// <summary>
     /// Binds this expression's value for the row currently being projected
     /// into <paramref name="batch"/> (not onto this instance — a plan-cached
     /// <c>Selection</c> shares its tree across concurrent commands). The

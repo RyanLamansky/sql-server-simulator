@@ -107,6 +107,30 @@ Helpers: `VarbinaryToInteger` / `VarbinaryToMoneyUnits` / `EncodeIntegerToBinary
 `binary(N)` targets carry their length on the `BinarySqlType`; `varbinary(N)` targets carry it on the `VarbinarySqlType` (length ≤ 0 — unspecified / MAX — keeps native width).
 Arithmetic/bitwise/comparison with a binary operand routes through these same paths — see [`arithmetic.md`](arithmetic.md)'s *Binary operand promotion*.
 
+## Conversion legality is settled while compiling
+
+**Msg 529** (`"Explicit conversion from data type {source} to {target} is not allowed."`, class 16 state 1, bare family-root names on both sides) is decided from the two *types* — no value enters into it.
+Real settles it while compiling, so a typed NULL raises it, an empty rowset raises it, `TRY_CAST` / `TRY_CONVERT` raise it rather than returning NULL (529 is an illegal conversion, not a conversion failure), and a module body carrying one refuses its own `CREATE`.
+`Cast.IsIllegalExplicitConversion` is the table, asked from `Cast.GetSqlType` / `Convert.GetSqlType`; an untyped `NULL` source is exempt, having no type to judge.
+
+The table is the probed one — SQL Server 2025, 2026-08-05, every ordered pair of the 28 common type names, 284 refusals — and reads by source family:
+
+| Source | Refuses |
+| --- | --- |
+| a number (integer / decimal / money / float / real) | `date`, `time`, `datetime2`, `datetimeoffset`, `uniqueidentifier`, `xml` |
+| `date` / `time` / `datetime2` / `datetimeoffset` | every number; `date` and `time` also refuse *each other*; `uniqueidentifier`, `xml` |
+| `datetime` / `smalldatetime` | `uniqueidentifier`, `xml` — the two day-count conversions are what a number reaches, and reaches back |
+| `uniqueidentifier` | every number, the whole date/time family, `xml` |
+| `xml` | every number, the whole date/time family, `uniqueidentifier`, `sql_variant` |
+| `sql_variant` | `xml` |
+| `binary` / `varbinary` | `float`, `real` |
+| anything but a character string | `text` / `ntext` |
+| anything but an ANSI character string or a binary | `image` |
+
+Types outside that grid (`rowversion`, `hierarchyid`, the spatial pair, alias types) are not in the table and keep whatever the value path decides.
+A module body's Msg 529 **ends the bind report where it is**: real gathers name-resolution errors across a whole body but stops at this one, so a body whose first statement carries a conversion error reports it alone even when a later statement names a missing column, while a name error found first reports with the conversion behind it (probed 2026-08-05).
+Oracle: `ConversionLegalityTests`.
+
 ## Legacy LOB explicit conversions (`text` / `ntext` / `image`)
 An explicit `CAST` / `CONVERT` out of a legacy LOB type is gated by **source family**, and the payload's parseability never enters into it — `CAST(<text '5'> AS int)` is refused as firmly as a non-numeric one would be.
 Probe-confirmed; **Msg 529 St 1**, `"Explicit conversion from data type {source} to {target} is not allowed."`, with bare family-root names on both sides (`decimal`, not `decimal(10,2)`).

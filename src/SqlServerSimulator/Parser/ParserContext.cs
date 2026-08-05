@@ -48,9 +48,40 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// <summary>
     /// The tokenizer position within <see cref="commandText"/>: the next
     /// un-read character. <see cref="MoveNext"/> advances this past the
-    /// returned token (see <see cref="Tokenizer"/>'s index contract).
+    /// returned token (see <see cref="Tokenizer"/>'s index contract). Kept
+    /// accurate while a token memo is being replayed too, so abandoning the
+    /// memo mid-parse resumes live tokenization at the right character.
     /// </summary>
     private int index;
+
+    /// <summary>
+    /// The <see cref="TokenMemo"/> entry being replayed, or
+    /// <see langword="null"/> when this parse is tokenizing live. Its tokens
+    /// are shared with every other execution of the same text and are read,
+    /// never written.
+    /// </summary>
+    private Token[]? memoTokens;
+
+    /// <summary>Read position within <see cref="memoTokens"/>.</summary>
+    private int memoPosition;
+
+    /// <summary>
+    /// Tokens gathered for publication when this parse is the one that
+    /// populates the memo. Null when a memo is already being replayed, when
+    /// the memo is full, or once the collection has been abandoned.
+    /// </summary>
+    private List<Token>? memoCollector;
+
+    /// <summary>
+    /// The tokenization inputs this context bound to. Re-checked on every
+    /// <see cref="MoveNext"/>: a mid-batch <c>SET QUOTED_IDENTIFIER</c> or
+    /// <c>USE</c> changes what the remaining characters tokenize to, and both
+    /// abandon the memo rather than serve tokens from the wrong inputs.
+    /// </summary>
+    private TokenMemoKey memoKey;
+
+    /// <summary>Whether <see cref="BindTokenMemo"/> has run for this context.</summary>
+    private bool memoBound;
 
     /// <summary>
     /// The effective <c>QUOTED_IDENTIFIER</c> setting at the current parse
@@ -114,6 +145,54 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public Token? Token;
 
     /// <summary>
+    /// The last token <see cref="MoveNext"/> produced before it ran out of
+    /// input, which is what an end-of-batch syntax error names. Real reports
+    /// the last token it consumed rather than an empty slot — probed against
+    /// SQL Server 2025 (2026-08-05) across the whole family:
+    /// <c>SELECT abs(-1</c> → <c>near '1'</c>, <c>SELECT 1 FROM</c> →
+    /// <c>near 'FROM'</c>, <c>IF 'abc'</c> → Msg 4145 <c>near 'abc'</c>. Only
+    /// read once <see cref="Token"/> is null; a checkpoint restore leaves it
+    /// pointing past the restore, which no live parse can observe.
+    /// </summary>
+    public Token? LastToken;
+
+    /// <summary>
+    /// How many parenthesized <em>boolean</em> groups the predicate parser is
+    /// currently inside. Read only by the Msg 4145 factory: real settles the
+    /// non-boolean diagnostic against the token following the whole
+    /// parenthesized expression, so <c>IF ((1)) PRINT 'x'</c> names
+    /// <c>'PRINT'</c> where the simulator's grammar (which consumes the parens
+    /// on the way in) is sitting on the innermost <c>)</c>. Probed 2026-08-05
+    /// across the family — <c>SELECT 1 WHERE (1)</c> still names <c>')'</c>,
+    /// because nothing follows it.
+    /// </summary>
+    public int BooleanGroupDepth;
+
+    /// <summary>
+    /// Whether the query specification that parsed most recently was a bare
+    /// <c>SELECT &lt;expression list&gt;</c> — no FROM, WHERE, ORDER BY, TOP,
+    /// DISTINCT, INTO or subquery. Read once the outermost query expression is
+    /// complete, to settle Msg 422: real refuses a <c>WITH</c> prefix on
+    /// exactly that shape and accepts every other one, a trailing
+    /// <c>WHERE 1 = 1</c> / <c>ORDER BY 1</c> / <c>UNION</c> / <c>FOR JSON</c>
+    /// / <c>OPTION (…)</c> included (probed 2026-08-05).
+    /// </summary>
+    public bool LastQuerySpecIsBareProjection;
+
+    /// <summary>
+    /// Whether the <c>WITH</c> prefix the dispatch loop just parsed leads a
+    /// <c>SELECT</c> statement rather than an <c>INSERT</c> / <c>UPDATE</c> /
+    /// <c>DELETE</c> / <c>MERGE</c>. Msg 422 asks only about a SELECT: real
+    /// accepts an unused prefix on every DML form, including the one whose
+    /// source is the bare projection it refuses on its own
+    /// (<c>WITH c AS (…) INSERT INTO t SELECT 1</c>, probed 2026-08-05). A
+    /// stored body that parses outside the dispatch loop — a view, an inline
+    /// TVF, a cursor declaration — never sets it, which is what keeps those
+    /// accepting the shape as real does.
+    /// </summary>
+    public bool CtePrefixLeadsSelectStatement;
+
+    /// <summary>
     /// True while an <c>Expression.Parse</c> call is running for a
     /// <c>CREATE TABLE</c> column's <c>DEFAULT</c> clause. Set by the
     /// CREATE-TABLE parser around the call to
@@ -150,7 +229,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// aggregate / subquery / column reference?" without walking the finished
     /// tree — which matters because only a minority of the 170-odd
     /// <see cref="Expression"/> subclasses override
-    /// <see cref="Expression.VisitColumnReferences"/>, so a tree walk silently
+    /// <see cref="Expression.VisitColumnReferences(Action{MultiPartName})"/>, so a tree walk silently
     /// misses containers like <c>CASE</c> and most scalar function calls.
     /// Counting at construction is complete by construction instead.
     /// <para>Consumed by the aggregate-binding rules: Msg 130 (aggregate over an
@@ -471,6 +550,21 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public Database CurrentDatabase => Connection.CurrentDatabase;
 
     /// <summary>
+    /// A saved parse position: the tokenizer's character index, the current
+    /// token, and the ordinal of that token within the batch's token sequence.
+    /// All three restore together, and the parser moves the cursor both
+    /// backwards and forwards through saved checkpoints — a lookahead that
+    /// scans ahead, rewinds to re-parse from an earlier point, then jumps back
+    /// to where the scan stopped is the <c>FROM</c>-clause probe's shape.
+    /// </summary>
+    public readonly struct Checkpoint(int index, Token? token, int memoPosition)
+    {
+        public readonly int Index = index;
+        public readonly Token? Token = token;
+        public readonly int MemoPosition = memoPosition;
+    }
+
+    /// <summary>
     /// Snapshots the current tokenizer position and current token so a
     /// caller can probe the upcoming token via <see cref="MoveNext"/> and
     /// then restore to this point if the lookahead doesn't match. The
@@ -478,7 +572,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// the saved index produces the same token sequence), so a checkpoint
     /// + restore round-trip is byte-stable.
     /// </summary>
-    public (int Index, Token? Token) SaveCheckpoint() => (this.index, this.Token);
+    public Checkpoint SaveCheckpoint() => new(this.index, this.Token, this.memoPosition);
 
     /// <summary>
     /// Raw source text of the command from <paramref name="startIndex"/> up to the
@@ -495,10 +589,11 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// <summary>
     /// Restores a checkpoint captured by <see cref="SaveCheckpoint"/>.
     /// </summary>
-    public void RestoreCheckpoint((int Index, Token? Token) checkpoint)
+    public void RestoreCheckpoint(Checkpoint checkpoint)
     {
         this.index = checkpoint.Index;
         this.Token = checkpoint.Token;
+        this.memoPosition = checkpoint.MemoPosition;
     }
 
     /// <summary>
@@ -595,20 +690,182 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     [MemberNotNullWhen(true, nameof(Token))]
     public bool MoveNext()
     {
-        while (Tokenizer.NextToken(commandText, ref index, this.CurrentDatabase.Collation, this.QuotedIdentifiers, this.CurrentDatabase.CompatibilityLevel) is Token token)
+        if (!this.memoBound)
         {
-            if (token is Whitespace or Comment)
-                continue;
-
-#if DEBUG
-            tokens.Add(token);
-#endif
-            this.Token = token;
-            return true;
+            BindTokenMemo();
+        }
+        else if ((this.memoTokens is not null || this.memoCollector is not null) && !TokenMemoInputsUnchanged())
+        {
+            // A mid-batch SET QUOTED_IDENTIFIER or USE changed what the
+            // remaining characters tokenize to. Everything consumed so far was
+            // read under the old inputs and stays valid — `index` is one past
+            // it — so live tokenization simply resumes from here, and nothing
+            // is published (the sequence would be a splice of two settings).
+            this.memoTokens = null;
+            this.memoCollector = null;
         }
 
+        if (this.memoTokens is { } memo)
+        {
+            if (this.memoPosition < memo.Length)
+            {
+                var memoized = memo[this.memoPosition++];
+                this.index = memoized.EndIndex;
+#if DEBUG
+                tokens.Add(memoized);
+#endif
+                this.Token = memoized;
+                return true;
+            }
+
+            this.index = commandText.Length;
+            this.LastToken = this.Token;
+            this.Token = null;
+            return false;
+        }
+
+        try
+        {
+            while (Tokenizer.NextToken(commandText, ref index, this.CurrentDatabase.Collation, this.QuotedIdentifiers, this.CurrentDatabase.CompatibilityLevel) is Token token)
+            {
+                if (token is Whitespace or Comment)
+                    continue;
+
+#if DEBUG
+                tokens.Add(token);
+#endif
+                CollectToken(token);
+                this.memoPosition++;
+                this.Token = token;
+                return true;
+            }
+        }
+        catch (SimulatedSqlException)
+        {
+            // The tokenizer refused a character (Msg 102 / 103 / 105 / 113).
+            // It leaves `index` past the text it was mid-way through, so a
+            // later scan — the dispatch loop's error recovery — resumes beyond
+            // the refused span and can still reach end-of-text. Collecting
+            // through that would publish a sequence with the refused span
+            // missing, and the next execution would parse the hole instead of
+            // raising: the probe that found this reported Msg 105 once and
+            // Msg 102 forever after. A text the tokenizer won't read is a text
+            // with no sequence to share.
+            this.memoCollector = null;
+            throw;
+        }
+
+        // End of text reached with no tokenization error: the collected
+        // sequence is complete and safe to share. Publishing here — and only
+        // here — is what keeps a text whose tokenizer raises mid-way out of
+        // the memo, so its error fires at the same character every time.
+        // The count check is defensive: a sequence with an unwritten slot
+        // would be a hole, and the parse that produced it is not one worth
+        // trusting to serve every later execution.
+        if (this.memoCollector is { } collected && collected.Count == this.memoPosition)
+        {
+            if (!RewritesTokenizationInputs(collected))
+                this.Simulation.TokenMemo.Publish(this.memoKey, [.. collected]);
+            this.memoCollector = null;
+        }
+
+        this.LastToken = this.Token;
         this.Token = null;
         return false;
+    }
+
+    /// <summary>
+    /// Whether a completed token sequence names a construct that can change
+    /// the tokenizer's own inputs partway through the same text — a
+    /// <c>SET QUOTED_IDENTIFIER</c> (or the <c>ANSI_DEFAULTS</c> bundle that
+    /// carries it), a <c>USE</c> switching the database whose collation and
+    /// compatibility level the tokenizer reads, or an <c>ALTER</c> that could
+    /// re-collate or re-level the current one. No single token sequence is
+    /// correct for such a text, because its two halves tokenize under
+    /// different settings.
+    /// <para>
+    /// The live parse handles this by abandoning the memo the moment the
+    /// inputs move; this is the other half, and it exists because tokenizing
+    /// runs ahead of dispatch. A lookahead that scans to end-of-text — the
+    /// <c>FROM</c>-clause probe does, over a batch with no separators —
+    /// completes the sequence <em>before</em> the statement that flips the
+    /// setting has run, so abandonment alone would leave a wrong sequence
+    /// already published. Judging the finished sequence needs no ordering
+    /// assumption at all.
+    /// </para>
+    /// </summary>
+    private static bool RewritesTokenizationInputs(List<Token> collected)
+    {
+        foreach (var token in collected)
+        {
+            switch (token)
+            {
+                case ReservedKeyword { Keyword: Keyword.Use or Keyword.Alter }:
+                    return true;
+                case Name name when name.Span.Equals("QUOTED_IDENTIFIER", StringComparison.OrdinalIgnoreCase)
+                    || name.Span.Equals("ANSI_DEFAULTS", StringComparison.OrdinalIgnoreCase):
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Records a live-tokenized token at its ordinal position in the sequence
+    /// being collected. Addressed by <see cref="memoPosition"/> rather than
+    /// appended because the parser re-reads: a checkpoint restore rewinds the
+    /// cursor and the tokens after it are read again. Re-reading the same
+    /// character position under unchanged inputs produces an equal token, so
+    /// overwriting the slot is a no-op in content; what matters is that the
+    /// slot's <em>ordinal</em> is the one the token belongs at, which append
+    /// would get wrong the moment a restore jumped the cursor forward again.
+    /// </summary>
+    private void CollectToken(Token token)
+    {
+        if (this.memoCollector is not { } collector)
+            return;
+        if (this.memoPosition < collector.Count)
+            collector[this.memoPosition] = token;
+        else if (this.memoPosition == collector.Count)
+            collector.Add(token);
+        else
+            this.memoCollector = null; // Unreachable: a slot was never written.
+    }
+
+    /// <summary>
+    /// Binds this parse to the simulation's token memo on the first
+    /// <see cref="MoveNext"/>: either replaying a stored sequence for this
+    /// text, or collecting one for the next execution. Deferred to first use
+    /// rather than done in a field initializer so a context built and never
+    /// walked costs nothing.
+    /// </summary>
+    private void BindTokenMemo()
+    {
+        this.memoBound = true;
+        var database = this.CurrentDatabase;
+        this.memoKey = new TokenMemoKey(commandText, database.Collation, database.CompatibilityLevel, this.QuotedIdentifiers);
+        var memo = this.Simulation.TokenMemo;
+        if (memo.TryGet(this.memoKey) is { } stored)
+            this.memoTokens = stored;
+        else if (memo.HasCapacity)
+            this.memoCollector = [];
+    }
+
+    /// <summary>
+    /// Whether the tokenization inputs still match the ones
+    /// <see cref="BindTokenMemo"/> captured. <c>QUOTED_IDENTIFIER</c> flips
+    /// mid-batch at the textual position of its <c>SET</c>, and <c>USE</c>
+    /// swaps the database whose collation tags string literals and whose
+    /// compatibility level decides the reserved words — both change what the
+    /// characters after them tokenize to.
+    /// </summary>
+    private bool TokenMemoInputsUnchanged()
+    {
+        var database = this.CurrentDatabase;
+        return this.QuotedIdentifiers == this.memoKey.QuotedIdentifiers
+            && ReferenceEquals(database.Collation, this.memoKey.Collation)
+            && database.CompatibilityLevel == this.memoKey.CompatibilityLevel;
     }
 
 #if DEBUG

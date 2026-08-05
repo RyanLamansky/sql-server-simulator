@@ -22,6 +22,11 @@ internal abstract class TwoSidedExpression : Expression
     // operand's flag here is harmless — the non-decimal result is filtered out.
     internal override bool ResultReportsNumeric => this.left.ResultReportsNumeric || this.right.ResultReportsNumeric;
 
+    // Every subclass is arithmetic, bitwise or concatenation over the two
+    // operands — value-only, with no BatchContext write between them — so the
+    // pair's own answer settles the node's.
+    internal override bool ParallelSafe => this.left.ParallelSafe && this.right.ParallelSafe;
+
     private protected override bool IsStructuralConstant => this.left.IsWrittenConstant && this.right.IsWrittenConstant;
 
     internal override bool IsNonNullConstantComputation => this.left.IsNonNullConstantComputation && this.right.IsNonNullConstantComputation;
@@ -497,7 +502,7 @@ internal abstract class TwoSidedExpression : Expression
         }
         catch (OverflowException)
         {
-            throw SimulatedSqlException.ArithmeticOverflowToNumeric();
+            throw RejectDecimalOverflow(l, r, op, resultType);
         }
 
         // Every operator but division rounds half away from zero at the result
@@ -516,6 +521,29 @@ internal abstract class TwoSidedExpression : Expression
         return integerDigits < 28 && decimal.Abs(decimal.Truncate(settled)) > maxIntegerPart
             ? throw SimulatedSqlException.ArithmeticOverflowToNumeric()
             : SqlValue.FromDecimal(resultType, settled);
+    }
+
+    /// <summary>
+    /// Splits a .NET <see cref="decimal"/> overflow into the two things it can
+    /// mean. Real overflows <c>numeric</c> only past 38 digits; between that
+    /// and .NET's 28 sits a band of results real computes and the simulator
+    /// cannot hold, and reporting Msg 8115 for those would claim real refuses
+    /// a statement it runs. The magnitude is re-estimated in <c>double</c>,
+    /// whose ~15 significant digits are ample to tell 10^29 from 10^38.
+    /// </summary>
+    private static Exception RejectDecimalOverflow(decimal left, decimal right, char op, DecimalSqlType resultType)
+    {
+        var l = (double)left;
+        var r = (double)right;
+        var magnitude = op switch
+        {
+            '*' => Math.Abs(l) * Math.Abs(r),
+            '/' => r == 0 ? double.PositiveInfinity : Math.Abs(l) / Math.Abs(r),
+            _ => Math.Abs(l) + Math.Abs(r),
+        };
+        return magnitude >= 1e38
+            ? SimulatedSqlException.ArithmeticOverflowToNumeric()
+            : DecimalCeiling.Exceeded($"computing {left} {op} {right} as {resultType}");
     }
 
     private static decimal ToDecimal(SqlValue v) =>
@@ -714,8 +742,20 @@ internal abstract class TwoSidedExpression : Expression
     /// </summary>
     internal bool BothOperandsMatch(Func<Expression, bool> predicate) => predicate(this.left) && predicate(this.right);
 
-    internal sealed override void VisitColumnReferences(Action<MultiPartName> visit)
+    internal sealed override void VisitColumnReferencesCore(ColumnReferenceVisitor visit)
     {
+        if (visit.CoversSubtree is not null)
+        {
+            // A covering predicate has to meet every node, and the spine walk
+            // below reaches the leaves without entering the intermediate ones —
+            // which is what a `SELECT a + 1 + 0` against `GROUP BY a + 1` needs.
+            // Its recursion is affordable here: the predicate is asked once per
+            // statement compile, never per row.
+            this.left.VisitColumnReferences(visit);
+            this.right.VisitColumnReferences(visit);
+            return;
+        }
+
         // Iterative left-spine walk (see Run) so a long flat chain doesn't
         // recurse per term; visits the leftmost leaf then each right operand in
         // source order, matching the former recursive traversal.

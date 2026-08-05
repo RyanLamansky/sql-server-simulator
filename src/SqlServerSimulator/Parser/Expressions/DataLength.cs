@@ -22,6 +22,8 @@ internal sealed class DataLength(ParserContext context) : Expression
 
     private bool returnsBigInt;
 
+    internal override bool ParallelSafe => this.source.ParallelSafe;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = source.Run(runtime);

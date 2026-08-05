@@ -175,7 +175,7 @@ internal sealed class SpatialStaticCall : Expression
     internal override bool ResultIsNullable(NullabilityContext context) =>
         this.arguments.Any(a => a.ResultIsNullable(context));
 
-    internal override void VisitColumnReferences(Action<MultiPartName> visit)
+    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit)
     {
         foreach (var arg in this.arguments)
             arg.VisitColumnReferences(visit);

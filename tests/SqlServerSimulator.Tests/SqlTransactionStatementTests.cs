@@ -206,11 +206,28 @@ public sealed class SqlTransactionStatementTests
     }
 
     [TestMethod]
-    public void RollbackTran_UnknownSavepoint_Throws()
+    public void RollbackTran_UnknownSavepoint_IsMsg6401()
     {
+        // Probed against SQL Server 2025 (2026-08-05): Msg 6401 class 16 state
+        // 1, the name echoed exactly as written, and the transaction survives.
+        // With no transaction open at all it is Msg 3903 instead (below).
         using var conn = new Simulation().CreateOpenConnection();
         _ = conn.CreateCommand("begin tran").ExecuteNonQuery();
-        _ = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             conn.CreateCommand("rollback tran nosuch").ExecuteNonQuery());
+        AreEqual(6401, ex.Number);
+        AreEqual("Cannot roll back nosuch. No transaction or savepoint of that name was found.", ex.Message);
+        AreEqual(16, ex.Class);
+        AreEqual(1, ex.State);
+        AreEqual(1, conn.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void RollbackTranNamed_NoTransaction_IsMsg3903()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        var ex = Throws<SimulatedSqlException>(() =>
+            conn.CreateCommand("rollback tran nosuch").ExecuteNonQuery());
+        AreEqual(3903, ex.Number);
     }
 }
