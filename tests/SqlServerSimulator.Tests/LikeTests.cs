@@ -197,7 +197,12 @@ public class LikeTests
     [DataRow("'A' collate Latin1_General_CS_AS like 'A'", 1)]
     [DataRow("'A' collate Latin1_General_CS_AS like 'A' collate Latin1_General_CS_AS", 1)]
     [DataRow("'abc ' like 'abc' collate Latin1_General_CS_AS", 1)]               // trailing-space slack survives CS
-    [DataRow("'A' like '[a-z]' collate Latin1_General_CS_AS", 0)]                // character class honors case
+    // A class range is ordered by the collation, which interleaves the cases
+    // (a &lt; A &lt; b &lt; B &lt; … &lt; z &lt; Z), so [a-z] holds every letter but Z
+    // and [A-Z] holds every one but a — probe-confirmed against SQL Server 2025.
+    [DataRow("'A' like '[a-z]' collate Latin1_General_CS_AS", 1)]
+    [DataRow("'Z' like '[a-z]' collate Latin1_General_CS_AS", 0)]
+    [DataRow("'a' like '[A-Z]' collate Latin1_General_CS_AS", 0)]
     [DataRow("'A' like '[A-Z]' collate Latin1_General_CS_AS", 1)]
     [DataRow("'a%b' like 'a!%b' collate Latin1_General_CS_AS escape '!'", 1)]    // ESCAPE + COLLATE compose either order
     [DataRow("'a%b' like 'a!%b' escape '!' collate Latin1_General_CS_AS", 1)]

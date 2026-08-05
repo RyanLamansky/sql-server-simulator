@@ -213,9 +213,10 @@ None of these are exposed as `EF.Functions.X` LINQ extensions; coverage targets 
 **Projected result widths** for the length-deriving members here (`STUFF` / `REPLICATE` / `SPACE`, plus `LEFT` / `RIGHT` / `SUBSTRING`) are const-folded from a literal count/length argument to match SQL Server's exact COLMETADATA width — see the *String / binary width algebra* section of [`arithmetic.md`](arithmetic.md).
 The rules below describe the *runtime* value; the width bounds it.
 
-- **`PATINDEX(pattern, subject)`** shares the LIKE wildcard compiler via `LikePatternBuilder` (single source of truth for `%`/`_`/`[...]`).
+- **`PATINDEX(pattern, subject)`** shares LIKE's matcher via `LikeMatcher` (single source of truth for `%`/`_`/`[...]`), so it reads the **subject's collation** the same way — case, accent, kana and width all decide the match, characters group the way LIKE groups them, and the non-Unicode trailing-space slack applies wherever the match has to reach the subject's end (`PATINDEX('x', 'x  ')` is 1 and `PATINDEX(N'x', N'x  ')` is 0). See [the LIKE / PATINDEX matching model](collations.md#like--patindex-matching).
   Anchoring is decided by leading / trailing `%` in the pattern: a leading `%` strips the start anchor (find-anywhere); a trailing `%` strips the end anchor; without either, the pattern is anchored at both ends and only a full-subject match returns 1.
-  Leading and trailing `%` characters are consumed by the anchoring decision and don't translate to `.*` in the regex body — that's what makes `PATINDEX('%abc%', 'xabcx')` return 2 (position of `abc`) rather than 1 (position of the empty `.*` prefix).
+  Leading and trailing `%` characters are consumed by the anchoring decision rather than becoming segments — that's what makes `PATINDEX('%abc%', 'xabcx')` return 2 (position of `abc`) rather than 1 (the position an empty leading match would report).
+  The reported position counts UTF-16 units, codepoints under an `_SC_` collation, matching CHARINDEX's dispatch.
   Subject NULL raises Msg 8116 (asymmetric with NULL pattern, which silently returns NULL).
   Subject non-string raises Msg 8116; pattern non-string implicitly coerces to the subject's string family.
   The subject takes a `text` / `ntext` document but not an `image`, and the pattern refuses all three — see *Legacy LOB arguments* below.

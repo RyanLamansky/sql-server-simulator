@@ -244,15 +244,36 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool AllowsWindowExpressions = true;
 
     /// <summary>
-    /// True when expression parsing is inside a clause where SQL Server
-    /// rejects <c>NEXT VALUE FOR</c> (probe-confirmed: WHERE / GROUP BY /
-    /// HAVING / ORDER BY / TOP / OVER / OUTPUT / ON all raise Msg 11720).
-    /// Set by the Selection parser around the affected clauses and consumed
-    /// by the <c>NEXT VALUE FOR</c> expression constructor; outside those
-    /// scopes (projection / DEFAULT / INSERT VALUES / SET / etc.) the flag
-    /// stays false and <c>NEXT VALUE FOR</c> is legal.
+    /// Which of SQL Server's <c>NEXT VALUE FOR</c> refusals the expression
+    /// currently being parsed sits under, or <see cref="NextValueForScope.Allowed"/>
+    /// in the positions that stay legal (a bare projection, a <c>VALUES</c>
+    /// tuple, a column <c>DEFAULT</c>, a stored procedure's own statements).
+    /// Each rejecting construct's parse sets it for its own duration and the
+    /// <c>NEXT VALUE FOR</c> constructor consumes it, so the whole batch is
+    /// refused at parse — which is what keeps the sequence from advancing.
     /// </summary>
-    public bool RejectNextValueFor;
+    public NextValueForScope NextValueForRejection;
+
+    /// <summary>
+    /// True while an <c>UPDATE</c> / <c>DELETE</c>'s own <c>FROM</c> clause is
+    /// parsed, where real leaves a derived table's <c>NEXT VALUE FOR</c> legal
+    /// (probe-confirmed) although every other derived table refuses it.
+    /// </summary>
+    public bool AllowNextValueForInFromClause;
+
+    /// <summary>
+    /// Collects the column references parsed while a <b>non-APPLY</b> FROM
+    /// source's own arguments are read — a table-valued function's arguments,
+    /// <c>STRING_SPLIT</c> / <c>OPENJSON</c>'s, a <c>VALUES</c> constructor's
+    /// cells. SQL Server binds those in a scope that excludes the FROM's own
+    /// sources (only <c>APPLY</c> grants laterality), so a reference landing
+    /// on a sibling is Msg 4104 there; the collected list is what the check
+    /// runs over once every source is parsed and the sibling set is known.
+    /// Null everywhere else, including inside any nested query body — a
+    /// <see cref="Selection"/> parse suspends it, so a derived table's own
+    /// references never leak into the enclosing source's list.
+    /// </summary>
+    public List<Expressions.Reference>? FromSourceColumnSink;
 
     /// <summary>
     /// Constructs seen while parsing one branch of a WITH body, recorded
@@ -591,4 +612,32 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         return new string(result);
     }
 #endif
+}
+
+/// <summary>
+/// The construct a <c>NEXT VALUE FOR</c> reference sits inside, and with it
+/// which of SQL Server's four refusals applies. Probed against SQL Server 2025
+/// (2026-08-05); each arm carries the message real raises, and every one of
+/// them is a <em>parse</em>-time refusal of the whole batch, so the sequence
+/// never advances and a <c>TRY</c> in the same batch never sees it.
+/// </summary>
+internal enum NextValueForScope
+{
+    /// <summary>A position real accepts: a bare projection, a <c>VALUES</c> tuple, a column <c>DEFAULT</c>, a stored procedure's own statement.</summary>
+    Allowed,
+
+    /// <summary>A clause of the query — <c>TOP</c> / <c>OVER</c> / <c>OUTPUT</c> / <c>ON</c> / <c>WHERE</c> / <c>GROUP BY</c> / <c>HAVING</c> / <c>ORDER BY</c>. Msg 11720.</summary>
+    Clause,
+
+    /// <summary>A nested query or stored expression — a derived table, a CTE, a subquery, an <c>APPLY</c> body, a view / function body, a computed column, a <c>CHECK</c> constraint, a table type's default. Msg 11719.</summary>
+    Nested,
+
+    /// <summary>An arm of <c>CASE</c> / <c>COALESCE</c> / <c>IIF</c> / <c>ISNULL</c> / <c>NULLIF</c>. Msg 11741 — which names <c>CHOOSE</c> too, though real accepts that one.</summary>
+    Conditional,
+
+    /// <summary>An aggregate's argument. Msg 11725.</summary>
+    Aggregate,
+
+    /// <summary>A statement that dedupes or combines rowsets — <c>DISTINCT</c>, <c>UNION</c>, <c>UNION ALL</c>, <c>EXCEPT</c>, <c>INTERSECT</c>. Msg 11721.</summary>
+    Deduplicating,
 }

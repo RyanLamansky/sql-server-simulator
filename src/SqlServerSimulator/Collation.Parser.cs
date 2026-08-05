@@ -385,10 +385,23 @@ internal abstract partial class Collation
         var caseSensitive = flags.HasFlag(CollationFlags.CaseSensitive);
         var kanaSensitive = flags.HasFlag(CollationFlags.KanaSensitive);
         var widthSensitive = flags.HasFlag(CollationFlags.WidthSensitive);
+        // The _AI names fold diacritics for every comparison — `=`, DISTINCT,
+        // ORDER BY and LIKE alike. Absent the token the collation is
+        // accent-sensitive, which is what the name grammar's own default is.
+        var accentInsensitive = flags.HasFlag(CollationFlags.AccentInsensitive);
         // SC behavior is engaged when the _SC_ flag is set explicitly or
         // when the version is v140+ (where SC is implicit / default).
         var scAware = flags.HasFlag(CollationFlags.SupplementaryCharacters) || version is >= 140;
-        var cultureBody = new CultureCollation(name, description, prefixInfo.CultureName, caseSensitive, kanaSensitive, widthSensitive, storageEncoding, ansiCodePage, scAware);
+        // LIKE's `_` reads a surrogate pair three different ways depending on
+        // the name's vintage (probe-confirmed against SQL Server 2025 over
+        // U+1F600): an SC-aware name matches the pair with one `_`, a
+        // versioned name matches it with two, and an unversioned one — the
+        // whole SQL_* family and the pre-100 Windows names — matches it with
+        // no number of them at all.
+        var surrogateMatching = scAware ? SurrogateMatching.CodePoint
+            : version is not null ? SurrogateMatching.CodeUnits
+            : SurrogateMatching.Unmatchable;
+        var cultureBody = new CultureCollation(name, description, prefixInfo.CultureName, caseSensitive, accentInsensitive, kanaSensitive, widthSensitive, storageEncoding, ansiCodePage, scAware, surrogateMatching);
 
         // The default collation gets a byte-exact sort body wrapping the
         // generic culture comparer (which still supplies metadata + the

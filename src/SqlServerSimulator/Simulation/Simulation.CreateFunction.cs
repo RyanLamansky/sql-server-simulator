@@ -688,7 +688,7 @@ partial class Simulation
         var parser = innerBatch.Parser;
         parser.MoveNextRequired();
 
-        var selection = ParseBodyQuery(parser);
+        var selection = ParseBodyQuery(parser, rejectsNextValueFor: true);
 
         var columns = new HeapColumn[selection.Schema.Length];
         var seenNames = new HashSet<string>(outerContext.Batch.CurrentDatabase.Collation);

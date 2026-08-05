@@ -227,6 +227,23 @@ internal sealed class FromSource(
             lateralIsQueryBody: this.LateralIsQueryBody);
 
     /// <summary>
+    /// Returns a copy of this source reading <paramref name="rows"/> — the same
+    /// rows filtered by the WHERE conjuncts that read only this source (see
+    /// <c>Selection.TryPrefilterJoinSource</c>). Every other field is preserved,
+    /// <see cref="HeapPlan"/> included, because a prefiltered source is still the
+    /// plain base-table scan the later join passes may seek or hash on its own
+    /// terms — one that happens to hand back fewer rows.
+    /// </summary>
+    public FromSource WithFilteredRows(IEnumerable<byte[]> rows) =>
+        new(this.Qualifier, this.ColumnNames, this.Columns, this.StoredSchema,
+            this.StorageOrdinals, this.LobStore, rows,
+            lateralPlan: this.LateralPlan, backingTable: this.BackingTable, backingView: this.BackingView,
+            heapPlan: this.HeapPlan, materializeOnce: this.MaterializeOnce, isPlaceholder: this.IsPlaceholder,
+            backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
+            viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
+            lateralIsQueryBody: this.LateralIsQueryBody);
+
+    /// <summary>
     /// Returns a copy of this source with its deferred <see cref="LateralPlan"/>
     /// replaced by an already-materialized <paramref name="rows"/> list —
     /// clearing <see cref="LateralPlan"/> and <see cref="MaterializeOnce"/> so

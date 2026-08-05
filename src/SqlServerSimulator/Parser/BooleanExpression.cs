@@ -428,7 +428,7 @@ internal abstract class BooleanExpression
         // EXISTS counts rows and throws the projection away, so its select list
         // never has to settle an output collation (probe-confirmed).
         context.ProjectionDiscarded = true;
-        var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+        var inner = Expression.ParseSubqueryRejectingNextValueFor(context);
         context.ProjectionDiscarded = false;
         for (var i = 0; i <= extraParens; i++)
         {
@@ -548,7 +548,8 @@ internal abstract class BooleanExpression
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+            var inner = Expression.ParseSubqueryRejectingNextValueFor(context);
+            context.SubqueriesParsed++;
             if (inner.Schema.Length != 1)
                 throw SimulatedSqlException.SubqueryNotIntroducedWithExists();
             if (context.Token is not Operator { Character: ')' })
@@ -719,7 +720,7 @@ internal abstract class BooleanExpression
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.Select })
         {
-            var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+            var inner = Expression.ParseSubqueryRejectingNextValueFor(context);
             if (inner.Schema.Length != 1)
                 throw SimulatedSqlException.SubqueryNotIntroducedWithExists();
             if (context.Token is not Operator { Character: ')' })
@@ -1155,6 +1156,45 @@ internal abstract class BooleanExpression
     /// equality-seek path's existing NULL-skip applies identically.
     /// </summary>
     internal virtual bool TryGetEqualityFamily([NotNullWhen(true)] out List<(Expression Left, Expression Right)>? pairs)
+    {
+        pairs = null;
+        return false;
+    }
+
+    /// <summary>
+    /// Exposes the left side of a non-negated <c>expr IN (SELECT …)</c>, whose
+    /// value set exists only once the subquery has run. The index-seek planner
+    /// asks first — the subject has to be an indexable column of the source it
+    /// is narrowing — and only then materializes through
+    /// <see cref="TryMaterializeProbeFamily"/>, so a body whose values could
+    /// never drive a seek is never executed early for that purpose.
+    /// </summary>
+    internal virtual bool TryGetSubqueryProbeSubject([NotNullWhen(true)] out Expression? subject)
+    {
+        subject = null;
+        return false;
+    }
+
+    /// <summary>
+    /// The equality family an <b>uncorrelated</b> <c>IN (SELECT …)</c>
+    /// decomposes into once its values are materialized — one
+    /// <c>&lt;subject&gt; = &lt;value&gt;</c> pair per non-NULL value — so a
+    /// read whose subject is indexed drives from the values (a seek each)
+    /// instead of scanning the outer and probing every row against them.
+    /// Declines for <c>NOT IN</c> (whose matches are the complement), for a
+    /// correlated body, and past <paramref name="cap"/> values. The
+    /// materialization goes through the statement's own subquery memo, so the
+    /// per-row path reuses it rather than running the body twice; NULL values
+    /// are left out (they equi-match nothing) and the untouched <c>IN</c>
+    /// conjunct stays in the residual WHERE, which is what keeps the
+    /// three-valued answer exact.
+    /// </summary>
+    internal virtual bool TryMaterializeProbeFamily(
+        BatchContext batch,
+        Func<MultiPartName, SqlValue> outerResolver,
+        SqlType subjectType,
+        int cap,
+        [NotNullWhen(true)] out List<(Expression Left, Expression Right)>? pairs)
     {
         pairs = null;
         return false;
@@ -1673,6 +1713,16 @@ internal abstract class BooleanExpression
         public override bool? Run(RuntimeContext runtime)
         {
             PermissionEnforcement.CheckSubqueryReads(runtime.Batch, inner);
+
+            // Past the per-row threshold an equi-correlated body answers from
+            // the key set its decorrelated plan built once; a NULL outer key
+            // equi-matches nothing, so the body returns no row for it.
+            if (SemiJoinProbe.Open(runtime, inner) is { } index
+                && index.TryProbeKey(runtime, inner.SemiJoin!, out var key, out var keyHasNull))
+            {
+                return !keyHasNull && index.ContainsKey(key);
+            }
+
             var memo = UncorrelatedSubqueryCache.Open(runtime, this);
             if (memo.Result is { } cached)
                 return (bool)cached;
@@ -1803,10 +1853,34 @@ internal abstract class BooleanExpression
         public override bool? Run(RuntimeContext runtime)
         {
             var src = source.Run(runtime);
-            if (src.IsNull)
-                return null;
 
             PermissionEnforcement.CheckSubqueryReads(runtime.Batch, inner);
+
+            // A NULL left side settles on the body's *emptiness* alone, not on
+            // its values: `x IN (S)` is an OR of `x = s` over S, and an OR over
+            // no elements is FALSE whatever x is, while one over a non-empty S
+            // is UNKNOWN because every comparison against NULL is. Probed
+            // against SQL Server 2025: `NULL IN (SELECT v FROM t WHERE 1 = 0)`
+            // is FALSE (`NOT IN` TRUE) and the same over a non-empty body is
+            // UNKNOWN — including per correlation key, so a NULL-keyed outer
+            // row whose group is empty answers `NOT IN` TRUE.
+            if (src.IsNull)
+                return this.NullLeftSide(runtime, src.Type);
+
+            // Past the per-row threshold an equi-correlated body answers from
+            // the per-key value groups its decorrelated plan built once. A NULL
+            // outer key — or one no inner row carries — makes the body's result
+            // empty for this row, which is a definite miss however many NULLs
+            // other keys' groups hold.
+            if (inner.SemiJoin is { ProjectsValue: true } shape
+                && SemiJoinProbe.Open(runtime, inner) is { } index
+                && index.TryProbeKey(runtime, shape, out var key, out var keyHasNull))
+            {
+                return keyHasNull || !index.TryGetGroup(key, out var group)
+                    ? negated
+                    : this.TestGroup(group, src);
+            }
+
             var memo = UncorrelatedSubqueryCache.Open(runtime, this);
             if (memo.Result is { } cached)
                 return this.Test((InnerColumnValues)cached, src);
@@ -1817,6 +1891,50 @@ internal abstract class BooleanExpression
             memo.Remember(runtime, this, values);
             return this.Test(values, src);
         }
+
+        /// <summary>
+        /// The answer for a NULL left side: <c>negated</c> (FALSE for
+        /// <c>IN</c>, TRUE for <c>NOT IN</c>) when the body produced no row,
+        /// UNKNOWN when it produced any. Routed through the same three sources
+        /// of inner rows the value path uses — the decorrelated per-key index,
+        /// the statement's materialized memo, and the per-row execution — so
+        /// the transform and the memo answer identically here too.
+        /// <para>
+        /// The per-row execution reads one row rather than none, which is where
+        /// this parts company with real: real needs the body's <em>shape</em>
+        /// and not its values, so a projection that raises (<c>SELECT 1/0</c>)
+        /// answers UNKNOWN there and raises here. Its <c>WHERE</c> raises on
+        /// both, since emptiness can't be known without evaluating it.
+        /// </para>
+        /// </summary>
+        private bool? NullLeftSide(RuntimeContext runtime, SqlType sourceType)
+        {
+            // Decorrelated: a key no inner row carries — a NULL-component key
+            // included — selects nothing, which is the empty case. A key that
+            // found a group selected at least one row, NULL projection or not.
+            if (inner.SemiJoin is { ProjectsValue: true } shape
+                && SemiJoinProbe.Open(runtime, inner) is { } index
+                && index.TryProbeKey(runtime, shape, out var key, out var keyHasNull))
+            {
+                return keyHasNull || !index.TryGetGroup(key, out _) ? negated : null;
+            }
+
+            var memo = UncorrelatedSubqueryCache.Open(runtime, this);
+            if (memo.Result is { } cached)
+                return IsEmpty((InnerColumnValues)cached) ? negated : null;
+            if (memo.Probe is not { } probe)
+            {
+                foreach (var _ in inner.Execute(runtime.Batch, runtime.ResolveColumn).RowBytes)
+                    return null;
+                return negated;
+            }
+
+            var values = new InnerColumnValues(inner.Execute(runtime.Batch, probe.Resolver), sourceType);
+            memo.Remember(runtime, this, values);
+            return IsEmpty(values) ? negated : null;
+        }
+
+        private static bool IsEmpty(InnerColumnValues values) => values.Values.Length == 0 && !values.SawNull;
 
         /// <summary>
         /// The per-outer-row execution a correlated inner takes: stream the
@@ -1867,7 +1985,83 @@ internal abstract class BooleanExpression
             return values.SawNull ? null : negated;
         }
 
+        /// <summary>
+        /// Tests one LHS value against the inner rows the semi-join index holds
+        /// under this row's correlation key — the same promote-and-compare walk
+        /// <see cref="ScanPerRow"/> runs over the rows that key's correlated
+        /// execution would have produced, including the NULL rule
+        /// (<see cref="SemiJoinGroup.SawNull"/> is per key, so a NULL under some
+        /// other key can't taint this one).
+        /// </summary>
+        private bool? TestGroup(SemiJoinGroup group, SqlValue src)
+        {
+            foreach (var value in group.Values)
+            {
+                if (CompareValuesPromoted(src, value, "equal to", static (l, r) => l.Equals(r)) == true)
+                    return !negated;
+            }
+            return group.SawNull ? null : negated;
+        }
+
         internal override string DebugDisplay() => $"{source.DebugDisplay()} {(negated ? "NOT IN" : "IN")} (...)";
+
+        internal override bool TryGetSubqueryProbeSubject([NotNullWhen(true)] out Expression? subject)
+        {
+            subject = source;
+            return !negated;
+        }
+
+        internal override bool TryMaterializeProbeFamily(
+            BatchContext batch,
+            Func<MultiPartName, SqlValue> outerResolver,
+            SqlType subjectType,
+            int cap,
+            [NotNullWhen(true)] out List<(Expression Left, Expression Right)>? pairs)
+        {
+            pairs = null;
+            if (negated)
+                return false;
+
+            var runtime = new RuntimeContext(outerResolver, batch);
+            var memo = UncorrelatedSubqueryCache.Open(runtime, this);
+            InnerColumnValues values;
+            if (memo.Result is { } cached)
+            {
+                values = (InnerColumnValues)cached;
+            }
+            else if (memo.Probe is { } probe)
+            {
+                try
+                {
+                    values = new InnerColumnValues(inner.Execute(runtime.Batch, probe.Resolver), subjectType);
+                }
+                catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
+                {
+                    // The body raises for this statement either way; let the
+                    // per-row evaluation be what surfaces it, in row order.
+                    return false;
+                }
+
+                memo.Remember(runtime, this, values);
+                // A body that read the enclosing row (or drew a per-call-varying
+                // built-in) produced values good for one row only.
+                if (!probe.CanReplay(runtime))
+                    return false;
+            }
+            else
+            {
+                // Already known to need per-row execution.
+                return false;
+            }
+
+            if (values.Values.Length == 0 || values.Values.Length > cap)
+                return false;
+
+            pairs = new List<(Expression Left, Expression Right)>(values.Values.Length);
+            foreach (var value in values.Values)
+                pairs.Add((source, Value.NonLiteral(value)));
+            return true;
+        }
 
         // Only the LHS source is a reachable Expression operand; the subquery
         // side is a Selection (handled by its own machinery).
@@ -2367,19 +2561,19 @@ internal abstract class BooleanExpression
 
     /// <summary>
     /// SQL Server <c>LIKE</c> / <c>NOT LIKE</c> with optional <c>ESCAPE</c>
-    /// clause. Pattern translation flows through <see cref="LikePatternBuilder"/>
-    /// (shared with <c>PATINDEX</c>), behind this node's own
-    /// <see cref="LikePatternBuilder.Cache"/> so a per-row predicate translates
-    /// its pattern once rather than once per row. Trailing-space
-    /// behavior (subject's leftover U+0020 spaces accepted but pattern's must
-    /// match) is encoded by anchoring the regex with <c>[ ]*$</c>. Wildcards
-    /// inside <c>[...]</c> classes are taken literally; <c>[]</c> and reversed
-    /// ranges (<c>[c-a]</c>) and unterminated <c>[</c> all produce never-match
-    /// translations to mirror SQL Server's silent failure.
+    /// clause. Pattern compilation and matching flow through
+    /// <see cref="LikeMatcher"/> (shared with <c>PATINDEX</c>), behind this
+    /// node's own <see cref="LikeMatcher.Cache"/> so a per-row predicate
+    /// compiles its pattern once rather than once per row. The match reads the
+    /// resolved collation's full comparison semantics — case, accent, kana and
+    /// width — and the trailing-space rule the operand types decide; wildcards
+    /// inside <c>[...]</c> classes are taken literally, and <c>[]</c> and an
+    /// unterminated <c>[</c> never match, mirroring SQL Server's silent
+    /// failure.
     /// </summary>
     private sealed class LikeExpression(Expression left, Expression right, Expression? escape, bool negated) : CompareExpression(left, right)
     {
-        private readonly LikePatternBuilder.Cache patterns = new(forPatIndex: false);
+        private readonly LikeMatcher.Cache patterns = new(forPatIndex: false);
         private readonly Expression? escape = escape;
         private readonly bool negated = negated;
 
@@ -2427,7 +2621,13 @@ internal abstract class BooleanExpression
                     l.Type.Collation!.Name,
                     this.OperatorName);
 
-            var matched = this.patterns.Get(r.AsString, escapeChar, resolved.Collation.CaseSensitive).IsMatch(l.AsString);
+            // Trailing-space slack is the non-Unicode family's alone: real
+            // accepts a varchar subject's leftover U+0020 and refuses an
+            // nvarchar one's, and a single nvarchar operand decides it for the
+            // pair (probe-confirmed both ways, and through a char / nchar
+            // column's own ANSI padding).
+            var slack = !SqlType.IsNationalStringCategory(l.Type) && !SqlType.IsNationalStringCategory(r.Type);
+            var matched = this.patterns.Get(r.AsString, escapeChar, resolved.Collation).IsMatch(l.AsString, slack);
             return matched ^ this.negated;
         }
 

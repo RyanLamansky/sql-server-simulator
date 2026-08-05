@@ -37,6 +37,45 @@ Probe-confirmed against SQL Server 2025: `SELECT COUNT(DISTINCT g) FROM (SELECT 
 
 The counter has a second consumer with the same reasoning: the once-per-enumeration materialization of a deferred FROM source, in [`joins.md`](joins.md#deferred-sources-materialize-once-per-enumeration).
 
+## An equi-correlated body switches to a hash semi / anti-join
+
+A correlated `EXISTS` / `NOT EXISTS` / `[NOT] IN (SELECT …)` re-executes its inner plan per outer row.
+Past **128 evaluations within one statement** the site executes a **decorrelated key plan** once instead — the same body with its correlation equalities removed and its projection replaced by the inner columns those equalities named — and every later row probes the result (`Parser/SemiJoinIndex.cs`, `Parser/Selection.SemiJoin.cs`).
+The quantified `ANY` / `SOME` / `ALL` forms keep their per-row comparison.
+
+**Eligibility is classified once at parse** and captured in the plan (so it is value-independent and survives the plan cache).
+The WHERE has to split into *correlation equi-conjuncts* — `<bare column of this body> = <enclosing-scope expression>`, the value side taking the same stability rule an index seek's probe does and naming at least one enclosing column — plus a residual reading only this body's own sources.
+Everything that reads the row set as a whole declines, because the body's answer would then depend on *which* rows the correlation kept: `DISTINCT`, `TOP` / `OFFSET` / `FETCH`, `GROUP BY` / `HAVING`, an aggregate, a window, an `ORDER BY`.
+So does a correlated reference anywhere but those conjuncts — a residual conjunct, a JOIN `ON`, the projection — and a key pair whose types `TryPromoteComparableKeyTypes` won't settle (the same gate the equi-join hash buckets rest on, so a bucket means what evaluating the `=` meant: collation folding, ANSI trailing-space padding, cross-width promotion).
+
+**The switch is adaptive**, mirroring `EquiJoinSeekOrHash`'s philosophy.
+Below the threshold nothing changes, so a small outer never pays a build it can't amortize.
+Past it, an inner the per-row path **seeks** (a lone base table with a key / index leading on a correlation column) keeps running per row until the outer reaches a quarter of that table's row count — the build costs one pass over the whole table while the per-row path pays only for the rows each key selects, the same conservative 4:1 crossover the join planner uses.
+An inner with no such index is a scan per outer row and takes no delay.
+
+**The one-shot execution runs under the correlation latch** the outer-independence probe already owns (`OuterRowProbe`): a key plan that consulted the outer row — a correlation hidden inside a nested subquery, which the parse-time classification doesn't see into — or that drew a per-call-varying built-in declines the site for the rest of the statement, and the row that triggered the build falls back to its own per-row execution.
+An error raised while building declines the same way rather than surfacing, so the per-row path stays the one that decides whether a row's inner result raises: this transform reads rows a short-circuiting per-row evaluation might never touch, but it never converts that into an error the query didn't have.
+
+**NULL rules** (probed against SQL Server 2025 as the four forms × NULL outer key × NULL inner key × NULL inner projection matrix, and identical to what the per-row path already answered):
+
+- A row whose **inner** key has a NULL component is dropped while building — `NULL = NULL` is UNKNOWN, so it equi-matches no outer key, a NULL one included.
+- A NULL **outer** key selects no inner row: `EXISTS` false, `NOT EXISTS` true, `IN` false, `NOT IN` true.
+- `IN` / `NOT IN` carry **`sawNull` per correlation key**, not globally: a NULL projection under key *k* turns a miss into UNKNOWN only for the outer rows whose key is *k*. A key no inner row carries is a definite miss (false / true) however many NULLs the other keys' groups hold.
+
+### A NULL left side settles on the inner's emptiness
+
+`x IN (S)` is an OR of `x = s` over S, so a NULL left side has no bearing on the answer beyond whether S is empty: an OR over no elements is FALSE whatever `x` is, and one over a non-empty S is UNKNOWN because every comparison against NULL is.
+`InSubqueryExpression.NullLeftSide` reads exactly that — `negated` (FALSE for `IN`, TRUE for `NOT IN`) when the body produced no row, UNKNOWN when it produced any — through the same three sources of inner rows the value path uses, so the decorrelated per-key index, the statement's materialized memo and the per-row execution all answer identically.
+Per correlation key, a key no inner row carries (a NULL-component key included) is the empty case.
+
+Probed against SQL Server 2025 (2026-08-05): `NULL IN (SELECT v FROM t WHERE 1 = 0)` is `F` and `NULL NOT IN (…)` is `T`, the same pair over a non-empty body is `U` in both directions, and a body whose only row is NULL is non-empty and therefore `U`.
+A `TOP 0` body and a `(VALUES …) WHERE 1 = 0` body are two more ways to be empty.
+
+**Divergence — the emptiness probe reads one row.**
+Real needs the body's *shape* and not its values, so a projection that raises answers UNKNOWN there (`NULL IN (SELECT 1/0 FROM <non-empty>)`) where the simulator raises Msg 8134 from projecting the first row.
+Its **WHERE** raises on both, since emptiness can't be known without evaluating it.
+`EXISTS` carries the same divergence for the same reason and pre-dates this.
+
 ### The hashed `IN` probe
 
 An uncorrelated `IN (SELECT …)` materializes its inner column once — non-NULL values in row order, plus a `sawNull` flag — and builds a `HashSet<SqlValue>` over them, so the per-row membership test is a lookup rather than a walk of the inner result.
@@ -45,7 +84,18 @@ An uncorrelated `IN (SELECT …)` materializes its inner column once — non-NUL
 The probe set is built only where promotion stays inside one type family (same `SqlTypeCategory`, neither side LOB, category not `Other`), so coercing a value to the common type is a widening rather than the value-dependent conversion a cross-family pair runs.
 That matters for error fidelity: `int IN (SELECT <varchar column>)` has to raise its Msg 245 from the comparison, in row order, not while a probe set is being built — so that pair declines the hash and takes the walk.
 The set is also keyed by the LHS type it was built against; an LHS of any other type (a `sql_variant` row, a runtime-narrowed value) falls back to the walk for that row.
-A correlated `IN` keeps the per-row streaming walk, short-circuiting on the first match.
+A correlated `IN` keeps the per-row streaming walk, short-circuiting on the first match, until the semi-join switch above takes over.
+
+### A small uncorrelated `IN` set drives the read
+
+An uncorrelated `col IN (SELECT …)` whose materialized set is at most **64** non-NULL values exposes them to the index seek as an equality family on `col`, so a read whose subject column **leads** some key / index *drives from the values* — one seek per value — instead of scanning the outer and probing every row against the hash.
+It is the same family a written `IN (1, 2, 3)` list decomposes into, and it rides the seek's existing per-column probe expansion.
+
+The values only exist once the body has run, so the seek planner asks the conjunct for its subject first (an indexable, key-leading column of the source it is narrowing) and materializes only then — through the statement's own subquery memo, so the per-row evaluation reads the same values rather than running the body twice, and a **correlated** body simply records itself as per-row there and declines.
+`NOT IN` never drives (its matches are the complement).
+NULL values are left out of the probes — they equi-match nothing — and the `IN` conjunct stays in the residual WHERE like every other matched conjunct, which is what keeps the three-valued answer exact for the rows the seek selected and makes the rows it skipped ones the predicate answered FALSE or UNKNOWN for anyway.
+
+Measured on WideWorldImporters (`Sales.Orders.CustomerID IN (SELECT … FROM Sales.Customers WHERE CustomerID IN (801, 802, 803))`): **17.3 ms → 0.2 ms**, against 1.4 ms live.
 
 ### Divergences
 

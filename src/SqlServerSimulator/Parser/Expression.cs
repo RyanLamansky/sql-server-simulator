@@ -819,13 +819,18 @@ internal abstract class Expression
 
     /// <summary>
     /// Records a freshly-built <see cref="Reference"/> against
-    /// <see cref="ParserContext.ColumnReferencesParsed"/> and returns it, so the
-    /// counting stays a one-token change at each construction site inside the
-    /// primary-expression switch.
+    /// <see cref="ParserContext.ColumnReferencesParsed"/> — and against
+    /// <see cref="ParserContext.FromSourceColumnSink"/> when a FROM source's
+    /// arguments are being read — and returns it, so both stay a one-token
+    /// change at each construction site inside the primary-expression switch.
     /// </summary>
     private static Reference Counted(ParserContext context, Reference reference)
     {
         context.ColumnReferencesParsed++;
+        // The reference is recorded rather than its name: the dotted parts are
+        // appended to `ReferencedName` after construction, so the whole
+        // multi-part name only exists once the postfix loop is done with it.
+        context.FromSourceColumnSink?.Add(reference);
         return reference;
     }
 
@@ -1158,6 +1163,26 @@ internal abstract class Expression
     private const int SubqueryNestingCost = 6;
 
     /// <summary>
+    /// Parses a subquery body with <c>NEXT VALUE FOR</c> refused inside it
+    /// (real's Msg 11719 — see <see cref="ParserContext.NextValueForRejection"/>).
+    /// A subquery is one of the constructs real's message names, and the
+    /// refusal holds for the body's whole parse rather than only its clauses.
+    /// </summary>
+    internal static Selection ParseSubqueryRejectingNextValueFor(ParserContext context)
+    {
+        var saved = context.NextValueForRejection;
+        context.NextValueForRejection = NextValueForScope.Nested;
+        try
+        {
+            return Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+        }
+        finally
+        {
+            context.NextValueForRejection = saved;
+        }
+    }
+
+    /// <summary>
     /// Parses a grouped expression starting at the opening <c>(</c>. Two
     /// shapes share the leading paren: a parenthesized expression
     /// (<c>(1 + 2)</c>, parses as <see cref="Parenthesized"/>) or a scalar
@@ -1182,7 +1207,7 @@ internal abstract class Expression
         {
             if (isSubquery)
             {
-                var inner = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+                var inner = ParseSubqueryRejectingNextValueFor(context);
                 context.SubqueriesParsed++;
                 return inner.Schema.Length != 1
                     ? throw SimulatedSqlException.SubqueryNotIntroducedWithExists()

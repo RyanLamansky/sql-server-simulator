@@ -62,7 +62,7 @@ Two gates keep it from costing anything where it can't pay:
 - **the target must not be a string**, because a string-to-string promotion re-tags the same instance and would allocate an entry per row on an operand that varies, while the non-string targets are the parses (the date/time grammar, decimal, `uniqueidentifier`).
 
 A failed conversion is never memoized, so Msg 241 still surfaces from the row that carries the bad text, as many times as it did before.
-Like the [LIKE pattern memo](collations.md#the-pattern-translation-is-memoized-per-node) the entry is immutable and published through `Volatile`, since a cached plan shares the node across sessions.
+Like the [LIKE pattern memo](collations.md#the-pattern-compilation-is-memoized-per-node) the entry is immutable and published through `Volatile`, since a cached plan shares the node across sessions.
 `InExpression` doesn't carry one — a list of literals would thrash a single entry.
 
 ## `bit` operand pairs

@@ -86,7 +86,8 @@ internal sealed partial class Selection
         foreach (var excluder in excluders)
             excluder.CollectConjuncts(conjuncts);
 
-        var equalities = CollectColumnEqualities(source, conjuncts, allowCorrelatedColumnValue: true, planSources);
+        var equalities = CollectColumnEqualities(
+            source, conjuncts, allowCorrelatedColumnValue: true, planSources, table, batch, outerResolver);
         var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue: true, planSources);
 
         // A SERIALIZABLE / HOLDLOCK reader's phantom fence is settled here,
@@ -354,8 +355,18 @@ internal sealed partial class Selection
     // equality conjunct (or IN-list / OR-of-equalities on the same column) to
     // its value side(s). First writer wins per column; a redundant later
     // conjunct just stays as a residual filter.
+    // <paramref name="probeTable"/> / <paramref name="probeBatch"/> opt the
+    // source into the drive-side transform for a small uncorrelated
+    // `col IN (SELECT …)`: its values become one more equality family. Passing
+    // neither (every caller but the query path) leaves such a conjunct alone.
     private static Dictionary<int, Expression[]> CollectColumnEqualities(
-        FromSource source, List<BooleanExpression> conjuncts, bool allowCorrelatedColumnValue, FromSource[]? planSources = null)
+        FromSource source,
+        List<BooleanExpression> conjuncts,
+        bool allowCorrelatedColumnValue,
+        FromSource[]? planSources = null,
+        HeapTable? probeTable = null,
+        BatchContext? probeBatch = null,
+        Func<MultiPartName, SqlValue>? outerResolver = null)
     {
         var equalities = new Dictionary<int, Expression[]>();
         foreach (var conjunct in conjuncts)
@@ -367,10 +378,70 @@ internal sealed partial class Selection
                 continue;
             }
             if (conjunct.TryGetEqualityFamily(out var family))
+            {
                 _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue, planSources);
+                continue;
+            }
+            if (probeTable is not null && probeBatch is not null)
+                _ = TryRecordSubqueryProbeFamily(source, probeTable, probeBatch, outerResolver, conjunct, equalities);
         }
 
         return equalities;
+    }
+
+    /// <summary>
+    /// Records a small <b>uncorrelated</b> <c>col IN (SELECT …)</c>'s values as
+    /// this column's equality family, which is what makes the read drive from
+    /// the values (one seek each) rather than scan every row and probe it
+    /// against them. The subject has to be an indexable column that <b>leads</b>
+    /// some key / index — the structural precondition for a seek — and that is
+    /// asked <em>before</em> the body is materialized, so a body that could
+    /// never drive one is never executed on this account. The materialization
+    /// itself goes through the statement's subquery memo, so the per-row
+    /// evaluation reads the same values rather than running the body again, and
+    /// a correlated body simply records itself as per-row there and declines.
+    /// The <c>IN</c> conjunct stays in the residual WHERE like every other
+    /// matched conjunct, so a NULL among the inner values — left out of the
+    /// probes, since it equi-matches nothing — still reaches its three-valued
+    /// answer for the rows the seek did select, and the rows it didn't select
+    /// were ones the predicate answered FALSE or UNKNOWN for anyway.
+    /// </summary>
+    private static bool TryRecordSubqueryProbeFamily(
+        FromSource source,
+        HeapTable table,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        BooleanExpression conjunct,
+        Dictionary<int, Expression[]> equalities)
+    {
+        return conjunct.TryGetSubqueryProbeSubject(out var subject)
+            && TryIdentifyIndexableColumn(source, subject, out var ordinal)
+            && !equalities.ContainsKey(ordinal)
+            && LeadsSomeKeyOrIndex(table, ordinal)
+            && conjunct.TryMaterializeProbeFamily(
+                batch,
+                outerResolver ?? ThrowOnColumnReference,
+                source.StoredSchema[ordinal].Type,
+                UnionSeekProbeCap,
+                out var family)
+            && TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue: false);
+    }
+
+    // Whether a storage ordinal is the leading key column of some key / index —
+    // the structural precondition a probe family needs to seek at all.
+    private static bool LeadsSomeKeyOrIndex(HeapTable table, int storageOrdinal)
+    {
+        foreach (var key in table.KeyConstraints)
+        {
+            if (key.StorageOrdinals.Length > 0 && key.StorageOrdinals[0] == storageOrdinal)
+                return true;
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (index.KeyColumns.Length > 0 && index.KeyColumns[0].StorageOrdinal == storageOrdinal)
+                return true;
+        }
+        return false;
     }
 
     // Wraps a narrowed row stream back into a single-source array, preserving the
@@ -430,10 +501,36 @@ internal sealed partial class Selection
         return true;
     }
 
+    /// <summary>
+    /// Row count below which the range seek's span gate (see
+    /// <see cref="RangeSpanGateDivisor"/>) never engages. Under it the candidate
+    /// list is small however wide the interval, so the seek's random-address
+    /// materialization can't lose to the sequential scan by enough to matter, and
+    /// leaving the gate off keeps the access path predictable for the small
+    /// tables a seek is easiest to reason about.
+    /// </summary>
+    private const int RangeSpanGateMinRows = 1024;
+
+    /// <summary>
+    /// The reciprocal of the share of a table's rows a range may select before
+    /// the seek stops paying for itself — 4, so an interval selecting more than a
+    /// quarter of the rows falls back to the scan. A range seek trades a
+    /// sequential page walk for a per-address <c>ReadSlotBytes</c> plus an
+    /// ordered-view walk whose per-key comparer calls the scan doesn't pay; at a
+    /// wide span those costs dominate (measured 3× SLOWER than the scan for a
+    /// 99%-selecting <c>&gt;</c> on a 231k-row table, and 16 MB more allocated).
+    /// The bounds are searched first and the span compared afterwards, so the
+    /// cache is already built when the gate declines — which is fine: the build
+    /// is shared with every other seek against that column and is what makes the
+    /// <em>next</em> narrow range on it free.
+    /// </summary>
+    private const int RangeSpanGateDivisor = 4;
+
     // Address-only core of the single-column leading range seek, shared by the
     // query path (TrySeekByRange) and the mutation path. Returns true with the
     // in-range (page, slot) candidates (possibly empty — a NULL bound seeks to
-    // nothing), or false when no range bound lands on a leading key column.
+    // nothing), or false when no range bound lands on a leading key column or
+    // the interval spans too much of the table to be worth seeking.
     private static bool TryComputeRangeCandidates(
         FromSource source,
         HeapTable table,
@@ -455,10 +552,20 @@ internal sealed partial class Selection
             case BoundEval.Null: return true;
         }
 
+        var rowCount = table.Heap.RowCount;
         var cache = HeapSeekCache.For(table.Heap);
-        candidates = cache.RangeScan(
+        var found = cache.RangeScan(
             table.Heap, source.StoredSchema, source.LobStore, ordinal, common,
-            hasLower, lowerValue, bound.LowerInclusive, hasUpper, upperValue, bound.UpperInclusive);
+            hasLower, lowerValue, bound.LowerInclusive, hasUpper, upperValue, bound.UpperInclusive,
+            rowCount >= RangeSpanGateMinRows ? rowCount / RangeSpanGateDivisor : int.MaxValue);
+
+        if (found is null)
+        {
+            IndexSeekDiagnostics.Sink?.Add($"RangeSpanTooWide({table.Name})");
+            return false;
+        }
+
+        candidates = found;
         return true;
     }
 
@@ -1283,6 +1390,13 @@ internal sealed partial class Selection
     /// SERIALIZABLE reader locks and when. The leftmost slot keeps its
     /// long-standing unconditional attempt.
     /// </para>
+    /// <para>
+    /// A source no key or index lets the seek narrow falls back to
+    /// <see cref="TryPrefilterJoinSource"/>, which filters its row stream by the
+    /// same conjuncts rather than seeking on them — the access path a range on an
+    /// unindexed column gets, where the predicate can still shrink the join's
+    /// input even though nothing can position on it.
+    /// </para>
     /// </summary>
     private static (FromSource[] Sources, JoinSpec[] Joins) NarrowJoinSources(
         FromSource[] sources,
@@ -1294,6 +1408,10 @@ internal sealed partial class Selection
         if (sources.Length < 2 || excluders.Count == 0)
             return (sources, joins);
 
+        var conjuncts = new List<BooleanExpression>();
+        foreach (var excluder in excluders)
+            excluder.CollectConjuncts(conjuncts);
+
         FromSource[]? narrowed = null;
         int[]? seekedCandidates = null;
         for (var i = 0; i < sources.Length; i++)
@@ -1303,7 +1421,16 @@ internal sealed partial class Selection
             var seeked = MaybeApplyIndexSeek(
                 [sources[i]], NoJoins, excluders, batch, outerResolver, planSources: sources, out var candidates);
             if (ReferenceEquals(seeked[0], sources[i]))
+            {
+                if (TryPrefilterJoinSource(sources[i], conjuncts, sources, batch, outerResolver) is { } prefiltered)
+                {
+                    narrowed ??= (FromSource[])sources.Clone();
+                    narrowed[i] = prefiltered;
+                }
+
                 continue;
+            }
+
             narrowed ??= (FromSource[])sources.Clone();
             if (seekedCandidates is null)
             {
@@ -1315,9 +1442,16 @@ internal sealed partial class Selection
             seekedCandidates[i] = candidates;
         }
 
-        return narrowed is null
-            ? (sources, joins)
-            : ReorderToDriveFromNarrowedSource(narrowed, joins, seekedCandidates!) ?? (narrowed, joins);
+        if (narrowed is null)
+            return (sources, joins);
+
+        // The reorder picks its driver by seeked candidate count, which a
+        // prefiltered source doesn't have (its stream is lazy and counting it
+        // would materialize the table). With nothing seeked, the written order
+        // stands and the prefilter alone does the narrowing.
+        return seekedCandidates is null
+            ? (narrowed, joins)
+            : ReorderToDriveFromNarrowedSource(narrowed, joins, seekedCandidates) ?? (narrowed, joins);
     }
 
     /// <summary>

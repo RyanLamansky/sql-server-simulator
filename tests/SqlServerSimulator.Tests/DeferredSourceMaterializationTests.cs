@@ -229,25 +229,42 @@ public sealed class DeferredSourceMaterializationTests
             """));
 
     /// <summary>
-    /// A rowset function's arguments are parsed in the enclosing FROM's scope,
-    /// so a non-APPLY join can still hand it the left row's column per row —
-    /// each row's own CSV splits, never the first row's. (Real rejects this
-    /// shape with Msg 4104; the simulator answers it, and materializing would
-    /// have frozen the first row's argument silently.)
+    /// A rowset function's arguments bind in a scope holding none of the FROM's
+    /// own sources — only <c>APPLY</c> grants laterality — so naming a sibling
+    /// is Msg 4104, probed against SQL Server 2025 (2026-08-05, probe N1.01).
+    /// That refusal is what lets the materialization below take a generator
+    /// source at all: post-4104 its arguments provably read no sibling.
     /// </summary>
     [TestMethod]
-    public void CorrelatedRowsetFunction_UnderInnerJoin_StillReadsEachLeftRow()
-        => AreEqual(3, WithSales().ExecuteScalar("""
+    public void CorrelatedRowsetFunction_UnderInnerJoin_IsMsg4104()
+    {
+        var ex = WithSales().AssertSqlError("""
             select count(*) from (select 1 as id, 'a,b' as csv union all select 2, 'c') t
             join string_split(t.csv, ',') s on 1 = 1
-            """));
+            """, 4104);
+        Contains("t.csv", ex.Message);
+    }
 
-    /// <summary>The comma-join spelling of the same shape.</summary>
+    /// <summary>The comma-join spelling of the same shape (probe N1.03).</summary>
     [TestMethod]
-    public void CorrelatedRowsetFunction_UnderCommaJoin_StillReadsEachLeftRow()
-        => AreEqual(3, WithSales().ExecuteScalar("""
+    public void CorrelatedRowsetFunction_UnderCommaJoin_IsMsg4104()
+    {
+        _ = WithSales().AssertSqlError("""
             select count(*) from (select 1 as id, 'a,b' as csv union all select 2, 'c') t,
                  string_split(t.csv, ',') s
+            """, 4104);
+    }
+
+    /// <summary>
+    /// The same shape written with <c>CROSS APPLY</c> — the form real accepts —
+    /// still reads each left row's own CSV, so the refusal above is about the
+    /// join form and not about the correlation (probe N1.04).
+    /// </summary>
+    [TestMethod]
+    public void CorrelatedRowsetFunction_UnderCrossApply_ReadsEachLeftRow()
+        => AreEqual(3, WithSales().ExecuteScalar("""
+            select count(*) from (select 1 as id, 'a,b' as csv union all select 2, 'c') t
+            cross apply string_split(t.csv, ',') s
             """));
 
     // ---- the enclosing statement's row -----------------------------------

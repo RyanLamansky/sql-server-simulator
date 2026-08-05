@@ -7,7 +7,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// position of the first match of <c>pattern</c> within <c>expression</c>;
 /// 0 when no match. Wildcards follow the same
 /// rules as <c>LIKE</c> (<c>%</c>, <c>_</c>, <c>[...]</c>), shared via
-/// <see cref="LikePatternBuilder.BuildForPatIndex"/>. There is no
+/// <see cref="LikeMatcher"/>. There is no
 /// <c>ESCAPE</c> clause — real SQL Server raises Msg 156 on parse, and the
 /// simulator inherits that via <see cref="Expression.Parse"/>'s general
 /// argument-list grammar (no ESCAPE token recognized in a non-LIKE atom).
@@ -24,7 +24,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/patindex-transact-sql</remarks>
 internal sealed class PatIndex : Expression
 {
-    private readonly LikePatternBuilder.Cache patterns = new(forPatIndex: true);
+    private readonly LikeMatcher.Cache patterns = new(forPatIndex: true);
     private readonly Expression pattern;
     private readonly Expression subject;
 
@@ -60,15 +60,24 @@ internal sealed class PatIndex : Expression
             ? p.AsString
             : p.CoerceTo(s.Type).AsString;
 
-        var regex = this.patterns.Get(patternString, escapeChar: null, caseSensitive: false);
+        // PATINDEX reads the same collation LIKE does — case, accent, kana and
+        // width all decide the match (probe-confirmed: `PATINDEX(N'%cafe%', …)`
+        // finds `café` under _CI_AI and not under _CI_AS, and `PATINDEX(N'%A%',
+        // N'xax')` is 0 under _CS_AS). The subject supplies it: the pattern is
+        // coercible-default at every call site that isn't a column.
+        var collation = s.Type.Collation ?? Collation.Baseline;
+        // The non-Unicode trailing-space slack applies here too, wherever the
+        // match has to reach the subject's end: `PATINDEX('x', 'x  ')` is 1 and
+        // `PATINDEX(N'x', N'x  ')` is 0.
+        var slack = !SqlType.IsNationalStringCategory(s.Type) && !SqlType.IsNationalStringCategory(p.Type);
         var subjectStr = s.AsString;
-        var match = regex.Match(subjectStr);
+        var index = this.patterns.Get(patternString, escapeChar: null, collation).Find(subjectStr, slack);
         // Result position is code-unit-based under non-SC, codepoint-based
         // under _SC_ — matches CHARINDEX dispatch on the subject's collation.
-        var position = !match.Success ? 0L
-            : s.Type.Collation?.IsSupplementaryCharacterAware == true
-                ? (long)SupplementaryCharacters.CodeUnitToCodepoint(subjectStr, match.Index) + 1
-                : (long)match.Index + 1;
+        var position = index < 0 ? 0L
+            : collation.IsSupplementaryCharacterAware
+                ? (long)SupplementaryCharacters.CodeUnitToCodepoint(subjectStr, index) + 1
+                : (long)index + 1;
         return isBig ? SqlValue.FromInt64(position) : SqlValue.FromInt32((int)position);
     }
 

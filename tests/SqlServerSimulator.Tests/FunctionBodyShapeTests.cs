@@ -442,12 +442,14 @@ public sealed class FunctionBodyShapeTests
     /// A body whose bind stopped at a deferred missing object never saw the
     /// last statement, so Msg 455 isn't reported on a guess. Real, which knows
     /// where the deferred statement ended, keeps checking and reports it.
+    /// (The deferral here is a missing DML target — the one shape the skip-mode
+    /// placeholder continuation doesn't cover, see <c>control-flow.md</c>.)
     /// </summary>
     [TestMethod]
     public void BindAbandonedAtADeferral_LeavesTheLastStatementRuleUnrun()
     {
         var sim = WithFixture();
-        sim.ExecuteBatches("create function dbo.f(@x int) returns int as begin set @x = next value for dbo.missing_seq set @x = 2 end");
+        sim.ExecuteBatches("create function dbo.f(@x int) returns int as begin update dbo.missing_table set a = 1 set @x = 2 end");
         AreEqual(1, ObjectCount(sim, "f"));
     }
 }

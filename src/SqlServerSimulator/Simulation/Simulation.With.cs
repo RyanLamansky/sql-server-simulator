@@ -46,11 +46,24 @@ partial class Simulation
     /// rejecting the WITH, matching real.
     /// </para>
     /// </remarks>
-    internal static Selection ParseBodyQuery(ParserContext context)
+    internal static Selection ParseBodyQuery(ParserContext context, bool rejectsNextValueFor = false)
     {
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-            ParseCteBindings(context);
-        return Selection.Parse(context, depth: 0);
+        // A view or function body is one of the constructs real names in
+        // Msg 11719, and it refuses the CREATE rather than the later reference
+        // (probe-confirmed, with the error attributed to the module).
+        var savedRejection = context.NextValueForRejection;
+        if (rejectsNextValueFor)
+            context.NextValueForRejection = NextValueForScope.Nested;
+        try
+        {
+            if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+                ParseCteBindings(context);
+            return Selection.Parse(context, depth: 0);
+        }
+        finally
+        {
+            context.NextValueForRejection = savedRejection;
+        }
     }
 
     private static void ParseCteBindings(ParserContext context)
@@ -173,7 +186,21 @@ partial class Simulation
         context.ReadColumnSink = [];
         try
         {
-            var body = ParseCteBody(context, binding);
+            // Real refuses NEXT VALUE FOR inside a common table expression by
+            // name (Msg 11719, probe-confirmed) — over the body's whole parse,
+            // not merely its clauses.
+            var savedRejection = context.NextValueForRejection;
+            context.NextValueForRejection = NextValueForScope.Nested;
+            Selection body;
+            try
+            {
+                body = ParseCteBody(context, binding);
+            }
+            finally
+            {
+                context.NextValueForRejection = savedRejection;
+            }
+
             if (context.SecurableSink is { Count: > 0 } bodySecurables)
                 body.ReferencedSecurables = bodySecurables;
             if (context.ReadColumnSink is { Count: > 0 } bodyReadColumns)

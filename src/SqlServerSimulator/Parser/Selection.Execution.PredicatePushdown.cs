@@ -219,6 +219,7 @@ partial class Selection
             valueRowSource: (batch, outerResolver) =>
             {
                 var execSources = PushWhereIntoDeferredSources(shape.Sources, excluders, batch);
+                execSources = BoundRowNumberBodies(execSources, excluders, batch);
                 execSources = ReduceGroupedBodiesByJoinKeys(execSources, shape.Joins, excluders, batch, outerResolver);
                 execSources = MaterializeUncorrelatedDeferredSources(execSources, shape.Joins, batch, outerResolver);
                 return ProjectSqlRows(
@@ -355,6 +356,7 @@ partial class Selection
             valueRowSource: (batch, outerResolver) =>
             {
                 var execSources = PushWhereIntoDeferredSources(shape.Sources, from.Excluders, batch);
+                execSources = BoundRowNumberBodies(execSources, from.Excluders, batch);
                 execSources = ReduceGroupedBodiesByJoinKeys(execSources, shape.Joins, from.Excluders, batch, outerResolver);
                 execSources = MaterializeUncorrelatedDeferredSources(execSources, shape.Joins, batch, outerResolver);
                 return BuildAggregateProjectionRows(

@@ -191,6 +191,26 @@ The original equi-join win still stands — with ≥1 equi-key the inner is inde
 MERGE's own match phase hashes its source the same way when the target can't be seeked, over its two name spaces rather than a `FromSource[]`; the key-type rule is literally shared (`TryPromoteComparableKeyTypes`).
 See [`dml.md`](dml.md#match-strategies).
 
+### A non-APPLY source's arguments can't read a sibling
+
+SQL Server binds a FROM source's own arguments in a scope holding **none** of that FROM's sources — only `CROSS` / `OUTER APPLY` makes a right side lateral.
+So `FROM t JOIN STRING_SPLIT(t.csv, ',') s ON …` is **Msg 4104** ("The multi-part identifier "t.csv" could not be bound"), class 16 state 1, and the simulator raises it from `RejectSiblingReferences` (`Selection.cs`).
+
+Probed against SQL Server 2025 (2026-08-05) across `STRING_SPLIT`, `OPENJSON`, an inline and a multi-statement TVF and a `VALUES` constructor, as a `JOIN` / `CROSS JOIN` / comma / `LEFT JOIN` right side, as the leftmost source naming a *later* sibling, as one generator naming another's output column, as an argument naming the generator's own alias, and inside a joined `UPDATE`'s FROM: every one is Msg 4104 on the written multi-part name.
+Two neighbours settle the shape of the rule:
+
+- The **unqualified** spelling (`STRING_SPLIT(csv, ',')`) is real's plain **Msg 207** on the leaf — the name resolves to nothing once the siblings are out of scope, rather than a multi-part identifier failing to bind.
+- A qualifier naming a sibling is 4104 **whether or not the column exists** (`t.nosuch` is 4104, not 207), because what failed is the qualifier's presence in the scope.
+
+**What stays legal**: the same source under `CROSS` / `OUTER APPLY`, a literal or variable argument, and — the case the rejection must not touch — an argument reading an **enclosing** query's column, which is ordinary correlation (a generator inside a select-list subquery, an `EXISTS` body, or an APPLY body's own FROM all keep working, at any depth).
+
+**How it's collected.** A `Reference` is recorded into `ParserContext.FromSourceColumnSink` at the one place the parser builds one (`Expression.Counted`), and the sink is installed only while a **non-APPLY** source is parsed — `ParseLateralFromSource` deliberately never installs it.
+The *reference object* is recorded rather than its name, because the dotted parts are appended after construction.
+A nested `Selection` parse suspends the sink, so a derived table's own body never contributes.
+The check runs once the whole FROM is parsed, since a source may name a sibling written after it; a generator that types its arguments as it parses them raises Msg 207 from inside that parse first, so the source parse also catches Msg 207 and re-reports it as 4104 when the collected reference is qualified by a source already written to its left.
+
+Real follows the 4104 with the argument's own type complaint (Msg 8116, "void type", for `STRING_SPLIT`); the simulator raises the leading error alone, as it does for every multi-error statement response.
+
 ### Deferred sources materialize once per enumeration
 
 A `LateralPlan` source — a derived table, a CTE reference, a view, a catalog view, a TVF, `VALUES`, `OPENJSON` — is re-executed per left-side row by the streaming operators, and `TryPlanEquiJoin` rejects it outright (line "`sources[level].LateralPlan is not null`").
@@ -202,16 +222,15 @@ Two kinds of source qualify:
 
 - A **`MaterializeOnce` catalog view**, wherever it sits: its generator takes no outer resolver, so it can't correlate.
   This removes both the per-outer-row re-generation and the O(L × R) loop from catalog multi-joins (SMO's per-column property-bag query) — see [`catalog-views.md`](catalog-views.md) for the correlation-safety contract and measured improvement.
-- A **non-leftmost, non-APPLY source whose plan is a query body with its own name scope** — a derived table, a CTE reference, or a view.
-  SQL Server requires `APPLY` for laterality, so such a body can't read a sibling FROM source: the simulator's parser reports Msg 207 where real reports Msg 4104.
-  It *can* read an enclosing statement's row, but that row is fixed for one execution of this `Selection` (the enclosing query re-executes the whole plan per enclosing row), so every re-execution within one enumeration would return identical rows.
+- Any **non-leftmost, non-APPLY source with a `LateralPlan`** — a derived table, a CTE reference, a view, or a generator.
+  SQL Server requires `APPLY` for laterality, so none of them can read a sibling FROM source.
+  Each *can* read an enclosing statement's row, but that row is fixed for one execution of this `Selection` (the enclosing query re-executes the whole plan per enclosing row), so every re-execution within one enumeration would return identical rows.
 
 The leftmost source stays deferred — a fold range's leftmost slot already executes its plan once and streams, so materializing it buys nothing and costs the buffer.
 The leftmost slot of a parenthesized join group is skipped for the same reason (`GroupJoin` materializes the whole interior as a unit).
 
-**A generator-backed source never qualifies.**
-A TVF, `VALUES`, `OPENJSON` / `OPENXML`, `STRING_SPLIT`, PIVOT or a linked-server query takes *arguments parsed in the enclosing FROM's scope*, so it can read a sibling source's column per row even under a plain JOIN.
-Real rejects that shape outright — `FROM t JOIN STRING_SPLIT(t.csv, ',') s ON …` and its comma spelling are Msg 4104 there, probe-confirmed — while the simulator answers it, so materializing would silently freeze the first left row's argument values instead of raising.
+A **generator-backed source** — a TVF, `VALUES`, `OPENJSON` / `OPENXML`, `STRING_SPLIT`, a linked-server query, `xml.nodes()` — qualifies on the same terms, because its arguments provably read no sibling: naming one is Msg 4104 (the section above), and everything else they can read (a literal, a variable, an enclosing scope's column) is fixed for one execution of this plan.
+Measured on WWI, `Sales.Invoices` (70,510 rows) joined to `GENERATE_SERIES(1, 20)` on an equi key: **160.9 ms / 83.9 MB → 24.5 ms / 9.7 MB**, since materializing is also what lets `TryPlanEquiJoin` hash the level instead of re-running the generator per left row.
 
 **A per-call-varying built-in declines the reuse.**
 `SimulatedDbConnection.VolatileEvaluations` is sampled around the materializing execution — the same gate the uncorrelated-subquery memo applies, see [`subqueries.md`](subqueries.md) — and a plan that drew a `NEWID()` keeps its per-row execution however uncorrelated it is.

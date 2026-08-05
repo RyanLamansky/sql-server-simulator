@@ -123,7 +123,7 @@ partial class Simulation
         var commandText = context.Command.CommandText;
         var bodyStart = context.Token?.StartIndex
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
-        var bodySelection = ParseBodyQuery(context);
+        var bodySelection = ParseBodyQuery(context, rejectsNextValueFor: true);
         var bodyEnd = context.Token?.StartIndex ?? commandText.Length;
         var bodyText = commandText[bodyStart..bodyEnd];
 

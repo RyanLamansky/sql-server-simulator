@@ -22,6 +22,17 @@ Measured on a 228k-row `SELECT COUNT(*)`: **71 ms → 11 ms**, which is the floo
 Reading its `Keys` property takes *every* one of the dictionary's locks and copies the keys into a fresh collection; the walk enumerates the dictionary directly instead, which is the lock-free weakly-consistent enumeration the set was chosen for, and short-circuits on `IsEmpty` for the overwhelmingly common heap nothing has deleted from.
 Removing candidates mid-walk is what that enumerator supports, so the stale-index and exhausted-page removals stay where they were.
 
+**The slot total is maintained, not walked.**
+`Heap.RowCount` is a field the four seams that move it keep current — `InsertCore` (each insert appends exactly one slot, whether to the tail page, a reused reclaimable page or a fresh one), `TrimTrailingDeadPages` (whole pages off the tail), and `TRUNCATE` plus the undo log's truncation restore, which replace `Heap.Pages` wholesale and re-derive through `Heap.RecomputeRowCount`.
+Nothing else changes a page's slot count: a DELETE tombstones its slot in place, an undo un-tombstones it, and `HeapPage.Compact` preserves slot indices by design.
+The join planner reads the count once per join level per execution (the seek-vs-hash ratio, and the hash build's row-list sizing), which made the O(pages) walk a per-query cost that grew with the table.
+`RecomputeRowCount` is also the walk `Tests.Internal`'s `HeapRowCountTests` asserts the maintained value against, after inserts, deletes, a relocating UPDATE, a rolled-back insert / delete / TRUNCATE, and a `DBCC SHRINKDATABASE`.
+It counts *slots* rather than live rows — a tombstone keeps its directory entry — which is what the walk it replaced counted.
+
+**`HeapPage.InstallForward` asserts its extent.**
+The 6-byte forward reference is written over the slot's existing payload, so a shorter extent would spill into the neighbouring slot.
+Every SQL-reachable row clears that floor (the encoder's header alone — flags, fixed offset, column count, NULL bitmap — is at least 6 bytes), so a `Debug.Assert` on `SlotExtent` is a tripwire on the encoder's minimum rather than a runtime check.
+
 **The live page counts are surfaced to the catalog**: `Heap.Pages.Count` (data pages) and `Heap.LobPages.Count` (LOB-chain pages) back `sys.allocation_units.total_pages` / `used_pages` / `data_pages`, and their per-database sum (`BuiltInResources.SumDataFilePages`) sizes `sys.database_files` / `sys.master_files` and `FILEPROPERTY(<db>_Data, 'SpaceUsed')`.
 Because reclaimed interior pages stay in `Pages` (only the tail trims), these counts reflect the peak concurrent working set, not a post-GC minimum — a divergence from real SQL Server's IAM-tracked allocation.
 See [`catalog-views.md`](catalog-views.md) for the self-consistency contract.

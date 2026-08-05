@@ -286,18 +286,22 @@ public sealed class UncorrelatedSubqueryTests
             """));
 
     /// <summary>
-    /// A sequence advances per call, so an uncorrelated inner that reads one
-    /// still runs — and advances — once per outer row.
+    /// The sequence half of the volatility gate is unreachable through a
+    /// subquery, because real refuses <c>NEXT VALUE FOR</c> there outright:
+    /// Msg 11719 at parse, so the batch is rejected and the sequence is left
+    /// where it stood (probed 2026-08-05 — the derived table around it carries
+    /// the same refusal). <c>NEWID()</c> is what covers the gate itself.
     /// </summary>
     [TestMethod]
-    public void ScalarSubquery_NextValueForInside_AdvancesPerRow()
+    public void ScalarSubquery_NextValueForInside_IsRejectedWithoutAdvancing()
     {
         var sim = WithNumbers();
         _ = sim.ExecuteNonQuery("create sequence dbo.s as int start with 1 increment by 1");
-        AreEqual(4, sim.ExecuteScalar("""
+        _ = sim.AssertSqlError("""
             select count(distinct g) from (
                 select (select top 1 next value for dbo.s from inner_rows) as g from outer_rows) x
-            """));
+            """, 11719);
+        AreEqual(1, sim.ExecuteScalar("select cast(current_value as int) from sys.sequences where name = 's'"));
     }
 
     // ---- the reuse ends at the statement ---------------------------------

@@ -44,6 +44,35 @@ internal enum Coercibility : byte
 }
 
 /// <summary>
+/// How a surrogate pair participates in the single-character wildcard of
+/// <c>LIKE</c> / <c>PATINDEX</c>. Probe-confirmed against SQL Server 2025 —
+/// the three modes are what the collation's own vintage decides, and the
+/// answers differ for every one of them (over the emoji U+1F600):
+/// <list type="bullet">
+/// <item><see cref="Unmatchable"/> — an unversioned name (the <c>SQL_*</c>
+/// family and the pre-100 Windows names): <c>LIKE N'_'</c> and
+/// <c>LIKE N'__'</c> both answer no, so the pair matches no number of
+/// wildcards at all. A literal still matches it.</item>
+/// <item><see cref="CodeUnits"/> — a versioned name (<c>_90_</c> / <c>_100_</c>)
+/// and every binary collation: each half is its own character, so
+/// <c>LIKE N'__'</c> answers yes.</item>
+/// <item><see cref="CodePoint"/> — a supplementary-character-aware name: the
+/// pair is one character, so <c>LIKE N'_'</c> answers yes.</item>
+/// </list>
+/// </summary>
+internal enum SurrogateMatching : byte
+{
+    /// <summary>Neither half nor the pair matches <c>_</c> or a character class.</summary>
+    Unmatchable = 0,
+
+    /// <summary>Each UTF-16 code unit is its own matchable character.</summary>
+    CodeUnits = 1,
+
+    /// <summary>The pair is one matchable character.</summary>
+    CodePoint = 2,
+}
+
+/// <summary>
 /// The SQL Server equivalent to .NET's <see cref="IComparer{T}"/> for strings.
 /// Concrete subclasses are constructed by the parser
 /// (<see cref="TryParse(string, out Collation?)"/>) from the grammatical
@@ -83,14 +112,106 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
     /// <summary>
     /// True when the collation name carries the <c>_CS_</c> or <c>_BIN</c>
-    /// marker — i.e. case differences are significant. Consulted by
-    /// <c>LIKE</c>'s regex builder to decide whether to set
-    /// <c>System.Text.RegularExpressions.RegexOptions.IgnoreCase</c>.
-    /// Other string ops (sort, equality, hash) honor the collation
+    /// marker — i.e. case differences are significant. Read by the ordinal
+    /// half of <c>LIKE</c>'s matcher (binary collations, and the printable-
+    /// ASCII fast path) to pick between an ordinal and an ordinal-ignore-case
+    /// comparison. Other string ops (sort, equality, hash) honor the collation
     /// directly through <see cref="Compare"/> / <see cref="Equals"/> /
     /// <see cref="GetHashCode"/> via the column type's pinned collation.
     /// </summary>
     public virtual bool CaseSensitive => false;
+
+    /// <summary>
+    /// The <see cref="CompareInfo"/> and <see cref="CompareOptions"/> that
+    /// carry this collation's comparison semantics, or <see langword="null"/>
+    /// for a collation that compares by code unit / byte rather than
+    /// linguistically. Read by <see cref="Parser.LikeMatcher"/>, which needs a
+    /// <em>positional</em> comparison (how much of the subject a pattern run
+    /// consumes) that <see cref="Equals"/> can't express — the halves the
+    /// options encode are the same ones equality reads, so LIKE and <c>=</c>
+    /// answer alike on the same pair.
+    /// </summary>
+    internal virtual (CompareInfo Info, CompareOptions Options)? LinguisticMatching => null;
+
+    /// <summary>
+    /// How <c>LIKE</c>'s <c>_</c> and character classes treat a surrogate
+    /// pair under this collation. Every binary collation reports
+    /// <see cref="SurrogateMatching.CodeUnits"/> (probe-confirmed on
+    /// <c>Latin1_General_BIN2</c>), which is also the default here.
+    /// </summary>
+    internal virtual SurrogateMatching SurrogateMatching => SurrogateMatching.CodeUnits;
+
+    /// <summary>
+    /// True when, across the printable-ASCII range (U+0020..U+007E), this
+    /// collation's equality relation is exactly ordinal equality plus — for a
+    /// case-insensitive collation — the 26 ASCII letter-case pairs. That is
+    /// the eligibility proof for <see cref="Parser.LikeMatcher"/>'s ordinal
+    /// fast path: with an all-printable-ASCII subject and pattern, an
+    /// ordinal (ignore-case) comparison then gives the same answer as the
+    /// linguistic one, at a fraction of the cost.
+    /// <para>Computed once per collation instance by grouping the 95
+    /// printable characters through <see cref="GetHashCode"/> (equal strings
+    /// must hash equally, so only same-bucket pairs can be equal) and
+    /// checking every collision. <c>Turkish_CI_AS</c> is what makes the check
+    /// necessary rather than assumed: it holds <c>'I'</c> and <c>'i'</c>
+    /// apart, so an ordinal-ignore-case match there would over-match.</para>
+    /// </summary>
+    internal bool PrintableAsciiFoldsCaseOnly
+    {
+        get
+        {
+            // 0 = not computed, 1 = yes, 2 = no. Racing threads compute the
+            // same answer from immutable state, so no lock is taken.
+            if (this.printableAsciiFoldsCaseOnly == 0)
+                this.printableAsciiFoldsCaseOnly = (byte)(this.ComputePrintableAsciiFoldsCaseOnly() ? 1 : 2);
+            return this.printableAsciiFoldsCaseOnly == 1;
+        }
+    }
+
+    private volatile byte printableAsciiFoldsCaseOnly;
+
+    private bool ComputePrintableAsciiFoldsCaseOnly()
+    {
+        var buckets = new Dictionary<int, List<char>>();
+        for (var c = ' '; c <= '~'; c++)
+        {
+            var s = c.ToString();
+            // A character the collation gives no weight at all would let a
+            // literal run swallow it, which ordinal comparison never does.
+            if (this.Equals(s, string.Empty))
+                return false;
+            var hash = this.GetHashCode(s);
+            if (!buckets.TryGetValue(hash, out var bucket))
+                buckets[hash] = bucket = [];
+            bucket.Add(c);
+        }
+
+        foreach (var bucket in buckets.Values)
+        {
+            for (var i = 0; i < bucket.Count; i++)
+            {
+                for (var j = i + 1; j < bucket.Count; j++)
+                {
+                    var equal = this.Equals(bucket[i].ToString(), bucket[j].ToString());
+                    if (equal != (!this.CaseSensitive && IsAsciiCasePair(bucket[i], bucket[j])))
+                        return false;
+                }
+            }
+        }
+
+        // The case pairs themselves have to fold (a bucket collision is only
+        // evidence for the pairs that landed together).
+        for (var c = 'a'; c <= 'z'; c++)
+        {
+            if (this.Equals(c.ToString(), char.ToUpperInvariant(c).ToString()) == this.CaseSensitive)
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsAsciiCasePair(char a, char b) =>
+        char.IsAsciiLetter(a) && char.IsAsciiLetter(b) && (a ^ b) == 0x20;
 
     /// <summary>
     /// The simulator's hardcoded baseline collation —
@@ -416,9 +537,12 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         private readonly bool isSupplementaryCharacterAware;
 
-        internal CultureCollation(string name, string description, string cultureName, bool caseSensitive, bool kanaTypeSensitive, bool widthSensitive, Encoding storageEncoding, int ansiCodePage, bool isSupplementaryCharacterAware)
+        private readonly SurrogateMatching surrogateMatching;
+
+        internal CultureCollation(string name, string description, string cultureName, bool caseSensitive, bool accentInsensitive, bool kanaTypeSensitive, bool widthSensitive, Encoding storageEncoding, int ansiCodePage, bool isSupplementaryCharacterAware, SurrogateMatching surrogateMatching)
         {
             this.name = name;
+            this.surrogateMatching = surrogateMatching;
             this.description = description;
             this.caseSensitive = caseSensitive;
             this.compareInfo = CultureInfo.GetCultureInfo(cultureName).CompareInfo;
@@ -434,6 +558,10 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
             // katakana of the same logical character compare equal.
             if (!kanaTypeSensitive) baseOpts |= CompareOptions.IgnoreKanaType;
             if (!widthSensitive) baseOpts |= CompareOptions.IgnoreWidth;
+            // The _AI_ suffix folds diacritics: `N'café' = N'cafe'` is true
+            // under Latin1_General_CI_AI on real, and so are its DISTINCT
+            // grouping, its ORDER BY tie and its LIKE match.
+            if (accentInsensitive) baseOpts |= CompareOptions.IgnoreNonSpace;
             this.equalityOptions = baseOpts;
         }
 
@@ -448,6 +576,11 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         internal override int AnsiCodePage => this.ansiCodePage;
 
         internal override bool IsSupplementaryCharacterAware => this.isSupplementaryCharacterAware;
+
+        internal override (CompareInfo Info, CompareOptions Options)? LinguisticMatching =>
+            (this.compareInfo, this.equalityOptions);
+
+        internal override SurrogateMatching SurrogateMatching => this.surrogateMatching;
 
         public override int Compare(string? x, string? y)
         {

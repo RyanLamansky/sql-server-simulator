@@ -368,6 +368,17 @@ internal abstract partial class Collation
 
         internal override bool IsSupplementaryCharacterAware => false;
 
+        // LIKE matches through the inner culture body's CompareInfo rather
+        // than through this body's weight tables: matching needs a positional
+        // comparison (how much of the subject a pattern run consumes) that the
+        // weight cursors don't express. The one behavior that costs is this
+        // body's ligature expansion — real answers yes to
+        // `N'ß' LIKE N'ss'` under this collation and the inner CompareInfo
+        // says no, so LIKE and `=` disagree there (see collations.md).
+        internal override (CompareInfo Info, CompareOptions Options)? LinguisticMatching => this.inner.LinguisticMatching;
+
+        internal override SurrogateMatching SurrogateMatching => this.inner.SurrogateMatching;
+
         internal override Encoding StorageEncoding => this.inner.StorageEncoding;
 
         internal override Collation ForVarcharStorage() => this.varcharBody ?? this;

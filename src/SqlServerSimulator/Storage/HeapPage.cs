@@ -407,6 +407,12 @@ internal sealed class HeapPage
     public void InstallForward(int slotIndex, (int PageIndex, int SlotIndex) target)
     {
         var (offset, _, _) = this.ReadSlotRaw(slotIndex);
+        // The write below spills into the next slot's bytes if the extent is
+        // shorter than the 6-byte reference. Every SQL-reachable row clears
+        // that floor (the encoder's header alone — flags, fixed offset, column
+        // count, NULL bitmap — is at least 6 bytes), so this is a tripwire on
+        // the encoder's minimum rather than a runtime check.
+        Debug.Assert(this.SlotExtent(slotIndex) >= 6, "A forwarded slot's extent must hold the 6-byte forward reference.");
         BinaryPrimitives.WriteInt32LittleEndian(this.Bytes.AsSpan(offset, 4), target.PageIndex);
         BinaryPrimitives.WriteInt16LittleEndian(this.Bytes.AsSpan(offset + 4, 2), (short)target.SlotIndex);
         var slotByteOffset = PageSize - (2 * (slotIndex + 1));

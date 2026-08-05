@@ -522,7 +522,20 @@ partial class Simulation
     {
         var sourcesList = new List<FromSource>();
         var joinsList = new List<JoinSpec>();
-        Selection.ParseSourcesAndJoins(context, depth: 0, sourcesList, joinsList, outerTypeResolver: null);
+        // Real leaves NEXT VALUE FOR legal in a joined UPDATE / DELETE's own
+        // FROM-clause derived table, where every other derived table refuses it
+        // (probe-confirmed 2026-08-05, both spellings, against the Msg 11719
+        // the SELECT / INSERT … SELECT / MERGE … USING forms take).
+        var savedAllowNextValueFor = context.AllowNextValueForInFromClause;
+        context.AllowNextValueForInFromClause = true;
+        try
+        {
+            Selection.ParseSourcesAndJoins(context, depth: 0, sourcesList, joinsList, outerTypeResolver: null);
+        }
+        finally
+        {
+            context.AllowNextValueForInFromClause = savedAllowNextValueFor;
+        }
         var sources = sourcesList.ToArray();
         var joins = joinsList.ToArray();
 

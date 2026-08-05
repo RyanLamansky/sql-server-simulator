@@ -239,14 +239,15 @@ public sealed class JoinStrategyTests
             CaptureStrategies("select a.id from a join (select top 1 a_id, newid() as g from b) d on d.a_id = a.id"));
 
     /// <summary>
-    /// A rowset function's arguments bind in the enclosing FROM's scope, so it
-    /// can read the left row per row even under a plain JOIN — never
-    /// materialized, never hashed.
+    /// A rowset function under a plain JOIN can no longer read a sibling (that
+    /// is Msg 4104, probed), so its arguments are fixed for the enumeration and
+    /// the source materializes once — which is what promotes the level from the
+    /// O(L × R) nested loop to the equi-join hash.
     /// </summary>
     [TestMethod]
-    public void CorrelatedRowsetFunction_StaysNestedLoops()
-        => Contains("Inner:NestedLoops",
-            CaptureStrategies("select a.id from a join string_split(a.name, ',') s on s.value = a.name"));
+    public void UncorrelatedRowsetFunction_MaterializesAndHashes()
+        => Contains("Inner:HashMatch(keys=1,residual=0)",
+            CaptureStrategies("select a.id from a join string_split('x,y', ',') s on s.value = a.name"));
 
     // ---- narrowed-source-first reorder ---------------------------------------
 

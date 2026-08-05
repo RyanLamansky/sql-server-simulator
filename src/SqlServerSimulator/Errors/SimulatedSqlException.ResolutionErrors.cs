@@ -79,9 +79,11 @@ partial class SimulatedSqlException
         new($"Multi-part identifier '{qualifier}.{leaf}' is ambiguous. Both columns '{qualifier}' and '{qualifier}.{leaf}' exist.", 326, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 4104: the OUTPUT clause references an
-    /// identifier that doesn't exist in either the INSERTED/DELETED virtual
-    /// tables or the MERGE source alias.
+    /// Mimics SQL Server error 4104: a multi-part identifier that binds
+    /// nowhere in scope — an OUTPUT clause naming neither the
+    /// INSERTED/DELETED virtual tables nor the MERGE source alias, or a
+    /// non-<c>APPLY</c> FROM source's argument naming a sibling source
+    /// (see <c>Selection.RejectSiblingReferences</c>).
     /// </summary>
     internal static SimulatedSqlException MultiPartIdentifierCouldNotBeBound(string name) =>
         new($"The multi-part identifier \"{name}\" could not be bound.", 4104, 16, 1);

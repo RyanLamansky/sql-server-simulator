@@ -961,6 +961,11 @@ internal sealed partial class Selection
                 // below, so a source that materializes materializes the
                 // narrowed rowset. Every pushed conjunct stays here as well.
                 var execSources = PushWhereIntoDeferredSources(sources, fromClause.Excluders, batch);
+                // Hand a ROW_NUMBER()-only body the row-number window the WHERE
+                // above it leaves surviving, so it keeps a bounded per-partition
+                // selection instead of sorting every partition in full and
+                // projecting every row for the filter here to discard.
+                execSources = BoundRowNumberBodies(execSources, fromClause.Excluders, batch);
                 // Reduce a joined GROUP BY body to the key set its equi-join
                 // partner actually carries, so the body aggregates the groups
                 // the join can use instead of every group in the table. After
@@ -1033,7 +1038,47 @@ internal sealed partial class Selection
                 selection.PushdownIsGrouped = true;
             }
         }
+        // A body whose only window function is a bare ROW_NUMBER() projection
+        // can answer an enclosing WHERE's constant bound on that row number from
+        // the top rows of each partition alone — see RowNumberWindowShape for
+        // why the one-window rule is what makes that legal. Every other shape
+        // gate is the pushdown block's: anything reading the row set as a whole
+        // would see a different one once the bound drops rows.
+        if (!distinct && orderBy.Count == 0 && !selection.HasTopOrOffsetOrFetch
+            && intoTarget is null && !isAssignmentOnly && sources.Length > 0
+            && aggregates.Count == 0 && fromClause.GroupingSets.Count == 0 && fromClause.Having is null
+            && windows is [{ Kind: WindowKind.RowNumber, Frame: null } rowNumberWindow]
+            && ProjectedWindowOrdinal(expressions, rowNumberWindow) is >= 0 and var rowNumberOrdinal)
+        {
+            var boundedShape = new RowNumberWindowShape(
+                outputSchema, outputColumnNames, sources, joins, expressions, fromClause.Excluders,
+                rowNumberWindow, rowNumberOrdinal);
+            selection.RowNumberBoundPushdown = bound => BuildBoundedRowNumberPlan(boundedShape, bound);
+        }
+
         return selection;
+    }
+
+    /// <summary>
+    /// The output ordinal at which <paramref name="window"/> is projected on its
+    /// own (through an alias, unchanged), or -1 when the projection wraps it in
+    /// an expression — where the enclosing statement's filter names a value the
+    /// row number isn't, so no bound on that column bounds the window.
+    /// </summary>
+    private static int ProjectedWindowOrdinal(List<Expression> expressions, WindowExpression window)
+    {
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            var projected = expressions[i];
+            while (projected is NamedExpression named)
+                projected = named.Inner;
+            while (projected is Parenthesized parenthesized)
+                projected = parenthesized.Wrapped;
+            if (ReferenceEquals(projected, window))
+                return i;
+        }
+
+        return -1;
     }
 
     /// <summary>
@@ -1415,8 +1460,7 @@ internal sealed partial class Selection
             return false;
         var join = joins[index - 1];
         return join.Kind is not (JoinKind.CrossApply or JoinKind.OuterApply)
-            && join.GroupCount == 1
-            && (source.LateralIsQueryBody || source.BackingView is not null);
+            && join.GroupCount == 1;
     }
 
     private static IEnumerable<SqlValue[]> ProjectSqlRows(

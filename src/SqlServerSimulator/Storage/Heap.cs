@@ -255,6 +255,7 @@ internal sealed class Heap
         // The new row went into the slot at SlotCount-1 of the chosen page —
         // TryInsert appends a new directory entry as the highest-index slot.
         var slotIndex = this.Pages[pageIndex].SlotCount - 1;
+        this.RowCount++;
         this.MutationGeneration++;
         undoLog?.RecordInsert(this, pageIndex, slotIndex);
         if (journalEvent && this.seekJournalActive)
@@ -379,6 +380,7 @@ internal sealed class Heap
             var last = this.Pages.Count - 1;
             if (!this.Pages[last].IsFullyDead || pageIsPinned(last))
                 break;
+            this.RowCount -= this.Pages[last].SlotCount;
             this.Pages.RemoveAt(last);
             _ = this.reclaimablePages.TryRemove(last, out _);
             if (this.Pages.Count > 0)
@@ -683,16 +685,39 @@ internal sealed class Heap
     public bool IsSlotTombstoned(int pageIndex, int slotIndex) =>
         pageIndex < 0 || pageIndex >= this.Pages.Count || this.Pages[pageIndex].IsSlotTombstoned(slotIndex);
 
-    /// <summary>Total row count across all pages.</summary>
-    public int RowCount
+    /// <summary>
+    /// Total slot count across all pages — maintained rather than walked,
+    /// because the join planner reads it once per join level per execution to
+    /// size the seek-vs-hash choice and the hash build's row lists, which made
+    /// an O(pages) walk a per-query cost that grows with the table.
+    /// <para>
+    /// Every seam that moves it is one of four: <see cref="InsertCore"/> (each
+    /// insert appends exactly one slot, whether to the tail page, a reused
+    /// reclaimable page, or a fresh one), <see cref="TrimTrailingDeadPages"/>
+    /// (drops whole pages from the tail), <c>TRUNCATE</c> and the undo log's
+    /// truncation restore — the last two clearing / re-attaching
+    /// <see cref="Pages"/> wholesale and re-deriving the count through
+    /// <see cref="RecomputeRowCount"/>. Nothing else changes a page's slot
+    /// count: a DELETE tombstones its slot in place, an UNDO un-tombstones it,
+    /// and <see cref="HeapPage.Compact"/> preserves slot indices by design.
+    /// </para>
+    /// Counts slots rather than live rows (a tombstone keeps its directory
+    /// entry), which is what the walk it replaces counted.
+    /// </summary>
+    public int RowCount;
+
+    /// <summary>
+    /// Re-derives <see cref="RowCount"/> from the pages. The two seams that
+    /// replace <see cref="Pages"/> wholesale call it; the storage-internals
+    /// tests call it to assert the maintained count against the walk.
+    /// </summary>
+    internal int RecomputeRowCount()
     {
-        get
-        {
-            var count = 0;
-            foreach (var page in this.Pages)
-                count += page.SlotCount;
-            return count;
-        }
+        var count = 0;
+        foreach (var page in this.Pages)
+            count += page.SlotCount;
+        this.RowCount = count;
+        return count;
     }
 
     /// <summary>

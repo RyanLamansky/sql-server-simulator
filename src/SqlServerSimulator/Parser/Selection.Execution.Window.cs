@@ -414,8 +414,23 @@ internal sealed partial class Selection
                 case WindowKind.RowNumber:
                     foreach (var (_, indices) in partitions)
                     {
+                        // Ordering by the window keys and then by the row's own
+                        // arrival position is a total order, so which member of a
+                        // tie group takes which number is settled rather than left
+                        // to the sort. That is what makes the bounded
+                        // per-partition path (ProjectBoundedRowNumberRows) select
+                        // the same rows and number them the same way — a heap can
+                        // only match a full sort against an order with no ties in
+                        // it. Ranking is what real leaves plan-dependent here, so
+                        // pinning it costs no fidelity; the other window kinds
+                        // don't take the tiebreak, since RANK / DENSE_RANK number
+                        // peers alike either way.
                         indices.Sort((a, b) =>
-                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                        {
+                            var comparison = CompareOrderKeys(
+                                perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList);
+                            return comparison != 0 ? comparison : a.CompareTo(b);
+                        });
                         for (var rank = 0; rank < indices.Count; rank++)
                             results[indices[rank]] = SqlValue.FromInt64(rank + 1);
                     }

@@ -7,7 +7,7 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Behavioral tests for <c>PATINDEX(pattern, subject)</c>. Shares the
 /// LIKE-pattern wildcard semantics via the centralized
-/// <c>LikePatternBuilder</c>, with anchoring decided by leading / trailing
+/// <c>LikeMatcher</c>, with anchoring decided by leading / trailing
 /// <c>%</c>. Probe-confirmed against SQL Server 2025.
 /// </summary>
 [TestClass]

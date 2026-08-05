@@ -376,6 +376,7 @@ internal sealed class UndoLog
         {
             heap.Pages.Clear();
             heap.Pages.AddRange(oldPages);
+            _ = heap.RecomputeRowCount();
             heap.LobPages.Clear();
             heap.LobPages.AddRange(oldLobPages);
             heap.ForwardTargets.Clear();

@@ -57,8 +57,8 @@ The parallel `SqlValue.FromString(type, value)` similarly preserves the target t
 - **`LIKE`** — `LikeExpression.Run` calls `Collation.Resolve(l.Type, r.Type)` on the runtime values' types.
   Replaces the old parse-time `PeelExplicitCollation` walk, which only caught explicit COLLATE postfixes.
   Conflict raises Msg 468 with operator name `"like"`.
-  The resolved `Collation.CaseSensitive` flag flips `RegexOptions.IgnoreCase`.
-  Translating the pattern into that regex is memoized per node (`LikePatternBuilder.Cache`, shared with `PATINDEX`) — see [the pattern memo](#the-pattern-translation-is-memoized-per-node) below.
+  The resolved collation then decides the match itself, every half of it — see [LIKE / PATINDEX matching](#like--patindex-matching) below.
+  Compiling the pattern is memoized per node (`LikeMatcher.Cache`, shared with `PATINDEX`) — see [the pattern memo](#the-pattern-compilation-is-memoized-per-node) below.
 - **String concat (`+`)** — `Add.StringConcatenation` hands the operand pair to `UnresolvedCollation.Settle`, which either settles it, marks the result unresolved, or raises (see [the propagation rules](#an-unresolved-collation-propagates--coercibilitynocollation)); the `varchar`-family raise is **Msg 457 State 1**, and real calls string `+` *add*.
   `TwoSidedExpression.GetSqlType` runs the same body so the projection schema's result type matches the runtime value's type — RowEncoder rejects mismatched instances, so the GetSqlType / Run paths must stay aligned.
 - **ANSI concat (`||`)** — `Concatenate.ResolveResultType` (shared by `Run` and `GetSqlType`) settles the same way naming the **`concat`** operator where `+` names `add` (probe-confirmed both ways).
@@ -67,20 +67,67 @@ The parallel `SqlValue.FromString(type, value)` similarly preserves the target t
 - **`CONCAT` / `CONCAT_WS`** — `StringConcat.CollationAccumulator` left-folds the string arguments (`CONCAT_WS`'s separator participates like any other; non-string arguments stringify into the accumulated collation and contribute nothing), so the result carries a column's collation instead of the database default.
   An unresolvable fold marks the result rather than raising, for **both** string families — see [Msg 451](#msg-451--the-output-column-message) for where that lands.
 
-## The pattern translation is memoized per node
+## LIKE / PATINDEX matching
 
-`LIKE` / `NOT LIKE` / `PATINDEX` translate a SQL pattern into a .NET `Regex`, which is by far the expensive half of the predicate: building one parses the pattern, allocates a node tree and emits interpreter code, at roughly a microsecond and a few kilobytes.
-That ran once per row.
-`LikePatternBuilder.Cache` — one instance on each `LikeExpression` / `PatIndex` node — holds the last translation and its whole input: the **pattern text**, the **escape character**, and the resolved collation's **case sensitivity**.
-A literal or a parameter hands out the same pattern for every row of a statement, so one entry is enough; a per-row pattern column misses every time and rebuilds exactly as it did before, one reference compare later.
+`LikeMatcher` compiles a pattern into a segment list — literal runs, `%`, `_`, character classes — and matches it against the subject under the **resolved collation's whole comparison semantics**.
+Both front doors share it: `LIKE` / `NOT LIKE` compile anchored at both ends, `PATINDEX` consumes a leading / trailing `%` into the anchoring decision instead (so `PATINDEX('%abc', 'xabc')` reports 2, where the content starts) and reports the match position in UTF-16 units, codepoints under `_SC_`.
+The whole model below is probe-confirmed against SQL Server 2025; the matrix lives in `LikeCollationTests`, each case naming its probe row.
 
-On a 228k-row `WHERE Description LIKE 'USB%'` this is 285 ms and 782 MB down to 35 ms and 68 MB — the same scan reading the column and doing nothing else costs 23 ms and 68 MB, so the residual is the matching itself.
+**The subject is a sequence of characters, not of UTF-16 units.**
+A base character carries its combining marks — `N'e' + NCHAR(0x0301)` matches `N'_'` and not `N'__'`, and so does a halfwidth kana plus its voiced sound mark — while a bare mark, a CR and an LF each stand alone.
+Every boundary the match lands on is a character boundary, which is what makes `PATINDEX(N'%e%', N'Xe' + NCHAR(0x0301) + N'Y')` answer 0 under an accent-sensitive collation: the base `e` alone isn't a character there.
+A **surrogate pair** reads three ways, and the collation's vintage picks (`Collation.SurrogateMatching`, derived in the name parser):
 
-The memo is read and written concurrently, because the plan cache shares a node across sessions: the entry is immutable and published through `Volatile`, and two threads racing to fill it build equivalent regexes.
-`Regex` matching is itself thread-safe.
+| Collation | `emoji LIKE N'_'` | `emoji LIKE N'__'` |
+|---|---|---|
+| unversioned — the `SQL_*` family and the pre-100 Windows names | no | no |
+| versioned (`_90_`, `_100_`) and every binary collation | no | **yes** |
+| supplementary-character-aware (`_SC`, v140+) | **yes** | no |
+
+A literal still matches the pair under all three, and so does `%`.
+
+**A literal run compares linguistically**, through `CompareInfo.IsPrefix`'s own match length — which is how much of the subject the run consumed, five UTF-16 units for a four-unit run when an accent-insensitive `cafe` eats a following combining mark.
+So `N'café' LIKE N'cafe%'` matches under `_CI_AI`, a decomposed subject matches a composed pattern, and `_KS_` / `_WS_` stop the kana and width folding exactly as they stop it for `=`.
+Turkish is why the ordinal fast path below has to be proven rather than assumed: `N'I' COLLATE Turkish_CI_AS LIKE N'i'` answers no.
+
+**A character class is ordered by the collation.**
+A range tests `Collation.Compare` and a single member tests `Collation.Equals`, so `[a-c]` under `Latin1_General_CS_AS` holds `A` and `B` but not `C` (the collation interleaves the cases), `á` falls inside `[a-c]` under an accent-*sensitive* collation, and a fullwidth `５` falls inside `[0-9]` even under `_WS`.
+A reversed range (`[c-a]`) is unsatisfiable rather than fatal — `[c-a1]` still matches `1`.
+Members are characters, so `[` + `e` + U+0301 + `]` is one member.
+An empty `[]` and an unterminated `[` never match, real's silent failure.
+
+**Wildcards and the escape character are matched by code point**, never through the collation: a fullwidth `％` is a literal, and `ESCAPE N'e'` makes neither the pattern's `E` nor its `é` an escape.
+What an escape protects is still an ordinary literal that compares under the collation.
+
+**Trailing-space slack is the non-Unicode family's.**
+A subject may carry trailing U+0020 the pattern didn't consume — `'x  ' LIKE 'x'` — but a single `nvarchar` / `nchar` operand makes the comparison Unicode and the slack disappears: `N'x  ' LIKE N'x'`, `N'x  ' LIKE 'x'` and `'x  ' LIKE N'x'` all answer no.
+The rule is the operand types', not storage's, so a `char(10)` holding `'x'` matches `'x'` and an `nchar(10)` doesn't, and a `char(10)` subject against an `nvarchar` pattern doesn't either.
+The pattern's own trailing spaces are significant in every case, and `PATINDEX` takes the same rule wherever its match has to reach the subject's end.
+
+### Cost, and the ordinal fast path
+
+Matching linguistically is more expensive per character than an ordinal compare, so the matcher proves its way onto an ordinal path instead of assuming it.
+`Collation.PrintableAsciiFoldsCaseOnly` decides eligibility: across U+0020..U+007E, the collation's equality has to be exactly ordinal equality plus — for a case-insensitive collation — the 26 ASCII letter-case pairs.
+It is computed once per collation instance by bucketing the 95 characters through `Collation.GetHashCode` (equal strings hash equally, so only same-bucket pairs can be equal) and checking every collision, plus the 26 pairs directly; `Turkish_CI_AS` fails it, which is the point.
+With that established, a literal run whose own window — the run's length plus one character, so a combining mark right after it sends the match back to the linguistic path — is printable ASCII compares with an ordinal `StartsWith`.
+Only the `%`-then-literal shape classifies the *whole* subject, because that is what licenses skipping ahead with an ordinal `IndexOf` instead of walking character by character.
+
+Measured on the WWI battery: `UPPER(Description) LIKE 'USB%'` over 228k rows runs **36.7 ms** against the regex engine's 93 ms, and `StockItemName LIKE '%shark%'` 0.14 ms against ~1 ms.
+
+## The pattern compilation is memoized per node
+
+`LIKE` / `NOT LIKE` / `PATINDEX` compile a SQL pattern into a `LikeMatcher`: the pattern is walked, the segment list built, and each character class's printable-ASCII bitmap filled with 95 collation comparisons.
+Compiling the pattern per row instead costs roughly a microsecond and a few kilobytes each time.
+`LikeMatcher.Cache` — one instance on each `LikeExpression` / `PatIndex` node — holds the last compilation and its whole input: the **pattern text**, the **escape character**, and the **resolved collation**.
+A literal or a parameter hands out the same pattern for every row of a statement, so one entry is enough; a per-row pattern column misses every time and recompiles exactly as it did before, one reference compare later.
+
+On a 228k-row `WHERE Description LIKE 'USB%'`, per-row compilation measures 285 ms and 782 MB against the memoized 35 ms and 68 MB — and the same scan reading the column and doing nothing else costs 23 ms and 68 MB, so the residual is the matching itself.
+
+The memo is read and written concurrently, because the plan cache shares a node across sessions: the entry is immutable and published through `Volatile`, and two threads racing to fill it compile equivalent matchers.
+A `LikeMatcher` is immutable, so matching is thread-safe.
 
 Two of the three key components are per-node stable in every shape reachable through SQL today — the escape character can vary per row (`… LIKE 'A_B' ESCAPE <expression>`), but the resolved collation can't, since every route to a second collation for one node (`COLLATE` postfix, a `CASE` over two differently-collated columns, a set operation) is settled statically or is a Msg 451 / 468 conflict.
-Case sensitivity stays in the key anyway: the memo's contract is the whole input, not the parts that happen to vary.
+The collation stays in the key anyway: the memo's contract is the whole input, not the parts that happen to vary.
 
 ## Compile-time binding
 
@@ -229,6 +276,9 @@ Every other modeled name routes through `CultureCollation` or `BinaryCollationBo
 - **`_UTF8` collations**: storage encoding flips from CP1252 to UTF-8 for varchar/char columns.
   `_BIN2_UTF8` substitutes `Utf8CodepointBinaryCollation` (codepoint-order = UTF-8 byte order) on varchar storage.
 - **`_SC_` collations** (and v140+ implicitly): set `IsSupplementaryCharacterAware` on the constructed instance, driving codepoint-aware LEN/SUBSTRING/etc. dispatch (see [`_SC_` function-semantics dispatch](#_sc_-function-semantics-dispatch)).
+- **`_AI` flag**: sets `CompareOptions.IgnoreNonSpace`, so a diacritic folds for every comparison the collation drives — `=`, DISTINCT, ORDER BY, an index seek's range and LIKE alike.
+  A name carrying neither `_AI` nor `_AS` is accent-sensitive, the grammar's own default.
+  Note what that means for a key: an accent-only variant of an existing value violates a PRIMARY KEY under an `_AI` collation (Msg 2627, probe-confirmed).
 - **`_KS_` / `_WS_` flags**: flip `CompareOptions.IgnoreKanaType` / `IgnoreWidth` off (default = both on).
 - **Locale prefixes** (Japanese, Chinese, Turkish, Korean, etc.): map to the closest .NET culture via `KnownPrefixes`; fall back to invariant when no clean .NET equivalent exists (Tamazight, Traditional_Spanish, Indic_General).
   Sort-parity caveat in [Locale-comparer sort-parity gap](#locale-comparer-sort-parity-gap) applies — equality / CI/CS / KS / WS folding align, secondary sort tiebreakers within equivalence classes may diverge.
@@ -584,14 +634,13 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
 
 ## Known gaps
 
-- **`LIKE` reads only the collation's case half.**
-  The match runs as a `CultureInvariant` regex whose `IgnoreCase` flag comes from `Collation.CaseSensitive`, so an **accent-insensitive** collation still matches accent-sensitively: over `N'ÜSB cable'` in a `Latin1_General_CI_AI` column, `LIKE N'USB%'` answers no on the simulator and yes on real (probe-confirmed).
-  The same holds for the KS / WS suffixes.
-  Closing it means matching through `CompareInfo` rather than a regex, which is a matching-engine change — the wildcard grammar has no `CompareInfo` equivalent, so it wants a purpose-built matcher.
-  Equality, `IN`, `BETWEEN`, grouping and `ORDER BY` all read the full collation; this is `LIKE` / `PATINDEX` only.
-- **`LIKE` grants trailing-space slack real doesn't grant an `nvarchar` subject.**
-  The anchored translation ends `[ ]*\z`, so `N'x  ' LIKE N'x'` is true on the simulator and false on real (probe-confirmed).
-  Real's slack comes from ANSI padding on the *stored* `char` / `varchar` value rather than from the match, so the fix is to drop the regex's slack and let the storage rules produce it — which wants its own probe across `char` / `varchar` / `nvarchar` and the `ANSI_PADDING` matrix before it moves.
+- **A ligature doesn't expand in a `LIKE` literal run.**
+  Real answers yes to `N'ß' LIKE N'ss'` and `N'æ' LIKE N'ae'`; the simulator answers no, because the match runs through `CompareInfo`, which holds a ligature apart from its expansion.
+  Under `Latin1_General_CI_AS` this keeps LIKE and `=` in agreement (the simulator's `=` says no there too, which is its own divergence from real); under the **default** `SQL_Latin1_General_CP1_CI_AS` the two disagree, because [the byte-exact body](#sql_latin1_general_cp1_ci_as--byte-exact-sort) expands ligatures for `=` and the matcher reads the inner culture body.
+  Closing it wants an expansion-aware prefix comparison, which `CompareInfo` doesn't expose — the natural shape is a candidate-length walk over `Collation.Equals`, and that lands on the failure path, which is the per-row hot path of every scan.
+- **A zero-weight character is equal to nothing on real and to the empty string here.**
+  `N'x' + NCHAR(0x00AD) = N'x'` (soft hyphen) is false on real and true here — `CompareInfo` gives the character no weight where real gives it one.
+  `LIKE` is unaffected: it counts characters, so `N'x' + NCHAR(0x00AD) LIKE N'x'` answers no in both.
 - **An unresolved collation reaching a consumer the marker model doesn't cover.**
   The catalog under [Msg 4191](#msg-4191--the-consuming-operation-reports) is what probing established; a value with no collation that reaches full-text, spatial, XML or the JSON builders isn't gated, and a conflict that survives to execution falls back to the left operand's collation rather than raising.
 - **`IN (SELECT <conflicted> …)` reports the subquery's Msg 451 where real reports the comparison's Msg 4191** (`equal to`), and `SET @v = (SELECT <conflicted varchar> …)` reports Msg 451 where real reports Msg 456.

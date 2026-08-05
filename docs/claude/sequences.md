@@ -42,14 +42,6 @@ Bump sites:
 - **`SELECT` projection row** — both streaming (`ProjectStreaming`) and buffered (`ProjectBuffered`) paths bump on each row that passes WHERE.
 - **`UPDATE` per-row** — both single-table and joined paths bump before evaluating the SET-list expressions.
 
-## Restricted contexts (Msg 11720)
-
-`NEXT VALUE FOR` is rejected at parse in: `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `TOP`, `OVER`, `OUTPUT`, `ON` (probe-confirmed wording).
-Implementation: `ParserContext.RejectNextValueFor` is set inside `ParseWhereGroupByHavingOrderBy` and consumed by `NextValueFor`'s constructor.
-ORDER BY toggles the flag separately from WHERE/GROUP BY/HAVING because ORDER BY allows windowed functions but still rejects sequences.
-
-**Gaps** (not yet enforced): `ON` (JOIN predicates), `OUTPUT`, `TOP` — these don't yet set `RejectNextValueFor`.
-The other clauses are covered.
 
 ## Resolution / lookup
 
@@ -111,9 +103,41 @@ Projecting it unconditionally reported one increment ahead of real after any use
 
 ## Where `NEXT VALUE FOR` is rejected
 
-**Msg 11720** covers all eight clauses its own text names — `TOP`, `OVER`, `OUTPUT`, `ON`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY` — enforced at parse via `ParserContext.RejectNextValueFor`, which each clause's parse sets for its own duration.
-Real binds this at parse too (probe-confirmed: TRY/CATCH in the same batch doesn't intercept it).
-The allowed positions — a bare `SELECT`, a `VALUES` tuple, a projection over a FROM source, and a column `DEFAULT` — are unaffected.
+Two of real's refusals ship, both at parse — which is what keeps the sequence from advancing, since the batch never runs.
+`ParserContext.NextValueForRejection` carries which one applies (`NextValueForScope`), each construct's parse sets it for its own duration, and `NextValueFor`'s constructor consumes it.
+
+**Msg 11720** covers all eight clauses its own text names — `TOP`, `OVER`, `OUTPUT`, `ON`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`.
+
+**Msg 11719** covers the nested-query and stored-expression family, severity 15 state 1 (probed against SQL Server 2025, 2026-08-05):
+
+| context | probe |
+|---|---|
+| derived table, with or without its own FROM | N2.02 / N2.03 |
+| common table expression | N2.04 |
+| scalar subquery in the select list | N2.05 |
+| a subquery in the `WHERE` (the nested error, not the clause one) | N2.06 |
+| `EXISTS` body | N2.29 |
+| `APPLY` body | N2.28 |
+| the derived table an `INSERT … SELECT` or `SELECT … INTO` reads | N2.30 / N2b.04 |
+| a `MERGE`'s `USING` source | N2.32 |
+| view body — at **`CREATE`**, attributed to the view | N2.18 |
+| scalar UDF / inline TVF / multi-statement TVF body — at `CREATE`, attributed to the function | N2.19 / N2.20 / N2.21 |
+| a derived table inside a **procedure** body — at `CREATE` | N2.26 |
+
+A sequence rejected this way is untouched: real reports the same `current_value` afterwards as before, and so does the simulator.
+
+**The positions that stay legal** are a bare `SELECT`, a `VALUES` tuple, a projection over a FROM source, a column `DEFAULT`, and a stored **procedure's** own statements (a procedure is not one of the module kinds real names — N2.25, it draws a value per call).
+One more is legal and looks like it shouldn't be: **a joined `UPDATE` / `DELETE`'s own FROM-clause derived table**.
+Probed both spellings — `UPDATE t SET … FROM (SELECT NEXT VALUE FOR s AS n) d` and the `JOIN` form — run and draw their value on real, where the identical derived table under a `SELECT`, an `INSERT … SELECT` or a `MERGE … USING` is refused (N2b.01-03 against N2b.04-05).
+`ParserContext.AllowNextValueForInFromClause`, set around the mutation's `ParseSourcesAndJoins`, is that exemption.
+
+**Not built yet**: the three remaining refusals — **Msg 11741** for a `CASE` / `COALESCE` / `IIF` / `ISNULL` / `NULLIF` arm (real's message names `CHOOSE` too but accepts one — N2.14), **Msg 11725** for an aggregate's argument, and **Msg 11721** for a statement carrying `DISTINCT` or a set operator.
+All three are probed; each still advances the sequence here.
+
+### A parse that isn't going to run draws nothing
+
+A FROM-less `SELECT` bakes its projection at parse time, which *evaluates* it — so `CREATE PROCEDURE p AS SELECT NEXT VALUE FOR s` drew a value while binding the body, where real leaves `last_used_value` NULL (probe-confirmed 2026-08-05).
+The bake declines whenever the parsing batch is skipping — an un-taken branch or a module body being bound at `CREATE` — which costs nothing, since a skipped statement yields no rows for anyone to read.
 
 ## Deferred
 
@@ -121,7 +145,6 @@ The allowed positions — a bare `SELECT`, a `VALUES` tuple, a projection over a
 - Multi-name `DROP SEQUENCE a, b, c` — the comma-separated form works (inherited from the shared DROP parser); each name is dropped independently with `IF EXISTS` applied uniformly.
 - `INFORMATION_SCHEMA.SEQUENCES` — ISO-standard surface, not shipped.
   Apps that query catalogs typically use `sys.sequences` instead.
-- *(the `ON` / `OUTPUT` gap is closed — see [Where `NEXT VALUE FOR` is rejected](#where-next-value-for-is-rejected))*
 - *(the VALUES + DEFAULT double-advance is fixed — see [One value per row](#one-value-per-row) below)*
 - **CREATE SEQUENCE in transaction undo log** — sequence creation isn't logged.
   Same asymmetry as CREATE TABLE for regular (non-temp) tables, documented as a quirk.

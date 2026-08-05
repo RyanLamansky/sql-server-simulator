@@ -651,6 +651,11 @@ internal sealed partial class Selection
         // this scope's own sources; a nested query installs its own and the
         // enclosing one comes back here.
         var savedScopeSources = context.ScopeSources;
+        // A nested query body owns its own name scope, so its column references
+        // are not the enclosing FROM source's arguments — suspend the sibling
+        // collector for its duration.
+        var savedFromSourceColumnSink = context.FromSourceColumnSink;
+        context.FromSourceColumnSink = null;
         var aggregates = new List<AggregateExpression>();
         var windows = new List<WindowExpression>();
         var savedEnclosingAggregateCollector = context.EnclosingAggregateCollector;
@@ -668,6 +673,7 @@ internal sealed partial class Selection
             context.EnclosingAggregateCollector = savedEnclosingAggregateCollector;
             context.OuterTypeResolver = savedOuterTypeResolver;
             context.ScopeSources = savedScopeSources;
+            context.FromSourceColumnSink = savedFromSourceColumnSink;
         }
     }
 
@@ -969,8 +975,8 @@ internal sealed partial class Selection
             // Rejecting the prefix here also keeps ParsePrimary on its
             // stops-before-any-binary-operator path — a sign would otherwise
             // absorb the following multiplicative chain, star included.
-            var savedRejectInTop = context.RejectNextValueFor;
-            context.RejectNextValueFor = true;
+            var savedRejectInTop = context.NextValueForRejection;
+            context.NextValueForRejection = NextValueForScope.Clause;
             try
             {
                 context.RecursiveBranchConstructs.TopOrOffset = true;
@@ -980,7 +986,7 @@ internal sealed partial class Selection
             }
             finally
             {
-                context.RejectNextValueFor = savedRejectInTop;
+                context.NextValueForRejection = savedRejectInTop;
             }
             // `TOP n PERCENT` — cap becomes ceil(n% × rowcount). PERCENT is a
             // reserved keyword.
@@ -1067,6 +1073,27 @@ internal sealed partial class Selection
                 context.ScopeSources = scopeSources;
             }
         }
+
+        // No FROM of this statement's own bound (there is none, or the
+        // speculative pre-pass above discarded it): install the enclosing
+        // scope directly. A nested subquery reads its outer chain from
+        // `context.OuterTypeResolver` — it never sees this parse's
+        // `outerTypeResolver` argument — so leaving whatever the enclosing
+        // parse happened to have there is what made a FROM-less APPLY body's
+        // `WHERE EXISTS (… c.k …)` fail to bind against the APPLY's left side
+        // (a body carrying its own FROM installed the chain and worked).
+        if (preParsedSources is null && outerTypeResolver is not null)
+            context.OuterTypeResolver = outerTypeResolver;
+
+        // A FROM-less SELECT bakes its projection at parse time, which is only
+        // sound while nothing in it can read an enclosing row. A subquery can:
+        // `VisitColumnReferences` doesn't descend into a nested query body, so
+        // the reference test below it misses `SELECT (SELECT o.k FROM …)` and
+        // the bake evaluated the inner plan against a resolver that refuses
+        // every name. Count the subqueries this statement parses instead — the
+        // same snapshot-and-compare the aggregate binder uses — and defer the
+        // projection to the executor whenever it saw one.
+        var subqueriesBeforeProjection = context.SubqueriesParsed;
 
         // Whether the next token should begin a select-list element: true at
         // the start and after a comma, false once an element (and any alias it
@@ -1326,7 +1353,15 @@ internal sealed partial class Selection
                     if (topExpression is not null && fromClause.OffsetExpression is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, sources);
-                    return BuildSqlProjection(context.Batch, [.. sources], [.. joins], expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink, projectionDiscarded);
+                    JoinSpec[] joinArray = [.. joins];
+                    var plan = BuildSqlProjection(context.Batch, [.. sources], joinArray, expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink, projectionDiscarded);
+                    // The decorrelated key plan an enclosing EXISTS / IN can
+                    // answer itself from; null for every body that isn't
+                    // equi-correlated, which is every top-level query.
+                    plan.SemiJoin = TryBuildSemiJoinShape(
+                        context.Batch, plan, [.. sources], joinArray, expressions, fromClause,
+                        distinct, topExpression, aggregates, windows, outerTypeResolver);
+                    return plan;
 
                 // SELECT projection INTO target [FROM ...] — captures the
                 // destination table name. Real SQL Server requires every
@@ -1443,7 +1478,8 @@ internal sealed partial class Selection
                 : ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch),
             ResolveRowCountLimit(fromClause.OffsetExpression, RowLimitKind.Offset, context.Batch),
             ResolveRowCountLimit(fromClause.FetchExpression, RowLimitKind.Fetch, context.Batch),
-            ResolveAssignmentMode(expressions), intoTarget, context.OuterTypeResolver ?? outerTypeResolver);
+            ResolveAssignmentMode(expressions), intoTarget, context.OuterTypeResolver ?? outerTypeResolver,
+            context.SubqueriesParsed > subqueriesBeforeProjection);
     }
 
     /// <summary>
@@ -1609,7 +1645,12 @@ internal sealed partial class Selection
         // A FROM clause at any nesting depth is what makes a function body's
         // rejected SELECT real's Msg 444 state 2 rather than state 3.
         FunctionBodyShape.NoteRowsetRead(context);
-        ParseExplicitJoinChain(context, depth, sources, joins, outerTypeResolver);
+        // Every column reference a non-APPLY source's own arguments name, kept
+        // until the whole FROM is parsed — a source may name a sibling written
+        // after it, so the check can't run per source. Local to this FROM, so a
+        // nested one validates against its own sources.
+        var siblingCandidates = new List<Reference>();
+        ParseExplicitJoinChain(context, depth, sources, joins, outerTypeResolver, siblingCandidates);
 
         // Comma-separated FROM (ANSI-89 syntax) binds at lower precedence than
         // explicit JOINs: `FROM a, b JOIN c ON p` means `a CROSS JOIN (b JOIN c
@@ -1623,8 +1664,10 @@ internal sealed partial class Selection
         while (context.Token is Operator { Character: ',' })
         {
             joins.Add(new JoinSpec(JoinKind.Cross, onPredicate: null));
-            ParseExplicitJoinChain(context, depth, sources, joins, outerTypeResolver);
+            ParseExplicitJoinChain(context, depth, sources, joins, outerTypeResolver, siblingCandidates);
         }
+
+        RejectSiblingReferences(siblingCandidates, sources, outerTypeResolver);
     }
 
     private static void ParseExplicitJoinChain(
@@ -1632,16 +1675,17 @@ internal sealed partial class Selection
         uint depth,
         List<FromSource> sources,
         List<JoinSpec> joins,
-        Func<MultiPartName, SqlType>? outerTypeResolver)
+        Func<MultiPartName, SqlType>? outerTypeResolver,
+        List<Reference> siblingCandidates)
     {
         // A parenthesized join group as the leftmost item — `(A JOIN B ON …)
         // [LEFT] JOIN C …` — is a pure grammar grouping: a left-deep spine
         // already groups its left operand, so the group's interior sources /
         // joins splice directly into this chain with no group marker.
         if (NextSourceIsJoinGroup(context))
-            ParseJoinGroup(context, depth, sources, joins, outerTypeResolver);
+            ParseJoinGroup(context, depth, sources, joins, outerTypeResolver, siblingCandidates);
         else
-            sources.Add(ParseSingleFromSource(context, depth, outerTypeResolver));
+            sources.Add(ParseSourceCollectingColumnReads(context, depth, outerTypeResolver, sources, siblingCandidates));
 
         // Parse JOIN clauses. ParseSingleFromSource ends with the cursor at
         // the lookahead-after-source token (e.g. WHERE, ORDER, JOIN, INNER,
@@ -1675,7 +1719,7 @@ internal sealed partial class Selection
                 // inserted only after this nested group finishes), so
                 // `groupStart - 1` would misplace the join under nesting.
                 var groupJoinIndex = joins.Count;
-                ParseJoinGroup(context, depth, sources, joins, outerTypeResolver);
+                ParseJoinGroup(context, depth, sources, joins, outerTypeResolver, siblingCandidates);
                 var groupCount = sources.Count - groupStart;
                 BooleanExpression? groupOn = null;
                 if (kind == JoinKind.Cross)
@@ -1706,7 +1750,7 @@ internal sealed partial class Selection
             // play so a correlated derived table here is at least diagnosed
             // (NotSupportedException at execute time) rather than silently
             // resolving against a wrong scope.
-            sources.Add(ParseSingleFromSource(context, depth, outerTypeResolver));
+            sources.Add(ParseSourceCollectingColumnReads(context, depth, outerTypeResolver, sources, siblingCandidates));
             BooleanExpression? on = null;
             if (kind == JoinKind.Cross)
             {
@@ -1720,15 +1764,15 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
                 // An ON predicate rejects NEXT VALUE FOR (Msg 11720), like the
                 // other clauses real names in that message.
-                var savedRejectInOn = context.RejectNextValueFor;
-                context.RejectNextValueFor = true;
+                var savedRejectInOn = context.NextValueForRejection;
+                context.NextValueForRejection = NextValueForScope.Clause;
                 try
                 {
                     on = ParseOnPredicateWithScope(context, sources, outerTypeResolver);
                 }
                 finally
                 {
-                    context.RejectNextValueFor = savedRejectInOn;
+                    context.NextValueForRejection = savedRejectInOn;
                 }
             }
             joins.Add(new JoinSpec(kind, on));
@@ -1798,14 +1842,167 @@ internal sealed partial class Selection
         uint depth,
         List<FromSource> sources,
         List<JoinSpec> joins,
-        Func<MultiPartName, SqlType>? outerTypeResolver)
+        Func<MultiPartName, SqlType>? outerTypeResolver,
+        List<Reference> siblingCandidates)
     {
         var joinsBefore = joins.Count;
         context.MoveNextRequired();
-        ParseExplicitJoinChain(context, depth, sources, joins, outerTypeResolver);
+        ParseExplicitJoinChain(context, depth, sources, joins, outerTypeResolver, siblingCandidates);
         if (joins.Count == joinsBefore || context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
+    }
+
+    /// <summary>
+    /// Parses a nested query body — a derived table or an <c>APPLY</c> right
+    /// side — with <c>NEXT VALUE FOR</c> refused inside it (real's Msg 11719,
+    /// see <see cref="ParserContext.NextValueForRejection"/>). The refusal is
+    /// suppressed for an <c>UPDATE</c> / <c>DELETE</c>'s own <c>FROM</c>
+    /// clause, which real exempts: probed 2026-08-05, an
+    /// <c>UPDATE t SET … FROM (SELECT NEXT VALUE FOR s AS n) d</c> runs and
+    /// draws its value where the same derived table under a <c>SELECT</c>,
+    /// an <c>INSERT … SELECT</c> or a <c>MERGE … USING</c> is refused.
+    /// </summary>
+    private static Selection ParseNestedQueryRejectingNextValueFor(
+        ParserContext context,
+        uint depth,
+        Func<MultiPartName, SqlType>? outerTypeResolver)
+    {
+        var saved = context.NextValueForRejection;
+        if (!context.AllowNextValueForInFromClause)
+            context.NextValueForRejection = NextValueForScope.Nested;
+        try
+        {
+            return Selection.Parse(context, depth, outerTypeResolver);
+        }
+        finally
+        {
+            context.NextValueForRejection = saved;
+        }
+    }
+
+    /// <summary>
+    /// Parses one <b>non-APPLY</b> FROM source with its own column references
+    /// collected into <paramref name="siblingCandidates"/>. Only a source
+    /// carrying <em>arguments</em> — a table-valued function, <c>STRING_SPLIT</c>
+    /// / <c>OPENJSON</c> / <c>GENERATE_SERIES</c>, a <c>VALUES</c> constructor —
+    /// contributes anything: a plain table names no expression, and a derived
+    /// table or view body suspends the sink while its own parse runs.
+    /// <see cref="ParseLateralFromSource"/> deliberately doesn't collect —
+    /// <c>APPLY</c> is exactly the form that grants laterality.
+    /// </summary>
+    private static FromSource ParseSourceCollectingColumnReads(
+        ParserContext context,
+        uint depth,
+        Func<MultiPartName, SqlType>? outerTypeResolver,
+        List<FromSource> sourcesSoFar,
+        List<Reference> siblingCandidates)
+    {
+        var saved = context.FromSourceColumnSink;
+        var collectedBefore = siblingCandidates.Count;
+        context.FromSourceColumnSink = siblingCandidates;
+        try
+        {
+            return ParseSingleFromSource(context, depth, outerTypeResolver);
+        }
+        catch (SimulatedSqlException ex) when (ex.Number == InvalidColumnNameNumber)
+        {
+            // A generator types its arguments as it parses them, so a sibling
+            // reference that an enclosing scope can't answer raises the plain
+            // "invalid column name" from inside that parse — before the
+            // whole-FROM check below can see the sibling set. Re-report it as
+            // the Msg 4104 real gives when the offending name is qualified by
+            // a source already written to the left of this one.
+            RejectSiblingReferences(siblingCandidates.GetRange(collectedBefore, siblingCandidates.Count - collectedBefore),
+                sourcesSoFar, outerTypeResolver);
+            throw;
+        }
+        finally
+        {
+            context.FromSourceColumnSink = saved;
+        }
+    }
+
+    /// <summary>Msg 207's number, so the generator-argument catch above reads as what it matches.</summary>
+    private const int InvalidColumnNameNumber = 207;
+
+    /// <summary>
+    /// SQL Server binds a non-<c>APPLY</c> FROM source's arguments in a scope
+    /// that holds none of the FROM's own sources — only <c>APPLY</c> makes the
+    /// right side lateral — so a reference landing on a sibling can't bind.
+    /// Probed against SQL Server 2025 (2026-08-05) across <c>STRING_SPLIT</c>,
+    /// <c>OPENJSON</c>, an inline and a multi-statement TVF and a <c>VALUES</c>
+    /// constructor, as a <c>JOIN</c> / <c>CROSS JOIN</c> / comma / <c>LEFT
+    /// JOIN</c> right side and as the leftmost source naming a later sibling:
+    /// every one is <b>Msg 4104</b>, class 16 state 1, naming the written
+    /// multi-part identifier — while the <em>unqualified</em> spelling is
+    /// <b>Msg 207</b> on the leaf, because the name simply resolves to nothing
+    /// in that scope. The same source under <c>CROSS</c> / <c>OUTER APPLY</c>,
+    /// and one reading an <em>enclosing</em> query's column, both answer.
+    /// <para>
+    /// Real follows the 4104 with the argument's own type complaint (Msg 8116,
+    /// "void type", for <c>STRING_SPLIT</c>); the simulator raises the leading
+    /// error alone, as it does for every multi-error statement response.
+    /// </para>
+    /// </summary>
+    private static void RejectSiblingReferences(
+        IReadOnlyList<Reference> siblingCandidates,
+        IReadOnlyList<FromSource> sources,
+        Func<MultiPartName, SqlType>? outerTypeResolver)
+    {
+        foreach (var candidate in siblingCandidates)
+        {
+            var name = candidate.ReferencedName;
+            if (name.ImmediateQualifier is { } qualifier)
+            {
+                // A qualifier naming one of this FROM's sources is out of
+                // scope here whether or not the column exists, which is why
+                // `t.nosuch` is 4104 rather than 207.
+                foreach (var source in sources)
+                {
+                    if (source.Qualifier is { } exposed && BuiltInToken.Equals(qualifier, exposed))
+                        throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
+                }
+
+                continue;
+            }
+
+            // Unqualified: real reports the plain "invalid column name",
+            // because the leaf resolves to nothing once the siblings are out
+            // of scope. An enclosing scope that can answer it keeps it legal.
+            if (!SomeSourceCarriesColumn(sources, name.Leaf) || OuterScopeResolves(outerTypeResolver, name))
+                continue;
+
+            throw SimulatedSqlException.InvalidColumnName(name);
+        }
+    }
+
+    private static bool SomeSourceCarriesColumn(IReadOnlyList<FromSource> sources, string leaf)
+    {
+        foreach (var source in sources)
+        {
+            foreach (var columnName in source.ColumnNames)
+            {
+                if (BuiltInToken.Equals(leaf, columnName))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool OuterScopeResolves(Func<MultiPartName, SqlType>? outerTypeResolver, MultiPartName name)
+    {
+        if (outerTypeResolver is null)
+            return false;
+        try
+        {
+            _ = outerTypeResolver(name);
+            return true;
+        }
+        catch (SimulatedSqlException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -1930,7 +2127,7 @@ internal sealed partial class Selection
         if (afterApplyParen is not ReservedKeyword { Keyword: Keyword.Select })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        var lateralPlan = Selection.Parse(context, depth + 1, outerTypeResolver: ChainedResolver);
+        var lateralPlan = ParseNestedQueryRejectingNextValueFor(context, depth + 1, ChainedResolver);
 
         var schema = lateralPlan.Schema;
         var columnNames = lateralPlan.ColumnNames;
@@ -2478,8 +2675,8 @@ internal sealed partial class Selection
                 // Selection) and the explicit <paramref name="outerTypeResolver"/>
                 // chain (set when this FROM source is itself nested inside
                 // a subquery) are honored.
-                var derivedSelection = Selection.Parse(context, depth + 1,
-                    outerTypeResolver: context.OuterTypeResolver ?? outerTypeResolver);
+                var derivedSelection = ParseNestedQueryRejectingNextValueFor(context, depth + 1,
+                    context.OuterTypeResolver ?? outerTypeResolver);
 
                 // Inner SELECT result rows are LOB-inline (projections never
                 // emit LOB pointers because they have no destination Heap),
@@ -3004,9 +3201,9 @@ internal sealed partial class Selection
         // duration of those parses; ORDER BY (which DOES allow windows but
         // rejects NEXT VALUE FOR) handled separately below.
         var savedAllowsWindows = context.AllowsWindowExpressions;
-        var savedRejectNextValueFor = context.RejectNextValueFor;
+        var savedRejectNextValueFor = context.NextValueForRejection;
         context.AllowsWindowExpressions = false;
-        context.RejectNextValueFor = true;
+        context.NextValueForRejection = NextValueForScope.Clause;
         try
         {
             while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -3035,7 +3232,7 @@ internal sealed partial class Selection
         finally
         {
             context.AllowsWindowExpressions = savedAllowsWindows;
-            context.RejectNextValueFor = savedRejectNextValueFor;
+            context.NextValueForRejection = savedRejectNextValueFor;
         }
 
         // Optional trailing WINDOW clause (SQL Server 2022+), between HAVING and
@@ -3056,14 +3253,14 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             // ORDER BY rejects NEXT VALUE FOR (Msg 11720), but allows windowed
             // functions. Toggle just the sequence flag for the duration.
-            context.RejectNextValueFor = true;
+            context.NextValueForRejection = NextValueForScope.Clause;
             try
             {
                 ParseOrderByItems(context, fromClause.OrderBy);
             }
             finally
             {
-                context.RejectNextValueFor = savedRejectNextValueFor;
+                context.NextValueForRejection = savedRejectNextValueFor;
             }
             ConsumeOffsetFetch(context, fromClause);
         }
@@ -3629,7 +3826,7 @@ internal sealed partial class Selection
     /// no-op for sort but its presence flips <see cref="HasOrderBy"/>
     /// so the set-op chain rejects per-branch ORDER BY (Msg 156).
     /// </summary>
-    private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly, MultiPartName? intoTarget, Func<MultiPartName, SqlType>? outerTypeResolver)
+    private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly, MultiPartName? intoTarget, Func<MultiPartName, SqlType>? outerTypeResolver, bool containsSubquery)
     {
         // The FROM-less SELECT path bakes projection values at parse time
         // (see the Run-then-GetSqlType loop below) — replaying that closure
@@ -3656,7 +3853,20 @@ internal sealed partial class Selection
         // reference and defer those to the executor, where the outer resolver
         // is supplied; the reference-free case keeps the baked fast path
         // unchanged, so `SELECT 1` still folds at parse time.
-        var referencesOuterColumns = false;
+        // A parsed subquery counts as an outer reference whether or not one is
+        // written: its body is a plan of its own that the walk below can't see
+        // into, and it re-reads the enclosing row on every invocation, so the
+        // baked value would be both wrong and stale.
+        //
+        // So does a parse that isn't going to run the statement at all — an
+        // un-taken branch, or a module body being bound at CREATE. The bake
+        // *evaluates* the projection, which for a side-effecting built-in is a
+        // side effect the statement never earned: `CREATE PROCEDURE p AS SELECT
+        // NEXT VALUE FOR s` drew a value here where real leaves the sequence
+        // untouched (probe-confirmed 2026-08-05 — `last_used_value` stays NULL
+        // there). Deferring costs nothing, since a skipped statement yields no
+        // rows for anyone to read.
+        var referencesOuterColumns = containsSubquery || parseBatch.IsSkipping;
         foreach (var expression in expressions)
             expression.VisitColumnReferences(_ => referencesOuterColumns = true);
 

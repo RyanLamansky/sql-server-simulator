@@ -451,6 +451,24 @@ A FROM-less SELECT that references an outer column can't bake its projection at 
 `BuildSynthesizedSqlRow` detects any column reference and defers those expressions to the executor, where the outer resolver is supplied; the reference-free case keeps the baked fast path unchanged.
 This is also why `NamedExpression` forwards `VisitColumnReferences` — an alias renames a projection, it doesn't hide what the expression reads, and without the forward `t.col AS v` looked reference-free.
 
+Two more things defer for the same reason, neither of them a written column reference:
+
+- **A parsed subquery.**
+  `VisitColumnReferences` doesn't descend into a nested query body, so `SELECT (SELECT o.k FROM …)` looked reference-free and the bake ran the inner plan against a resolver that refuses every name.
+  The projection's own subquery count is what settles it — `ParserContext.SubqueriesParsed` snapshotted around the select list, the same compare the aggregate binder uses — and a subquery is a plan of its own that re-reads the enclosing row on every invocation anyway, so the baked value would be stale as well as wrong.
+- **A parse that isn't going to run the statement** — an un-taken branch, or a module body being bound at `CREATE`.
+  The bake *evaluates* the projection, which for a side-effecting built-in is a side effect the statement never earned: `CREATE PROCEDURE p AS SELECT NEXT VALUE FOR s` drew a sequence value where real leaves it untouched (see [`sequences.md`](sequences.md#a-parse-that-isnt-going-to-run-draws-nothing)).
+
+### A FROM-less body installs the enclosing scope for its nested queries
+
+A nested subquery reads its outer chain from `ParserContext.OuterTypeResolver` — it never sees the `outerTypeResolver` argument its enclosing parse was handed.
+A SELECT **with** a FROM installs that chain over its own sources; one **without** installed nothing, so a nested subquery chained through whatever the enclosing parse happened to have left there.
+That is what made `CROSS APPLY (SELECT c.x AS x WHERE EXISTS (SELECT 1 FROM o WHERE o.k = c.k)) a` report Msg 207 on `c.k` while the same body carrying its own FROM answered.
+`ParseInner` installs the inherited resolver whenever this statement's own FROM never bound — there is none, or the speculative pre-pass discarded it.
+
+Probed against SQL Server 2025 (2026-08-05): the shape answers there, and so do a scalar subquery in the body's select list, an `IN (SELECT …)` and a quantified comparison in its WHERE, two levels of nesting, `APPLY` inside `APPLY`, and a subquery inside an `APPLY` inside a subquery.
+The same seam covers a FROM-less scalar subquery wrapping a correlated one with no `APPLY` in sight (`SELECT (SELECT (SELECT COUNT(*) FROM o WHERE o.k = c.k)) FROM c`), which failed identically.
+
 Covered shapes (all probe-confirmed): a FROM-less subquery projecting an outer column, a derived table (VALUES or SELECT, including a FROM-less or set-operation body) in a subquery's FROM, and APPLY both at the top level and nested inside a subquery.
 
 **Not modeled: an aggregate reading only the enclosing query's columns, where there is no enclosing collector to move it to.**
@@ -605,6 +623,48 @@ Cross-aggregate Msg 8711 isn't modeled (EF doesn't emit).
   Divergence: with no ORDER BY the row order a `ROWS` frame counts along is unspecified, and real doesn't run it in the emitted order for every bound pair — a frame ending at `UNBOUNDED FOLLOWING` counts opposite to the rows it emits (probe-confirmed), which the simulator's straight partition-order walk doesn't reproduce.
   The `PRECEDING`-anchored bounds, which is what the shape is written for, match.
 - Errors: `STRING_AGG OVER` → Msg 4113; `COUNT(DISTINCT) OVER` / `SUM(DISTINCT) OVER` → Msg 10759; windowed function in WHERE/HAVING/GROUP BY/ON → Msg 4108.
+
+### Bounded per-partition `ROW_NUMBER()` selection
+
+The greatest-n-per-group idiom writes the row number in a derived table and filters it above:
+
+```sql
+SELECT … FROM (SELECT …, ROW_NUMBER() OVER (PARTITION BY p ORDER BY s) AS rn FROM t) x WHERE rn = 1
+```
+
+Read literally that ranks every row of every partition and projects all of them for the filter to throw away — 73k rows and 663 partitions to answer 663.
+`Selection.BoundRowNumberBodies` (`Selection.Execution.WindowTopN.cs`) hands the body the **inclusive row-number window the enclosing WHERE leaves surviving** instead, and the body then keeps each partition's top rows in a bounded max-heap (`PartitionTopRows`) — the mechanism [Top-N heap](#top-n-heap) gives a statement's own `TOP (n)`, read against one partition rather than the whole result.
+A row the bound can't reach is dropped as it is read: not cloned, not ranked, not projected.
+
+**The bounding conjunct stays in the enclosing WHERE**, the residual invariant every narrowing pass rests on (see [`joins.md`](joins.md) and [`indexes.md`](indexes.md#the-scan-prefilter-a-join-source-no-key-can-seek)).
+The body drops only rows whose row number falls outside the window that conjunct itself rejects, so the pass can only remove tuples the statement was going to discard — which is what makes it safe for every join kind, including a bounded body on an outer join's NULL-supplied side (a tuple NULL-extended because this side lost its rows reads UNKNOWN for the very conjunct that justified the bound).
+
+**What binds.** The body's single window function has to be a bare `ROW_NUMBER()` **projection** — the one kind whose per-row value is settled one row at a time.
+Every other kind's value is a property of the whole partition: a `SUM(x) OVER (PARTITION BY p)` beside the row number reads every row, and `RANK` / `DENSE_RANK` number ties alike, so no row count bounds how many rows carry a rank at or below *k*.
+Otherwise the body has to be a plain SELECT-project-filter (no DISTINCT, no TOP / OFFSET / FETCH, no GROUP BY / HAVING / aggregate, no ORDER BY) — anything reading the row set as a whole would see a different one once the bound drops rows.
+A join body qualifies, and so does a chain reaching the window through plain derived tables, since the ordinary predicate push carries the conjunct down to the level that reads it.
+
+The bound itself is collected **per bounded column** rather than per conjunct, so `rn > 50000 AND rn <= 50050` combines; `rn = k`, `rn <= k`, `rn < k`, `rn BETWEEN a AND b`, `rn IN (…)` and either operand order all contribute, and the value side has to be row-independent (a literal, a variable, a parameter, arithmetic over those) and is evaluated once per execution.
+Rounding is outward on both ends — `rn <= 2.5` keeps two rows, `rn >= 2.5` starts at three — so a fractional comparand can never tighten the window past what the residual comparison rejects.
+A lower bound with no upper one declines: every row of the partition would still have to be ranked.
+
+Past **4096** rows the selection heap stands down (the crossover [Top-N heap](#top-n-heap) draws, for the same reason) and the partition sorts as it always did — but the bound still narrows what is *projected*, which is the whole win for a deep-paging `rn BETWEEN 50001 AND 50050` read.
+
+**Ties, and why the ranking sort is total.** A heap can only reproduce a full sort's answer against an order with no ties in it, so both paths order a partition by the window's ORDER BY keys **and then by the row's own arrival position**.
+That settles which member of a tie group takes which number; a bare `List<int>.Sort` introsort would pick arbitrarily above its insertion-sort threshold and stably below it — not even consistent with itself across partition sizes.
+Ranking ties is what real leaves plan-dependent, so pinning it costs no fidelity; only `ROW_NUMBER` takes the tiebreak, since `RANK` / `DENSE_RANK` number peers alike either way.
+Measured cost on a 231k-row three-window query: none (445 ms against a 466 ms control, identical allocation).
+
+Measured on WWI `Sales.Orders` (73k rows, 663 partitions), against the same query written so no bound reads it (`rn + 0 = 1`), interleaved in one process:
+
+| shape | full sort | bounded | |
+|---|---|---|---|
+| `rn = 1` | 60.0 ms, 46.5 MB | **25.8 ms, 16.3 MB** | 2.3× |
+| `rn <= 10` | 109.7 ms | **33.5 ms** | 3.3× |
+| `rn BETWEEN 1 AND 50` (no partition) | 67.3 ms | **28.4 ms** | 2.4× |
+| `rn BETWEEN 50001 AND 50050` (no partition, past the heap ceiling) | 64.9 ms | **38.0 ms** | 1.7× |
+
+A bare `SELECT COUNT(*), MAX(OrderDate)` over the same table costs ~21 ms here, so the `rn = 1` shape sits about 5 ms above the scan it has to do anyway — and below the reference server's own time for it.
 
 ### Windows over a grouped query
 

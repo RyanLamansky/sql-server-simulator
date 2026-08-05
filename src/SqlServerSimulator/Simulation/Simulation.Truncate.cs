@@ -97,6 +97,7 @@ partial class Simulation
         }
 
         table.Heap.Pages.Clear();
+        _ = table.Heap.RecomputeRowCount();
         table.Heap.LobPages.Clear();
         table.Heap.ForwardTargets.Clear();
         table.Heap.ClearFreeLobPages();

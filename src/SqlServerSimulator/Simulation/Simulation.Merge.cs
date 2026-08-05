@@ -297,7 +297,20 @@ partial class Simulation
         {
             if (context.Token is ReservedKeyword { Keyword: Keyword.With } withKeyword)
                 throw SimulatedSqlException.SyntaxErrorNearKeyword(withKeyword);
-            var selection = Selection.Parse(context, depth: 1);
+            // A MERGE's USING source is one of the derived-table shapes real
+            // refuses NEXT VALUE FOR in (Msg 11719, probe-confirmed).
+            var savedRejection = context.NextValueForRejection;
+            context.NextValueForRejection = NextValueForScope.Nested;
+            Selection selection;
+            try
+            {
+                selection = Selection.Parse(context, depth: 1);
+            }
+            finally
+            {
+                context.NextValueForRejection = savedRejection;
+            }
+
             sourceSchema = selection.Schema;
             selectionColumnNames = selection.ColumnNames;
             materialize = batch =>

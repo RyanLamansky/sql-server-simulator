@@ -74,15 +74,12 @@ public sealed class LikePatternReuseTests
         => AreEqual("2", Ids("cs like N'u_b%'"));
 
     /// <summary>
-    /// An accent-insensitive collation still folds case, which is the half of
-    /// the collation the pattern translation reads. (Its accent half is a
-    /// separate, pre-existing gap: real answers <c>1,2,3,4,5</c> here because
-    /// <c>ai</c> folds the umlaut too — see the LIKE section of
-    /// <c>docs/claude/collations.md</c>.)
+    /// An accent-insensitive collation folds the umlaut as well as the case, so
+    /// the same pattern that picks three rows under <c>ci</c> picks five here.
     /// </summary>
     [TestMethod]
-    public void AccentInsensitive_UpperPattern_StillFoldsCase()
-        => AreEqual("1,2,3", Ids("ai like N'USB%'"));
+    public void AccentInsensitive_UpperPattern_FoldsCaseAndAccent()
+        => AreEqual("1,2,3,4,5", Ids("ai like N'USB%'"));
 
     /// <summary>
     /// The accent-<em>sensitive</em> counterpart: under CI_AS the umlaut is a

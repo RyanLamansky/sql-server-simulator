@@ -153,6 +153,20 @@ A promotion / collation-conflict failure declines to the scan.
 This leading-column form is the no-equality fallback; an equality-prefix continued by a range takes the extended equality seek instead (next section).
 A range on a column that is neither a leading key column nor the continuation column stays residual.
 
+#### The span gate
+
+A range seek only pays for itself while the interval is **selective**.
+It trades a sequential page walk for a per-address `ReadSlotBytes` plus an ordered-view walk whose per-key comparer calls the scan doesn't make, so past some share of the table those costs dominate: a `> 100` over WWI's 231 000-row `Sales.OrderLines` (99.9% of the rows) measured **~55 ms seeked against ~35 ms scanned**, and 16 MB more allocated.
+
+So the walk carries a candidate cap: `rowCount / RangeSpanGateDivisor` (4 — a quarter of the table), applied only once the heap holds `RangeSpanGateMinRows` (1024) or more.
+`HeapSeekCache.RangeScan` abandons the walk and returns null the moment the collected rid count passes it, and `TryComputeRangeCandidates` reports `RangeSpanTooWide(table)` and declines to the scan.
+Aborting mid-walk rather than counting afterwards is what keeps the fallback cheap — the discarded work is bounded by the cap instead of the whole table (the same `> 100` measured ~28 ms gated, level with the scan).
+The gate lives in the address-only core, so the UPDATE / DELETE path takes it too.
+
+The floor exists because under it the candidate list is small however wide the interval, so the seek can't lose by enough to matter, and leaving the gate off keeps the access path predictable for small tables.
+The cache entry and its ordered view are already built when the gate declines, which is deliberate: that build is shared with every other seek against the column and is what makes the *next* narrow range on it free.
+The gate is pure cost policy — the bound conjuncts are residual either way, so the rows are identical whichever path runs.
+
 ### Equality-prefix + range continuation
 
 A stable range bound on the key column **immediately after** the matched equality prefix extends the seek predicate one column further: `WHERE a = @x AND b BETWEEN @lo AND @hi` against a key on `(a, b, …)` seeks the in-range slice of `a = @x`'s group rather than dragging the whole group through the residual filter.
@@ -210,6 +224,31 @@ Measured (WWI, `Sales.Orders`, `CustomerID = 90 OR SalespersonPersonID = 16`): ~
 All three single-table projectors — non-aggregate (`ProjectSqlRows`), aggregate (`BuildAggregateProjectionRows`), and window (`ProjectWindowedRows`) — narrow a single-base-table source through the seek, so `SELECT COUNT(*) … WHERE indexedcol = x` and `SELECT … OVER (…) FROM t WHERE indexedcol = x` both seek like their non-aggregate counterpart (without this the window projector silently full-scanned even when its WHERE was perfectly sargable, the regression that made running-total-per-parent EF queries scan the table).
 They also push single-source WHERE equality / range predicates onto **every** base-table source of a multi-source FROM before the join (`NarrowJoinSources` — the matched conjuncts stay in the residual WHERE, so narrowing any one source is semantics-preserving for every join kind), and reorder a pure INNER equi-join chain to drive from the source the pushdown narrowed hardest.
 The INNER / LEFT equi-join operator then **seeks the inner side per outer row** when that rowset is small relative to the inner and the inner is indexed on the join key — see [`joins.md`](joins.md).
+
+### The scan prefilter: a join source no key can seek
+
+A source whose sargable conjunct lands on a column **no key or index leads** can't seek — but the predicate can still shrink what the join sees.
+`TryPrefilterJoinSource` (traced `ScanPrefilter(table,n)`, `n` being the conjuncts pushed) is that fallback: when `NarrowJoinSources`' seek attempt declines for a source, the source's row stream is wrapped in a filter evaluating the WHERE conjuncts that read only that source, and the join reads through it.
+It runs only for a multi-source FROM — with one source the residual WHERE already is the scan's filter, so there is nothing to save.
+
+The pushed shapes are the same sargable whitelist the seek's own intake uses: a comparison (`=` / `>` / `>=` / `<` / `<=`, either operand order) or a `BETWEEN` whose column side is a bare reference into this source (`TryIdentifyIndexableColumn`) and whose value side is row-invariant for this execution (`IsStableValueSide` — a literal, a variable, a pure conversion or arithmetic over those, or an enclosing-scope column; a **sibling** of the same FROM declines, since it isn't readable before the join runs).
+That structural whitelist is what makes the push provably source-local: both operand shapes are enumerated node by node, so unlike an `Expression.VisitColumnReferences` walk it can't miss a reference buried in a container the walk doesn't descend into.
+Every name a pushed conjunct can read is therefore either this source's own column or one the enclosing resolver answers, and the filter resolves through a one-slot tuple over that single source with the enclosing resolver behind it.
+
+Correctness rests on the same residual invariant the seek narrowing does — **the pushed conjunct stays in the enclosing WHERE** — which makes the pass a pure narrowing that can only drop rows the residual would have rejected:
+
+- **Every join kind** is safe, the NULL-extendable side included. All the pushed shapes are NULL-rejecting on the source's own column, so a tuple an outer join NULL-extends because this side lost a row reads UNKNOWN for the very conjunct that dropped it and is excluded — exactly as the matched-but-failing tuple was.
+- **`TOP` / `OFFSET`** are unaffected: the row cap applies after the residual WHERE, so the same output rows come out of the same underlying rows, which is also what leaves the scan's **lock footprint** unchanged (the underlying enumeration is untouched; a filtered row was still read and locked).
+- A conjunct that **raises** while being prefiltered (a divide-by-zero bound, say) keeps its row rather than dropping it, and lets the residual decide. Dropping it would be the one way the narrowing could change results: the join might never have produced a tuple from that row, in which case the enclosing statement never evaluated the conjunct at all.
+
+Cost is one predicate evaluation per source row against whatever the join saves, so a predicate that drops almost nothing is pure overhead.
+Past `PrefilterProbeRows` (4096) rows a pass rate above one half switches the filter off for the rest of the enumeration — sound at any point, since removing no rows is a correct outcome for a pure narrowing.
+
+The pass is the seek's fallback, not its peer: a source the seek narrowed never takes it, and the join **reorder** ignores prefiltered sources (it picks its driver by seeked candidate count, which a lazy filtered stream doesn't have — with nothing seeked the written order stands).
+What it buys is the join's own strategy switch: a driving table cut to a handful of rows lands under `EquiJoinSeekOrHash`'s outer cap and takes the per-outer-row seek instead of hashing the whole inner.
+
+Measured (WWI, `Sales.Orders JOIN Sales.OrderLines` with a one-week `BETWEEN` on the unindexed `OrderDate` — the shape real also has no index for): **77.3 ms → 26.6 ms** (~2.9×) and 59.2 MB → 8.4 MB allocated, against ~64 ms on live SQL Server.
+A year-wide range on the same shape (38% of the table, so the filter keeps filtering but the join still hashes) went 92.0 → 74.4 ms.
 
 ### ORDER BY elimination
 

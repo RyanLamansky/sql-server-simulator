@@ -81,13 +81,20 @@ partial class Simulation
     /// they are appended behind the binder's own errors once the whole body has
     /// bound, which is the order real reports them in.
     /// </param>
+    /// <param name="rejectsNextValueFor">
+    /// True for the module kinds real names in Msg 11719 — a scalar UDF and a
+    /// multi-statement TVF — so a <c>NEXT VALUE FOR</c> anywhere in the body
+    /// refuses the <c>CREATE</c>. A procedure's or trigger's body is not one of
+    /// them and passes false.
+    /// </param>
     private void BindModuleBodyAtCreate(
         ParserContext outerContext,
         string bodyText,
         string moduleName,
         int bodyLineOffset,
         Func<SimulatedDbCommand, BatchContext> buildBindBatch,
-        FunctionBodyShape? shape = null)
+        FunctionBodyShape? shape = null,
+        bool rejectsNextValueFor = false)
     {
         if (string.IsNullOrEmpty(bodyText))
             return;
@@ -117,6 +124,13 @@ partial class Simulation
         try
         {
             var parser = bindBatch.Parser;
+            // A user-defined function's body is one of the constructs real
+            // names in Msg 11719, and it refuses the CREATE (probe-confirmed,
+            // attributed to the function). A stored procedure's body is not —
+            // real runs `CREATE PROCEDURE p AS SELECT NEXT VALUE FOR s` and the
+            // proc draws a value per call.
+            if (rejectsNextValueFor)
+                parser.NextValueForRejection = NextValueForScope.Nested;
             parser.MoveNextOptional();
             foreach (var _ in DispatchStatementsUntil(bindBatch, endKeyword: null))
             {
@@ -226,7 +240,8 @@ partial class Simulation
         var variables = SeedFunctionParameters(parameters);
         BindModuleBodyAtCreate(outerContext, bodyText, functionName, bodyLineOffset,
             bodyCommand => new BatchContext(bodyCommand, variables, new UdfFrame(returnType)),
-            new FunctionBodyShape());
+            new FunctionBodyShape(),
+            rejectsNextValueFor: true);
     }
 
     /// <summary>
@@ -264,7 +279,8 @@ partial class Simulation
             batch.TableVariables[returnVariableName] = returnTable;
             return batch;
         },
-        new FunctionBodyShape());
+        new FunctionBodyShape(),
+        rejectsNextValueFor: true);
     }
 
     /// <summary>

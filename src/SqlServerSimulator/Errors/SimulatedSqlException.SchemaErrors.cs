@@ -477,6 +477,41 @@ partial class SimulatedSqlException
         new("NEXT VALUE FOR function is not allowed in the TOP, OVER, OUTPUT, ON, WHERE, GROUP BY, HAVING, or ORDER BY clauses.", 11720, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 11719: <c>NEXT VALUE FOR</c> inside a nested
+    /// query or a stored expression — a derived table, a CTE, a subquery, an
+    /// <c>APPLY</c> body, a view / user-defined-function body, a computed
+    /// column, a <c>CHECK</c> constraint, a table type's column default.
+    /// Probe-confirmed (SQL Server 2025) wording, severity and state; real
+    /// binds it at parse, so the whole batch is refused and the sequence
+    /// does not advance.
+    /// </summary>
+    internal static SimulatedSqlException NextValueForNotAllowedNested() =>
+        new(
+            "NEXT VALUE FOR function is not allowed in check constraints, default objects, computed columns, views, "
+            + "user-defined functions, user-defined aggregates, user-defined table types, sub-queries, common table "
+            + "expressions, derived tables or return statements.",
+            11719, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11741: <c>NEXT VALUE FOR</c> inside an arm of
+    /// the conditional family. Probe-confirmed — real's message names
+    /// <c>CHOOSE</c> as well, but a <c>CHOOSE</c> argument is accepted there,
+    /// so the simulator accepts it too.
+    /// </summary>
+    internal static SimulatedSqlException NextValueForNotAllowedInConditional() =>
+        new("NEXT VALUE FOR function cannot be used within CASE, CHOOSE, COALESCE, IIF, ISNULL and NULLIF.", 11741, 15, 1);
+
+    /// <summary>Mimics SQL Server error 11725: <c>NEXT VALUE FOR</c> passed to an aggregate. Probe-confirmed.</summary>
+    internal static SimulatedSqlException NextValueForNotAllowedInAggregate() =>
+        new("An expression that contains a NEXT VALUE FOR function cannot be passed as an argument to an aggregate.", 11725, 15, 1);
+
+    /// <summary>Mimics SQL Server error 11721: <c>NEXT VALUE FOR</c> in a statement carrying DISTINCT or a set operator. Probe-confirmed.</summary>
+    internal static SimulatedSqlException NextValueForNotAllowedWithDedup() =>
+        new(
+            "NEXT VALUE FOR function cannot be used directly in a statement that uses a DISTINCT, UNION, UNION ALL, EXCEPT or INTERSECT operator.",
+            11721, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 11726: <c>NEXT VALUE FOR</c> resolved to an
     /// object that isn't a sequence. Probe-confirmed: real SQL Server uses
     /// the qualified <c>schema.name</c> form in the message.

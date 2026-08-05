@@ -28,9 +28,12 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// single deterministic order regardless).</description></item>
 /// <item><description>No-cycle exhaustion raises Msg 11728 from
 /// <see cref="Sequence.Advance"/>.</description></item>
-/// <item><description>Restricted contexts (TOP / OVER / OUTPUT / ON / WHERE
-/// / GROUP BY / HAVING / ORDER BY) raise Msg 11720 — gated at parse via
-/// <see cref="ParserContext.RejectNextValueFor"/>.</description></item>
+/// <item><description>Restricted contexts are gated at parse via
+/// <see cref="ParserContext.NextValueForRejection"/>, which carries which of
+/// real's four refusals applies — Msg 11720 for a query clause, Msg 11719 for
+/// a nested query or stored expression, Msg 11741 for a conditional arm,
+/// Msg 11725 for an aggregate argument, Msg 11721 for a deduplicating
+/// statement.</description></item>
 /// </list>
 /// </para>
 /// </remarks>
@@ -41,8 +44,7 @@ internal sealed class NextValueFor : Expression
 
     public NextValueFor(ParserContext context, MultiPartName sequenceName)
     {
-        if (context.RejectNextValueFor)
-            throw SimulatedSqlException.NextValueForNotAllowedHere();
+        ThrowIfRejectedHere(context.NextValueForRejection);
         if (!context.Batch.TryResolveSequence(sequenceName, out var resolved))
         {
             // Real SQL Server distinguishes "object name doesn't resolve" (Msg 208)
@@ -60,6 +62,27 @@ internal sealed class NextValueFor : Expression
         // Record the reference for any collector in scope (INSERT's Msg 11731
         // gate); collecting here catches a reference at any nesting depth.
         context.SequenceCollector?.Add(resolved);
+    }
+
+    /// <summary>
+    /// Raises the refusal the scope names. Real settles every one of these
+    /// while parsing, so the throw here refuses the whole batch and no
+    /// sequence value is drawn (probe-confirmed: a sequence's
+    /// <c>current_value</c> is unmoved after a rejected batch).
+    /// </summary>
+    private static void ThrowIfRejectedHere(NextValueForScope scope)
+    {
+        if (scope == NextValueForScope.Allowed)
+            return;
+
+        throw scope switch
+        {
+            NextValueForScope.Clause => SimulatedSqlException.NextValueForNotAllowedHere(),
+            NextValueForScope.Nested => SimulatedSqlException.NextValueForNotAllowedNested(),
+            NextValueForScope.Conditional => SimulatedSqlException.NextValueForNotAllowedInConditional(),
+            NextValueForScope.Aggregate => SimulatedSqlException.NextValueForNotAllowedInAggregate(),
+            _ => SimulatedSqlException.NextValueForNotAllowedWithDedup(),
+        };
     }
 
     public override SqlValue Run(RuntimeContext runtime)

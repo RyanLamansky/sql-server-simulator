@@ -108,15 +108,15 @@ partial class Simulation
 
         // An OUTPUT clause rejects NEXT VALUE FOR (Msg 11720), one of the
         // clauses real names in that message.
-        var savedRejectNextValueFor = context.RejectNextValueFor;
-        context.RejectNextValueFor = true;
+        var savedRejectNextValueFor = context.NextValueForRejection;
+        context.NextValueForRejection = NextValueForScope.Clause;
         try
         {
             return ParseOutputClauseBody(context, table, allowInserted, allowDeleted);
         }
         finally
         {
-            context.RejectNextValueFor = savedRejectNextValueFor;
+            context.NextValueForRejection = savedRejectNextValueFor;
         }
     }
 
@@ -405,15 +405,15 @@ partial class Simulation
             return null;
 
         // Msg 11720, as on the mutation-side OUTPUT entry above.
-        var savedRejectNextValueFor = context.RejectNextValueFor;
-        context.RejectNextValueFor = true;
+        var savedRejectNextValueFor = context.NextValueForRejection;
+        context.NextValueForRejection = NextValueForScope.Clause;
         try
         {
             return ParseInsertOutputClauseBody(context, destinationTable, sourceColumnNames);
         }
         finally
         {
-            context.RejectNextValueFor = savedRejectNextValueFor;
+            context.NextValueForRejection = savedRejectNextValueFor;
         }
     }
 

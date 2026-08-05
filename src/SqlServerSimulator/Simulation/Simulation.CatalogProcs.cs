@@ -1,5 +1,4 @@
 using System.Collections.Frozen;
-using System.Text.RegularExpressions;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Storage;
@@ -343,7 +342,7 @@ partial class Simulation
 
     private static void AppendColumnRows(
         List<SqlValue[]> rows, SqlValue qualifier, SqlValue owner, string tableName,
-        HeapColumn[] columns, FrozenDictionary<string, object?[]> byName, Regex? columnPattern)
+        HeapColumn[] columns, FrozenDictionary<string, object?[]> byName, LikeMatcher? columnPattern)
     {
         var tableNameValue = SqlValue.FromSystemName(tableName);
         for (var i = 0; i < columns.Length; i++)
@@ -1002,10 +1001,12 @@ partial class Simulation
     }
 
     // A null pattern matches everything; otherwise a T-SQL LIKE pattern
-    // compiled case-insensitively (catalog names fold under the baseline
-    // collation the way sp_tables / sp_columns compare owners and names).
-    private static Regex? CompileCatalogPattern(string? pattern) =>
-        pattern is null ? null : LikePatternBuilder.BuildAnchored(pattern, escapeChar: null, caseSensitive: false);
+    // compiled under the baseline collation (catalog names fold the way
+    // sp_tables / sp_columns compare owners and names). The arguments are
+    // nvarchar sysname on real, so the match takes no trailing-space slack.
+    private static LikeMatcher? CompileCatalogPattern(string? pattern) =>
+        pattern is null ? null : LikeMatcher.Compile(pattern, escapeChar: null, Collation.Baseline, forPatIndex: false);
 
-    private static bool Matches(Regex? pattern, string value) => pattern is null || pattern.IsMatch(value);
+    private static bool Matches(LikeMatcher? pattern, string value) =>
+        pattern is null || pattern.IsMatch(value, trailingSpaceSlack: false);
 }

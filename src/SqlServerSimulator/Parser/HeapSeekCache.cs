@@ -73,15 +73,19 @@ internal sealed class HeapSeekCache
     // same as an equality seek on that one column), then unions the row
     // addresses whose key falls within the bounds. An absent lower/upper means
     // unbounded on that side. Returns a freshly-built list, so the caller can
-    // enumerate it after the lock is released.
-    public List<(int Page, int Slot)> RangeScan(
+    // enumerate it after the lock is released — or null once the in-range rid
+    // count passes <paramref name="candidateCap"/>, which is the caller's
+    // "this range is too wide to be worth seeking" signal and stops the walk
+    // there rather than building a list it will throw away.
+    public List<(int Page, int Slot)>? RangeScan(
         Heap heap, HeapColumn[] schema, Heap? lobStore, int ordinal, SqlType common,
-        bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive)
+        bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive,
+        int candidateCap)
     {
         lock (this.gate)
         {
             var entry = this.ResolveEntry(heap, schema, lobStore, [ordinal], [common]);
-            return entry.RangeCandidates(hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive);
+            return entry.RangeCandidates(hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive, candidateCap);
         }
     }
 
@@ -467,12 +471,14 @@ internal sealed class HeapSeekCache
         }
 
         // Single-column range seek: the in-range keys of a one-column entry,
-        // in ascending order. Thin wrapper that builds arity-1 composite bounds.
-        public List<(int Page, int Slot)> RangeCandidates(
-            bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive) =>
-            this.OrderedCandidates(
+        // in ascending order, or null once the walk passes candidateCap. Thin
+        // wrapper that builds arity-1 composite bounds.
+        public List<(int Page, int Slot)>? RangeCandidates(
+            bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive,
+            int candidateCap) =>
+            this.CappedCandidates(
                 hasLower ? new SqlValueKey([lower]) : null, lowerInclusive,
-                hasUpper ? new SqlValueKey([upper]) : null, upperInclusive);
+                hasUpper ? new SqlValueKey([upper]) : null, upperInclusive, candidateCap);
 
         // Unions, in ascending key order, the row addresses whose key lies
         // within the optional composite bounds. Each bound is a (possibly
@@ -487,7 +493,16 @@ internal sealed class HeapSeekCache
         // bound is a keyset cursor (WHERE a > @x OR (a = @x AND b > @y)).
         // SortedSet.GetViewBetween gives the in-range keys in O(log n + matches).
         public List<(int Page, int Slot)> OrderedCandidates(
-            SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive)
+            SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive) =>
+            this.CappedCandidates(lower, lowerInclusive, upper, upperInclusive, int.MaxValue)!;
+
+        // The walk above with an abort: returns null the moment the collected rid
+        // count passes <paramref name="candidateCap"/>. A caller that knows the
+        // range stops paying for itself past some share of the table passes that
+        // share here, so a whole-table range stops after a quarter of the walk
+        // instead of building a list it discards. int.MaxValue is uncapped.
+        private List<(int Page, int Slot)>? CappedCandidates(
+            SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, int candidateCap)
         {
             var sorted = this.EnsureSorted();
             var result = new List<(int Page, int Slot)>();
@@ -506,7 +521,11 @@ internal sealed class HeapSeekCache
                 if (upper is { } uk && !upperInclusive && KeyTupleComparer.Instance.Compare(key, uk) == 0)
                     continue;
                 if (this.Buckets.TryGetValue(key, out var bucket))
+                {
+                    if (result.Count + bucket.Count > candidateCap)
+                        return null;
                     result.AddRange(bucket);
+                }
             }
 
             return result;
