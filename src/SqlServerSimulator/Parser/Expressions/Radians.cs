@@ -26,8 +26,7 @@ internal sealed class Radians(ParserContext context) : Expression
         return v.IsNull ? SqlValue.Null(resultType) : resultType.Category switch
         {
             SqlTypeCategory.Integer => DegreesRadians.IntegerArm(MathScalars.AsLong(v), DegreesRadians.DegreesToRadiansDouble, resultType),
-            SqlTypeCategory.Decimal => DegreesRadians.DecimalArm(MathScalars.AsDecimalOrMoney(v), numerator: DegreesRadians.DecimalPi, denominator: 180m, resultType),
-            SqlTypeCategory.Money => MathScalars.FromDecimalOrMoney(resultType, MathScalars.AsDecimalOrMoney(v) * DegreesRadians.DecimalPi / 180m),
+            SqlTypeCategory.Decimal or SqlTypeCategory.Money => DegreesRadians.ExactNumericArm(MathScalars.AsDecimal38OrMoney(v), DegreesRadians.DegreesToRadiansDouble, resultType),
             SqlTypeCategory.Approximate => SqlValue.FromDouble(MathScalars.AsDouble(v) * DegreesRadians.DegreesToRadiansDouble),
             _ => throw new NotSupportedException($"RADIANS doesn't support {v.Type}.")
         };

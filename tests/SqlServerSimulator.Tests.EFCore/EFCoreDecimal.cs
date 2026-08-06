@@ -93,4 +93,27 @@ public class EFCoreDecimal
         var asDouble = context.Products.Select(p => (double)p.Price).Single();
         Assert.AreEqual(19.99, asDouble, 0.001);
     }
+
+    /// <summary>
+    /// <c>HasPrecision(38, 6)</c> — <c>numeric</c>'s own widest precision —
+    /// through the LINQ-to-SQL path: the value stores, reads back and sums at
+    /// a width no <see cref="decimal"/> arithmetic on the client would reach
+    /// on its own.
+    /// </summary>
+    [TestMethod]
+    public void WidePrecision_RoundTripsAndSums()
+    {
+        using var context = new TestDbContext(TestDbContext.CreateLedgersSimulation());
+
+        const decimal first = 12345678901234567890.123456m;
+        const decimal second = 98765432109876543210.876544m;
+        context.Ledgers.AddRange(
+            new Ledger { Id = 1, Amount = first },
+            new Ledger { Id = 2, Amount = second });
+        _ = context.SaveChanges();
+
+        Assert.AreEqual(first, context.Ledgers.Where(l => l.Id == 1).Select(l => l.Amount).Single());
+        Assert.AreEqual(first + second, context.Ledgers.Sum(l => l.Amount));
+        Assert.AreEqual(1, context.Ledgers.Count(l => l.Amount > 50000000000000000000m));
+    }
 }

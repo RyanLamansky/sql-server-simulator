@@ -512,77 +512,68 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     }
 
     /// <summary>
-    /// Non-NULL SQL <c>decimal(p, s)</c> value. The .NET <see cref="decimal"/>
+    /// Non-NULL SQL <c>decimal(p, s)</c> value. The <see cref="Decimal38"/>
     /// payload is boxed in the reference slot; <paramref name="type"/> carries
-    /// the precision and scale identity, and the payload is re-tagged to that
+    /// the precision and scale identity, and the payload is restated at that
     /// declared scale — SQL Server's value carries exactly the declared number
     /// of fractional digits, so <c>CAST(1 AS numeric(10, 2))</c> is
-    /// <c>1.00m</c> rather than <c>1m</c>, which is what a surface writing the
-    /// raw <see cref="decimal"/> (the JSON builders, <c>GetDecimal</c>) has to
-    /// see. Precision remains the caller's to validate (use
+    /// <c>1.00</c> rather than <c>1</c>, which is what a surface writing the
+    /// raw number (the JSON builders, <c>CAST … AS varchar</c>) has to see.
+    /// Precision remains the caller's to validate (use
     /// <see cref="CoerceTo(SqlType)"/> for the rounding-and-overflow path).
     /// </summary>
-    public static SqlValue FromDecimal(SqlType type, decimal value) =>
-        type is not DecimalSqlType declared
-            ? throw new ArgumentException($"{type} is not a decimal type.", nameof(type))
-            : new(type, 0, AtScale(value, declared.scale), isNull: false);
-
-    /// <summary>
-    /// Re-tags a <see cref="decimal"/> to carry <paramref name="scale"/>
-    /// fractional digits. Widening adds a zero of the target scale (.NET's
-    /// addition takes the larger operand's scale) and so leaves the numeric
-    /// value untouched; a payload carrying more digits than the declared scale
-    /// rounds half-away-from-zero, the rule SQL Server's narrowing conversions
-    /// use and the one the <c>F&lt;scale&gt;</c> rendering paths already apply.
-    /// .NET's <see cref="decimal"/> caps at 28 fractional digits and a 96-bit
-    /// mantissa, so a wider declared scale — or trailing zeros that wouldn't
-    /// fit beside the integer part — settles at the widest representation
-    /// available instead of failing.
-    /// </summary>
-    private static decimal AtScale(decimal value, int scale)
+    public static SqlValue FromDecimal(SqlType type, Decimal38 value)
     {
-        var current = value.Scale;
-        if (current == scale)
-            return value;
-        if (current > scale)
-            return decimal.Round(value, scale, MidpointRounding.AwayFromZero);
-        try
-        {
-            return value + new decimal(lo: 0, mid: 0, hi: 0, isNegative: false, scale: (byte)Math.Min(scale, 28));
-        }
-        catch (OverflowException)
-        {
-            // The trailing zeros wouldn't fit beside the integer part — the
-            // widest representation available is the value as it stands, which
-            // is the same number written with fewer of them.
-            return value;
-        }
+        if (type is not DecimalSqlType declared)
+            throw new ArgumentException($"{type} is not a decimal type.", nameof(type));
+        if (value.Scale == declared.scale)
+            return new(type, 0, value, isNull: false);
+
+        // Restating at the declared scale rounds half away from zero when it
+        // narrows and pads zeros when it widens; only a value whose digits
+        // then leave numeric's own 38 has nowhere to go.
+        return Decimal38.TryRescale(value, Decimal38.MaxPrecision, declared.scale, out var scaled)
+            ? new(type, 0, scaled, isNull: false)
+            : throw SimulatedSqlException.ArithmeticOverflowToNumeric();
     }
 
     /// <summary>
-    /// Non-NULL SQL <c>money</c> / <c>smallmoney</c> value. The decimal
-    /// input is rounded half-away-from-zero to scale 4 and stored as a
-    /// scaled int64 (smallmoney is range-checked at encode time, since it
-    /// shares this representation with money).
+    /// Non-NULL SQL <c>decimal(p, s)</c> value from a .NET
+    /// <see cref="decimal"/> — the parameter-binding and client-supplied-value
+    /// convenience form. Every .NET <see cref="decimal"/> is inside
+    /// <see cref="Decimal38"/>'s range, so the crossing is lossless.
     /// </summary>
-    public static SqlValue FromMoney(SqlType type, decimal value)
+    public static SqlValue FromDecimal(SqlType type, decimal value) =>
+        FromDecimal(type, Decimal38.FromDotNetDecimal(value));
+
+    /// <summary>
+    /// Non-NULL SQL <c>money</c> / <c>smallmoney</c> value. The input is
+    /// rounded half-away-from-zero to scale 4 and stored as a scaled int64
+    /// (smallmoney is range-checked here too, since it shares this
+    /// representation with money). A magnitude past the target's range raises
+    /// the exact-numeric source's own error, which is what a conversion out of
+    /// a <c>decimal</c> reports; a conversion whose source family reports
+    /// something else settles that at its own call site.
+    /// </summary>
+    public static SqlValue FromMoney(SqlType type, Decimal38 value)
     {
         if (type != SqlType.Money && type != SqlType.SmallMoney)
             throw new ArgumentException($"{type} is not a money type.", nameof(type));
-        var scaled = decimal.Round(value * MoneySqlType.ScaleFactor, 0, MidpointRounding.AwayFromZero);
-        long units;
-        try
+        if (!Decimal38.TryRescale(value, Decimal38.MaxPrecision, MoneySqlType.Scale, out var scaled)
+            || scaled.Magnitude > (scaled.IsNegative ? (UInt128)long.MaxValue + 1 : long.MaxValue))
         {
-            units = checked((long)scaled);
+            throw SimulatedSqlException.ArithmeticOverflowToTarget(type.ToString()!, state: 4);
         }
-        catch (OverflowException)
-        {
-            throw SimulatedSqlException.ArithmeticOverflowToTarget(type.ToString()!);
-        }
+
+        var units = scaled.IsNegative ? unchecked(-(long)scaled.Magnitude) : (long)scaled.Magnitude;
         return type == SqlType.SmallMoney && units is < int.MinValue or > int.MaxValue
-            ? throw SimulatedSqlException.ArithmeticOverflowToTarget("smallmoney")
+            ? throw SimulatedSqlException.ArithmeticOverflowToTarget("smallmoney", state: 4)
             : new(type, units, null, isNull: false);
     }
+
+    /// <summary>Non-NULL SQL <c>money</c> / <c>smallmoney</c> value from a .NET <see cref="decimal"/>.</summary>
+    public static SqlValue FromMoney(SqlType type, decimal value) =>
+        FromMoney(type, Decimal38.FromDotNetDecimal(value));
 
     /// <summary>
     /// Internal constructor for the storage-layer decoder: the on-disk
@@ -727,25 +718,58 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             ? throw new InvalidOperationException($"Value is {this.Type}, not hierarchyid.")
             : (byte[])this.reference!;
 
-    /// <summary>Returns the value as <see cref="decimal"/>. Throws if NULL or not a decimal-typed value.</summary>
-    public decimal AsDecimal => this.IsNull
+    /// <summary>
+    /// Returns the exact value of a <c>decimal</c> / <c>numeric</c>, all 38
+    /// digits of it — the internal accessor every computation site reads.
+    /// Throws if NULL or not a decimal-typed value.
+    /// </summary>
+    public Decimal38 AsDecimal38 => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
         : this.Type is not DecimalSqlType
             ? throw new InvalidOperationException($"Value is {this.Type}, not a decimal type.")
-            : (decimal)this.reference!;
+            : (Decimal38)this.reference!;
 
     /// <summary>
-    /// Returns the money/smallmoney value as a <see cref="decimal"/> carrying
-    /// money's fixed scale of 4 — dividing the scaled integer alone would drop
-    /// trailing zeros the real value keeps (<c>CAST(1 AS money)</c> is
-    /// <c>1.0000m</c>), which shows wherever the raw <see cref="decimal"/>
-    /// reaches a surface.
+    /// Returns the value as a .NET <see cref="decimal"/> — the client-boundary
+    /// accessor, shedding trailing fractional zeros where that is what it takes
+    /// to fit, exactly as SqlClient's own reader does. Throws if NULL, not a
+    /// decimal-typed value, or wider than a .NET <see cref="decimal"/> holds.
     /// </summary>
-    public decimal AsMoney => this.IsNull
-        ? throw new InvalidOperationException("Value is NULL.")
-        : this.Type != SqlType.Money && this.Type != SqlType.SmallMoney
-            ? throw new InvalidOperationException($"Value is {this.Type}, not a money type.")
-            : AtScale(this.primitive / (decimal)MoneySqlType.ScaleFactor, MoneySqlType.Scale);
+    /// <remarks>
+    /// SqlClient answers a minority of non-fitting values with
+    /// <c>SqlTypeException("Invalid numeric precision/scale.")</c> instead of
+    /// <see cref="OverflowException"/>, from an internal precision-scale check
+    /// whose trigger is value-dependent in a way black-box probing couldn't
+    /// pin. The one exception is raised uniformly here.
+    /// </remarks>
+    public decimal AsDecimal => Decimal38.TryToDotNetDecimal(this.AsDecimal38, out var result)
+        ? result
+        : throw new OverflowException("Conversion overflows.");
+
+    /// <summary>
+    /// Returns the money/smallmoney value carrying money's fixed scale of 4 —
+    /// the scaled integer alone would drop trailing zeros the real value keeps
+    /// (<c>CAST(1 AS money)</c> is <c>1.0000</c>), which shows wherever the raw
+    /// number reaches a surface.
+    /// </summary>
+    public Decimal38 AsMoneyDecimal38
+    {
+        get
+        {
+            var units = this.AsMoneyScaledUnits;
+            var magnitude = units < 0 ? (UInt128)(ulong)-units : (UInt128)(ulong)units;
+            return Decimal38.FromParts(magnitude, units < 0, MoneySqlType.Scale);
+        }
+    }
+
+    /// <summary>
+    /// Returns the money/smallmoney value as a .NET <see cref="decimal"/> at
+    /// money's fixed scale of 4. Money's whole range fits, so this crossing
+    /// never sheds or raises.
+    /// </summary>
+    public decimal AsMoney => Decimal38.TryToDotNetDecimal(this.AsMoneyDecimal38, out var result)
+        ? result
+        : throw new OverflowException("Conversion overflows.");
 
     /// <summary>Returns the raw scaled-int64 representation of a money/smallmoney value (storage-layer use only).</summary>
     internal long AsMoneyScaledUnits => this.IsNull
@@ -821,7 +845,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                     : this.Type == SqlType.UniqueIdentifier
                         ? (Guid)this.reference! == (Guid)other.reference!
                         : this.Type is DecimalSqlType
-                            ? (decimal)this.reference! == (decimal)other.reference!
+                            ? (Decimal38)this.reference! == (Decimal38)other.reference!
                             : this.Type == SqlType.HierarchyId
                                 ? ((byte[])this.reference!).AsSpan().SequenceEqual((byte[])other.reference!)
                                 : this.IdentityPrimitive == other.IdentityPrimitive && ReferenceContentEquals(this.reference, other.reference)));
@@ -916,7 +940,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             {
                 SqlTypeCategory.Integer or SqlTypeCategory.DateTime or SqlTypeCategory.Money
                     => this.primitive.CompareTo(other.primitive),
-                SqlTypeCategory.Decimal => this.AsDecimal.CompareTo(other.AsDecimal),
+                SqlTypeCategory.Decimal => this.AsDecimal38.CompareTo(other.AsDecimal38),
                 SqlTypeCategory.Approximate => this.Type == SqlType.Float
                     ? this.AsDouble.CompareTo(other.AsDouble)
                     : this.AsSingle.CompareTo(other.AsSingle),
@@ -964,7 +988,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     {
         (null, null) => true,
         (string x, string y) => string.Equals(x, y, StringComparison.Ordinal),
-        (decimal x, decimal y) => x == y && x.Scale == y.Scale,
+        (Decimal38 x, Decimal38 y) => x == y && x.Scale == y.Scale,
         (DateTimeOffset x, DateTimeOffset y) => x.EqualsExact(y),
         (byte[] x, byte[] y) => x.AsSpan().SequenceEqual(y),
         _ => Equals(a, b),
@@ -1015,7 +1039,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         }
         else if (this.Type is DecimalSqlType)
         {
-            hash.Add((decimal)this.reference!);
+            // Keyed on the canonical form, so a declared scale's trailing zeros
+            // don't split the hash the way they don't split equality.
+            hash.Add((Decimal38)this.reference!);
         }
         else if (this.Type == SqlType.HierarchyId)
         {
@@ -1073,10 +1099,10 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         DateTimeOffsetSqlType dto => $"'{FormatDateTimeOffset(this.AsDateTimeOffset, dto.precision)}'",
         _ when this.Type == SqlType.UniqueIdentifier => $"'{this.AsGuid:D}'",
         _ when this.Type == SqlType.HierarchyId => $"'{HierarchyIdSqlType.PathToString(this.AsHierarchyId)}'",
-        DecimalSqlType d => this.AsDecimal.ToString($"F{d.scale}", CultureInfo.InvariantCulture),
+        DecimalSqlType => this.AsDecimal38.ToString(),
         _ when this.Type == SqlType.Float => this.AsDouble.ToString("G15", CultureInfo.InvariantCulture),
         _ when this.Type == SqlType.Real => this.AsSingle.ToString("G7", CultureInfo.InvariantCulture),
-        _ when this.Type == SqlType.Money || this.Type == SqlType.SmallMoney => this.AsMoney.ToString("F4", CultureInfo.InvariantCulture),
+        _ when this.Type == SqlType.Money || this.Type == SqlType.SmallMoney => this.AsMoneyDecimal38.ToString(),
         SqlVariantSqlType => this.AsVariantInner.AsCurrentType(),
         _ => "?",
     };

@@ -953,8 +953,9 @@ public sealed partial class BacpacBuilder
     /// Encodes a decimal in DACFx's BCP wire format:
     /// <c>[1-byte length N][precision][scale][sign][N-3 mantissa bytes LE]</c>.
     /// Mantissa width comes from the precision bucket (≤9 → 4, ≤19 → 8, ≤28 → 12,
-    /// ≤38 → 16 bytes). <c>System.Decimal.GetBits</c> covers up to 28 digits;
-    /// values needing more precision fall outside the simulator's storage model.
+    /// ≤38 → 16 bytes). The harness takes its values as .NET
+    /// <see cref="decimal"/>s, so <c>System.Decimal.GetBits</c> bounds what it
+    /// can write at 28 digits — narrower than the 38 the reader accepts.
     /// </summary>
     private static void EncodeDecimal(Stream stream, decimal? value, string args)
     {

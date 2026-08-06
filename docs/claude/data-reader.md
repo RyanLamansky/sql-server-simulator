@@ -7,6 +7,9 @@ Typed accessors read `SqlValue` via the cursor indexer, unwrap via `As*` (no box
 - A **`datetime` rounds to whole milliseconds at the ADO.NET boundary** (`DateTimeSqlType.RoundToClientMilliseconds`, in `GetDateTime` + `SqlValue.ToObject` — the latter covers `GetValue`/`GetFieldValue`/output-param writeback) matching SqlClient's `.000`/`.003`/`.007`; the engine keeps full 1/300-second resolution internally, so only the client surface rounds.
   (The TDS endpoint transfers the full internal resolution and lets real SqlClient do the same client-side rounding — see [`tds-endpoint.md`](tds-endpoint.md).)
 - `GetDecimal` covers Decimal/Numeric/Money/SmallMoney; `GetFieldValue<T>` short-circuits EF's `DateOnly`-over-`Date` / `TimeOnly`-over-`Time`.
+- A **`decimal` wider than a .NET `decimal` sheds or raises at the boundary**, reproducing SqlClient's own rule rather than the server's: `GetDecimal` / `GetValue` / `GetFieldValue<decimal>` / `ExecuteScalar` drop trailing *fractional* zeros until the value fits and hand back what's left (`CAST(1 AS decimal(38, 30))` arrives at scale 28, `CAST('8000000000000000000000000000.0' AS decimal(38, 1))` at scale 0), and raise `OverflowException("Conversion overflows.")` when nothing can be shed (`CAST('79228162514264337593543950336' AS decimal(38, 0))`, one past `decimal.MaxValue`).
+  `GetFieldType` / `GetDataTypeName` answer `System.Decimal` / `decimal` whatever the width.
+  `SqlDecimal` — the accessor real SqlClient offers for full 38-digit fidelity — is not part of the simulator's public surface; the TDS endpoint carries the full width to real SqlClient, where `GetSqlDecimal` reads it (see [`tds-endpoint.md`](tds-endpoint.md)).
 - `GetOrdinal` two-pass linear (case-sensitive then -insensitive, SqlClient precedence).
   `HasRows` sticky.
   `GetChar(int)` always raises `InvalidCastException`.
@@ -113,3 +116,7 @@ A non-MARS wire connection still rejects the overlap client-side in SqlClient, s
 
 **`GetBytes` / `GetChars` materialize, don't stream**: each call decodes the full column value via `RowDecoder` and slices into the caller's buffer.
 Per-call observation matches SqlClient; the streaming-memory guarantee doesn't.
+
+**A non-fitting `decimal` always raises `OverflowException`.**
+SqlClient answers a minority of them with `System.Data.SqlTypes.SqlTypeException("Invalid numeric precision/scale.")` instead — the split is value-dependent even between operands whose precision, scale and byte length are identical (`123456789012345678901234567890.0` raises the `SqlTypeException` where `111111111111111111111111111111.0` raises the `OverflowException`), and it comes from `SqlDecimal.ConvertToPrecScale` receiving a negative scale inside `SqlBuffer.get_Decimal`.
+That is a SqlClient internal rather than a server behavior, so the one exception type is what the reader raises.

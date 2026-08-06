@@ -1,6 +1,5 @@
 using System.Buffers.Binary;
 using System.Data;
-using System.Numerics;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Network;
@@ -915,28 +914,9 @@ internal static class TdsTypeCodec
         body[2] = type.precision;
         body[3] = type.scale;
 
-        var number = inner.AsDecimal;
-        body[4] = number >= 0 ? (byte)1 : (byte)0;
-
-        Span<int> bits = stackalloc int[4];
-        _ = decimal.GetBits(Math.Abs(number), bits);
-        var storedScale = (bits[3] >> 16) & 0xFF;
-        var magnitude = ((BigInteger)(uint)bits[2] << 64) | ((ulong)(uint)bits[1] << 32) | (uint)bits[0];
-        if (storedScale < type.scale)
-        {
-            magnitude *= BigInteger.Pow(10, type.scale - storedScale);
-        }
-        else if (storedScale > type.scale)
-        {
-            var divisor = BigInteger.Pow(10, storedScale - type.scale);
-            var (quotient, remainder) = BigInteger.DivRem(magnitude, divisor);
-            if (remainder * 2 >= divisor)
-                quotient++;
-
-            magnitude = quotient;
-        }
-
-        _ = magnitude.TryWriteBytes(body.AsSpan(5, magnitudeBytes), out _, isUnsigned: true, isBigEndian: false);
+        var number = AtDeclaredScale(inner.AsDecimal38, type);
+        body[4] = number.IsNegative ? (byte)0 : (byte)1;
+        BinaryPrimitives.WriteUInt128LittleEndian(body.AsSpan(5, magnitudeBytes), number.Magnitude);
         return body;
     }
 
@@ -976,34 +956,24 @@ internal static class TdsTypeCodec
         var magnitudeBytes = MagnitudeBytes(type.precision);
         writer.WriteByte((byte)(magnitudeBytes + 1));
 
-        var number = value.AsDecimal;
-        writer.WriteByte(number >= 0 ? (byte)1 : (byte)0);
-
-        Span<int> bits = stackalloc int[4];
-        _ = decimal.GetBits(Math.Abs(number), bits);
-        var storedScale = (bits[3] >> 16) & 0xFF;
-        var magnitude = ((BigInteger)(uint)bits[2] << 64) | ((ulong)(uint)bits[1] << 32) | (uint)bits[0];
-        if (storedScale < type.scale)
-        {
-            magnitude *= BigInteger.Pow(10, type.scale - storedScale);
-        }
-        else if (storedScale > type.scale)
-        {
-            var divisor = BigInteger.Pow(10, storedScale - type.scale);
-            var (quotient, remainder) = BigInteger.DivRem(magnitude, divisor);
-            if (remainder * 2 >= divisor)
-                quotient++;
-
-            magnitude = quotient;
-        }
+        var number = AtDeclaredScale(value.AsDecimal38, type);
+        writer.WriteByte(number.IsNegative ? (byte)0 : (byte)1);
 
         Span<byte> raw = stackalloc byte[16];
-        if (!magnitude.TryWriteBytes(raw[..magnitudeBytes], out var written, isUnsigned: true, isBigEndian: false))
-            throw new OverflowException($"decimal({type.precision}, {type.scale}) value does not fit its wire width.");
-
-        raw[written..magnitudeBytes].Clear();
+        BinaryPrimitives.WriteUInt128LittleEndian(raw, number.Magnitude);
         writer.WriteBytes(raw[..magnitudeBytes]);
     }
+
+    /// <summary>
+    /// The value restated at the column's declared scale, which is what the
+    /// wire mantissa is: the 38-digit magnitude little-endian behind a sign
+    /// byte, with no rescaling left to do once the value carries the scale the
+    /// metadata announced.
+    /// </summary>
+    private static Decimal38 AtDeclaredScale(in Decimal38 value, DecimalSqlType type) =>
+        value.Scale == type.scale ? value
+        : Decimal38.TryRescale(value, type.precision, type.scale, out var restated) ? restated
+        : throw new OverflowException($"decimal({type.precision}, {type.scale}) value does not fit its wire width.");
 
     private static void WriteSingleByteString(TdsTokenWriter writer, Collation? collation, short declaredLength, SqlValue value)
     {

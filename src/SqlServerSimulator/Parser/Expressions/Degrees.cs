@@ -29,8 +29,7 @@ internal sealed class Degrees(ParserContext context) : Expression
         return v.IsNull ? SqlValue.Null(resultType) : resultType.Category switch
         {
             SqlTypeCategory.Integer => DegreesRadians.IntegerArm(MathScalars.AsLong(v), DegreesRadians.RadiansToDegreesDouble, resultType),
-            SqlTypeCategory.Decimal => DegreesRadians.DecimalArm(MathScalars.AsDecimalOrMoney(v), numerator: 180m, denominator: DegreesRadians.DecimalPi, resultType),
-            SqlTypeCategory.Money => MathScalars.FromDecimalOrMoney(resultType, MathScalars.AsDecimalOrMoney(v) * 180m / DegreesRadians.DecimalPi),
+            SqlTypeCategory.Decimal or SqlTypeCategory.Money => DegreesRadians.ExactNumericArm(MathScalars.AsDecimal38OrMoney(v), DegreesRadians.RadiansToDegreesDouble, resultType),
             SqlTypeCategory.Approximate => SqlValue.FromDouble(MathScalars.AsDouble(v) * DegreesRadians.RadiansToDegreesDouble),
             _ => throw new NotSupportedException($"DEGREES doesn't support {v.Type}.")
         };

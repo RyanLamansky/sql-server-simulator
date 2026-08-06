@@ -108,7 +108,11 @@ internal sealed class Format : Expression
     private static string FormatValue(SqlValue v, string format, CultureInfo culture) => v.Type switch
     {
         TinyIntSqlType or SmallIntSqlType or Int32SqlType or BigIntSqlType => v.CoerceTo(SqlType.BigInt).AsInt64.ToString(format, culture),
-        DecimalSqlType => v.AsDecimal.ToString(format, culture),
+        // A value a .NET decimal holds formats through .NET's own engine; a
+        // wider one lays its digits out directly, which is what lets real's
+        // full-38-digit rendering come back.
+        DecimalSqlType when Decimal38.TryToDotNetDecimal(v.AsDecimal38, out var narrow) => narrow.ToString(format, culture),
+        DecimalSqlType => WideNumericFormat.Render(v.AsDecimal38, format, culture),
         MoneySqlType or SmallMoneySqlType => v.AsMoney.ToString(format, culture),
         FloatSqlType => WithoutNegativeZero(v.AsDouble).ToString(format, culture),
         RealSqlType => WithoutNegativeZero(v.AsSingle).ToString(format, culture),

@@ -65,7 +65,7 @@ internal readonly partial struct SqlValue
         // dozen type tests. Identical to that branch — see the
         // <see cref="CoerceToDecimal"/> arm it duplicates.
         if (target is DecimalSqlType hotDecimalTarget && this.Type is DecimalSqlType)
-            return FromDecimal(hotDecimalTarget, RoundAndOverflowCheck(this.AsDecimal, hotDecimalTarget));
+            return FromDecimal(hotDecimalTarget, RescaleOrOverflow(this.AsDecimal38, hotDecimalTarget, this.Type));
 
         if (SqlType.IsIntegerCategory(this.Type) && SqlType.IsIntegerCategory(target))
         {
@@ -248,14 +248,18 @@ internal readonly partial struct SqlValue
         // decimal conversion.
         if (target == SqlType.Float || target == SqlType.Real)
             return this.CoerceToApproximate(target);
-        if (SqlType.IsApproximateNumericCategory(this.Type))
-            return this.CoerceFromApproximate(target);
 
         // money / smallmoney crossings: string parses with currency-symbol
         // and thousands-comma stripping (Msg 235 on bad input), integer/
-        // decimal widen straight in via the scale-4 storage rep.
+        // decimal widen straight in via the scale-4 storage rep, and an
+        // approximate source reads its exact binary value at scale 4. The
+        // money target is tested ahead of the approximate source so that
+        // last pair reaches the money arm rather than falling to Msg 529.
         if (SqlType.IsMoneyCategory(target))
             return this.CoerceToMoney(target);
+
+        if (SqlType.IsApproximateNumericCategory(this.Type))
+            return this.CoerceFromApproximate(target);
         if (SqlType.IsMoneyCategory(this.Type))
             return this.CoerceFromMoney(target);
 
@@ -303,7 +307,7 @@ internal readonly partial struct SqlValue
         DateTimeOffsetSqlType => FromDateTime(this.AsDateTimeOffset.DateTime),
         VarbinarySqlType or BinarySqlType => FromDateTime(DecodeLegacyDateTimeFromBytes(this.AsBytes)),
         _ when SqlType.IsIntegerCategory(this.Type) => CoerceIntegerDaysToDateTime(AsInt64Widened(this)),
-        DecimalSqlType => CoerceFractionalDaysToDateTime(this.AsDecimal),
+        DecimalSqlType => CoerceFractionalDaysToDateTime(FractionalDaysOrOverflow(this.AsDecimal38, SqlType.DateTime)),
         _ when this.Type == SqlType.Float => CoerceFractionalDaysToDateTime((decimal)this.AsDouble),
         _ when this.Type == SqlType.Real => CoerceFractionalDaysToDateTime((decimal)this.AsSingle),
         _ when SqlType.IsMoneyCategory(this.Type) => CoerceFractionalDaysToDateTime(this.AsMoney),
@@ -320,7 +324,7 @@ internal readonly partial struct SqlValue
         DateTimeOffsetSqlType => FromSmallDateTime(this.AsDateTimeOffset.DateTime),
         VarbinarySqlType or BinarySqlType => FromSmallDateTime(DecodeSmallDateTimeFromBytes(this.AsBytes)),
         _ when SqlType.IsIntegerCategory(this.Type) => CoerceIntegerDaysToSmallDateTime(AsInt64Widened(this)),
-        DecimalSqlType => CoerceFractionalDaysToSmallDateTime(this.AsDecimal),
+        DecimalSqlType => CoerceFractionalDaysToSmallDateTime(FractionalDaysOrOverflow(this.AsDecimal38, SqlType.SmallDateTime)),
         _ when this.Type == SqlType.Float => CoerceFractionalDaysToSmallDateTime((decimal)this.AsDouble),
         _ when this.Type == SqlType.Real => CoerceFractionalDaysToSmallDateTime((decimal)this.AsSingle),
         _ when SqlType.IsMoneyCategory(this.Type) => CoerceFractionalDaysToSmallDateTime(this.AsMoney),
@@ -1008,12 +1012,12 @@ internal readonly partial struct SqlValue
 
     private SqlValue CoerceToMoney(SqlType target) => this.Type switch
     {
-        _ when SqlType.IsStringCategory(this.Type) => FromMoney(target, ParseMoneyString(this.AsString)),
-        _ when SqlType.IsIntegerCategory(this.Type) => FromMoney(target, AsInt64Widened(this)),
-        DecimalSqlType => FromMoney(target, this.AsDecimal),
-        _ when SqlType.IsMoneyCategory(this.Type) => FromMoney(target, this.AsMoney),
-        _ when this.Type == SqlType.Float => FromMoney(target, (decimal)this.AsDouble),
-        _ when this.Type == SqlType.Real => FromMoney(target, (decimal)this.AsSingle),
+        _ when SqlType.IsStringCategory(this.Type) => this.MoneyFromNonDecimalSource(target, Decimal38.FromDotNetDecimal(ParseMoneyString(this.AsString))),
+        _ when SqlType.IsIntegerCategory(this.Type) => this.MoneyFromNonDecimalSource(target, Decimal38.FromInt64(AsInt64Widened(this))),
+        DecimalSqlType => FromMoney(target, this.AsDecimal38),
+        _ when SqlType.IsMoneyCategory(this.Type) => this.MoneyFromNonDecimalSource(target, this.AsMoneyDecimal38),
+        _ when this.Type == SqlType.Float => FromMoney(target, FloatToMoneyChecked(this.AsDouble, target)),
+        _ when this.Type == SqlType.Real => FromMoney(target, FloatToMoneyChecked(this.AsSingle, target)),
         // varbinary / binary → money / smallmoney: the payload's rightmost
         // 8 (money) / 4 (smallmoney) bytes are the raw scale-4 currency units,
         // read big-endian as a two's-complement integer then divided by 10000.
@@ -1022,6 +1026,33 @@ internal readonly partial struct SqlValue
         VarbinarySqlType or BinarySqlType => FromMoney(target, VarbinaryToMoneyUnits(this.AsBytes, target)),
         _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
     };
+
+    /// <summary>
+    /// <c>money</c> / <c>smallmoney</c> from a source family that reports its
+    /// own overflow error rather than the exact-numeric one
+    /// <see cref="FromMoney(SqlType, Decimal38)"/> raises. Probed against
+    /// SQL Server 2025: a <c>tinyint</c> / <c>smallint</c> / <c>int</c> source
+    /// reports the value-bearing Msg 220 at state 3, a <c>money</c> source
+    /// narrowing to <c>smallmoney</c> reports Msg 237 at state 3, and a
+    /// <c>bigint</c> or character source reports Msg 8115's generic
+    /// "expression" wording at state 2.
+    /// </summary>
+    private SqlValue MoneyFromNonDecimalSource(SqlType target, in Decimal38 value)
+    {
+        var limit = target == SqlType.SmallMoney ? (UInt128)int.MaxValue + 1 : (UInt128)long.MaxValue + 1;
+        if (Decimal38.TryRescale(value, Decimal38.MaxPrecision, MoneySqlType.Scale, out var scaled)
+            && scaled.Magnitude <= (scaled.IsNegative ? limit : limit - 1))
+        {
+            return FromMoney(target, scaled);
+        }
+
+        throw SqlType.IsIntegerCategory(this.Type) && this.Type != SqlType.BigInt
+            ? SimulatedSqlException.ArithmeticOverflowForDataType(
+                target.SqlServerName, this.CoerceTo(SqlType.BigInt).AsInt64.ToString(CultureInfo.InvariantCulture), state: 3)
+            : SqlType.IsMoneyCategory(this.Type)
+                ? SimulatedSqlException.InsufficientResultSpaceForMoneyToSmallMoney()
+                : SimulatedSqlException.ArithmeticOverflow(target.SqlServerName);
+    }
 
     private SqlValue CoerceFromMoney(SqlType target)
     {
@@ -1033,7 +1064,7 @@ internal readonly partial struct SqlValue
         if (SqlType.IsStringCategory(target))
             return FromString(target, m.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
         if (target is DecimalSqlType targetDecimal)
-            return FromDecimal(targetDecimal, RoundAndOverflowCheck(m, targetDecimal));
+            return FromDecimal(targetDecimal, RescaleOrOverflow(this.AsMoneyDecimal38, targetDecimal, this.Type));
         if (SqlType.IsMoneyCategory(target))
             return FromMoney(target, m);
         if (target == SqlType.Float)
@@ -1147,7 +1178,7 @@ internal readonly partial struct SqlValue
         {
             _ when SqlType.IsStringCategory(this.Type) => ParseStringToDouble(this.AsString, this.Type),
             _ when SqlType.IsIntegerCategory(this.Type) => AsInt64Widened(this),
-            DecimalSqlType => DecimalToDouble(this.AsDecimal),
+            DecimalSqlType => this.AsDecimal38.ToDouble(),
             _ when this.Type == SqlType.Float => this.AsDouble,
             _ when this.Type == SqlType.Real => this.AsSingle,
             _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
@@ -1155,30 +1186,13 @@ internal readonly partial struct SqlValue
         return target == SqlType.Float ? FromDouble(d) : FromSingle((float)d);
     }
 
-    /// <summary>
-    /// Widens a <c>decimal</c> to <see cref="double"/>, folding away .NET's
-    /// signed zero. SQL Server's exact numerics have no negative zero — real
-    /// reports <c>CAST(0.0 * -1 AS float)</c> as <c>0</c> — but .NET's
-    /// <see cref="decimal"/> carries a sign bit through a zero result
-    /// (<c>0.0m * -1</c> and <c>decimal.Negate(0m)</c> both set it), and the
-    /// widening conversion would turn that into an IEEE negative zero real
-    /// only produces from <c>float</c> / <c>real</c> arithmetic.
-    /// </summary>
-    private static double DecimalToDouble(decimal value) => value == 0 ? 0d : (double)value;
-
-    /// <summary>
-    /// Narrows a <c>decimal</c> to <see cref="float"/>, folding away .NET's
-    /// signed zero for the reason <see cref="DecimalToDouble"/> gives.
-    /// </summary>
-    private static float DecimalToSingle(decimal value) => value == 0 ? 0f : (float)value;
-
     private SqlValue CoerceFromApproximate(SqlType target)
     {
         var d = this.Type == SqlType.Float ? this.AsDouble : (double)this.AsSingle;
         if (SqlType.IsStringCategory(target))
             return FromString(target, FormatDouble(d, this.Type == SqlType.Float ? 15 : 7));
         if (target is DecimalSqlType targetDecimal)
-            return FromDecimal(targetDecimal, RoundAndOverflowCheck((decimal)d, targetDecimal));
+            return FromDecimal(targetDecimal, FloatToDecimal38(d, targetDecimal, this.Type));
         if (target == SqlType.DateTime)
             return this.CoerceToDateTime();
         if (target == SqlType.SmallDateTime)
@@ -1238,10 +1252,10 @@ internal readonly partial struct SqlValue
 
     private SqlValue CoerceToDecimal(DecimalSqlType target) => this.Type switch
     {
-        _ when SqlType.IsStringCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(ParseDecimal(this.AsString, this.Type, target), target)),
-        _ when SqlType.IsIntegerCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(AsInt64Widened(this), target)),
-        DecimalSqlType => FromDecimal(target, RoundAndOverflowCheck(this.AsDecimal, target)),
-        _ when SqlType.IsMoneyCategory(this.Type) => FromDecimal(target, RoundAndOverflowCheck(this.AsMoney, target)),
+        _ when SqlType.IsStringCategory(this.Type) => FromDecimal(target, ParseDecimal(this.AsString, this.Type, target)),
+        _ when SqlType.IsIntegerCategory(this.Type) => FromDecimal(target, RescaleOrOverflow(Decimal38.FromInt64(AsInt64Widened(this)), target, this.Type)),
+        DecimalSqlType => FromDecimal(target, RescaleOrOverflow(this.AsDecimal38, target, this.Type)),
+        _ when SqlType.IsMoneyCategory(this.Type) => FromDecimal(target, RescaleOrOverflow(this.AsMoneyDecimal38, target, this.Type)),
         // float / real → decimal is a permitted conversion (implicit and
         // explicit), not the Msg 529 rejection: an out-of-range magnitude
         // raises Msg 8115 arithmetic overflow. real converts from its own
@@ -1249,8 +1263,8 @@ internal readonly partial struct SqlValue
         // ~7-significant-digit representation real does. Probe-confirmed
         // against SQL Server 2025 (2026-07-23; ODBC / pyodbc binds a Python
         // float parameter as float, so SQLAlchemy's decimal inserts land here).
-        _ when this.Type == SqlType.Float => FromDecimal(target, RoundAndOverflowCheck(FloatToDecimalChecked(this.AsDouble), target)),
-        _ when this.Type == SqlType.Real => FromDecimal(target, RoundAndOverflowCheck(FloatToDecimalChecked(this.AsSingle), target)),
+        _ when this.Type == SqlType.Float => FromDecimal(target, FloatToDecimal38(this.AsDouble, target, SqlType.Float)),
+        _ when this.Type == SqlType.Real => FromDecimal(target, FloatToDecimal38(this.AsSingle, target, SqlType.Real)),
         // varbinary / binary → decimal / numeric is disallowed: SQL Server
         // raises Msg 8114 ("Error converting data type varbinary to numeric.")
         // rather than the Msg 529 explicit-conversion rejection used elsewhere.
@@ -1260,44 +1274,41 @@ internal readonly partial struct SqlValue
     };
 
     /// <summary>
-    /// float (double) / real (single) → decimal with the .NET out-of-range
-    /// <see cref="OverflowException"/> mapped to SQL Server's Msg 8115
-    /// arithmetic overflow (NaN / ±Infinity / magnitude past decimal's range).
-    /// The overload keeps real's narrower conversion distinct from float's.
+    /// <c>float</c> / <c>real</c> → <c>decimal</c>, reading the operand's
+    /// <b>exact</b> binary value and rounding half away from zero at the
+    /// target's scale — real's own rule, so
+    /// <c>CAST(CAST(1.1 AS real) AS decimal(20, 10))</c> is
+    /// <c>1.1000000238</c> rather than a seven-digit approximation, and
+    /// <c>CAST(CAST(1e30 AS float) AS decimal(38, 0))</c> is the double's
+    /// exact <c>1000000000000000019884624838656</c>. NaN, an infinity or a
+    /// magnitude past the target raises Msg 8115 at real's state 6.
     /// </summary>
-    private static decimal FloatToDecimalChecked(double value)
-    {
-        try
-        {
-            return (decimal)value;
-        }
-        catch (OverflowException)
-        {
-            throw SimulatedSqlException.ArithmeticOverflowToNumeric();
-        }
-    }
+    private static Decimal38 FloatToDecimal38(double value, DecimalSqlType target, SqlType source) =>
+        Decimal38.TryFromDouble(value, target.precision, target.scale, out var result)
+            ? result
+            : throw SimulatedSqlException.ArithmeticOverflowConverting(source, "numeric", state: 6);
 
-    private static decimal FloatToDecimalChecked(float value)
-    {
-        try
-        {
-            return (decimal)value;
-        }
-        catch (OverflowException)
-        {
-            throw SimulatedSqlException.ArithmeticOverflowToNumeric();
-        }
-    }
+    /// <summary>
+    /// <c>float</c> / <c>real</c> → <c>money</c> / <c>smallmoney</c>: the same
+    /// exact-binary reading at money's fixed scale of 4. A magnitude past the
+    /// target's range is the value-bearing Msg 232 an approximate source
+    /// reports, with the six fractional digits real writes.
+    /// </summary>
+    private static Decimal38 FloatToMoneyChecked(double value, SqlType target) =>
+        Decimal38.TryFromDouble(value, MoneySqlType.Precision, MoneySqlType.Scale, out var result)
+            && result.Magnitude <= (UInt128)(target == SqlType.SmallMoney ? int.MaxValue : long.MaxValue)
+            ? result
+            : throw SimulatedSqlException.ArithmeticOverflowForType(target.SqlServerName, value, state: 2);
 
     private SqlValue CoerceFromDecimal(SqlType target)
     {
-        var d = this.AsDecimal;
+        var d = this.AsDecimal38;
         if (SqlType.IsStringCategory(target))
-            return FromString(target, FormatDecimal(d, ((DecimalSqlType)this.Type).scale));
+            return FromString(target, d.ToString());
         if (target == SqlType.Float)
-            return FromDouble(DecimalToDouble(d));
+            return FromDouble(d.ToDouble());
         if (target == SqlType.Real)
-            return FromSingle(DecimalToSingle(d));
+            return FromSingle((float)d.ToDouble());
         if (SqlType.IsMoneyCategory(target))
             return FromMoney(target, d);
         if (target == SqlType.DateTime)
@@ -1310,14 +1321,15 @@ internal readonly partial struct SqlValue
         // Decimal → integer truncates toward zero (verified against
         // SQL Server 2025: 1.5 → 1, -1.5 → -1, 0.5 → 0). Range overflow
         // raises the standard Msg 8115 with the target type name.
-        var truncated = decimal.Truncate(d);
+        if (!Decimal38.TryToInt64(d, out var truncated))
+            throw SimulatedSqlException.ArithmeticOverflow(target.ToString()!);
         try
         {
             return target == SqlType.Bit ? FromBoolean(truncated != 0)
                 : target == SqlType.TinyInt ? FromByte(checked((byte)truncated))
                 : target == SqlType.SmallInt ? FromInt16(checked((short)truncated))
                 : target == SqlType.Int32 ? FromInt32(checked((int)truncated))
-                : FromInt64(checked((long)truncated));
+                : FromInt64(truncated);
         }
         catch (OverflowException)
         {
@@ -1326,130 +1338,69 @@ internal readonly partial struct SqlValue
     }
 
     /// <summary>
-    /// Rounds a value to the target decimal's scale (half-away-from-zero,
-    /// matching SQL Server 2025 — verified <c>'12.345' → 12.35</c>,
-    /// <c>'-12.345' → -12.35</c>) and validates against the target's
-    /// precision. Overflow surfaces as Msg 8115 ("Arithmetic overflow error
-    /// converting to data type numeric.") to match the real-server text.
+    /// Restates <paramref name="value"/> at <paramref name="target"/>'s scale —
+    /// rounding half away from zero where that narrows it (verified against
+    /// SQL Server 2025: <c>'12.345' → 12.35</c>, <c>'-12.345' → -12.35</c>) and
+    /// padding zeros where it widens it — and validates the result against the
+    /// target's declared precision, reporting Msg 8115 in the source's own
+    /// wording when it doesn't fit.
     /// </summary>
-    private static decimal RoundAndOverflowCheck(decimal value, DecimalSqlType target)
-    {
-        // .NET decimal.Round caps at 28 fractional digits. For targets with
-        // larger declared scale, no actual rounding is needed (the input
-        // value can't have more fractional digits than .NET decimal stores
-        // anyway); skip the call.
-        // Rounding only has work to do when the value carries more fractional
-        // digits than the target declares. Asking .NET to round to a *wider*
-        // scale makes it re-scale the mantissa, which overflows on a value
-        // whose digits already fill the type — and there is nothing to round.
-        var rounded = target.scale > 28 || value.Scale <= target.scale
-            ? value
-            : decimal.Round(value, target.scale, MidpointRounding.AwayFromZero);
-
-        // Cap integer-digit count at 28 for the overflow check — a larger
-        // power of ten would itself overflow .NET decimal. Values that fit
-        // .NET decimal can't exceed 28 integer digits anyway, so a target
-        // that wide admits everything and needs no compare at all: the
-        // magnitude test is evaluated only below the cap, which also keeps
-        // the table lookup in range.
-        // |trunc(v)| > 10^k - 1 and |v| >= 10^k agree for every v (10^k is an
-        // integer, and truncation towards zero never crosses it), so the
-        // magnitude test reads the value directly rather than truncating first.
-        var integerDigits = Math.Min(28, target.precision - target.scale);
-        return integerDigits < 28 && decimal.Abs(rounded) >= Pow10Decimal[integerDigits]
-            ? throw SimulatedSqlException.ArithmeticOverflowToNumeric()
-            : rounded;
-    }
+    private static Decimal38 RescaleOrOverflow(in Decimal38 value, DecimalSqlType target, SqlType source) =>
+        Decimal38.TryRescale(value, target.precision, target.scale, out var result)
+            ? result
+            : throw DecimalConversionOverflow(value, target, source);
 
     /// <summary>
-    /// 10^0 … 10^28 — every power of ten .NET <see cref="decimal"/> can hold.
-    /// Read by the numeric overflow check, which runs on every conversion into
-    /// a <c>decimal</c> / <c>numeric</c> target: computing the bound by
-    /// repeated multiplication cost up to 28 decimal multiplies per coerced
-    /// value, which profiling put at a seventh of a decimal-summing aggregate's
-    /// whole CPU.
+    /// Msg 8115 for a value that outgrew a <c>decimal</c> / <c>numeric</c>
+    /// target, named the way real names it: the source family, with a
+    /// <c>decimal</c> source reported as <c>numeric</c> — probe-confirmed
+    /// across int / bigint / money / varchar / numeric sources.
     /// </summary>
-    private static readonly decimal[] Pow10Decimal =
-    [
-        1m, 10m, 100m, 1000m, 10000m, 100000m, 1000000m, 10000000m, 100000000m,
-        1000000000m, 10000000000m, 100000000000m, 1000000000000m, 10000000000000m,
-        100000000000000m, 1000000000000000m, 10000000000000000m, 100000000000000000m,
-        1000000000000000000m, 10000000000000000000m, 100000000000000000000m,
-        1000000000000000000000m, 10000000000000000000000m, 100000000000000000000000m,
-        1000000000000000000000000m, 10000000000000000000000000m,
-        100000000000000000000000000m, 1000000000000000000000000000m,
-        10000000000000000000000000000m,
-    ];
+    /// <remarks>
+    /// A numeric source splits the state by how far the value overran: state 6
+    /// where restating it at the target's scale would need more than 38 digits
+    /// (<c>CAST(CAST(370.93049074045129 AS decimal(18, 14)) AS
+    /// decimal(38, 37))</c>), state 8 where it stays inside 38 and merely
+    /// exceeds the declared precision (<c>CAST(CAST(123456 AS decimal(9, 0)) AS
+    /// decimal(5, 0))</c>). Every other source family reports state 8.
+    /// </remarks>
+    private static SimulatedSqlException DecimalConversionOverflow(in Decimal38 value, DecimalSqlType target, SqlType source) =>
+        source is DecimalSqlType
+            ? SimulatedSqlException.ArithmeticOverflowToTarget(
+                "numeric", Decimal38.TryRescale(value, Decimal38.MaxPrecision, target.scale, out _) ? (byte)8 : (byte)6)
+            : SimulatedSqlException.ArithmeticOverflowConverting(source, "numeric", state: 8);
 
     /// <summary>
-    /// Formats a decimal value with exactly <paramref name="scale"/> trailing
-    /// fractional digits — matching SQL Server's <c>decimal → varchar</c>
-    /// rendering, which always emits the declared scale (verified
-    /// <c>decimal(10,5) 0 → "0.00000"</c>, <c>decimal(10,0) 100 → "100"</c>).
+    /// A <c>decimal</c> read as a fractional day count for the legacy
+    /// date/time conversions. Only a magnitude far outside every legal
+    /// date leaves the .NET <see cref="decimal"/> range, so failing to cross
+    /// is real's own Msg 8115 against the date target.
     /// </summary>
-    private static string FormatDecimal(decimal value, int scale) =>
-        value.ToString(scale == 0 ? "0" : "0." + new string('0', scale), System.Globalization.CultureInfo.InvariantCulture);
+    private static decimal FractionalDaysOrOverflow(in Decimal38 value, SqlType target) =>
+        Decimal38.TryToDotNetDecimal(value, out var days)
+            ? days
+            : throw SimulatedSqlException.ArithmeticOverflow(target.ToString()!);
 
     /// <summary>
-    /// Parses a string into a <see cref="decimal"/> using SQL Server's CAST
-    /// rules: signed, decimal point optional on either side, scientific
-    /// notation accepted, surrounding whitespace stripped. Empty / whitespace-
-    /// only strings raise Msg 8114 (not 0 — verified against SQL Server 2025;
-    /// distinct from float, where empty → 0).
+    /// Parses a string into a <c>decimal</c> / <c>numeric</c> using SQL
+    /// Server's own grammar: surrounding whitespace, one leading sign, digits
+    /// with at most one decimal point, and nothing else — no exponent, no
+    /// grouping separator, no currency symbol, each of which real answers with
+    /// Msg 8114 (probe-confirmed, <c>'1e5'</c> included; empty and
+    /// whitespace-only likewise, distinct from float where empty is 0).
+    /// Fractional digits past the target's scale round half away from zero, and
+    /// the digit count is judged after that rounding.
     /// </summary>
-    private static decimal ParseDecimal(string source, SqlType sourceType, DecimalSqlType target)
-    {
-        var trimmed = source.Trim();
-        if (decimal.TryParse(
-            trimmed,
-            System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowLeadingSign,
-            System.Globalization.CultureInfo.InvariantCulture,
-            out var d))
+    private static Decimal38 ParseDecimal(string source, SqlType sourceType, DecimalSqlType target) =>
+        Decimal38.TryParse(source, target.precision, target.scale, out var parsed) switch
         {
-            return d;
-        }
-
-        // A plain-digit text .NET decimal can't hold is a magnitude question,
-        // not a syntax one: real reads the number and judges it against the
-        // target's own precision, so a text wider than the target could ever
-        // hold is Msg 8115 and everything the target would have held is the
-        // simulator's 28-digit ceiling. Scientific notation is not that shape —
-        // real answers Msg 8114 for `'1e40'` where it answers Msg 8115 for the
-        // same magnitude written out (probed 2026-08-05).
-        var integerDigits = PlainIntegerDigitCount(trimmed);
-        if (integerDigits < 0)
-            throw SimulatedSqlException.ConvertingDataTypeError(sourceType, "numeric");
-        if (integerDigits > target.precision - target.scale)
-            throw SimulatedSqlException.ArithmeticOverflowConverting(sourceType, "numeric", state: integerDigits > 38 ? (byte)6 : (byte)8);
-        throw DecimalCeiling.Exceeded($"converting the string '{trimmed}' to {target}");
-    }
-
-    /// <summary>
-    /// The number of integer digits an optionally-signed plain decimal text
-    /// carries, leading zeros excluded, or -1 when the text is anything else
-    /// (an exponent, a stray character, an empty string). Only asked once a
-    /// parse has already failed, so it never runs on the conversion hot path.
-    /// </summary>
-    private static int PlainIntegerDigitCount(string text)
-    {
-        var i = text.Length > 0 && text[0] is '+' or '-' ? 1 : 0;
-        var digits = 0;
-        var seenDigit = false;
-        for (; i < text.Length && char.IsAsciiDigit(text[i]); i++)
-        {
-            seenDigit = true;
-            if (digits > 0 || text[i] != '0')
-                digits++;
-        }
-
-        if (i < text.Length && text[i] == '.')
-        {
-            for (i++; i < text.Length && char.IsAsciiDigit(text[i]); i++)
-                seenDigit = true;
-        }
-
-        return i == text.Length && seenDigit ? digits : -1;
-    }
+            Decimal38ParseOutcome.Success => parsed,
+            Decimal38ParseOutcome.ExceedsNumericDomain =>
+                throw SimulatedSqlException.ArithmeticOverflowConverting(sourceType, "numeric", state: 6),
+            Decimal38ParseOutcome.ExceedsDeclaredPrecision =>
+                throw SimulatedSqlException.ArithmeticOverflowConverting(sourceType, "numeric", state: 8),
+            _ => throw SimulatedSqlException.ConvertingDataTypeError(sourceType, "numeric"),
+        };
 
     private SqlValue CoerceToUniqueIdentifier() => this.Type switch
     {

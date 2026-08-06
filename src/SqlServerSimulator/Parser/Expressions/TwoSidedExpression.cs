@@ -466,10 +466,10 @@ internal abstract class TwoSidedExpression : Expression
     /// per-operator scale formulas verified against SQL Server 2025), so
     /// the static <see cref="GetSqlType"/> path and this runtime path
     /// always agree on the schema. Integer / money operands canonicalize
-    /// to their decimal equivalent before the .NET-decimal compute step.
+    /// to their decimal equivalent before the compute step.
     /// Digits past the result scale round half away from zero for every
-    /// operator but division, which truncates toward zero — see
-    /// <see cref="DecimalMath"/>.
+    /// operator but division, which truncates toward zero — the split
+    /// <see cref="Decimal38"/> carries.
     /// </summary>
     private protected static SqlValue DecimalArithmetic(SqlValue left, SqlValue right, char op)
     {
@@ -480,76 +480,46 @@ internal abstract class TwoSidedExpression : Expression
         if (left.IsNull || right.IsNull)
             return SqlValue.Null(resultType);
 
-        var l = ToDecimal(left);
-        var r = ToDecimal(right);
-
-        decimal raw;
-        try
-        {
-            raw = op switch
-            {
-                '+' => l + r,
-                '-' => l - r,
-                '*' => l * r,
-                '/' => DecimalMath.Truncating(l, r, resultScale),
-                '%' => l % r,
-                _ => throw new NotSupportedException($"Operator '{op}'."),
-            };
-        }
-        catch (DivideByZeroException)
-        {
+        var l = ToDecimal38(left);
+        var r = ToDecimal38(right);
+        if (r.IsZero && op is '/' or '%')
             throw SimulatedSqlException.DivideByZero();
-        }
-        catch (OverflowException)
+
+        // Real aligns both modulo operands at the result's scale — max(s1, s2)
+        // — before taking the remainder, so an operand needing more than 38
+        // digits there is an arithmetic overflow whatever the remainder itself
+        // would have been. Probe-confirmed: a decimal(38, 0) holding 1 answers
+        // against a decimal(38, 37) while the same shape holding 99 raises.
+        if (op == '%'
+            && (!Decimal38.TryRescale(l, Decimal38.MaxPrecision, resultScale, out _)
+                || !Decimal38.TryRescale(r, Decimal38.MaxPrecision, resultScale, out _)))
         {
-            throw RejectDecimalOverflow(l, r, op, resultType);
+            throw SimulatedSqlException.ArithmeticOverflow("numeric");
         }
 
-        // Every operator but division rounds half away from zero at the result
-        // scale; division truncated toward zero on the way out of the compute
-        // step above, so its digits are already settled. .NET decimal.Round
-        // caps at 28 fractional digits, so a wider result-type scale skips it
-        // too (the value can't have more fractional bits than decimal stores).
-        var settled = op == '/' || resultScale > 28 ? raw : decimal.Round(raw, resultScale, MidpointRounding.AwayFromZero);
-        // Final overflow check against the result type's declared precision.
-        // Cap integer-digit count at 28 for the same .NET-decimal-range
-        // reason — values that fit .NET decimal can't exceed 28 integer
-        // digits, so the overflow doesn't fire spuriously for high-precision
-        // result types.
-        var integerDigits = Math.Min(28, resultPrecision - resultScale);
-        var maxIntegerPart = DecimalMath.Pow10(integerDigits) - 1;
-        return integerDigits < 28 && decimal.Abs(decimal.Truncate(settled)) > maxIntegerPart
-            ? throw SimulatedSqlException.ArithmeticOverflowToNumeric()
-            : SqlValue.FromDecimal(resultType, settled);
-    }
-
-    /// <summary>
-    /// Splits a .NET <see cref="decimal"/> overflow into the two things it can
-    /// mean. Real overflows <c>numeric</c> only past 38 digits; between that
-    /// and .NET's 28 sits a band of results real computes and the simulator
-    /// cannot hold, and reporting Msg 8115 for those would claim real refuses
-    /// a statement it runs. The magnitude is re-estimated in <c>double</c>,
-    /// whose ~15 significant digits are ample to tell 10^29 from 10^38.
-    /// </summary>
-    private static Exception RejectDecimalOverflow(decimal left, decimal right, char op, DecimalSqlType resultType)
-    {
-        var l = (double)left;
-        var r = (double)right;
-        var magnitude = op switch
+        Decimal38 settled;
+        var computed = op switch
         {
-            '*' => Math.Abs(l) * Math.Abs(r),
-            '/' => r == 0 ? double.PositiveInfinity : Math.Abs(l) / Math.Abs(r),
-            _ => Math.Abs(l) + Math.Abs(r),
+            '+' => Decimal38.TryAdd(l, r, resultPrecision, resultScale, out settled),
+            '-' => Decimal38.TrySubtract(l, r, resultPrecision, resultScale, out settled),
+            '*' => Decimal38.TryMultiply(l, r, resultPrecision, resultScale, out settled),
+            '/' => Decimal38.TryDivide(l, r, resultPrecision, resultScale, out settled),
+            '%' => Decimal38.TryModulo(l, r, resultPrecision, resultScale, out settled),
+            _ => throw new NotSupportedException($"Operator '{op}'."),
         };
-        return magnitude >= 1e38
-            ? SimulatedSqlException.ArithmeticOverflowToNumeric()
-            : DecimalCeiling.Exceeded($"computing {left} {op} {right} as {resultType}");
+
+        // A result past the declared precision is real's own arithmetic
+        // overflow, reported at state 2 (probe-confirmed) — distinct from the
+        // conversion overflow a CAST into a narrow target raises.
+        return computed
+            ? SqlValue.FromDecimal(resultType, settled)
+            : throw SimulatedSqlException.ArithmeticOverflow("numeric");
     }
 
-    private static decimal ToDecimal(SqlValue v) =>
-        v.Type is DecimalSqlType ? v.AsDecimal
-        : SqlType.IsMoneyCategory(v.Type) ? v.AsMoney
-        : SqlValue.AsInt64Widened(v);
+    private static Decimal38 ToDecimal38(SqlValue v) =>
+        v.Type is DecimalSqlType ? v.AsDecimal38
+        : SqlType.IsMoneyCategory(v.Type) ? v.AsMoneyDecimal38
+        : Decimal38.FromInt64(SqlValue.AsInt64Widened(v));
 
     private protected static long ToInt64(SqlValue v) =>
         v.Type == SqlType.Bit ? (v.AsBoolean ? 1L : 0L)
@@ -584,7 +554,7 @@ internal abstract class TwoSidedExpression : Expression
     /// <c>$5 * 3 → money</c>). Same-money-pair preserves the wider of the
     /// two; mixed money / smallmoney widens to money. Math runs on the
     /// underlying decimal values; the result re-rounds half-away-from-zero
-    /// to scale 4 inside <see cref="SqlValue.FromMoney"/> — except division,
+    /// to scale 4 inside <see cref="SqlValue.FromMoney(SqlType, Decimal38)"/> — except division,
     /// which truncates toward zero at scale 4 the way the decimal family's
     /// does (<c>$1.00 / 7</c> is real's <c>0.1428</c>), leaving that rounding
     /// nothing to do.
@@ -597,30 +567,32 @@ internal abstract class TwoSidedExpression : Expression
         if (left.IsNull || right.IsNull)
             return SqlValue.Null(resultType);
 
-        var l = MoneyOrIntegerToDecimal(left);
-        var r = MoneyOrIntegerToDecimal(right);
-        decimal raw;
-        try
+        var l = MoneyOrIntegerToDecimal38(left);
+        var r = MoneyOrIntegerToDecimal38(right);
+        if (r.IsZero && op is '/' or '%')
+            throw SimulatedSqlException.DivideByZero();
+
+        // Money computes at money's own width — 19 digits at scale 4 — and a
+        // product that outgrows it is real's Msg 8115 against the money target
+        // rather than against numeric.
+        Decimal38 raw;
+        var computed = op switch
         {
-            raw = op switch
-            {
-                '+' => l + r,
-                '-' => l - r,
-                '*' => l * r,
-                '/' => r == 0m ? throw SimulatedSqlException.DivideByZero() : DecimalMath.Truncating(l, r, MoneySqlType.Scale),
-                '%' => r == 0m ? throw SimulatedSqlException.DivideByZero() : l % r,
-                _ => throw new NotSupportedException($"Operator '{op}' on money operands isn't implemented."),
-            };
-        }
-        catch (OverflowException)
-        {
-            throw SimulatedSqlException.ArithmeticOverflowToTarget(resultType.ToString()!);
-        }
-        return SqlValue.FromMoney(resultType, raw);
+            '+' => Decimal38.TryAdd(l, r, MoneySqlType.Precision, MoneySqlType.Scale, out raw),
+            '-' => Decimal38.TrySubtract(l, r, MoneySqlType.Precision, MoneySqlType.Scale, out raw),
+            '*' => Decimal38.TryMultiply(l, r, MoneySqlType.Precision, MoneySqlType.Scale, out raw),
+            '/' => Decimal38.TryDivide(l, r, MoneySqlType.Precision, MoneySqlType.Scale, out raw),
+            '%' => Decimal38.TryModulo(l, r, MoneySqlType.Precision, MoneySqlType.Scale, out raw),
+            _ => throw new NotSupportedException($"Operator '{op}' on money operands isn't implemented."),
+        };
+
+        return computed
+            ? SqlValue.FromMoney(resultType, raw)
+            : throw SimulatedSqlException.ArithmeticOverflow(resultType.ToString()!);
     }
 
-    private static decimal MoneyOrIntegerToDecimal(SqlValue v) =>
-        SqlType.IsMoneyCategory(v.Type) ? v.AsMoney : SqlValue.AsInt64Widened(v);
+    private static Decimal38 MoneyOrIntegerToDecimal38(SqlValue v) =>
+        SqlType.IsMoneyCategory(v.Type) ? v.AsMoneyDecimal38 : Decimal38.FromInt64(SqlValue.AsInt64Widened(v));
 
     private protected static SqlValue ApproximateArithmetic(SqlValue left, SqlValue right, char op)
     {
@@ -655,8 +627,8 @@ internal abstract class TwoSidedExpression : Expression
     private static double ToDouble(SqlValue v) =>
         v.Type == SqlType.Float ? v.AsDouble
         : v.Type == SqlType.Real ? v.AsSingle
-        : v.Type is DecimalSqlType ? (double)v.AsDecimal
-        : SqlType.IsMoneyCategory(v.Type) ? (double)v.AsMoney
+        : v.Type is DecimalSqlType ? v.AsDecimal38.ToDouble()
+        : SqlType.IsMoneyCategory(v.Type) ? v.AsMoneyDecimal38.ToDouble()
         : SqlValue.AsInt64Widened(v);
 
     /// <summary>

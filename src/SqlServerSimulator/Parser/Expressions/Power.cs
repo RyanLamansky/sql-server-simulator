@@ -58,7 +58,7 @@ internal sealed class Power : Expression
             : resultType.Category switch
             {
                 SqlTypeCategory.Approximate => SqlValue.FromDouble(raw),
-                SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimalOrMoney(resultType, (decimal)raw),
+                SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDoubleAsDecimalOrMoney(resultType, raw),
                 _ => CoerceIntegerResult(raw, resultType),
             };
     }

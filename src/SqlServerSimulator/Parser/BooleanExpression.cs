@@ -115,10 +115,10 @@ internal abstract class BooleanExpression
             _ when type == SqlType.SmallInt => value.AsInt16.ToString(CultureInfo.InvariantCulture),
             _ when type == SqlType.TinyInt => value.AsByte.ToString(CultureInfo.InvariantCulture),
             _ when type == SqlType.Bit => value.AsBoolean ? "1" : "0",
-            _ when type == SqlType.Money || type == SqlType.SmallMoney => value.AsMoney.ToString("F4", CultureInfo.InvariantCulture),
+            _ when type == SqlType.Money || type == SqlType.SmallMoney => value.AsMoneyDecimal38.ToString(),
             _ when type == SqlType.Float => value.AsDouble.ToString("G15", CultureInfo.InvariantCulture),
             _ when type == SqlType.Real => value.AsSingle.ToString("G7", CultureInfo.InvariantCulture),
-            DecimalSqlType d => value.AsDecimal.ToString($"F{d.scale}", CultureInfo.InvariantCulture),
+            DecimalSqlType => value.AsDecimal38.ToString(),
             _ => null,
         };
         return text is null ? null : $"({text})";

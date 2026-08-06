@@ -851,7 +851,7 @@ partial class Selection
             case var _ when type == SqlType.Real:
                 return value.AsSingle.ToString("0.0000000e+000", CultureInfo.InvariantCulture);
             case var _ when type == SqlType.Money || type == SqlType.SmallMoney:
-                return value.AsMoney.ToString("0.0000", CultureInfo.InvariantCulture);
+                return value.AsMoneyDecimal38.ToString();
             case BinarySqlType or VarbinarySqlType or ImageSqlType:
                 return Convert.ToBase64String(value.AsBytes);
             case DateTime2SqlType dt2:

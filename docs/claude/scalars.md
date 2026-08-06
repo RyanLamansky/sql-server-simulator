@@ -16,6 +16,8 @@ Probe-confirmed against SQL Server 2025.
 The widening rule treats string input as float for projection-schema parity.
 Two per-function nuances: `POWER`'s result type follows the **first** arg's widen rule (so `POWER('2', 3) → float` but `POWER(2, '3') → int` with truncation toward zero); `ROUND`'s **value** arg coerces but the `length` / `function` args stay strict-int (Msg 8116 on string, matching real).
 
+**`ROUND`'s length argument** clamps to ±38 — `numeric`'s own digit domain — and the rounded result settles back into the **argument's declared precision**, so a carry out of it is Msg 8115 state 2: `ROUND(CAST(7.2 AS decimal(2, 1)), -1)` raises where the same value declared `decimal(3, 1)` answers `10.0`, and `ROUND(CAST(94.5 AS decimal(3, 1)), -2)` raises.
+
 Errors: `SQRT(neg)` / `LOG(<= 0)` / `LOG10(<= 0)` / `LOG(x, 1)` / `POWER(neg, frac)` → Msg 3623.
 `POWER(0, neg)` → Msg 8134.
 `EXP` / `SQUARE` overflow → Msg 8115 float.
@@ -27,9 +29,10 @@ Domain errors → Msg 3623 (including `ATN2(0, 0)`, which diverges from .NET's `
 Wrong arg count → Msg 174 (`"The {lower-name} function requires {N} argument(s)."`) — `pi(1)` raises Msg 174 not Msg 102.
 
 **`DEGREES`/`RADIANS`** are type-preserving with one tweak: `decimal(p, s)` widens to `decimal(38, max(s, 18))` rather than preserving.
-Integer arm truncates toward zero; out-of-range integer results raise Msg 8115 with the family name.
-Decimal arm uses a 28-digit `DecimalPi` constant in evaluation order `(input * 180m) / DecimalPi` for trailing-digit fidelity.
-.NET decimal's 28-digit precision cap means scale > 28 results land at scale 28.
+Every arm computes in `double` against a **single pre-multiplied ratio** — `180.0 / Math.PI` and `Math.PI / 180.0` — which is what real does whatever the argument's family, so the exact-numeric result is that double's own binary expansion rounded half away from zero at the result's scale.
+The digits are probe-matched: `DEGREES(CAST(1.5 AS decimal(10, 2)))` is `85.943669269623484297`, and at `decimal(38, 30)` the same call is `85.943669269623484296971582807600` — the binary fraction running out before the digits do.
+Multiplying by the ratio as one constant rather than by 180 and then dividing is load-bearing; `DEGREES(CAST(33644737241.2066 AS decimal(18, 4)))` separates the two.
+The integer arm truncates toward zero, `money` comes back at its own scale of 4, and an out-of-range result raises Msg 8115 with the result type's family (`DEGREES(CAST('999999999999999999999' AS decimal(38, 0)))` is state 2 against `numeric`).
 
 ## Additional date scalars: `DATENAME` / `DATETRUNC` / `SWITCHOFFSET` / `TODATETIMEOFFSET` / `DATE_BUCKET` / `CURRENT_DATE`
 
@@ -246,6 +249,12 @@ The rules below describe the *runtime* value; the width bounds it.
   NULL value → NULL; NULL format → Msg 8116 (probed: ordering doesn't matter — the format-NULL check fires first).
   Culture defaults to en-US; invalid culture name silently falls back to en-US.
   .NET `FormatException` (e.g. `decimal.ToString("D5")`) → NULL; unrecognized custom-format tokens that .NET passes through (e.g. `int.ToString("qq qq")`) are echoed verbatim.
+  An exact-numeric value **wider than a .NET `decimal`** lays its digits out directly (`Parser/Expressions/WideNumericFormat.cs`) instead of crossing to a narrower type, so real's full 38-digit rendering comes back: `FORMAT(CAST(12345678901234567890123456789012345678 AS decimal(38, 0)), 'N0')` groups every digit, `'N40'` of a `decimal(38, 38)` writes forty fractional ones, and `'#,##0.00'` / `'0.###'` / `'E4'` / `'C'` / `'G'` all answer.
+  The culture's separators, group sizes and default digit counts come off its `NumberFormatInfo`, and the decoration around the digits — currency symbol, percent sign, the sign patterns — comes from asking .NET to format `1` and `-1` under the same specifier, so the wide path carries whatever the narrow path would have written around it.
+  `D` / `X` / `R` raise the `FormatException` .NET raises and answer NULL; a custom pattern carrying scientific notation over a wide value raises `NotSupportedException`.
+
+  **Divergences**, all of them shared with the narrow path and none width-related — SQL Server's FORMAT runs on the .NET Framework's NLS culture data where the simulator runs on .NET's ICU data:
+  a default-precision `'P'` writes three fractional digits against real's two (`FORMAT(CAST(123.456 AS decimal(10, 3)), 'P')` is `12,345.600%` against `12,345.60%`), a negative `'C'` under `en-US` writes `-$0.50` against real's parenthesized `($0.50)`, `FORMAT(0, '#')` is empty against real's `0`, and `FORMAT(CAST(0 AS decimal(5, 0)), 'P')` is `0.000%` against real's `000.00%`.
 
 ## Integer arguments outside the parameter's range
 

@@ -18,6 +18,9 @@ internal sealed class MoneySqlType() : SqlType(SqlTypeCategory.Money)
     /// <summary>Number of fractional decimal digits represented in the scaled int.</summary>
     public const int Scale = 4;
 
+    /// <summary>Digits the widest money value carries — the <c>decimal(19, 4)</c> it promotes as.</summary>
+    public const int Precision = 19;
+
     /// <summary>10^Scale — multiplier between the user-visible decimal and the stored scaled int.</summary>
     public const long ScaleFactor = 10_000;
 

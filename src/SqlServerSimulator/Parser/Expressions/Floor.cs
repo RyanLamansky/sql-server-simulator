@@ -22,7 +22,7 @@ internal sealed class Floor(ParserContext context) : Expression
         return v.IsNull ? SqlValue.Null(resultType) : resultType.Category switch
         {
             SqlTypeCategory.Integer => MathScalars.PromoteInteger(resultType, MathScalars.AsLong(v)),
-            SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimalOrMoney(resultType, decimal.Floor(MathScalars.AsDecimalOrMoney(v))),
+            SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimal38OrMoney(resultType, MathScalars.Floor(MathScalars.AsDecimal38OrMoney(v))),
             SqlTypeCategory.Approximate => SqlValue.FromDouble(Math.Floor(MathScalars.AsDouble(v))),
             _ => throw new NotSupportedException($"FLOOR doesn't support {v.Type}.")
         };

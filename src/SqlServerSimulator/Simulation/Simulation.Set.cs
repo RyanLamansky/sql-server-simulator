@@ -408,7 +408,7 @@ partial class Simulation
         if (literal.Value.Type == SqlType.BigInt)
             throw SimulatedSqlException.IntegerValueOutOfRange((negative ? -literal.Value.AsInt64 : literal.Value.AsInt64).ToString(System.Globalization.CultureInfo.InvariantCulture));
         if (literal.Value.Type is DecimalSqlType { scale: 0 })
-            throw SimulatedSqlException.IntegerValueOutOfRange((negative ? -literal.Value.AsDecimal : literal.Value.AsDecimal).ToString(System.Globalization.CultureInfo.InvariantCulture));
+            throw SimulatedSqlException.IntegerValueOutOfRange(negative ? literal.Value.AsDecimal38.Negate().ToString() : literal.Value.AsDecimal38.ToString());
 
         if (applyTextSize && !context.Batch.IsSkipping && literal.Value.Type == SqlType.Int32)
         {

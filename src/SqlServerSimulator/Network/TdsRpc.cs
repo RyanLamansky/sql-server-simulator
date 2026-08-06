@@ -283,20 +283,15 @@ internal sealed class TdsRpcRequest
         var payload = reader.ReadBytes(length);
         var isNegative = payload[0] != 1;
         var magnitude = payload[1..];
-        for (var i = 12; i < magnitude.Length; i++)
-        {
-            if (magnitude[i] != 0)
-                throw new NotSupportedException("A decimal RPC parameter exceeds the range of System.Decimal.");
-        }
-
-        Span<byte> assembled = stackalloc byte[12];
+        Span<byte> assembled = stackalloc byte[16];
         assembled.Clear();
-        magnitude[..Math.Min(magnitude.Length, 12)].CopyTo(assembled);
-        var lo = BinaryPrimitives.ReadInt32LittleEndian(assembled);
-        var mid = BinaryPrimitives.ReadInt32LittleEndian(assembled[4..]);
-        var hi = BinaryPrimitives.ReadInt32LittleEndian(assembled[8..]);
-        var value = new decimal(lo, mid, hi, isNegative, scale);
+        magnitude[..Math.Min(magnitude.Length, 16)].CopyTo(assembled);
+        var wide = Decimal38.FromParts(BinaryPrimitives.ReadUInt128LittleEndian(assembled), isNegative, scale);
 
+        // A .NET decimal holds every value SqlClient can send, so the common
+        // path binds the familiar CLR type; a wider mantissa — which only a
+        // non-SqlClient driver produces — keeps its full width instead.
+        object value = Decimal38.TryToDotNetDecimal(wide, out var narrow) ? narrow : wide;
         return new TdsRpcParameter(name, isOutput, DbType.Decimal, value, precision: precision, scale: scale);
     }
 

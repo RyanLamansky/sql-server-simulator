@@ -12,7 +12,7 @@ Per-source-category rule applied after `SqlValue.CoerceTo`:
 - `tinyint`/`smallint`/`int` source → `varchar` too narrow → asterisk fallback (`'*'`).
   Quirk specific to `varchar`; `nvarchar` raises Msg 8115.
   `bigint` doesn't get fallback either.
-- `decimal`/`numeric` source → Msg 8115 with "numeric" wording (distinct from int/bigint's "expression" wording).
+- `decimal`/`numeric` source → an ANSI target is Msg 8115 **state 5** with "numeric to data type varchar" wording (the family root whatever the target's declared length), while a Unicode target is Msg 8115 **state 2** with the generic "expression to data type nvarchar" wording — probed both ways.
 - `money`/`smallmoney` → Msg 234 (`"There is insufficient result space to convert a money value to <target>."` — "money" regardless of source variant).
 - `float`/`real` → Msg 232 with formatted source value (F6).
 - `uniqueidentifier`: pre-CoerceTo branch (Msg 8170 char/varchar, Msg 8115 nchar/nvarchar) — fires only for a *bounded* target under 36 chars; a MAX target (length sentinel -1) has unbounded width and holds the 36-char dashed form, so the check guards `max is >= 0 and < 36` (a plain `< 36` treated the sentinel as too-narrow and wrongly raised Msg 8115 on `CAST(newid() AS nvarchar(max))` — tiberius-surfaced).
@@ -31,13 +31,56 @@ A numeric value overflowing an integer conversion target picks its error by **so
 - `money` source splinters per target: tinyint → Msg 232 state 11; smallint → **Msg 220 state 7 with the value in money's ×10000 tick representation** (70000 reports `value = 700000000`); int → **Msg 237** `There is insufficient result space to convert a money value to int.`; `smallmoney` takes none of these and stays Msg 8115.
 - String source → Msg 244 (`INT1`/`INT2`, state 1/2 target-keyed) for tinyint/smallint, Msg 248 for int, Msg 8115 for bigint — see the string→integer section.
 
+A `float` / `real` source's value slot carries **seventeen significant digits** before its six fractional ones, so a magnitude past that shows trailing zeros rather than the double's own binary tail: `CAST(CAST(1e30 AS float) AS int)` names `1000000000000000000000000000000.000000`, not `…19884624838656`.
+
 TRY_CAST/TRY_CONVERT swallow all of these (232 and 237 are in the swallow set).
+
+### The `money` / `smallmoney` target
+
+A magnitude past the target's range splits by source the same way, and the states were probed against SQL Server 2025:
+
+| source | error |
+| --- | --- |
+| `decimal` / `numeric` | **Msg 8115 state 4**, `"…converting numeric to data type money"` |
+| `bigint`, character | **Msg 8115 state 2**, `"…converting expression to data type money"` |
+| `tinyint` / `smallint` / `int` | **Msg 220 state 3**, `"Arithmetic overflow error for data type smallmoney, value = 1000000."` |
+| `money` → `smallmoney` | **Msg 237 state 3**, `"There is insufficient result space to convert a money value to smallmoney."` |
+| `float` / `real` | **Msg 232 state 2**, the value-bearing form |
 
 ## `float`/`real` → `decimal`/`numeric`
 
-A permitted conversion (implicit and explicit), **not** the Msg 529 explicit-conversion rejection — `CoerceToDecimal` converts through .NET `decimal` (rounding half-away-from-zero to the target scale; `real` converts from its own 4-byte value, keeping the ~7-significant-digit representation real does).
-An out-of-range magnitude (NaN / ±Infinity / past `decimal`'s range, or more integer digits than the target holds) raises Msg 8115 arithmetic overflow.
-Load-bearing for ODBC / pyodbc callers, which bind a Python/CLR `float` parameter as `float`: a decimal-column insert (e.g. SQLAlchemy's) arrives as a float-to-decimal assignment, which previously hit the wrong Msg 529 path.
+A permitted conversion (implicit and explicit), **not** the Msg 529 explicit-conversion rejection.
+The operand's **exact binary value** is read and rounded half away from zero at the target's scale — real's own rule, and it is visible from scale 8 onward: `CAST(CAST(1.1 AS real) AS decimal(20, 10))` is `1.1000000238` rather than a seven-significant-digit approximation, `CAST(CAST(0.333333 AS float) AS decimal(38, 30))` is `0.333332999999999990414778494596`, and `CAST(CAST(1e30 AS float) AS decimal(38, 0))` is the double's exact `1000000000000000019884624838656`.
+`real` reads its own 4-byte value the same way rather than a decimal-digit rendering of it.
+
+NaN, an infinity, or a magnitude past the target raises **Msg 8115 state 6** naming the source family (`"…converting float to data type numeric."`).
+The guard is on the binary exponent rather than a `>= 1e38` magnitude test, since the double spelled `1e38` *is* `99999999999999997748809823456034029568` — below 10^38, and a value real converts.
+
+`float` / `real` reach `money` / `smallmoney` by the same exact-binary reading at money's fixed scale of 4.
+
+Load-bearing for ODBC / pyodbc callers, which bind a Python/CLR `float` parameter as `float`: a decimal-column insert (e.g. SQLAlchemy's) arrives as a float-to-decimal assignment.
+
+## String → `decimal` / `numeric`
+
+The accepted grammar is narrow: surrounding whitespace, one leading `+` or `-`, digits with at most one `.`, and nothing else.
+A bare leading point (`'.5'`) and a bare trailing one (`'5.'`) read, and leading zeros are free at any count.
+Everything else is **Msg 8114 state 5** — `''`, `'   '`, `'.'`, `'abc'`, `'1,000'`, `'$1.00'`, `'(1)'`, `'++1'`, `'1+'`, `'1.2.3'`, and **every exponent form** (`'1e5'`, `'1E5'`, `'1.5e2'`), whatever the magnitude.
+
+Fractional digits past the target's scale **round half away from zero**, and the digit count is judged after that rounding — so a 40-significant-digit string converts when the rounded value fits (`CAST('1.0000000000000000000000000000000000000005' AS decimal(38, 2))` is `1.00`).
+
+A value that doesn't fit reports **Msg 8115** naming the source family, at a state settled by the **text's own** natural precision — its integer digits past any leading zeros plus every written fractional digit:
+
+| text | target | state |
+| --- | --- | --- |
+| `'123456789012345678901234567890123456789'` (39 digits) | `decimal(38, 0)` or `decimal(10, 0)` | **6** — the text outran `numeric`'s own domain |
+| `'0.999999999999999999999999999999999999995'` (39) | `decimal(38, 38)` | **6** |
+| `'1.005'` (4) | `decimal(38, 38)` | **8** — the rescaled value needs 39 digits, while the text stays inside 38 |
+| `'99.5'` (3) | `decimal(2, 0)` | **8** |
+| `'99999999999999999999999999999999999999'` (38) | `decimal(38, 1)` | **8** |
+
+Text wider than 38 digits is not an error by itself: `CAST('0.00000000000000000000000000000000000000000005' AS decimal(38, 38))` is `0`.
+
+A **`decimal` source** narrowing to a `decimal` target runs the split on the *rescaled value* instead — state 6 where restating it at the target's scale would need more than 38 digits, state 8 where it stays inside 38 — and names itself `numeric` on both sides.
 
 ## `PARSE` / `TRY_PARSE` (culture-aware conversion)
 
@@ -45,6 +88,11 @@ Load-bearing for ODBC / pyodbc callers, which bind a Python/CLR `float` paramete
 The string argument routes through .NET's `<Type>.Parse(string, CultureInfo)` rather than the simulator's existing CAST machinery, so the accepted formats follow the CLR's culture rules (commas vs dots, locale-specific date orderings) rather than SQL Server's CAST grammar.
 Culture defaults to `en-US` when the USING clause is omitted; unknown culture name raises Msg 9819 (probe-confirmed) via a dedicated `ParseConversionFailed` factory.
 `PARSE` re-raises any `FormatException` / `OverflowException` as Msg 9819 with the source value embedded; `TRY_PARSE` catches the same set and returns NULL.
+An exact-numeric target is named **`numeric`** in that message however the statement spelled it.
+
+An exact-numeric target reads at the full 38 digits: the culture's group separators come off and the digits go through `Decimal38`, with .NET's own parse kept as the grammar gate for anything a `decimal` could have held.
+So `PARSE('99.999.999.999.999.999.999.999.999.999.999.999.999' AS decimal(38, 0) USING 'de-DE')` answers, and `NumberStyles.Number`'s grammar still decides what the culture accepts (a trailing sign reads, `'(1234.56)'` and `'$1,234.56'` do not).
+Excess fractional digits round as they do for `CAST`, but **text carrying more than 38 digits is refused outright rather than rounded into range** — `PARSE('1.0000000000000000000000000000000000000005' AS decimal(38, 2))` raises Msg 9819 where the `CAST` answers `1.00`.
 
 Accepted target types: `int` / `bigint` / `smallint` / `tinyint` / `decimal(p, s)` / `numeric(p, s)` / `float` / `real` / `money` / `smallmoney` / `bit` / `date` / `datetime` / `datetime2(N)` / `smalldatetime` / `datetimeoffset(N)` / `time(N)` / `uniqueidentifier`.
 String targets (`varchar` / `nvarchar` / `char` / `nchar`) raise Msg 9819 since PARSE only handles parsing INTO a non-string type — matches real SQL Server's rejection.

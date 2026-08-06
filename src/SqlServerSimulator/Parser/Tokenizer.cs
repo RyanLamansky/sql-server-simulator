@@ -471,7 +471,7 @@ static class Tokenizer
     /// <summary>
     /// Lightweight parse for the literal-form body (currency symbol
     /// already consumed). Produces a <see cref="decimal"/>; range checks
-    /// happen later inside <see cref="SqlValue.FromMoney"/>.
+    /// happen later inside <see cref="SqlValue.FromMoney(SqlType, decimal)"/>.
     /// </summary>
     private static decimal ParseLiteralBody(ReadOnlySpan<char> body)
     {

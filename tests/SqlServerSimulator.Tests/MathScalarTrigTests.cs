@@ -151,38 +151,34 @@ public sealed class MathScalarTrigTests
     public void Degrees_IntOverflow_RaisesMsg8115Int()
         => AssertSqlError("select degrees(cast(2147483646 as int))", 8115, "Arithmetic overflow error converting expression to data type int.");
 
+    /// <summary>
+    /// The exact-numeric arm computes in <see cref="double"/> against a single
+    /// pre-multiplied ratio and comes back at <c>decimal(38, max(s, 18))</c>,
+    /// so every digit is the double's own — probe-confirmed digit for digit.
+    /// </summary>
     [TestMethod]
-    public void Degrees_OfDecimal_WidensToDecimal38_18()
-    {
-        // SQL Server's decimal arithmetic uses higher-precision intermediate
-        // accumulators than .NET's 96-bit decimal, so the trailing digits
-        // diverge past the 14th decimal place. Real value: 85.94366926962348429...;
-        // simulator value: 85.94366926962348131... (matches at 13 digits).
-        var v = (decimal)ExecuteScalar("select degrees(cast(1.5 as decimal(10,2)))")!;
-        IsLessThan(1e-12m, Math.Abs(85.94366926962348m - v));
-    }
+    [DataRow("degrees(cast(1.5 as decimal(10,2)))", "85.943669269623484297")]
+    [DataRow("degrees(cast(2 as decimal(38,0)))", "114.591559026164645729")]
+    [DataRow("degrees(cast(-0.79 as decimal(2,2)))", "-45.263665815335038189")]
+    [DataRow("degrees(cast(33644737241.2066 as decimal(18,4)))", "1927701446747.762939453125000000")]
+    [DataRow("degrees(cast(0.001 as decimal(25,22)))", "0.0572957795130823246965")]
+    [DataRow("degrees(cast(1.5 as decimal(38,30)))", "85.943669269623484296971582807600")]
+    [DataRow("radians(cast(180 as decimal(10,2)))", "3.141592653589793116")]
+    [DataRow("radians(cast(1.5 as decimal(10,2)))", "0.026179938779914945")]
+    [DataRow("radians(cast(1.5 as decimal(38,30)))", "0.026179938779914944946280996874")]
+    public void DegreesAndRadians_OfDecimal_CarryTheDoublesOwnDigits(string expression, string expected)
+        => AreEqual(expected, ExecuteScalar($"select cast({expression} as varchar(60))"));
 
+    /// <summary>
+    /// A result past <c>decimal(38, 18)</c> is real's arithmetic overflow —
+    /// <c>DEGREES</c> tops out a little under 1e20 for that reason.
+    /// </summary>
     [TestMethod]
-    public void Radians_OfDecimal_WidensToDecimal38_18()
-    {
-        var v = (decimal)ExecuteScalar("select radians(cast(180 as decimal(10,2)))")!;
-        // 180 * pi / 180 = pi rendered as decimal(38, 18). Tolerance to absorb
-        // .NET-vs-SQL-Server decimal-arithmetic precision differences.
-        IsLessThan(1e-12m, Math.Abs(3.141592653589793m - v));
-    }
-
-    [TestMethod]
-    public void Degrees_PreservesScaleAboveEighteen()
-    {
-        // Input scale 22 > 18 → result decimal(38, 22). The .NET decimal storage
-        // accommodates scale 22 for small values; the encoder's Pow10(22) ≈ 1e22
-        // fits inside decimal.MaxValue (7.92e28). Larger scales (e.g. > 28)
-        // exceed .NET decimal's range entirely — that's the pre-existing
-        // 28-digit-max quirk noted in CLAUDE.md, not specific to DEGREES.
-        var v = (decimal)ExecuteScalar("select degrees(cast(0.001 as decimal(25,22)))")!;
-        var scale = (decimal.GetBits(v)[3] >> 16) & 0xFF;
-        IsLessThanOrEqualTo(22, scale);
-    }
+    public void Degrees_ResultPastTheResultType_RaisesMsg8115()
+        => AssertSqlError(
+            "select degrees(cast('999999999999999999999' as decimal(38,0)))",
+            8115,
+            "Arithmetic overflow error converting expression to data type numeric.");
 
     [TestMethod]
     public void Degrees_OfMoney_StaysMoney()

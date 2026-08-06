@@ -574,10 +574,9 @@ internal abstract partial class SqlType
     /// SQL Server's <c>decimal(p, s)</c> / <c>numeric(p, s)</c>: exact-precision
     /// fixed-point. Each (precision, scale) pair is a distinct singleton
     /// reachable through <see cref="GetDecimal"/>; reference equality flows
-    /// the same way it does for date/time precision singletons. Precision
-    /// above 28 throws <see cref="NotSupportedException"/> — .NET decimal's
-    /// 28-29 digit limit doesn't extend to SQL Server's full 38, and the
-    /// arbitrary-precision mantissa needed to bridge isn't modeled yet.
+    /// the same way it does for date/time precision singletons. The whole
+    /// 1-38 range is storable; values are carried in <c>Decimal38</c>, which
+    /// holds every digit real does.
     /// </remarks>
     public static SqlType GetDecimal(int precision, int scale) => DecimalSqlType.Get(precision, scale);
 

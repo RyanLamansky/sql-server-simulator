@@ -109,7 +109,7 @@ internal sealed class Checksum : Expression
         // (CHECKSUM(CAST(1 AS numeric(10, 2))) equals CHECKSUM(CAST(1 AS
         // numeric(10, 0))), probe-confirmed), even though the fold itself is
         // the simulator's own.
-        if (t is DecimalSqlType) return Encoding.UTF8.GetBytes(v.AsDecimal.ToString("G29", System.Globalization.CultureInfo.InvariantCulture));
+        if (t is DecimalSqlType) return Encoding.UTF8.GetBytes(v.AsDecimal38.Canonicalize().ToString());
         // Date/time, guid, others — fall back to canonical string form.
         return Encoding.Unicode.GetBytes(v.CoerceTo(SqlType.NVarchar).AsString);
     }

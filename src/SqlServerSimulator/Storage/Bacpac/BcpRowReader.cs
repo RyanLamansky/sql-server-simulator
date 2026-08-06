@@ -261,34 +261,13 @@ internal static class BcpRowReader
         var positive = bytes[2] != 0;
         var mantissaSpan = bytes[3..];
 
-        // Fast path: mantissa fits in 96 bits (System.Decimal's ceiling) —
-        // either the BCP layout already has ≤ 12 mantissa bytes (precision
-        // ≤ 28), or the 16-byte form's top 4 bytes are zero (the actual
-        // value happens to fit). Construct the decimal directly from its
-        // (lo, mid, hi, sign, scale) representation with zero arithmetic.
-        // Skips BigInteger.Pow + BigInteger division, which profiled as
-        // ~15% of total BACPAC load wall clock against WWI-Full.
-        if (onDiskScale <= 28
-            && (mantissaSpan.Length <= 12 || mantissaSpan[12..].IndexOfAnyExcept((byte)0) < 0))
-        {
-            Span<byte> padded = stackalloc byte[12];
-            mantissaSpan[..Math.Min(12, mantissaSpan.Length)].CopyTo(padded);
-            var lo = BinaryPrimitives.ReadInt32LittleEndian(padded[..4]);
-            var mid = BinaryPrimitives.ReadInt32LittleEndian(padded[4..8]);
-            var hi = BinaryPrimitives.ReadInt32LittleEndian(padded[8..12]);
-            return SqlValue.FromDecimal(type, new decimal(lo, mid, hi, isNegative: !positive, scale: onDiskScale));
-        }
-
-        // Wide path (mantissa > 96 bits) — use BigInteger. Anything in this
-        // branch exceeds System.Decimal's 28-digit ceiling and may lose
-        // precision (matches the simulator's documented quirk).
-        var unsigned = new System.Numerics.BigInteger(mantissaSpan, isUnsigned: true, isBigEndian: false);
-        var signed = positive ? unsigned : -unsigned;
-        var scaleDivisor = System.Numerics.BigInteger.Pow(10, onDiskScale);
-        var quotient = signed / scaleDivisor;
-        var remainder = signed % scaleDivisor;
-        var value = (decimal)quotient + ((decimal)remainder / (decimal)scaleDivisor);
-        return SqlValue.FromDecimal(type, value);
+        // The mantissa is the value's own digits at the on-disk scale, so the
+        // whole width reads straight into the storage form — a 38-digit column
+        // round-trips with no arithmetic at all.
+        Span<byte> padded = stackalloc byte[16];
+        mantissaSpan[..Math.Min(16, mantissaSpan.Length)].CopyTo(padded);
+        var magnitude = BinaryPrimitives.ReadUInt128LittleEndian(padded);
+        return SqlValue.FromDecimal(type, Decimal38.FromParts(magnitude, isNegative: !positive, onDiskScale));
     }
 
     /// <summary>

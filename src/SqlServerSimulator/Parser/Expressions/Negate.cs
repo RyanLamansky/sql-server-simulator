@@ -47,7 +47,7 @@ internal sealed class Negate(Expression operand) : Expression
     /// </summary>
     internal static Expression Of(Expression operand) =>
         Unwrap(operand) is Value { IsLiteral: true, Constant: { Type: DecimalSqlType { scale: 0 }, IsNull: false } constant }
-            && constant.AsDecimal == -(decimal)int.MinValue
+            && constant.AsDecimal38 == Decimal38.FromInt64(-(long)int.MinValue)
             ? new Value(SqlValue.FromInt32(int.MinValue), integerLiteralDigitCount: 0)
             : new Negate(operand);
 

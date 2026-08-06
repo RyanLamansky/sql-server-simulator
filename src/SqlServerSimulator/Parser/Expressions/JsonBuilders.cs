@@ -57,14 +57,14 @@ internal static class JsonValueRender
         }
         if (type is DecimalSqlType)
         {
-            _ = sb.Append(value.AsDecimal.ToString(CultureInfo.InvariantCulture));
+            _ = sb.Append(value.AsDecimal38.ToString());
             return;
         }
         if (SqlType.IsMoneyCategory(type))
         {
             // money / smallmoney serialize as decimal numbers (4 decimal
             // places preserved by .ToString on the underlying decimal).
-            _ = sb.Append(value.AsMoney.ToString(CultureInfo.InvariantCulture));
+            _ = sb.Append(value.AsMoneyDecimal38.ToString());
             return;
         }
         if (type == SqlType.Float)

@@ -45,7 +45,7 @@ internal sealed class Round : Expression
         if (lenValue.IsNull) return SqlValue.Null(resultType);
         if (lenValue.Type.Category != SqlTypeCategory.Integer)
             throw SimulatedSqlException.InvalidArgumentDataType(SqlTypeFamilyName(lenValue.Type), 2, "round");
-        var len = (int)Math.Clamp(MathScalars.AsLong(lenValue), -28, 28);
+        var len = (int)Math.Clamp(MathScalars.AsLong(lenValue), -Decimal38.MaxPrecision, Decimal38.MaxPrecision);
 
         var truncate = false;
         if (this.function is not null)
@@ -60,7 +60,7 @@ internal sealed class Round : Expression
         return resultType.Category switch
         {
             SqlTypeCategory.Integer => MathScalars.PromoteInteger(resultType, RoundLong(MathScalars.AsLong(v), len, truncate)),
-            SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimalOrMoney(resultType, RoundDecimal(MathScalars.AsDecimalOrMoney(v), len, truncate)),
+            SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimal38OrMoney(resultType, RoundWithinPrecision(resultType, MathScalars.AsDecimal38OrMoney(v), len, truncate)),
             SqlTypeCategory.Approximate => SqlValue.FromDouble(RoundDouble(MathScalars.AsDouble(v), len, truncate)),
             _ => throw new NotSupportedException($"ROUND doesn't support {v.Type}.")
         };
@@ -78,6 +78,22 @@ internal sealed class Round : Expression
 
     internal override string DebugDisplay() => $"ROUND({this.value.DebugDisplay()}, {this.length.DebugDisplay()})";
 
+    /// <summary>
+    /// The rounded value settled back into the argument's own declared
+    /// precision, which is what the result carries — so a carry out of it is
+    /// an arithmetic overflow rather than a wider value. Probe-confirmed:
+    /// <c>ROUND(CAST(7.2 AS decimal(2, 1)), -1)</c> raises Msg 8115 at state 2
+    /// where the same value declared <c>decimal(3, 1)</c> answers
+    /// <c>10.0</c>.
+    /// </summary>
+    private static Decimal38 RoundWithinPrecision(SqlType resultType, in Decimal38 value, int length, bool truncate)
+    {
+        var rounded = MathScalars.RoundAtPosition(value, length, truncate);
+        return resultType is DecimalSqlType d && rounded.Magnitude >= Decimal38.Pow10[d.precision]
+            ? throw SimulatedSqlException.ArithmeticOverflow("numeric")
+            : rounded;
+    }
+
     /// <remarks>
     /// Integer ROUND only matters for negative <paramref name="length"/>
     /// (e.g. <c>ROUND(127, -1)</c> → 130). Non-negative length on integer
@@ -92,20 +108,6 @@ internal sealed class Round : Expression
         var half = scale / 2;
         var absRounded = (Math.Abs(value) + half) / scale * scale;
         return value < 0 ? -absRounded : absRounded;
-    }
-
-    private static decimal RoundDecimal(decimal value, int length, bool truncate)
-    {
-        if (length >= 0)
-        {
-            return truncate
-                ? Math.Truncate(value * Pow10Decimal(length)) / Pow10Decimal(length)
-                : Math.Round(value, length, MidpointRounding.AwayFromZero);
-        }
-        var scale = Pow10Decimal(-length);
-        var scaled = value / scale;
-        var rounded = truncate ? Math.Truncate(scaled) : Math.Round(scaled, 0, MidpointRounding.AwayFromZero);
-        return rounded * scale;
     }
 
     private static double RoundDouble(double value, int length, bool truncate)
@@ -126,14 +128,6 @@ internal sealed class Round : Expression
         long result = 1;
         for (var i = 0; i < exponent && result <= long.MaxValue / 10; i++)
             result *= 10;
-        return result;
-    }
-
-    private static decimal Pow10Decimal(int exponent)
-    {
-        var result = 1m;
-        for (var i = 0; i < exponent; i++)
-            result *= 10m;
         return result;
     }
 

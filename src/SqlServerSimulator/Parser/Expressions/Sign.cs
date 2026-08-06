@@ -21,7 +21,7 @@ internal sealed class Sign(ParserContext context) : Expression
         return v.IsNull ? SqlValue.Null(resultType) : resultType.Category switch
         {
             SqlTypeCategory.Integer => MathScalars.PromoteInteger(resultType, Math.Sign(MathScalars.AsLong(v))),
-            SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimalOrMoney(resultType, Math.Sign(MathScalars.AsDecimalOrMoney(v))),
+            SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimal38OrMoney(resultType, Decimal38.FromInt32(MathScalars.AsDecimal38OrMoney(v).Sign)),
             SqlTypeCategory.Approximate => SqlValue.FromDouble(Math.Sign(MathScalars.AsDouble(v))),
             _ => throw new NotSupportedException($"SIGN doesn't support {v.Type}.")
         };

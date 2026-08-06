@@ -443,10 +443,10 @@ partial class Selection
                 _ = sb.Append(value.AsInt64.ToString(CultureInfo.InvariantCulture));
                 return;
             case DecimalSqlType:
-                _ = sb.Append(value.AsDecimal.ToString(CultureInfo.InvariantCulture));
+                _ = sb.Append(value.AsDecimal38.ToString());
                 return;
             case var _ when type == SqlType.Money || type == SqlType.SmallMoney:
-                _ = sb.Append(value.AsMoney.ToString("0.0000", CultureInfo.InvariantCulture));
+                _ = sb.Append(value.AsMoneyDecimal38.ToString());
                 return;
             case var _ when type == SqlType.Float:
                 _ = sb.Append(value.AsDouble.ToString("0.000000000000000e+000", CultureInfo.InvariantCulture));

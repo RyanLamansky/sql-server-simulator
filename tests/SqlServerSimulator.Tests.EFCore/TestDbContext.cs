@@ -110,6 +110,19 @@ internal class Product
 }
 
 /// <summary>
+/// Exercises a <c>decimal(38, s)</c> column through EF Core, declared with the
+/// fluent <c>HasPrecision(38, 6)</c> rather than a <c>[Column]</c> type name —
+/// the widest exact-numeric type SQL Server has, which the simulator carries at
+/// full width in storage, arithmetic and aggregation.
+/// </summary>
+internal class Ledger
+{
+    public int Id { get; set; }
+
+    public decimal Amount { get; set; }
+}
+
+/// <summary>
 /// Exercises the simulator's <c>nvarchar(MAX)</c> / <c>varchar(MAX)</c> /
 /// <c>varbinary(MAX)</c> support through EF Core — the LOB-eligible MAX
 /// siblings of the bounded var types. EF Core's default mapping for an
@@ -373,6 +386,12 @@ internal class TestDbContext(Simulation simulation) : DbContext
         _ = modelBuilder.Entity<Heartbeat>()
             .Property(h => h.CreatedAt)
             .HasDefaultValueSql("getutcdate()");
+
+        // Pin Ledger.Amount at numeric's own widest precision through the
+        // fluent API, which is how EF Core reaches decimal(38, s).
+        _ = modelBuilder.Entity<Ledger>()
+            .Property(l => l.Amount)
+            .HasPrecision(38, 6);
     }
 
     public DbSet<TestRow> Rows => Set<TestRow>();
@@ -384,6 +403,8 @@ internal class TestDbContext(Simulation simulation) : DbContext
     public DbSet<Document> Documents => Set<Document>();
 
     public DbSet<Product> Products => Set<Product>();
+
+    public DbSet<Ledger> Ledgers => Set<Ledger>();
 
     public DbSet<Article> Articles => Set<Article>();
 
@@ -498,6 +519,16 @@ internal class TestDbContext(Simulation simulation) : DbContext
                     Discount decimal(5, 4) null
                 )
                 """)
+            .ExecuteNonQuery();
+        return simulation;
+    }
+
+    public static Simulation CreateLedgersSimulation()
+    {
+        var simulation = new Simulation();
+        _ = simulation
+            .CreateOpenConnection()
+            .CreateCommand("create table Ledgers (Id int, Amount decimal(38, 6) not null)")
             .ExecuteNonQuery();
         return simulation;
     }

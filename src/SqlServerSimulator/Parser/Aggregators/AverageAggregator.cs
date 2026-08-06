@@ -33,21 +33,19 @@ internal static class AverageAggregator
             type == SqlType.Int32 ? SqlValue.FromInt32((int)value) : SqlValue.FromInt64(value);
     }
 
-    private sealed class DecimalAvg(SqlType resultType, bool distinct) : NumericAggregator<decimal>(resultType, distinct)
+    private sealed class DecimalAvg(SqlType resultType, bool distinct) : Decimal38Aggregator(resultType, distinct)
     {
-        protected override decimal Extract(SqlValue value) =>
-            value.Type == SqlType.Money ? value.AsMoney : value.AsDecimal;
-
         // Real computes AVG as SUM / COUNT and so inherits division's own
         // digit rule: the quotient truncates toward zero at the result scale
         // rather than rounding (probe-confirmed — seven values summing to
         // 4.00 average to 0.571428, and AVG(money) of $1.00 over seven rows
-        // is 0.1428). See DecimalMath.
-        protected override decimal Finalize(decimal total, long count) =>
-            DecimalMath.Truncating(total, count, this.ResultType is DecimalSqlType d ? d.scale : MoneySqlType.Scale);
-
-        protected override SqlValue Wrap(decimal value, SqlType type) =>
-            type == SqlType.Money ? SqlValue.FromMoney(type, value) : SqlValue.FromDecimal(type, value);
+        // is 0.1428).
+        protected override Decimal38 Finalize(in Decimal38 total, long count)
+        {
+            if (!Decimal38.TryDivide(total, Decimal38.FromInt64(count), Decimal38.MaxPrecision, this.Scale, out var mean))
+                throw this.AccumulatorOverflow();
+            return mean;
+        }
     }
 
     private sealed class DoubleAvg(SqlType resultType, bool distinct) : NumericAggregator<double>(resultType, distinct)

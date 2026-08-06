@@ -319,16 +319,7 @@ internal static class TdsColumnDecoder
                 return SqlValue.Null(type);
             var isNegative = reader.ReadByte() != 1;
             var magnitude = reader.ReadBytes(16);
-            for (var i = 12; i < 16; i++)
-            {
-                if (magnitude[i] != 0)
-                    throw new NotSupportedException("A decimal client value exceeds the range of System.Decimal.");
-            }
-
-            var lo = BinaryPrimitives.ReadInt32LittleEndian(magnitude);
-            var mid = BinaryPrimitives.ReadInt32LittleEndian(magnitude[4..]);
-            var hi = BinaryPrimitives.ReadInt32LittleEndian(magnitude[8..]);
-            return SqlValue.FromDecimal(type, new decimal(lo, mid, hi, isNegative, scale));
+            return SqlValue.FromDecimal(type, Decimal38.FromParts(BinaryPrimitives.ReadUInt128LittleEndian(magnitude), isNegative, scale));
         }
 
         private SqlValue ReadTime(TdsValueReader reader)

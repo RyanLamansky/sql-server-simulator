@@ -9,19 +9,21 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// is type-preserving across most categories with the decimal arm using
 /// <c>decimal(38, max(s, 18))</c> instead of preserving — that decision
 /// lives in each call site (per-function), but the actual integer-arm and
-/// decimal-arm computations are factored here.
+/// exact-numeric-arm computations are factored here.
 /// </summary>
+/// <remarks>
+/// Every arm computes in <see cref="double"/> against a single pre-multiplied
+/// ratio, which is what real does whatever the argument's family — the
+/// exact-numeric result is the double's own exact expansion rounded at the
+/// result's scale, so <c>DEGREES(CAST(1.5 AS decimal(10, 2)))</c> is
+/// <c>85.943669269623484297</c> and the same call at
+/// <c>decimal(38, 30)</c> is <c>85.943669269623484296971582807600</c>, the
+/// binary fraction running out before the digits do. Multiplying by the
+/// ratio as one constant rather than by 180 and then dividing is load-bearing:
+/// <c>DEGREES(CAST(33644737241.2066 AS decimal(18, 4)))</c> separates the two.
+/// </remarks>
 internal static class DegreesRadians
 {
-    /// <summary>
-    /// 28-digit decimal pi constant, the maximum precision .NET's
-    /// <see cref="decimal"/> can represent. Used so <c>(input * 180m) / pi</c>
-    /// rounds to scale-18 with the same trailing digits as SQL Server emits
-    /// (probe-confirmed: <c>degrees(cast(1.5 as decimal(10,2))) =
-    /// 85.943669269623484297</c>).
-    /// </summary>
-    public const decimal DecimalPi = 3.1415926535897932384626433833m;
-
     public const double RadiansToDegreesDouble = 180.0 / Math.PI;
 
     public const double DegreesToRadiansDouble = Math.PI / 180.0;
@@ -44,23 +46,13 @@ internal static class DegreesRadians
     }
 
     /// <summary>
-    /// Computes the decimal-arm result: <c>(input * numerator) / denominator</c>
-    /// rounded to <paramref name="resultType"/>'s declared scale using
-    /// half-away-from-zero (matches SQL Server's decimal arithmetic
-    /// rounding convention). Operation order matters for trailing-digit
-    /// fidelity — <c>(input * 180m) / pi</c> gives a different last digit
-    /// than <c>input * (180m / pi)</c>.
+    /// Computes the exact-numeric arm — <c>decimal</c> / <c>numeric</c> and
+    /// <c>money</c> / <c>smallmoney</c> alike: the operand crosses to
+    /// <see cref="double"/>, meets <paramref name="multiplier"/> there, and the
+    /// product's exact binary value comes back rounded half away from zero at
+    /// <paramref name="resultType"/>'s declared scale. A magnitude the result
+    /// type can't hold is real's Msg 8115 at state 2.
     /// </summary>
-    public static SqlValue DecimalArm(decimal input, decimal numerator, decimal denominator, SqlType resultType)
-    {
-        var raw = input * numerator / denominator;
-        // .NET decimal max scale is 28; declared SQL scale can run up to 38.
-        // Cap the round target so the .NET runtime doesn't throw on scale > 28
-        // (the result decimal's natural precision tops out at 28 anyway, so
-        // capping doesn't lose any value information).
-        var declaredScale = ((DecimalSqlType)resultType).scale;
-        var roundScale = declaredScale > 28 ? 28 : declaredScale;
-        var rounded = Math.Round(raw, roundScale, MidpointRounding.AwayFromZero);
-        return SqlValue.FromDecimal(resultType, rounded);
-    }
+    public static SqlValue ExactNumericArm(in Decimal38 input, double multiplier, SqlType resultType) =>
+        MathScalars.FromDoubleAsDecimalOrMoney(resultType, input.ToDouble() * multiplier);
 }

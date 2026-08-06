@@ -87,6 +87,8 @@ Type matrix probe-confirmed against AdventureWorks2025 hex-dumps:
   Probe against AW's plain-bit `Production.Document.FolderFlag` (the only non-UDDT bit column in AW) confirmed.
 - MAX types + xml + CLR-UDT all share the **simple inline** 8-byte-prefix shape, NOT the chunked PLP form used in TDS network traffic.
   Probe-confirmed via `ProductPhoto.ThumbNailPhoto` (1077 bytes inline, no chunk markers) and `HumanResources.JobCandidate.Resume` xml (9086 bytes likewise inline).
+- `decimal` / `numeric` carries an inline precision + scale + sign ahead of the mantissa, whose width is the precision tier's (4 / 8 / 12 / 16 bytes for 1-9 / 10-19 / 20-28 / 29-38), and the reader takes the whole mantissa at any tier — a `decimal(38, s)` column round-trips digit for digit.
+  `BacpacBuilder`, the test harness that writes these files, takes its values as .NET `decimal`s and so writes narrower ones than the reader accepts.
 
 ### The variable-precision temporal family
 

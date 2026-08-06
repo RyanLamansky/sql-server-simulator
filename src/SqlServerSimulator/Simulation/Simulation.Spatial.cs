@@ -261,7 +261,7 @@ partial class Simulation
             _ when numeric.Value.Type == SqlType.Float => numeric.Value.AsDouble,
             _ when numeric.Value.Type == SqlType.Int32 => numeric.Value.AsInt32,
             _ when numeric.Value.Type == SqlType.BigInt => numeric.Value.AsInt64,
-            _ => (double)numeric.Value.AsDecimal,
+            _ => numeric.Value.AsDecimal38.ToDouble(),
         };
         return negate ? -raw : raw;
     }

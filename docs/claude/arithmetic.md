@@ -185,48 +185,47 @@ The sign only moves the sign — `-4.00 / 7`, `4.00 / -7` and `-4.00 / -7` all c
 `money` follows the same split at its fixed scale of 4 (`$1.00 / 7` is `0.1428`, `$2.00 / 3` is `0.6666`, while `$1.0001 * $0.5555` rounds to `0.5556`), and **`AVG` inherits it** — real computes `AVG` as `SUM` / `COUNT`, so seven values summing to `4.00` average to `0.571428`, `AVG(money)` of `$1.00` over seven rows is `0.1428`, and the explicit `SUM(v) / COUNT(*)` spelling agrees.
 `CAST` / `CONVERT` are untouched: a narrowing conversion still rounds (`CAST(CAST(0.5714285 AS decimal(10, 7)) AS decimal(10, 6))` is `0.571429`), so the truncation is arithmetic's, not the conversion's.
 
-`Storage/DecimalMath.cs` carries both halves of the rule: `Truncating(dividend, divisor, scale)` is the one seam `DecimalArithmetic`'s `/`, `MoneyArithmetic`'s `/` and `AverageAggregator`'s finalize all divide through.
-It scales the dividend up front rather than dividing and dropping digits after, because .NET's own division rounds at its 28-significant-digit ceiling and that rounding lands *inside* the kept digits once the result scale approaches 28 — `CAST(2 AS decimal(38, 28)) / 3` is real's `0.6666…6666` where the rounded quotient would truncate to `…6667`.
-The pre-scaling runs only where it can't overflow (a divisor of magnitude 1 or more can't grow the quotient past the scaled dividend); everything else falls back to dividing first and truncating after.
+`Decimal38.TryDivide` carries both halves of the rule and is the one seam `DecimalArithmetic`'s `/`, `MoneyArithmetic`'s `/` and `AverageAggregator`'s finalize all divide through.
+It scales the dividend into a 256-bit intermediate before dividing, so the quotient's digits are exact at the result scale and the cut is a truncation of the true value rather than of an already-rounded one — `CAST(2 AS decimal(38, 28)) / 3` is real's `0.6666…6666`.
+`TrySubtract` / `TryAdd` / `TryMultiply` / `TryModulo` sit beside it, each rounding half away from zero at the result scale.
 
 ### The value carries the declared scale
 
-Those formulas settle the result *type*; the .NET `decimal` behind the value carries the same scale, so `CAST(1 AS numeric(10, 2))` is `1.00m` and not `1m`.
-`SqlValue.FromDecimal` stamps it — widening adds a zero of the target scale (.NET's addition takes the larger operand's scale, leaving the number untouched) and a payload with more fractional digits than the declared scale rounds half-away-from-zero, the same rule the `F<scale>` rendering paths apply.
-Because it sits in the factory every decimal-typed value passes through, one stamp covers `CAST` / `CONVERT` / `TRY_*`, arithmetic, the aggregates, the math scalars, `GENERATE_SERIES`, a column read, and the TVP / BCP / TDS / CLR ingestion paths alike; `SqlValue.AsMoney` does the same for `money` / `smallmoney`'s fixed scale of 4, which the scaled-integer storage would otherwise divide away.
+Those formulas settle the result *type*; the value behind it carries the same scale, so `CAST(1 AS numeric(10, 2))` holds `1.00` and not `1`, and `CAST(1 AS numeric(38, 30))` holds all thirty zeros.
+`SqlValue.FromDecimal` stamps it — a payload already at the declared scale passes straight through, one carrying fewer fractional digits widens with zeros, and one carrying more rounds half away from zero, the same rule the rendering paths apply.
+Because it sits in the factory every decimal-typed value passes through, one stamp covers `CAST` / `CONVERT` / `TRY_*`, arithmetic, the aggregates, the math scalars, `GENERATE_SERIES`, a column read, and the TVP / BCP / TDS / CLR ingestion paths alike; `SqlValue.FromMoney` does the same for `money` / `smallmoney`'s fixed scale of 4, which the scaled-integer storage would otherwise divide away.
 
-It matters wherever a surface writes the raw `decimal` instead of formatting from the declared type — [the JSON builders](json.md), `FOR JSON`, `FORMAT`, and `SimulatedDbDataReader.GetDecimal` / `GetValue` (SqlClient's readers hand back the declared scale too).
-Scale is invisible to `decimal` equality, comparison and hashing, so `GROUP BY` keys, `DISTINCT`, index seek keys and `SqlValue.Equals` are untouched; `CHECKSUM` renders its decimal input with `G29` so it keys off the numeric value the way real's does (`CHECKSUM(CAST(1 AS numeric(10, 2)))` equals `CHECKSUM(CAST(1 AS numeric(10, 0)))`).
-The TDS encoder already rescales to the declared scale from the column metadata, so the wire bytes don't move.
+It matters wherever a surface writes the raw value instead of formatting from the declared type — [the JSON builders](json.md), `FOR JSON`, `FOR XML`, `PRINT` / `RAISERROR` argument rendering, `FORMAT`, and `SimulatedDbDataReader.GetDecimal` / `GetValue` (SqlClient's readers hand back the declared scale too, inside what a .NET `decimal` can carry — see [`data-reader.md`](data-reader.md)).
+Scale is invisible to equality, comparison and hashing, so `GROUP BY` keys, `DISTINCT`, index seek keys and `SqlValue.Equals` are untouched; `CHECKSUM` canonicalizes its decimal input so it keys off the numeric value the way real's does (`CHECKSUM(CAST(1 AS numeric(10, 2)))` equals `CHECKSUM(CAST(1 AS numeric(10, 0)))`).
+The TDS encoder writes the magnitude straight from the column metadata's scale, so the wire bytes don't move.
 
-The stamp's precision check bounds the value against the target's integer-digit count, which is a table lookup of the powers of ten .NET `decimal` can hold: computing that bound by repeated multiplication cost up to 28 decimal multiplies per coerced value, a seventh of a decimal-summing aggregate's whole CPU.
-The magnitude test reads the value directly rather than truncating first (`|trunc(v)| > 10^k - 1` and `|v| >= 10^k` agree for every `v`, since `10^k` is an integer and truncation towards zero never crosses it), and a target with 28 or more integer digits admits everything `decimal` can hold, so it skips the compare entirely.
-`SUM` over a decimal skips the coercion altogether where it provably changes nothing — the operand a decimal of the *same scale* and no more integer digits than the result type, which is the shape SQL Server's own `SUM(decimal(p, s)) → decimal(38, s)` rule produces — because a decimal `SqlValue` boxes its payload, so the discarded intermediate costs an allocation per accumulated row.
-
-The one thing that can't be carried is a declared scale past .NET `decimal`'s 28 fractional digits, or trailing zeros with no room beside the integer part — `numeric(38, 30)`, or `numeric(38, 20)` holding a 15-digit integer part — where the value settles at the widest representation available rather than failing.
 Probed against SQL Server 2025 through `JSON_ARRAY`, which writes the raw value: `+ - %` carry `max(s1, s2)`, `*` carries `s1 + s2`, `/` carries `max(6, s1 + p2 + 1)`, `SUM` keeps the column's scale, `AVG` promotes to `numeric(38, max(s, 6))`, `ROUND` / `ABS` / `SIGN` / `POWER` keep the operand's, and `CEILING` / `FLOOR` drop to `numeric(p, 0)`.
-Oracle: `DecimalTests`, `MoneyTests`, `JsonBuilderTests`, and `TypeRoundTripTests` for the wire reader.
+Oracle: `DecimalTests`, `WideDecimalTests`, `MoneyTests`, `JsonBuilderTests`, and `TypeRoundTripTests` for the wire reader.
 
-### The 28-digit ceiling has one error surface
+### The backing type
 
-SQL Server carries 38 significant digits; the .NET `decimal` behind every value here carries 28-29.
-A value real represents happily can therefore have no representation at all, which is a **gap, not a SQL Server behavior** — so every path that reaches it raises `DecimalCeiling.Exceeded`, a `NotSupportedException` naming the ceiling and the operation that met it, rather than a `SimulatedSqlException` claiming real refused the statement.
-The covered paths: a **literal** (`Numeric`'s tokenizer branch), a **string conversion** (`SqlValue.ParseDecimal`), **arithmetic** (`TwoSidedExpression.RejectDecimalOverflow`), a **running aggregate total** (`NumericAggregator`), and the **row encode** that scales a value to its declared scale (`DecimalType.Encode`).
+`Storage/Decimal38` is the exact-numeric value: a `UInt128` magnitude, a sign flag and a scale byte, normalized at construction so zero is never negative.
+That is `numeric`'s whole domain — 38 significant digits at any scale from 0 to 38 — so a value real represents has a representation here, and the storage encoder writes the magnitude little-endian behind a sign byte at SQL Server's own 5 / 9 / 13 / 17-byte precision tiers.
 
-Where real's own error is due it still fires, and the split is probed (2026-08-05):
+Every operator is a `Try*` returning `false` on overflow rather than throwing, leaving the caller to name the error real names, and each computes through `Storage/UInt256` where 128 bits won't hold the intermediate: a multiply widens both operands, a division scales the dividend up front, and the reduction back to the result scale is a chain of at-most-19-digit `ulong` divisions (the first dropped digit settles the rounding, so no remainder wider than one digit is ever formed).
+`UInt256`'s own division is limb long division for a divisor inside 64 bits and Knuth algorithm D past it.
+The `ulong` fast paths ahead of every 256-bit path are what keep an ordinary narrow operand off that machinery — a narrow division measures faster than the .NET `decimal` arithmetic it replaced.
+
+The one narrowing left is the **client boundary**, and it is real SqlClient's own rather than the simulator's: `GetDecimal` / `GetValue` shed trailing fractional zeros to fit and raise `OverflowException` when nothing can be shed, exactly as SqlClient does against a real server — see [`data-reader.md`](data-reader.md).
+
+Real's own overflow errors fire where they are due, and the split is probed (2026-08-06):
 
 | Statement | Answer |
 | --- | --- |
-| `CAST('<30 digits>' AS decimal(38, 0))` | ceiling — real converts it, and SqlClient is what then refuses to hand it to a .NET caller |
-| `CAST('<40 digits>' AS decimal(38, 0))` | Msg 8115 state 6 — wider than `numeric`'s own 38 |
-| `CAST('<30 digits>' AS decimal(20, 0))` | Msg 8115 state 8 — wider than the declared target |
-| `CAST('1e40' AS decimal(38, 0))` / `CAST('abc' AS …)` | Msg 8114 — scientific notation past range is a read failure, not an overflow |
-| `SELECT <39- or 40-digit literal>` | Msg 1007 |
-| `CAST(1e28 AS decimal(38, 0)) * 10` | ceiling — real computes it |
+| `CAST('<30 digits>' AS decimal(38, 0))` | the value — the reader is where a .NET caller meets a narrowing |
+| `CAST('<40 digits>' AS decimal(38, 0))` | Msg 8115 state 6 — the text is wider than `numeric`'s own 38 |
+| `CAST('<30 digits>' AS decimal(20, 0))` | Msg 8115 state 8 — text inside 38 digits, wider than the declared target |
+| `CAST('1e40' AS decimal(38, 0))` / `CAST('abc' AS …)` | Msg 8114 — scientific notation is a read failure, not an overflow |
+| `SELECT <39- or 40-digit literal>` | Msg 1007, at parse |
+| `CAST(1e28 AS decimal(38, 0)) * 10` | the value |
+| `CAST(99999999999999999999999999999999999999 AS decimal(38, 0)) * 10` | Msg 8115 state 2 — the arithmetic-overflow shape |
 
-Arithmetic tells the two apart by re-estimating the magnitude in `double`, whose ~15 significant digits are ample to separate 10^29 from 10^38.
-A **widening** to a declared scale is the one place that degrades instead of raising: the trailing zeros settle at the widest representation available, which is the same number written with fewer of them (the quirk the section above describes).
-Oracle: `DecimalCeilingTests`.
+Oracle: `WideDecimalTests`, `ExactNumericConversionErrorTests`, and `Decimal38Tests` / `Decimal38DifferentialTests` in `Tests.Internal`, the latter sweeping every operator against a `BigInteger` reference model.
 
 ### Integer literals size by digit count against a decimal
 SQL Server types an integer **literal** as `numeric(digit_count, 0)` — not `int`'s fixed precision 10 — when it is unified with a decimal/numeric partner, so `10.0/3` is `numeric(8, 6)`, not `numeric(14, 12)` (the `3` contributes `(1, 0)`; `10.0/CAST(3 AS int)` keeps `(14, 12)` since a non-literal `int` stays `(10, 0)`).

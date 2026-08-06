@@ -37,7 +37,7 @@ internal sealed class AbsoluteValue(ParserContext context) : Expression
         return v.IsNull ? SqlValue.Null(resultType) : resultType.Category switch
         {
             SqlTypeCategory.Integer => AbsInteger(MathScalars.AsLong(v), resultType),
-            SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimalOrMoney(resultType, Math.Abs(MathScalars.AsDecimalOrMoney(v))),
+            SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimal38OrMoney(resultType, MathScalars.AsDecimal38OrMoney(v).Abs()),
             SqlTypeCategory.Approximate => SqlValue.FromDouble(Math.Abs(MathScalars.AsDouble(v))),
             _ => throw new NotSupportedException($"ABS doesn't support {v.Type}.")
         };

@@ -262,8 +262,17 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ArithmeticOverflowConverting(SqlType source, string targetWord, byte state) =>
         new($"Arithmetic overflow error converting {FamilyRootName(source)} to data type {targetWord}.", 8115, 16, state);
 
-    internal static SimulatedSqlException ArithmeticOverflowToTarget(string targetTypeName) =>
-        new($"Arithmetic overflow error converting numeric to data type {targetTypeName}.", 8115, 16, 8);
+    /// <summary>
+    /// Mimics SQL Server error 8115 out of an exact-numeric source, whose
+    /// message names <c>numeric</c> on the source side whatever the declared
+    /// precision. The state is the target's: 4 for <c>money</c> /
+    /// <c>smallmoney</c>, 5 for a <c>varchar</c> / <c>char</c> too short to
+    /// hold the rendering, and 6 or 8 for a narrower <c>numeric</c> depending
+    /// on whether the value overran 38 digits or only the declared precision —
+    /// each probed against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ArithmeticOverflowToTarget(string targetTypeName, byte state) =>
+        new($"Arithmetic overflow error converting numeric to data type {targetTypeName}.", 8115, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 235: a string couldn't be parsed as money /
@@ -309,6 +318,35 @@ partial class SimulatedSqlException
         new($"Arithmetic overflow error for type {typeName}, value = {formattedValue}.", 232, 16, state);
 
     /// <summary>
+    /// <see cref="ArithmeticOverflowForType(string, string, byte)"/> for an
+    /// approximate source, which real renders at <b>seventeen significant
+    /// digits</b> before padding to six fractional ones — so a magnitude past
+    /// seventeen digits shows trailing zeros rather than the double's own
+    /// exact binary tail (<c>CAST(CAST(1e30 AS float) AS int)</c> names
+    /// <c>1000000000000000000000000000000.000000</c>, not the double's
+    /// <c>…19884624838656</c>).
+    /// </summary>
+    internal static SimulatedSqlException ArithmeticOverflowForType(string typeName, double value, byte state) =>
+        ArithmeticOverflowForType(typeName, FormatApproximateAtSeventeenDigits(value), state);
+
+    private static string FormatApproximateAtSeventeenDigits(double value)
+    {
+        if (!double.IsFinite(value) || Math.Abs(value) < 1e17)
+            return value.ToString("F6", CultureInfo.InvariantCulture);
+
+        // "E16" is the seventeen-digit form; past 1e17 every one of those
+        // digits is an integer digit, so the layout is the digits, the zeros
+        // the exponent adds beyond them, and an all-zero fraction.
+        var text = value.ToString("E16", CultureInfo.InvariantCulture);
+        var negative = text[0] == '-';
+        var body = negative ? text[1..] : text;
+        var marker = body.IndexOf('E', StringComparison.Ordinal);
+        var digits = string.Concat(body[..1], body[2..marker]);
+        var exponent = int.Parse(body[(marker + 1)..], NumberStyles.Integer, CultureInfo.InvariantCulture);
+        return string.Concat(negative ? "-" : "", digits, new string('0', exponent - 16), ".000000");
+    }
+
+    /// <summary>
     /// Mimics SQL Server error 220: integer-family narrowing overflow during
     /// column assignment, CAST, or ALTER COLUMN per-row coercion (e.g.
     /// <c>int</c> → <c>tinyint</c> on a value &gt; 255). Probe-confirmed
@@ -330,6 +368,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException InsufficientResultSpaceForMoneyToInt() =>
         new("There is insufficient result space to convert a money value to int.", 237, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 237's <c>smallmoney</c> cell: a <c>money</c>
+    /// value outside <c>smallmoney</c>'s range. Same number as the <c>int</c>
+    /// cell at a different state (probe-confirmed).
+    /// </summary>
+    internal static SimulatedSqlException InsufficientResultSpaceForMoneyToSmallMoney() =>
+        new("There is insufficient result space to convert a money value to smallmoney.", 237, 16, 3);
 
     /// <summary>
     /// Chooses the SQL Server error for a numeric source value that overflowed
@@ -370,9 +416,7 @@ partial class SimulatedSqlException
                 : targetType == SqlType.Int32 ? (byte)3
                 : (byte)0;
             return state == 0 ? null : ArithmeticOverflowForType(
-                targetType.SqlServerName,
-                source.CoerceTo(SqlType.Float).AsDouble.ToString("F6", CultureInfo.InvariantCulture),
-                state);
+                targetType.SqlServerName, source.CoerceTo(SqlType.Float).AsDouble, state);
         }
 
         if (source.Type == SqlType.Money)

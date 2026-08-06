@@ -111,36 +111,28 @@ internal sealed partial class Selection
         }
         else
         {
-            var start = startVal.AsDecimal;
-            var stop = stopVal.AsDecimal;
-            decimal step;
+            var declared = (DecimalSqlType)outputType;
+            var start = startVal.AsDecimal38;
+            var stop = stopVal.AsDecimal38;
+            Decimal38 step;
             if (!stepValProvided)
             {
-                step = start > stop ? -1m : 1m;
+                step = start > stop ? Decimal38.One.Negate() : Decimal38.One;
             }
             else
             {
-                step = stepVal.AsDecimal;
-                if (step == 0m)
+                step = stepVal.AsDecimal38;
+                if (step.IsZero)
                     throw SimulatedSqlException.GenerateSeriesStepZero();
             }
 
             var cur = start;
-            if (step > 0m)
+            var ascending = step.Sign > 0;
+            while (ascending ? cur <= stop : cur >= stop)
             {
-                while (cur <= stop)
-                {
-                    yield return RowEncoder.EncodeRow(schema, [SqlValue.FromDecimal(outputType, cur)]);
-                    cur += step;
-                }
-            }
-            else
-            {
-                while (cur >= stop)
-                {
-                    yield return RowEncoder.EncodeRow(schema, [SqlValue.FromDecimal(outputType, cur)]);
-                    cur += step;
-                }
+                yield return RowEncoder.EncodeRow(schema, [SqlValue.FromDecimal(outputType, cur)]);
+                if (!Decimal38.TryAdd(cur, step, declared.precision, declared.scale, out cur))
+                    throw SimulatedSqlException.ArithmeticOverflow("numeric");
             }
         }
     }

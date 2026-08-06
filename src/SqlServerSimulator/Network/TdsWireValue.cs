@@ -186,19 +186,10 @@ internal static class TdsWireValue
         var type = SqlType.GetDecimal(precision, scale);
         var isNegative = reader.ReadByte() != 1;
         var magnitude = reader.ReadBytes(MagnitudeBytes(precision));
-        for (var i = 12; i < magnitude.Length; i++)
-        {
-            if (magnitude[i] != 0)
-                throw new NotSupportedException("A sql_variant decimal value exceeds the range of System.Decimal.");
-        }
-
-        Span<byte> assembled = stackalloc byte[12];
+        Span<byte> assembled = stackalloc byte[16];
         assembled.Clear();
-        magnitude[..Math.Min(magnitude.Length, 12)].CopyTo(assembled);
-        var lo = BinaryPrimitives.ReadInt32LittleEndian(assembled);
-        var mid = BinaryPrimitives.ReadInt32LittleEndian(assembled[4..]);
-        var hi = BinaryPrimitives.ReadInt32LittleEndian(assembled[8..]);
-        return SqlValue.FromDecimal(type, new decimal(lo, mid, hi, isNegative, scale));
+        magnitude[..Math.Min(magnitude.Length, 16)].CopyTo(assembled);
+        return SqlValue.FromDecimal(type, Decimal38.FromParts(BinaryPrimitives.ReadUInt128LittleEndian(assembled), isNegative, scale));
     }
 
     private static SqlValue ReadVariantTime(TdsValueReader reader)

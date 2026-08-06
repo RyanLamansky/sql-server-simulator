@@ -6,8 +6,9 @@ namespace SqlServerSimulator.Parser.Aggregators;
 /// Backs <c>SUM</c>. Result types follow SQL Server's rules
 /// (see <see cref="Expressions.AggregateExpression"/>'s GetSqlType): integer
 /// types accumulate at the result-type's width with overflow detection
-/// (Msg 8115); decimal types accumulate as .NET decimal (precision 28-29
-/// digits — the simulator's documented decimal limitation). float and real
+/// (Msg 8115); decimal and money types accumulate as
+/// <see cref="Decimal38"/> at the promoted result type, so a total past
+/// <c>decimal(38, s)</c> raises real's own Msg 8115 state 2. float and real
 /// alike sum in .NET <see cref="double"/> — real's result type is float, and
 /// each single widens exactly on the way in — with infinity / NaN as
 /// observed. Empty input or all-NULL input → NULL of result type.
@@ -42,28 +43,9 @@ internal static class SumAggregator
             : SqlValue.FromInt64(value);
     }
 
-    private sealed class DecimalSum(SqlType resultType, bool distinct) : NumericAggregator<decimal>(resultType, distinct)
+    private sealed class DecimalSum(SqlType resultType, bool distinct) : Decimal38Aggregator(resultType, distinct)
     {
-        protected override decimal Extract(SqlValue value) =>
-            value.Type == SqlType.Money ? value.AsMoney : value.AsDecimal;
-
-        // A decimal SqlValue boxes its payload, so the coercion the base class
-        // performs allocates once per accumulated row — and for the shape that
-        // dominates a decimal SUM (a decimal operand summed into a decimal of
-        // the same scale and at least as many integer digits) it changes
-        // nothing: no value of the source type rounds, and none can overflow
-        // the target's precision. Anything else takes the ordinary coercion.
-        protected override decimal ExtractCoerced(SqlValue value) =>
-            value.Type is DecimalSqlType source && this.ResultType is DecimalSqlType target
-            && source.scale == target.scale
-            && target.precision - target.scale >= source.precision - source.scale
-                ? value.AsDecimal
-                : base.ExtractCoerced(value);
-
-        protected override decimal Finalize(decimal total, long count) => total;
-
-        protected override SqlValue Wrap(decimal value, SqlType type) =>
-            type == SqlType.Money ? SqlValue.FromMoney(type, value) : SqlValue.FromDecimal(type, value);
+        protected override Decimal38 Finalize(in Decimal38 total, long count) => total;
     }
 
     private sealed class DoubleSum(SqlType resultType, bool distinct) : NumericAggregator<double>(resultType, distinct)

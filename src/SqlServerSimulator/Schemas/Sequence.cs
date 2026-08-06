@@ -17,8 +17,7 @@ namespace SqlServerSimulator.Schemas;
 /// declared type — int / bigint / smallint / tinyint all fit, and
 /// <c>decimal(p, 0)</c> values are bounded by their precision (largest
 /// supported is <c>decimal(18, 0)</c> for safety, since long can hold up to
-/// 19 decimal digits; CLAUDE.md mentions decimal values requiring more than
-/// 28 significant digits aren't modeled and the same applies here).
+/// 19 decimal digits).
 /// <see cref="CurrentValue"/> tracks the next value to emit; first
 /// <c>NEXT VALUE FOR</c> returns <see cref="CurrentValue"/> unchanged and
 /// then advances it by <see cref="Increment"/> (probe-confirmed against
@@ -177,7 +176,7 @@ internal sealed class Sequence(
     /// <summary>
     /// Wraps a <see cref="long"/> as the sequence's declared type. The
     /// integer family uses the matching narrow value; decimal types route
-    /// through <see cref="SqlValue.FromDecimal"/> with scale 0.
+    /// through <see cref="SqlValue.FromDecimal(SqlType, decimal)"/> with scale 0.
     /// </summary>
     private SqlValue WrapAsDeclaredType(long value) => this.DeclaredType switch
     {

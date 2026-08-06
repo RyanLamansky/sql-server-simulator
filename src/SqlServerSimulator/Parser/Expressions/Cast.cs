@@ -458,8 +458,13 @@ internal sealed class Cast : Expression
                     => SqlValue.FromVarchar("*"),
                 SqlTypeCategory.Integer
                     => throw SimulatedSqlException.ArithmeticOverflow(familyName),
+                // An exact-numeric source names itself and takes state 5 into
+                // a varchar / char target, while the Unicode targets take the
+                // generic "expression" wording at state 2 — probed both ways.
+                SqlTypeCategory.Decimal when targetType is NVarcharSqlType
+                    => throw SimulatedSqlException.ArithmeticOverflow(familyName),
                 SqlTypeCategory.Decimal
-                    => throw SimulatedSqlException.ArithmeticOverflowToTarget(familyName),
+                    => throw SimulatedSqlException.ArithmeticOverflowToTarget(familyName, state: 5),
                 SqlTypeCategory.Money
                     => throw SimulatedSqlException.InsufficientResultSpaceForMoney(familyName),
                 SqlTypeCategory.Approximate

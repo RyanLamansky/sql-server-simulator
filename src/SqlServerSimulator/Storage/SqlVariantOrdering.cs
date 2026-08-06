@@ -113,16 +113,21 @@ internal static class SqlVariantOrdering
             : string.CompareOrdinal(left, right);
     }
 
-    /// <summary>The exact-numeric family's canonical value — decimal holds every member's range.</summary>
-    private static decimal ExactValue(SqlValue value) => value.Type switch
+    /// <summary>
+    /// The exact-numeric family's canonical value — <see cref="Decimal38"/>
+    /// holds every member's range, and its scale-insensitive equality and hash
+    /// are what make <c>int 5</c>, <c>bigint 5</c> and <c>decimal 5.00</c> one
+    /// value inside a <c>sql_variant</c>.
+    /// </summary>
+    private static Decimal38 ExactValue(SqlValue value) => value.Type switch
     {
-        BitSqlType => value.AsBoolean ? 1m : 0m,
-        TinyIntSqlType => value.AsByte,
-        SmallIntSqlType => value.AsInt16,
-        Int32SqlType => value.AsInt32,
-        BigIntSqlType => value.AsInt64,
-        DecimalSqlType => value.AsDecimal,
-        _ => value.AsMoneyScaledUnits / 10000m,
+        BitSqlType => value.AsBoolean ? Decimal38.One : Decimal38.Zero,
+        TinyIntSqlType => Decimal38.FromInt32(value.AsByte),
+        SmallIntSqlType => Decimal38.FromInt32(value.AsInt16),
+        Int32SqlType => Decimal38.FromInt32(value.AsInt32),
+        BigIntSqlType => Decimal38.FromInt64(value.AsInt64),
+        DecimalSqlType => value.AsDecimal38,
+        _ => value.AsMoneyDecimal38,
     };
 
     private static double ApproximateValue(SqlValue value) =>

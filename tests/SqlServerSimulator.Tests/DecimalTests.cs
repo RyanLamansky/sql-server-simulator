@@ -52,9 +52,20 @@ public sealed class DecimalTests
     public void Cast_StringToDecimal_BadFormatRaisesMsg8114(string literal) =>
         AssertSqlMessage($"select cast({literal} as decimal(10, 2))", "Error converting data type varchar to numeric.");
 
+    /// <summary>
+    /// A conversion overflow names the source family, where an arithmetic one
+    /// names <c>expression</c> — probe-confirmed across int / bigint / money /
+    /// varchar / numeric sources, all at state 8.
+    /// </summary>
     [TestMethod]
     public void Cast_DecimalOverflow_RaisesMsg8115() =>
-        AssertSqlMessage("select cast(1000 as decimal(3, 0))", "Arithmetic overflow error converting expression to data type numeric.");
+        AssertSqlMessage("select cast(1000 as decimal(3, 0))", "Arithmetic overflow error converting int to data type numeric.");
+
+    [TestMethod]
+    public void Cast_DecimalToNarrowerDecimalOverflow_NamesNumeric() =>
+        AssertSqlMessage(
+            "select cast(cast(123456 as decimal(10, 0)) as decimal(5, 0))",
+            "Arithmetic overflow error converting numeric to data type numeric.");
 
     [TestMethod]
     [DataRow("1.5", "1")]
@@ -190,10 +201,10 @@ public sealed class DecimalTests
             .ToString(System.Globalization.CultureInfo.InvariantCulture));
 
     /// <summary>
-    /// A result scale at .NET <see cref="decimal"/>'s own 28-digit ceiling
-    /// still reports real's digits: dividing first and truncating after would
-    /// hand .NET's rounding of the quotient (…6667) into the kept digits, so
-    /// the dividend is scaled up front instead.
+    /// A result scale of 28 — as many fractional digits as a .NET
+    /// <see cref="decimal"/> can carry back to the client — still reports
+    /// real's digits: the dividend is scaled up front so the quotient's own
+    /// rounding (…6667) never reaches the kept digits.
     /// </summary>
     [TestMethod]
     public void DecimalDivision_ResultScaleAtDecimalsCeiling_KeepsRealsDigits() =>

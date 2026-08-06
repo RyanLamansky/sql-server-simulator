@@ -112,29 +112,101 @@ internal static class MathScalars
     public static double AsDouble(SqlValue v) => v.Type.Category switch
     {
         SqlTypeCategory.Integer => AsLong(v),
-        SqlTypeCategory.Decimal => (double)v.AsDecimal,
-        SqlTypeCategory.Money => (double)v.AsMoney,
+        SqlTypeCategory.Decimal => v.AsDecimal38.ToDouble(),
+        SqlTypeCategory.Money => v.AsMoneyDecimal38.ToDouble(),
         SqlTypeCategory.Approximate => v.Type == SqlType.Float ? v.AsDouble : v.AsSingle,
         _ => throw new NotSupportedException($"Math function doesn't accept {v.Type} operand.")
     };
 
     /// <summary>
-    /// Decimal-or-money read accessor: routes <c>decimal</c> / <c>numeric</c>
-    /// through <see cref="SqlValue.AsDecimal"/> and <c>money</c> /
-    /// <c>smallmoney</c> through <see cref="SqlValue.AsMoney"/> (which
-    /// converts the scaled-int storage). Both return a <see cref="decimal"/>.
+    /// Decimal-or-money read accessor at full width: a <c>decimal</c> /
+    /// <c>numeric</c> as it stands, a <c>money</c> / <c>smallmoney</c> through
+    /// its scaled-int storage at scale 4.
     /// </summary>
-    public static decimal AsDecimalOrMoney(SqlValue v) => v.Type.Category == SqlTypeCategory.Money ? v.AsMoney : v.AsDecimal;
+    public static Decimal38 AsDecimal38OrMoney(SqlValue v) =>
+        v.Type.Category == SqlTypeCategory.Money ? v.AsMoneyDecimal38 : v.AsDecimal38;
 
     /// <summary>
-    /// Decimal-or-money write helper: dispatches to
-    /// <see cref="SqlValue.FromMoney"/> when <paramref name="resultType"/>
-    /// is money / smallmoney, otherwise <see cref="SqlValue.FromDecimal"/>.
-    /// Lets each math-scalar function emit a single line for the
-    /// <c>Decimal</c>-or-<c>Money</c> arm of its dispatch.
+    /// Decimal-or-money write helper: the result type's own scale is restored
+    /// by the constructor, so a scalar that produced an integer-valued result
+    /// comes back carrying the declared fractional zeros. Lets each math-scalar
+    /// function emit a single line for the <c>Decimal</c>-or-<c>Money</c> arm
+    /// of its dispatch.
     /// </summary>
-    public static SqlValue FromDecimalOrMoney(SqlType resultType, decimal value) =>
+    public static SqlValue FromDecimal38OrMoney(SqlType resultType, in Decimal38 value) =>
         resultType.Category == SqlTypeCategory.Money
             ? SqlValue.FromMoney(resultType, value)
             : SqlValue.FromDecimal(resultType, value);
+
+    /// <summary>
+    /// A <see cref="double"/>-computed result landed on an exact-numeric result
+    /// type, reading the operand's exact binary value and rounding half away
+    /// from zero at the declared scale. A magnitude the type can't hold is
+    /// real's Msg 8115 at state 2 — the arithmetic-overflow shape, since the
+    /// value came out of a computation rather than a conversion.
+    /// </summary>
+    public static SqlValue FromDoubleAsDecimalOrMoney(SqlType resultType, double value)
+    {
+        var (precision, scale) = resultType is DecimalSqlType d
+            ? (d.precision, d.scale)
+            : (MoneySqlType.Precision, MoneySqlType.Scale);
+        return Decimal38.TryFromDouble(value, precision, scale, out var converted)
+            ? FromDecimal38OrMoney(resultType, converted)
+            : throw SimulatedSqlException.ArithmeticOverflow(resultType is DecimalSqlType ? "numeric" : resultType.ToString()!);
+    }
+
+    /// <summary>
+    /// The smallest integer-valued number at or above <paramref name="value"/>,
+    /// at scale 0 — <c>CEILING</c>'s exact-numeric arm.
+    /// </summary>
+    public static Decimal38 Ceiling(in Decimal38 value) => StepToInteger(value, up: true);
+
+    /// <summary>
+    /// The largest integer-valued number at or below <paramref name="value"/>,
+    /// at scale 0 — <c>FLOOR</c>'s exact-numeric arm.
+    /// </summary>
+    public static Decimal38 Floor(in Decimal38 value) => StepToInteger(value, up: false);
+
+    private static Decimal38 StepToInteger(in Decimal38 value, bool up)
+    {
+        _ = Decimal38.TryTruncate(value, Decimal38.MaxPrecision, 0, out var truncated);
+        var comparison = value.CompareTo(truncated);
+        if (up ? comparison <= 0 : comparison >= 0)
+            return truncated;
+
+        var stepped = up
+            ? Decimal38.TryAdd(truncated, Decimal38.One, Decimal38.MaxPrecision, 0, out var moved)
+            : Decimal38.TrySubtract(truncated, Decimal38.One, Decimal38.MaxPrecision, 0, out moved);
+        return stepped ? moved : throw SimulatedSqlException.ArithmeticOverflow("numeric");
+    }
+
+    /// <summary>
+    /// <paramref name="value"/> settled at decimal position
+    /// <paramref name="length"/> — rounding half away from zero, or dropping
+    /// the digits toward zero when <paramref name="truncate"/> — keeping the
+    /// value's own scale, so <c>ROUND(CAST(1.5 AS decimal(10, 4)), 0)</c> is
+    /// real's <c>2.0000</c> and <c>ROUND(127, -1)</c> is <c>130</c>.
+    /// </summary>
+    public static Decimal38 RoundAtPosition(in Decimal38 value, int length, bool truncate)
+    {
+        var shift = value.Scale - length;
+        if (shift <= 0)
+            return value;
+        if (shift > Decimal38.MaxPrecision)
+            return Decimal38.FromParts(UInt128.Zero, isNegative: false, value.Scale);
+
+        // Reading the magnitude as though it carried `shift` fractional digits
+        // puts the cut where the caller asked for it; the settled digits then go
+        // back to the place they came from, which is what keeps the scale.
+        var digits = Decimal38.FromParts(value.Magnitude, value.IsNegative, shift);
+        _ = truncate
+            ? Decimal38.TryTruncate(digits, Decimal38.MaxPrecision, 0, out var settled)
+            : Decimal38.TryRescale(digits, Decimal38.MaxPrecision, 0, out settled);
+
+        var magnitude = settled.Magnitude * Decimal38.Pow10[shift];
+        return magnitude >= Decimal38.Pow10[Decimal38.MaxPrecision]
+            ? throw SimulatedSqlException.ArithmeticOverflow("numeric")
+            : Decimal38.FromParts(magnitude, value.IsNegative, value.Scale);
+    }
+
 }

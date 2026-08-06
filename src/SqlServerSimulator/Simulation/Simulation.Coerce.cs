@@ -737,9 +737,9 @@ partial class Simulation
             DateTimeOffsetSqlType => value.AsDateTimeOffset.ToString("yyyy-MM-dd HH:mm:ss.fffffff zzz", CultureInfo.InvariantCulture),
             _ when value.Type == SqlType.Float => value.AsDouble.ToString("G15", CultureInfo.InvariantCulture),
             _ when value.Type == SqlType.Real => value.AsSingle.ToString("G7", CultureInfo.InvariantCulture),
-            _ when value.Type == SqlType.Money || value.Type == SqlType.SmallMoney => value.AsMoney.ToString("F4", CultureInfo.InvariantCulture),
+            _ when value.Type == SqlType.Money || value.Type == SqlType.SmallMoney => value.AsMoneyDecimal38.ToString(),
             VarbinarySqlType or BinarySqlType => $"0x{Convert.ToHexString(value.AsBytes)}",
-            DecimalSqlType d => value.AsDecimal.ToString($"F{d.scale}", CultureInfo.InvariantCulture),
+            DecimalSqlType => value.AsDecimal38.ToString(),
             _ => throw new NotSupportedException($"No key-violation rendering for {value.Type}."),
         };
 }

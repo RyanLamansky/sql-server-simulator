@@ -14,12 +14,11 @@ namespace SqlServerSimulator.Storage;
 /// equality flows through the type-identity pattern used elsewhere.
 /// </summary>
 /// <remarks>
-/// In-memory values use .NET's <see cref="decimal"/> (28-29 significant
-/// digits), stored in <see cref="SqlValue"/>'s reference slot. Declared
-/// precision > 28 falls outside the .NET decimal range; the simulator
-/// raises <see cref="NotSupportedException"/> naming that as the unmodeled
-/// limit rather than silently truncating. Byte width is still allocated to
-/// match SQL Server so row-size budgeting remains correct.
+/// In-memory values are <see cref="Decimal38"/> — the full 38 significant
+/// digits real carries — boxed in <see cref="SqlValue"/>'s reference slot.
+/// The on-disk form is the probed one: a sign byte (0x00 negative, 0x01
+/// non-negative) then the absolute mantissa little-endian, scaled to the
+/// declared scale and zero-padded to the type's storage width.
 /// </remarks>
 internal sealed class DecimalSqlType(byte precision, byte scale) : SqlType(SqlTypeCategory.Decimal)
 {
@@ -37,58 +36,41 @@ internal sealed class DecimalSqlType(byte precision, byte scale) : SqlType(SqlTy
     public override int Encode(SqlValue value, Span<byte> destination)
     {
         // Sign byte (0x00 = negative, 0x01 = non-negative; matches the
-        // documented SQL Server convention) followed by the absolute
-        // mantissa as a little-endian unsigned integer scaled to the
-        // declared scale, zero-padded to the type's storage width.
+        // documented SQL Server convention, probe-confirmed against
+        // CAST(<decimal> AS varbinary)) followed by the absolute mantissa as a
+        // little-endian unsigned integer already scaled to the declared scale,
+        // zero-padded to the type's storage width.
         var width = StorageWidth(this.precision);
         destination[..width].Clear();
-        var d = value.AsDecimal;
-        destination[0] = d >= 0 ? (byte)0x01 : (byte)0x00;
+        var d = value.AsDecimal38;
+        destination[0] = d.IsNegative ? (byte)0x00 : (byte)0x01;
 
-        decimal scaled;
-        try
-        {
-            scaled = decimal.Truncate(decimal.Multiply(decimal.Abs(d), Pow10(this.scale)));
-        }
-        catch (OverflowException)
-        {
-            // The scaled mantissa needs more than a .NET decimal's 96 bits, so
-            // the value has no storage form here at all — the backing-type
-            // ceiling rather than anything real would refuse.
-            throw DecimalCeiling.Exceeded($"storing {d} as {this}");
-        }
-
-        // .NET decimal exposes its 96-bit mantissa via GetBits — three int32s
-        // representing low/mid/high. Width budget for 1-9 / 10-19 / 20-28
-        // precisions is 4 / 8 / 12 mantissa bytes, all of which fit; p 29-38
-        // would need more, but those types throw at construction.
-        Span<int> bits = stackalloc int[4];
-        var written = decimal.GetBits(scaled, bits);
-        Span<byte> mantissa = stackalloc byte[12];
-        BinaryPrimitives.WriteInt32LittleEndian(mantissa[..4], bits[0]);
-        BinaryPrimitives.WriteInt32LittleEndian(mantissa.Slice(4, 4), bits[1]);
-        BinaryPrimitives.WriteInt32LittleEndian(mantissa.Slice(8, 4), bits[2]);
-        var mantissaBytes = width - 1;
-        mantissa[..Math.Min(mantissaBytes, 12)].CopyTo(destination[1..]);
+        // The value carries the declared scale by construction, so the mantissa
+        // is the magnitude as it stands; 38 digits need 127 bits, which the
+        // 16 mantissa bytes of the widest tier hold.
+        Span<byte> mantissa = stackalloc byte[16];
+        BinaryPrimitives.WriteUInt128LittleEndian(mantissa, d.Magnitude);
+        mantissa[..(width - 1)].CopyTo(destination[1..]);
         return width;
     }
 
     public override SqlValue Decode(ReadOnlySpan<byte> source)
     {
         var negative = source[0] == 0x00;
-        var width = source.Length;
-        var mantissaBytes = width - 1;
-        Span<byte> mantissa = stackalloc byte[12];
-        source[1..Math.Min(width, 13)].CopyTo(mantissa);
-        var lo = BinaryPrimitives.ReadInt32LittleEndian(mantissa[..4]);
-        var mid = BinaryPrimitives.ReadInt32LittleEndian(mantissa.Slice(4, 4));
-        var hi = BinaryPrimitives.ReadInt32LittleEndian(mantissa.Slice(8, 4));
-        var scaled = new decimal(lo, mid, hi, isNegative: negative, scale: this.scale);
-        return SqlValue.FromDecimal(this, scaled);
+        Span<byte> mantissa = stackalloc byte[16];
+        source[1..Math.Min(source.Length, 17)].CopyTo(mantissa);
+        var magnitude = BinaryPrimitives.ReadUInt128LittleEndian(mantissa);
+        return SqlValue.FromDecimal(this, Decimal38.FromParts(magnitude, negative, this.scale));
     }
 
     public override SqlValue ConvertParameter(object raw)
     {
+        // A value that arrived at full width (a non-SqlClient driver's RPC
+        // decimal) keeps it; the declared scale still wins when it is the wider
+        // of the two, matching the .NET-decimal path below.
+        if (raw is Decimal38 wide)
+            return SqlValue.FromDecimal(wide.Scale <= this.scale ? this : Get(Decimal38.MaxPrecision, wide.Scale), wide);
+
         var value = Convert.ToDecimal(raw, CultureInfo.InvariantCulture);
         // The .NET decimal carries its own scale in the high bits of its
         // flags word — preserve it in the bound SqlValue so a parameter of
@@ -96,14 +78,11 @@ internal sealed class DecimalSqlType(byte precision, byte scale) : SqlType(SqlTy
         // <c>decimal(18, 0)</c> mapping when the caller didn't supply
         // explicit Precision/Scale on the DbParameter.
         var valueScale = (decimal.GetBits(value)[3] >> 16) & 0xFF;
-        if (valueScale <= this.scale)
-            return SqlValue.FromDecimal(this, value);
-
-        // Widen to a type that fits the natural scale. Cap precision at 28
-        // (the .NET decimal limit the simulator already enforces); the value
-        // can't have demanded more than that to begin with.
-        var widerType = Get(28, valueScale);
-        return SqlValue.FromDecimal(widerType, value);
+        return valueScale <= this.scale
+            ? SqlValue.FromDecimal(this, value)
+            // Widen to a type that fits the natural scale. A .NET decimal's
+            // mantissa is 96 bits, so 29 digits of precision always hold it.
+            : SqlValue.FromDecimal(Get(Math.Max(29, valueScale), valueScale), value);
     }
 
     public override string ToString() => $"decimal({this.precision},{this.scale})";
@@ -140,12 +119,4 @@ internal sealed class DecimalSqlType(byte precision, byte scale) : SqlType(SqlTy
     }
 
     private static readonly ConcurrentDictionary<(byte Precision, byte Scale), DecimalSqlType> cache = new();
-
-    private static decimal Pow10(int n)
-    {
-        var result = 1m;
-        for (var i = 0; i < n; i++)
-            result *= 10m;
-        return result;
-    }
 }

@@ -68,7 +68,7 @@ internal sealed class Numeric : Token
             if (precision > 38)
                 throw SimulatedSqlException.NumberOutOfRangeForNumeric(number.ToString());
             var scale = fractionalPart;
-            var parsed = decimal.Parse(number, NumberStyles.Float, CultureInfo.InvariantCulture);
+            _ = Decimal38.TryParse(number, precision, scale, out var parsed);
             this.Value = SqlValue.FromDecimal(SqlType.GetDecimal(precision, scale), parsed);
             return;
         }
@@ -97,14 +97,7 @@ internal sealed class Numeric : Token
         var digits = this.IntegerLiteralDigitCount;
         this.IntegerLiteralDigitCount = 0;
 
-        if (decimal.TryParse(number, NumberStyles.Integer, CultureInfo.InvariantCulture, out var bigDec))
-        {
-            this.Value = SqlValue.FromDecimal(SqlType.GetDecimal(digits, 0), bigDec);
-            return;
-        }
-
-        // Past .NET `decimal`'s 28-29 significant digits — the documented
-        // backing-type limit, not a SQL Server behavior.
-        throw Storage.DecimalCeiling.Exceeded($"reading the literal {number}");
+        _ = Decimal38.TryParse(number, digits, 0, out var wide);
+        this.Value = SqlValue.FromDecimal(SqlType.GetDecimal(digits, 0), wide);
     }
 }

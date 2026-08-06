@@ -65,7 +65,7 @@ internal static class ClrTypeMarshaller
             : clrType == typeof(SqlBoolean) ? new SqlBoolean(value.AsBoolean)
             : clrType == typeof(SqlDouble) ? new SqlDouble(value.AsDouble)
             : clrType == typeof(SqlSingle) ? new SqlSingle(value.AsSingle)
-            : clrType == typeof(SqlDecimal) ? new SqlDecimal(value.AsDecimal)
+            : clrType == typeof(SqlDecimal) ? ToSqlDecimal(value.AsDecimal38)
             : clrType == typeof(SqlMoney) ? new SqlMoney(value.AsMoney)
             : clrType == typeof(SqlDateTime) ? new SqlDateTime(value.Type is SmallDateTimeSqlType ? value.AsSmallDateTime : value.AsDateTime)
             : clrType == typeof(SqlBinary) ? new SqlBinary(value.AsBytes)
@@ -89,7 +89,7 @@ internal static class ClrTypeMarshaller
             SqlBoolean b => SqlValue.FromBoolean(b.Value),
             SqlDouble d => SqlValue.FromDouble(d.Value),
             SqlSingle f => SqlValue.FromSingle(f.Value),
-            SqlDecimal d => SqlValue.FromDecimal(returnType, d.Value),
+            SqlDecimal d => SqlValue.FromDecimal(returnType, FromSqlDecimal(d)),
             SqlMoney m => SqlValue.FromMoney(returnType, m.Value),
             SqlDateTime d => returnType is SmallDateTimeSqlType ? SqlValue.FromSmallDateTime(d.Value) : SqlValue.FromDateTime(d.Value),
             SqlBinary b => SqlValue.FromVarbinary(b.Value),
@@ -97,6 +97,37 @@ internal static class ClrTypeMarshaller
             SqlXml x => SqlValue.FromXml(x.Value),
             _ => throw new NotSupportedException($"CLR type '{result.GetType().FullName}' is not a modeled SQLCLR return type."),
         };
+
+    /// <summary>
+    /// The exact-numeric value as a <see cref="SqlDecimal"/>, all 38 digits of
+    /// it — the CLR type carries the same width the server does, so this
+    /// crossing is lossless where the .NET <see cref="decimal"/> one is not.
+    /// </summary>
+    private static SqlDecimal ToSqlDecimal(in Decimal38 value)
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt128LittleEndian(bytes, value.Magnitude);
+        var precision = (byte)Math.Clamp(Math.Max(value.SignificantDigits(), value.Scale), 1, Decimal38.MaxPrecision);
+        return new SqlDecimal(
+            precision,
+            value.Scale,
+            !value.IsNegative,
+            System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes),
+            System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes[4..]),
+            System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes[8..]),
+            System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes[12..]));
+    }
+
+    /// <summary>The inverse of <see cref="ToSqlDecimal"/>, reading the routine's returned value at full width.</summary>
+    private static Decimal38 FromSqlDecimal(SqlDecimal value)
+    {
+        var data = value.Data;
+        var magnitude = ((UInt128)(uint)data[3] << 96)
+            | ((UInt128)(uint)data[2] << 64)
+            | ((UInt128)(uint)data[1] << 32)
+            | (uint)data[0];
+        return Decimal38.FromParts(magnitude, !value.IsPositive, value.Scale);
+    }
 
     /// <summary>The <c>Null</c> sentinel for a
     /// <see cref="System.Data.SqlTypes"/> struct, boxed.</summary>
