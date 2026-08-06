@@ -715,6 +715,42 @@ public class InsertTests
     // --- A parenthesized SELECT source ---
 
     /// <summary>
+    /// A parenthesized source may not carry an <c>ORDER BY</c> — real refuses
+    /// it there as <strong>Msg 156</strong> even with the <c>TOP</c> that
+    /// licenses one in a derived table, and refuses it through a set operator
+    /// too. The unparenthesized form is unaffected (probe-confirmed against
+    /// SQL Server 2025 on 2026-08-06).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert into t (a) (select top 2 v from (values (3),(1),(2)) x(v) order by v)")]
+    [DataRow("insert into t (a) ((select top 1 v from (values (1),(2)) z(v) order by v))")]
+    [DataRow("insert into t (a) (select 1 union select 2 order by 1)")]
+    public void ParenthesizedSource_RefusesItsOwnOrderBy(string statement)
+        => AreEqual(
+            "Incorrect syntax near the keyword 'order'.",
+            new Simulation().AssertSqlError($"create table t (a int null); {statement}", 156).Message);
+
+    [TestMethod]
+    public void UnparenthesizedSource_StillTakesOrderBy()
+        => AreEqual(2, new Simulation().ExecuteScalar("""
+            create table t (a int null);
+            insert into t (a) select top 2 v from (values (3),(1),(2)) x(v) order by v;
+            select count(*) from t
+            """));
+
+    /// <summary>
+    /// The restriction is the source query's alone: a derived table or a
+    /// subquery written inside it keeps the ordinary rules, so each may order
+    /// with its own TOP.
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert into t (a) (select v from (select top 2 v from (values (3),(1),(2)) x(v) order by v) d)", 2)]
+    [DataRow("insert into t (a) (select (select top 1 v from (values (5),(4)) y(v) order by v))", 1)]
+    public void NestedQueriesInsideTheSource_KeepTheOrdinaryOrderByRules(string statement, int expectedRows)
+        => AreEqual(expectedRows, new Simulation().ExecuteScalar(
+            $"create table t (a int null); {statement}; select count(*) from t"));
+
+    /// <summary>
     /// <c>INSERT INTO t (cols) (SELECT …)</c> — the parens are only reachable
     /// once an explicit column list has been consumed, which is why the
     /// no-column-list form stays a syntax error on both engines.

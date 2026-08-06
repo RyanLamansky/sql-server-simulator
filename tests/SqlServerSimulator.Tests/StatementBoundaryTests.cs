@@ -143,4 +143,78 @@ public sealed class StatementBoundaryTests
             exec @rc = xp_qv N'x', N'y';
             select @rc
             """));
+
+    // --- The other half: input the preceding statement does NOT own ---
+    //
+    // The dispatch loop advances one token past a parser that stopped on its
+    // last consumed token, which silently swallowed a stray token after any
+    // parser that had already stopped past its own input: `DECLARE @x int = 1
+    // zzz` ran clean where real raises Msg 102. A statement kind whose parser
+    // stops at its first un-consumed token now says so, and a non-boundary
+    // token after one of those is rejected. Every case below is
+    // probe-confirmed against SQL Server 2025 (2026-08-06).
+
+    [TestMethod]
+    [DataRow("declare @x int = 1 zzz")]
+    [DataRow("declare @x int zzz")]
+    [DataRow("declare @x int = 1, @y int = 2 zzz")]
+    [DataRow("print 'x' zzz")]
+    [DataRow("insert into t values (2) zzz")]
+    [DataRow("update t set a = 1 zzz")]
+    [DataRow("delete from t zzz")]
+    // Wrapped in a transaction so COMMIT succeeds: a statement that raises an
+    // error of its own reports that error first, since the simulator executes
+    // as it parses where real parses the whole batch first — see the
+    // parse-before-bind entry in backlog.md.
+    [DataRow("begin transaction commit zzz")]
+    [DataRow("waitfor delay '00:00:00' zzz")]
+    [DataRow("raiserror('m', 0, 1) zzz")]
+    [DataRow("throw 50000, 'm', 1 zzz")]
+    [DataRow("revert zzz")]
+    [DataRow("reconfigure zzz")]
+    [DataRow("use master zzz")]
+    [DataRow("grant select on t to public zzz")]
+    [DataRow("revoke select on t from public zzz")]
+    [DataRow("deny select on t to public zzz")]
+    [DataRow("drop table t zzz")]
+    public void TrailingTokenAfterAStatementThatOwnsItsInput_RaisesMsg102(string statement)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int null); insert t values (1)");
+        var ex = sim.AssertSqlError(statement, 102);
+        Assert.Contains("zzz", ex.Message);
+    }
+
+    /// <summary>
+    /// The rejection must not reach a statement kind whose parser genuinely
+    /// ends on its last consumed token — those still need the advance, and a
+    /// following statement is not a stray token.
+    /// </summary>
+    [TestMethod]
+    [DataRow("set nocount on", "select 42")]
+    [DataRow("declare @x int = 1", "select 42")]
+    [DataRow("print 'x'", "select 42")]
+    [DataRow("insert into t values (2)", "select 42")]
+    [DataRow("begin transaction commit", "select 42")]
+    [DataRow("declare @y int set @y = 1", "select 42")]
+    public void AStatementFollowingAnotherIsNotATrailingToken(string preceding, string following)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int null); insert t values (1)");
+        AreEqual(42, sim.ExecuteScalar($"{preceding}\n{following}"));
+    }
+
+    /// <summary>
+    /// The marker is per-statement: one statement declaring that it owns its
+    /// input must not make the <em>next</em> statement's legitimate tail a
+    /// syntax error. Before the flag was cleared unconditionally, an INSERT
+    /// followed by `set nocount on` reported Msg 102 near 'on'.
+    /// </summary>
+    [TestMethod]
+    public void TheMarkerDoesNotLeakToTheFollowingStatement()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int null)");
+        AreEqual(42, sim.ExecuteScalar("insert into t values (1)\nset nocount on\nselect 42"));
+    }
 }

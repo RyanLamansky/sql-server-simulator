@@ -1455,7 +1455,7 @@ internal sealed partial class Selection
                         sources = preParsedSources;
                         joins = preParsedJoins!;
                         context.RestoreCheckpoint(afterSources);
-                        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], outerTypeResolver, allowOrderBy);
+                        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], outerTypeResolver, allowOrderBy, depth);
                     }
                     else
                     {
@@ -1498,12 +1498,12 @@ internal sealed partial class Selection
                 // ConsumeWhereAndOrderBy already reads them in grammar order
                 // from whichever of the three the cursor sits on.
                 case ReservedKeyword { Keyword: Keyword.Where or Keyword.Group or Keyword.Having }:
-                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy);
+                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, depth);
                     goto ExitWhileTokenLoop;
 
                 case ReservedKeyword { Keyword: Keyword.Order }:
-                    if (allowOrderBy)
-                        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy);
+                    if (allowOrderBy || depth == context.ParenthesizedInsertSourceDepth)
+                        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, depth);
                     // When this branch is part of a set-op chain, leave
                     // the cursor on ORDER for the top-level driver to
                     // consume (or for the outer caller to error on, per
@@ -1782,7 +1782,7 @@ internal sealed partial class Selection
         ParseSourcesAndJoins(context, depth, sources, joins, outerTypeResolver);
 
         // Now register the multi-source type resolver and parse WHERE / etc.
-        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], outerTypeResolver, allowOrderBy);
+        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], outerTypeResolver, allowOrderBy, depth);
     }
 
     /// <summary>
@@ -3265,7 +3265,8 @@ internal sealed partial class Selection
         FromClause fromClause,
         FromSource[] sources,
         Func<MultiPartName, SqlType>? outerTypeResolver,
-        bool allowOrderBy)
+        bool allowOrderBy,
+        uint depth)
     {
         SqlType MyResolver(MultiPartName name) => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
 
@@ -3277,7 +3278,7 @@ internal sealed partial class Selection
         context.ScopeSources = sources;
         try
         {
-            ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy);
+            ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, depth);
         }
         finally
         {
@@ -3372,8 +3373,19 @@ internal sealed partial class Selection
     /// the lookahead contract, and an extra advance here would silently swallow
     /// the next clause's opening keyword.
     /// </remarks>
-    private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy)
+    private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy, uint depth)
     {
+        // A parenthesized INSERT source's own query may not carry an ORDER BY:
+        // real refuses it there even with the TOP that would license one in a
+        // derived table, and does so as Msg 156 on the keyword
+        // (probe-confirmed 2026-08-06). Matched on depth so a derived table or
+        // subquery nested inside the source keeps the ordinary rules.
+        if (depth == context.ParenthesizedInsertSourceDepth
+            && context.Token is ReservedKeyword { Keyword: Keyword.Order } orderKeyword)
+        {
+            throw SimulatedSqlException.SyntaxErrorNearKeyword(orderKeyword);
+        }
+
         // WHERE / GROUP BY / HAVING reject windowed functions (Msg 4108) and
         // NEXT VALUE FOR (Msg 11720). Toggle the parser-context flags for the
         // duration of those parses; ORDER BY (which DOES allow windows but

@@ -79,6 +79,15 @@ partial class Simulation
         context.MoveNextRequired();
         var stateExpr = Expression.Parse(context);
 
+        // Real parses the whole statement before running any of it, so a stray
+        // token after the argument list is Msg 102 — not the error this THROW
+        // would otherwise have raised (probe-confirmed 2026-08-06:
+        // `THROW 50000, 'm', 1 zzz` reports near 'zzz', never message 'm').
+        // The dispatch loop's own trailing-token check runs too late here,
+        // since a raising statement never returns to it.
+        if (!IsStatementBoundary(context.Token))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
         if (batch.IsSkipping)
             return;
 

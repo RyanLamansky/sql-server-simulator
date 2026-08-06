@@ -975,9 +975,24 @@ partial class Simulation
 
         // Parsing at the open-paren count is what makes the query parser read
         // the closing `)` as its terminator rather than as a stray token — the
-        // same depth a derived table's body is parsed at, and the reason an
-        // ORDER BY inside the parens is refused here as it is there.
-        var rows = ExecuteSelectSource(context, expectedColumnCount, hasExplicitColumnList, identityColumn, destinationTable, (uint)depth);
+        // same depth a derived table's body is parsed at.
+        //
+        // The source query's own ORDER BY is refused there (Msg 156), which is
+        // stricter than the derived-table rule: real declines it even with a
+        // TOP. Recording the depth rather than a flag keeps the restriction to
+        // that one query — anything nested inside it parses deeper and keeps
+        // the ordinary rules.
+        var savedOrderByDepth = context.ParenthesizedInsertSourceDepth;
+        context.ParenthesizedInsertSourceDepth = (uint)depth;
+        List<SqlValue[]> rows;
+        try
+        {
+            rows = ExecuteSelectSource(context, expectedColumnCount, hasExplicitColumnList, identityColumn, destinationTable, (uint)depth);
+        }
+        finally
+        {
+            context.ParenthesizedInsertSourceDepth = savedOrderByDepth;
+        }
 
         while (depth > 0)
         {

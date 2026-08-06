@@ -1284,6 +1284,13 @@ internal abstract class Expression
         if (context.ScalarOnlyOperand)
             throw ScalarOnlyOperandError(context);
         var saved = context.EnterNextValueForScope(NextValueForScope.Nested);
+        // A subquery always parses at depth 1 whatever its enclosing depth, so
+        // the parenthesized-INSERT-source marker — which is a depth — would
+        // collide with a subquery written inside such a source and refuse its
+        // ORDER BY too. The restriction belongs to the source query alone, so
+        // clear the marker across this boundary.
+        var savedInsertSourceDepth = context.ParenthesizedInsertSourceDepth;
+        context.ParenthesizedInsertSourceDepth = null;
         Selection subquery;
         try
         {
@@ -1292,6 +1299,7 @@ internal abstract class Expression
         finally
         {
             context.NextValueForRejection = saved;
+            context.ParenthesizedInsertSourceDepth = savedInsertSourceDepth;
         }
 
         // Msg 1033: a subquery is one of the five constructs the message names,

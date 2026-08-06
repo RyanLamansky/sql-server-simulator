@@ -230,7 +230,11 @@ Both funnel into one shared per-row encode loop (defaults / identity / rowversio
 
 **A parenthesized source** — `INSERT INTO t (cols) (SELECT …)`, nesting to any depth — is accepted, and the query inside is parsed at the open-paren count so the closing `)` reads as its terminator rather than a stray token.
 Those parens are only reachable once an explicit column list has been consumed: with no column list the leading `(` is read as the start of one, and the `SELECT` inside it is Msg 102 — which is what real reports for `INSERT INTO t (SELECT …)` too, from the same ambiguity.
-One divergence stands: real refuses an `ORDER BY` inside the parens (Msg 102 at the keyword) where the simulator executes it — see [`backlog.md`](backlog.md).
+
+**The source query may not carry an `ORDER BY`** — real refuses it as **Msg 156** on the keyword, and refuses it even with the `TOP` that licenses one in a derived table, so this is stricter than the [Msg 1033 rule](ctes.md) the nested constructs take.
+A set-operator source is refused the same way.
+The restriction belongs to that one query: a derived table or a subquery written *inside* the source keeps the ordinary rules and may order with its own `TOP`.
+`ParserContext.ParenthesizedInsertSourceDepth` records the nesting depth rather than a flag for exactly that reason — and is cleared across a subquery boundary, since a subquery always parses at depth 1 whatever encloses it and would otherwise collide with a source parsed at that same depth.
 
 **Full buffering**: source materializes to `List<SqlValue[]>` before any destination write — makes self-insert (`INSERT t SELECT … FROM t`) safe.
 

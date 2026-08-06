@@ -219,7 +219,17 @@ Timing: the gate is a **batch-level compile check, not a runtime one** — a nev
 ## Trailing-token tightening
 
 The per-statement dispatch normalizer advances one token past a parser that stopped on its last-consumed token (many statement parsers rely on this), so a lone *unexpected* trailing token after a statement was silently swallowed — `SELECT id FROM t LIMIT 2` parsed `LIMIT` as the source's alias and the normalizer dropped the dangling `2`.
-A general "any unconsumed trailing token → Msg 102" rule proved too invasive (dozens of statement parsers legitimately end on a last-consumed token; the parenthesized-join FROM form leaves its alias dangling).
+
+**The statement kind now declares its own cursor discipline.**
+A parser leaves the cursor in one of two places — at its first *un*-consumed token, or on the last token it consumed — and the two can't be told apart from the cursor alone, which is why the advance used to be unconditional.
+A dispatch arm whose parser does the former calls `ParserContext.RejectTrailingToken()`, and a non-boundary token left after one of those is **Msg 102** naming it; everything else keeps the advance.
+Marked kinds, each probe-confirmed against SQL Server 2025 (2026-08-06) by placing a stray identifier after it: `INSERT` / `UPDATE` / `DELETE` / `MERGE`, `DECLARE`, `PRINT`, `RAISERROR`, `THROW`, `WAITFOR`, `EXEC`, `RECONFIGURE`, `REVERT`, `USE`, `COMMIT`, `GRANT` / `REVOKE` / `DENY`, and `DROP`.
+`SET`, `CREATE` and `ALTER` are deliberately unmarked — those parsers do end on their last consumed token, and `SET NOCOUNT ON zzz` is already rejected because the dispatch loop reads the leftover `zzz` as a statement of its own.
+
+Two mechanics are load-bearing.
+The flag is read **unconditionally** at the end of every statement, not only when a non-boundary token is present: leaving it set when a statement ends on a boundary would carry the claim into the *next* statement and reject its legitimate tail (an `INSERT` followed by `SET NOCOUNT ON` reported Msg 102 near `on` until it was cleared).
+And a statement that raises can't rely on the check at all, since it never returns to the dispatch loop — `THROW` therefore rejects its own trailing token where it finishes parsing its argument list, which is also where real finds it (`THROW 50000, 'm', 1 zzz` reports near `'zzz'`, never message `'m'`).
+The general "any unconsumed trailing token → Msg 102" rule remains wrong: flipping the default rejects ~1100 legitimate cases across the suite, because dozens of parsers end on a last-consumed token and the parenthesized-join FROM form leaves its alias dangling.
 The narrow fix: a completed top-level SELECT that left the cursor on a **value literal** (`Numeric` / `Literal`) — which a well-formed SELECT never does — raises Msg 102, matching real for `SELECT … LIMIT n` and `SELECT … OFFSET n` (both Msg 102 without an ORDER BY on real).
 An identifier or other token still routes through the normalizer; the alias-swallow case it used to leave open (`SELECT 1 xyz 2` parsing as two columns) is now caught inside the projection loop instead — see [Select-list element positions](#select-list-element-positions).
 

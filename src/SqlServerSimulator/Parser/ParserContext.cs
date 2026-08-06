@@ -447,6 +447,54 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool InInsertSourceSelect;
 
     /// <summary>
+    /// The nesting depth at which a parenthesized <c>INSERT</c> source's own
+    /// query is being parsed, or null outside one. That query may not carry an
+    /// <c>ORDER BY</c> — real refuses it there even with the <c>TOP</c> that
+    /// would license one in a derived table, as <strong>Msg 156</strong>.
+    /// </summary>
+    /// <remarks>
+    /// Recorded as a depth rather than a bool because the restriction is the
+    /// source query's alone: a derived table or subquery <em>inside</em> it
+    /// parses deeper and keeps the ordinary rules, so
+    /// <c>INSERT … (SELECT x FROM (SELECT TOP 1 v FROM u ORDER BY v) d)</c>
+    /// stays legal.
+    /// </remarks>
+    public uint? ParenthesizedInsertSourceDepth;
+
+    /// <summary>
+    /// Set for a statement whose parser leaves the cursor at its first
+    /// <em>un</em>-consumed token, so anything there that isn't a statement
+    /// boundary is unconsumed input rather than the parse's own tail.
+    /// </summary>
+    /// <remarks>
+    /// The dispatch loop can't tell the two apart from the cursor alone: most
+    /// parsers stop on the last token they consumed and need one advance,
+    /// while these stop past it. Advancing unconditionally is what let a stray
+    /// token vanish — <c>DECLARE @x int = 1 zzz</c> ran clean where real
+    /// raises Msg 102. Marking is opt-in per statement kind because it's a
+    /// claim about that parser's cursor discipline, verified against real
+    /// rather than assumed.
+    /// </remarks>
+    private bool statementOwnsItsTrailingToken;
+
+    /// <summary>
+    /// Declares that this statement's parser consumed everything it owns, so
+    /// a non-boundary token left behind is Msg 102.
+    /// </summary>
+    public void RejectTrailingToken() => this.statementOwnsItsTrailingToken = true;
+
+    /// <summary>
+    /// Reads and clears the flag. Clearing keeps it per-statement — one
+    /// statement's discipline says nothing about the next one's.
+    /// </summary>
+    public bool ConsumeRejectTrailingToken()
+    {
+        var value = this.statementOwnsItsTrailingToken;
+        this.statementOwnsItsTrailingToken = false;
+        return value;
+    }
+
+    /// <summary>
     /// Set on the <c>SELECT</c> that sits immediately inside an <c>EXISTS</c>,
     /// whose projection real never materializes — an unresolved collation in
     /// that select list settles into nothing rather than reporting Msg 451
