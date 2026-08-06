@@ -396,6 +396,12 @@ In-process connections never authenticate — login DDL through one is how the r
 - `ALTER LOGIN name WITH PASSWORD = '…'` re-hashes and stamps `PasswordLastSetTime` (readable via `LOGINPROPERTY`).
   Every other ALTER form (ENABLE / DISABLE / other WITH options) parses-and-discards after the existence check — DISABLE does **not** block endpoint logins.
 - `DROP LOGIN name` — **no `IF EXISTS` clause**: real SQL Server's DROP LOGIN grammar rejects it (probe-confirmed Msg 156 near 'IF'), reproduced verbatim — a reserved keyword in any of the three login-name positions raises the keyword-flavored Msg 156, not the generic Msg 102.
+- **`sa` resolves without being in the registry.**
+  The registry has to stay *empty* in a simulation nobody created a login in, because the TDS endpoint reads an empty registry as "accept any credentials" — so `sa` is a fixed login the catalog views synthesize rather than a `Logins` entry, the way `EXECUTE AS`, the GRANT family, `sp_addsrvrolemember` and the server-role paths already resolve it by name.
+  `ALTER LOGIN [sa]` therefore resolves by name too (real accepts it — probe-confirmed with `DEFAULT_LANGUAGE`), and since every option but PASSWORD parses and discards, there is nothing to record.
+  `ALTER LOGIN [sa] WITH PASSWORD` raises `NotSupportedException`: recording it would mean adding `sa` to the registry, which flips the endpoint from accepting any credentials to enforcing them — a large behavioural change to fall out of a password change.
+  `CREATE LOGIN` collides against every *server principal*, not just a previously created login, so `CREATE LOGIN [sa]` / `[public]` / a fixed server-role name is Msg 15025 rather than a second row the catalog views would project alongside the built-in.
+  `DROP LOGIN [sa]` stays Msg 15151; real refuses it too, but the exact message is unprobed — running it against the reference instance risks the account the harness connects with.
 
 | Msg | When | Provenance |
 |---|---|---|

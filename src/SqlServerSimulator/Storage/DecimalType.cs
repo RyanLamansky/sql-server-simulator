@@ -102,6 +102,24 @@ internal sealed class DecimalSqlType(byte precision, byte scale) : SqlType(SqlTy
     };
 
     /// <summary>
+    /// The width <c>DATALENGTH</c> reports, which is <em>not</em>
+    /// <see cref="StorageWidth"/>: real sizes a numeric by the magnitude the
+    /// value actually holds rather than by its declared precision, so
+    /// <c>CAST(1 AS decimal(38, 0))</c> reports 5 while the column storing it
+    /// occupies 17. Same sign byte, but only as many 32-bit mantissa words as
+    /// the unscaled magnitude needs — so the scale counts, and
+    /// <c>decimal(38, 10)</c> holding <c>1.0</c> reports 9 for an unscaled
+    /// 10^10. Uniform across columns, variables, literals, arithmetic and
+    /// aggregate results; every band boundary probe-confirmed against
+    /// SQL Server 2025.
+    /// </summary>
+    public static int ValueWidth(UInt128 magnitude)
+        => magnitude <= uint.MaxValue ? 5
+        : magnitude <= ulong.MaxValue ? 9
+        : magnitude < ((UInt128)1 << 96) ? 13
+        : 17;
+
+    /// <summary>
     /// Resolves <c>decimal(precision, scale)</c> to its singleton instance.
     /// Validates ranges (1 ≤ p ≤ 38, 0 ≤ s ≤ p) before caching; lazy
     /// <see cref="ConcurrentDictionary{TKey,TValue}"/> keeps the working set

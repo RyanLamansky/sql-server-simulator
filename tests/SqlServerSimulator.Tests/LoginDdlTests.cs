@@ -160,4 +160,53 @@ public sealed class LoginDdlTests
         _ = sim.ExecuteNonQuery("create login App with password = 'Xy!12345'");
         _ = sim.AssertSqlError("create login APP with password = 'Zz!98765'", 15025);
     }
+
+    // === The built-in server principals ===
+    //
+    // `sa` is a fixed login the catalog views synthesize rather than a registry
+    // entry — the registry has to stay empty in a simulation nobody created a
+    // login in, because the TDS endpoint reads an empty one as "accept any
+    // credentials". So the DDL resolves it by name, the way EXECUTE AS and the
+    // GRANT family already do. Real accepts ALTER LOGIN [sa] (probe-confirmed
+    // with DEFAULT_LANGUAGE against SQL Server 2025).
+
+    [TestMethod]
+    public void AlterLogin_Sa_Resolves()
+    {
+        var sim = new Simulation();
+        // Would have been Msg 15151 while only the registry was consulted, even
+        // though sys.sql_logins listed it the whole time.
+        _ = sim.ExecuteNonQuery("alter login [sa] with default_language = [us_english]");
+        AreEqual("sa", sim.ExecuteScalar("select name from sys.sql_logins where name = 'sa'"));
+    }
+
+    [TestMethod]
+    public void AlterLogin_Sa_WithPassword_IsNotModeled()
+    {
+        var sim = new Simulation();
+        // Recording it would mean adding sa to the registry, which flips the
+        // endpoint from accepting any credentials to enforcing them.
+        _ = ThrowsExactly<NotSupportedException>(
+            () => sim.ExecuteNonQuery("alter login [sa] with password = 'Xy!12345'"));
+    }
+
+    [TestMethod]
+    public void AlterLogin_MissingLogin_StillRaises15151()
+    {
+        var sim = new Simulation();
+        _ = sim.AssertSqlError("alter login [no_such_login] with default_language = [us_english]", 15151);
+    }
+
+    [TestMethod]
+    [DataRow("sa")]
+    [DataRow("public")]
+    [DataRow("sysadmin")]
+    public void CreateLogin_CollidingWithABuiltInServerPrincipal_Raises15025(string name)
+    {
+        // The collision is against every server principal, not just a
+        // previously created login — otherwise the catalog views would project
+        // two rows for the same name.
+        var sim = new Simulation();
+        _ = sim.AssertSqlError($"create login [{name}] with password = 'Xy!12345'", 15025);
+    }
 }

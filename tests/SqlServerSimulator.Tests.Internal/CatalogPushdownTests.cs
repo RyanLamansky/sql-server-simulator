@@ -5,13 +5,18 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// Guards the catalog-view predicate pushdown (<c>Selection.BuildSqlProjection</c>
-/// → <c>Selection.ForCatalogView</c>): a leftmost pushdown-aware catalog view
-/// (<c>sys.columns</c> and peers) with a top-level <c>&lt;key&gt; = &lt;row-independent
-/// value&gt;</c> WHERE conjunct must hand the key into the row generator so it
-/// enumerates only the matching object (the <c>Seek(view.column)</c> trace), a
-/// NULL comparand must short-circuit to no rows (<c>SeekEmpty</c>), and shapes
-/// that can't push (OR-combined predicate, catalog view not leftmost, no
-/// eligible conjunct) must run the full generator (<c>Scan</c>). The pushdown is
+/// → <c>Selection.ForCatalogView</c>): a pushdown-aware catalog view
+/// (<c>sys.columns</c> and peers) with a top-level <c>&lt;key&gt; = &lt;value fixed
+/// for the execution&gt;</c> conjunct must hand the key into the row generator so
+/// it enumerates only the matching object (the <c>Seek(view.column)</c> trace).
+/// The conjunct may come from WHERE or from an inner join's ON, the view need
+/// not be leftmost, the comparand may name an enclosing query's column (the
+/// correlated case, which real also plans as a seek), and an equality chained
+/// through an inner join carries the comparand to the far side. A NULL
+/// comparand must short-circuit to no rows (<c>SeekEmpty</c>), and shapes that
+/// can't push — an OR-combined predicate, an outer join's null-supplying side,
+/// a comparand naming a source of this same query, no eligible conjunct — must
+/// run the full generator (<c>Scan</c>). The pushdown is
 /// result-transparent — the full WHERE re-applies as a residual filter — so the
 /// correctness suite passes either way; these read the opt-in
 /// <see cref="CatalogPushdownDiagnostics"/> trace to assert the path directly and
@@ -142,17 +147,91 @@ public sealed class CatalogPushdownTests
     }
 
     [TestMethod]
-    public void CatalogViewNotLeftmost_DoesNotPush()
+    public void CatalogViewNotLeftmost_StillSeeks()
     {
-        // Leftmost source is the base table t2; sys.columns is the join's right
-        // side, so no pushdown fires — but results stay correct.
+        // The leftmost source is the base table t2 and sys.columns is the
+        // join's right side. An inner join's ON is interchangeable with WHERE,
+        // so the equality narrows the generator exactly as safely there — and
+        // it has to, or a catalog view reached through a join stays a full
+        // regeneration per execution, which is what made the correlated case
+        // quadratic.
         var (trace, rows) = Run("""
             select c.name from t2 join sys.columns c on c.object_id = object_id('dbo.t2')
             where t2.c is not null order by c.column_id
             """);
-        DoesNotContain("Seek(columns.object_id)", trace);
+        Contains("Seek(columns.object_id)", trace);
         // t2 has no rows, so the inner join yields nothing regardless.
         IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void CatalogViewOnOuterJoinNullSupplyingSide_DoesNotPush()
+    {
+        // A LEFT JOIN's right side is the one case an ON equality may NOT be
+        // pushed: dropping rows there turns matched rows into null-extended
+        // ones, and the residual predicate that makes every other narrowing
+        // safe cannot put them back.
+        var (trace, rows) = Run("""
+            select c.name from t2 left join sys.columns c on c.object_id = object_id('dbo.t2')
+            order by c.column_id
+            """);
+        DoesNotContain("Seek(columns.object_id)", trace);
+        IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void CorrelatedComparand_Seeks()
+    {
+        // The comparand names an enclosing query's column. A correlated body
+        // re-executes once per outer row, so the value is fixed for each
+        // execution — which is the pushdown's whole requirement, and is how
+        // real plans it (an index seek carrying OUTER REFERENCES). Without
+        // this the body regenerates the entire view per outer row.
+        var (trace, rows) = Run("""
+            select (select count(*) from sys.columns c where c.object_id = o.object_id)
+            from sys.objects o where o.name = 't2'
+            """);
+        Contains("Seek(columns.object_id)", trace);
+        DoesNotContain("Scan(columns)", trace);
+        HasCount(1, rows);
+        AreEqual(3, rows[0]);
+    }
+
+    [TestMethod]
+    public void CorrelatedComparandAcrossInnerJoin_SeeksBothSides()
+    {
+        // `ic.object_id = o.object_id` in WHERE and `ic.object_id =
+        // c.object_id` in the ON together fix c.object_id too. Real derives
+        // the same transitive seek; without it the joined side stays a full
+        // scan and dominates whatever the direct seek saved.
+        var (trace, rows) = Run("""
+            select (select count(*)
+                    from sys.index_columns ic
+                        inner join sys.columns c
+                            on ic.object_id = c.object_id and ic.column_id = c.column_id
+                    where ic.object_id = o.object_id)
+            from sys.objects o where o.name = 't2'
+            """);
+        Contains("Seek(index_columns.object_id)", trace);
+        Contains("Seek(columns.object_id)", trace);
+        DoesNotContain("Scan(columns)", trace);
+        HasCount(1, rows);
+        // t2's primary key indexes its single key column.
+        AreEqual(1, rows[0]);
+    }
+
+    [TestMethod]
+    public void ComparandNamingALocalSource_DoesNotPush()
+    {
+        // A self-join's comparand names a source of this same query, so it
+        // varies per row: fixing one value would seek the wrong rows, and the
+        // residual could not add back what the generator never produced.
+        var (trace, _) = Run("""
+            select a.name from sys.columns a
+                inner join sys.columns b on a.object_id = b.object_id and a.column_id = b.column_id + 1
+            """);
+        DoesNotContain("Seek(columns.object_id)", trace);
+        Contains("Scan(columns)", trace);
     }
 
     [TestMethod]

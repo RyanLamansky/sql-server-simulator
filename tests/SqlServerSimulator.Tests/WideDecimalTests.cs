@@ -366,4 +366,69 @@ public sealed class WideDecimalTests
         => AreEqual(
             "12345678901234567890123456789012345678",
             Text("try_parse('12345678901234567890123456789012345678' as decimal(38, 0))"));
+
+    // === DATALENGTH sizes by value, not by declared precision ===
+    //
+    // Real reports one sign byte plus as many 32-bit mantissa words as the
+    // UNSCALED magnitude needs, so 5 / 9 / 13 / 17 as it crosses 2^32 / 2^64 /
+    // 2^96 — nothing to do with the declared precision the row encoder lays
+    // out. Every band boundary probe-confirmed against SQL Server 2025.
+
+    [TestMethod]
+    // The declared precision is held at its widest throughout: only the value moves.
+    [DataRow("cast(0 as decimal(38, 0))", 5)]
+    [DataRow("cast(1 as decimal(38, 0))", 5)]
+    [DataRow("cast(-1 as decimal(38, 0))", 5)]                          // the sign byte is already counted
+    [DataRow("cast(4294967295 as decimal(38, 0))", 5)]                  // 2^32 - 1, the last one-word value
+    [DataRow("cast(4294967296 as decimal(38, 0))", 9)]                  // 2^32, first two-word value
+    [DataRow("cast(18446744073709551615 as decimal(38, 0))", 9)]        // 2^64 - 1
+    [DataRow("cast(18446744073709551616 as decimal(38, 0))", 13)]       // 2^64
+    [DataRow("cast(79228162514264337593543950335 as decimal(38, 0))", 13)]   // 2^96 - 1
+    [DataRow("cast(79228162514264337593543950336 as decimal(38, 0))", 17)]   // 2^96
+    [DataRow("cast(99999999999999999999999999999999999999 as decimal(38, 0))", 17)]
+    // The scale is part of the magnitude: decimal(38, 10) holding 1.0 is an
+    // unscaled 10^10, which is already past one word.
+    [DataRow("cast(1 as decimal(38, 10))", 9)]
+    [DataRow("cast(1 as decimal(38, 37))", 17)]
+    [DataRow("cast(0.0000000001 as decimal(38, 10))", 5)]
+    [DataRow("cast(1.5 as decimal(38, 20))", 13)]
+    // A narrow declared precision reports the same as a wide one holding the
+    // same value — the declared type never enters into it.
+    [DataRow("cast(1 as decimal(1, 0))", 5)]
+    [DataRow("cast(1 as decimal(9, 0))", 5)]
+    public void DataLengthOfDecimal_SizesByValueMagnitude(string expression, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select datalength({expression})"));
+
+    [TestMethod]
+    public void DataLengthOfDecimalColumn_SizesByValueNotTheColumnsWidth()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (b decimal(19, 4) not null, c decimal(38, 10) not null);
+            insert t values (1.0000, 1.0);
+            """);
+        // The column occupies 9 and 17 bytes on disk; the values report 5 and
+        // 9, because b's unscaled 10^4 fits one word and c's unscaled 10^10
+        // needs two.
+        AreEqual(5, sim.ExecuteScalar("select datalength(b) from t"));
+        AreEqual(9, sim.ExecuteScalar("select datalength(c) from t"));
+    }
+
+    [TestMethod]
+    public void DataLengthOfDecimal_FollowsArithmeticAndAggregateResults()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a decimal(9, 2) not null);
+            insert t values (1.00), (12345.67);
+            """);
+        // decimal(9,2) + decimal(9,2) is typed decimal(10,2) — a 9-byte column
+        // — but the value 2.00 is an unscaled 200 and reports 5.
+        AreEqual(5, sim.ExecuteScalar("select datalength(cast(1 as decimal(9, 2)) + cast(1 as decimal(9, 2)))"));
+        AreEqual(5, sim.ExecuteScalar("select datalength(sum(a)) from t"));
+    }
+
+    [TestMethod]
+    public void DataLengthOfNullDecimal_IsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select datalength(cast(null as decimal(38, 0)))"));
 }

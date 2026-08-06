@@ -1300,6 +1300,7 @@ public sealed partial class Simulation
                 batch.CurrentStatement.StartLine = 1;
                 batch.CurrentStatement.StatementScopedValues = null;
                 batch.CurrentStatement.SubqueryResults = null;
+                batch.CurrentStatement.CatalogViewRows = null;
                 batch.RcsiStatementSnapshotXid = null;
                 batch.BumpRowStamp();
                 // The cached plan is shared across principals; re-run the
@@ -2178,6 +2179,7 @@ public sealed partial class Simulation
         batch.CurrentStatement.UtcNow = DateTime.UtcNow;
         batch.CurrentStatement.StatementScopedValues = null;
         batch.CurrentStatement.SubqueryResults = null;
+        batch.CurrentStatement.CatalogViewRows = null;
 
         // WITH prefix applies to the immediately-following SELECT / INSERT /
         // UPDATE / DELETE / MERGE. ParseCteBindings sets context.CteBindings

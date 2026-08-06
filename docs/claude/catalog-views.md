@@ -21,16 +21,27 @@ The strategy is guarded by `JoinStrategyTests.CatalogView_EquiJoin_TakesHashPath
 The complementary win — not materializing the non-selected objects' rows in the first place — is the predicate pushdown below.
 
 **Predicate pushdown (perf).**
-When a SELECT's leftmost FROM source is a *pushdown-aware* catalog view and WHERE carries a top-level AND-conjunct `<key> = <comparand>` where `<key>` is one of the view's eligible columns (qualified to that source, or unqualified when it's the sole source) and `<comparand>` is *row-independent* (reads no column), the comparand is evaluated once per execution and passed to the view's `FilteredRowGenerator` so it enumerates only the matching object — one table's columns instead of every table's.
+When a *pushdown-aware* catalog view is a FROM source and some top-level AND-conjunct is `<key> = <comparand>` — where `<key>` is one of the view's eligible columns (qualified to that source, or unqualified when it's the sole source) and `<comparand>` holds one value for the whole execution — the comparand is evaluated once per execution and passed to the view's `FilteredRowGenerator` so it enumerates only the matching object, one table's columns instead of every table's.
+This is what real does too: its plan for the same query is an index seek on the underlying base table (`sysschobjs` / `sysiscols` / `syscolpars`) carrying OUTER REFERENCES, never a scan — real's catalog views are views over *indexed storage*, where the simulator's are projected on demand, and the pushdown is what stands in for the index.
 This closes the last dominant term in SMO's per-column property-bag: at 200 user tables × 20 columns, the per-table `sys.columns` query drops from ~11.6 ms/query to ~0.08 ms/query (~143×).
 Purely an optimization: the enclosing SELECT keeps applying the **full WHERE as a residual filter**, so the generator-side key match can only over-produce, never drop a row the predicate keeps.
 
 - **Contract.**
-  Detection is in `Selection.Execution.cs::DetectCatalogPushdown`, run in `BuildSqlProjection` after the comma-join rewrite; it rebuilds `sources[0]`'s `LateralPlan` via `Selection.ForCatalogView(view, db, column, comparand)`.
+  Detection is in `Selection.Execution.cs::DetectCatalogPushdowns`, run in `BuildSqlProjection` after the comma-join rewrite; it rebuilds each pushed source's `LateralPlan` via `Selection.ForCatalogView(view, db, column, comparand)`.
   The decision is compiled into the shared plan; the comparand *value* is resolved per execution (a variable / parameter that differs between runs re-evaluates each time — plan-cache safe).
   It composes with materialize-once: the pushed-down plan is what the `MaterializeUncorrelatedDeferredSources` pass runs once.
-- **Row-independence** is a sound, conservative check (`Expression.IsRowIndependent`, default `false`): literals, variables, parameters, and pass-throughs of those (`Parenthesized` / `Cast` / `COLLATE` / arithmetic / `OBJECT_ID` of a row-independent argument) opt in; column references, subqueries, and unrecognized nodes are assumed row-dependent and forgo the pushdown.
-  A comparand referencing an *outer* column (correlated subquery) is treated as row-dependent and not pushed — the simple-and-safe choice.
+- **Which conjuncts count.** WHERE conjuncts, plus the ON conjuncts of **inner** joins — for an inner join the two are interchangeable, so an ON equality narrows the generator exactly as safely.
+  An outer join's ON is excluded, and so is any source reachable only through one: dropping rows from a null-supplying side turns matched rows into null-extended ones, which the residual filter cannot undo.
+- **Which sources count.** Any pushdown-aware source, not just the leftmost.
+  A view reached through an inner join that keeps a full scan is not a missing optimization but the dominant cost of the whole query, because the scan repeats per execution of the enclosing body.
+- **Constant for one execution** is the comparand test (`Selection.Execution.cs::IsConstantForOneExecution`), and it admits two shapes.
+  *Row-independent* expressions (`Expression.IsRowIndependent`, default `false`): literals, variables, parameters, and pass-throughs of those (`Parenthesized` / `Cast` / `COLLATE` / arithmetic / `OBJECT_ID` of a row-independent argument); column references, subqueries and unrecognized nodes stay out.
+  And a **reference qualified by a name that belongs to no source of this query** — necessarily an enclosing query's column, and a correlated body re-executes once per outer row, so it is fixed for the duration of each execution.
+  That second shape is the load-bearing one: `WHERE ic.object_id = t.object_id` inside a `CROSS APPLY` is what a catalog-introspection query is *made* of, and without it the body regenerates every view it names once per outer row.
+  An **unqualified** reference is never taken — it could bind to a local source and vary per row, and since the pushdown only narrows, a wrong narrowing loses rows the residual can't add back.
+- **Transitive hop.** Given `ic.object_id = t.object_id` in WHERE and `ic.object_id = col.object_id` in an inner join's ON, `col.object_id` is fixed too, and the comparand carries across.
+  Real derives the same seek; without it the joined side stays a full scan and dominates whatever the direct seek saved.
+  One hop only, and only between two pushdown-aware sources on a pushdown column each.
 - **NULL comparand** (`= NULL`, or `OBJECT_ID` of a missing object) yields no rows — `col = NULL` is UNKNOWN for every candidate, which is exactly what the residual filter would give.
 - **Eligible views × keys** (`CatalogView.PushdownColumns` / `FilteredRowGenerator`, registered via the `SysP` helper): `sys.columns` / `sys.all_columns` (`object_id` — the headline), `sys.indexes` (`object_id`), `sys.index_columns` (`object_id`), `sys.parameters` / `sys.all_parameters` (`object_id`), `sys.extended_properties` (`major_id`).
   Each generator skips a non-matching object's inner loop instead of materializing then discarding it.
@@ -38,7 +49,14 @@ Purely an optimization: the enclosing SELECT keeps applying the **full WHERE as 
 - **Diagnostics.**
   `CatalogPushdownDiagnostics.Sink` (opt-in `[ThreadStatic]`, mirroring `IndexSeekDiagnostics`) records `Seek(view.column)` on a narrowed scan, `SeekEmpty(view.column)` on a NULL comparand, and `Scan(view)` when an eligible view runs its full generator.
   `CatalogPushdownTests` (internal) asserts the path fired (or correctly didn't); `CatalogPushdownResultTests` (public) asserts result parity.
-- **Residual gaps** (correctness-neutral — they only leave the full-scan cost in place): name-equality (`WHERE name = …`) isn't pushed; `sys.objects` / `sys.all_objects` aren't pushed (a catalog `object_id` there can be a constraint id nested under a non-matching parent table, so a table-level skip would be unsound and a per-row filter saves little — the view already emits one row per object); `sys.foreign_keys` (two candidate key columns) is unpushed; correlated / outer-column comparands are unpushed.
+- **Residual gaps** (correctness-neutral — they only leave the full-scan cost in place): name-equality (`WHERE name = …`) isn't pushed; `sys.objects` / `sys.all_objects` aren't pushed (a catalog `object_id` there can be a constraint id nested under a non-matching parent table, so a table-level skip would be unsound and a per-row filter saves little — the view already emits one row per object); `sys.foreign_keys` (two candidate key columns) is unpushed; the transitive hop is one level and doesn't chain across three sources.
+
+**Statement-scoped materialization (perf).**
+A catalog view that *isn't* narrowed to a seek is still projected only once per statement: the first read that drains the sequence to completion stores the encoded rows on `StatementContext.CatalogViewRows`, keyed by view and target database, and every later read in the same statement is served from there.
+The statement is the right scope because that is the span over which a metadata view's content is fixed — DDL runs as its own statement, and the session identity the visibility filter reads can't change mid-statement either.
+Only a **fully drained** sequence is stored, so a `TOP 1` or `EXISTS` read keeps streaming and stops early instead of paying to materialize the whole view.
+The **dynamic management views are excluded** (`CatalogView.StableWithinStatement`, off the `dm_` prefix): they report live runtime state — locks held, sessions connected, page counts — that a statement moves as it runs, so a read of one has to see it as it stands.
+This is the backstop for what pushdown can't narrow; the two together are what took a real catalog-introspection query over a 300-table database from a 30-second timeout to well under a second.
 
 **Where the code lives:** `BuiltInResources` is a `partial class` split across topical files `BuiltInResources.<Topic>.cs`.
 The registrations are grouped by topic into per-file `Register<Topic>(views)` methods — `CoreObjects`, `ColumnFamily`, `Programmable` (incl. the `INFORMATION_SCHEMA.*` views), `ConstraintsAndTriggers`, `Indexes`, `Security`, `FullTextXmlSpatial`, `ServerAndDatabases` — which the root `BuiltInResources.cs` bootstrap (`BuildCatalogViews`) invokes in registration order.

@@ -40,6 +40,13 @@ partial class Simulation
         if (password!.Length > PasswordHash.MaxClearTextChars)
             throw SimulatedSqlException.PasswordEncryptionInvalidValue();
         var simulation = context.Batch.Connection.Simulation;
+        // The name collides with any *server principal*, not just a previously
+        // created login: `sa`, `public` and the fixed server roles are all
+        // resolvable names that Logins doesn't hold, so checking that
+        // dictionary alone would let CREATE LOGIN [sa] through and leave the
+        // catalog views projecting two of it.
+        if (simulation.TryResolveServerPrincipalId(name, out _) || simulation.Logins.ContainsKey(name))
+            throw SimulatedSqlException.ServerPrincipalAlreadyExists(name);
         var utcNow = context.Batch.CurrentStatement.UtcNow;
         var login = new ServerLogin(simulation.AllocatePrincipalId(), name, PasswordHash.EncryptLegacy(password), utcNow, utcNow);
         if (!simulation.Logins.TryAdd(name, login))
@@ -70,10 +77,29 @@ partial class Simulation
             return true;
 
         var simulation = context.Batch.Connection.Simulation;
-        if (!simulation.Logins.TryGetValue(name, out var existing)
-            || !HoldsLoginDdlPermission(context, name))
-        {
+        if (!HoldsLoginDdlPermission(context, name))
             throw SimulatedSqlException.CannotAlterOrDropLogin("alter", name);
+        if (!simulation.Logins.TryGetValue(name, out var existing))
+        {
+            // `sa` is a fixed login, and the catalog views synthesize its row
+            // rather than holding it in Logins — that registry has to stay
+            // empty in a simulation nobody created a login in, because the TDS
+            // endpoint reads an empty registry as "accept any credentials".
+            // So it resolves by name here, the way EXECUTE AS, the GRANT
+            // family, sp_addsrvrolemember and the server-role paths already
+            // resolve it. Real accepts ALTER LOGIN [sa] (probe-confirmed via
+            // DEFAULT_LANGUAGE), and every option but PASSWORD parses and
+            // discards, so there is nothing to record.
+            if (!BuiltInToken.Comparer.Equals(name, "sa"))
+                throw SimulatedSqlException.CannotAlterOrDropLogin("alter", name);
+            if (password is not null)
+            {
+                throw new NotSupportedException(
+                    "ALTER LOGIN [sa] WITH PASSWORD is not modeled: recording a password for sa "
+                    + "would mean adding it to the login registry, which switches the TDS endpoint "
+                    + "from accepting any credentials to enforcing them.");
+            }
+            return true;
         }
         if (password is not null)
         {

@@ -305,11 +305,42 @@ internal sealed partial class Selection
             hasTopOrOffsetOrFetch: false,
             rowSource: (batch, _) =>
             {
+                var statement = batch.CurrentStatement;
+                var key = (view, targetDatabase);
+                if (statement.CatalogViewRows is { } memo && memo.TryGetValue(key, out var cached))
+                {
+                    CatalogPushdownDiagnostics.Sink?.Add($"CachedScan({view.Name})");
+                    return cached;
+                }
                 CatalogPushdownDiagnostics.Sink?.Add($"Scan({view.Name})");
                 var gated = BuiltInResources.ApplyDmvGate(view, batch, view.RowGenerator(batch, targetDatabase));
                 var rows = BuiltInResources.ApplyMetadataFilter(view, batch, targetDatabase, gated);
-                return rows.Select(values => RowEncoder.EncodeRow(view.Columns, values));
+                var encoded = rows.Select(values => RowEncoder.EncodeRow(view.Columns, values));
+                return view.StableWithinStatement ? RememberWhenFullyDrained(statement, key, encoded) : encoded;
             });
+    }
+
+    /// <summary>
+    /// Streams a catalog view's rows through unchanged, remembering them on
+    /// <see cref="StatementContext.CatalogViewRows"/> only once the consumer
+    /// has drained the whole sequence. That condition is the point: a read
+    /// that stops early (a <c>TOP 1</c>, an <c>EXISTS</c>) keeps streaming and
+    /// pays nothing to materialize, while a read that went to the end has
+    /// already built every row and can hand the next execution the finished
+    /// array. Abandoning the enumerator simply skips the store — the loop
+    /// never reaches its end — so a partial pass can't be mistaken for a
+    /// complete one.
+    /// </summary>
+    private static IEnumerable<byte[]> RememberWhenFullyDrained(
+        StatementContext statement, (CatalogView View, Database Database) key, IEnumerable<byte[]> rows)
+    {
+        List<byte[]> captured = [];
+        foreach (var row in rows)
+        {
+            captured.Add(row);
+            yield return row;
+        }
+        (statement.CatalogViewRows ??= [])[key] = [.. captured];
     }
 
     /// <summary>
@@ -334,10 +365,16 @@ internal sealed partial class Selection
             columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            rowSource: (batch, _) =>
+            rowSource: (batch, outerResolver) =>
             {
+                // The comparand may name an enclosing query's column — the
+                // correlated `WHERE ic.object_id = t.object_id` of a CROSS
+                // APPLY or subquery body. That is one value for the whole of
+                // this execution, which is exactly what the seek needs, and it
+                // is how real plans the same query: a correlated catalog read
+                // is an index seek carrying OUTER REFERENCES, never a scan.
                 var value = comparand.Run(new RuntimeContext(
-                    name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
+                    outerResolver ?? (name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name)), batch));
                 CatalogPushdownDiagnostics.Sink?.Add(
                     value.IsNull ? $"SeekEmpty({view.Name}.{pushdownColumn})" : $"Seek({view.Name}.{pushdownColumn})");
                 var filter = new CatalogFilter(pushdownColumn, value);

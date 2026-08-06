@@ -45,6 +45,33 @@ internal sealed class StatementContext
     public Dictionary<object, object>? SubqueryResults;
 
     /// <summary>
+    /// Fully-drained catalog-view rows, keyed by the view and the database it
+    /// was scoped to (both by reference identity), so every later read of the
+    /// same view within the statement is served from here rather than
+    /// regenerating it. The scope is the statement because that is the span
+    /// over which a metadata view's content is fixed: DDL runs as its own
+    /// statement, and the session identity the visibility filter reads can't
+    /// change mid-statement either.
+    /// <para>
+    /// This is what makes a correlated body affordable. A <c>CROSS APPLY</c>
+    /// or scalar subquery that reads a catalog view re-executes its plan per
+    /// outer row — correctly, since it is correlated — but the view inside it
+    /// is not correlated, and regenerating it each time is the whole cost:
+    /// <c>sys.columns</c> over a 300-table database takes ~10 ms to project,
+    /// which over 4,300 outer rows is 45 seconds of repeated identical work.
+    /// </para>
+    /// <para>
+    /// Only populated once a sequence is drained to completion, so a
+    /// <c>TOP 1</c> read still streams and stops early instead of paying to
+    /// materialize the whole view. Cleared by the dispatch loop at the top of
+    /// each statement iteration alongside <see cref="UtcNow"/>. Lives here —
+    /// not on the view — because a <see cref="Schemas.CatalogView"/> is
+    /// registered process-wide and shared by every concurrent session.
+    /// </para>
+    /// </summary>
+    public Dictionary<(Schemas.CatalogView View, Database Database), byte[][]>? CatalogViewRows;
+
+    /// <summary>
     /// UTC timestamp captured at the top of each top-level statement and
     /// consumed by the current-time scalar functions (<c>GETDATE</c>,
     /// <c>GETUTCDATE</c>, <c>SYSDATETIME</c>, <c>SYSUTCDATETIME</c>,

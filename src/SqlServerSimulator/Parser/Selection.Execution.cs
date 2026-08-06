@@ -573,44 +573,153 @@ internal sealed partial class Selection
     /// nothing qualifies. Only the leftmost source is considered — a catalog view
     /// deeper in a JOIN keeps its full scan.
     /// </summary>
-    private static (FromSource Source, string Column, Expression Comparand)? DetectCatalogPushdown(
+    private static List<(int Index, string Column, Expression Comparand)> DetectCatalogPushdowns(
         FromSource[] sources,
+        JoinSpec[] joins,
         List<BooleanExpression> excluders)
     {
+        List<(int, string, Expression)> found = [];
         if (sources.Length == 0)
-            return null;
-        var source = sources[0];
-        if (source.BackingCatalogView is not { PushdownColumns: { } pushColumns, FilteredRowGenerator: not null })
-            return null;
+            return found;
 
-        var singleSource = sources.Length == 1;
+        // WHERE conjuncts, plus the ON conjuncts of inner joins — for an inner
+        // join the two are interchangeable, so an ON equality narrows the
+        // generator exactly as safely as a WHERE one. An outer join's ON is
+        // deliberately excluded: dropping rows from the null-supplying side
+        // turns matched rows into null-extended ones, and the residual
+        // predicate that makes every other narrowing safe cannot undo that.
         var conjuncts = new List<BooleanExpression>();
         foreach (var excluder in excluders)
             excluder.CollectConjuncts(conjuncts);
+        var innerJoined = new bool[sources.Length];
+        innerJoined[0] = true;
+        for (var i = 0; i < joins.Length && i + 1 < sources.Length; i++)
+        {
+            if (joins[i].Kind != JoinKind.Inner)
+                continue;
+            innerJoined[i + 1] = innerJoined[i];
+            joins[i].OnPredicate?.CollectConjuncts(conjuncts);
+        }
 
+        var singleSource = sources.Length == 1;
+        for (var index = 0; index < sources.Length; index++)
+        {
+            if (!innerJoined[index]
+                || sources[index].BackingCatalogView is not { PushdownColumns: { } pushColumns, FilteredRowGenerator: not null })
+            {
+                continue;
+            }
+            if (MatchAnyConjunct(conjuncts, sources, index, singleSource, pushColumns) is { } direct)
+                found.Add((index, direct.Column, direct.Comparand));
+        }
+
+        // Transitive closure, one hop, which is the shape real derives: given
+        // `ic.object_id = t.object_id` in WHERE and `ic.object_id =
+        // col.object_id` in an inner join's ON, real seeks BOTH catalog tables
+        // by the outer value rather than seeking one and scanning the other.
+        // Without this the joined side stays a full scan and dominates
+        // everything the direct pushdown saved.
+        foreach (var (index, column, comparand) in found.ToArray())
+        {
+            for (var other = 0; other < sources.Length; other++)
+            {
+                if (other == index || !innerJoined[other]
+                    || found.Exists(f => f.Item1 == other)
+                    || sources[other].BackingCatalogView is not { PushdownColumns: { } otherColumns, FilteredRowGenerator: not null })
+                {
+                    continue;
+                }
+                if (LinksSameColumn(conjuncts, sources, index, column, other, otherColumns) is { } linked)
+                    found.Add((other, linked, comparand));
+            }
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// The first conjunct of the form
+    /// <c>&lt;sources[index].&lt;pushColumn&gt;&gt; = &lt;execution-constant&gt;</c>,
+    /// in either operand order.
+    /// </summary>
+    private static (string Column, Expression Comparand)? MatchAnyConjunct(
+        List<BooleanExpression> conjuncts,
+        FromSource[] sources,
+        int index,
+        bool singleSource,
+        string[] pushColumns)
+    {
         foreach (var conjunct in conjuncts)
         {
             if (!conjunct.TryGetEqualityOperands(out var left, out var right))
                 continue;
-            if (MatchPushdownKey(left, right, source.Qualifier, singleSource, pushColumns) is { } forward)
-                return (source, forward.Column, forward.Comparand);
-            if (MatchPushdownKey(right, left, source.Qualifier, singleSource, pushColumns) is { } reversed)
-                return (source, reversed.Column, reversed.Comparand);
+            if (MatchPushdownKey(left, right, sources, index, singleSource, pushColumns) is { } forward)
+                return forward;
+            if (MatchPushdownKey(right, left, sources, index, singleSource, pushColumns) is { } reversed)
+                return reversed;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Whether some conjunct equates <c>sources[index].&lt;column&gt;</c> with a
+    /// pushdown column of <c>sources[other]</c>, and if so which of the other
+    /// source's columns it is — the link that carries an already-known
+    /// comparand across an inner join.
+    /// </summary>
+    private static string? LinksSameColumn(
+        List<BooleanExpression> conjuncts,
+        FromSource[] sources,
+        int index,
+        string column,
+        int other,
+        string[] otherColumns)
+    {
+        foreach (var conjunct in conjuncts)
+        {
+            if (!conjunct.TryGetEqualityOperands(out var left, out var right))
+                continue;
+            if (NamesSourceColumn(left, sources, index, column) && ResolvePushColumn(right, sources, other, otherColumns) is { } forward)
+                return forward;
+            if (NamesSourceColumn(right, sources, index, column) && ResolvePushColumn(left, sources, other, otherColumns) is { } reversed)
+                return reversed;
+        }
+        return null;
+    }
+
+    private static bool NamesSourceColumn(Expression expression, FromSource[] sources, int index, string column)
+        => expression is Reference { ReferencedName: { ImmediateQualifier: { } qualifier } name }
+            && BuiltInToken.Equals(qualifier, sources[index].Qualifier)
+            && BuiltInToken.Equals(column, name.Leaf);
+
+    private static string? ResolvePushColumn(Expression expression, FromSource[] sources, int index, string[] pushColumns)
+    {
+        if (expression is not Reference { ReferencedName: { ImmediateQualifier: { } qualifier } name }
+            || !BuiltInToken.Equals(qualifier, sources[index].Qualifier))
+        {
+            return null;
+        }
+        foreach (var pushColumn in pushColumns)
+        {
+            if (BuiltInToken.Equals(pushColumn, name.Leaf))
+                return pushColumn;
         }
         return null;
     }
 
     // When `keySide` is a column reference to the catalog source naming one of
-    // `pushColumns`, and `valueSide` is row-independent, returns the canonical
-    // column name (from `pushColumns`) paired with the comparand; else null.
+    // `pushColumns`, and `valueSide` holds one value for the whole execution,
+    // returns the canonical column name (from `pushColumns`) paired with the
+    // comparand; else null.
     private static (string Column, Expression Comparand)? MatchPushdownKey(
         Expression keySide,
         Expression valueSide,
-        string? sourceQualifier,
+        FromSource[] sources,
+        int index,
         bool singleSource,
         string[] pushColumns)
     {
-        if (keySide is not Reference reference || !valueSide.IsRowIndependent)
+        var sourceQualifier = sources[index].Qualifier;
+        if (keySide is not Reference reference || !IsConstantForOneExecution(valueSide, sources))
             return null;
 
         var name = reference.ReferencedName;
@@ -627,6 +736,39 @@ internal sealed partial class Selection
                 return (pushColumn, valueSide);
         }
         return null;
+    }
+
+    /// <summary>
+    /// Whether the comparand holds a single value across one execution of this
+    /// plan, which is what lets the seek run once instead of per row.
+    /// </summary>
+    /// <remarks>
+    /// A row-independent expression (literal, variable, parameter) obviously
+    /// qualifies. So does a reference whose qualifier names no source of
+    /// <em>this</em> query: it can only be an enclosing query's column, and a
+    /// correlated body re-executes once per outer row, so it is fixed for the
+    /// duration of each execution. That second case is what a correlated
+    /// catalog read looks like — <c>WHERE ic.object_id = t.object_id</c>
+    /// inside a <c>CROSS APPLY</c> — and admitting it is the difference
+    /// between regenerating the whole view per outer row and seeking one
+    /// object, which is how real plans the same query (an index seek carrying
+    /// OUTER REFERENCES). An <em>unqualified</em> reference is never taken: it
+    /// could bind to a local source and vary per row, and the pushdown only
+    /// ever narrows the generator, so a wrong narrowing would lose rows the
+    /// residual WHERE could not add back.
+    /// </remarks>
+    private static bool IsConstantForOneExecution(Expression valueSide, FromSource[] sources)
+    {
+        if (valueSide.IsRowIndependent)
+            return true;
+        if (valueSide is not Reference { ReferencedName.ImmediateQualifier: { } qualifier })
+            return false;
+        foreach (var source in sources)
+        {
+            if (BuiltInToken.Equals(qualifier, source.Qualifier))
+                return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -782,9 +924,10 @@ internal sealed partial class Selection
         // the shared plan); the comparand's value is resolved per execution. The
         // full WHERE still runs as a residual filter, so this can only narrow the
         // generator output, never change the result.
-        if (DetectCatalogPushdown(sources, fromClause.Excluders) is (var pushSource, var pushColumn, var pushComparand))
+        foreach (var (pushIndex, pushColumn, pushComparand) in DetectCatalogPushdowns(sources, joins, fromClause.Excluders))
         {
-            sources[0] = new FromSource(
+            var pushSource = sources[pushIndex];
+            sources[pushIndex] = new FromSource(
                 qualifier: pushSource.Qualifier,
                 columnNames: pushSource.ColumnNames,
                 columns: pushSource.Columns,

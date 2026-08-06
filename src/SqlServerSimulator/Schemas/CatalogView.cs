@@ -126,6 +126,22 @@ internal sealed class CatalogView(
     /// first, so existing in-process DMV reads pay one bool read.
     /// </summary>
     internal DmvGateKind? DmvGate;
+
+    /// <summary>
+    /// Whether this view's rows are fixed for the duration of one statement,
+    /// which lets a correlated body that re-reads it be served one
+    /// materialization instead of regenerating the whole view per outer row —
+    /// see <c>Selection.ForCatalogView</c>. True for the metadata views, whose
+    /// content is a pure function of schema and session identity, neither of
+    /// which a statement can change while it runs. False for the dynamic
+    /// management views, which report live runtime state — locks held,
+    /// sessions connected, page counts — that a statement moves as it
+    /// executes, so a read of one has to see the state as it stands.
+    /// Keyed off the <c>dm_</c> prefix rather than <see cref="DmvGate"/>:
+    /// that field is null for the three ungated DMVs too, and it is assigned
+    /// after construction.
+    /// </summary>
+    public readonly bool StableWithinStatement = !name.StartsWith("dm_", StringComparison.Ordinal);
 }
 
 /// <summary>

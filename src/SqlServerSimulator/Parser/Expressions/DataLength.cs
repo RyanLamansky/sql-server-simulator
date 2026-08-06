@@ -40,6 +40,10 @@ internal sealed class DataLength(ParserContext context) : Expression
         var byteCount = value.Type switch
         {
             SpatialSqlType spatial => value.AsSpatial.Encoded(spatial.IsGeography).Length,
+            // decimal / numeric is fixed-length on disk but DATALENGTH does not
+            // report that width: real sizes the value by its own magnitude, so
+            // a decimal(38, 0) holding 1 reports 5 rather than the column's 17.
+            DecimalSqlType => DecimalSqlType.ValueWidth(value.AsDecimal38.Magnitude),
             { IsFixedLength: true } => value.Type.FixedLength,
             _ => value.Type.GetVariableByteCount(value),
         };

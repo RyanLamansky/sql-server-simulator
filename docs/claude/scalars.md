@@ -482,6 +482,9 @@ Probe-confirmed against SQL Server 2025:
   Load-bearing for DacFx bacpac export, whose bulk reader emits `DATALENGTH([maxCol])` companions and validates their wire type.
   Spatial operands report the CLR-UDT serialization length (a 2D point = 22, probe-confirmed against WWI), not the simulator's stored WKT byte count — DacFx writes the companion value as the BCP length prefix for the wire bytes, so the two must measure the same form.
   The legacy LOB family (`text`/`ntext`/`image`) reports `int`, matching real — only the three MAX types widen.
+  A **`decimal` / `numeric`** operand is sized by the magnitude the value actually holds, *not* by its declared precision — one sign byte plus as many 32-bit mantissa words as the unscaled magnitude needs, so 5 / 9 / 13 / 17 bytes as `|unscaled|` crosses 2^32 / 2^64 / 2^96.
+  `CAST(1 AS decimal(38, 0))` reports 5 while the column that stores it occupies 17, and the scale counts toward the magnitude, so `decimal(38, 10)` holding `1.0` reports 9 for an unscaled 10^10.
+  The rule is uniform across columns, variables, literals, arithmetic and aggregate results (every band boundary probe-confirmed), which is why `DecimalSqlType.ValueWidth` is separate from the `StorageWidth` the row encoder lays out — the two answer different questions and only the encoder's is precision-driven.
 
 ## Gzip scalars: `COMPRESS` / `DECOMPRESS`
 
