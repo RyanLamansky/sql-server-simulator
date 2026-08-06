@@ -79,7 +79,7 @@ The session maps 1:1 onto a `SimulatedDbConnection`; execution flows through `Si
   Batch-aborting errors (deadlock class 13, class ≥ 17, `NotSupportedException`) still throw out of the outcome stream into `ExecuteBatchAsync`'s / the RPC loop's top-level `catch`, which closes the batch with `DONE_ERROR`.
   Continuation applies to both SQLBatch and RPC (they share `StreamOutcomesAsync`); an RPC whose earlier statement set an output parameter before a later statement errored still writes that parameter's RETURNVALUE (probe-confirmed against real SQL Server 2025).
   The in-process ADO path never opts in — it stays fail-fast (first error throws).
-  Classification and the two known gaps (a genuine syntax error mid-batch continues over the wire; `SET XACT_ABORT ON` batch-abort not honored) are in [`control-flow.md`](control-flow.md).
+  Classification and the known gap (a genuine syntax error mid-batch continues over the wire) are in [`control-flow.md`](control-flow.md); `SET XACT_ABORT ON` suspends the continuation, ending the batch and rolling the transaction back — see [`transactions.md`](transactions.md#set-xact_abort).
 - **PRINT / low-severity RAISERROR**: the session subscribes to `SimulatedDbConnection.InfoMessage` and drains the queue as INFO tokens between statements and at batch end.
   **Each INFO flush in a SQLBatch response gets its own DONE**, mirroring real per-statement DONEs: info preceding an outcome is followed by `DONE_MORE` count 0 before the outcome's tokens, and trailing info (batch ends in PRINT) forces the last outcome's DONE to `DONE_MORE` with a closing `DONE_FINAL` count 0 after the INFO — an INFO token must never follow the final DONE.
   Without both, SqlClient's token reader stalls until command timeout on any batch mixing PRINT with a result set, and go-mssqldb silently drops the message (go-sqlcmd shakedown,; the pre-fix oracle only covered PRINT-without-result-set).
@@ -496,7 +496,7 @@ On cancel the streamer returns a "cancelled" flag; the batch loop applies the tr
 **Transaction / session semantics (probed).**
 Under the default `SET XACT_ABORT OFF`, a cancel leaves an open transaction **intact and usable** (`@@TRANCOUNT` unchanged, committed statements' rows preserved).
 Under `SET XACT_ABORT ON`, the cancel **rolls the transaction back** (`@@TRANCOUNT` → 0).
-XACT_ABORT is recorded onto the connection solely to drive this (see `SimulatedDbConnection.XactAbort`); its broader error-abort semantics stay parse-and-discard.
+The cancel path reads the same `SimulatedDbConnection.XactAbort` the option's error promotion does — see [`transactions.md`](transactions.md#set-xact_abort).
 Batch-scoped variables go with the ended batch either way; connection-scoped temp tables persist.
 `SimulatedDbCommand.Cancel()` routes to the same machinery, so an in-process `Cancel()` from another thread interrupts a running `WAITFOR` / long batch identically (the reader then drains already-materialized rows, nothing left in flight — the documented in-process reaction bound).
 Oracle: `AttentionTests` (Tests.SqlClient), `WaitForDelayTests.Delay_InterruptedByInProcessCancel_ReturnsPromptly` (Tests).

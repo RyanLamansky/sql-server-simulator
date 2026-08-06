@@ -11,28 +11,15 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// propagates, and any non-integer operand — decimal / numeric / float /
 /// money / string / binary — raises Msg 8117 with no coercion attempt.
 /// <c>~</c> is SQL Server's highest-precedence operator (above <c>* / %</c>),
-/// so it binds to the leftmost primary; see
-/// <see cref="TwoSidedExpression.SinkUnaryPrefixToLeftmostLeaf"/> for how the
-/// parser re-homes it after the operand parse consumes a whole chain.
+/// so it takes a lone primary and <c>~2 * 3</c> is <c>(~2) * 3</c> — but a
+/// sign is allowed to be that primary, and a sign reaches for the whole
+/// multiplicative chain, so <c>~ + 2 * 3</c> is <c>~(2 * 3)</c> = -7 and
+/// <c>~ - 2 * 3</c> is <c>~(-(2 * 3))</c> = 5 (probe-confirmed). Whatever the
+/// operand parse produced is therefore the operand as written.
 /// </summary>
-internal sealed class BitwiseNot : Expression
+internal sealed class BitwiseNot(Expression operand) : Expression
 {
-    private readonly Expression operand;
-
-    private BitwiseNot(Expression operand) => this.operand = operand;
-
-    /// <summary>
-    /// Wraps <paramref name="operand"/> in a <see cref="BitwiseNot"/>. When
-    /// the operand parsed as a binary chain (looser-binding than <c>~</c>),
-    /// the prefix sinks onto the chain's leftmost leaf so <c>~2 * 3</c> means
-    /// <c>(~2) * 3</c>.
-    /// </summary>
-    public static Expression Create(Expression operand) =>
-        operand is TwoSidedExpression twoSided
-            ? twoSided.SinkUnaryPrefixToLeftmostLeaf(static leaf => new BitwiseNot(leaf))
-            : new BitwiseNot(operand);
-
-    public override SqlValue Run(RuntimeContext runtime) => Compute(this.operand.Run(runtime));
+    public override SqlValue Run(RuntimeContext runtime) => Compute(operand.Run(runtime));
 
     private static SqlValue Compute(SqlValue v) =>
         v.Type.Category != SqlTypeCategory.Integer ? throw SimulatedSqlException.OperandDataTypeInvalid(v.Type, "'~'")
@@ -45,19 +32,19 @@ internal sealed class BitwiseNot : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var type = this.operand.GetSqlType(batch, resolveColumnType);
+        var type = operand.GetSqlType(batch, resolveColumnType);
         return type.Category == SqlTypeCategory.Integer
             ? type
             : throw SimulatedSqlException.OperandDataTypeInvalid(type, "'~'");
     }
 
     internal override bool ResultIsNullable(NullabilityContext context) =>
-        this.operand.ResultIsNullable(context);
+        operand.ResultIsNullable(context);
 
     internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) =>
-        this.operand.VisitColumnReferences(visit);
+        operand.VisitColumnReferences(visit);
 
-    internal override bool ContainsVariableReference => this.operand.ContainsVariableReference;
+    internal override bool ContainsVariableReference => operand.ContainsVariableReference;
 
-    internal override string DebugDisplay() => $"~{this.operand.DebugDisplay()}";
+    internal override string DebugDisplay() => $"~{operand.DebugDisplay()}";
 }

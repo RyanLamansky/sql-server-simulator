@@ -246,6 +246,10 @@ partial class Simulation
             // the counts the body's own statements reported were already
             // stamped as it produced them.
             var savedNoCount = connection.NoCount;
+            // XACT_ABORT / ROWCOUNT / DATEFIRST revert the same way, and unlike
+            // the six ANSI toggles the body's own SET does take effect while it
+            // runs (probe-confirmed for all three).
+            var savedOptions = new SimulatedDbConnection.SessionOptionScope(connection);
             // Materialize outcomes to a list so the try/finally cleanup
             // (NestingLevel decrement, OUTPUT param writeback, return-code
             // assignment) runs even when the iterator is partially consumed.
@@ -261,6 +265,7 @@ partial class Simulation
                 connection.QuotedIdentifiers = savedQuotedIdentifiers;
                 connection.TextSize = savedTextSize;
                 connection.NoCount = savedNoCount;
+                savedOptions.Restore(connection);
                 // Local temp tables the body created are dropped at proc exit
                 // (SQL Server's module-scoped lifetime — so a re-entrant call
                 // re-creates them without a Msg 2714 collision).

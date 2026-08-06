@@ -227,6 +227,66 @@ public sealed class LegacyLobWireTests
         CollectionAssert.AreEqual(MakeBytes(20_000), (byte[])rows[2][2]!);
     }
 
+    /// <summary>
+    /// A binary slice advertises the <c>varbinary</c> family at the width the
+    /// constant length names, <c>image</c> included; a MAX source stays MAX
+    /// (SqlClient reports <c>int.MaxValue</c>) and a non-constant length leaves
+    /// the source's own width, which for <c>image</c> is the 8000-byte
+    /// container. Probe-confirmed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select substring(vb, 2, 3) as x from B", 3)]
+    [DataRow("select substring(im, 2, 3) as x from B", 3)]
+    [DataRow("select substring(vbm, 2, 3) as x from B", int.MaxValue)]
+    [DataRow("declare @n int = 3; select substring(vb, 2, @n) as x from B", 30)]
+    [DataRow("declare @n int = 3; select substring(im, 2, @n) as x from B", 8000)]
+    public async Task BinarySubstring_ColumnSize(string sql, int expected)
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, """
+            create table B (id int not null, vb varbinary(30), im image, vbm varbinary(max), t text);
+            insert B values (1, 0x0102030405060708090A, 0x0102030405060708, 0x01020304050607080910, 'Hello world');
+            """);
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand(sql, connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+        AreEqual(expected, reader.GetColumnSchema()[0].ColumnSize);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        CollectionAssert.AreEqual(new byte[] { 0x02, 0x03, 0x04 }, (byte[])reader.GetValue(0));
+    }
+
+    /// <summary>
+    /// <c>READTEXT</c> hands the client one row of one column carrying the read
+    /// column's own name and legacy type.
+    /// </summary>
+    [TestMethod]
+    public async Task ReadText_ResultSetOverTheWire()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, """
+            create table L (id int not null, t text);
+            insert L values (1, 'Hello world');
+            """);
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand(
+            """
+            declare @p varbinary(16);
+            select @p = textptr(t) from L where id = 1;
+            readtext L.t @p 6 5;
+            """,
+            connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+        AreEqual("t", reader.GetName(0));
+        AreEqual("text", reader.GetDataTypeName(0));
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual("world", reader.GetString(0));
+        IsFalse(await reader.ReadAsync(TestContext.CancellationToken));
+    }
+
     private static byte[] MakeBytes(int count)
     {
         var bytes = new byte[count];

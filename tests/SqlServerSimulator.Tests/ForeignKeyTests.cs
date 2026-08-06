@@ -163,6 +163,79 @@ public sealed class ForeignKeyTests
         Assert.Contains("no primary or candidate keys", ex.Message);
     }
 
+    /// <summary>
+    /// <c>REFERENCES p</c> with no column list takes the parent's PRIMARY KEY
+    /// as the referenced list, so the constraint enforces against it and the
+    /// catalog stores the resolved column.
+    /// </summary>
+    [TestMethod]
+    public void FkWithoutReferencedColumnList_UsesParentPrimaryKey()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table p (id int not null primary key, code int not null);
+            create table c (id int not null primary key, p_id int null references p, note varchar(10));
+            insert p values (1, 100);
+            insert c values (10, 1, 'x')
+            """).ExecuteNonQuery();
+
+        AreEqual("id", connection.CreateCommand("""
+            select pc.name
+            from sys.foreign_keys fk
+            join sys.foreign_key_columns fkc on fkc.constraint_object_id = fk.object_id
+            join sys.columns pc on pc.object_id = fkc.referenced_object_id and pc.column_id = fkc.referenced_column_id
+            where fk.parent_object_id = object_id('dbo.c')
+            """).ExecuteScalar());
+
+        var ex = ThrowsExactly<SimulatedSqlException>(
+            () => connection.CreateCommand("insert c values (11, 99, 'y')").ExecuteNonQuery());
+        AreEqual(547, ex.Number);
+    }
+
+    /// <summary>
+    /// The implied list is the primary key alone, so a parent carrying only a
+    /// UNIQUE constraint has nothing to imply and real reports Msg 1773 — the
+    /// implicit-reference message, naming the object as <c>schema.table</c> —
+    /// rather than the explicit-list Msg 1776. Probed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void FkWithoutReferencedColumnList_ParentHasNoPrimaryKey_RaisesMsg1773()
+    {
+        var ex = new Simulation().AssertSqlError("""
+            create table p (id int not null unique);
+            create table c (pid int constraint fk_c_p references p)
+            """, 1773);
+        AreEqual(
+            "Foreign key 'fk_c_p' has implicit reference to object 'dbo.p' which does not have a primary key defined on it.",
+            ex.Message);
+    }
+
+    /// <summary>
+    /// <c>NO ACTION</c> spelled out is the same as omitting the clause: the
+    /// catalog reports NO_ACTION and a delete that would orphan a child is
+    /// refused.
+    /// </summary>
+    [TestMethod]
+    public void ExplicitNoAction_ParsesAndBehavesAsTheDefault()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table p (id int not null primary key);
+            create table c (id int not null primary key, p_id int null,
+                constraint fk_c_p foreign key (p_id) references p (id) on delete no action on update no action);
+            insert p values (1);
+            insert c values (10, 1)
+            """).ExecuteNonQuery();
+
+        AreEqual("NO_ACTION|NO_ACTION", connection.CreateCommand(
+            "select delete_referential_action_desc + '|' + update_referential_action_desc from sys.foreign_keys where name = 'fk_c_p'")
+            .ExecuteScalar());
+
+        var ex = ThrowsExactly<SimulatedSqlException>(
+            () => connection.CreateCommand("delete p where id = 1").ExecuteNonQuery());
+        AreEqual(547, ex.Number);
+    }
+
     [TestMethod]
     public void FkReferencingUniqueColumn_Succeeds()
         => AreEqual(1, new Simulation().ExecuteScalar("""

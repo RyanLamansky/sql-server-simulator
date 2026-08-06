@@ -373,6 +373,10 @@ partial class Simulation
         // same module scope USE and temp tables get (probe-confirmed for both
         // EXEC('…') and sp_executesql).
         var enteredNoCount = connection.NoCount;
+        // XACT_ABORT / ROWCOUNT / DATEFIRST bind for the dynamic batch only,
+        // the same module scope (probe-confirmed: `EXEC('SET XACT_ABORT ON …')`
+        // leaves the caller's @@OPTIONS bit clear).
+        var enteredOptions = new SimulatedDbConnection.SessionOptionScope(connection);
         List<SimulatedStatementOutcome> outcomes;
         try
         {
@@ -390,6 +394,7 @@ partial class Simulation
             // own database without leaving the session there.
             connection.CurrentDatabase = enteredDatabase;
             connection.NoCount = enteredNoCount;
+            enteredOptions.Restore(connection);
             // A temp table created by the dynamic batch is dropped when it
             // returns (SQL Server's module-scoped lifetime — so re-running the
             // same `create table #t` through sp_executesql, as tedious does,

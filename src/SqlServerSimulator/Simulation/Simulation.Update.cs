@@ -642,9 +642,14 @@ partial class Simulation
     /// </summary>
     private static void ApplyDmlTopCap<T>(Selection.DmlTopLimit? top, List<T> rows, BatchContext batch)
     {
-        if (top is not { } limit)
-            return;
-        var cap = Selection.ResolveDmlTopCap(limit, rows.Count, batch);
+        var cap = top is { } limit ? Selection.ResolveDmlTopCap(limit, rows.Count, batch) : rows.Count;
+        // SET ROWCOUNT caps a DML statement's affected rows the same way TOP
+        // does, and the two compose as a minimum (probe-confirmed: TOP 5 under
+        // ROWCOUNT 3 changes 3 rows, TOP 3 under ROWCOUNT 5 changes 3). This is
+        // the seam every INSERT / UPDATE / DELETE already collects its rows
+        // through, so the cap lands once for all of them.
+        if (batch.Connection.RowCountLimit is > 0 and var rowCountLimit && rowCountLimit < cap)
+            cap = (int)rowCountLimit;
         if (cap < rows.Count)
             rows.RemoveRange(cap, rows.Count - cap);
     }

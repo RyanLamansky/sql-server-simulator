@@ -7,9 +7,11 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// SQL <c>DATETRUNC(&lt;datepart&gt;, &lt;date-expr&gt;)</c>: floor the
 /// date/time value to the start of the given part (start-of-year,
 /// start-of-month, start-of-day, etc.). Returns the same type as the
-/// input. Week truncation uses Sunday-anchored weeks (matching the
-/// simulator's @@DATEFIRST default of 7). Probe-confirmed against
-/// SQL Server 2025 (2026-05-22).
+/// input. Week truncation anchors on the weekday <c>SET DATEFIRST</c> names,
+/// so it moves with the option (probe-confirmed against SQL Server 2025:
+/// a Wednesday truncates to the preceding Sunday under DATEFIRST 7, to the
+/// preceding Monday under DATEFIRST 1 and to itself under DATEFIRST 3); the
+/// ISO variant stays Monday-anchored.
 /// </summary>
 internal sealed class DateTrunc : Expression
 {
@@ -35,18 +37,19 @@ internal sealed class DateTrunc : Expression
             return SqlValue.Null(raw.Type);
         var value = DatePartKinds.CoerceDateArgumentImplicit(raw);
         var t = value.Type;
+        var dateFirst = runtime.Batch.Connection.DateFirst;
         if (t == SqlType.Date)
-            return SqlValue.FromDate(TruncateDate(value.AsDate, this.kind));
+            return SqlValue.FromDate(TruncateDate(value.AsDate, this.kind, dateFirst));
         if (t == SqlType.DateTime)
-            return SqlValue.FromDateTime(TruncateDateTime(value.AsDateTime, this.kind));
+            return SqlValue.FromDateTime(TruncateDateTime(value.AsDateTime, this.kind, dateFirst));
         if (t == SqlType.SmallDateTime)
-            return SqlValue.FromSmallDateTime(TruncateDateTime(value.AsSmallDateTime, this.kind));
+            return SqlValue.FromSmallDateTime(TruncateDateTime(value.AsSmallDateTime, this.kind, dateFirst));
         if (t is DateTime2SqlType)
-            return SqlValue.FromDateTime2(t, TruncateDateTime(value.AsDateTime2, this.kind));
+            return SqlValue.FromDateTime2(t, TruncateDateTime(value.AsDateTime2, this.kind, dateFirst));
         if (t is DateTimeOffsetSqlType)
         {
             var dto = value.AsDateTimeOffset;
-            var truncated = TruncateDateTime(dto.DateTime, this.kind);
+            var truncated = TruncateDateTime(dto.DateTime, this.kind, dateFirst);
             return SqlValue.FromDateTimeOffset(t, new DateTimeOffset(truncated, dto.Offset));
         }
         throw new NotSupportedException($"DATETRUNC on {t} not supported.");
@@ -57,24 +60,24 @@ internal sealed class DateTrunc : Expression
 
     internal override string DebugDisplay() => $"DATETRUNC({this.keywordText}, {this.source.DebugDisplay()})";
 
-    private static DateOnly TruncateDate(DateOnly d, DatePartKind k) => k switch
+    private static DateOnly TruncateDate(DateOnly d, DatePartKind k, int dateFirst) => k switch
     {
         DatePartKind.Year => new DateOnly(d.Year, 1, 1),
         DatePartKind.Quarter => new DateOnly(d.Year, ((d.Month - 1) / 3 * 3) + 1, 1),
         DatePartKind.Month => new DateOnly(d.Year, d.Month, 1),
         DatePartKind.DayOfYear or DatePartKind.Day or DatePartKind.Weekday => d,
-        DatePartKind.Week => d.AddDays(-(int)d.DayOfWeek),
+        DatePartKind.Week => d.AddDays(1 - DatePartKinds.WeekdayNumber(d, dateFirst)),
         DatePartKind.IsoWeek => d.AddDays(-(d.DayOfWeek == DayOfWeek.Sunday ? 6 : (int)d.DayOfWeek - 1)),
         _ => throw SimulatedSqlException.DatepartNotSupportedForType("datetrunc", "datetrunc", "date"),
     };
 
-    private static DateTime TruncateDateTime(DateTime dt, DatePartKind k) => k switch
+    private static DateTime TruncateDateTime(DateTime dt, DatePartKind k, int dateFirst) => k switch
     {
         DatePartKind.Year => new DateTime(dt.Year, 1, 1),
         DatePartKind.Quarter => new DateTime(dt.Year, ((dt.Month - 1) / 3 * 3) + 1, 1),
         DatePartKind.Month => new DateTime(dt.Year, dt.Month, 1),
         DatePartKind.DayOfYear or DatePartKind.Day or DatePartKind.Weekday => dt.Date,
-        DatePartKind.Week => dt.Date.AddDays(-(int)dt.DayOfWeek),
+        DatePartKind.Week => dt.Date.AddDays(1 - DatePartKinds.WeekdayNumber(DateOnly.FromDateTime(dt), dateFirst)),
         DatePartKind.IsoWeek => dt.Date.AddDays(-(dt.DayOfWeek == DayOfWeek.Sunday ? 6 : (int)dt.DayOfWeek - 1)),
         DatePartKind.Hour => new DateTime(dt.Year, dt.Month, dt.Day, dt.Hour, 0, 0),
         DatePartKind.Minute => new DateTime(dt.Year, dt.Month, dt.Day, dt.Hour, dt.Minute, 0),

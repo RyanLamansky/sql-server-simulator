@@ -230,4 +230,85 @@ public sealed class SqlTransactionStatementTests
             conn.CreateCommand("rollback tran nosuch").ExecuteNonQuery());
         AreEqual(3903, ex.Number);
     }
+
+    // --- WITH MARK: the mark itself has no home, its diagnostics do ---
+
+    [TestMethod]
+    public void WithMark_NamedTransaction_OpensTheTransaction()
+    {
+        using var conn = NewSeededConnection();
+        AreEqual(1, conn.CreateCommand("begin tran t1 with mark 'a mark'; select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void WithMark_DescriptionIsOptional()
+    {
+        using var conn = NewSeededConnection();
+        AreEqual(1, conn.CreateCommand("begin tran t1 with mark; select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void WithMark_TakesAVariableDescription()
+    {
+        using var conn = NewSeededConnection();
+        AreEqual(1, conn.CreateCommand("declare @m varchar(32) = 'mk'; begin tran t1 with mark @m; select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void WithMark_TakesAVariableTransactionName()
+    {
+        using var conn = NewSeededConnection();
+        AreEqual(1, conn.CreateCommand("declare @v varchar(32) = 'tx'; begin tran @v with mark 'm'; select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void WithMark_CommitsAndRollsBackLikeAnyOtherTransaction()
+    {
+        using var conn = NewSeededConnection();
+        _ = conn.CreateCommand("begin tran t1 with mark 'm'; insert t values (1, 10); commit tran t1").ExecuteNonQuery();
+        AreEqual(1, CountRows(conn, "t"));
+        _ = conn.CreateCommand("begin tran t2 with mark 'm2'; insert t values (2, 20); rollback").ExecuteNonQuery();
+        AreEqual(1, CountRows(conn, "t"));
+    }
+
+    [TestMethod]
+    public void WithMark_UnnamedTransaction_ReportsMsg3901AndLeavesTrancountAlone()
+    {
+        using var conn = NewSeededConnection();
+        var exception = Throws<SimulatedSqlException>(
+            () => conn.CreateCommand("begin transaction with mark 'm'").ExecuteNonQuery());
+        AreEqual(3901, exception.Number);
+        AreEqual("The transaction name must be specified when it is used with the mark option.", exception.Message);
+        AreEqual(0, conn.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void WithMark_SecondMarkedBegin_RaisesTheSeverity10Msg3920()
+    {
+        using var conn = NewSeededConnection();
+        var messages = new List<string>();
+        ((SimulatedDbConnection)conn).InfoMessage += (_, e) => messages.Add(e.Message);
+        AreEqual(2, conn.CreateCommand("begin tran t1 with mark 'm'; begin tran t2 with mark 'm2'; select @@trancount").ExecuteScalar());
+        _ = conn.CreateCommand("rollback").ExecuteNonQuery();
+        Contains("The WITH MARK option only applies to the first BEGIN TRAN WITH MARK statement. The option is ignored.", messages);
+    }
+
+    [TestMethod]
+    public void WithMark_NestedUnderAnUnmarkedTransaction_IsSilent()
+    {
+        using var conn = NewSeededConnection();
+        var messages = new List<string>();
+        ((SimulatedDbConnection)conn).InfoMessage += (_, e) => messages.Add(e.Message);
+        AreEqual(2, conn.CreateCommand("begin tran t1; begin tran t2 with mark 'm2'; select @@trancount").ExecuteScalar());
+        _ = conn.CreateCommand("rollback").ExecuteNonQuery();
+        IsEmpty(messages);
+    }
+
+    [TestMethod]
+    public void With_WithoutMark_IsASyntaxError()
+    {
+        using var conn = NewSeededConnection();
+        AreEqual(102, Throws<SimulatedSqlException>(
+            () => conn.CreateCommand("begin tran t1 with nothing").ExecuteNonQuery()).Number);
+    }
 }

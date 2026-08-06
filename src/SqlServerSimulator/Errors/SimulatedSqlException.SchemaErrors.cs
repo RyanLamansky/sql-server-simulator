@@ -1481,6 +1481,19 @@ partial class SimulatedSqlException
         new($"There are no primary or candidate keys in the referenced table '{referencedTable}' that match the referencing column list in the foreign key '{foreignKeyName}'.", 1776, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 1773: a FOREIGN KEY written without a
+    /// referenced column list points at a table carrying no PRIMARY KEY, so
+    /// the implied column list has nothing to resolve against. Real reports
+    /// this rather than Msg 1776, which is the explicit-list message, and
+    /// pairs it with the same trailing informational Msg 1750 the simulator
+    /// collapses away. Probe-confirmed verbatim wording against SQL Server
+    /// 2025 — a referenced table carrying only a UNIQUE constraint reports it
+    /// too, since the implied list reads the primary key alone.
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyImplicitReferenceWithoutPrimaryKey(string foreignKeyName, string referencedTable) =>
+        new($"Foreign key '{foreignKeyName}' has implicit reference to object '{referencedTable}' which does not have a primary key defined on it.", 1773, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1764: a FOREIGN KEY's referencing column is a
     /// computed column that isn't PERSISTED. Raised by the table-level
     /// <c>CREATE TABLE</c> and <c>ALTER TABLE ADD CONSTRAINT</c> forms; the
@@ -1727,6 +1740,82 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException OperationOnDisabledIndex(string indexName, string tableName) =>
         new($"Cannot perform the specified operation on disabled index '{indexName}' on table '{tableName}'.", 1973, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 155: an unrecognized option name inside
+    /// <c>ALTER INDEX … REORGANIZE WITH (…)</c>. REORGANIZE's option block has
+    /// its own wording — probe-confirmed, the message names the form where the
+    /// <c>SET</c> / <c>RESUME</c> blocks report the plain
+    /// <see cref="UnrecognizedAlterIndexOption"/> text.
+    /// </summary>
+    internal static SimulatedSqlException UnrecognizedAlterIndexReorganizeOption(string optionName) =>
+        new($"'{optionName}' is not a recognized ALTER INDEX REORGANIZE option.", 155, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 153: an index option given a value its grammar
+    /// doesn't take (<c>LOB_COMPACTION = 1</c> where only <c>ON</c> / <c>OFF</c>
+    /// is legal). Probe-confirmed verbatim, including the option name echoed as
+    /// the statement spelled it and the generic "INDEX statement" framing.
+    /// </summary>
+    internal static SimulatedSqlException InvalidUsageOfIndexOption(string optionName) =>
+        new($"Invalid usage of the option {optionName} in the INDEX statement.", 153, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 7729: a partition number given where nothing is
+    /// partitioned. Real splits the message by which object it could name — the
+    /// index for <c>ALTER INDEX &lt;name&gt; … PARTITION = n</c> (State 1), the
+    /// table for the <c>ON PARTITIONS (…)</c> data-compression sub-clause
+    /// (State 3) — while keeping "alter index statement" in the wording of the
+    /// first even when an <c>ALTER TABLE … REBUILD</c> raised it.
+    /// Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException PartitionNumberOnUnpartitionedIndex(string indexName) =>
+        new($"Cannot specify partition number in the alter index statement as the index '{indexName}' is not partitioned.", 7729, 16, 1);
+
+    /// <inheritdoc cref="PartitionNumberOnUnpartitionedIndex"/>
+    internal static SimulatedSqlException PartitionNumberOnUnpartitionedTable(string tableName) =>
+        new($"Cannot specify partition number in the alter table statement as the table '{tableName}' is not partitioned.", 7729, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 7735: the rebuild / reorganize flavour of the
+    /// same refusal, which real raises where the statement named no single index
+    /// — <c>ALTER INDEX ALL</c> and <c>ALTER TABLE … REBUILD</c>. The message
+    /// names the first index the statement would have touched, or the table when
+    /// there is none, and echoes the statement that raised it. Probe-confirmed
+    /// verbatim in all four combinations.
+    /// </summary>
+    internal static SimulatedSqlException RebuildPartitionOnUnpartitioned(bool alterIndex, string? indexName, string tableName) =>
+        new(
+            indexName is null
+                ? $"Cannot specify partition number in alter {(alterIndex ? "index" : "table")} statement to rebuild or reorganize a partition of table '{tableName}' as table is not partitioned."
+                : $"Cannot specify partition number in alter {(alterIndex ? "index" : "table")} statement to rebuild or reorganize a partition of index '{indexName}' as index is not partitioned.",
+            7735,
+            16,
+            1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10638: <c>ALTER INDEX &lt;name&gt; …
+    /// RESUME</c> / <c>PAUSE</c> / <c>ABORT</c> against an index carrying no
+    /// paused resumable operation. The simulator never starts one, so every such
+    /// statement lands here. Probe-confirmed verbatim, including the unqualified
+    /// table name and real's State split — 1 for <c>RESUME</c>, 2 for
+    /// <c>PAUSE</c> and <c>ABORT</c>.
+    /// </summary>
+    internal static SimulatedSqlException NoPendingResumableIndexOperation(string form, string indexName, string tableName) =>
+        new(
+            $"ALTER INDEX '{form}' failed. There is no pending resumable index operation for the index '{indexName}' on '{tableName}'.",
+            10638,
+            16,
+            form == "RESUME" ? (byte)1 : (byte)2);
+
+    /// <summary>
+    /// Mimics SQL Server error 10680: the <c>ALTER INDEX ALL</c> flavour of
+    /// <see cref="NoPendingResumableIndexOperation"/>, at real's unusual
+    /// Level 11 and a single State for all three forms. Probe-confirmed
+    /// verbatim.
+    /// </summary>
+    internal static SimulatedSqlException NoPendingResumableIndexOperationForAll(string form, string tableName) =>
+        new($"ALTER INDEX ALL '{form}' failed. There is no pending resumable index operation on '{tableName}'.", 10680, 11, 1);
 
     /// <summary>
     /// Mimics SQL Server error 8655: a table carrying a <i>disabled clustered</i>
@@ -2174,4 +2263,108 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotCreateIndexObjectCreatedWithOptionsOff(string viewName, string options) =>
         new($"Cannot create index. Object '{viewName}' was created with the following SET options off: '{options}'.", 1935, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151's user variant: <c>CREATE SCHEMA …
+    /// AUTHORIZATION</c> named a principal the database doesn't carry. Probe-confirmed verbatim — the
+    /// wording names the <i>user</i> where the sibling forms name the object
+    /// kind they were looking for.
+    /// </summary>
+    internal static SimulatedSqlException CannotFindUser(string name) =>
+        new($"Cannot find the user '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151's object variant, which is what a
+    /// <c>GRANT</c> element inside a <c>CREATE SCHEMA</c> reports for a
+    /// securable that doesn't resolve. Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException CannotFindObjectForGrant(string name) =>
+        new($"Cannot find the object '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2759 — the trailer real appends to <i>every</i>
+    /// failure inside a <c>CREATE SCHEMA</c>, whether the offending error came
+    /// from the schema name itself, the AUTHORIZATION principal, or one of the
+    /// statement's elements. Probe-confirmed verbatim in all four shapes.
+    /// </summary>
+    internal static SimulatedSqlException CreateSchemaFailed() =>
+        new("CREATE SCHEMA failed due to previous errors.", 2759, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15138: <c>DROP USER</c> / <c>DROP ROLE</c> of a
+    /// principal that owns a schema. Probe-confirmed verbatim — the message
+    /// names neither the principal nor the schema.
+    /// </summary>
+    internal static SimulatedSqlException PrincipalOwnsASchema() =>
+        new("The database principal owns a schema in the database, and cannot be dropped.", 15138, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 155's ALTER TABLE wording: an unrecognized
+    /// option name inside <c>ALTER TABLE … REBUILD WITH (…)</c>.
+    /// Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException UnrecognizedAlterTableOption(string optionName) =>
+        new($"'{optionName}' is not a recognized ALTER TABLE option.", 155, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4925: <c>ALTER TABLE … ALTER COLUMN … ADD
+    /// ROWGUIDCOL</c> where the table already carries one. Real follows it with
+    /// a terminating Msg 1750, which the simulator omits. Probe-confirmed
+    /// verbatim.
+    /// </summary>
+    internal static SimulatedSqlException TableAlreadyHasRowGuidCol(string tableName) =>
+        new($"ALTER TABLE ALTER COLUMN ADD ROWGUIDCOL failed because a column already exists in table '{tableName}' with ROWGUIDCOL property.", 4925, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4926: <c>DROP ROWGUIDCOL</c> where no column
+    /// carries the property. The message names the table but not the column the
+    /// statement asked about — probe-confirmed, so real drops <i>the</i>
+    /// ROWGUIDCOL rather than the named column's.
+    /// </summary>
+    internal static SimulatedSqlException NoRowGuidColToDrop(string tableName) =>
+        new($"ALTER TABLE ALTER COLUMN DROP ROWGUIDCOL failed because a column does not exist in table '{tableName}' with ROWGUIDCOL property.", 4926, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1731: a column real refuses to make sparse. The
+    /// message carries the whole rule rather than naming which half was
+    /// violated, so nullability, IDENTITY, ROWGUIDCOL and the refused types all
+    /// report it identically. Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException CannotCreateSparseColumn(string columnName, string tableName) =>
+        new($"Cannot create the sparse column '{columnName}' in the table '{tableName}' because an option or data type specified is not valid. A sparse column must be nullable and cannot have the ROWGUIDCOL, IDENTITY, or FILESTREAM properties. A sparse column cannot be of the following data types: text, ntext, image, geometry, geography, or user-defined type.", 1731, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11410: a column carrying a DEFAULT can't be made
+    /// sparse — a separate refusal from <see cref="CannotCreateSparseColumn"/>,
+    /// with its own advice. Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException CannotMakeColumnSparseWithDefault(string columnName, string tableName) =>
+        new($"Cannot modify the column '{columnName}' in the table '{tableName}' to a sparse column because the column has a default or rule bound to it. Unbind the rule or default from the column before designating the column as sparse.", 11410, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13592: <c>ALTER TABLE … DROP PERIOD FOR
+    /// SYSTEM_TIME</c> while the table is still system-versioned. The period is
+    /// what versioning reads, so it can only go once versioning is off.
+    /// Probe-confirmed verbatim, naming the table three-part.
+    /// </summary>
+    internal static SimulatedSqlException CannotDropPeriodWhileVersioned(string qualifiedTableName) =>
+        new($"Cannot drop SYSTEM_TIME period from table '{qualifiedTableName}' when SYSTEM_VERSIONING is ON.", 13592, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13593: <c>DROP PERIOD FOR SYSTEM_TIME</c> on a
+    /// table that carries no period — a table that never had one and one whose
+    /// period was already dropped report identically. Probe-confirmed verbatim.
+    /// </summary>
+    internal static SimulatedSqlException PeriodDoesNotExist(string qualifiedTableName) =>
+        new($"SYSTEM_TIME period cannot be dropped from table '{qualifiedTableName}', because SYSTEM_TIME period does not exist.", 13593, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4936: a <c>PERSISTED</c> computed column whose
+    /// expression is nondeterministic. Probe-confirmed verbatim at every
+    /// declaration site — <c>CREATE TABLE</c>'s inline form, <c>ALTER TABLE …
+    /// ADD</c> and <c>ALTER COLUMN … ADD PERSISTED</c> — with the table named
+    /// unqualified.
+    /// </summary>
+    internal static SimulatedSqlException ComputedColumnCannotBePersisted(string columnName, string tableName) =>
+        new($"Computed column '{columnName}' in table '{tableName}' cannot be persisted because the column is non-deterministic.", 4936, 16, 1);
 }

@@ -60,7 +60,24 @@ Result types: `DATEPART` → int; `DATEADD` preserves input type; `DATEDIFF` →
 `DATEPART`/`DATEADD` enforce per-type keyword compatibility: `date` accepts only date parts; `time(N)` only time parts; `datetime`/`smalldatetime`/`datetime2(N)` accept both; `datetimeoffset(N)` adds `tzoffset`.
 Wrong combination → Msg 9810.
 `DATEADD`'s interval count is `bigint` (`DatePartKinds.CoerceCount` → `CoerceTo(BigInt)`) — real accepts an interval exceeding int32 (`DATEADD(second, 2147483648, …)` lands in 2092); only an interval that pushes the *result* past the target type's range raises **Msg 517** (the `Add`/`checked` narrowing re-wraps it).
-`DATEPART(weekday)` uses default `DATEFIRST 7` (Sunday=1); changing `DATEFIRST` not modeled.
+### `SET DATEFIRST` and the parts that read it
+
+`SET DATEFIRST n` names the weekday the week starts on, 1..7, default 7 (Sunday — the us_english setting a fresh session gets under SqlClient and sqlcmd alike).
+Session state on `SimulatedDbConnection.DateFirst`, read back by `@@DATEFIRST` as `tinyint`.
+Which units follow it, probed against SQL Server 2025:
+
+- **`DATEPART(weekday | dw, …)`** counts from the named day: `(((int)DayOfWeek + 7 - DATEFIRST) % 7) + 1`, so Sunday reads 1 under the default 7, 7 under 1 and 5 under 3.
+- **`DATEPART(week, …)`** moves with it — January 1 is in week 1 and the number advances at each named weekday, so 2026-01-04 (a Sunday) opens week 2 under DATEFIRST 7 and stays in week 1 under DATEFIRST 1.
+- **`DATETRUNC(week, …)`** anchors on the named day; a Wednesday truncates to the preceding Sunday under 7, the preceding Monday under 1, and to itself under 3.
+- **`DATENAME(weekday | dw, …)`** does **not**: the name is the calendar day's own, so a Friday reads `Friday` under DATEFIRST 5 where `DATEPART` reads 1.
+- **`DATEPART(iso_week, …)`**, `DATETRUNC(iso_week, …)` and **`DATEDIFF(week, …)`** are all DATEFIRST-independent; the DATEDIFF boundary stays Saturday-to-Sunday whatever the option says.
+
+The argument accepts a literal or an `int` variable.
+Outside 1..7 → **Msg 2742** class 16 state 1 echoing the value (`SET DATEFIRST 8 is out of range.`), with a NULL variable rendered as `0` and a negative literal reaching the same message rather than a syntax error.
+A parameter that isn't an `int` — a literal past the int range, or a `bigint` variable — → **Msg 2743** class 16 state 3 (`SET DATEFIRST option requires integer parameter.`).
+Scoping matches `XACT_ABORT`: a procedure / trigger / dynamic-SQL body's own `SET` binds for the body and reverts on return, and a body with none inherits the caller's — see [`transactions.md`](transactions.md#set-xact_abort).
+
+Not modeled: `SET LANGUAGE` still parses-and-discards, so it doesn't move `@@DATEFIRST` the way real does (`SET LANGUAGE French` reads 1 there, and `us_english` restores 7 — but only when the language actually changes, so a `SET DATEFIRST 3` followed by `SET LANGUAGE us_english` on an already-us_english session keeps 3).
 
 **Implicit operand coercion** (date argument, all three functions): string operands route through `DatePartKinds.CoerceDateArgumentImplicit` → `CoerceTo(datetime2(7))`; integer operands → `CoerceTo(datetime)` (days-since-1900-01-01).
 `ParseDateTime2` also accepts a **bare time-of-day string** (`HH:mm[:ss[.fffffff]]`, anchored to 1900-01-01), so `DATEDIFF(second, '11:15:00', <time>)` / `DATEPART(microsecond, '11:15:00')` coerce like real (a Django DurationField/TimeField pattern) rather than raising Msg 241.
@@ -335,7 +352,7 @@ Three members deviate, each probe-confirmed:
   Its own SOUNDEX refuses all three.
 - **QUOTENAME** quotes the `nvarchar` rendering of whatever it is given, so `text` / `ntext` and every non-string family quote normally; only `image`, which has no implicit conversion to `nvarchar`, fails — and with **Msg 206** (`Operand type clash: image is incompatible with nvarchar`) rather than the family's Msg 8116.
 
-An argument that is **read** rather than transformed accepts a LOB, which is how a legacy `text` column is meant to be consumed — CHARINDEX's haystack, PATINDEX's subject and SUBSTRING's source all take one, as do CONCAT / CONCAT_WS / COALESCE / ISNULL and DATALENGTH.
+An argument that is **read** rather than transformed accepts a LOB, which is how a legacy `text` column is meant to be consumed — CHARINDEX's haystack, PATINDEX's subject and SUBSTRING's source all take one (SUBSTRING's admits `image` too and slices bytes — see [`legacy-lob.md`](legacy-lob.md#binary-substring)), as do CONCAT / CONCAT_WS / COALESCE / ISNULL and DATALENGTH.
 `StringScalars.CoerceToVarchar`'s `allowLegacyLob` flag marks the coercing sites; `StringScalars.RejectLegacyLob` is the standalone gate for the members that read their argument directly.
 
 The gate is a **compile-time** one, as it is on real: each member's `GetSqlType` resolves the argument's static type through `StringScalars.BindArgument` (or `BindCoercedArgument` for the members whose runtime path goes through `CoerceToVarchar`), which applies the identical `RejectLegacyLobType` / `RejectLegacyLobInCoercion` body the per-value gate calls — so the two phases can't drift, and an **empty** rowset, a never-taken branch, and a module body at CREATE all raise where real raises.
@@ -347,7 +364,6 @@ The types are column-only besides: a local variable declared `text` / `ntext` / 
 ### Divergences
 
 - **`CHARINDEX(<needle>, <image>)`** reports Msg 8116 for argument 2 where real reports Msg 206 (`image is incompatible with varchar`); real accepts the pair when the needle is binary too, which needs the unbuilt binary CHARINDEX.
-- **`SUBSTRING(<image>)` / `SUBSTRING(<varbinary>)`** raise Msg 8116 where real returns the binary slice — binary SUBSTRING isn't built.
 
 ## EF.Functions-driven type-check / random scalars: `ISNUMERIC` / `ISDATE` / `RAND`
 - **`ISNUMERIC(expression)`** returns `int` (1 / 0); NULL → 0 (not NULL).
@@ -562,8 +578,10 @@ Constants whose values don't carry real session/server identity in the simulator
   The same value `sys.dm_exec_sessions.program_name` and `sp_who2`'s `ProgramName` project.
 - **`ORIGINAL_DB_NAME()`** — returns `Simulation.DefaultDatabaseName` (`"simulated"`).
 - **`GETANSINULL([db])`** — returns 1 (the simulator's ANSI-NULL behavior matches `SET ANSI_NULLS ON`, which is the only modeled mode).
-- **`@@DATEFIRST`** — constant 7 (Sunday).
-  `SET DATEFIRST` parses-and-discards.
+- **`@@DATEFIRST`** — session state (`SimulatedDbConnection.DateFirst`), default 7 (Sunday), `tinyint`.
+  `SET DATEFIRST` carries semantic effect — see [`SET DATEFIRST and the parts that read it`](#set-datefirst-and-the-parts-that-read-it).
+- **`@@OPTIONS`** — the fresh-session 5432 with two bits tracking the session: `QUOTED_IDENTIFIER` (256) at the parse position and `XACT_ABORT` (16384) at run time.
+  sqlcmd's own fresh session reads 5176, differing only in `QUOTED_IDENTIFIER`.
 - **`@@MAX_PRECISION`** — constant 38.
 - **`@@MAX_CONNECTIONS`** — constant 32767.
 - **`@@SERVERNAME`** — `"SIMULATED"`.
@@ -772,17 +790,7 @@ Probe-confirmed against SQL Server 2025.
 
 ## Legacy text-pointer scalars: `TEXTPTR` / `TEXTVALID`
 
-`Parser/Expressions/TextPointer.cs` (`LegacyTextPointer` helper + `TextPointer`), `Parser/Expressions/TextValid.cs`.
-Probe-confirmed against SQL Server 2025.
-
-- **`TEXTPTR(column)`** returns the 16-byte `varbinary` text pointer of a base-table `text` / `ntext` / `image` column, or NULL when the cell is NULL.
-  The argument must be a base-table column reference: a literal, CAST, or computed expression raises **Msg 280** (`Only base table columns are allowed in the TEXTPTR function.`), and a column of any other type (including `varchar(max)`) raises **Msg 8116** (`Argument data type <t> is invalid for argument 1 of textptr function.`).
-  Real varies the pointer per row; the simulator fabricates a shape carrying only column identity — an 8-byte signature plus an 8-byte FNV-1a-64 hash of the case-folded column name — since the only sanctioned consumers (`READTEXT` / `WRITETEXT` / `UPDATETEXT`) stay unmodeled.
-  Two non-NULL cells of one column therefore share a pointer (a divergence with no observable consumer).
-- **`TEXTVALID('table.column', text_ptr)`** returns `int` `1` when the pointer is valid for the named column, else `0`.
-  A NULL pointer / NULL name, a pointer that isn't a simulator-fabricated text pointer (e.g. arbitrary bytes), and a name whose final (column) segment doesn't match the pointer's source column all return `0`.
-  The name must have at least two dotted parts (`table.column`) — a bare single-part name returns `0`, matching real — but only its column segment is matched against the pointer's embedded column-identity hash; the table portion is not resolved against the catalog.
-  A syntactically valid name whose column segment matches the pointer's source column therefore returns `1` even if its table portion names a different table (real cross-checks the exact column object); this is unobservable through the sanctioned `TEXTVALID('t.c', TEXTPTR(c))` idiom, where the two column names always agree.
+Both scalars, the 16-byte pointer they exchange, and the `READTEXT` / `WRITETEXT` / `UPDATETEXT` statements that resolve one back to a row live in [`legacy-lob.md`](legacy-lob.md), alongside binary `SUBSTRING`.
 
 ## Placeholder security / FILESTREAM scalars: `CERTENCODED` / `CERTPRIVATEKEY` / `GET_FILESTREAM_TRANSACTION_CONTEXT`
 

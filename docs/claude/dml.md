@@ -123,6 +123,8 @@ Probe-confirmed semantics (SQL Server 2025):
   Real SQL Server rejects a bad literal at compile time (before any scan); the simulator resolves + validates the value after collecting candidate rows but before any heap write, so the error still surfaces with zero rows changed — observably identical for a single statement.
   `ResolveDmlTopCap` is always called when a limit is present (even at zero candidates) so the value errors fire regardless of match count.
 - **INSERT TOP** caps the inserted-row count across `VALUES` (multiple tuples), `SELECT`, and `EXEC` sources — applied to the buffered `sourceRows` list in `ProcessHeapInsert` (and the view / INSTEAD OF paths).
+- **`SET ROWCOUNT n` caps a DML statement the same way**, and the two compose as a minimum — `ApplyDmlTopCap` reads the session value beside the written `TOP`, so `INSERT` / `UPDATE` / `DELETE` all take it at one seam and `MERGE` at its own.
+  See [`query.md`](query.md#set-rowcount-n).
 
 ## INSERT value counts
 

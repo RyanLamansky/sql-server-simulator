@@ -106,6 +106,33 @@ partial class SimulatedSqlException
         new($"Index '{indexName}' on table '{qualifiedTableName}' (specified in the FROM clause) does not exist.", 308, 16, 1);
 
     /// <summary>
+    /// Msg 362 — a nested <c>FORCESEEK(index (col [, …]))</c> named a column
+    /// that isn't the index's key column at that position. Real reports the
+    /// first offender and names the base table rather than the alias the query
+    /// wrote; an <c>INCLUDE</c>d column and a key column out of order both land
+    /// here. Probe-confirmed verbatim against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForceSeekColumnNotAKeyColumn(string columnName, string tableName, string indexName) =>
+        new(
+            $"The query processor could not produce a query plan because the name '{columnName}' in the FORCESEEK hint on table or view '{tableName}' did not match the key column names of the index '{indexName}'.",
+            362,
+            16,
+            1);
+
+    /// <summary>
+    /// Msg 365 — a nested <c>FORCESEEK</c> listed more seek columns than the
+    /// named index has key columns. Probe-confirmed to be settled ahead of
+    /// <see cref="ForceSeekColumnNotAKeyColumn"/>, so a list that is both too
+    /// long and misspelled reports the count.
+    /// </summary>
+    internal static SimulatedSqlException ForceSeekTooManySeekColumns(string tableName, string indexName) =>
+        new(
+            $"The query processor could not produce a query plan because the FORCESEEK hint on table or view '{tableName}' specified more seek columns than the number of key columns in index '{indexName}'.",
+            365,
+            16,
+            1);
+
+    /// <summary>
     /// Msg 3952 — raised when a session whose
     /// <see cref="SimulatedDbConnection.SessionIsolationLevel"/> is
     /// <see cref="System.Data.IsolationLevel.Snapshot"/> accesses a user

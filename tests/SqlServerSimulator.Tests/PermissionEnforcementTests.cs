@@ -423,6 +423,22 @@ public sealed class PermissionEnforcementTests
         AreEqual(1, sim.ExecuteScalar("execute as user = 'u'; select has_perms_by_name('dbo.t', 'object', 'select')"));
     }
 
+    /// <summary>
+    /// The <c>SCHEMA</c> securable class resolves the name to a schema and
+    /// asks the same grant question: 0 without a grant, 1 with one, and 0 for
+    /// a name no schema carries. Probed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void HasPermsByName_SchemaClass_FollowsTheSchemaGrant()
+    {
+        var sim = Seeded();
+        sim.ExecuteBatches("create schema s2");
+        AreEqual(0, sim.ExecuteScalar("execute as user = 'u'; select has_perms_by_name('s2', 'SCHEMA', 'ALTER')"));
+        _ = sim.ExecuteNonQuery("grant alter on schema::s2 to u");
+        AreEqual(1, sim.ExecuteScalar("execute as user = 'u'; select has_perms_by_name('s2', 'SCHEMA', 'ALTER')"));
+        AreEqual(0, sim.ExecuteScalar("execute as user = 'u'; select has_perms_by_name('dbo', 'SCHEMA', 'ALTER')"));
+    }
+
     [TestMethod]
     public void IsMember_TransitiveRole_SeesOne()
     {

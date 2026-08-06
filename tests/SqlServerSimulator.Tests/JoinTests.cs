@@ -238,6 +238,64 @@ public sealed class JoinTests
         CollectionAssert.AreEquivalent(new[] { (1, 1), (2, 2), (3, -1), (-1, 4) }, rows);
     }
 
+    /// <summary>
+    /// Left rows 10 / 20 / 30 against right rows 15 / 5 / 25, so an inequality
+    /// ON matches several right rows per left row, leaves one right row
+    /// unmatched and (for FULL) one left row unmatched.
+    /// </summary>
+    private static DbConnection SeededInequality()
+    {
+        var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table l (id int, v int);
+            create table r (id int, w int);
+            insert l values (1, 10), (2, 20), (3, 30);
+            insert r values (1, 15), (2, 5), (4, 25)
+            """).ExecuteNonQuery();
+        return connection;
+    }
+
+    /// <summary>
+    /// A RIGHT JOIN whose ON carries no equality has no hash keys to build, so
+    /// it runs the streaming nested-loop operator instead of the hash path
+    /// every equi-join RIGHT takes. Row set probed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void RightJoin_NonEquiPredicate_MatchesAndOrphansRight()
+    {
+        using var connection = SeededInequality();
+        var rows = ReadIntPairs(connection.CreateCommand("select l.id, r.id from l right join r on l.v < r.w"));
+        CollectionAssert.AreEquivalent(new[] { (1, 1), (-1, 2), (1, 4), (2, 4) }, rows);
+    }
+
+    /// <summary>
+    /// The same shape as FULL: unmatched left rows emit with the right slot
+    /// NULL-filled and the one unmatched right row emits at the end.
+    /// </summary>
+    [TestMethod]
+    public void FullJoin_NonEquiPredicate_EmitsBothUnmatchedSides()
+    {
+        using var connection = SeededInequality();
+        var rows = ReadIntPairs(connection.CreateCommand("select l.id, r.id from l full join r on l.v < r.w"));
+        CollectionAssert.AreEquivalent(new[] { (1, 1), (-1, 2), (1, 4), (2, 4), (3, -1) }, rows);
+    }
+
+    /// <summary>
+    /// A non-equi ON no row satisfies: RIGHT drops every left row and emits
+    /// every right row NULL-left, FULL emits both sides whole.
+    /// </summary>
+    [TestMethod]
+    public void RightAndFullJoin_NonEquiPredicateMatchingNothing()
+    {
+        using var connection = SeededInequality();
+        CollectionAssert.AreEquivalent(
+            new[] { (-1, 1), (-1, 2), (-1, 4) },
+            ReadIntPairs(connection.CreateCommand("select l.id, r.id from l right join r on l.v > 1000")));
+        CollectionAssert.AreEquivalent(
+            new[] { (1, -1), (2, -1), (3, -1), (-1, 1), (-1, 2), (-1, 4) },
+            ReadIntPairs(connection.CreateCommand("select l.id, r.id from l full join r on l.v > 1000")));
+    }
+
     [TestMethod]
     public void RightJoin_NullKey_DoesNotMatch()
     {

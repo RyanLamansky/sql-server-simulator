@@ -244,6 +244,27 @@ Measured on `SELECT TOP (10) InvoiceLineID, UnitPrice, ExtendedPrice FROM Sales.
 The residual is not the cap — a bare `SELECT COUNT(*)` over the same table already costs ~70 ms here — but the scan, and real's own plan shows why it wins: 41 ms elapsed against **280 ms of CPU**, at `DegreeOfParallelism="8"`.
 Single-threaded, the simulator uses less CPU than real does for the same query; the gap is intra-query parallelism, which no top-N strategy reaches.
 
+## `SET ROWCOUNT n`
+
+The session-wide sibling of `TOP`: a cap on how many rows a statement returns or changes, lifted by `SET ROWCOUNT 0` (the default).
+Session state on `SimulatedDbConnection.RowCountLimit`, `bigint`-wide because real accepts a `bigint` variable there even though the literal form is int-bounded.
+Probed against SQL Server 2025 (2026-08-06).
+
+- **The two caps compose as a minimum**, in both directions: `TOP 5` under `ROWCOUNT 3` returns 3, `TOP 3` under `ROWCOUNT 5` returns 3.
+- **The cap is on what the statement emits, not what it reads**: `SELECT COUNT(*)` under `ROWCOUNT 3` still answers over the whole table and reports one row.
+- `@@ROWCOUNT` reports the capped count.
+- Every row-emitting shape takes it — a plain `SELECT`, an `OFFSET … FETCH`, a `SELECT … INTO`, a `SELECT @v = …` assignment (which then keeps the last row inside the cap), and `INSERT` / `UPDATE` / `DELETE` / `MERGE`.
+- `NEXT VALUE FOR` under an active cap is **Msg 11739**, the message real writes naming all three sources ("if ROWCOUNT option has been set, or the query contains TOP or OFFSET").
+
+Enforcement is two seams, not sprinkled checks: `SimulatedSqlResultSet.WithRowCountLimit` wraps the statement's own row sequence lazily at the SELECT / `SELECT … INTO` dispatch, and `ApplyDmlTopCap` — the list every `INSERT` / `UPDATE` / `DELETE` already collects its rows through — folds the session cap in beside `TOP`.
+Inner plans (a join's sources, a subquery, a view body) are untouched, matching real.
+
+**Scoping.** The cap persists into a called procedure, while a body's own `SET ROWCOUNT` reverts when it returns — dynamic SQL the same — through `SimulatedDbConnection.SessionOptionScope`, shared with `XACT_ABORT` and `DATEFIRST`.
+
+**Argument errors.** A negative *literal* never reaches the option's own validation because the grammar has no sign slot, so real reports **Msg 102** near the `-`; a literal that isn't an int is **Msg 1080** echoing it (`The integer value 2.5 is out of range.`); a NULL or negative *variable* is **Msg 507** class 16 state 2 (`Invalid argument for SET ROWCOUNT. Must be a non-null non-negative integer.`).
+
+**Divergence.** Real counts a `MERGE`'s *actions* against the cap; the simulator caps the materialized source rows, which agrees whenever each source row draws an action and otherwise lets a declining row consume a slot.
+
 ## `WINDOW w AS (…)` named-window clause (SQL Server 2022+)
 - A trailing `WINDOW name AS (<over-body>) [, …]` clause (between HAVING and ORDER BY) defines named windows an `OVER w` reference resolves to.
 - Every window kind reaches one — the ranking family (`ROW_NUMBER` / `RANK` / `DENSE_RANK` / `NTILE`), the distribution pair (`CUME_DIST` / `PERCENT_RANK`), the offset pair (`LAG` / `LEAD`), the value pair (`FIRST_VALUE` / `LAST_VALUE`), the ordered-set pair (`PERCENTILE_CONT` / `PERCENTILE_DISC`) and aggregate-OVER.

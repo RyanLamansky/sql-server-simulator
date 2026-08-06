@@ -172,4 +172,131 @@ public sealed class PrintStatementTests
         // Subsequent statement on a fresh connection should work normally.
         AreEqual(1, sim.ExecuteScalar<int>("select 1"));
     }
+
+    /// <summary>
+    /// The formatted message <c>PRINT</c> delivers, captured through the
+    /// public <see cref="SimulatedDbConnection.InfoMessage"/> surface.
+    /// </summary>
+    private static string PrintOutput(string commandText)
+    {
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
+        var captured = new List<string>();
+        connection.InfoMessage += (_, e) => captured.Add(e.Message);
+        using var command = connection.CreateCommand();
+        command.CommandText = commandText;
+        _ = command.ExecuteNonQuery();
+        return string.Join("\n", captured);
+    }
+
+    /// <summary>
+    /// PRINT renders a non-string operand through the implicit conversion to a
+    /// character string, which is style 0's layout for the legacy datetime
+    /// family and for <c>float</c> / <c>real</c>. Every expected rendering is
+    /// probe-confirmed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("print 1", "1")]
+    [DataRow("print 1.5", "1.5")]
+    [DataRow("print cast(1 as smallint)", "1")]
+    [DataRow("print cast(1 as bigint)", "1")]
+    [DataRow("print cast(1 as bit)", "1")]
+    [DataRow("print cast(1 as money)", "1.00")]
+    [DataRow("print cast(1.5 as money)", "1.50")]
+    [DataRow("print cast(12345.6789 as decimal(12, 4))", "12345.6789")]
+    [DataRow("print cast(1.5 as float)", "1.5")]
+    [DataRow("print cast(1.5 as real)", "1.5")]
+    [DataRow("print cast(1234567890123456789 as float)", "1.23457e+018")]
+    [DataRow("print cast(0.000001234 as float)", "1.234e-006")]
+    [DataRow("print cast(1000000 as float)", "1e+006")]
+    [DataRow("print cast(123456 as float)", "123456")]
+    [DataRow("print 0x41424344", "0x41424344")]
+    [DataRow("print cast('2026-08-06 13:45:12.345' as datetime)", "Aug  6 2026  1:45PM")]
+    [DataRow("print cast('2026-08-06 13:45' as smalldatetime)", "Aug  6 2026  1:45PM")]
+    [DataRow("print cast('2026-08-06 13:45:12.345' as datetime2(3))", "2026-08-06 13:45:12.345")]
+    [DataRow("print cast('2026-08-06' as date)", "2026-08-06")]
+    [DataRow("print cast('13:45:12.1234567' as time)", "13:45:12.1234567")]
+    [DataRow("print cast('2026-08-06 13:45:12.345 +05:30' as datetimeoffset)", "2026-08-06 13:45:12.3450000 +05:30")]
+    public void Print_FormatsOperand(string commandText, string expected) =>
+        AreEqual(expected, PrintOutput(commandText));
+
+    /// <summary>
+    /// A NULL operand and an empty string both deliver a single space, not an
+    /// empty message (probe-confirmed: the message is exactly U+0020).
+    /// </summary>
+    [TestMethod]
+    [DataRow("print null")]
+    [DataRow("print ''")]
+    [DataRow("print N''")]
+    [DataRow("declare @v varchar(10) = null; print @v")]
+    public void Print_NullOrEmpty_EmitsSingleSpace(string commandText) =>
+        AreEqual(" ", PrintOutput(commandText));
+
+    /// <summary>
+    /// The message truncates at 8000 characters, or 4000 for the national
+    /// string types — probe-confirmed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @s varchar(max) = replicate(cast('a' as varchar(max)), 8010); print @s", 8000)]
+    [DataRow("declare @s nvarchar(max) = replicate(cast(N'b' as nvarchar(max)), 4010); print @s", 4000)]
+    public void Print_TruncatesAtFamilyCap(string commandText, int expectedLength) =>
+        AreEqual(expectedLength, PrintOutput(commandText).Length);
+
+    /// <summary>
+    /// The operand has no column scope, so a name — bare, bracketed or dotted —
+    /// is real's own Msg 128 rather than the Msg 207 / 4104 a query scope would
+    /// report.
+    /// </summary>
+    [TestMethod]
+    [DataRow("print some_identifier", "some_identifier")]
+    [DataRow("print [foo]", "foo")]
+    [DataRow("print a.b", "a.b")]
+    [DataRow("print upper(zzz)", "zzz")]
+    [DataRow("print aaa + bbb", "aaa")]
+    [DataRow("print bbb + (select 1)", "bbb")]
+    public void Print_ColumnName_RaisesMsg128(string commandText, string name)
+    {
+        var ex = new Simulation().AssertSqlError(commandText, 128);
+        AreEqual($"The name \"{name}\" is not permitted in this context. Valid expressions are constants, constant expressions, and (in some contexts) variables. Column names are not permitted.", ex.Message);
+        AreEqual((byte)15, ex.Class);
+        AreEqual((byte)1, ex.State);
+    }
+
+    /// <summary>
+    /// A subquery anywhere in the operand — nested in a function argument or
+    /// inside a CASE — is Msg 1046, and the refusal is settled while parsing,
+    /// so an un-taken IF branch raises it too.
+    /// </summary>
+    [TestMethod]
+    [DataRow("print (select 1)")]
+    [DataRow("print len((select 'ab'))")]
+    [DataRow("print case when exists(select 1) then 'y' else 'n' end")]
+    [DataRow("print (select 1) + 1")]
+    [DataRow("if 1 = 0 print (select 1)")]
+    public void Print_Subquery_RaisesMsg1046(string commandText)
+    {
+        var ex = new Simulation().AssertSqlError(commandText, 1046);
+        AreEqual("Subqueries are not allowed in this context. Only scalar expressions are allowed.", ex.Message);
+        AreEqual((byte)15, ex.Class);
+    }
+
+    /// <summary>
+    /// The name gate withdraws a reference the parser turned into a function
+    /// call, so the built-in and user-function spellings still print.
+    /// </summary>
+    [TestMethod]
+    [DataRow("print db_name()")]
+    [DataRow("print len('abc')")]
+    [DataRow("print @@spid")]
+    [DataRow("declare @i int = 7; print @i")]
+    public void Print_FunctionOrVariable_IsNotAName(string commandText) =>
+        _ = new Simulation().ExecuteNonQuery(commandText);
+
+    /// <summary>
+    /// Msg 128 is settled while parsing, so an un-taken IF branch raises it —
+    /// probe-confirmed (<c>IF 1 = 0 PRINT zzz</c> reports Msg 128 on real).
+    /// </summary>
+    [TestMethod]
+    public void Print_ColumnName_InSkippedBranch_StillRaises() =>
+        _ = new Simulation().AssertSqlError("if 1 = 0 print zzz", 128);
 }

@@ -37,6 +37,32 @@ public sealed class CompileTimePredicateFoldTests
     private static int RowCount(Simulation simulation, string sql) =>
         simulation.ExecuteScalar<int>($"select count(*) from ({sql}) q(c1)");
 
+    /// <summary>
+    /// <c>NOT</c> asks its operand whether it can ever be FALSE, and an
+    /// <c>OR</c> answers from its own operands — so <c>NOT (x OR NULL = 1)</c>
+    /// keeps nothing, since the OR is never FALSE and the NOT is therefore
+    /// never TRUE. Stacked <c>NOT</c>s ask through each other. Probed against
+    /// SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select a from t where not (a = 2 or b = 30)", 1)]
+    [DataRow("select a from t where not not (a = 2)", 1)]
+    [DataRow("select a from t where not (a = 2 or null = 1)", 0)]
+    [DataRow("select a from t where not (null = 1 or null = 2)", 0)]
+    [DataRow("select a from t where not not (a = 2 or null = 1)", 1)]
+    public void NotOverOr_AsksWhetherTheOperandCanBeFalse(string sql, int expected)
+        => AreEqual(expected, RowCount(Seeded(), sql));
+
+    /// <summary>
+    /// A never-true filter over a derived table is still offered to the
+    /// pushdown walk, which reads whether the predicate is a written constant
+    /// before trying to rebind it against the inner query.
+    /// </summary>
+    [TestMethod]
+    public void NeverTrueFilterOverADerivedTable_KeepsNothing()
+        => AreEqual(0, Seeded().ExecuteScalar<int>(
+            "select count(*) from (select a, b from t where b > 0) d where null > 1"));
+
     // === The other side of a NULL comparison never runs ===
 
     [TestMethod]

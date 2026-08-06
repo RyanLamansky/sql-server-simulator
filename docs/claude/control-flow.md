@@ -226,8 +226,7 @@ See [`tds-endpoint.md`](tds-endpoint.md).
   Real tooling never sends invalid batches; the batches that rely on continuation (`DROP #tmp` cleanup) are all runtime errors.
 - **Row materialization**: a SELECT that errors mid-scan (`SELECT 10/id …`) materializes its rows up front, so the error fires before any partial row is yielded — real SQL Server streams the rows preceding the failing one, then throws.
   The positional shape (Read throws, reader survives, tail clean) matches; the pre-error row count does not.
-- **`SET XACT_ABORT ON` batch-abort semantics are not honored.**
-  XACT_ABORT is parse-and-discard, so continuation applies regardless of the option's state.
+  Continuation is also what `SET XACT_ABORT ON` suspends: under the option a statement-terminating run-time error ends the batch and rolls the transaction back instead of continuing, and caught by a `TRY` frame it leaves the transaction doomed — see [`transactions.md`](transactions.md#set-xact_abort).
 
 ## TRY/CATCH + ERROR_*() + live @@ERROR + THROW
 `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` blocks parse via `Simulation.TryCatch.cs:ParseTryCatch`.
@@ -277,6 +276,7 @@ Outside any TRY/CATCH the value otherwise stays 0 because uncaught errors tear d
   The IF/WHILE skip-mode plumbing also composes: an `IF 1=0 BEGIN TRY ... END CATCH` skip-dispatches the TRY body (no runtime errors fire) and CATCH never activates.
 - Transactions: caught errors don't auto-rollback explicit transactions (matches real SQL Server's XACT_ABORT OFF default).
   The standard `IF @@TRANCOUNT > 0 ROLLBACK` idiom in CATCH works.
+  Under `SET XACT_ABORT ON` the same caught error leaves the transaction **doomed** — `@@TRANCOUNT` unchanged, `XACT_STATE()` reading `-1`, and the next statement that writes refused with Msg 3930; see [`transactions.md`](transactions.md#set-xact_abort).
 
 **Fidelity gaps.**
 - **Parse-time name-resolution errors ARE caught** by TRY/CATCH in the simulator — `BEGIN TRY SELECT * FROM nonexistent END TRY BEGIN CATCH ... END CATCH` runs the CATCH.
@@ -286,8 +286,6 @@ Outside any TRY/CATCH the value otherwise stays 0 because uncaught errors tear d
 - **Divide-by-zero raises raw `DivideByZeroException`** (not `SimulatedSqlException` Msg 8134), so TRY/CATCH doesn't catch it.
   Gap independent of TRY/CATCH; will close when the arithmetic error path is converted to factory-emitted Msg 8134.
 - **ERROR_LINE() / ERROR_PROCEDURE()** report the exception's resolved line / procedure (see [`errors.md`](errors.md)); residuals there (tokenizer-thrown multi-line literals; UDF/TVF/trigger/view bodies) are narrow.
-- **No XACT_STATE() / XACT_ABORT / doomed-transaction semantics**: deferred.
-  `@@TRANCOUNT` is correct (caught errors don't auto-rollback), so the common idiom works; apps relying on `XACT_STATE() = -1` to detect doomed transactions won't.
 
 ## `RAISERROR`
 `RAISERROR (msg, severity, state [, arg]…) [WITH option[, option]…]` — fires an error of the supplied severity / state, or surfaces an informational message at severity ≤ 10.
@@ -345,18 +343,39 @@ Matches real SQL Server's grammar (probe-confirmed).
 Multiple PRINTs in one batch coalesce into a single newline-joined event.
 The evaluation isn't a no-op: operand-side errors still surface — `PRINT 'val=' + 5` raises Msg 245 because the `+` operator's int-side promotion tries to parse `'val='` as int (probe-confirmed against SQL Server 2025).
 
-Probe-confirmed semantics the simulator handles correctly because evaluation runs unchanged:
-- `PRINT NULL` and `PRINT ''` are silent no-ops (no message body, no error).
+Probe-confirmed semantics:
+- `PRINT NULL` and `PRINT ''` deliver a message whose whole body is a single U+0020 space — real emits exactly one character rather than an empty message.
 - `PRINT` resets `@@ROWCOUNT` to 0 — applied by the dispatcher after the parser returns.
 - Skip-mode (un-taken IF, after BREAK / CONTINUE / RETURN) suppresses operand evaluation entirely, so an error-bearing operand in a skipped branch doesn't fire.
   Standard pattern: parse the expression unconditionally to advance the cursor, then gate `expression.Run` on `!batch.IsSkipping`.
 - Rollback doesn't undo a PRINT (real SQL Server's InfoMessage stream is non-transactional too), and the simulator's delivery is likewise outside the undo log.
+- The message truncates at **8000** characters, or **4000** when the operand is one of the national string types (`nvarchar` / `nchar` / `ntext`).
+  Real delivers exactly that many characters and drops the rest without a warning.
 
-**Fidelity gaps** (modeled deviations from probed behavior):
-- Real SQL Server's PRINT truncates messages at 8000 chars (varchar) / 4000 chars (nvarchar).
-  The simulator delivers the whole string untruncated.
-- Real SQL Server raises **Msg 1046** ("Subqueries are not allowed in this context. Only scalar expressions are allowed.") for `PRINT (SELECT 'inner')`.
-  The simulator silently evaluates the scalar subquery — Msg 1046 isn't modeled.
+### The operand admits only scalar expressions
+
+`PRINT` has no column scope and no rowset scope, so real refuses both a name and a subquery there, in whichever order the left-to-right reading meets them:
+
+- A name — bare, bracketed or dotted — is **Msg 128**, class 15 state 1: `The name "a.b" is not permitted in this context. Valid expressions are constants, constant expressions, and (in some contexts) variables. Column names are not permitted.`
+  The name is rendered as written, double-quoted, with brackets stripped.
+- A subquery at any depth, a function argument or a `CASE` arm included, is **Msg 1046**: `Subqueries are not allowed in this context. Only scalar expressions are allowed.`
+- `PRINT bbb + (SELECT 1)` reports Msg 128 and `PRINT (SELECT 1) + bbb` reports Msg 1046 — the reading order decides, not the construct.
+
+Both are settled while parsing (`ParserContext.ScalarOnlyOperand` arms the recording; `Expression.Counted` notes the first reference and `ParseSubqueryRejectingNextValueFor` refuses a subquery), so an un-taken `IF` branch and a module body at CREATE raise where real raises.
+A name the parser turns into a function call is withdrawn from the record at the same seam that un-counts it, which is why `PRINT DB_NAME()` still prints.
+
+### Non-string operands
+
+The rendering is the implicit conversion to a character string real applies, not a bare cast:
+
+| Operand | Rendering |
+| --- | --- |
+| `datetime` / `smalldatetime` | style 0 — `Aug  6 2026  1:45PM` |
+| `date` / `time` / `datetime2` / `datetimeoffset` | the type's own ISO layout — `2026-08-06`, `13:45:12.1234567`, `2026-08-06 13:45:12.345`, `2026-08-06 13:45:12.3450000 +05:30` |
+| `money` / `smallmoney` | two decimals — `1.00` |
+| `float` / `real` | style 0 — six significant digits, scientific with a three-digit exponent outside `[1e-4, 1e6)`: `1.23457e+018`, `1.234e-006`, `1e+006`, and `123456` unchanged |
+| `binary` / `varbinary` / `image` | `0x`-prefixed hex, not style 0's byte reinterpretation |
+| everything else | the ordinary coercion to `varchar` |
 
 ## `WAITFOR DELAY`
 `WAITFOR DELAY '<time>'` and `WAITFOR DELAY @variable` block the calling thread via `Thread.Sleep(TimeSpan)`, matching real SQL Server's "blocks the connection" semantics.

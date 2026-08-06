@@ -65,10 +65,22 @@ partial class Simulation
     /// can't have the option set table-wide.
     /// </para>
     /// <para>
-    /// The <c>REBUILD</c> / <c>REORGANIZE</c> / <c>DISABLE</c> / <c>RESUME</c> /
-    /// <c>PAUSE</c> / <c>ABORT</c> forms raise <see cref="NotSupportedException"/>
-    /// naming the form: they're real features the simulator hasn't built, not
-    /// rejections. The heap has no B-tree to rebuild and no disabled-index state.
+    /// <c>REORGANIZE</c> has nothing to compact in a flat page list, so it
+    /// validates and succeeds. Its own <c>WITH (…)</c> block takes
+    /// <c>LOB_COMPACTION</c> and <c>COMPRESS_ALL_ROW_GROUPS</c> — real accepts
+    /// the columnstore option on a rowstore index — and refuses anything else
+    /// with a REORGANIZE-flavoured <b>Msg 155</b>, a non-<c>ON</c>/<c>OFF</c>
+    /// value with <b>Msg 153</b>. A disabled index refuses REORGANIZE with
+    /// <b>Msg 1973</b> where <c>ALL</c> skips over it, matching real.
+    /// </para>
+    /// <para>
+    /// <c>RESUME</c> / <c>PAUSE</c> / <c>ABORT</c> address a paused resumable
+    /// index build. The simulator never starts one — every index is built in
+    /// place — so the whole model is real's own refusal: <b>Msg 10638</b> for a
+    /// named index (State 1 for RESUME, 2 for PAUSE and ABORT) and
+    /// <b>Msg 10680</b> at Level 11 for <c>ALL</c>, both raised after the table
+    /// and index have resolved, and neither caring whether the index is
+    /// disabled.
     /// </para>
     /// </remarks>
     private static bool TryParseAlterIndex(ParserContext context)
@@ -94,30 +106,46 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.Set } => AlterIndexForm.Set,
             UnquotedString { ContextualKeyword: ContextualKeyword.Disable } => AlterIndexForm.Disable,
             UnquotedString { ContextualKeyword: ContextualKeyword.Rebuild } => AlterIndexForm.Rebuild,
-            _ => throw new NotSupportedException(
-                $"ALTER INDEX '{(alterAll ? "ALL" : indexName)}' supports the SET (…) / DISABLE / REBUILD forms; "
-                + "REORGANIZE / RESUME / PAUSE / ABORT aren't modeled."),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Reorganize } => AlterIndexForm.Reorganize,
+            UnquotedString { ContextualKeyword: ContextualKeyword.Resume } => AlterIndexForm.Resume,
+            UnquotedString { ContextualKeyword: ContextualKeyword.Pause } => AlterIndexForm.Pause,
+            UnquotedString { ContextualKeyword: ContextualKeyword.Abort } => AlterIndexForm.Abort,
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
 
         bool? ignoreDupKey = null;
-        if (form == AlterIndexForm.Set)
+        var namedPartition = false;
+        switch (form)
         {
-            ignoreDupKey = ParseAlterIndexSetOptions(context);
-        }
-        else
-        {
-            // REBUILD takes an optional PARTITION = ALL and its own WITH (…)
-            // option block; neither describes anything a heap has.
-            context.MoveNextOptional();
-            if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Partition })
-            {
-                context.MoveNextRequired();
-                if (context.Token is not Operator { Character: '=' })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                context.MoveNextRequired();
+            case AlterIndexForm.Set:
+                ignoreDupKey = ParseAlterIndexSetOptions(context);
+                break;
+            case AlterIndexForm.Pause:
+            case AlterIndexForm.Abort:
+                // Neither takes a PARTITION clause or an option block; real
+                // reports the trailing WITH as Msg 319.
                 context.MoveNextOptional();
-            }
-            _ = ParseOptionalIndexWithClause(context);
+                break;
+            case AlterIndexForm.Resume:
+                // RESUME's WITH (…) carries the resumption controls
+                // (MAX_DURATION / MAXDOP / WAIT_AT_LOW_PRIORITY). There is
+                // nothing to resume, so the block is validated by name and
+                // discarded.
+                context.MoveNextOptional();
+                ParseOptionalResumeWithClause(context);
+                break;
+            case AlterIndexForm.Reorganize:
+                context.MoveNextOptional();
+                namedPartition = ParseOptionalIndexPartitionClause(context);
+                ParseOptionalReorganizeWithClause(context);
+                break;
+            default:
+                // REBUILD takes an optional PARTITION = ALL and its own WITH (…)
+                // option block; neither describes anything a heap has.
+                context.MoveNextOptional();
+                namedPartition = ParseOptionalIndexPartitionClause(context);
+                _ = ParseOptionalIndexWithClause(context);
+                break;
         }
 
         if (context.Batch.IsSkipping)
@@ -140,6 +168,7 @@ partial class Simulation
             {
                 if (collation.Equals(constraint.Name, indexName))
                 {
+                    RejectNamedIndexTarget(form, namedPartition, constraint.Name, table.Name);
                     ApplyToConstraint(table, constraint, form, ignoreDupKey);
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
@@ -150,6 +179,7 @@ partial class Simulation
             {
                 if (collation.Equals(index.Name, indexName))
                 {
+                    RejectNamedIndexTarget(form, namedPartition, index.Name, table.Name);
                     ApplyToIndex(context, table, index, form, ignoreDupKey);
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
@@ -159,23 +189,73 @@ partial class Simulation
             throw SimulatedSqlException.CannotFindIndex(indexName!);
         }
 
+        // ALL: the resumable forms never look at an individual index — real
+        // raises its own ALL-flavoured refusal even for a table carrying no
+        // index at all (probe-confirmed on a bare heap).
+        if (form is AlterIndexForm.Resume or AlterIndexForm.Pause or AlterIndexForm.Abort)
+            throw SimulatedSqlException.NoPendingResumableIndexOperationForAll(FormName(form), table.Name);
+        if (namedPartition)
+        {
+            // Real names the first index the statement would have touched —
+            // index_id order, so a constraint's clustered index first — and
+            // falls back to the table when there is none.
+            var firstTarget = table.KeyConstraints.Count > 0 ? table.KeyConstraints[0].Name
+                : table.Indexes.Count > 0 ? table.Indexes[0].Name
+                : null;
+            throw SimulatedSqlException.RebuildPartitionOnUnpartitioned(alterIndex: true, firstTarget, table.Name);
+        }
+
         // ALL: constraints first, matching real's abort-on-first-refusal — a
         // constraint-backed index is present in every table that has a key, so
         // an IGNORE_DUP_KEY set over ALL raises Msg 1979 before touching
         // anything. Nothing is mutated before every target has been accepted.
         foreach (var constraint in table.KeyConstraints)
+        {
+            // REORGANIZE over ALL steps past a disabled index where naming it
+            // would be Msg 1973 (probe-confirmed).
+            if (form == AlterIndexForm.Reorganize && constraint.IsDisabled)
+                continue;
             ApplyToConstraint(table, constraint, form, ignoreDupKey);
+        }
         foreach (var index in table.Indexes)
+        {
+            if (form == AlterIndexForm.Reorganize && index.IsDisabled)
+                continue;
             ApplyToIndex(context, table, index, form, ignoreDupKey);
+        }
         RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), table.Name, "INDEX", table.Name, "TABLE");
         return true;
     }
+
+    /// <summary>
+    /// Raises the refusals a named <c>ALTER INDEX</c> target earns once it has
+    /// resolved: the partition clause on an unpartitioned index (Msg 7729) and
+    /// the resumable forms' Msg 10638.
+    /// </summary>
+    private static void RejectNamedIndexTarget(AlterIndexForm form, bool namedPartition, string indexName, string tableName)
+    {
+        if (namedPartition)
+            throw SimulatedSqlException.PartitionNumberOnUnpartitionedIndex(indexName);
+        if (form is AlterIndexForm.Resume or AlterIndexForm.Pause or AlterIndexForm.Abort)
+            throw SimulatedSqlException.NoPendingResumableIndexOperation(FormName(form), indexName, tableName);
+    }
+
+    private static string FormName(AlterIndexForm form) => form switch
+    {
+        AlterIndexForm.Abort => "ABORT",
+        AlterIndexForm.Pause => "PAUSE",
+        _ => "RESUME",
+    };
 
     private enum AlterIndexForm
     {
         Set,
         Disable,
         Rebuild,
+        Reorganize,
+        Resume,
+        Pause,
+        Abort,
     }
 
     /// <summary>
@@ -199,6 +279,12 @@ partial class Simulation
                 if (constraint.IsDisabled)
                     ValidateExistingRowsForKeyConstraint(table, constraint);
                 constraint.IsDisabled = false;
+                break;
+            case AlterIndexForm.Reorganize:
+                // Nothing to compact in a flat page list, but a disabled index
+                // still refuses the operation.
+                if (constraint.IsDisabled)
+                    throw SimulatedSqlException.OperationOnDisabledIndex(constraint.Name, table.Name);
                 break;
             default:
                 if (constraint.IsDisabled)
@@ -228,6 +314,10 @@ partial class Simulation
                         table, index, context.Batch, $"{Database.DefaultSchemaName}.{table.Name}");
                 }
                 index.IsDisabled = false;
+                break;
+            case AlterIndexForm.Reorganize:
+                if (index.IsDisabled)
+                    throw SimulatedSqlException.OperationOnDisabledIndex(index.Name, table.Name);
                 break;
             default:
                 if (index.IsDisabled)
@@ -295,6 +385,131 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
         return ignoreDupKey;
+    }
+
+    /// <summary>
+    /// <c>ALTER INDEX … REORGANIZE WITH (…)</c> options. Both take
+    /// <c>ON</c> / <c>OFF</c>; real accepts the columnstore-shaped
+    /// <c>COMPRESS_ALL_ROW_GROUPS</c> on a rowstore index without complaint
+    /// (probe-confirmed), so neither name is gated on the index kind.
+    /// </summary>
+    private static readonly FrozenSet<string> ReorganizeOptions = new[]
+    {
+        "COMPRESS_ALL_ROW_GROUPS",
+        "LOB_COMPACTION",
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// <c>ALTER INDEX … RESUME WITH (…)</c> options. Recognized by name and
+    /// discarded — there is never an operation to resume, so nothing reads
+    /// them.
+    /// </summary>
+    private static readonly FrozenSet<string> ResumeOptions = new[]
+    {
+        "MAXDOP",
+        "MAX_DURATION",
+        "WAIT_AT_LOW_PRIORITY",
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Parses the optional <c>PARTITION = { ALL | &lt;number&gt; }</c> clause
+    /// shared by <c>REBUILD</c> and <c>REORGANIZE</c>, returning
+    /// <see langword="true"/> when a partition <i>number</i> was named — which
+    /// nothing here is partitioned enough to satisfy, so the caller raises
+    /// real's refusal once it knows what to name. Cursor on entry: the first
+    /// token past the form keyword. On exit: the first token past the clause.
+    /// </summary>
+    private static bool ParseOptionalIndexPartitionClause(ParserContext context)
+    {
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Partition })
+            return false;
+        context.MoveNextRequired();
+        if (context.Token is not Operator { Character: '=' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var named = context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.All };
+        if (named && context.Token is not Numeric)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+        return named;
+    }
+
+    /// <summary>
+    /// Parses <c>REORGANIZE</c>'s own <c>WITH ( option = ON | OFF [, …] )</c>
+    /// block. Unlike <c>SET</c>'s, an unrecognized name here reports the
+    /// REORGANIZE-flavoured Msg 155 and a non-<c>ON</c>/<c>OFF</c> value reports
+    /// Msg 153 rather than a syntax error.
+    /// </summary>
+    private static void ParseOptionalReorganizeWithClause(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
+            return;
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        while (true)
+        {
+            if (context.GetNextRequired() is not (StringToken or ReservedKeyword))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var optionName = context.Token.Source.ToString();
+            if (!ReorganizeOptions.Contains(optionName))
+                throw SimulatedSqlException.UnrecognizedAlterIndexReorganizeOption(optionName);
+            if (context.GetNextRequired() is not Operator { Character: '=' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off })
+                throw SimulatedSqlException.InvalidUsageOfIndexOption(optionName);
+
+            if (context.GetNextRequired() is not Operator { Character: ',' })
+                break;
+        }
+
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+    }
+
+    /// <summary>
+    /// Parses <c>RESUME</c>'s <c>WITH ( … )</c> block. Each option's value
+    /// grammar differs (<c>MAX_DURATION = &lt;n&gt; [MINUTES]</c>,
+    /// <c>MAXDOP = &lt;n&gt;</c>, <c>WAIT_AT_LOW_PRIORITY ( … )</c>), so the
+    /// names are validated and the values skipped to the matching close paren.
+    /// </summary>
+    private static void ParseOptionalResumeWithClause(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
+            return;
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        var depth = 1;
+        var expectingName = true;
+        while (depth > 0)
+        {
+            var token = context.GetNextRequired();
+            if (expectingName)
+            {
+                if (token is not (StringToken or ReservedKeyword))
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (!ResumeOptions.Contains(token.Source.ToString()))
+                    throw SimulatedSqlException.UnrecognizedAlterIndexOption(token.Source.ToString());
+                expectingName = false;
+                continue;
+            }
+
+            switch (token)
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' }:
+                    depth--;
+                    break;
+                case Operator { Character: ',' } when depth == 1:
+                    expectingName = true;
+                    break;
+            }
+        }
+
+        context.MoveNextOptional();
     }
 
     private static bool ReadOnOffOptionValue(ParserContext context, Token value) =>

@@ -48,7 +48,7 @@ internal readonly partial struct Decimal38
             magnitude = UInt256.Add(leftAligned, rightAligned);
             negative = left.IsNegative;
         }
-        else if (leftAligned >= rightAligned)
+        else if (leftAligned.CompareTo(rightAligned) >= 0)
         {
             magnitude = UInt256.Subtract(leftAligned, rightAligned);
             negative = left.IsNegative;
@@ -187,7 +187,7 @@ internal readonly partial struct Decimal38
         // Only one side can need aligning, so whenever the divisor is the
         // smaller of the two it is also inside 128 bits.
         UInt256 remainder;
-        if (divisor > dividend)
+        if (divisor.CompareTo(dividend) > 0)
         {
             remainder = dividend;
         }
@@ -356,19 +356,6 @@ internal readonly partial struct Decimal38
         }
 
         return true;
-    }
-
-    private static bool TryScaleUpNarrow(UInt128 value, int exponent, out UInt128 result)
-    {
-        if (exponent > MaxPrecision)
-        {
-            result = default;
-            return value == UInt128.Zero;
-        }
-
-        var widened = UInt256.Multiply(value, Pow10[exponent]);
-        result = widened.Low;
-        return widened.FitsUInt128;
     }
 
     private static UInt128[] BuildPow10()

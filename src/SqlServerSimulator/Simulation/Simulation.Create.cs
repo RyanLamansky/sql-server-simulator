@@ -167,6 +167,11 @@ partial class Simulation
             // probe-confirmed — the non-persisted form is accepted).
             if (pending.Persisted && IncorrectSetOptionNames(context) is { } setOptions)
                 throw SimulatedSqlException.IncorrectSetOptions("CREATE TABLE", setOptions);
+            // …and refuses one whose expression isn't deterministic at all
+            // (Msg 4936), since the stored value could then disagree with a
+            // fresh evaluation.
+            if (pending.Persisted)
+                RejectNondeterministicPersisted(context, heapColumns, pending.Name, tableName.Leaf, pending.Definition);
             heapColumns[pending.Index] = new HeapColumn(
                 pending.Name,
                 resolvedType,
@@ -1256,9 +1261,7 @@ partial class Simulation
                 case ReservedKeyword { Keyword: Keyword.Default } when defaultExpression is null:
                     context.MoveNextRequired();
                     var defaultStart = context.Token.StartIndex;
-                    context.InDefaultClause = true;
-                    try { defaultExpression = Expression.Parse(context); }
-                    finally { context.InDefaultClause = false; }
+                    defaultExpression = ParseDefaultClauseExpression(context);
                     defaultDefinition = $"({context.SourceTextFrom(defaultStart)})";
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Default }:
@@ -2556,10 +2559,15 @@ partial class Simulation
             int[] refOrdinals;
             if (pf.ReferencedColumnNames.Length == 0)
             {
+                // The implied column list is the referenced table's primary
+                // key, so a table carrying no primary key — a UNIQUE
+                // constraint included — reports real's Msg 1773 rather than
+                // the explicit-list Msg 1776, naming the object as
+                // schema.table.
                 var pk = ResolvePrimaryKey(referencedTable)
-                    ?? throw SimulatedSqlException.ForeignKeyNoMatchingKey(
-                        referencedTable.Name,
-                        pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)));
+                    ?? throw SimulatedSqlException.ForeignKeyImplicitReferenceWithoutPrimaryKey(
+                        pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)),
+                        $"{SchemaNameOf(context.Batch.CurrentDatabase, referencedTable)}.{referencedTable.Name}");
                 refOrdinals = StorageOrdinalsToFullOrdinals(referencedTable, pk.StorageOrdinals);
             }
             else
@@ -2858,5 +2866,73 @@ partial class Simulation
         h.Mix((byte)declarationIndex);
         var singleCol = childColumnNames.Length == 1 ? childColumnNames[0] : null;
         return FormatAutoConstraintName("FK__", childTableName, singleCol, h.Value);
+    }
+
+    /// <summary>
+    /// Parses a <c>DEFAULT</c> clause's expression — the inline column form and
+    /// the <c>ALTER TABLE … ADD CONSTRAINT … DEFAULT … FOR</c> form alike.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two flags ride the parse. <see cref="ParserContext.InDefaultClause"/> is
+    /// what <c>NEWSEQUENTIALID()</c>'s grammar gate reads — the flag is the only
+    /// thing distinguishing a legal DEFAULT context from an illegal scalar use
+    /// of the function.
+    /// </para>
+    /// <para>
+    /// <see cref="ParserContext.ScalarOnlyOperand"/> is the other: a DEFAULT
+    /// expression has no column scope at all, so a name inside it is
+    /// <b>Msg 128</b> and a subquery is <b>Msg 1046</b>, whichever the
+    /// left-to-right reading meets first. Real settles both while parsing, so
+    /// they fire whatever the table holds — an empty table, a name that <i>is</i>
+    /// a column of the table, and a name that is nothing at all all report the
+    /// same Msg 128 (probe-confirmed at all three sites: <c>CREATE TABLE</c>'s
+    /// inline form, <c>ALTER TABLE … ADD &lt;column&gt; DEFAULT</c>, and the
+    /// named-constraint <c>… DEFAULT (v) FOR w</c>).
+    /// </para>
+    /// </remarks>
+    private static Expression ParseDefaultClauseExpression(ParserContext context)
+    {
+        var savedScalarOnly = context.ScalarOnlyOperand;
+        var savedScalarOnlyReference = context.ScalarOnlyColumnReference;
+        context.InDefaultClause = true;
+        context.ScalarOnlyOperand = true;
+        context.ScalarOnlyColumnReference = null;
+        try
+        {
+            var expression = Expression.Parse(context);
+            return context.ScalarOnlyColumnReference is null
+                ? expression
+                : throw Expression.ScalarOnlyOperandError(context);
+        }
+        finally
+        {
+            context.InDefaultClause = false;
+            context.ScalarOnlyOperand = savedScalarOnly;
+            context.ScalarOnlyColumnReference = savedScalarOnlyReference;
+        }
+    }
+
+    /// <summary>
+    /// Raises <b>Msg 4936</b> for a <c>PERSISTED</c> computed column whose
+    /// expression real classifies nondeterministic. The determinism question is
+    /// the same one <c>OBJECTPROPERTY(…, 'IsDeterministic')</c> answers for a
+    /// schema-bound module, and it is asked at every declaration site —
+    /// <c>CREATE TABLE</c>'s inline form and <c>ALTER TABLE … ADD</c> alike
+    /// (probe-confirmed, including that <c>CONVERT(varchar(20), &lt;datetime
+    /// col&gt;, 112)</c> is persistable where style 0 is not, which is the
+    /// conversion-style rule the shared walk already carries).
+    /// </summary>
+    private static void RejectNondeterministicPersisted(
+        ParserContext context, List<HeapColumn?> scope, string columnName, string tableName, string definition)
+    {
+        var resolved = new List<HeapColumn>(scope.Count);
+        foreach (var column in scope)
+        {
+            if (column is not null)
+                resolved.Add(column);
+        }
+        if (!Schemas.ModuleDeterminism.IsComputedColumnDeterministic(context.CurrentDatabase, [.. resolved], definition))
+            throw SimulatedSqlException.ComputedColumnCannotBePersisted(columnName, tableName);
     }
 }

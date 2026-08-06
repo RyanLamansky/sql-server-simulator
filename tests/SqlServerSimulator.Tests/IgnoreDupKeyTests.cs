@@ -461,16 +461,16 @@ public sealed class IgnoreDupKeyTests
             """, 102);
 
     [TestMethod]
-    public void AlterIndex_ReorganizeForm_IsNotModeled()
+    public void AlterIndex_ReorganizeForm_LeavesIgnoreDupKeyAlone()
     {
-        // SET / DISABLE / REBUILD ship (the latter two in DisabledIndexTests);
-        // the rest of the ALTER INDEX grammar doesn't.
+        // REORGANIZE ships in AlterIndexMaintenanceTests; what belongs here is
+        // that it never touches the option this file is about.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("""
             create table t (id int not null, u int);
-            create unique index ux on t(u)
+            create unique index ux on t(u) with (ignore_dup_key = on);
+            alter index ux on t reorganize
             """);
-        var exception = Throws<NotSupportedException>(() => simulation.ExecuteNonQuery("alter index ux on t reorganize"));
-        Contains("REORGANIZE", exception.Message);
+        IsTrue((bool)simulation.ExecuteScalar("select ignore_dup_key from sys.indexes where name = 'ux'")!);
     }
 }

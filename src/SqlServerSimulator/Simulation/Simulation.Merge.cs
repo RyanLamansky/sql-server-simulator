@@ -791,9 +791,22 @@ partial class Simulation
             columns = [.. insertColumns];
         }
 
-        return columns.Length != insertValues.Count
-            ? throw SimulatedSqlException.SyntaxErrorNear(context)
-            : new WhenClause(kind, MergeActionKind.Insert, searchCondition, assignments: null, insertColumns: columns, insertValues: [.. insertValues]);
+        // The width mismatch reports what the ordinary INSERT forms report:
+        // a written column list is measured against itself (Msg 109 / 110),
+        // while the column-list-less form is measured against the target's
+        // definition (Msg 213) — a view target included, whose definition is
+        // its own projection rather than the base table's. Probe-confirmed
+        // against SQL Server 2025.
+        if (columns.Length != insertValues.Count)
+        {
+            throw insertColumns.Count == 0
+                ? SimulatedSqlException.ColumnCountDoesNotMatchTableDefinition()
+                : columns.Length < insertValues.Count
+                    ? SimulatedSqlException.FewerInsertColumnsThanValues()
+                    : SimulatedSqlException.MoreInsertColumnsThanValues();
+        }
+
+        return new WhenClause(kind, MergeActionKind.Insert, searchCondition, assignments: null, insertColumns: columns, insertValues: [.. insertValues]);
     }
 
     private static WhenClause ParseMergeUpdateAction(
@@ -1109,6 +1122,13 @@ partial class Simulation
             return new SimulatedNonQuery(0);
 
         var sourceRows = materializeSource(context.Batch);
+        // SET ROWCOUNT caps a MERGE as it caps every other DML statement
+        // (probe-confirmed: ROWCOUNT 2 over six matching source rows updates
+        // two). Real counts the actions it took; the cap lands on the source
+        // rows here instead, which agrees whenever each source row draws an
+        // action and otherwise lets a declining row consume a slot of the cap.
+        if (context.Connection.RowCountLimit is > 0 and var mergeLimit && mergeLimit < sourceRows.Count)
+            sourceRows.RemoveRange((int)mergeLimit, sourceRows.Count - (int)mergeLimit);
         var sourceMatched = new bool[sourceRows.Count];
         var defaultTargetName = sourceView?.Name ?? destinationTable.Name;
 

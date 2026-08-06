@@ -65,7 +65,7 @@ partial class SimulatedSqlException
     /// subquery-not-allowed error rather than anything full-text specific.
     /// </summary>
     internal static SimulatedSqlException FullTextPredicateNotAllowedHere() =>
-        new("Subqueries are not allowed in this context. Only scalar expressions are allowed.", 1046, 15, 1);
+        SubqueriesNotAllowedInThisContext();
 
     /// <summary>
     /// Real's severity-10 Msg 9927, raised through the <c>InfoMessage</c>

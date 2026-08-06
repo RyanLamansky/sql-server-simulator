@@ -93,6 +93,10 @@ public sealed class OperatorPrecedenceTests
     [DataRow("~ 2 + 3", 0)]
     [DataRow("~ - 2 * 3", 5)]              // ~(-(2 * 3)); a lone-operand `-` would give 3.
     [DataRow("- ~ 2 * 3", 9)]              // -((~2) * 3).
+    [DataRow("~ + 2 * 3", -7)]             // a leading `+` reaches for the chain the same way `-` does.
+    [DataRow("~ + + 2 * 3", -7)]           // stacked signs reach the same distance.
+    [DataRow("~ + 2 + 3", 0)]              // the reach stops at the additive level: (~2) + 3.
+    [DataRow("~ + 2 * 3 + 1", -6)]
     public void BitwiseNot_BindsTighterThanMultiplicative(string expr, int expected) =>
         AreEqual(expected, ExecuteScalar($"select {expr}"));
 

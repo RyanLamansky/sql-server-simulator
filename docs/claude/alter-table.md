@@ -1,7 +1,7 @@
 # ALTER TABLE
 
-`ALTER TABLE` ships seven modeled shapes: `SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))` (see [`temporal-tables.md`](temporal-tables.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) …`, `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), and `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)).
-REBUILD, SWITCH PARTITION, and the `ALTER COLUMN col ADD/DROP {PERSISTED|MASKED|ROWGUIDCOL|SPARSE}` sub-clause forms raise `NotSupportedException`.
+`ALTER TABLE` ships ten modeled shapes: `SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))` (see [`temporal-tables.md`](temporal-tables.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) [, …]` (multi-element constraint list — see [Multi-element ADD](#multi-element-add)), `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)), `ALTER COLUMN col { ADD | DROP } { ROWGUIDCOL | SPARSE }` (see [Column attributes](#column-attributes)), `DROP PERIOD FOR SYSTEM_TIME` (see [DROP PERIOD FOR SYSTEM_TIME](#drop-period-for-system_time)), and `REBUILD` (see [REBUILD](#rebuild)).
+`SWITCH PARTITION` and the `ALTER COLUMN col ADD/DROP {PERSISTED|MASKED}` sub-clause forms raise `NotSupportedException`.
 Probe-confirmed against SQL Server 2025.
 
 ## Grammar
@@ -33,7 +33,10 @@ DEFAULT expression FOR column        -- value parentheses optional
 
 The DEFAULT value's parentheses are optional (probe-confirmed): both `ADD CONSTRAINT df DEFAULT (0) FOR b` and the bare `ADD CONSTRAINT df DEFAULT 0 FOR b` are accepted, bind the default to the column, and store an equivalent parenthesized definition; inserts that omit the column pick it up.
 
-Single constraint per `ADD` — comma-separated multi-constraint ADD raises `NotSupportedException`.
+**A DEFAULT expression has no column scope at all.**
+A name inside one is **Msg 128** (`The name "v" is not permitted in this context. …`) and a subquery is **Msg 1046**, whichever the left-to-right reading meets first — the same `ParserContext.ScalarOnlyOperand` arming `PRINT`'s operand takes (see [`control-flow.md`](control-flow.md#the-operand-admits-only-scalar-expressions)).
+Real settles both while parsing, so they fire whatever the table holds: an empty table, a name that *is* a column of the table, and a name that is nothing at all all report the same Msg 128, at all three declaration sites (`CREATE TABLE`'s inline form, `ALTER TABLE … ADD <column> DEFAULT`, and the named-constraint `DEFAULT (v) FOR w`).
+
 Anonymous ADD (no `CONSTRAINT name`) auto-generates a name with the same FNV-1a-based scheme as CREATE TABLE inline: `PK__<t8>__<hex>` / `UQ__<t8>__<hex>` / `FK__<t8>__<col8>__<hex>` / `CK__<t8>__<hex>` / `DF__<t8>__<col8>__<hex>`.
 `is_system_named` reflects the auto-name path on FK / CHECK / DEFAULT (KeyConstraint infers from the prefix — `PK__` / `UQ__` — since the existing storage doesn't carry an explicit flag).
 
@@ -145,6 +148,55 @@ Probe-confirmed shapes:
 
 **Multi-drop is atomic** — all names resolve and validate first; any failure (Msg 3728 / 3725) leaves the table's constraint state unchanged.
 Probe-confirmed.
+
+## Multi-element ADD
+
+`ADD` takes any number of comma-separated constraint elements — `ADD CONSTRAINT pk PRIMARY KEY (a), CONSTRAINT ck CHECK (b > 0), CHECK (c > 0)` — mixing every `<body>` form including `DEFAULT … FOR`.
+
+The statement is **atomic**, which is the part worth having: a later element that raises leaves none of the earlier ones behind (probe-confirmed for a binder error and for a CHECK the existing rows violate).
+`AlterTableAddUndo` captures the three constraint lists' lengths plus each column's `Default` / `DefaultConstraint` — a `DEFAULT … FOR` element writes onto the column instance rather than into a list — and puts them back on the way out.
+
+A column-add list is a separate branch and consumes the rest of the statement, so a list mixing column definitions with constraint elements (`ADD x int, CONSTRAINT ck CHECK (…)`) is not built yet.
+
+## Column attributes
+
+`ALTER COLUMN col { ADD | DROP } { ROWGUIDCOL | SPARSE }` toggles a marker.
+Both are metadata here: the `$ROWGUID` pseudo-column isn't modeled, and the row encoder already omits a NULL from the row, so `SPARSE`'s storage bargain has nothing to buy.
+`sys.columns.is_rowguidcol` / `is_sparse` is what observes the toggle.
+
+Probed refusals:
+
+| Statement | Refusal |
+| --- | --- |
+| Either form on a column the table doesn't have | **Msg 4924** State 1 (the PERSISTED form's is State 2) |
+| `ADD ROWGUIDCOL` where the table already carries one | **Msg 4925** |
+| `ADD ROWGUIDCOL` on a non-`uniqueidentifier` column | **Msg 2761** |
+| `DROP ROWGUIDCOL` where no column carries it | **Msg 4926** — and it names the table, not the column the statement asked about, so real drops *the* ROWGUIDCOL rather than the named column's |
+| `ADD SPARSE` on a NOT NULL / IDENTITY / ROWGUIDCOL column, or one typed `text` / `ntext` / `image` / `geometry` / `geography` | **Msg 1731**, whose message carries the whole rule rather than naming which half was violated |
+| `ADD SPARSE` on a computed column | **Msg 4928** |
+| `ADD SPARSE` on a column carrying a DEFAULT | **Msg 11410** |
+
+Real follows Msg 4925 / 4926 with a terminating **Msg 1750**, which the simulator omits — the first message is the load-bearing signal.
+
+`ADD | DROP PERSISTED` and `ADD | DROP MASKED` raise `NotSupportedException`; see [`backlog.md`](backlog.md) for the probe data.
+
+## DROP PERIOD FOR SYSTEM_TIME
+
+`ALTER TABLE t DROP PERIOD FOR SYSTEM_TIME` removes the period row and turns its two columns into ordinary ones — they keep their type, nullability and `column_id` but lose `GENERATED ALWAYS AS ROW START | END`, so `sys.periods` empties and `sys.tables.temporal_type` reads `NON_TEMPORAL_TABLE`.
+Storage is untouched, since both columns were stored either way.
+
+Two refusals, both naming the table three-part (`db.schema.table`, unlike most of `ALTER TABLE`'s unqualified messages):
+
+- **Msg 13592** while system versioning is still on — the period is what versioning reads, so `SET (SYSTEM_VERSIONING = OFF)` has to come first.
+- **Msg 13593** when there is no period, which a table that never had one and one whose period was already dropped report alike.
+
+## REBUILD
+
+`ALTER TABLE t REBUILD [PARTITION = { ALL | <n> }] [WITH ( option = value [, …] )]` re-lays-out physical storage, which a flat page list has no notion of, so it validates and succeeds without touching a row.
+
+- The option block takes `DATA_COMPRESSION` (`NONE` / `ROW` / `PAGE` / `COLUMNSTORE` / `COLUMNSTORE_ARCHIVE`), `MAXDOP`, `ONLINE`, `SORT_IN_TEMPDB` and `XML_COMPRESSION`; anything else is **Msg 155** in its ALTER TABLE wording, a bad compression level or an empty list is Msg 102.
+- A partition *number* splits three ways exactly as real's does: **Msg 7729** State 1 naming the table's key-backed index (in real's own "alter index statement" wording, whichever statement raised it), **Msg 7735** naming the table when it carries no index, and **Msg 7729** State 3 for the `ON PARTITIONS (…)` sub-clause.
+- A missing table is **Msg 4902**, as for every other ALTER TABLE shape.
 
 ## Storage
 

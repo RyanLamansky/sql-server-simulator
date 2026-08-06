@@ -345,6 +345,10 @@ partial class Simulation
         // trigger leaves the firing statement's own count intact and doesn't
         // follow the session out.
         var savedNoCount = connection.NoCount;
+        // XACT_ABORT / ROWCOUNT / DATEFIRST are body-scoped the same way
+        // (probe-confirmed against SQL Server 2025 for a procedure body, whose
+        // scoping a trigger body shares).
+        var savedOptions = new SimulatedDbConnection.SessionOptionScope(connection);
         BatchContext? innerBatch = null;
         try
         {
@@ -397,6 +401,7 @@ partial class Simulation
             connection.CurrentDatabase = savedDatabase;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.NoCount = savedNoCount;
+            savedOptions.Restore(connection);
             connection.NestingLevel--;
             connection.TriggerNestLevel--;
             connection.FiringTriggers.RemoveAt(connection.FiringTriggers.Count - 1);

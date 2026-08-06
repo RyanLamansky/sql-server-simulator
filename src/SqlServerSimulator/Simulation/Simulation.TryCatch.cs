@@ -79,6 +79,10 @@ partial class Simulation
         batch.ErrorSignaled = false;
 
         batch.TryFrameDepth++;
+        // The session-wide companion: whether an XACT_ABORT-promoted error
+        // rolls back or merely dooms depends on any frame on the stack holding
+        // a TRY, including one in a caller a procedure body can't see.
+        batch.Connection.OpenTryFrames++;
         try
         {
             // TRY body dispatches normally. The per-statement wrapper
@@ -92,6 +96,7 @@ partial class Simulation
         finally
         {
             batch.TryFrameDepth--;
+            batch.Connection.OpenTryFrames--;
         }
 
         // Consume END TRY.

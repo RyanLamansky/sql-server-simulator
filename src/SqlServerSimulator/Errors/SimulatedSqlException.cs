@@ -136,6 +136,28 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool AbortsTransaction { get; private init; }
 
     /// <summary>
+    /// When <see langword="true"/>, this error came from a <c>RAISERROR</c>
+    /// statement, the one raising construct <c>SET XACT_ABORT ON</c> does not
+    /// promote: probed against SQL Server 2025, a severity-16 or severity-19
+    /// <c>RAISERROR</c> under <c>XACT_ABORT ON</c> leaves the batch running and
+    /// the transaction committable, where the same session's <c>THROW</c> ends
+    /// the batch and rolls back. (Caught by a <c>TRY</c> frame it still dooms
+    /// the transaction, like any other error under the option.)
+    /// </summary>
+    internal bool RaisedByRaiserror { get; private init; }
+
+    /// <summary>
+    /// Set once, at the innermost dispatch frame, when
+    /// <c>SET XACT_ABORT ON</c> promoted this error out of the
+    /// statement-terminating class: the transaction has already been rolled
+    /// back or doomed, and the frame that finally handles the error ends the
+    /// batch rather than continuing to the next statement. Mutable rather than
+    /// <c>init</c> because the promotion is a property of the session the error
+    /// was raised in, not of the factory that built it.
+    /// </summary>
+    internal bool XactAbortPromoted;
+
+    /// <summary>
     /// Guards <see cref="ResolveDiagnostics"/> against re-stamping. An error
     /// born inside a nested body (procedure / dynamic-SQL batch) is resolved at
     /// its own dispatch frame's catch boundary; as it propagates outward each

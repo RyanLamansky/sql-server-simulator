@@ -320,6 +320,16 @@ internal static class StringScalars
     }
 
     /// <summary>
+    /// True when <paramref name="expression"/> is a numeric literal whose value
+    /// is negative — the shape SQL Server settles while compiling, raising
+    /// Msg 536 before a row is read. A non-constant, non-numeric or
+    /// non-negative operand returns <see langword="false"/> and leaves the
+    /// diagnostic to the per-value check, which reports Msg 537 instead.
+    /// </summary>
+    public static bool IsConstantNegativeCount(Expression expression) =>
+        Expression.IntegerLiteralValue(expression) is < 0;
+
+    /// <summary>
     /// The collation a character-matching scalar (<see cref="CharIndex"/>,
     /// <see cref="Replace"/>, <see cref="Translate"/>, the <c>TRIM</c> family,
     /// <c>STRING_SPLIT</c>) searches under, given its operands. SQL Server

@@ -236,6 +236,42 @@ public sealed class FullTextQueryTests
     public void Near_Distances_Match_Reference(string condition, string expected) =>
         Assert.AreEqual(expected, ProximityHits(SeededProximity(), condition));
 
+    /// <summary>
+    /// The rowset form has to rank a proximity condition, which needs the
+    /// leaves under the NEAR node — a walk the predicate forms never take.
+    /// </summary>
+    [TestMethod]
+    public void ContainsTable_Near_RanksTheMatchingRows()
+    {
+        var sim = SeededProximity();
+        using var reader = sim.ExecuteReader(
+            "select ft.[KEY], ft.[RANK] from containstable(dbo.nr, t, 'NEAR((aaa,bbb),1)') ft order by ft.[KEY]");
+        List<int> keys = [];
+        while (reader.Read())
+        {
+            keys.Add(reader.GetInt32(0));
+            Assert.IsGreaterThan(0, reader.GetInt32(1));
+        }
+        CollectionAssert.AreEqual(new[] { 1, 2, 7 }, keys);
+    }
+
+    /// <summary>
+    /// A quoted phrase that word-breaks to nothing matches nothing, in the
+    /// rowset form as in the predicate one — and it collapses an
+    /// <c>AND NOT</c> that names it on the right, so the whole clause keeps
+    /// no row either. Probed against SQL Server 2025 (which also emits the
+    /// noise-word informational for both).
+    /// </summary>
+    [TestMethod]
+    public void ContainsTable_PhraseWithNoTerms_MatchesNothing()
+    {
+        var sim = SeededProximity();
+        using var reader = sim.ExecuteReader(
+            "select ft.[KEY] from containstable(dbo.nr, t, '\"...\"') ft");
+        Assert.IsFalse(reader.Read());
+        Assert.AreEqual("-", ProximityHits(sim, "aaa AND NOT \"...\""));
+    }
+
     [TestMethod]
     public void Near_Distance_Counts_Stopwords_As_Occupying_Positions()
     {

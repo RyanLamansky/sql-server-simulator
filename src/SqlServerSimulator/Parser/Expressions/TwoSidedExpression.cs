@@ -4,9 +4,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 internal abstract class TwoSidedExpression : Expression
 {
-    // `left` is re-homed by SinkUnaryPrefixToLeftmostLeaf (unary `~`); `right`
-    // is set once at construction.
-    private Expression left;
+    private readonly Expression left;
     private readonly Expression right;
 
     private protected TwoSidedExpression(Expression left, Expression right)
@@ -50,23 +48,6 @@ internal abstract class TwoSidedExpression : Expression
         '^' => new BitwiseExclusiveOr(left, right),
         _ => throw new ArgumentException($"'{op}' isn't a compound-assignment arithmetic operator.", nameof(op)),
     };
-
-    /// <summary>
-    /// Sinks a tightest-binding unary prefix (the <c>~</c> bitwise-NOT, the
-    /// only operator SQL Server ranks above <c>* / %</c>) down to this
-    /// sub-tree's leftmost leaf, then returns the sub-tree. Reached when
-    /// <c>~</c>'s operand primary is itself a binary node — a leading unary
-    /// minus, e.g. <c>~ -1</c> parses the operand as <c>0 - 1</c>, and the
-    /// <c>~</c> must re-home onto the <c>0</c> leaf rather than wrapping the
-    /// whole <c>-1</c>. Re-wraps a leaf rather than re-parenting a node.
-    /// </summary>
-    internal Expression SinkUnaryPrefixToLeftmostLeaf(Func<Expression, Expression> wrap)
-    {
-        this.left = this.left is TwoSidedExpression leftTwo
-            ? leftTwo.SinkUnaryPrefixToLeftmostLeaf(wrap)
-            : wrap(this.left);
-        return this;
-    }
 
     public sealed override SqlValue Run(RuntimeContext runtime)
     {

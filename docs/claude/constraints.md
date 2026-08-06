@@ -33,6 +33,16 @@ All probe-confirmed against SQL Server 2025.
 `sys.check_constraints.is_system_named` is 1 for every server-generated name and 0 for a `CONSTRAINT name` one, on both declaration paths — CREATE TABLE (inline column tail and table-level list) and `ALTER TABLE … ADD` — matching real (probe-confirmed against SQL Server 2025, which reports the same split for `sys.default_constraints` and `sys.key_constraints`).
 The auto-name shapes themselves are in [`alter-table.md`](alter-table.md); they are deterministic but don't byte-match real's object-id-derived hex.
 
+## PERSISTED needs a deterministic expression
+
+`PERSISTED` stores the expression's value once, so real refuses one whose expression it classifies nondeterministic: **Msg 4936**, `Computed column '<col>' in table '<table>' cannot be persisted because the column is non-deterministic.`, with the table named unqualified.
+The gate is applied at every declaration site — `CREATE TABLE`'s inline form and `ALTER TABLE … ADD` — and sits behind the SET-option gate (Msg 1934) that the same declaration already takes.
+
+Determinism is the same question `OBJECTPROPERTY(…, 'IsDeterministic')` answers for a schema-bound module, so it runs the same walk (see [`catalog-views.md`](catalog-views.md)): the nondeterministic-built-in table, the `CAST` / `CONVERT` **style rule**, and the transitive descent into referenced functions and views.
+That is what makes `CONVERT(varchar(20), <datetime col>, 112)` persistable while style 0 is not, and what leaves `NEWID()` / `GETDATE()` refused whatever wraps them.
+A **`type::Method(…)` static call is not the built-in of the same name** — real persists a computed `geography::Parse('POINT(0 0)')` while refusing the scalar `PARSE(s AS int)`, so the walk skips a name whose preceding token is `::`.
+A *non-persisted* computed column takes no gate at all: it is evaluated per read, so nondeterminism is exactly what it is for.
+
 ## Computed columns in a CHECK constraint
 
 A **PERSISTED** computed column carries a CHECK in every form: the inline column tail (`cc AS a + 1 PERSISTED [CONSTRAINT n] CHECK (cc > 0)`), the table-level list, `ALTER TABLE … ADD CONSTRAINT … CHECK`, and the inline tail of an `ALTER TABLE … ADD` of the computed column itself.

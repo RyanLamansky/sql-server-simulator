@@ -146,10 +146,19 @@ Every other recognized OPTION hint is a pure no-op.
   Multi-arg `INDEX(bad, good)` raises Msg 308 on the first failing argument and skips the rest.
   `FORCESEEK`'s nested form carries an index name too — `FORCESEEK(IX_foo(c1, c2))` — and the parser peeks that leading name into the same `IndexArguments` list (rewinding so the balanced-paren skip stays the single consumer of the payload), so it validates through the identical path and raises the identical Msg 308.
   The bare `FORCESEEK` / `FORCESCAN` forms carry no name and are unaffected.
+- **FORCESEEK's seek columns** — the nested form's column list has to be a **leading prefix of the named index's own key columns, in order**, and `ValidateForceSeekColumns` measures it once the table has resolved:
+  more names than the index has key columns is **Msg 365** (checked first, so a list that is both too long and misspelled reports the count), and the first name that isn't the key column at its position is **Msg 362** naming it.
+  An `INCLUDE`d column, a key column out of order and an unknown name all land on Msg 362 alike; the match is collation-driven, and both messages name the **base table** rather than the alias the query wrote (probe-confirmed).
+  A key constraint is a legal target too, its `StorageOrdinals` mapped back to the declared column names.
+- **The legacy no-`WITH` parenthesized form** splits on the alias, matching real.
+  With an alias written, the parens are unambiguously a hint list and an unknown name is Msg 321.
+  Without one they are an **argument list**: real binds them first, so each name inside reports its own **Msg 207** — the source is not in scope for its own arguments, so even a name the table carries is unresolvable — and the run closes with **Msg 215** (`Parameters supplied for object 't' which is not a function. If the parameters are intended as a table hint, a WITH keyword is required.`), all of it arriving as one multi-error exception the way a client sees it.
+  A scalar argument (a literal, a variable) reports Msg 215 alone.
+  `INDEX` is the one name real refuses outright in that form, wherever in the list it stands and whether or not an alias preceded the parens: **Msg 1018**, carrying real's own inconsistent capitalization (`… A WITH keyword and parenthesis are now required.`).
 
 ## Not enforced
 
-- **FORCESEEK plan rejection** (`Msg 8622`) — fires on real SQL Server when planner can't honor the directive; the simulator has no planner state to conflict over.
+- **FORCESEEK plan rejection** (`Msg 8622`) — fires on real SQL Server when the planner can't honor the directive, which it does for every `FORCESEEK` over a query with no sargable predicate; the simulator validates the hint's names and then reads normally, since it has no plan to declare infeasible.
 - **`INDEX = (value-list)` equals-form** — probe-confirmed that real SQL Server raises `Msg 102` on the equals-with-multiple-values form anyway (the docs notwithstanding), so the simulator's "= takes one literal" rule matches by parsing as well.
 
 `FROM t NOLOCK` without parens is *not* a deprecated hint shape — it parses as the bare-alias form (`FROM t <alias>`) on both real SQL Server and the simulator.

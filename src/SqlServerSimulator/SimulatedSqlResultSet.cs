@@ -74,6 +74,28 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     /// — so a projecting SELECT holds <see cref="SqlValue"/> rows from here to
     /// the client instead of a page image it would decode straight back.
     /// </summary>
+    /// <summary>
+    /// Caps the row sequence at the session's <c>SET ROWCOUNT</c> value, doing
+    /// nothing when the option is off (<c>0</c>). Applied to a statement's own
+    /// result — the top-level SELECT, the source a <c>SELECT … INTO</c> or an
+    /// <c>INSERT … SELECT</c> consumes, a <c>MERGE</c>'s USING source — rather
+    /// than to the inner plans a join or subquery drives, matching real, where
+    /// the cap is on what the statement returns or changes. The wrap is lazy,
+    /// so a capped statement stops producing rows at the cap instead of
+    /// producing them all and discarding the tail.
+    /// </summary>
+    public SimulatedSqlResultSet WithRowCountLimit(long limit)
+    {
+        if (limit <= 0)
+            return this;
+        var take = (int)Math.Min(limit, int.MaxValue);
+        if (this.rowValues is { } values)
+            this.rowValues = values.Take(take);
+        else
+            this.rowBytes = this.rowBytes!.Take(take);
+        return this;
+    }
+
     public int MaterializeRows()
     {
         if (this.rowValues is { } values)

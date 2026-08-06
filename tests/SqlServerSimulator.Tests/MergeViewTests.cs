@@ -28,6 +28,33 @@ public sealed class MergeViewTests
         AreEqual(10, sim.ExecuteScalar("select v from base_t where id = 1"));
     }
 
+    /// <summary>
+    /// With no column list the implied one is the <em>view's</em> projection,
+    /// not the base table's: three values land against a three-column view
+    /// over a four-column table, and the untargeted base column takes its
+    /// default. A fourth value is Msg 213. Probed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void SimpleView_NotMatchedInsertWithoutColumnList_UsesViewProjection()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table base_t (id int primary key, a int, b varchar(10), c int default 7)",
+            "create view v_base as select id, a, b from base_t",
+            """
+            merge into v_base using (values(3, 30, 'three')) src(id, a, b) on v_base.id = src.id
+            when not matched then insert values (src.id, src.a, src.b);
+            """);
+        AreEqual("30|three|7", sim.ExecuteScalar(
+            "select cast(a as varchar(10)) + '|' + b + '|' + cast(c as varchar(10)) from base_t where id = 3"));
+
+        var ex = ThrowsExactly<SimulatedSqlException>(() => sim.ExecuteBatches("""
+            merge into v_base using (values(4, 40, 'four')) src(id, a, b) on v_base.id = src.id
+            when not matched then insert values (src.id, src.a, src.b, 5);
+            """));
+        AreEqual(213, ex.Number);
+    }
+
     [TestMethod]
     public void SimpleView_MatchedUpdate_LandsInBase()
     {

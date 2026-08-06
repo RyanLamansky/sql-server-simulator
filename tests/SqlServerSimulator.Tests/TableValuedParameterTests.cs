@@ -355,6 +355,44 @@ public sealed class TableValuedParameterTests
         IsFalse(rdr.Read());
     }
 
+    /// <summary>
+    /// A TVP row's cells are converted by the destination column's own type,
+    /// so a table type carrying <c>hierarchyid</c>, <c>geography</c> and
+    /// <c>smalldatetime</c> reaches each of those conversions — the path a
+    /// plain scalar parameter never takes, since none of the three maps from
+    /// a <see cref="DbType"/>.
+    /// </summary>
+    [TestMethod]
+    public void Structured_DataTable_ConvertsPerDestinationColumnType()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create type dbo.t1 as table (h hierarchyid, g geography, w smalldatetime)");
+        _ = simulation.ExecuteNonQuery(
+            "create proc dbo.p1 @rows dbo.t1 readonly as select h.ToString(), g.STAsText(), w from @rows");
+
+        using var con = simulation.CreateDbConnection();
+        con.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "exec dbo.p1 @rows";
+        var dt = new DataTable();
+        _ = dt.Columns.Add("h", typeof(string));
+        _ = dt.Columns.Add("g", typeof(string));
+        _ = dt.Columns.Add("w", typeof(DateTime));
+        _ = dt.Rows.Add("/1/2/", "POINT (-122 47)", new DateTime(2024, 3, 4, 5, 6, 0, DateTimeKind.Unspecified));
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@rows";
+        p.Value = dt;
+        p.TypeName = "dbo.t1";
+        _ = cmd.Parameters.Add(p);
+
+        using var rdr = cmd.ExecuteReader();
+        IsTrue(rdr.Read());
+        AreEqual("/1/2/", rdr.GetString(0));
+        AreEqual("POINT (-122 47)", rdr.GetString(1));
+        AreEqual(new DateTime(2024, 3, 4, 5, 6, 0, DateTimeKind.Unspecified), rdr.GetDateTime(2));
+        IsFalse(rdr.Read());
+    }
+
     [TestMethod]
     public void Structured_DataTable_ColumnNamesIgnored_PositionalFill()
     {

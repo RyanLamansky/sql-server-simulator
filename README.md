@@ -124,11 +124,11 @@ A few examples:
 
 - Cross-database DML - writes through a 3-part name targeting a different database.
   Cross-database reads work; issue `USE <db>` to switch first for writes.
-- `BEGIN DISTRIBUTED TRANSACTION`, `BEGIN TRANSACTION ... WITH MARK`, `GOTO`/labels.
+- `BEGIN DISTRIBUTED TRANSACTION`, `GOTO`/labels.
 - CLR stored procedures, table-valued functions, aggregates and UDTs; logon triggers; natively-compiled procedures beyond parser fidelity.
   CLR *scalar* functions work: set `EnableClr` on the `Simulation`, then `CREATE ASSEMBLY` and `CREATE FUNCTION ... AS EXTERNAL NAME`.
   Enabling it runs the assembly's code inside your process — .NET has no Code Access Security, so `PERMISSION_SET = SAFE` cannot be enforced.
-- A few `ALTER TABLE` shapes: `DROP PERIOD FOR SYSTEM_TIME`, `REBUILD`, `SWITCH PARTITION`.
+- A few `ALTER TABLE` shapes: `SWITCH PARTITION`, and `ALTER COLUMN ... ADD | DROP PERSISTED | MASKED`.
 
 ## Limitations
 

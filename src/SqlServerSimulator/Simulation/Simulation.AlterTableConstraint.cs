@@ -34,6 +34,41 @@ partial class Simulation
         // Cursor on ADD; advance to the next element.
         context.MoveNextRequired();
 
+        // A column-add carries its own comma list (and its own rollback), so it
+        // consumes the rest of the statement; a constraint list loops here.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Column }
+            or Name or UnquotedString)
+        {
+            return ParseAddColumns(context, tableName);
+        }
+
+        var undo = AlterTableAddUndo.Capture(context, tableName);
+        try
+        {
+            while (true)
+            {
+                _ = ParseOneAddedConstraint(context, tableName, withNoCheck);
+                if (context.Token is not Operator { Character: ',' })
+                    return true;
+                context.MoveNextRequired();
+            }
+        }
+        catch
+        {
+            undo.Restore();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Parses one element of an <c>ALTER TABLE … ADD</c> constraint list.
+    /// Real's grammar takes any number of them separated by commas, and the
+    /// statement is atomic — a later element that raises leaves none of the
+    /// earlier ones behind (probe-confirmed for both a binder error and a
+    /// CHECK the existing rows violate).
+    /// </summary>
+    private static bool ParseOneAddedConstraint(ParserContext context, MultiPartName tableName, bool withNoCheck)
+    {
         // Optional explicit CONSTRAINT name.
         string? explicitName = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint })
@@ -50,18 +85,54 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.Foreign } => ParseAddForeignKeyConstraint(context, tableName, explicitName, withNoCheck),
             ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } => ParseAddKeyConstraint(context, tableName, explicitName),
             ReservedKeyword { Keyword: Keyword.Default } => ParseAddDefaultConstraint(context, tableName, explicitName),
-            // ADD COLUMN routes to the column-list parser. The grammar is
-            // ambiguous at the leading-token level: any non-constraint
-            // identifier starts a column-name declaration. The leading
-            // explicit-CONSTRAINT-name fork is incompatible with ADD COLUMN
-            // (real SQL Server's grammar doesn't allow naming a column-add
-            // with CONSTRAINT), so explicitName must be null to enter this
-            // branch.
-            Name when explicitName is null => ParseAddColumns(context, tableName),
-            UnquotedString when explicitName is null => ParseAddColumns(context, tableName),
-            ReservedKeyword { Keyword: Keyword.Column } when explicitName is null => ParseAddColumns(context, tableName),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
+    }
+
+    /// <summary>
+    /// The state an <c>ALTER TABLE … ADD &lt;constraint list&gt;</c> has to put
+    /// back when a later element raises: the three constraint lists' lengths
+    /// and each column's DEFAULT, which a <c>DEFAULT … FOR</c> element writes
+    /// onto the column instance rather than into a list.
+    /// </summary>
+    private sealed class AlterTableAddUndo(
+        HeapTable? table,
+        int keyCount,
+        int checkCount,
+        int foreignKeyCount,
+        (HeapColumn Column, Expression? Default, DefaultConstraint? Constraint)[] defaults)
+    {
+        internal static AlterTableAddUndo Capture(ParserContext context, MultiPartName tableName)
+        {
+            if (context.Batch.IsSkipping || !context.Batch.TryResolveTable(tableName, out var table))
+                return new AlterTableAddUndo(null, 0, 0, 0, []);
+            var defaults = new (HeapColumn, Expression?, DefaultConstraint?)[table.Columns.Length];
+            for (var i = 0; i < defaults.Length; i++)
+                defaults[i] = (table.Columns[i], table.Columns[i].Default, table.Columns[i].DefaultConstraint);
+            return new AlterTableAddUndo(
+                table, table.KeyConstraints.Count, table.CheckConstraints.Count, table.OutgoingForeignKeys.Count, defaults);
+        }
+
+        internal void Restore()
+        {
+            if (table is null)
+                return;
+            while (table.KeyConstraints.Count > keyCount)
+                table.KeyConstraints.RemoveAt(table.KeyConstraints.Count - 1);
+            while (table.CheckConstraints.Count > checkCount)
+                table.CheckConstraints.RemoveAt(table.CheckConstraints.Count - 1);
+            while (table.OutgoingForeignKeys.Count > foreignKeyCount)
+            {
+                var stale = table.OutgoingForeignKeys[^1];
+                table.OutgoingForeignKeys.RemoveAt(table.OutgoingForeignKeys.Count - 1);
+                _ = stale.ReferencedTable.IncomingForeignKeys.Remove(stale);
+            }
+            foreach (var (column, defaultExpression, constraint) in defaults)
+            {
+                column.Default = defaultExpression;
+                column.DefaultConstraint = constraint;
+            }
+        }
     }
 
     /// <summary>
@@ -339,14 +410,7 @@ partial class Simulation
         if (parenthesized)
             context.MoveNextRequired();
         var expressionStart = context.Token!.StartIndex;
-        // Mark the expression body as a DEFAULT clause so NEWSEQUENTIALID()'s
-        // grammar gate accepts it (parity with the inline-DEFAULT path in
-        // ParseOneColumnIntoLists). The flag is the only thing distinguishing
-        // a legal DEFAULT context from an illegal scalar use of the function.
-        context.InDefaultClause = true;
-        Expression expression;
-        try { expression = Expression.Parse(context); }
-        finally { context.InDefaultClause = false; }
+        var expression = ParseDefaultClauseExpression(context);
         string definition;
         if (parenthesized)
         {
@@ -613,8 +677,10 @@ partial class Simulation
         // keyword in the simulator's grammar.
         if (afterDrop is ReservedKeyword { Keyword: Keyword.Column })
             return ParseDropColumns(context, tableName);
+        if (afterDrop is UnquotedString { ContextualKeyword: ContextualKeyword.Period })
+            return ParseDropPeriod(context, tableName);
         if (afterDrop is not ReservedKeyword { Keyword: Keyword.Constraint })
-            throw new NotSupportedException("ALTER TABLE supports only DROP CONSTRAINT and DROP COLUMN among its DROP shapes.");
+            throw new NotSupportedException("ALTER TABLE supports only DROP CONSTRAINT, DROP COLUMN and DROP PERIOD FOR SYSTEM_TIME among its DROP shapes.");
 
         var ifExists = false;
         context.MoveNextRequired();
@@ -925,4 +991,69 @@ partial class Simulation
                 break;
         }
     }
+
+    /// <summary>
+    /// Parses <c>ALTER TABLE … DROP PERIOD FOR SYSTEM_TIME</c>. The period row
+    /// goes and its two columns become ordinary ones — they keep their type and
+    /// nullability but lose <c>GENERATED ALWAYS AS ROW START | END</c>, so
+    /// <c>sys.periods</c> empties and <c>sys.tables.temporal_type</c> reads
+    /// <c>NON_TEMPORAL_TABLE</c> (probe-confirmed). Storage is untouched: both
+    /// columns were stored either way.
+    /// </summary>
+    /// <remarks>
+    /// Two refusals, both probe-confirmed verbatim and both naming the table
+    /// three-part: <b>Msg 13592</b> while system versioning is still on — the
+    /// period is what versioning reads, so <c>SET (SYSTEM_VERSIONING = OFF)</c>
+    /// has to come first — and <b>Msg 13593</b> when there is no period, which a
+    /// table that never had one and one already dropped report alike.
+    /// </remarks>
+    private static bool ParseDropPeriod(ParserContext context, MultiPartName tableName)
+    {
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.For })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.System_Time })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+
+        if (context.Batch.IsSkipping)
+            return true;
+
+        if (!context.Batch.TryResolveTable(tableName, out var table))
+            throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+        var qualified = QualifyTableName(table, context.CurrentDatabase);
+        if (table.SystemVersioning is not null)
+            throw SimulatedSqlException.CannotDropPeriodWhileVersioned(qualified);
+        if (table.PeriodColumns is not { } period)
+            throw SimulatedSqlException.PeriodDoesNotExist(qualified);
+
+        var columns = (HeapColumn[])table.Columns.Clone();
+        columns[period.StartOrdinal] = WithoutGeneratedAlways(columns[period.StartOrdinal]);
+        columns[period.EndOrdinal] = WithoutGeneratedAlways(columns[period.EndOrdinal]);
+        table.Columns = columns;
+        table.PeriodColumns = null;
+        table.PeriodInheritedFromBase = false;
+        table.RecomputeStorageProjections();
+        return true;
+    }
+
+    /// <summary>
+    /// A copy of <paramref name="column"/> with its <c>GENERATED ALWAYS AS ROW
+    /// START | END</c> marker cleared, keeping everything the catalog reports
+    /// about it otherwise — including its <c>column_id</c>, which real preserves
+    /// across the drop.
+    /// </summary>
+    private static HeapColumn WithoutGeneratedAlways(HeapColumn column) =>
+        new(column.Name,
+            column.Type,
+            column.MaxLength,
+            column.Nullable,
+            identity: column.Identity,
+            defaultExpression: column.Default,
+            collation: column.Collation,
+            isRowGuidCol: column.IsRowGuidCol)
+        {
+            DefaultConstraint = column.DefaultConstraint,
+            ColumnId = column.ColumnId,
+            IsSparse = column.IsSparse,
+        };
 }

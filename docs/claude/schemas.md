@@ -18,7 +18,7 @@ Probed against SQL Server 2025.
   This makes cross-database short-form queries (`SELECT * FROM sales..Customer`) land in the correct database; temp-table forms (`tempdb..#foo`) still work because `TryResolveTable`'s `IsLocalTempName` check operates on the leaf regardless of qualifier.
 - **`CREATE TABLE schema.t`** where `schema` doesn't exist → **Msg 2760** (target schema for the create must already exist).
   Distinct from FROM / INSERT / UPDATE / DELETE / MERGE / DROP / TRUNCATE access which use 208 / 3701 / 4701 respectively.
-- **`AUTHORIZATION owner`** and the embedded `<schema_element>` list (CREATE TABLE / VIEW / GRANT nested inside CREATE SCHEMA) aren't modeled — `AUTHORIZATION` raises `NotSupportedException`; trailing statement-starting tokens (CREATE / SELECT / INSERT / etc.) parse as their own statements in the same batch (deviates from real SQL Server's strict greedy-consume but reaches the same end state for the common idiom).
+- **`AUTHORIZATION owner`** and the embedded `<schema_element>` list both ship — see [CREATE SCHEMA's owner and its element list](#create-schemas-owner-and-its-element-list).
 - **"First in batch" is enforced** — `CREATE SCHEMA` after any dispatched statement raises **Msg 111 state 14** (`'CREATE SCHEMA' must be the first statement in a query batch.`), matching real; with no `GO`, a batch is one `CommandText`.
 - **`sys` and `INFORMATION_SCHEMA` host catalog views** (sys.schemas / sys.tables / sys.objects / sys.columns / INFORMATION_SCHEMA.TABLES / .COLUMNS / .SCHEMATA — see [`catalog-views.md`](catalog-views.md)).
   Adding a user table via `CREATE TABLE sys.foo (…)` raises `NotSupportedException` ("Cannot CREATE TABLE in the built-in 'sys' schema"); same rejection for `INFORMATION_SCHEMA`.
@@ -180,7 +180,25 @@ Default class is `OBJECT` (the bare form with no prefix).
   Statement-scoped — matches the idiom every other DDL site uses (`CREATE` / `ALTER` / `DROP` / `TRUNCATE`).
   Same-schema transfers skip the lock acquisition along with the mutation.
 
-**Deferred**: `ALTER SCHEMA … TRANSFER` with the `XML SCHEMA COLLECTION::` / `PARTITION FUNCTION::` / other niche class prefixes (the simulator only models OBJECT and TYPE); `ALTER AUTHORIZATION` (no principal model); `DROP SCHEMA` cascade-mode (real SQL Server's ANSI extension; not in the standard T-SQL grammar).
+**Deferred**: `ALTER SCHEMA … TRANSFER` with the `XML SCHEMA COLLECTION::` / `PARTITION FUNCTION::` / other niche class prefixes (the simulator only models OBJECT and TYPE); `ALTER AUTHORIZATION` in every form (there is no parser for the statement at all, so a schema's owner is settled once at CREATE); `DROP SCHEMA` cascade-mode (real SQL Server's ANSI extension; not in the standard T-SQL grammar).
+
+## CREATE SCHEMA's owner and its element list
+
+`CREATE SCHEMA [<name>] [AUTHORIZATION <owner>] [<schema_element> …]` ships whole.
+
+**`AUTHORIZATION`** binds a database principal as the schema's owner, which `sys.schemas.principal_id` projects; a schema created without the clause is owned by `dbo` (principal 1), matching real.
+Any database principal will do, roles included.
+A principal the database doesn't carry is **Msg 15151**'s *user* variant (`Cannot find the user 'nobody', …`, distinct from the object variant a `GRANT` element reports), and a principal that owns a schema cannot be dropped — `DROP USER` / `DROP ROLE` is **Msg 15138** (`The database principal owns a schema in the database, and cannot be dropped.`).
+Written without a schema name the clause supplies one: `CREATE SCHEMA AUTHORIZATION dbo` claims the name `dbo`, which is then the ordinary reserved-name Msg 2760.
+
+**Every failure inside the statement carries a trailing Msg 2759** (`CREATE SCHEMA failed due to previous errors.`) — the duplicate-name Msg 2714, the owner's Msg 15151 and an element's own error alike — and the statement is **atomic**: an element that raises leaves neither the schema nor its earlier elements behind.
+
+**The element list is part of the statement**, and its point is the name scope: *an unqualified name inside an element resolves to the schema being created*.
+`CREATE SCHEMA s CREATE TABLE t (…) GRANT SELECT ON t TO u` creates `s.t` and grants on `s.t`, a sibling element's `REFERENCES p(a)` finds `s.p`, and a view element's body resolves there too; an explicit qualifier still wins (`CREATE TABLE dbo.qq` lands in `dbo`).
+`BatchContext.CreateSchemaElementScope` carries it, consulted by `TryResolveSchema` — the one place a 1-part name picks its schema — so creation sites and reference sites agree without a second rule.
+
+Real's element grammar admits `CREATE TABLE`, `CREATE VIEW`, `GRANT`, `REVOKE` and `DENY` and nothing else: `CREATE PROCEDURE` / `FUNCTION` is Msg 156, `CREATE TYPE` Msg 102 and `CREATE INDEX` Msg 1018.
+A `CREATE VIEW` element may be followed by further elements — a view body normally runs to the end of its batch, and inside an element list it ends at the next element keyword instead, so `RejectStatementAfterModuleBody` stands down while the scope is installed.
 
 ## Object identifiers + `OBJECT_ID()`
 Every `HeapTable` carries a stable per-database `int ObjectId` assigned at CREATE time from `Database.AllocateObjectId()` (a `Database`-scoped `Interlocked.Increment` counter seeded at 100).

@@ -2069,6 +2069,18 @@ internal sealed class BatchContext
             ? database
             : this.CurrentDatabase;
 
+    /// <summary>
+    /// Schema an unqualified name resolves to while a <c>CREATE SCHEMA
+    /// &lt;name&gt; &lt;element&gt; …</c> element list is being bound — the
+    /// schema being created rather than
+    /// <see cref="Database.DefaultSchemaName"/>. Real scopes the elements that
+    /// way (probe-confirmed: an element's <c>CREATE TABLE t</c> lands in the new
+    /// schema and a sibling <c>GRANT SELECT ON t</c> grants on it), and routing
+    /// it through the one place unqualified names bind is what makes creation
+    /// sites and reference sites agree. Null everywhere else.
+    /// </summary>
+    internal string? CreateSchemaElementScope;
+
     public bool TryResolveSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
     {
         if (name.Count >= 4)
@@ -2089,7 +2101,9 @@ internal sealed class BatchContext
                 return false;
             }
         }
-        var schemaName = name.Count >= 2 ? name.ImmediateQualifier! : Database.DefaultSchemaName;
+        var schemaName = name.Count >= 2
+            ? name.ImmediateQualifier!
+            : this.CreateSchemaElementScope ?? Database.DefaultSchemaName;
         return database.Schemas.TryGetValue(schemaName, out schema);
     }
 

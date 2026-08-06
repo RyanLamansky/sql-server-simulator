@@ -138,10 +138,6 @@ internal static class FullTextWordBreaker
         return accentSensitive ? lowered : FullTextLexicon.FoldAccents(lowered);
     }
 
-    /// <inheritdoc cref="Normalize(ReadOnlySpan{char}, bool)"/>
-    public static string Normalize(string term, bool accentSensitive) =>
-        Normalize(term.AsSpan(), accentSensitive);
-
     private static bool IsWordCharacter(char ch) => char.IsLetterOrDigit(ch);
 
     /// <summary>

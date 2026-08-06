@@ -41,4 +41,58 @@ Probed against SQL Server 2025 (2026-08-05), with a transaction opened in an ear
 Real settles Msg 8728 while *compiling*, so on real it also fires inside a branch the batch never takes (`IF 1 = 0 BEGIN <the query> END` raises and the batch never starts).
 The simulator raises it while parsing the statement, which reaches the same place for the shapes that matter and additionally fires under the dispatch loop's skip mode.
 
-Not modeled: `BEGIN DISTRIBUTED TRANSACTION` → `NotSupportedException` at dispatch; `BEGIN TRANSACTION <name> WITH MARK 'm'` → Msg 319 at parse (bare named transactions ship).
+Not modeled: `BEGIN DISTRIBUTED TRANSACTION` → `NotSupportedException` at dispatch.
+
+## `WITH MARK`
+
+`BEGIN TRAN <name> WITH MARK ['description']` labels a point in the transaction log for a point-in-time restore to name.
+There is no log here, so the description is parsed and discarded — the name may be a variable, the description a literal or a variable, and both `WITH MARK 'm'` and the bare `WITH MARK` are accepted.
+Two consequences *are* observable and both are modeled:
+
+- The transaction has to be **named**: an unnamed `BEGIN TRANSACTION WITH MARK` is **Msg 3901** (`The transaction name must be specified when it is used with the mark option.`) raised at run time, so `@@TRANCOUNT` stays where it was rather than the transaction opening anyway.
+- A second `WITH MARK` under a transaction that already carries one raises the severity-10 **Msg 3920** (`The WITH MARK option only applies to the first BEGIN TRAN WITH MARK statement. The option is ignored.`) through the `InfoMessage` surface, at class 0 on the wire.
+  Real emits it only for the second *marked* BEGIN — a `WITH MARK` nested under an unmarked transaction is silent — so `SimulatedDbTransaction.IsMarked` is what the check reads.
+
+Everything else about a marked transaction is an ordinary one: `@@TRANCOUNT` nests the same way, savepoints and `ROLLBACK` behave the same, and nothing reads the mark back.
+
+## `SET XACT_ABORT`
+
+The option generalizes that plumbing conditionally, and the two shapes are **not** the same: Msg 8728 refuses a `BEGIN TRY` frame outright, while an XACT_ABORT-promoted error is caught normally and leaves the transaction *doomed* rather than rolled back.
+`SimulatedDbConnection.XactAbort` holds the setting; `Simulation.ApplyXactAbortPromotion` applies it once, at the innermost dispatch frame, and marks the exception so an outer frame re-raising it doesn't ask twice.
+Probed against SQL Server 2025 (2026-08-06).
+
+**Uncaught**, the promotion covers the statement-terminating run-time family — Msg 245, 515, 547, 1222, 2601 / 2627, 2628, 8115, 8134, deferred-name 208, and an uncaught `THROW`:
+
+| | `XACT_ABORT OFF` | `XACT_ABORT ON` |
+| --- | --- | --- |
+| the rest of the batch | runs (bar the batch-aborting name-resolution family) | never runs |
+| `@@TRANCOUNT` | unchanged | 0, whatever the depth — 2 reads 0, not 1 |
+| the transaction's writes | stand | rolled back |
+| `XACT_STATE()` | 1 | 0 |
+
+The batch ends even with no transaction open — the option is not conditional on one.
+An error raised inside a procedure body ends the **calling** batch, not just the body.
+
+**`RAISERROR` is the exemption**, at every severity and with or without `WITH LOG`: uncaught under the option it reports, the batch runs on, and the transaction stays committable at `XACT_STATE()` 1.
+`THROW` is promoted like everything else, which is the observable split between the two.
+`SimulatedSqlException.RaisedByRaiserror` marks the factory.
+
+**Caught by a `TRY` frame**, every error including `RAISERROR` behaves the same way instead: the `CATCH` runs, the batch carries on past `END CATCH`, `@@TRANCOUNT` is untouched — and the transaction is doomed, `XACT_STATE()` reading `-1` (`SimulatedDbTransaction.Doomed`).
+Whether an error rolls back or dooms is a question about the **whole session stack**, not one batch frame: a procedure with no `TRY` of its own, called from inside the caller's, dooms.
+`SimulatedDbConnection.OpenTryFrames` is the session-wide counter that answers it.
+
+A doomed transaction then:
+
+- refuses any statement that writes to the log with **Msg 3930** class 16 state 1 (*"The current transaction cannot be committed and cannot support operations that write to the log file. Roll back the transaction."*) — DML, object DDL, `SAVE TRANSACTION` and `COMMIT` alike, while a `SELECT` and a `DECLARE` complete normally.
+  Msg 3930 is itself batch-aborting and rolls the transaction back, and a nested `TRY` can catch it.
+- is rolled back at end of batch with **Msg 3998** class 16 state 1 (*"Uncommittable transaction is detected at the end of the batch. The transaction is rolled back."*), emitted after the batch's own results.
+- is cleared only by `ROLLBACK`, after which the batch runs on normally.
+
+**Scoping.** Unlike the six ANSI toggles (which a module body ignores), `SET XACT_ABORT` inside a procedure, trigger or dynamic-SQL body takes effect for that body and reverts when it returns; a body with no `SET` of its own inherits the caller's.
+`SimulatedDbConnection.SessionOptionScope` captures and restores it — together with `ROWCOUNT` and `DATEFIRST`, which scope identically — at the three invocation seams and around a parameterized ad-hoc command.
+`@@OPTIONS & 16384` reports the setting (`OptionsExpression`); a fresh session reads 5432 with the bit clear under SqlClient and 5176 under sqlcmd, whose difference is `QUOTED_IDENTIFIER` alone.
+
+The option also decides whether a client attention rolls an open transaction back — see the cancel bullet above.
+
+**Divergences.** Msg 3930's write gate covers DML (through `RunMutation`) and the `CREATE` / `ALTER` / `DROP` / `TRUNCATE` verbs; a `GRANT`, an `sp_rename` or an extended-property write inside a doomed transaction still runs.
+Msg 245 is transaction-aborting on real *without* the option — a conversion failure rolls the transaction back and reads `XACT_STATE() = -1` from a `CATCH` even under `XACT_ABORT OFF` — where the simulator treats it as statement-terminating like its neighbours until the option is on.

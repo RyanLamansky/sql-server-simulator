@@ -28,8 +28,6 @@ internal readonly partial struct Decimal38
         return new(magnitude, isNegative: true, 0);
     }
 
-    public static Decimal38 FromUInt64(ulong value) => new(value, isNegative: false, 0);
-
     /// <summary>
     /// A .NET <see cref="decimal"/>, exactly — a 96-bit mantissa at up to 28
     /// fractional digits is inside this type's range whatever its value.

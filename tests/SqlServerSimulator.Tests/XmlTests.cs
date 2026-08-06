@@ -436,6 +436,21 @@ public sealed class XmlTests
         => AreEqual(expected, new Simulation().ExecuteScalar(
             $"declare @x xml = '{instance}'; select cast(@x.query('{xquery}') as nvarchar(max))"));
 
+    /// <summary>
+    /// The numeric aggregate functions over a written sequence, which is the
+    /// shape that reaches the library's own sequence-numbering step. Values
+    /// probed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("sum((1,2,3))", "6")]
+    [DataRow("max((1,5,3))", "5")]
+    [DataRow("min((4,2,9))", "2")]
+    [DataRow("avg((2,4,6))", "4")]
+    [DataRow("count((1,2,3))", "3")]
+    public void XmlQuery_NumericSequenceFunctions(string xquery, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(
+            $"declare @x xml = '<r/>'; select cast(@x.query('{xquery}') as nvarchar(max))"));
+
     [TestMethod]
     [DataRow("<a>1</a><a>2</a>", "(/a)[2]", "2")]
     [DataRow("<a>1</a>tail", "(/text())[1]", "tail")]

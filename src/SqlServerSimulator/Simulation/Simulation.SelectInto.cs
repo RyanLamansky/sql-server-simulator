@@ -100,7 +100,7 @@ partial class Simulation
         // round trip landed on exactly the values the projection had computed.
         // Identity columns track source values via ObserveExplicit so the
         // high-water mark survives the copy.
-        var resultSet = selection.Execute(batch);
+        var resultSet = selection.Execute(batch).WithRowCountLimit(batch.Connection.RowCountLimit);
         var rowCount = 0;
         var undoLog = batch.Connection.CurrentTransaction?.UndoLog;
         foreach (var sourceValues in resultSet.RowValues)

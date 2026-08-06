@@ -125,6 +125,35 @@ partial class Simulation
         if (firstKind == SetOptionKind.OnOff && context.Token is ReservedKeyword { Keyword: var onOff })
             RecordSessionStateOption(context, firstName, onOff == Keyword.On);
 
+        // DATEFIRST names the weekday the week starts on, in 1..7 — read by
+        // @@DATEFIRST, by DATEPART / DATENAME's weekday and week units and by
+        // DATETRUNC(week, …). Real refuses a non-int parameter with Msg 2743
+        // (a literal past the int range and a bigint variable alike) and
+        // anything outside 1..7 with Msg 2742 echoing the value, a NULL
+        // variable rendering as 0.
+        if (firstName.Equals("DATEFIRST", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping)
+        {
+            var requested = ReadIntegerOptionValue(context) switch
+            {
+                null => throw SimulatedSqlException.DateFirstRequiresInteger(),
+                var v => negativeInteger ? -v.Value : v.Value,
+            };
+            context.Connection.DateFirst = requested is >= 1 and <= 7
+                ? (byte)requested
+                : throw SimulatedSqlException.DateFirstOutOfRange(requested);
+        }
+
+        // XACT_ABORT promotes the statement-terminating run-time errors to
+        // batch-aborting, transaction-rolling ones. Unlike the six ANSI toggles
+        // above it applies inside a procedure / trigger / dynamic-SQL body —
+        // the body's SET binds for the body's duration and the invocation seam
+        // restores the caller's value (SimulatedDbConnection.SessionOptionScope).
+        if (firstName.Equals("XACT_ABORT", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping
+            && context.Token is ReservedKeyword { Keyword: var xactOnOff })
+        {
+            context.Connection.XactAbort = xactOnOff == Keyword.On;
+        }
+
         // LOCK_TIMEOUT is the one Integer-shape option that has semantic
         // effect — it drives lock-acquisition wait via
         // SimulatedDbConnection.LockTimeoutMillis. Every other Integer /
@@ -224,10 +253,10 @@ partial class Simulation
     /// so only a top-level <c>SET</c> persists to the session — matching how
     /// real SQL Server scopes these options. Runs regardless of
     /// <see cref="BatchContext.IsSkipping"/> (a SET in a never-taken IF branch
-    /// still applies, as with QUOTED_IDENTIFIER). XACT_ABORT records onto the
-    /// connection too (its cancel-time transaction-abort behavior reads the
-    /// flag); other recognized OnOff options fall through the default arm and
-    /// no-op.
+    /// still applies, as with QUOTED_IDENTIFIER). Other recognized OnOff
+    /// options fall through the default arm and no-op — including XACT_ABORT,
+    /// whose write happens in the caller because it carries the opposite
+    /// module scoping (it applies inside a body and reverts on return).
     /// </summary>
     private static void RecordSessionStateOption(ParserContext context, string optionName, bool on)
     {
@@ -256,9 +285,6 @@ partial class Simulation
                 break;
             case "NUMERIC_ROUNDABORT":
                 connection.NumericRoundabort = on;
-                break;
-            case "XACT_ABORT":
-                connection.XactAbort = on;
                 break;
             default:
                 break;
@@ -396,10 +422,34 @@ partial class Simulation
     {
         var value = context.GetNextRequired();
         var negative = false;
-        if (value is Operator { Character: '-' })
+        if (value is Operator { Character: '-' } minus)
         {
+            // ROWCOUNT's grammar has no sign slot: real reports Msg 102 near
+            // the '-' rather than reaching its own Msg 507 (probe-confirmed;
+            // the negative value only reaches 507 through a variable).
+            if (!applyTextSize)
+                throw SimulatedSqlException.SyntaxErrorNear(minus);
             negative = true;
             value = context.GetNextRequired();
+        }
+
+        // The variable form (`SET ROWCOUNT @n` / `SET TEXTSIZE @n`) reads the
+        // slot's runtime value; real accepts a bigint there even though a
+        // literal past the int range is Msg 1080.
+        if (value is AtPrefixedString variable)
+        {
+            var slot = context.Batch.GetVariableSlot(variable.Value);
+            if (context.Batch.IsSkipping)
+                return true;
+            var slotValue = slot.Value;
+            var requested = slotValue.IsNull ? (long?)null : slotValue.CoerceTo(SqlType.BigInt).AsInt64;
+            if (applyTextSize)
+                context.Connection.TextSize = requested is not { } t ? 4096 : t == -1 ? -1 : t <= 0 ? 4096 : (int)Math.Min(t, int.MaxValue);
+            else if (requested is not { } rows || rows < 0)
+                throw SimulatedSqlException.InvalidRowCountArgument();
+            else
+                context.Connection.RowCountLimit = rows;
+            return true;
         }
 
         if (value is not Numeric { Value.IsNull: false } literal)
@@ -407,13 +457,19 @@ partial class Simulation
 
         if (literal.Value.Type == SqlType.BigInt)
             throw SimulatedSqlException.IntegerValueOutOfRange((negative ? -literal.Value.AsInt64 : literal.Value.AsInt64).ToString(System.Globalization.CultureInfo.InvariantCulture));
-        if (literal.Value.Type is DecimalSqlType { scale: 0 })
+        // A literal these options can't take as an int — one past the int range
+        // (numeric with scale 0) or one carrying a fraction — is Msg 1080 with
+        // the value echoed as written (probe-confirmed for `SET ROWCOUNT 2.5`).
+        if (literal.Value.Type is DecimalSqlType)
             throw SimulatedSqlException.IntegerValueOutOfRange(negative ? literal.Value.AsDecimal38.Negate().ToString() : literal.Value.AsDecimal38.ToString());
 
-        if (applyTextSize && !context.Batch.IsSkipping && literal.Value.Type == SqlType.Int32)
+        if (!context.Batch.IsSkipping && literal.Value.Type == SqlType.Int32)
         {
             var requested = negative ? -literal.Value.AsInt32 : literal.Value.AsInt32;
-            context.Connection.TextSize = requested == -1 ? -1 : requested <= 0 ? 4096 : requested;
+            if (applyTextSize)
+                context.Connection.TextSize = requested == -1 ? -1 : requested <= 0 ? 4096 : requested;
+            else
+                context.Connection.RowCountLimit = requested;
         }
 
         // Real names these two apart from the generic value-taking options
@@ -433,11 +489,35 @@ partial class Simulation
     private static bool ConsumeValueForKind(ParserContext context, SetOptionKind kind) => kind switch
     {
         SetOptionKind.OnOff => context.Token is ReservedKeyword { Keyword: Keyword.On or Keyword.Off },
-        SetOptionKind.Integer => context.Token is Numeric { Value.IsNull: false },
+        // The variable form (`SET DATEFIRST @d`, `SET LOCK_TIMEOUT @n`) is
+        // legal wherever an integer literal is.
+        SetOptionKind.Integer => context.Token is Numeric { Value.IsNull: false } or AtPrefixedString,
         SetOptionKind.Identifier => context.Token is Name or Literal,
         SetOptionKind.IntegerOrIdent => context.Token is Numeric or Name or Literal,
         SetOptionKind.Binary => context.Token is Literal,
         _ => false,
+    };
+
+    /// <summary>
+    /// Reads the <c>int</c> an Integer-shape SET option was given, from either
+    /// a literal or a variable, with the cursor already on the value token.
+    /// Returns <see langword="null"/> when the parameter isn't <c>int</c>-typed
+    /// — a literal past the int range (which tokenizes as bigint or numeric) or
+    /// a variable of a wider type — which is the distinction real reports as
+    /// Msg 2743 for <c>DATEFIRST</c>. A NULL variable reads as <c>0</c>, which
+    /// is the value real's out-of-range message echoes for it.
+    /// </summary>
+    private static long? ReadIntegerOptionValue(ParserContext context) => context.Token switch
+    {
+        Numeric { Value: { IsNull: false, Type: var type } literal } when type == SqlType.Int32 => literal.AsInt32,
+        AtPrefixedString variable => context.Batch.GetVariableSlot(variable.Value).Value switch
+        {
+            { IsNull: true } => 0L,
+            { Type: var type } slotValue when type == SqlType.Int32 || type == SqlType.SmallInt || type == SqlType.TinyInt =>
+                slotValue.CoerceTo(SqlType.Int32).AsInt32,
+            _ => null,
+        },
+        _ => null,
     };
 
     /// <summary>

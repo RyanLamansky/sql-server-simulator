@@ -26,6 +26,42 @@ public sealed class WindowFrameTests
         return connection;
     }
 
+    /// <summary>
+    /// A sliding frame over a <c>decimal</c> measure: the accumulator deducts
+    /// the row leaving the frame instead of recomputing it, which is a
+    /// separate arithmetic path from the integer one every other frame test
+    /// uses. Values probed against SQL Server 2025, <c>AVG</c>'s six-place
+    /// scale included.
+    /// </summary>
+    [TestMethod]
+    public void SlidingFrame_OverDecimalAndMoney_DeductsTheRowLeavingTheFrame()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table d (id int, amt decimal(10, 2), cash money);
+            insert d values (1, 1.11, 1.11), (2, 2.22, 2.22), (3, 3.33, 3.33), (4, 4.44, 4.44)
+            """).ExecuteNonQuery();
+        using var reader = connection.CreateCommand("""
+            select id,
+                   sum(amt) over (order by id rows between 1 preceding and current row),
+                   avg(amt) over (order by id rows between 1 preceding and current row),
+                   sum(cash) over (order by id rows between 1 preceding and current row)
+            from d order by id
+            """).ExecuteReader();
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add($"{reader.GetInt32(0)}|{reader.GetDecimal(1)}|{reader.GetDecimal(2)}|{reader.GetDecimal(3)}");
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "1|1.11|1.110000|1.1100",
+                "2|3.33|1.665000|3.3300",
+                "3|5.55|2.775000|5.5500",
+                "4|7.77|3.885000|7.7700",
+            },
+            rows);
+    }
+
     // === Default frame (ORDER BY in OVER → running total with peer-tie grouping) ===
 
     [TestMethod]

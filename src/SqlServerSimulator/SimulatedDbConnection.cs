@@ -223,16 +223,70 @@ public sealed class SimulatedDbConnection : DbConnection
 
     /// <summary>
     /// Session-scoped <c>XACT_ABORT</c> setting (default
-    /// <see langword="false"/>). Load-bearing for one behavior: when a
-    /// running command is cancelled by a client attention (or an
-    /// <c>ExecuteReader</c> caller's <c>Cancel()</c>) while a transaction is
-    /// open, <c>XACT_ABORT ON</c> rolls that transaction back, whereas
-    /// <c>OFF</c> leaves it open and usable — probe-confirmed against SQL
-    /// Server 2025. Otherwise recorded only (the broader XACT_ABORT
-    /// error-abort semantics remain parse-and-discard). Scoping mirrors
-    /// <see cref="AnsiNulls"/>.
+    /// <see langword="false"/>, surfaced as <c>@@OPTIONS &amp; 16384</c>).
+    /// While on, a run-time error that would otherwise terminate only its own
+    /// statement instead ends the batch and rolls the session's whole
+    /// transaction stack back; caught by a <c>TRY</c> frame it leaves the
+    /// transaction doomed instead
+    /// (<see cref="SimulatedDbTransaction.Doomed"/>). It also decides whether a
+    /// client attention (or an <c>ExecuteReader</c> caller's <c>Cancel()</c>)
+    /// rolls an open transaction back. Unlike the six ANSI toggles this one
+    /// applies inside a procedure / trigger / dynamic-SQL body and reverts when
+    /// that body returns — see <see cref="SessionOptionScope"/>.
     /// </summary>
     internal bool XactAbort;
+
+    /// <summary>
+    /// Session-scoped <c>SET ROWCOUNT</c> cap: the maximum number of rows a
+    /// statement returns or changes, <c>0</c> meaning unlimited (the default).
+    /// <c>bigint</c>-wide because real accepts a <c>bigint</c> variable there
+    /// even though the literal form is bounded by <c>int</c>. Scoping matches
+    /// <see cref="XactAbort"/>.
+    /// </summary>
+    internal long RowCountLimit;
+
+    /// <summary>
+    /// Session-scoped <c>SET DATEFIRST</c> value in 1..7, naming which weekday
+    /// starts the week (default <c>7</c> = Sunday, the us_english setting).
+    /// Read by <c>@@DATEFIRST</c>, by <c>DATEPART</c> / <c>DATENAME</c>'s
+    /// <c>weekday</c> and <c>week</c> units and by <c>DATETRUNC(week, …)</c>;
+    /// the ISO units and <c>DATEDIFF(week, …)</c> ignore it. Scoping matches
+    /// <see cref="XactAbort"/>.
+    /// </summary>
+    internal byte DateFirst = 7;
+
+    /// <summary>
+    /// The three session options a procedure / trigger / dynamic-SQL body may
+    /// change for its own duration only: real applies the change inside the
+    /// body and restores the caller's value when the body returns
+    /// (probe-confirmed against SQL Server 2025 for all three). Captured on
+    /// entry to a body and written back in the body's <c>finally</c>.
+    /// </summary>
+    internal readonly struct SessionOptionScope(SimulatedDbConnection connection)
+    {
+        private readonly bool xactAbort = connection.XactAbort;
+        private readonly long rowCountLimit = connection.RowCountLimit;
+        private readonly byte dateFirst = connection.DateFirst;
+
+        public void Restore(SimulatedDbConnection connection)
+        {
+            connection.XactAbort = this.xactAbort;
+            connection.RowCountLimit = this.rowCountLimit;
+            connection.DateFirst = this.dateFirst;
+        }
+    }
+
+    /// <summary>
+    /// Count of <c>BEGIN TRY</c> frames open anywhere on this session, across
+    /// nested procedure / trigger / dynamic-SQL bodies. A body carries its own
+    /// <c>BatchContext.TryFrameDepth</c>, but whether an
+    /// <c>XACT_ABORT</c>-promoted error rolls the transaction back or merely
+    /// dooms it depends on whether <em>any</em> frame will catch it — a
+    /// procedure with no <c>TRY</c> of its own called from inside one dooms the
+    /// transaction (probe-confirmed), so the question has to be asked of the
+    /// whole stack.
+    /// </summary>
+    internal int OpenTryFrames;
 
     /// <summary>
     /// The cancellation source for the command currently executing on this
@@ -407,11 +461,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <c>LCK_M_&lt;mode&gt;</c> (e.g. <c>LCK_M_X</c>, <c>LCK_M_S</c>) and
     /// through <c>sys.dm_tran_locks.request_mode</c> for WAIT-status rows.
     /// </summary>
-    internal LockMode? WaitingForMode
-    {
-        get => this.Session.WaitingForMode;
-        set => this.Session.WaitingForMode = value;
-    }
+    internal LockMode? WaitingForMode => this.Session.WaitingForMode;
 
     /// <summary>
     /// The database this session is pointed at. Defaults to the entry named

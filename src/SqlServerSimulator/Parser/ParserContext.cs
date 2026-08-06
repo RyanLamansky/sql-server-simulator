@@ -266,6 +266,24 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public int ColumnReferencesParsed;
 
     /// <summary>
+    /// Armed while an operand that admits only scalar expressions is parsed —
+    /// <c>PRINT</c>'s is the one such site. It has no column scope and no
+    /// rowset scope, so a name reports <b>Msg 128</b> and a subquery reports
+    /// <b>Msg 1046</b>, whichever the reading meets first.
+    /// </summary>
+    public bool ScalarOnlyOperand;
+
+    /// <summary>
+    /// The first column reference met while <see cref="ScalarOnlyOperand"/> is
+    /// armed. The reference is recorded rather than its name, since the dotted
+    /// parts are appended after construction — the whole multi-part name only
+    /// exists once the postfix loop is done with it, and Msg 128 names it as
+    /// written. Left-to-right precedence falls out of the recording order: a
+    /// subquery met later reports this name instead of its own error.
+    /// </summary>
+    public Expressions.Reference? ScalarOnlyColumnReference;
+
+    /// <summary>
     /// When non-null, every <see cref="Expressions.WindowExpression"/>
     /// constructor registers itself here. Scoped by Selection.Parse around
     /// projection parsing — the executor needs the list to detect the

@@ -68,9 +68,6 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
     public SecurityPrincipalFrame Effective =>
         this.impersonation.Count > 0 ? this.impersonation[^1] : baseFrame;
 
-    /// <summary>True while at least one <c>EXECUTE AS</c> / module frame is active.</summary>
-    public bool IsImpersonating => this.impersonation.Count > 0;
-
     /// <summary>True when the effective database principal is <c>dbo</c> — the same-database enforcement bypass. A reference that crosses a database boundary asks the boundary-aware form instead, since a <c>dbo</c> frame can be database-scoped.</summary>
     public bool EffectiveIsDbo => this.Effective.DatabasePrincipalId == Database.DboPrincipalId;
 

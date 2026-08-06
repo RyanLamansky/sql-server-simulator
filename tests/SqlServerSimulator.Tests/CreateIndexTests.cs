@@ -130,6 +130,8 @@ public sealed class CreateIndexTests
     [DataRow("x = -1", "([x]=(-1))")]
     [DataRow("status in (1, 2, 3)", "([status] IN ((1), (2), (3)))")]
     [DataRow("nm = 0.10", "([nm]=(0.10))")]
+    [DataRow("status > 5", "([status]>(5))")]
+    [DataRow("status < 5", "([status]<(5))")]
     public void CreateIndex_FilterDefinition_NormalizedLikeSqlServer(string filter, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"""
             create table t (id int not null primary key, status int, code int,

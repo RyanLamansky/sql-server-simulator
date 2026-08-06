@@ -24,12 +24,4 @@ internal readonly struct RuntimeContext(Func<MultiPartName, SqlValue> resolveCol
 
     /// <summary>The batch this expression is executing in.</summary>
     public readonly BatchContext Batch = batch;
-
-    /// <summary>
-    /// Builds a context with a different <see cref="ResolveColumn"/> while
-    /// preserving the batch. Useful in executors that build per-row
-    /// resolvers and recurse into nested expressions.
-    /// </summary>
-    public RuntimeContext WithResolver(Func<MultiPartName, SqlValue> resolveColumn) =>
-        new(resolveColumn, this.Batch);
 }

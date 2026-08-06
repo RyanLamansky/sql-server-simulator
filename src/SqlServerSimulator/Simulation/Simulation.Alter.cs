@@ -1110,8 +1110,12 @@ partial class Simulation
                 if (withCheckExplicit.HasValue)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 return TryParseAlterTableAlterColumn(context, tableName);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Rebuild }:
+                if (withCheckExplicit.HasValue)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                return TryParseAlterTableRebuild(context, tableName);
             default:
-                throw new NotSupportedException("ALTER TABLE supports only SET (SYSTEM_VERSIONING = OFF), ADD / DROP / ALTER COLUMN, ADD / DROP CONSTRAINT, and CHECK / NOCHECK CONSTRAINT shapes.");
+                throw new NotSupportedException("ALTER TABLE supports only SET (SYSTEM_VERSIONING = OFF), ADD / DROP / ALTER COLUMN, ADD / DROP CONSTRAINT, CHECK / NOCHECK CONSTRAINT and REBUILD shapes.");
         }
     }
 
@@ -1282,4 +1286,143 @@ partial class Simulation
             trigger.SchemaId = destSchema.SchemaId;
         }
     }
+
+    /// <summary>
+    /// <c>ALTER TABLE … REBUILD WITH (…)</c> options, mapped to the value
+    /// grammar each takes. Every one of them describes physical storage a flat
+    /// page list doesn't have, so all are validated by name and discarded.
+    /// </summary>
+    private static readonly System.Collections.Frozen.FrozenDictionary<string, bool> RebuildOptions =
+        new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
+        {
+            // true = the value is a bare word (ON / OFF / a compression level);
+            // false = the value is numeric.
+            ["DATA_COMPRESSION"] = true,
+            ["MAXDOP"] = false,
+            ["ONLINE"] = true,
+            ["SORT_IN_TEMPDB"] = true,
+            ["XML_COMPRESSION"] = true,
+        }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Compression levels <c>DATA_COMPRESSION</c> takes. A name outside the set
+    /// is Msg 102 on real rather than the option-name Msg 155, since the value
+    /// slot is a closed keyword list rather than an identifier.
+    /// </summary>
+    private static readonly System.Collections.Frozen.FrozenSet<string> DataCompressionLevels = new[]
+    {
+        "COLUMNSTORE",
+        "COLUMNSTORE_ARCHIVE",
+        "NONE",
+        "PAGE",
+        "ROW",
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Parses <c>ALTER TABLE &lt;table&gt; REBUILD [PARTITION = { ALL |
+    /// &lt;number&gt; }] [WITH ( option = value [, …] )]</c>. Rebuilding
+    /// re-lays-out a table's physical storage, which the simulator's flat page
+    /// list has no notion of, so the statement validates and succeeds without
+    /// touching a row — probe-confirmed that real leaves the data identical.
+    /// </summary>
+    /// <remarks>
+    /// What is modeled is the validation. An option name outside real's list is
+    /// <b>Msg 155</b> in its ALTER TABLE wording, a bad <c>DATA_COMPRESSION</c>
+    /// level or an empty option list is <b>Msg 102</b>, and a partition number
+    /// where nothing is partitioned splits three ways exactly as real's does:
+    /// <b>Msg 7729</b> State 1 naming the table's clustered index (in real's own
+    /// "alter index statement" wording, whichever statement raised it),
+    /// <b>Msg 7735</b> naming the table when it carries no index, and
+    /// <b>Msg 7729</b> State 3 for the <c>ON PARTITIONS (…)</c> sub-clause.
+    /// </remarks>
+    private static bool TryParseAlterTableRebuild(ParserContext context, MultiPartName tableName)
+    {
+        context.MoveNextOptional();
+        var namedPartition = ParseOptionalIndexPartitionClause(context);
+        var namedPartitionList = ParseOptionalRebuildOptions(context);
+
+        if (context.Batch.IsSkipping)
+            return true;
+
+        if (!context.Batch.TryResolveTable(tableName, out var table))
+            throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+        if (namedPartitionList)
+            throw SimulatedSqlException.PartitionNumberOnUnpartitionedTable(table.Name);
+        if (namedPartition)
+        {
+            throw table.KeyConstraints.Count > 0
+                ? SimulatedSqlException.PartitionNumberOnUnpartitionedIndex(table.KeyConstraints[0].Name)
+                : SimulatedSqlException.RebuildPartitionOnUnpartitioned(alterIndex: false, indexName: null, table.Name);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Parses REBUILD's own <c>WITH ( … )</c> block, returning
+    /// <see langword="true"/> when an <c>ON PARTITIONS (…)</c> sub-clause was
+    /// written — which nothing here is partitioned enough to satisfy, so the
+    /// caller raises real's refusal once the table has resolved. Cursor on
+    /// entry: the token after the PARTITION clause. On exit: past the block.
+    /// </summary>
+    private static bool ParseOptionalRebuildOptions(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
+            return false;
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        var onPartitions = false;
+        while (true)
+        {
+            if (context.GetNextRequired() is not (StringToken or ReservedKeyword))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var optionName = context.Token.Source.ToString();
+            if (!RebuildOptions.TryGetValue(optionName, out var bareWordValue))
+                throw SimulatedSqlException.UnrecognizedAlterTableOption(optionName);
+            if (context.GetNextRequired() is not Operator { Character: '=' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+
+            var value = context.GetNextRequired();
+            if (!bareWordValue)
+            {
+                if (value is not Numeric)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            else if (DataCompressionOption.Equals(optionName, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!DataCompressionLevels.Contains(value.Source.ToString()))
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            else if (value is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off })
+            {
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+
+            context.MoveNextRequired();
+            if (context.Token is ReservedKeyword { Keyword: Keyword.On })
+            {
+                if (context.GetNextRequired() is not Name partitionsWord
+                    || !partitionsWord.Value.Equals("PARTITIONS", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                }
+                onPartitions = true;
+                if (context.GetNextRequired() is not Operator { Character: '(' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                SkipBalancedParens(context);
+                context.MoveNextRequired();
+            }
+
+            if (context.Token is not Operator { Character: ',' })
+                break;
+        }
+
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+        return onPartitions;
+    }
+
+    private const string DataCompressionOption = "DATA_COMPRESSION";
 }

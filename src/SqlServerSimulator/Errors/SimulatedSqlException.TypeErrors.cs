@@ -588,6 +588,20 @@ partial class SimulatedSqlException
         new($"Invalid length parameter passed to the {function} function.", 536, 16, state);
 
     /// <summary>
+    /// The runtime half of the negative length / count diagnostic: SQL Server
+    /// settles a <em>constant</em> negative argument while compiling and
+    /// reports Msg 536 naming the one function, but a value that only turns
+    /// negative at run time reports a different message per family —
+    /// <c>LEFT</c> and <c>SUBSTRING</c> share Msg 537 state 2 naming both, and
+    /// <c>RIGHT</c> keeps Msg 536 at state 2 with its own name capitalized.
+    /// Probe-confirmed against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException NegativeLengthNotAllowedAtRuntime(bool isRight) =>
+        isRight
+            ? new("Invalid length parameter passed to the RIGHT function.", 536, 16, 2)
+            : new("Invalid length parameter passed to the LEFT or SUBSTRING function.", 537, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 1007: a numeric literal carries more than 38
     /// significant digits, exceeding the maximum precision of the numeric
     /// representation. Class 15 — raised while reading the literal.

@@ -53,7 +53,7 @@ internal sealed class DatePart : Expression
         if (value.IsNull)
             return SqlValue.Null(SqlType.Int32);
         DatePartKinds.RequireCompatible(this.kind, this.keywordText, value.Type, "datepart");
-        return SqlValue.FromInt32(DatePartKinds.Extract(this.kind, value));
+        return SqlValue.FromInt32(DatePartKinds.Extract(this.kind, value, runtime.Batch.Connection.DateFirst));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;

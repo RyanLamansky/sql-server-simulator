@@ -133,13 +133,6 @@ internal sealed class Database
         (16393, "db_denydatawriter"),
     ];
 
-    /// <summary>
-    /// Convenience accessor for the <c>dbo</c> schema's tables — the
-    /// unqualified-reference fallback path. Equivalent to
-    /// <c>Schemas[DefaultSchemaName].HeapTables</c>.
-    /// </summary>
-    public ConcurrentDictionary<string, HeapTable> DefaultSchemaTables => this.Schemas[DefaultSchemaName].HeapTables;
-
     private int nextSchemaId = 4;
 
     /// <summary>
@@ -544,7 +537,4 @@ internal readonly struct ExtendedPropertyKey(byte @class, int majorId, int minor
 
     public override int GetHashCode() =>
         HashCode.Combine(this.Class, this.MajorId, this.MinorId, BuiltInToken.GetHashCode(this.Name));
-
-    public static bool operator ==(ExtendedPropertyKey left, ExtendedPropertyKey right) => left.Equals(right);
-    public static bool operator !=(ExtendedPropertyKey left, ExtendedPropertyKey right) => !left.Equals(right);
 }

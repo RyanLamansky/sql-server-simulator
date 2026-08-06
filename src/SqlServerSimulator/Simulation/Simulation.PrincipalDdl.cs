@@ -247,10 +247,18 @@ partial class Simulation
         {
             throw SimulatedSqlException.DropUserPermissionDenied(name);
         }
-        if (!context.CurrentDatabase.Principals.TryRemove(name, out var removed))
+        if (!context.CurrentDatabase.Principals.TryGetValue(name, out var removed))
         {
             return ifExists ? true : throw SimulatedSqlException.CannotFindPrincipal(name);
         }
+        // A principal that owns a schema can't be dropped — Msg 15138, which
+        // names neither the principal nor the schema (probe-confirmed).
+        foreach (var schema in context.CurrentDatabase.Schemas.Values)
+        {
+            if (schema.PrincipalId == removed.PrincipalId)
+                throw SimulatedSqlException.PrincipalOwnsASchema();
+        }
+        _ = context.CurrentDatabase.Principals.TryRemove(name, out _);
         // Cascade: drop role memberships that reference the removed principal.
         _ = context.CurrentDatabase.RoleMembers.RemoveAll(rm =>
             rm.RoleId == removed.PrincipalId || rm.MemberId == removed.PrincipalId);

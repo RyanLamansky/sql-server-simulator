@@ -94,10 +94,10 @@ internal sealed class Value : Expression
         // through Expression.Parse's double-at switch — they need runtime
         // batch/connection/database access this constant form can't reach.
         // Values below match SQL Server 2025 defaults (probe-confirmed
-        // 2026-05-22) — exact server name and configurable session knobs
-        // (DATEFIRST) collapse to documented defaults since the simulator
-        // parses-and-discards the corresponding SET commands. @@TEXTSIZE
-        // routes to TextSizeExpression (SET TEXTSIZE carries semantic effect).
+        // 2026-05-22) — the exact server name collapses to a documented
+        // default. @@TEXTSIZE routes to TextSizeExpression, @@DATEFIRST to
+        // DateFirstExpression and @@OPTIONS to OptionsExpression (SET TEXTSIZE
+        // / DATEFIRST / XACT_ABORT all carry semantic effect).
         switch (doubleAtPrefixedString.Parse())
         {
             case AtAtKeyword.Version:
@@ -127,9 +127,6 @@ internal sealed class Value : Expression
             case AtAtKeyword.RemServer:
                 this.Constant = SqlValue.Null(SqlType.NVarchar);
                 return;
-            case AtAtKeyword.DateFirst:
-                this.Constant = SqlValue.FromByte(7);
-                return;
             // System statistical counters (all int, probe-confirmed
             // 2026-07-19 against SQL Server 2025). The in-process simulator
             // does no physical IO, CPU-time accounting, or TDS packet
@@ -157,17 +154,6 @@ internal sealed class Value : Expression
 
         throw new NotSupportedException($"Simulator doesn't recognize {doubleAtPrefixedString}.");
     }
-
-    /// <summary>
-    /// Builds the <c>@@OPTIONS</c> constant: SQL Server 2025's fresh-session
-    /// default 5432 (probe-confirmed 2026-05-22), with the QUOTED_IDENTIFIER
-    /// bit (256) tracking the parse-position setting — the one component the
-    /// simulator's <c>SET</c> surface actually models. Baking the value at
-    /// parse is correct because QUOTED_IDENTIFIER is itself a parse-time
-    /// option and the plan cache keys on it.
-    /// </summary>
-    public static Value FromAtAtOptions(ParserContext context) =>
-        NonLiteral(SqlValue.FromInt32(context.QuotedIdentifiers ? 5432 : 5432 & ~256));
 
     internal override bool ParallelSafe => true;
 

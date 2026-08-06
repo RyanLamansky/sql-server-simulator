@@ -90,6 +90,29 @@ public sealed class TemporalTableTests
             13507,
             "System-versioned table SYSTEM_TIME period definition end column name not matching 'GENERATED ALWAYS AS ROW END' column name.");
 
+    /// <summary>
+    /// The three sibling refusals of Msg 13507: a period declared with no
+    /// generated ROW START column at all (13504), none for ROW END (13505),
+    /// and a start name that matches no generated column (13506). Probed
+    /// against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void Ddl_PeriodWithoutMatchingGeneratedColumns_RaisesTheStartAndEndErrors()
+    {
+        new Simulation().AssertSqlError(
+            "create table t (id int, Vt datetime2 generated always as row end hidden not null, period for system_time (Vf, Vt))",
+            13504,
+            "Temporal 'GENERATED ALWAYS AS ROW START' column definition missing.");
+        new Simulation().AssertSqlError(
+            "create table t (id int, Vf datetime2 generated always as row start hidden not null, period for system_time (Vf, Vt))",
+            13505,
+            "Temporal 'GENERATED ALWAYS AS ROW END' column definition missing.");
+        new Simulation().AssertSqlError(
+            "create table t (id int, Vf datetime2 generated always as row start hidden not null, Vt datetime2 generated always as row end hidden not null, Other int, period for system_time (Other, Vt))",
+            13506,
+            "System-versioned table SYSTEM_TIME period definition start column name not matching 'GENERATED ALWAYS AS ROW START' column name.");
+    }
+
     [TestMethod]
     public void Ddl_PeriodColumnNullable_RaisesMsg13587()
         => new Simulation().AssertSqlError(
@@ -460,7 +483,7 @@ public sealed class TemporalTableTests
         var simulation = new Simulation();
         simulation.ExecuteBatches(CreateTemporalCustomers);
         _ = ThrowsExactly<NotSupportedException>(
-            () => simulation.ExecuteNonQuery("alter table Customers rebuild"));
+            () => simulation.ExecuteNonQuery("alter table Customers switch partition 1 to Archive"));
     }
 
     [TestMethod]

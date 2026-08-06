@@ -259,6 +259,13 @@ partial class Simulation
             // (probe-confirmed Msg 1934 "ALTER TABLE failed …").
             if (pc.Persisted && IncorrectSetOptionNames(batch.Parser) is { } setOptions)
                 throw SimulatedSqlException.IncorrectSetOptions("ALTER TABLE", setOptions);
+            if (pc.Persisted)
+            {
+                var scope = new List<HeapColumn?>(table.Columns.Length + heapColumns.Count);
+                scope.AddRange(table.Columns);
+                scope.AddRange(heapColumns);
+                RejectNondeterministicPersisted(batch.Parser, scope, pc.Name, table.Name, pc.Definition);
+            }
             var computedType = pc.Expression.GetSqlType(batch, ResolveReference);
             heapColumns[pc.Index] = new HeapColumn(pc.Name, computedType, maxLength: null, nullable: pc.Nullable, computedExpression: pc.Expression, isPersisted: pc.Persisted, computedDefinition: pc.Definition);
         }
@@ -679,14 +686,11 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var columnName = nameToken.Value;
 
-        // Reject the ADD/DROP sub-clause forms early — `ALTER COLUMN col ADD
-        // {PERSISTED|MASKED|…}` and `ALTER COLUMN col DROP {…}` follow the
-        // column name directly without a type keyword. The simulator doesn't
-        // model these features, so the surface raises NotSupportedException
-        // rather than parse-accepting.
+        // `ALTER COLUMN col ADD | DROP <attribute>` follows the column name
+        // directly, without a type keyword.
         context.MoveNextRequired();
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Add or Keyword.Drop })
-            throw new NotSupportedException("ALTER TABLE ALTER COLUMN sub-clauses (ADD/DROP PERSISTED/MASKED/ROWGUIDCOL/SPARSE) aren't modeled.");
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Add or Keyword.Drop } addOrDrop)
+            return TryParseAlterColumnAttribute(context, tableName, columnName, adding: addOrDrop.Keyword == Keyword.Add);
 
         if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1158,4 +1162,113 @@ partial class Simulation
 
         table.Heap = newHeap;
     }
+
+    /// <summary>
+    /// Parses <c>ALTER TABLE … ALTER COLUMN &lt;col&gt; { ADD | DROP }
+    /// { ROWGUIDCOL | SPARSE }</c>. Both attributes are metadata here — the
+    /// <c>$ROWGUID</c> pseudo-column isn't modeled and the row encoder already
+    /// omits NULLs — so the toggle is a marker flip with no storage effect, and
+    /// the catalog is what observes it.
+    /// </summary>
+    /// <remarks>
+    /// Probe-confirmed refusals: a missing column is <b>Msg 4924</b> (State 1,
+    /// where the PERSISTED form's is State 2), <c>ADD ROWGUIDCOL</c> on a table
+    /// that already has one is <b>Msg 4925</b> and on a non-<c>uniqueidentifier</c>
+    /// column <b>Msg 2761</b>, <c>DROP ROWGUIDCOL</c> where nothing carries it is
+    /// <b>Msg 4926</b>, and <c>ADD SPARSE</c> on a NOT NULL / IDENTITY /
+    /// ROWGUIDCOL column or one of the refused types is <b>Msg 1731</b>, on a
+    /// computed column <b>Msg 4928</b> and on one carrying a DEFAULT
+    /// <b>Msg 11410</b>. Real follows Msg 4925 / 4926 with a terminating
+    /// <b>Msg 1750</b>, which the simulator omits — the first message is the
+    /// load-bearing signal.
+    /// </remarks>
+    private static bool TryParseAlterColumnAttribute(
+        ParserContext context, MultiPartName tableName, string columnName, bool adding)
+    {
+        var attribute = context.GetNextRequired() switch
+        {
+            ReservedKeyword { Keyword: Keyword.RowGuidCol } => ColumnAttribute.RowGuidCol,
+            UnquotedString { ContextualKeyword: ContextualKeyword.Sparse } => ColumnAttribute.Sparse,
+            UnquotedString { ContextualKeyword: ContextualKeyword.Persisted } =>
+                throw new NotSupportedException("ALTER TABLE ALTER COLUMN ADD / DROP PERSISTED isn't modeled."),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Masked } =>
+                throw new NotSupportedException("ALTER TABLE ALTER COLUMN ADD / DROP MASKED isn't modeled."),
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+        };
+        context.MoveNextOptional();
+        // MASKED carries a `WITH (FUNCTION = '…')` clause; the two modeled
+        // attributes take nothing.
+        if (context.Batch.IsSkipping)
+            return true;
+
+        if (!context.Batch.TryResolveTable(tableName, out var table))
+            throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+
+        HeapColumn? found = null;
+        var collation = context.Batch.CurrentDatabase.Collation;
+        foreach (var candidate in table.Columns)
+        {
+            if (collation.Equals(candidate.Name, columnName))
+            {
+                found = candidate;
+                break;
+            }
+        }
+        var target = found ?? throw SimulatedSqlException.AlterColumnDoesNotExist(columnName, table.Name);
+
+        if (attribute == ColumnAttribute.RowGuidCol)
+        {
+            if (!adding)
+            {
+                var carrier = FindRowGuidColumn(table) ?? throw SimulatedSqlException.NoRowGuidColToDrop(table.Name);
+                carrier.IsRowGuidCol = false;
+                return true;
+            }
+            if (FindRowGuidColumn(table) is not null)
+                throw SimulatedSqlException.TableAlreadyHasRowGuidCol(table.Name);
+            if (target.Type != SqlType.UniqueIdentifier)
+                throw SimulatedSqlException.RowGuidColRequiresUniqueIdentifier();
+            target.IsRowGuidCol = true;
+            return true;
+        }
+
+        if (!adding)
+        {
+            target.IsSparse = false;
+            return true;
+        }
+        if (target.Computed is not null)
+            throw SimulatedSqlException.CannotAlterColumnOfKind(columnName, "COMPUTED");
+        if (target.Default is not null)
+            throw SimulatedSqlException.CannotMakeColumnSparseWithDefault(columnName, table.Name);
+        if (!target.Nullable || target.Identity is not null || target.IsRowGuidCol || !SparseEligible(target.Type))
+            throw SimulatedSqlException.CannotCreateSparseColumn(columnName, table.Name);
+        target.IsSparse = true;
+        return true;
+    }
+
+    private enum ColumnAttribute
+    {
+        RowGuidCol,
+        Sparse,
+    }
+
+    private static HeapColumn? FindRowGuidColumn(HeapTable table)
+    {
+        foreach (var column in table.Columns)
+        {
+            if (column.IsRowGuidCol)
+                return column;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The types real refuses to make sparse: the legacy LOBs, the spatial pair
+    /// and user-defined types. Probe-confirmed as part of the Msg 1731 message's
+    /// own list.
+    /// </summary>
+    private static bool SparseEligible(SqlType type) =>
+        type != SqlType.Text && type != SqlType.NText && type != SqlType.Image
+        && type != SqlType.Geography && type != SqlType.Geometry;
 }

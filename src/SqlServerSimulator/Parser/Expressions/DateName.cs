@@ -64,8 +64,13 @@ internal sealed class DateName : Expression
         return this.kind switch
         {
             DatePartKind.Month => SqlValue.FromNVarchar(ResultType, MonthNames[DatePartKinds.Extract(this.kind, value) - 1]),
+            // The weekday NAME is the calendar day's own, so it ignores
+            // DATEFIRST — probe-confirmed that DATENAME(dw, <a Friday>) reads
+            // 'Friday' under DATEFIRST 5, where DATEPART(dw, …) reads 1. Every
+            // other unit reads the number DATEPART would, DATEFIRST included
+            // (week moves with it).
             DatePartKind.Weekday => SqlValue.FromNVarchar(ResultType, DayOfWeekNames[DatePartKinds.Extract(this.kind, value) - 1]),
-            _ => SqlValue.FromNVarchar(ResultType, DatePartKinds.Extract(this.kind, value).ToString(CultureInfo.InvariantCulture)),
+            _ => SqlValue.FromNVarchar(ResultType, DatePartKinds.Extract(this.kind, value, runtime.Batch.Connection.DateFirst).ToString(CultureInfo.InvariantCulture)),
         };
     }
 

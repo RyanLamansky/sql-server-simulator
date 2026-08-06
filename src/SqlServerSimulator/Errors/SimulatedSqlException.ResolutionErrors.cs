@@ -271,4 +271,35 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException DependencyReportMayBeIncomplete(string entityName) =>
         new($"The dependencies reported for entity \"{entityName}\" might not include references to all columns. This is either because the entity references an object that does not exist or because of an error in one or more statements in the entity.  Before rerunning the query, ensure that there are no errors in the entity and that all objects referenced by the entity exist.", 2020, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 128 — a name stood where the context offers no
+    /// column scope at all, so the answer is neither Msg 207 nor Msg 4104 but
+    /// its own refusal. <paramref name="name"/> is the identifier as written
+    /// (dotted qualifiers included, brackets stripped) and real double-quotes
+    /// it. Probe-confirmed as <c>PRINT</c>'s answer to a bare or qualified
+    /// name, whatever the batch's other scopes hold.
+    /// </summary>
+    internal static SimulatedSqlException NameNotPermittedInThisContext(string name) =>
+        new($"The name \"{name}\" is not permitted in this context. Valid expressions are constants, constant expressions, and (in some contexts) variables. Column names are not permitted.", 128, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 1046 — a subquery stood where only a scalar
+    /// expression may. The full-text predicate raises it because real classifies
+    /// that predicate as a rowset construct; <c>PRINT</c>'s operand raises it
+    /// for a genuine subquery at any depth, a wrapping function call included.
+    /// </summary>
+    internal static SimulatedSqlException SubqueriesNotAllowedInThisContext() =>
+        new("Subqueries are not allowed in this context. Only scalar expressions are allowed.", 1046, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 215 — a parenthesized list followed a FROM
+    /// source that isn't a function, and no alias stood between them for real to
+    /// read the parens as the legacy table-hint form. The whole list is bound as
+    /// an argument list first, so each name inside it reports its own Msg 207
+    /// ahead of this one. Probe-confirmed verbatim, the object named as the FROM
+    /// clause wrote it.
+    /// </summary>
+    internal static SimulatedSqlException ParametersSuppliedForNonFunction(string objectName) =>
+        new($"Parameters supplied for object '{objectName}' which is not a function. If the parameters are intended as a table hint, a WITH keyword is required.", 215, 16, 1);
 }

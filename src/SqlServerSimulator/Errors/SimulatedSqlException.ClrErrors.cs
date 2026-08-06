@@ -53,14 +53,6 @@ partial class SimulatedSqlException
         new($"{verb} ASSEMBLY failed because the source assembly is, according to MVID, identical to an assembly that is already registered under the name \"{existingName}\".", 6285, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 10343: <c>clr strict security</c> is on, so a
-    /// <c>SAFE</c> / <c>EXTERNAL_ACCESS</c> assembly must be signed or
-    /// explicitly trusted. Severity 14, not 16.
-    /// </summary>
-    internal static SimulatedSqlException AssemblyBlockedByStrictSecurity(string assemblyName) =>
-        new($"CREATE or ALTER ASSEMBLY for assembly '{assemblyName}' with the SAFE or EXTERNAL_ACCESS option failed because the 'clr strict security' option of sp_configure is set to 1. Microsoft recommends that you sign the assembly with a certificate or asymmetric key that has a corresponding login with UNSAFE ASSEMBLY permission. Alternatively, you can trust the assembly using sp_add_trusted_assembly.", 10343, 14, 1);
-
-    /// <summary>
     /// Mimics SQL Server error 6263: a CLR routine was invoked while the
     /// <c>clr enabled</c> configuration option is 0. Note this gates
     /// <em>execution</em> only — <c>CREATE ASSEMBLY</c> itself succeeds with

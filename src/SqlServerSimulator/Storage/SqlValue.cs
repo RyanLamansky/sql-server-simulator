@@ -1062,16 +1062,6 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return hash.ToHashCode();
     }
 
-    public static bool operator ==(SqlValue left, SqlValue right)
-    {
-        return left.Equals(right);
-    }
-
-    public static bool operator !=(SqlValue left, SqlValue right)
-    {
-        return !left.Equals(right);
-    }
-
     /// <summary>
     /// Diagnostic-only string rendering, surfaced via
     /// <see cref="DebuggerDisplayAttribute"/>. NOT user-visible — production

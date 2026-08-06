@@ -210,6 +210,16 @@ partial class SimulatedSqlException
         new($"The {functionName} function requires {min} to {max} arguments.", 189, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 3901: <c>BEGIN TRANSACTION WITH MARK</c> without
+    /// a transaction name. Real needs the name to label the log mark, so the
+    /// unnamed form is refused — and refused at run time, leaving
+    /// <c>@@TRANCOUNT</c> at 0 rather than opening the transaction anyway
+    /// (probe-confirmed). Class 16, State 1, wording verbatim.
+    /// </summary>
+    internal static SimulatedSqlException TransactionNameRequiredForMark() =>
+        new("The transaction name must be specified when it is used with the mark option.", 3901, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 3902: a <c>COMMIT</c> was issued with no
     /// active transaction. Probe-confirmed against SQL Server 2025
     /// (2026-05-08): Class 16, State 1, exact wording verbatim.
@@ -240,6 +250,56 @@ partial class SimulatedSqlException
     /// </remarks>
     internal static SimulatedSqlException CannotRollBackUnknownSavepoint(string name) =>
         new($"Cannot roll back {name}. No transaction or savepoint of that name was found.", 6401, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 3930: a statement that would write to the log
+    /// ran inside a doomed transaction (one an error under
+    /// <c>SET XACT_ABORT ON</c> made uncommittable). Probe-confirmed against
+    /// SQL Server 2025: Class 16, State 1, raised by DML, DDL,
+    /// <c>SAVE TRANSACTION</c> and <c>COMMIT</c> alike, while a read completes
+    /// normally. The error itself ends the batch and rolls the transaction
+    /// back, and a nested <c>TRY</c> can catch it.
+    /// </summary>
+    internal static SimulatedSqlException UncommittableTransactionCannotWrite() =>
+        new("The current transaction cannot be committed and cannot support operations that write to the log file. Roll back the transaction.", 3930, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 3998: the batch ended with a doomed transaction
+    /// still open, so the server rolls it back and reports this. Probe-confirmed
+    /// against SQL Server 2025: Class 16, State 1, emitted after the batch's own
+    /// results.
+    /// </summary>
+    internal static SimulatedSqlException UncommittableTransactionAtEndOfBatch() =>
+        new("Uncommittable transaction is detected at the end of the batch. The transaction is rolled back.", 3998, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 507: <c>SET ROWCOUNT</c> was given a NULL or
+    /// negative value through a variable. Probe-confirmed against SQL Server
+    /// 2025: Class 16, State 2, and a NULL takes the same message as a negative
+    /// value. A negative <em>literal</em> never reaches here — the <c>-</c>
+    /// isn't in the grammar, so real reports Msg 102 near it.
+    /// </summary>
+    internal static SimulatedSqlException InvalidRowCountArgument() =>
+        new("Invalid argument for SET ROWCOUNT. Must be a non-null non-negative integer.", 507, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 2742: <c>SET DATEFIRST</c> was given a value
+    /// outside 1..7. Probe-confirmed against SQL Server 2025: Class 16,
+    /// State 1, with the offending value echoed into the message, and a NULL
+    /// variable rendered as <c>0</c>.
+    /// </summary>
+    /// <summary>
+    /// Mimics SQL Server error 2743: <c>SET DATEFIRST</c> was given a value
+    /// that isn't an <c>int</c> — a literal past the int range, or a
+    /// <c>bigint</c> variable. Probe-confirmed against SQL Server 2025:
+    /// Class 16, State 3. (<c>SET ROWCOUNT</c> reports Msg 1080 for the literal
+    /// and accepts the <c>bigint</c> variable, so the two options split here.)
+    /// </summary>
+    internal static SimulatedSqlException DateFirstRequiresInteger() =>
+        new("SET DATEFIRST option requires integer parameter.", 2743, 16, 3);
+
+    internal static SimulatedSqlException DateFirstOutOfRange(long value) =>
+        new($"SET DATEFIRST {value.ToString(System.Globalization.CultureInfo.InvariantCulture)} is out of range.", 2742, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 319: a CTE-prefixed statement (a <c>WITH</c>
@@ -594,8 +654,18 @@ partial class SimulatedSqlException
     /// synthesized id). Class is the supplied severity; state is the supplied
     /// state. Sev ≤ 10 is the informational path — those don't throw; the
     /// caller writes <c>@@ERROR</c> directly when <c>WITH SETERROR</c> is set
-    /// and discards the message otherwise.
+    /// and discards the message otherwise. <c>RaisedByRaiserror</c> marks the
+    /// one raising construct <c>SET XACT_ABORT ON</c> leaves alone.
     /// </summary>
     internal static SimulatedSqlException RaiserrorRaised(string message, byte severity, byte state) =>
-        new(message, 50000, severity, state);
+        new(message, 50000, severity, state) { RaisedByRaiserror = true };
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 1018 — an <c>INDEX</c> hint written in the
+    /// legacy no-<c>WITH</c> parenthesized form, which real refuses outright
+    /// rather than reading as an argument list. Probe-confirmed verbatim,
+    /// including real's own inconsistent capitalization of the second sentence.
+    /// </summary>
+    internal static SimulatedSqlException IndexHintNeedsWithKeyword() =>
+        new("Incorrect syntax near 'INDEX'. If this is intended as a part of a table hint, A WITH keyword and parenthesis are now required. See SQL Server Books Online for proper syntax.", 1018, 15, 1);
 }

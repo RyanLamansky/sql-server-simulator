@@ -259,6 +259,14 @@ internal sealed partial class Selection
         /// <see cref="ValidateIndexHintArguments(Collation, TableHintInfo, HeapTable, string)"/>.
         /// </summary>
         public List<IndexHintArgument>? IndexArguments;
+        /// <summary>
+        /// The seek-column list of a nested <c>FORCESEEK(index (col [, …]))</c>,
+        /// in written order. Null when the hint carried no nested form. Real
+        /// requires the list to be a leading prefix of the named index's
+        /// <i>key</i> columns and validates it once the table has resolved —
+        /// see <see cref="ValidateForceSeekColumns"/>.
+        /// </summary>
+        public List<string>? ForceSeekColumns;
     }
 
     /// <summary>
@@ -305,7 +313,7 @@ internal sealed partial class Selection
             if (context.GetNextRequired() is not Operator { Character: '(' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
-            ConsumeTableHintListBody(context, ref info);
+            ConsumeTableHintListBody(context, ref info, legacyForm: false);
             return info;
         }
         if (allowLegacyParenForm && context.Token is Operator { Character: '(' })
@@ -321,14 +329,14 @@ internal sealed partial class Selection
             if (commitOnLegacyParen)
             {
                 context.MoveNextRequired();
-                ConsumeTableHintListBody(context, ref info);
+                ConsumeTableHintListBody(context, ref info, legacyForm: true);
                 return info;
             }
             var checkpoint = context.SaveCheckpoint();
             context.MoveNextRequired();
             if (context.Token is not null && TableHintLookup.ContainsKey(context.Token.Source))
             {
-                ConsumeTableHintListBody(context, ref info);
+                ConsumeTableHintListBody(context, ref info, legacyForm: true);
                 return info;
             }
             context.RestoreCheckpoint(checkpoint);
@@ -337,15 +345,76 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// The FROM-source / JOIN-RHS entry point: parses the optional table-hint
+    /// clause, then settles what a parenthesized run that <i>isn't</i> a
+    /// recognized hint list means. Real decides that on the alias — with one
+    /// written, the parens are unambiguously the legacy hint form and an
+    /// unknown name inside is <b>Msg 321</b>; without one, the parens are an
+    /// argument list, so each name inside reports its own <b>Msg 207</b> (the
+    /// source itself is not in scope for its own arguments) and the run closes
+    /// with <b>Msg 215</b>. An <c>INDEX</c> hint written that way is
+    /// <b>Msg 1018</b> instead, real's own "a WITH keyword is now required".
+    /// All three probe-confirmed against SQL Server 2025.
+    /// </summary>
+    internal static TableHintInfo ParseOptionalFromSourceHints(ParserContext context, bool aliasConsumed, string writtenObjectName)
+    {
+        var info = ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: aliasConsumed);
+        if (context.Token is not Operator { Character: '(' })
+            return info;
+
+        context.MoveNextRequired();
+
+        // A bare name is a column reference; one followed by `(` is a function
+        // call and one followed by or preceded by `.` is part of a qualified
+        // name, neither of which real answers with Msg 207 here. The pending
+        // slot defers the verdict until the next token settles it.
+        var errors = new List<SimulatedSqlException>();
+        var depth = 1;
+        Name? pending = null;
+        var afterDot = false;
+        while (depth > 0)
+        {
+            var token = context.Token;
+            if (pending is not null && token is not Operator { Character: '(' or '.' })
+            {
+                errors.Add(SimulatedSqlException.InvalidColumnName(pending.Value));
+                pending = null;
+            }
+
+            switch (token)
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    pending = null;
+                    break;
+                case Operator { Character: ')' }:
+                    depth--;
+                    break;
+                case Name argumentName when !afterDot:
+                    pending = argumentName;
+                    break;
+            }
+
+            afterDot = token is Operator { Character: '.' };
+            if (depth > 0)
+                context.MoveNextRequired();
+        }
+
+        context.MoveNextOptional();
+        errors.Add(SimulatedSqlException.ParametersSuppliedForNonFunction(writtenObjectName));
+        throw SimulatedSqlException.Aggregate(errors);
+    }
+
+    /// <summary>
     /// Walks the comma-separated body of a table-hint list. Cursor on entry:
     /// the first hint-name token (immediately after the opening <c>(</c>).
     /// Cursor on exit: the next token after the closing <c>)</c>.
     /// </summary>
-    private static void ConsumeTableHintListBody(ParserContext context, ref TableHintInfo info)
+    private static void ConsumeTableHintListBody(ParserContext context, ref TableHintInfo info, bool legacyForm)
     {
         while (true)
         {
-            ConsumeOneTableHint(context, ref info);
+            ConsumeOneTableHint(context, ref info, legacyForm);
             if (context.Token is Operator { Character: ')' })
             {
                 context.MoveNextOptional();
@@ -453,13 +522,18 @@ internal sealed partial class Selection
     /// Msg 321. Cursor advances to the trailing <c>,</c> or <c>)</c>. Updates
     /// <paramref name="info"/> for the phase-1a-recognized modifier set.
     /// </summary>
-    private static void ConsumeOneTableHint(ParserContext context, ref TableHintInfo info)
+    private static void ConsumeOneTableHint(ParserContext context, ref TableHintInfo info, bool legacyForm)
     {
         if (context.Token is null)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var sourceSpan = context.Token.Source;
         if (!TableHintLookup.TryGetValue(sourceSpan, out var kind))
             throw SimulatedSqlException.UnrecognizedTableHint(sourceSpan);
+        // An INDEX hint is the one name real refuses outright in the legacy
+        // no-WITH form, wherever in the list it stands and whether or not an
+        // alias preceded the parens (probe-confirmed).
+        if (legacyForm && kind == TableHintKind.Index)
+            throw SimulatedSqlException.IndexHintNeedsWithKeyword();
         // Recognize the phase-1b lock-affecting hints. NOLOCK / READUNCOMMITTED
         // skip S acquisition (dirty-read). HOLDLOCK / REPEATABLEREAD /
         // SERIALIZABLE retain row-S to transaction end (so re-read sees the
@@ -504,7 +578,15 @@ internal sealed partial class Selection
                     var checkpoint = context.SaveCheckpoint();
                     context.MoveNextRequired();
                     if (context.Token is Name)
+                    {
                         CaptureOneIndexArgument(context, ref info);
+                        // The index name may be followed by its own
+                        // parenthesized seek-column list. Capture the names so
+                        // the FROM-source call site can measure them against the
+                        // index's key columns (Msg 362 / 365).
+                        if (context.MoveNext() && context.Token is Operator { Character: '(' })
+                            CaptureForceSeekColumns(context, ref info);
+                    }
                     context.RestoreCheckpoint(checkpoint);
 
                     SkipBalancedParens(context);
@@ -563,6 +645,99 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
         }
+    }
+
+    /// <summary>
+    /// Reads the <c>(col [, …])</c> seek-column list of a nested
+    /// <c>FORCESEEK</c>. Cursor on entry: the opening <c>(</c>. Leaves the
+    /// cursor wherever it lands — the caller restores its checkpoint and lets
+    /// the payload skip walk the run again. An empty list is Msg 102, matching
+    /// real.
+    /// </summary>
+    private static void CaptureForceSeekColumns(ParserContext context, ref TableHintInfo info)
+    {
+        var columns = new List<string>();
+        while (true)
+        {
+            if (context.GetNextRequired() is not Name columnName)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            columns.Add(columnName.Value);
+            if (context.GetNextRequired() is not Operator { Character: ',' })
+                break;
+        }
+
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        info.ForceSeekColumns = columns;
+    }
+
+    /// <summary>
+    /// Validates a nested <c>FORCESEEK(index (col [, …]))</c>'s seek columns
+    /// against the resolved index. Real requires the list to be a leading
+    /// prefix of the index's <i>key</i> columns, in order: an <c>INCLUDE</c>d
+    /// column, a key column out of position and an unknown name all report
+    /// <b>Msg 362</b> naming the first offender, and more names than the index
+    /// has key columns reports <b>Msg 365</b> ahead of any name check. Both
+    /// messages name the base table rather than the alias the query wrote
+    /// (probe-confirmed), and both are raised after the index-name check that
+    /// <see cref="ValidateIndexHintArguments"/> answers with Msg 308.
+    /// </summary>
+    internal static void ValidateForceSeekColumns(Collation collation, TableHintInfo info, HeapTable table)
+    {
+        if (info.ForceSeekColumns is not { } seekColumns || info.IndexArguments is not { Count: > 0 } args)
+            return;
+        if (args[0].Name is not { } indexName)
+            return;
+
+        string[]? keyColumnNames = null;
+        foreach (var constraint in table.KeyConstraints)
+        {
+            if (!collation.Equals(constraint.Name, indexName))
+                continue;
+            keyColumnNames = new string[constraint.StorageOrdinals.Length];
+            for (var i = 0; i < keyColumnNames.Length; i++)
+                keyColumnNames[i] = table.Columns[ColumnOrdinalForStorageOrdinal(table, constraint.StorageOrdinals[i])].Name;
+            break;
+        }
+        if (keyColumnNames is null)
+        {
+            foreach (var index in table.Indexes)
+            {
+                if (!collation.Equals(index.Name, indexName))
+                    continue;
+                keyColumnNames = new string[index.KeyColumns.Length];
+                for (var i = 0; i < keyColumnNames.Length; i++)
+                    keyColumnNames[i] = table.Columns[index.KeyColumns[i].ColumnOrdinal].Name;
+                break;
+            }
+        }
+        // An unresolvable index name is Msg 308's business, raised by the
+        // sibling validator.
+        if (keyColumnNames is null)
+            return;
+
+        if (seekColumns.Count > keyColumnNames.Length)
+            throw SimulatedSqlException.ForceSeekTooManySeekColumns(table.Name, indexName);
+        for (var i = 0; i < seekColumns.Count; i++)
+        {
+            if (!collation.Equals(seekColumns[i], keyColumnNames[i]))
+                throw SimulatedSqlException.ForceSeekColumnNotAKeyColumn(seekColumns[i], table.Name, indexName);
+        }
+    }
+
+    /// <summary>
+    /// Inverts <see cref="HeapTable.StorageOrdinals"/> for one entry. Key
+    /// constraints record the columns they cover by storage ordinal, and the
+    /// names a diagnostic reports come off the declared column list.
+    /// </summary>
+    private static int ColumnOrdinalForStorageOrdinal(HeapTable table, int storageOrdinal)
+    {
+        for (var i = 0; i < table.StorageOrdinals.Length; i++)
+        {
+            if (table.StorageOrdinals[i] == storageOrdinal)
+                return i;
+        }
+        return storageOrdinal;
     }
 
     /// <summary>

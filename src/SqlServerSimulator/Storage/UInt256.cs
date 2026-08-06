@@ -17,7 +17,7 @@ namespace SqlServerSimulator.Storage;
 /// reductions by a power of ten route through the latter in ≤ 19-digit chunks,
 /// so a power of ten wider than a <see cref="ulong"/> never has to be formed.
 /// </remarks>
-internal readonly struct UInt256(UInt128 high, UInt128 low) : IEquatable<UInt256>
+internal readonly struct UInt256(UInt128 high, UInt128 low)
 {
     /// <summary>Bits 128-255.</summary>
     public readonly UInt128 High = high;
@@ -224,23 +224,6 @@ internal readonly struct UInt256(UInt128 high, UInt128 low) : IEquatable<UInt256
     public int CompareTo(UInt256 other) =>
         this.High != other.High ? this.High.CompareTo(other.High) : this.Low.CompareTo(other.Low);
 
-    public bool Equals(UInt256 other) => this.High == other.High && this.Low == other.Low;
-
-    public override bool Equals(object? obj) => obj is UInt256 other && Equals(other);
-
-    public override int GetHashCode() => HashCode.Combine(this.High, this.Low);
-
-    public static bool operator ==(UInt256 left, UInt256 right) => left.Equals(right);
-
-    public static bool operator !=(UInt256 left, UInt256 right) => !left.Equals(right);
-
-    public static bool operator <(UInt256 left, UInt256 right) => left.CompareTo(right) < 0;
-
-    public static bool operator >(UInt256 left, UInt256 right) => left.CompareTo(right) > 0;
-
-    public static bool operator <=(UInt256 left, UInt256 right) => left.CompareTo(right) <= 0;
-
-    public static bool operator >=(UInt256 left, UInt256 right) => left.CompareTo(right) >= 0;
 
     /// <summary>Decimal rendering, for diagnostics and test failure messages.</summary>
     public override string ToString()

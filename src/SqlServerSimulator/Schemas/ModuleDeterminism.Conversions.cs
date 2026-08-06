@@ -355,7 +355,7 @@ internal static partial class ModuleDeterminism
     /// </summary>
     private static Dictionary<string, ConversionFamily> NameFamilies(
         Database database,
-        SchemaObject module,
+        SchemaObject? module,
         List<Token> tokens,
         List<(string Qualifier, string Leaf)> referencedNames)
     {

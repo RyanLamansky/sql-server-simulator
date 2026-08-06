@@ -1,5 +1,6 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 using System.Collections.Frozen;
 
 namespace SqlServerSimulator.Schemas;
@@ -218,6 +219,45 @@ internal static partial class ModuleDeterminism
         _ => null,
     };
 
+    /// <summary>
+    /// Whether a computed column's expression is deterministic — the question
+    /// <c>PERSISTED</c> asks, since a persisted value is stored once and read
+    /// back forever. Runs the same pipeline a schema-bound module's body takes:
+    /// the nondeterministic-built-in table, the <c>CAST</c> / <c>CONVERT</c>
+    /// style rule (which is what makes <c>CONVERT(varchar(20), &lt;datetime
+    /// col&gt;, 112)</c> persistable and style 0 not), and the transitive walk
+    /// into referenced functions and views. <paramref name="scopeColumns"/> is
+    /// the column list the expression's names bind against, which the style rule
+    /// needs to type them.
+    /// </summary>
+    internal static bool IsComputedColumnDeterministic(Database database, HeapColumn[] scopeColumns, string definition)
+    {
+        if (!Scan(definition, out var tokens, out var referencedModules))
+            return false;
+        var families = NameFamilies(database, module: null, tokens, referencedModules);
+        AddColumns(families, scopeColumns);
+        if (!ConversionsAreDeterministic(tokens, families))
+            return false;
+
+        var visited = new HashSet<int>();
+        foreach (var (qualifier, leaf) in referencedModules)
+        {
+            if (!database.Schemas.TryGetValue(qualifier, out var schema))
+                continue;
+            if (schema.Functions.TryGetValue(leaf, out var referencedFunction)
+                && !IsDeterministic(database, referencedFunction, visited))
+            {
+                return false;
+            }
+            if (schema.Views.TryGetValue(leaf, out var referencedView)
+                && !IsDeterministic(database, referencedView, visited))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static bool IsDeterministic(Database database, SchemaObject module, HashSet<int> visited)
     {
         // A reference cycle can only be reached through a module the walk is
@@ -341,6 +381,12 @@ internal static partial class ModuleDeterminism
                         }
                         else if (leafIndex + 1 < tokens.Count && tokens[leafIndex + 1] is Operator { Character: '(' })
                         {
+                            // A `type::Method(…)` static call is not the built-in
+                            // of the same name — real persists a computed
+                            // `geography::Parse('POINT(0 0)')` while refusing the
+                            // scalar `PARSE(s AS int)` (probe-confirmed).
+                            if (i > 0 && tokens[i - 1] is Operator { Character: ':' })
+                                break;
                             // An unqualified call is always a built-in: real
                             // rejects a bare user-function call outright.
                             if (lookup.Contains(name.Span))

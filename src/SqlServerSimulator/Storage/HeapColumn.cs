@@ -89,7 +89,22 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// column per table may carry it (Msg 8196), and only a
     /// <c>uniqueidentifier</c> column (Msg 2761).
     /// </summary>
-    public readonly bool IsRowGuidCol = isRowGuidCol;
+    /// <remarks>
+    /// Mutable because <c>ALTER TABLE … ALTER COLUMN &lt;c&gt; ADD | DROP
+    /// ROWGUIDCOL</c> moves the marker without touching storage.
+    /// </remarks>
+    public bool IsRowGuidCol = isRowGuidCol;
+
+    /// <summary>
+    /// True when the column was declared or altered <c>SPARSE</c>. Real trades
+    /// a per-non-NULL-value overhead for storing nothing at all where the value
+    /// is NULL; the simulator's row encoder already omits a NULL from the row,
+    /// so the flag is metadata — it round-trips through
+    /// <c>sys.columns.is_sparse</c> and <c>COLUMNPROPERTY(…, 'IsSparse')</c>.
+    /// A sparse column has to be nullable and may carry neither IDENTITY,
+    /// ROWGUIDCOL nor a bound DEFAULT (Msg 1731 / Msg 11410).
+    /// </summary>
+    public bool IsSparse;
 
     /// <summary>
     /// True for columns whose values flow through LOB-chain storage rather

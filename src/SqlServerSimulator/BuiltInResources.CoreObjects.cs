@@ -24,8 +24,9 @@ internal static partial class BuiltInResources
         // are injected here rather than backing them with empty Schema objects.
         // principal_id matches real (probe-confirmed 2026-07-23): every fixed
         // schema is owned by the like-named/like-id principal, so
-        // principal_id = schema_id for schema_id ≤ 4 or ≥ 16384; user schemas
-        // (ids 5..16383) are owned by dbo, so principal_id = 1.
+        // principal_id = schema_id for schema_id ≤ 4 or ≥ 16384; a user schema
+        // (ids 5..16383) reports the owner it carries, dbo unless a
+        // CREATE SCHEMA … AUTHORIZATION named another.
         Sys("schemas",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -35,7 +36,7 @@ internal static partial class BuiltInResources
         {
             var rows = new List<SqlValue[]>();
             foreach (var s in database.Schemas.Values)
-                rows.Add(SchemaRow(s.Name, s.SchemaId));
+                rows.Add(SchemaRow(s.Name, s.SchemaId, s.PrincipalId));
             foreach (var (name, id) in FixedCatalogOnlySchemas)
             {
                 if (!database.Schemas.ContainsKey(name))
@@ -339,9 +340,11 @@ internal static partial class BuiltInResources
         // for string types.
         var systemTypeId = SqlType.TinyInt;
         var nullCollation = SqlValue.Null(SqlType.SystemName);
-        // sys.columns / sys.all_columns share one shape. is_sparse ships as a
-        // constant 0 (the simulator has no sparse-column storage); SMO's
-        // Object-Explorer HasSparseColumn probe reads it off sys.all_columns.
+        // sys.columns / sys.all_columns share one shape. is_sparse reports the
+        // column's own marker, which is metadata here — the row encoder already
+        // omits a NULL from the row, so there is no storage difference to make.
+        // SMO's Object-Explorer HasSparseColumn probe reads it off
+        // sys.all_columns.
         // sys.all_columns is user-object-parity with sys.columns here: real
         // SQL Server also surfaces system objects' negative-object_id columns,
         // but SMO correlates only on user tables' object_ids so the identical
@@ -512,7 +515,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromBoolean(col.Identity is not null),
                         SqlValue.FromBoolean(col.Computed is not null),
                         CollationFor(col),
-                        falseBit,
+                        SqlValue.FromBoolean(col.IsSparse),
                         falseBit,
                         XmlCollectionIdFor(col),
                         falseBit,
@@ -571,7 +574,7 @@ internal static partial class BuiltInResources
                         falseBit,
                         falseBit,
                         CollationFor(col),
-                        falseBit,
+                        SqlValue.FromBoolean(col.IsSparse),
                         falseBit,
                         zeroInt,
                         falseBit,
@@ -630,7 +633,7 @@ internal static partial class BuiltInResources
                         falseBit,
                         falseBit,
                         CollationFor(col),
-                        falseBit,
+                        SqlValue.FromBoolean(col.IsSparse),
                         falseBit,
                         zeroInt,
                         falseBit,
@@ -689,7 +692,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromBoolean(col.Identity is not null),
                         SqlValue.FromBoolean(col.Computed is not null),
                         CollationFor(col),
-                        falseBit,
+                        SqlValue.FromBoolean(col.IsSparse),
                         falseBit,
                         XmlCollectionIdFor(col),
                         falseBit,
@@ -753,11 +756,11 @@ internal static partial class BuiltInResources
     // One sys.schemas row: principal_id follows real's ownership convention —
     // fixed schemas (ids ≤ 4 or ≥ 16384) are owned by the like-id principal;
     // user schemas (5..16383) are owned by dbo (principal_id 1).
-    private static SqlValue[] SchemaRow(string name, int schemaId) =>
+    private static SqlValue[] SchemaRow(string name, int schemaId, int? ownerPrincipalId = null) =>
     [
         SqlValue.FromSystemName(name),
         SqlValue.FromInt32(schemaId),
-        SqlValue.FromInt32(schemaId is >= 5 and < 16384 ? Database.DboSchemaId : schemaId),
+        SqlValue.FromInt32(schemaId is >= 5 and < 16384 ? ownerPrincipalId ?? Database.DboPrincipalId : schemaId),
     ];
 
     /// <summary>

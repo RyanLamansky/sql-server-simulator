@@ -1098,18 +1098,33 @@ public sealed partial class Simulation
         // modification batches open with `SET NOCOUNT ON` and rely on it.
         var adHocScope = command.ScopeTempTablesToBatch || command.Parameters.Count > 0;
         var enteredNoCount = batch.Connection.NoCount;
+        var enteredOptions = new SimulatedDbConnection.SessionOptionScope(batch.Connection);
         try
         {
             var context = batch.Parser;
             context.MoveNextOptional();
             foreach (var outcome in DispatchStatementsUntil(batch, endKeyword: null))
                 yield return outcome;
+            // A transaction an XACT_ABORT-caught error doomed can survive to
+            // here: the CATCH ran, the batch carried on, and nothing rolled it
+            // back. Real ends such a batch by rolling back and reporting
+            // Msg 3998 after the batch's own results (probe-confirmed).
+            if (batch.Connection.CurrentTransaction is { Doomed: true } doomed)
+            {
+                doomed.Rollback();
+                var endOfBatch = SimulatedSqlException.UncommittableTransactionAtEndOfBatch();
+                endOfBatch.ResolveDiagnostics(1, batch.LineOffset, batch.ErrorProcedureName);
+                yield return new SimulatedErrorOutcome(endOfBatch, rowReturning: false);
+            }
             WriteBackOutputParameters(batch);
         }
         finally
         {
             if (adHocScope)
+            {
                 batch.Connection.NoCount = enteredNoCount;
+                enteredOptions.Restore(batch.Connection);
+            }
             // The flush has to run even when the consumer disposes the reader
             // before fully draining the iterator (ExecuteScalar reads one row
             // and disposes) — otherwise PRINT / sev-≤10 RAISERROR output that
@@ -1285,7 +1300,7 @@ public sealed partial class Simulation
                 // SELECT permission check against the replaying session's
                 // current principal.
                 PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
-                var executed = selection.Execute(batch);
+                var executed = selection.Execute(batch).WithRowCountLimit(connection.RowCountLimit);
                 var rowCount = executed.MaterializeRows();
                 connection.LastStatementRowCount = rowCount;
                 var replayed = selection.IsAssignmentOnly
@@ -1767,6 +1782,16 @@ public sealed partial class Simulation
                 // refuses to be caught, so the TRY-frame arm below skips it.
                 if (ex.AbortsTransaction)
                     connection.CurrentTransaction?.Rollback();
+                // SET XACT_ABORT ON generalizes that class conditionally: while
+                // the option is on, a run-time error that would ordinarily end
+                // only its own statement ends the batch and rolls the whole
+                // stack back instead. It is NOT the same shape as the
+                // unconditional class above — a TRY frame anywhere on the
+                // session still catches it, and what the transaction gets is
+                // the doomed state rather than a rollback. Applied at the
+                // innermost frame and marked, so an outer frame re-raising the
+                // same exception doesn't ask twice.
+                ApplyXactAbortPromotion(connection, ex);
                 // Deferred name resolution: real SQL Server binds object /
                 // column names lazily, so an un-taken IF / WHILE branch (or a
                 // block skipped after BREAK / CONTINUE / RETURN) that names a
@@ -1819,11 +1844,13 @@ public sealed partial class Simulation
                 {
                     caught = ex;
                 }
-                else if (batch.ContinueOnError && (IsBatchAbortingNameResolution(ex) || ex.TerminatesBatch))
+                else if (batch.ContinueOnError && (IsBatchAbortingNameResolution(ex) || ex.TerminatesBatch || ex.XactAbortPromoted))
                 {
-                    // Batch-aborting error: either a bind-class name-resolution
+                    // Batch-aborting error: a bind-class name-resolution
                     // failure (missing object / column / ambiguous / could-not-
-                    // be-bound) or an uncaught THROW (ex.TerminatesBatch). Real
+                    // be-bound), an uncaught THROW (ex.TerminatesBatch), or an
+                    // error XACT_ABORT ON promoted with no TRY frame to catch
+                    // it (the transaction has already been rolled back). Real
                     // SQL Server ends the batch rather than continuing to the
                     // next statement — probe-confirmed that a mid-batch THROW
                     // leaves the following statement unrun (contrast a
@@ -2046,6 +2073,68 @@ public sealed partial class Simulation
         => ex.Class is >= 11 and <= 16 && ex.Number != 1205;
 
     /// <summary>
+    /// Applies <c>SET XACT_ABORT ON</c>'s error promotion to
+    /// <paramref name="ex"/> once, at the innermost dispatch frame that sees
+    /// it. Probed against SQL Server 2025 across Msg 245 / 515 / 547 / 1222 /
+    /// 2627 / 2628 / 8115 / 8134 and an uncaught <c>THROW</c>:
+    /// <list type="bullet">
+    /// <item>With no <c>TRY</c> frame open anywhere on the session, the whole
+    /// transaction stack rolls back (<c>@@TRANCOUNT</c> 2 reads 0 afterwards,
+    /// not 1) and the batch ends where the error was raised — including when
+    /// the error came from inside a procedure body.</item>
+    /// <item>With a <c>TRY</c> frame open, the <c>CATCH</c> runs and the batch
+    /// carries on past it, but the transaction is left doomed: the same
+    /// <c>@@TRANCOUNT</c>, <c>XACT_STATE()</c> reading <c>-1</c>, and Msg 3930
+    /// on the next statement that would write.</item>
+    /// <item><c>RAISERROR</c> is the exemption. Uncaught under the option it
+    /// neither ends the batch nor touches the transaction; caught, it dooms the
+    /// transaction like anything else, which is what
+    /// <see cref="SimulatedSqlException.RaisedByRaiserror"/> encodes.</item>
+    /// </list>
+    /// Severity 15 is real's parse phase, which never reaches a transaction,
+    /// and the two unconditional classes (deadlock victim, and the
+    /// transaction-aborting errors) already rolled back above.
+    /// </summary>
+    private static void ApplyXactAbortPromotion(SimulatedDbConnection connection, SimulatedSqlException ex)
+    {
+        if (!connection.XactAbort
+            || ex.XactAbortPromoted
+            || ex.AbortsTransaction
+            || ex.Class is not ((>= 11 and <= 14) or 16)
+            || ex.Number == 1205)
+        {
+            return;
+        }
+
+        if (connection.OpenTryFrames > 0)
+        {
+            if (connection.CurrentTransaction is { } doomed)
+                doomed.Doomed = true;
+            return;
+        }
+
+        if (ex.RaisedByRaiserror)
+            return;
+        ex.XactAbortPromoted = true;
+        connection.CurrentTransaction?.Rollback();
+    }
+
+    /// <summary>
+    /// Raises Msg 3930 when the session's transaction has been doomed by an
+    /// error caught under <c>SET XACT_ABORT ON</c>. Consulted where a statement
+    /// would write to the log — every DML statement (through
+    /// <see cref="RunMutation"/>, which covers the DDL that routes through it),
+    /// <c>COMMIT</c> and <c>SAVE TRANSACTION</c>. Reads pass through: a
+    /// <c>SELECT</c> inside a doomed transaction answers normally
+    /// (probe-confirmed), and so does a <c>DECLARE</c>.
+    /// </summary>
+    private static void RejectWriteInDoomedTransaction(SimulatedDbConnection connection)
+    {
+        if (connection.CurrentTransaction is { Doomed: true })
+            throw SimulatedSqlException.UncommittableTransactionCannotWrite();
+    }
+
+    /// <summary>
     /// True for the bind-class name-resolution failures that abort the whole
     /// batch on real SQL Server rather than merely terminating their statement.
     /// Probe-confirmed against SQL Server 2025 (2026-07-16): with a
@@ -2094,6 +2183,17 @@ public sealed partial class Simulation
                 throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
             ParseCteBindings(context);
             context.CtePrefixLeadsSelectStatement = context.Token is ReservedKeyword { Keyword: Keyword.Select };
+        }
+
+        // A doomed transaction refuses object DDL with Msg 3930 the way it
+        // refuses DML (probe-confirmed for CREATE TABLE). DML takes the check
+        // inside RunMutation, which is where it can see whether the statement
+        // reached a write; DDL writes unconditionally, so the leading keyword
+        // is enough.
+        if (!batch.IsSkipping
+            && context.Token is ReservedKeyword { Keyword: Keyword.Create or Keyword.Alter or Keyword.Drop or Keyword.Truncate })
+        {
+            RejectWriteInDoomedTransaction(connection);
         }
 
         // SET FMTONLY ON: SELECT returns its metadata with zero rows and every
@@ -2211,7 +2311,11 @@ public sealed partial class Simulation
                     // materializes to mirror that). The rows are held in
                     // whichever form the plan produced — a projecting SELECT's
                     // SqlValue rows travel to the reader as they are.
-                    var executed = selection.Execute(batch);
+                    // SET ROWCOUNT caps what the statement returns, including
+                    // the rows a `SELECT @v = …` assignment walks
+                    // (probe-confirmed: the assignment keeps the value from the
+                    // last row inside the cap, and @@ROWCOUNT reads the cap).
+                    var executed = selection.Execute(batch).WithRowCountLimit(connection.RowCountLimit);
                     var rowCount = executed.MaterializeRows();
                     connection.LastStatementRowCount = rowCount;
                     outcome = selection.IsAssignmentOnly
@@ -2353,6 +2457,29 @@ public sealed partial class Simulation
                 ParseWaitForStatement(batch);
                 if (!batch.IsSkipping)
                     connection.LastStatementRowCount = 0;
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.ReadText }:
+                {
+                    var readText = ParseReadTextStatement(batch);
+                    if (readText is not null)
+                    {
+                        connection.LastStatementRowCount = 1;
+                        yield return readText;
+                    }
+                }
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.WriteText }:
+                outcome = RunMutation(context, ParseWriteTextStatement);
+                if (!batch.IsSkipping)
+                    connection.LastStatementRowCount = outcome.RecordsAffected;
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.UpdateText }:
+                outcome = RunMutation(context, ParseUpdateTextStatement);
+                if (!batch.IsSkipping)
+                    connection.LastStatementRowCount = outcome.RecordsAffected;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Truncate }:
@@ -2618,39 +2745,85 @@ public sealed partial class Simulation
 
         var tx = context.Connection.CurrentTransaction
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+        // SAVE TRANSACTION writes a log record, so a doomed transaction
+        // refuses it with Msg 3930 (probe-confirmed).
+        RejectWriteInDoomedTransaction(context.Connection);
         tx.Savepoints[name] = tx.UndoLog.Position;
         return true;
     }
 
     /// <summary>
-    /// Parses <c>BEGIN TRAN[SACTION] [name] [WITH MARK 'description']</c>.
+    /// Parses <c>BEGIN TRAN[SACTION] [name] [WITH MARK ['description']]</c>.
     /// Opens a fresh <see cref="SimulatedDbTransaction"/> on the connection
     /// when none is active (TRANCOUNT 0 → 1) or increments
     /// <see cref="SimulatedDbTransaction.TranCount"/> when one already is
-    /// (nested-BEGIN TRANCOUNT bump, no real nesting). The optional name and
-    /// WITH MARK clause are accepted but cosmetic — SQL Server treats the
-    /// name as documentation only, and only the outermost COMMIT actually
-    /// commits regardless of which name the COMMIT references.
+    /// (nested-BEGIN TRANCOUNT bump, no real nesting). The optional name is
+    /// cosmetic — SQL Server treats it as documentation only, and only the
+    /// outermost COMMIT actually commits regardless of which name the COMMIT
+    /// references.
     /// </summary>
+    /// <remarks>
+    /// The mark a <c>WITH MARK</c> places is a transaction-log artifact used by
+    /// point-in-time restore, which nothing here has: the description is parsed
+    /// and discarded. Its two observable consequences are modeled —
+    /// <b>Msg 3901</b> when the transaction went unnamed (raised at run time, so
+    /// <c>@@TRANCOUNT</c> stays where it was), and the severity-10
+    /// <b>Msg 3920</b> when a mark is already on the transaction, which real
+    /// emits only for the second <i>marked</i> BEGIN rather than for every
+    /// nested one. Both probe-confirmed against SQL Server 2025, along with the
+    /// description being optional and admitting a variable.
+    /// </remarks>
     private static bool TryParseBeginTransaction(ParserContext context)
     {
         if (!context.MoveNext() || context.Token is not ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
             return false;
-        // Optional name (BEGIN TRANSACTION my_tx). Cosmetic; consume and ignore.
-        if (context.MoveNext() && context.Token is Name)
+        // Optional name (BEGIN TRANSACTION my_tx, or @v holding one). Cosmetic;
+        // consume and ignore — but whether one was written decides Msg 3901.
+        var named = false;
+        if (context.MoveNext() && context.Token is Name or AtPrefixedString)
+        {
+            named = true;
             context.MoveNextOptional();
+        }
+
+        var marked = false;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        {
+            if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Mark })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            marked = true;
+            // The description is optional and may be a literal or a variable.
+            if (context.MoveNext() && context.Token is Literal or AtPrefixedString)
+                context.MoveNextOptional();
+        }
 
         if (context.Batch.IsSkipping)
             return true;
 
+        if (marked && !named)
+            throw SimulatedSqlException.TransactionNameRequiredForMark();
+
         if (context.Connection.CurrentTransaction is { } existing)
         {
+            if (marked && existing.IsMarked)
+            {
+                context.Batch.AppendInfoError(
+                    @class: 0,
+                    state: 1,
+                    number: 3920,
+                    message: "The WITH MARK option only applies to the first BEGIN TRAN WITH MARK statement. The option is ignored.");
+            }
+
             existing.TranCount++;
+            existing.IsMarked |= marked;
         }
         else
         {
             context.Connection.CurrentTransaction = new SimulatedDbTransaction(
-                context.Simulation, context.Connection, System.Data.IsolationLevel.Unspecified);
+                context.Simulation, context.Connection, System.Data.IsolationLevel.Unspecified)
+            {
+                IsMarked = marked,
+            };
         }
         return true;
     }
@@ -2688,6 +2861,10 @@ public sealed partial class Simulation
         var tx = context.Connection.CurrentTransaction
             ?? throw SimulatedSqlException.NoCorrespondingBeginCommit();
 
+        // A COMMIT is a log write, so a doomed transaction refuses it with
+        // Msg 3930 exactly as a DML statement does (probe-confirmed) — real
+        // names the message's own advice: roll back instead.
+        RejectWriteInDoomedTransaction(context.Connection);
         tx.TranCount--;
         if (tx.TranCount == 0)
             tx.Commit();
@@ -2747,6 +2924,8 @@ public sealed partial class Simulation
 
     private static SimulatedStatementOutcome RunMutation(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> body)
     {
+        if (!context.Batch.IsSkipping)
+            RejectWriteInDoomedTransaction(context.Connection);
         var tx = context.Connection.CurrentTransaction;
         // Inside a trigger, join the firing statement's scope instead of
         // opening one: the parent statement and everything its triggers wrote

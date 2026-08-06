@@ -214,7 +214,7 @@ internal abstract class Expression
         {
             Operator { Character: '+' } => ParseSignedOperand(context),
             Operator { Character: '-' } => Negate.Of(ParseSignedOperand(context)),
-            Operator { Character: '~' } => BitwiseNot.Create(ParsePrimary(context.MoveNextRequiredReturnSelf())),
+            Operator { Character: '~' } => new BitwiseNot(ParsePrimary(context.MoveNextRequiredReturnSelf())),
             _ => ParsePostfix(ParseLeadingAtom(context), context),
         };
     }
@@ -261,7 +261,8 @@ internal abstract class Expression
             AtAtKeyword.ProcId => new ProcIdExpression(),
             AtAtKeyword.FetchStatus => new FetchStatusExpression(),
             AtAtKeyword.CursorRows => new CursorRowsExpression(),
-            AtAtKeyword.Options => Value.FromAtAtOptions(context),
+            AtAtKeyword.Options => new OptionsExpression(context),
+            AtAtKeyword.DateFirst => new DateFirstExpression(context),
             _ => new Value(doubleAtPrefixedString),
         },
         ReservedKeyword { Keyword: Keyword.Null } => new Value(),
@@ -563,8 +564,12 @@ internal abstract class Expression
     {
         // The name that got us here was counted as a column reference on the way
         // in (the parser can't know a `(` follows until now); un-count it so
-        // ParserContext.ColumnReferencesParsed nets genuine columns only.
+        // ParserContext.ColumnReferencesParsed nets genuine columns only, and
+        // withdraw it from the scalar-only record for the same reason —
+        // `PRINT DB_NAME()` names a function, not a column.
         context.ColumnReferencesParsed--;
+        if (ReferenceEquals(context.ScalarOnlyColumnReference, reference))
+            context.ScalarOnlyColumnReference = null;
 
         context.NestingDepth += FunctionCallNestingCost;
         if (context.NestingDepth > MaxNestingDepth)
@@ -841,6 +846,8 @@ internal abstract class Expression
         // appended to `ReferencedName` after construction, so the whole
         // multi-part name only exists once the postfix loop is done with it.
         context.FromSourceColumnSink?.Add(reference);
+        if (context.ScalarOnlyOperand)
+            context.ScalarOnlyColumnReference ??= reference;
         return reference;
     }
 
@@ -1270,6 +1277,12 @@ internal abstract class Expression
     /// </summary>
     internal static Selection ParseSubqueryRejectingNextValueFor(ParserContext context)
     {
+        // Every subquery shape funnels through here — the scalar form, EXISTS,
+        // the quantified comparisons and IN — so this is where an operand that
+        // admits only scalar expressions refuses one, ahead of the body's own
+        // parse so its columns can't be mistaken for the operand's.
+        if (context.ScalarOnlyOperand)
+            throw ScalarOnlyOperandError(context);
         var saved = context.EnterNextValueForScope(NextValueForScope.Nested);
         try
         {
@@ -1294,6 +1307,18 @@ internal abstract class Expression
     /// charges the shared nesting budget before recursing (Msg 191 on
     /// overflow).
     /// </summary>
+    /// <summary>
+    /// The diagnostic an operand that admits only scalar expressions raises,
+    /// picked by what the left-to-right reading met first: a column reference
+    /// already recorded outranks the construct now being refused, since real
+    /// reports <c>PRINT bbb + (SELECT 1)</c> as Msg 128 and
+    /// <c>PRINT (SELECT 1) + bbb</c> as Msg 1046.
+    /// </summary>
+    internal static SimulatedSqlException ScalarOnlyOperandError(ParserContext context) =>
+        context.ScalarOnlyColumnReference is { } reference
+            ? SimulatedSqlException.NameNotPermittedInThisContext(reference.ReferencedName.ToString())
+            : SimulatedSqlException.SubqueriesNotAllowedInThisContext();
+
     private static Expression ParseGroupedExpression(ParserContext context)
     {
         context.MoveNextRequired();

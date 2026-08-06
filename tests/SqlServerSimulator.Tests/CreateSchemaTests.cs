@@ -55,23 +55,15 @@ public sealed class CreateSchemaTests
     public void CreateSchema_InformationSchema_Msg2760()
         => new Simulation().AssertSqlError("create schema INFORMATION_SCHEMA", 2760);
 
-    [TestMethod]
-    public void CreateSchema_Authorization_NotSupported()
-        => Throws<NotSupportedException>(() =>
-            new Simulation().ExecuteNonQuery("create schema audit authorization dbo"));
-
     /// <summary>
-    /// Real SQL Server treats trailing tokens after <c>CREATE SCHEMA</c> as
-    /// the <c>&lt;schema_element&gt;</c> list (inline CREATE TABLE / VIEW /
-    /// GRANT) — the simulator doesn't implement schema_element grammar, but
-    /// trailing statement-starting keywords parse as the next statement in the
-    /// batch (CREATE / SELECT / INSERT / etc. are statement boundaries that
-    /// the dispatch loop picks up cleanly). Net effect is the same as the
-    /// common idiom; only the AUTHORIZATION clause and unusual non-boundary
-    /// trailers raise <see cref="NotSupportedException"/>.
+    /// The trailing tokens after <c>CREATE SCHEMA</c> are the statement's own
+    /// <c>&lt;schema_element&gt;</c> list, so a qualified element name resolves
+    /// as written and the statement that follows the list picks up normally.
+    /// The scoping rules the list carries live in
+    /// <see cref="CreateSchemaElementTests"/>.
     /// </summary>
     [TestMethod]
-    public void CreateSchema_FollowedByCreateTable_DispatchesAsTwoStatements()
+    public void CreateSchema_FollowedByCreateTable_BindsTheTableAsAnElement()
         => AreEqual(1, new Simulation().ExecuteScalar("""
             create schema audit
             create table audit.t (id int)

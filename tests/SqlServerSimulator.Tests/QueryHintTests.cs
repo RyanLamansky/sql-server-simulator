@@ -688,4 +688,131 @@ public sealed class QueryHintTests
             using (select id, v from src) as s on s.id = t.id
             when not matched by target then insert (id, v) values (s.id, s.v);
             """, 321, "\"banana\" is not a recognized table hints option.");
+
+    // --- the legacy bare-paren form: what it means turns on the alias ---
+
+    private const string SeekTable = """
+        create table t (a int, b int, d int, e int);
+        create index ix_ab on t(a, b) include (d);
+        insert t values (1, 2, 3, 4);
+        """;
+
+    [TestMethod]
+    public void BareParen_RecognizedHint_NoAlias_IsStillAHintList()
+        => AreEqual(1, new Simulation().ExecuteScalar($"{SeekTable} select count(*) from t (nolock)"));
+
+    [TestMethod]
+    public void BareParen_UnknownName_WithAlias_ReportsMsg321()
+        => new Simulation().AssertSqlError(
+            $"{SeekTable} select * from t x (unknown)",
+            321,
+            "\"unknown\" is not a recognized table hints option.");
+
+    [TestMethod]
+    public void BareParen_UnknownName_NoAlias_ReportsMsg207ThenMsg215()
+    {
+        var exception = new Simulation().AssertSqlError($"{SeekTable} select * from t (unknown)", 207);
+        AreEqual(2, exception.Errors.Count);
+        AreEqual("Invalid column name 'unknown'.", exception.Errors[0].Message);
+        AreEqual(215, exception.Errors[1].Number);
+        AreEqual(
+            "Parameters supplied for object 't' which is not a function. If the parameters are intended as a table hint, a WITH keyword is required.",
+            exception.Errors[1].Message);
+    }
+
+    [TestMethod]
+    public void BareParen_AColumnOfTheSourceItself_StillReportsMsg207()
+        // The source is not in scope for its own arguments, so even a name the
+        // table carries is an unresolvable column reference.
+        => AreEqual("Invalid column name 'a'.", new Simulation().AssertSqlError($"{SeekTable} select * from t (a)", 207).Message);
+
+    [TestMethod]
+    public void BareParen_SeveralUnknownNames_ReportOneMsg207Each()
+        => AreEqual(3, new Simulation().AssertSqlError($"{SeekTable} select * from t (unknown, alsounknown)", 207).Errors.Count);
+
+    [TestMethod]
+    public void BareParen_ScalarArgument_ReportsMsg215Alone()
+    {
+        var exception = new Simulation().AssertSqlError($"{SeekTable} select * from t (1)", 215);
+        AreEqual(1, exception.Errors.Count);
+    }
+
+    [TestMethod]
+    public void BareParen_VariableArgument_ReportsMsg215Alone()
+        => AreEqual(1, new Simulation().AssertSqlError($"{SeekTable} declare @z int = 1; select * from t (@z)", 215).Errors.Count);
+
+    [TestMethod]
+    public void BareParen_IndexHint_ReportsMsg1018()
+        => new Simulation().AssertSqlError(
+            $"{SeekTable} select * from t (index(ix_ab))",
+            1018,
+            "Incorrect syntax near 'INDEX'. If this is intended as a part of a table hint, A WITH keyword and parenthesis are now required. See SQL Server Books Online for proper syntax.");
+
+    // --- FORCESEEK's nested form validates its index and its seek columns ---
+
+    [TestMethod]
+    public void ForceSeek_LeadingKeyPrefix_IsAccepted()
+        => AreEqual(1, new Simulation().ExecuteScalar($"{SeekTable} select count(*) from t with (forceseek(ix_ab(a))) where a = 1"));
+
+    [TestMethod]
+    public void ForceSeek_WholeKey_IsAccepted()
+        => AreEqual(1, new Simulation().ExecuteScalar($"{SeekTable} select count(*) from t with (forceseek(ix_ab(a, b))) where a = 1"));
+
+    [TestMethod]
+    public void ForceSeek_MissingIndex_ReportsMsg308()
+        => new Simulation().AssertSqlError(
+            $"{SeekTable} select * from t with (forceseek(ix_nope(a)))",
+            308,
+            "Index 'ix_nope' on table 'dbo.t' (specified in the FROM clause) does not exist.");
+
+    [TestMethod]
+    public void ForceSeek_NonKeyColumn_ReportsMsg362()
+        => new Simulation().AssertSqlError(
+            $"{SeekTable} select * from t with (forceseek(ix_ab(nope)))",
+            362,
+            "The query processor could not produce a query plan because the name 'nope' in the FORCESEEK hint on table or view 't' did not match the key column names of the index 'ix_ab'.");
+
+    [TestMethod]
+    public void ForceSeek_IncludedColumn_ReportsMsg362()
+        => new Simulation().AssertSqlError($"{SeekTable} select * from t with (forceseek(ix_ab(d)))", 362);
+
+    [TestMethod]
+    public void ForceSeek_KeyColumnOutOfOrder_ReportsMsg362NamingIt()
+        => AreEqual(
+            "The query processor could not produce a query plan because the name 'b' in the FORCESEEK hint on table or view 't' did not match the key column names of the index 'ix_ab'.",
+            new Simulation().AssertSqlError($"{SeekTable} select * from t with (forceseek(ix_ab(b, a)))", 362).Message);
+
+    [TestMethod]
+    public void ForceSeek_SecondColumnWrong_NamesTheSecond()
+        => AreEqual(
+            "The query processor could not produce a query plan because the name 'nope' in the FORCESEEK hint on table or view 't' did not match the key column names of the index 'ix_ab'.",
+            new Simulation().AssertSqlError($"{SeekTable} select * from t with (forceseek(ix_ab(a, nope)))", 362).Message);
+
+    [TestMethod]
+    public void ForceSeek_TooManySeekColumns_ReportsMsg365AheadOfTheNameCheck()
+        => new Simulation().AssertSqlError(
+            $"{SeekTable} select * from t with (forceseek(ix_ab(a, b, d)))",
+            365,
+            "The query processor could not produce a query plan because the FORCESEEK hint on table or view 't' specified more seek columns than the number of key columns in index 'ix_ab'.");
+
+    [TestMethod]
+    public void ForceSeek_NamesTheBaseTableNotTheAlias()
+        => AreEqual(
+            "The query processor could not produce a query plan because the name 'nope' in the FORCESEEK hint on table or view 't' did not match the key column names of the index 'ix_ab'.",
+            new Simulation().AssertSqlError($"{SeekTable} select * from t v with (forceseek(ix_ab(nope)))", 362).Message);
+
+    [TestMethod]
+    public void ForceSeek_OnAConstraintBackedIndex_ValidatesItsKeyColumns()
+        => new Simulation().AssertSqlError("""
+            create table t (a int not null, b int not null, constraint pk_t primary key (a, b));
+            select * from t with (forceseek(pk_t(b)))
+            """, 362);
+
+    [TestMethod]
+    public void ForceSeek_ColumnNameMatchIsCollationDriven()
+        => AreEqual(1, new Simulation().ExecuteScalar($"{SeekTable} select count(*) from t with (forceseek(ix_ab(A))) where a = 1"));
+
+    [TestMethod]
+    public void ForceSeek_WithoutTheNestedForm_StaysParseAndDiscard()
+        => AreEqual(1, new Simulation().ExecuteScalar($"{SeekTable} select count(*) from t with (forceseek)"));
 }

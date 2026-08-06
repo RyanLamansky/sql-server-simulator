@@ -117,7 +117,7 @@ Every neighbouring pair below was probed directly (SQL Server 2025, 2026-08-05).
 | 3 | **11721** | a statement that dedupes or combines rowsets | `DISTINCT`, `UNION`, `UNION ALL`, `EXCEPT`, `INTERSECT` — in *either* branch; a nested query's own `DISTINCT` doesn't count |
 | 4 | **11723** | a statement carrying an `ORDER BY`, the reference naming no `OVER` | the select list, or a clause of the same statement |
 | 5 | **11720** | one of the eight clauses its own text names | `TOP`, `OVER`, `OUTPUT`, `ON` (a `MERGE`'s as well as a join's), `WHERE` (an `UPDATE` / `DELETE`'s as well as a `SELECT`'s), `GROUP BY`, `HAVING`, `ORDER BY` |
-| 6 | **11739** | a statement carrying a `TOP` or an `OFFSET` | either clause, whatever the reference's own position |
+| 6 | **11739** | a statement carrying a `TOP` or an `OFFSET`, or running under a session `SET ROWCOUNT` | either clause or the option, whatever the reference's own position |
 | 7 | **11741** | an arm of the conditional family | `CASE` (simple and searched — input expression, `WHEN` operand, `THEN`, `ELSE`), `IIF`, `COALESCE`, `ISNULL`, `NULLIF` |
 | 8 | **11742** | a `MERGE` action's own expression | a `WHEN MATCHED … UPDATE SET`, a `WHEN NOT MATCHED … INSERT … VALUES` |
 | 9 | **11738** | a statement real declines to define it in at all | `PRINT` |
@@ -157,12 +157,11 @@ Such a derived table is *uncorrelated*, so real evaluates it **once** for the wh
 
 ### Divergences
 
-Each is a case where both engines refuse and only the message differs, except the last.
+Each is a case where both engines refuse and only the message differs.
 
 - A reference sitting in a **restricted clause** (Msg 11720) or a **conditional arm** (Msg 11741) in a statement that *also* carries an `ORDER BY` reports its own message where real reports Msg 11723.
   Those two refusals fire where the reference parses, which is before the `ORDER BY` is read; `DISTINCT` and `TOP` are known by then and do report real's message.
 - A `NEXT VALUE FOR` inside a **windowed aggregate**'s argument (`SUM(NEXT VALUE FOR s) OVER ()`) reports Msg 11725 where real reports 11720, since the trailing `OVER` is read after the argument.
-- **`SET ROWCOUNT` isn't modeled** at all (it parses and is discarded — see [`grammar.md`](grammar.md)), so the third trigger of Msg 11739 doesn't fire; the `TOP` and `OFFSET` triggers do.
 
 ### A parse that isn't going to run draws nothing
 

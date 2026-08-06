@@ -34,7 +34,7 @@ internal sealed class Left : Expression
 
         var len = StringScalars.CoerceLengthArgument(n);
         if (len < 0)
-            throw SimulatedSqlException.NegativeLengthNotAllowed("left", 6);
+            throw SimulatedSqlException.NegativeLengthNotAllowedAtRuntime(isRight: false);
 
         var input = s.AsString;
         var result = s.Type.Collation?.IsSupplementaryCharacterAware == true
@@ -55,6 +55,8 @@ internal sealed class Left : Expression
     /// </summary>
     private SqlType ResolveResultType(SqlType sourceType, BatchContext batch)
     {
+        if (StringScalars.IsConstantNegativeCount(count))
+            throw SimulatedSqlException.NegativeLengthNotAllowed("left", 6);
         var stringType = StringScalars.ResolveResultType(sourceType, batch);
         if (StringScalars.IsMaxForm(stringType))
             return stringType;

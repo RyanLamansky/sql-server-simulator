@@ -39,9 +39,11 @@ public sealed class ResultNullabilityTests
             bnn bigint not null, tnn tinyint not null,
             fnn float not null, rnn real not null, ynn smallmoney not null,
             p70 decimal(7, 0) not null, p90 decimal(9, 0) not null, p160 decimal(16, 0) not null,
-            dtnn date not null, d2nn datetime2(7) not null, sdnn smalldatetime not null);
+            dtnn date not null, d2nn datetime2(7) not null, sdnn smalldatetime not null,
+            vbnn varbinary(10) not null, bfx binary(4) not null, vmnn varbinary(max) not null);
         insert nb values (2020, null, 1, 'a', null, '2020-01-01', null, 1.5, null,
-            1, 1, 1, 1, 1, 1, 1, 1, '2020-01-01', '2020-01-01', '2020-01-01');
+            1, 1, 1, 1, 1, 1, 1, 1, '2020-01-01', '2020-01-01', '2020-01-01',
+            0x0102, 0x01020304, 0x0102);
         """;
 
     /// <summary>
@@ -212,6 +214,13 @@ public sealed class ResultNullabilityTests
     [DataRow("coalesce(null, null, 5)", false)]
     [DataRow("coalesce(null, nn)", false)]
     [DataRow("coalesce(5, nu)", false)]                     // a constant non-NULL arm answers alone
+    // A binary arm unifies by widening, which preserves every value, so the
+    // NOT NULL operand keeps its answer at each of the family's widths.
+    [DataRow("coalesce(vbnn, 0x00)", false)]
+    [DataRow("coalesce(vbnn, 0x0000000000000000000000)", false)]
+    [DataRow("coalesce(bfx, 0x00000000)", false)]
+    [DataRow("coalesce(vmnn, 0x00)", false)]
+    [DataRow("coalesce(vbnn, cast(0x00 as varbinary(10)))", true)]
     [DataRow("isnull(nu, 0)", false)]                       // ISNULL needs only one non-null operand
     [DataRow("isnull(nu, nu)", true)]
     [DataRow("iif(nn > 1, 1, 2)", false)]

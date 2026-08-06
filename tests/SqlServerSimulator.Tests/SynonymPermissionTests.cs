@@ -175,6 +175,28 @@ public sealed class SynonymPermissionTests
         Contains("UPDATE permission was denied on the object 's'", ex.Message);
     }
 
+    /// <summary>
+    /// Without a WHERE clause the read requirement comes from the SET list
+    /// alone: a constant right-hand side needs only UPDATE, while one that
+    /// reads a column needs SELECT as well — object-grain on the synonym, so
+    /// the denial names it. Probed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void Update_ThroughSynonymWithNoWhere_NeedsSelectOnlyWhenTheSetListReads()
+    {
+        var sim = Seeded();
+        _ = sim.ExecuteNonQuery("grant update on dbo.s to u");
+        _ = sim.ExecuteNonQuery("execute as user = 'u'; update dbo.s set a = 1");
+        AreEqual(2, sim.ExecuteScalar("select count(*) from dbo.t where a = 1"));
+
+        var ex = sim.AssertSqlError("execute as user = 'u'; update dbo.s set a = a + 1", 229);
+        Contains("SELECT permission was denied on the object 's'", ex.Message);
+
+        _ = sim.ExecuteNonQuery("grant select on dbo.s to u");
+        _ = sim.ExecuteNonQuery("execute as user = 'u'; update dbo.s set a = a + 1");
+        AreEqual(2, sim.ExecuteScalar("select count(*) from dbo.t where a = 2"));
+    }
+
     [TestMethod]
     public void Delete_ThroughSynonym_StaysObjectGrain()
     {

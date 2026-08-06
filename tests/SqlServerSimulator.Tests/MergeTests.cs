@@ -217,6 +217,25 @@ public sealed class MergeTests
             when not matched by source then insert (id, v) values (0, 0);
             """, 10711);
 
+    /// <summary>
+    /// A MERGE insert action's value count is measured the way an ordinary
+    /// INSERT's is: against a written column list (Msg 110 for a surplus
+    /// value, Msg 109 for a missing one), and against the target's own
+    /// definition when no list is written (Msg 213). Probed against SQL
+    /// Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert (id, v) values (s.id, s.v, 3)", 110)]
+    [DataRow("insert (id, v, w) values (s.id, s.v)", 109)]
+    [DataRow("insert values (s.id, s.v)", 213)]
+    [DataRow("insert values (s.id, s.v, 3, 4)", 213)]
+    public void InsertActionWidthMismatch_ReportsTheInsertStatementError(string action, int errorNumber)
+        => _ = new Simulation().AssertSqlError($"""
+            create table t (id int, v int, w int);
+            merge t using (values (1, 10)) as s (id, v) on t.id = s.id
+            when not matched then {action};
+            """, errorNumber);
+
     [TestMethod]
     public void UpdateInWhenNotMatchedByTarget_RaisesMsg10710()
         => _ = new Simulation().AssertSqlError("""

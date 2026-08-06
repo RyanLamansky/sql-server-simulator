@@ -322,7 +322,7 @@ internal static class DatePartKinds
     /// non-NULL value <paramref name="value"/>. Caller must have already
     /// validated compatibility via <see cref="RequireCompatible"/>.
     /// </summary>
-    public static int Extract(DatePartKind kind, SqlValue value)
+    public static int Extract(DatePartKind kind, SqlValue value, int dateFirst = 7)
     {
         var (date, time, offsetMinutes) = SplitDateTime(value);
         return kind switch
@@ -332,12 +332,9 @@ internal static class DatePartKinds
             DatePartKind.Month => date.Month,
             DatePartKind.DayOfYear => date.DayOfYear,
             DatePartKind.Day => date.Day,
-            DatePartKind.Week => SqlServerWeek(date),
+            DatePartKind.Week => SqlServerWeek(date, dateFirst),
             DatePartKind.IsoWeek => System.Globalization.ISOWeek.GetWeekOfYear(date),
-            // SQL Server's DATEPART(weekday, ...) returns 1-7 with the start
-            // governed by SET DATEFIRST (default 7 = Sunday). Default mapping:
-            // Sunday=1, Monday=2, ..., Saturday=7.
-            DatePartKind.Weekday => (int)date.DayOfWeek + 1,
+            DatePartKind.Weekday => WeekdayNumber(date, dateFirst),
             DatePartKind.Hour => time.Hours,
             DatePartKind.Minute => time.Minutes,
             DatePartKind.Second => time.Seconds,
@@ -516,17 +513,25 @@ internal static class DatePartKinds
     }
 
     /// <summary>
-    /// SQL Server's default-week numbering with <c>SET DATEFIRST 7</c>
-    /// (Sunday): January 1's week is week 1; subsequent weeks roll over on
-    /// Sundays. Approximated here — SQL Server's exact algorithm depends on
-    /// <c>DATEFIRST</c> + <c>SET LANGUAGE</c> and the simulator pins the
-    /// default us_english behavior.
+    /// SQL Server's <c>DATEPART(weekday, …)</c>: 1..7 counting from the weekday
+    /// <c>SET DATEFIRST</c> names as the week's first. With the default 7
+    /// (Sunday) that is Sunday=1 … Saturday=7; with <c>DATEFIRST 3</c>
+    /// (Wednesday) Sunday reads 5 and Monday 6 (probe-confirmed across
+    /// DATEFIRST 1 / 3 / 5 / 7).
     /// </summary>
-    private static int SqlServerWeek(DateOnly date)
+    public static int WeekdayNumber(DateOnly date, int dateFirst) =>
+        (((int)date.DayOfWeek + 7 - dateFirst) % 7) + 1;
+
+    /// <summary>
+    /// SQL Server's <c>DATEPART(week, …)</c>: January 1 is in week 1, and the
+    /// number advances at each weekday <c>SET DATEFIRST</c> names, so the value
+    /// moves with the option (probe-confirmed: 2026-01-04, a Sunday, is week 2
+    /// under DATEFIRST 7 and week 1 under DATEFIRST 1). The ISO variant, which
+    /// is fixed to Monday, has its own kind.
+    /// </summary>
+    private static int SqlServerWeek(DateOnly date, int dateFirst)
     {
         var jan1 = new DateOnly(date.Year, 1, 1);
-        var jan1DayOfWeek = (int)jan1.DayOfWeek;
-        var daysFromJan1 = date.DayNumber - jan1.DayNumber;
-        return ((daysFromJan1 + jan1DayOfWeek) / 7) + 1;
+        return ((date.DayNumber - jan1.DayNumber + WeekdayNumber(jan1, dateFirst) - 1) / 7) + 1;
     }
 }

@@ -73,9 +73,30 @@ A `REBUILD` of an index that was never disabled is a no-op success, and the form
 Real's optimizer ignores a disabled index, but here the seek is a pure accelerator keyed on heap + column ordinals with a residual filter, never an index object, so skipping it couldn't change a result — only a plan, which the simulator doesn't expose.
 The observable surface (enforcement, the lockout, the catalog) is what's modeled.
 
-**Not modeled yet**: `REORGANIZE` / `RESUME` / `PAUSE` / `ABORT` raise `NotSupportedException` naming the form.
-
 `DisabledIndexTests` is the regression suite.
+
+## REORGANIZE, and the resumable trio
+
+`ALTER INDEX … REORGANIZE` compacts a B-tree's pages in place.
+A flat page list has nothing to compact, so what the statement does here is validate and succeed — probe-confirmed that real leaves the rows identical either way.
+The grammar is `REORGANIZE [PARTITION = { ALL | <n> }] [WITH ( option = ON | OFF [, …] )]`, and the validation is where the fidelity sits:
+
+- The `WITH` block takes `LOB_COMPACTION` and `COMPRESS_ALL_ROW_GROUPS` — real accepts the columnstore-shaped second option on a rowstore index without complaint, so neither name is gated on the index kind.
+  Anything else is **Msg 155** in REORGANIZE's own wording (`'X' is not a recognized ALTER INDEX REORGANIZE option.`, distinct from the `SET` block's plain text), a non-`ON`/`OFF` value is **Msg 153**, and an empty list is Msg 102 on the closing paren.
+- A **disabled** index refuses REORGANIZE with **Msg 1973**, but `ALTER INDEX ALL` steps past a disabled index rather than aborting on it — the opposite of the `SET (IGNORE_DUP_KEY …)` fan-out, and probe-confirmed both ways.
+- `PARTITION = ALL` is accepted; a partition *number* is refused, and real splits the refusal by what it can name.
+  A named index reports **Msg 7729** State 1 (`… as the index 'ix' is not partitioned.`), while `ALL` reports **Msg 7735** naming the first index the statement would have touched — index_id order, so a key constraint's clustered index first — or the table when it carries no index at all.
+- A table carrying no index at all takes `ALL … REORGANIZE` as a no-op success.
+
+`RESUME` / `PAUSE` / `ABORT` address a *paused resumable* index build.
+The simulator never starts one — every index is built in place — so the whole model is real's own refusal, raised after the table and the index have resolved and caring nothing about the disabled flag:
+
+- A named index: **Msg 10638**, `ALTER INDEX 'RESUME' failed. There is no pending resumable index operation for the index 'ix' on 't'.` — the table named unqualified, at State **1** for `RESUME` and State **2** for `PAUSE` and `ABORT`.
+- `ALL`: **Msg 10680** at Level 11 (not 16), `ALTER INDEX ALL 'RESUME' failed. There is no pending resumable index operation on 't'.`, at State 1 for all three forms and raised without looking at an individual index — a bare heap reports it too.
+- `RESUME` alone takes a `WITH (…)` block (`MAX_DURATION = <n> [MINUTES]` / `MAXDOP` / `WAIT_AT_LOW_PRIORITY (…)`), validated by name and discarded; an unrecognized name there is the *plain* Msg 155.
+  `PAUSE` and `ABORT` take no block, which real reports as Msg 319, and none of the three takes a `PARTITION` clause.
+
+`AlterIndexMaintenanceTests` is the regression suite.
 
 ## Equality-seek acceleration
 

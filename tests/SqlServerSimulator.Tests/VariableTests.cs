@@ -15,6 +15,23 @@ public sealed class VariableTests
     public void Declare_WithInit_HoldsValue()
         => AreEqual(7, ExecuteScalar<int>("declare @v int = 7; select @v"));
 
+    /// <summary>
+    /// A bare identifier in an expression with no FROM clause to bind it
+    /// against is Msg 207, the same error a SELECT's unresolved column takes —
+    /// probed against SQL Server 2025 for the DECLARE initializer, the SET
+    /// right-hand side and the IF / WHILE condition alike.
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @v int = nosuch_name;")]
+    [DataRow("declare @v int; set @v = nosuch_name;")]
+    [DataRow("if nosuch_name = 1 print 'x';")]
+    [DataRow("declare @v int; while nosuch_name = 1 set @v = 1;")]
+    public void BareIdentifierWithNoFromClause_RaisesMsg207(string sql)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 207);
+        AreEqual("Invalid column name 'nosuch_name'.", ex.Message);
+    }
+
     [TestMethod]
     public void Declare_AsKeywordOptional()
         => AreEqual(1, ExecuteScalar<int>("declare @v as int = 1; select @v"));

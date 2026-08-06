@@ -169,6 +169,58 @@ public sealed class GenerateSeriesTests
         CollectionAssert.AreEqual(new[] { 1.0m, 1.5m, 2.0m }, rows);
     }
 
+    /// <summary>
+    /// A negative decimal step walks down until the value passes the stop —
+    /// the mirror of the ascending loop, and the only shape that reaches the
+    /// descending bound test. Values probed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void Decimal_NegativeStep_Descends()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        using var reader = conn.CreateCommand(
+            "select value from GENERATE_SERIES(cast(5.0 as decimal(3,1)), cast(1.0 as decimal(3,1)), cast(-2.0 as decimal(3,1)))").ExecuteReader();
+        var rows = new List<decimal>();
+        while (reader.Read()) rows.Add(reader.GetDecimal(0));
+        CollectionAssert.AreEqual(new[] { 5.0m, 3.0m, 1.0m }, rows);
+    }
+
+    /// <summary>
+    /// The descending walk stops before overshooting when the step doesn't
+    /// divide the span, and an ascending stop below the start yields nothing.
+    /// </summary>
+    [TestMethod]
+    public void Decimal_NegativeStep_StopsBeforeOvershootAndEmptyWhenWrongWay()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        using var reader = conn.CreateCommand(
+            "select value from GENERATE_SERIES(cast(5.00 as decimal(5,2)), cast(1.00 as decimal(5,2)), cast(-1.50 as decimal(5,2)))").ExecuteReader();
+        var rows = new List<decimal>();
+        while (reader.Read()) rows.Add(reader.GetDecimal(0));
+        CollectionAssert.AreEqual(new[] { 5.00m, 3.50m, 2.00m }, rows);
+
+        AreEqual(
+            0,
+            conn.CreateCommand(
+                "select count(*) from GENERATE_SERIES(cast(1.0 as decimal(3,1)), cast(5.0 as decimal(3,1)), cast(-1.0 as decimal(3,1)))")
+                .ExecuteScalar());
+    }
+
+    /// <summary>
+    /// With no step written and a start above the stop, the implied step is
+    /// −1 and the series descends.
+    /// </summary>
+    [TestMethod]
+    public void Decimal_DefaultStep_DescendsWhenStartAboveStop()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        using var reader = conn.CreateCommand(
+            "select value from GENERATE_SERIES(cast(3.0 as decimal(3,1)), cast(1.0 as decimal(3,1)))").ExecuteReader();
+        var rows = new List<decimal>();
+        while (reader.Read()) rows.Add(reader.GetDecimal(0));
+        CollectionAssert.AreEqual(new[] { 3.0m, 2.0m, 1.0m }, rows);
+    }
+
     [TestMethod]
     public void Decimal_MixedPrecisionAndScale_Promotes()
     {

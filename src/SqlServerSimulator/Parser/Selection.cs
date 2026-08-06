@@ -1114,9 +1114,13 @@ internal sealed partial class Selection
         // ParseSingleSelectStatement, which owns the branch's context frame.
         // (An OFFSET earns Msg 11739 too, but it can only follow an ORDER BY,
         // whose Msg 11723 outranks it — so it needs no separate gate.)
+        // A session `SET ROWCOUNT` earns the same Msg 11739 as a written TOP —
+        // real's message names all three sources ("if ROWCOUNT option has been
+        // set, or the query contains TOP or OFFSET") and refuses on the
+        // option alone (probe-confirmed).
         if (distinct)
             _ = context.EnterNextValueForScope(NextValueForScope.Deduplicating);
-        else if (topExpression is not null)
+        else if (topExpression is not null || context.Connection.RowCountLimit > 0)
             _ = context.EnterNextValueForScope(NextValueForScope.RowLimited);
 
         // Msg 11723 is a property of the finished statement rather than of the
@@ -2614,7 +2618,7 @@ internal sealed partial class Selection
                     for (var ci = 0; ci < viewColumnNames.Length; ci++)
                         viewColumnNames[ci] = resolvedView.OutputColumns[ci].Name;
                     var viewAlias = ConsumeOptionalAlias(context);
-                    var viewHints = ParseOptionalTableHints(context);
+                    var viewHints = ParseOptionalFromSourceHints(context, viewAlias is not null, objectName.ToString());
                     // NOEXPAND reads an indexed view's materialized index
                     // rather than expanding its body, which is one of the
                     // operations real's SET-option gate covers — Msg 1934
@@ -2737,8 +2741,9 @@ internal sealed partial class Selection
                     ? ConsumeOptionalAlias(context)
                     : ConsumeOptionalAliasAtCurrent(context);
                 ParseOptionalTableSample(context);
-                var heapHints = ParseOptionalTableHints(context);
+                var heapHints = ParseOptionalFromSourceHints(context, heapAlias is not null, objectName.ToString());
                 ValidateIndexHintArguments(context.Batch.CurrentDatabase.Collation, heapHints, heapTable, $"{objectName.ImmediateQualifier ?? Database.DefaultSchemaName}.{heapTable.Name}");
+                ValidateForceSeekColumns(context.Batch.CurrentDatabase.Collation, heapHints, heapTable);
                 // Phase 1b: acquire table-level IS/IX/S/X (based on hints +
                 // isolation level) and capture the per-row plan. Temporal
                 // FOR SYSTEM_TIME sources bypass the per-row probe (they

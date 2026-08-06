@@ -42,6 +42,27 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal int TranCount = 1;
 
     /// <summary>
+    /// Set once a <c>BEGIN TRAN &lt;name&gt; WITH MARK</c> has placed a mark on
+    /// this transaction. The mark itself is a log artifact with no home here —
+    /// nothing reads it back — but a second <c>WITH MARK</c> under the same
+    /// transaction earns real's severity-10 Msg 3920, and this is what makes
+    /// that reachable.
+    /// </summary>
+    internal bool IsMarked;
+
+    /// <summary>
+    /// SQL Server's uncommittable ("doomed") transaction state: set when an
+    /// error raised under <c>SET XACT_ABORT ON</c> was caught by a
+    /// <c>TRY</c> frame instead of ending the batch. The transaction stays
+    /// open — <c>@@TRANCOUNT</c> is unchanged — but <c>XACT_STATE()</c> reads
+    /// <c>-1</c>, any statement that would write to the log raises Msg 3930,
+    /// and reaching the end of the batch with the flag still set raises
+    /// Msg 3998 and rolls back. Only <c>ROLLBACK</c> clears it, by ending the
+    /// transaction. Probe-confirmed against SQL Server 2025.
+    /// </summary>
+    internal bool Doomed;
+
+    /// <summary>
     /// Savepoint name → log position at the time of <c>SAVE TRANSACTION</c>.
     /// EF Core 10's <c>RelationalTransaction.CreateSavepoint</c> emits
     /// <c>SAVE TRANSACTION &lt;name&gt;</c> per SaveChanges call inside an

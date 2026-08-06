@@ -988,14 +988,13 @@ internal sealed partial class Selection
     /// Computes the composite bucket key for one side of the join, coercing
     /// each key value to its <see cref="EquiKey.Common"/> promotion type.
     /// Returns false (no bucket) the moment any key value is NULL.
+    /// <para>
+    /// The returned key wraps <paramref name="values"/>, so it is valid only
+    /// until the buffer's next reuse — fine for a dictionary lookup, which
+    /// reads the components without retaining them. A caller that stores the
+    /// key must clone the buffer first.
+    /// </para>
     /// </summary>
-    private static bool TryComputeKey(EquiKey[] keys, RuntimeContext runtime, bool rightSide, out SqlValueKey key) =>
-        TryComputeKeyInto(keys, runtime, rightSide, new SqlValue[keys.Length], out key);
-
-    // Scratch-buffer form: the returned key wraps <paramref name="values"/>,
-    // so it is valid only until the buffer's next reuse — fine for a
-    // dictionary lookup, which reads the components without retaining them.
-    // A caller that stores the key must clone the buffer first.
     private static bool TryComputeKeyInto(EquiKey[] keys, RuntimeContext runtime, bool rightSide, SqlValue[] values, out SqlValueKey key)
     {
         for (var i = 0; i < keys.Length; i++)

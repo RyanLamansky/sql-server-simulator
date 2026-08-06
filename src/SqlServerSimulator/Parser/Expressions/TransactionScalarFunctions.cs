@@ -7,8 +7,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// request as a tristate <c>smallint</c>. <c>0</c> = no active
 /// transaction; <c>1</c> = active, committable; <c>-1</c> = active but
 /// uncommittable (doomed by an unrecoverable error under
-/// <c>SET XACT_ABORT ON</c>). The simulator doesn't model the doomed
-/// state, so values collapse to <c>0</c> / <c>1</c>. Result type is
+/// <c>SET XACT_ABORT ON</c> — see
+/// <see cref="SimulatedDbTransaction.Doomed"/>). Result type is
 /// <see cref="SqlType.SmallInt"/> (real SQL Server's projection — verified
 /// 2026-05-22).
 /// </summary>
@@ -20,8 +20,10 @@ internal sealed class XactState : Expression
             throw SimulatedSqlException.FunctionRequiresNArguments("xact_state", 0);
     }
 
-    public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromInt16(runtime.Batch.Connection.CurrentTransaction?.TranCount > 0 ? (short)1 : (short)0);
+    public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromInt16(
+        runtime.Batch.Connection.CurrentTransaction is not { TranCount: > 0 } transaction ? (short)0
+            : transaction.Doomed ? (short)-1
+            : (short)1);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 

@@ -155,6 +155,11 @@ public sealed partial class Simulation
     /// </summary>
     private static void RejectStatementAfterModuleBody(ParserContext context, string moduleName)
     {
+        // A view body inside a CREATE SCHEMA element list is not its batch's
+        // only statement and isn't meant to be: real ends the body at the next
+        // <schema_element> keyword and carries on.
+        if (context.Batch.CreateSchemaElementScope is not null)
+            return;
         while (context.Token is Operator { Character: ';' })
             context.MoveNextOptional();
         if (context.Token is not { } trailing)

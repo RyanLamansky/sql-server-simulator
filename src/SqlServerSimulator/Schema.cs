@@ -41,6 +41,15 @@ internal sealed class Schema
     /// </summary>
     public readonly int SchemaId;
 
+    /// <summary>
+    /// Id of the database principal that owns this schema — what
+    /// <c>sys.schemas.principal_id</c> projects. <c>CREATE SCHEMA … AUTHORIZATION
+    /// &lt;principal&gt;</c> sets it; a schema created without the clause is
+    /// owned by <c>dbo</c>, matching real. A principal that owns a schema can't
+    /// be dropped (Msg 15138).
+    /// </summary>
+    public int PrincipalId = Database.DboPrincipalId;
+
     public Schema(Database database, string name, int schemaId)
     {
         this.Database = database;

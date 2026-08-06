@@ -745,9 +745,6 @@ partial class Simulation
         return (peeled as Parser.Expressions.NextValueFor)?.Sequence;
     }
 
-    private static List<SqlValue[]> EvaluateValuesTuples(ParserContext context)
-        => EvaluateParsedTuples(ParseValuesTuples(context), context.Batch, out _);
-
     /// <summary>
     /// Parses <c>VALUES</c> tuples, measures them against
     /// <paramref name="destinationColumns"/> (Msg 109 / 110 / 213, then

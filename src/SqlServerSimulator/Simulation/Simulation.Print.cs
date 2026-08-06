@@ -13,22 +13,16 @@ partial class Simulation
     /// formatted value buffers into the batch's pending-PRINT list, which
     /// fires as a single coalesced <see cref="SimulatedDbConnection.InfoMessage"/>
     /// event at end of dispatch (internal-only API — mirrors SqlClient's
-    /// probe-confirmed batch-coalescing semantic). Probed against SQL Server
-    /// 2025 (2026-05-11): NULL operand emits a single-space message; long
-    /// strings truncate at 8000 / 4000 chars depending on collation (not
-    /// modeled — simulator delivers whatever the expression evaluates to).
+    /// probe-confirmed batch-coalescing semantic).
     /// </summary>
     /// <remarks>
-    /// Type validity follows from normal expression evaluation: <c>PRINT 'val=' + 5</c>
-    /// raises Msg 245 from the <c>+</c> operator (matches probe). One known
-    /// fidelity gap: real SQL Server raises Msg 1046 ("Subqueries are not
-    /// allowed in this context") when a scalar subquery appears in the PRINT
-    /// operand; the simulator silently evaluates it. The non-string-value
-    /// formatting routes through <see cref="SqlValue.CoerceTo"/> to varchar,
-    /// which differs from SQL Server's PRINT-specific style 0 conventions
-    /// for datetime / money (acceptable divergence — string-based PRINT is
-    /// the dominant pattern; non-string emitters are typically wrapped in
-    /// CAST or CONVERT at the call site).
+    /// The operand admits only scalar expressions and has no column scope, so
+    /// the parse arms <see cref="ParserContext.ScalarOnlyOperand"/>: a name is
+    /// Msg 128 and a subquery Msg 1046, whichever the left-to-right reading
+    /// meets first, both settled while parsing so an un-taken <c>IF</c> branch
+    /// and a module body at CREATE raise where real raises. Type validity
+    /// otherwise follows from normal expression evaluation:
+    /// <c>PRINT 'val=' + 5</c> raises Msg 245 from the <c>+</c> operator.
     /// </remarks>
     private static void ParsePrintStatement(BatchContext batch)
     {
@@ -40,14 +34,22 @@ partial class Simulation
         // ones — though a CASE wrapped around the reference still reports
         // Msg 11741, which is what makes this a floor rather than a set.
         var savedRejection = context.EnterNextValueForScope(NextValueForScope.Unsupported);
+        var savedScalarOnly = context.ScalarOnlyOperand;
+        var savedScalarOnlyReference = context.ScalarOnlyColumnReference;
+        context.ScalarOnlyOperand = true;
+        context.ScalarOnlyColumnReference = null;
         Expression expression;
         try
         {
             expression = Expression.Parse(context);
+            if (context.ScalarOnlyColumnReference is not null)
+                throw Expression.ScalarOnlyOperandError(context);
         }
         finally
         {
             context.NextValueForRejection = savedRejection;
+            context.ScalarOnlyOperand = savedScalarOnly;
+            context.ScalarOnlyColumnReference = savedScalarOnlyReference;
         }
 
         if (batch.IsSkipping)
@@ -57,17 +59,51 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Renders a <see cref="SqlValue"/> for <c>PRINT</c> delivery. NULL → a
-    /// single-space string (probe-confirmed surprise); string-typed values
-    /// pass through verbatim (preserving any embedded CR / LF); other types
-    /// coerce to <c>varchar(8000)</c> for display. The 8000-byte cap matches
-    /// SQL Server's PRINT-output truncation point for ANSI strings, though
-    /// the simulator doesn't enforce the cap at the expression level —
-    /// upstream <c>+</c> concatenation may produce longer strings which
-    /// pass through here unchanged.
+    /// Renders a <see cref="SqlValue"/> for <c>PRINT</c> delivery, which is the
+    /// implicit conversion to a character string real applies — the datetime
+    /// family's own default layouts (<c>datetime</c> / <c>smalldatetime</c> at
+    /// style 0's <c>Aug  6 2026  1:45PM</c>, the modern types at their ISO
+    /// forms), <c>money</c> at two decimals, <c>float</c> / <c>real</c> at style
+    /// 0's six significant digits with a three-digit exponent, and the binary
+    /// family as <c>0x</c>-prefixed hex. NULL renders as a single space, which
+    /// is also what an empty string renders as.
     /// </summary>
-    private static string FormatPrintValue(SqlValue value) =>
-        value.IsNull ? " "
-        : SqlType.IsStringCategory(value.Type) ? value.AsString
-        : value.CoerceTo(VarcharSqlType.Get(8000, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;
+    /// <remarks>
+    /// The message truncates at <b>8000</b> characters, or <b>4000</b> when the
+    /// operand is one of the national string types — probe-confirmed against
+    /// SQL Server 2025, which delivers exactly that many characters and drops
+    /// the rest without a warning. A non-string operand's rendering is bounded
+    /// by its own type well below either cap.
+    /// </remarks>
+    private static string FormatPrintValue(SqlValue value)
+    {
+        if (value.IsNull)
+            return " ";
+        var type = value.Type;
+        if (SqlType.IsStringCategory(type))
+            return TruncateForPrint(value.AsString, IsNationalString(type) ? 4000 : 8000);
+        var target = VarcharSqlType.Get(8000, Collation.Baseline, Coercibility.CoercibleDefault);
+        var rendered = type switch
+        {
+            // Style 0 is the implicit rendering only for the two legacy
+            // datetime types; the modern date / time / datetime2 /
+            // datetimeoffset family converts to its own ISO layout instead
+            // (probe-confirmed: `PRINT CAST('2026-08-06' AS date)` is
+            // `2026-08-06`, not style 0's `Aug  6 2026`).
+            DateTimeSqlType or SmallDateTimeSqlType => value.CoerceDateTimeToStringWithStyle(target, 0),
+            _ when SqlType.IsMoneyCategory(type) => value.CoerceMoneyToStringWithStyle(target, 0),
+            _ when SqlType.IsApproximateNumericCategory(type) => value.CoerceFloatToStringWithStyle(target, 0),
+            VarbinarySqlType or BinarySqlType or ImageSqlType => value.CoerceBinaryToStringWithStyle(target, 1),
+            _ => value.CoerceTo(target),
+        };
+        return TruncateForPrint(rendered.AsString, 8000);
+    }
+
+    private static bool IsNationalString(SqlType type) =>
+        type is NVarcharSqlType or NCharSqlType or NTextSqlType;
+
+    private static string TruncateForPrint(string text, int limit) =>
+        text.Length == 0 ? " "
+        : text.Length <= limit ? text
+        : text[..limit];
 }

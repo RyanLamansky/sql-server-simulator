@@ -188,6 +188,9 @@ public sealed class ParallelAggregateTests
     [DataRow("select grp, count(*) from t group by grp order by grp offset 2 rows fetch next 3 rows only")]
     [DataRow("select year(whenOn), sum(case when month(whenOn) <= 6 then price else 0 end) from t group by year(whenOn) order by 1")]
     [DataRow("select grp, sum(measure) from t group by grp order by grp")]
+    // An OR chain a written constant absorbs keeps the folded predicate in the
+    // filter, so the purity walk meets the fold rather than the chain.
+    [DataRow("select grp, count(*) from t where id > 0 or 1 = 1 group by grp order by grp")]
     public void GroupedAggregate_ParallelMatchesSerial(string sql) => AssertParallelAgreesWithSerial(sql);
 
     /// <summary>
@@ -304,7 +307,60 @@ public sealed class ParallelAggregateTests
     [DataRow("select sum(case when rand() > 2 then 1 else 0 end) from t")]
     [DataRow("select count(*) from t where newid() is not null")]
     [DataRow("select count(*) from t where grp < (select max(k) from dim)")]
+    // A predicate kind that answers the purity question from the base — the
+    // rowset-valued family, which re-enters a plan per row.
+    [DataRow("select count(*) from t where exists (select 1 from dim where dim.k = 99)")]
+    [DataRow("select count(*) from t where grp in (select k from dim)")]
+    [DataRow("select count(*) from t where grp < any (select k from dim)")]
     public void EngagementGates_Decline(string sql) => AssertDeclinesToSerial(sql);
+
+    /// <summary>
+    /// The purity question is asked of every expression the workers evaluate —
+    /// each WHERE conjunct, each grouping expression and each aggregate
+    /// operand — so an expression kind that never answers it is a kind the
+    /// gate has never actually classified. This drives the whole scalar and
+    /// predicate zoo through that walk in one statement and asserts the merged
+    /// answer is the serial one, which is the only thing the classification is
+    /// there to protect.
+    /// </summary>
+    [TestMethod]
+    public void ParallelSafeExpressionZoo_ParallelMatchesSerial() =>
+        AssertParallelAgreesWithSerial("""
+            select grp,
+                   count(*),
+                   sum(abs(measure)),
+                   sum(cast(ceiling(price) as int) + convert(int, floor(price)) + sign(measure) + round(measure, -1)),
+                   max(datediff(day, '2015-01-01', dateadd(day, 1, whenOn))),
+                   max(len(upper(lower(trim(rtrim(ltrim(label))))))),
+                   max(datalength(replace(left(label, 4), 'a', 'b'))),
+                   max(len(right(label, 3) + '.')),
+                   max(coalesce(nullif(measure, 3), 0)),
+                   max(isnull(measure, 0)),
+                   max(greatest(measure, 1)),
+                   max(least(measure, 900)),
+                   max(iif(measure > 5, 1, 0)),
+                   max(charindex('a', substring(label, 1, 4))),
+                   max(len(concat(label, cast(measure as varchar(10))))),
+                   max(len(json_value('{"a":"xy"}', '$.a'))),
+                   max(len(label collate Latin1_General_CI_AS)),
+                   max(-measure)
+            from t
+            where (measure is distinct from 12345 and abs(id) between 1 and 1000000)
+               or not (grp in (98, 99) or sign(id) < 0)
+            group by grp
+            order by grp
+            """);
+
+    /// <summary>
+    /// A variable reference is pure — it is read once per row but never
+    /// written by one — so a WHERE naming one still engages.
+    /// </summary>
+    [TestMethod]
+    public void VariableInWhere_ParallelMatchesSerial() =>
+        AssertParallelAgreesWithSerial("""
+            declare @floor int = 0;
+            select grp, count(*), sum(measure) from t where id > @floor group by grp order by grp
+            """);
 
     /// <summary>
     /// A derived-table source declines: its rows come from a plan that would

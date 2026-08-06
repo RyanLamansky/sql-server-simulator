@@ -447,6 +447,26 @@ public sealed class CatalogProcTests
         AreEqual("myproc;1", rows[0]["PROCEDURE_NAME"]);
     }
 
+    /// <summary>
+    /// Several matches come back ordered by owner then name, which is the
+    /// order real returns them in (probed against SQL Server 2025) — the
+    /// ODBC <c>SQLProcedures</c> contract a one-row filter never exercises.
+    /// </summary>
+    [TestMethod]
+    public void SpStoredProcedures_SeveralMatches_OrderedByOwnerThenName()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create schema other",
+            "create procedure zproc as select 1",
+            "create procedure aproc as select 1",
+            "create procedure other.mproc as select 1");
+        var rows = Run(sim, "exec sp_stored_procedures @sp_name='%proc'");
+        CollectionAssert.AreEqual(
+            new[] { "dbo|aproc;1", "dbo|zproc;1", "other|mproc;1" },
+            rows.ConvertAll(r => $"{r["PROCEDURE_OWNER"]}|{r["PROCEDURE_NAME"]}"));
+    }
+
     [TestMethod]
     public void SpStoredProcedures_EightColumnShape()
     {
