@@ -711,4 +711,44 @@ public class InsertTests
         parameter.Value = value;
         _ = command.Parameters.Add(parameter);
     }
+
+    // --- A parenthesized SELECT source ---
+
+    /// <summary>
+    /// <c>INSERT INTO t (cols) (SELECT …)</c> — the parens are only reachable
+    /// once an explicit column list has been consumed, which is why the
+    /// no-column-list form stays a syntax error on both engines.
+    /// </summary>
+    [TestMethod]
+    public void ParenthesizedSelectSource_Inserts()
+        => AreEqual(2, new Simulation().ExecuteScalar("""
+            declare @t table (id int);
+            insert into @t (id) (select 1 union select 2);
+            select count(*) from @t
+            """));
+
+    [TestMethod]
+    public void NestedParenthesizedSelectSource_Inserts()
+        => AreEqual(5, new Simulation().ExecuteScalar("""
+            declare @t table (id int);
+            insert into @t (id) ((select 5));
+            select id from @t
+            """));
+
+    [TestMethod]
+    public void ParenthesizedSource_StillReportsTheArityError()
+        => AreEqual(
+            "The select list for the INSERT statement contains more items than the insert list. "
+                + "The number of SELECT values must match the number of INSERT columns.",
+            new Simulation().AssertSqlError("""
+                declare @t table (id int);
+                insert into @t (id) (select 1, 2)
+                """, 121).Message);
+
+    [TestMethod]
+    public void ParenthesizedSource_WithoutAColumnList_IsASyntaxError()
+        => new Simulation().AssertSqlError("""
+            declare @t table (id int);
+            insert into @t (select 7)
+            """, 102);
 }

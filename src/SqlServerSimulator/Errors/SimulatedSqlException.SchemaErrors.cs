@@ -1623,6 +1623,23 @@ partial class SimulatedSqlException
         new($"Column name '{columnName}' does not exist in the target table, index or view.", 1911, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 1927: <c>CREATE STATISTICS</c> named something
+    /// the table already carries. Statistics share the per-table name space
+    /// with indexes and key constraints, so an index's name collides here too
+    /// (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException StatisticsAlreadyExist(string tableName, string statisticsName) =>
+        new($"There are already statistics on table '{tableName}' named '{statisticsName}'.", 1927, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 3701 state 7: <c>DROP STATISTICS</c> named one
+    /// the table doesn't carry. Severity 11, unlike the severity-14 DROP
+    /// refusals in the permission family (probe-confirmed).
+    /// </summary>
+    internal static SimulatedSqlException CannotDropStatistics(string qualifiedName) =>
+        new($"Cannot drop the statistics '{qualifiedName}', because it does not exist or you do not have permission.", 3701, 11, 7);
+
+    /// <summary>
     /// Mimics SQL Server error 3728: <c>ALTER TABLE … DROP CONSTRAINT</c>
     /// named a constraint that doesn't exist on the target table. Probe-
     /// confirmed wording — name appears single-quoted.

@@ -64,6 +64,10 @@ partial class Simulation
                 return TryParseDropSynonym(context);
             case Name assemblyWord when assemblyWord.Value.Equals("ASSEMBLY", StringComparison.OrdinalIgnoreCase):
                 return TryParseDropAssembly(context);
+            // DROP STATISTICS takes `table.name` entries rather than the plain
+            // object names the shared comma-list path below resolves.
+            case ReservedKeyword { Keyword: Keyword.Statistics }:
+                return TryParseDropStatistics(context);
         }
 
         var targetKind = context.Token switch

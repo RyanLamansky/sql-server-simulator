@@ -55,11 +55,38 @@ Self-referencing FKs are supported (the parent table is already in its schema di
 1. **Referenced table must exist** — `MultiPartName` lookup against the live schema dict; missing → Msg 208.
 2. **Referenced column set must form a PRIMARY KEY or UNIQUE** — multiset compare against `referencedTable.KeyConstraints`.
    Mismatch → Msg 1776.
-3. **Cascade-cycle / multiple-path check** — when the new FK declares any non-NO_ACTION action, the resolver walks the existing FK graph (plus the FKs already queued in this same `CREATE TABLE` statement) looking for either a self-reference or a path from `newFk.ReferencedTable` back to `newFk.ChildTable`.
-   Either condition → Msg 1785.
+3. **Cascade-cycle / multiple-path check** — see below. → Msg 1785.
 
 The validation runs across the full pending FK list *before* mutating either table's `OutgoingForeignKeys` / `IncomingForeignKeys`.
 A failure unwinds the partial `CREATE TABLE` by removing the new table from its dict.
+
+### The Msg 1785 rule
+
+The cascade graph runs **parent → child**: deleting (or updating the key of) a parent row fires the action on the matching child rows.
+Two properties of an edge matter, and they are not the same property:
+
+- an edge **reaches** its child when its action for that operation isn't NO_ACTION, but
+- only **CASCADE propagates** — SET NULL and SET DEFAULT write the child row rather than deleting it, so nothing fires from that child in turn.
+
+One operation on one root table then has to land on each table at most once.
+A second arrival is the "multiple cascade paths" half of the message; an arrival back at the root is the "cycles" half, a self-reference being the one-edge case.
+Delete and update are analysed as separate trees, since a constraint can cascade on one and not the other, and roots are restricted to the tables that can reach the new FK's child — the graph was valid before this edge, so any new violation has to run through it (`CascadeWouldFormCycleOrDuplicate` in `Simulation.Create.cs`).
+
+The propagation distinction is the whole boundary, and both halves of the rule turn on it — probed against SQL Server 2025 over independently-built graphs, since a shared one lets an earlier rejection change what the next case is even asking:
+
+| Graph (edges written child → parent) | Verdict |
+|---|---|
+| `B→A` SET NULL, `C→B` CASCADE, `C→A` CASCADE | **accepted** — the SET NULL stops, so C is reached once |
+| `B→A` CASCADE, `C→B` CASCADE, `C→A` CASCADE | Msg 1785 — deleting A reaches C twice |
+| `B→A` CASCADE, `C→B` SET NULL, `C→A` CASCADE | Msg 1785 — the second arrival counts whatever its action |
+| `B→A` CASCADE, `C→B` CASCADE (chain, no second path) | **accepted** |
+| `C→A` CASCADE, `C→B` CASCADE (two independent roots) | **accepted** |
+| `X→Y` SET NULL, `Y→X` SET NULL (loop, nothing propagates) | **accepted** |
+| `X→Y` CASCADE, `Y→X` SET NULL (loop, the delete travels) | Msg 1785 |
+| `A→A` CASCADE (self-reference) | Msg 1785 |
+
+Both accepted loop-ish shapes turn up in production schemas — a lookup table whose rows a child cascades from while a third table nulls its reference to it, and a pair of tables each holding an optional reference to the other.
+Treating every non-NO_ACTION edge as propagating rejects both, which is how the check read before it was probed.
 
 ## Enforcement
 

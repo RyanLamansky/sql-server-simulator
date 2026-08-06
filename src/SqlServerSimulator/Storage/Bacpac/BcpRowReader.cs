@@ -88,6 +88,12 @@ internal static class BcpRowReader
         if (type == SqlType.Date) return ReadFixedRaw(ref stream, nullable, 3, type, DecodeDate);
         if (type == SqlType.Money) return ReadFixedRaw(ref stream, nullable, 8, type, b => DecodeMoney(b, type));
         if (type == SqlType.SmallMoney) return ReadFixedRaw(ref stream, nullable, 4, type, b => DecodeSmallMoney(b, type));
+        // float / real are IEEE 754 little-endian at their storage width, on
+        // the same fixed-raw prefix rule as the integer family. A float(n) with
+        // n <= 24 is real and carries the 4-byte singleton, so the declared
+        // type already names the width.
+        if (type == SqlType.Float) return ReadFixedRaw(ref stream, nullable, 8, type, b => SqlValue.FromDouble(BinaryPrimitives.ReadDoubleLittleEndian(b)));
+        if (type == SqlType.Real) return ReadFixedRaw(ref stream, nullable, 4, type, b => SqlValue.FromSingle(BinaryPrimitives.ReadSingleLittleEndian(b)));
 
         // Length-prefixed fixed — always 1-byte length prefix even when
         // NOT NULL. uniqueidentifier has fixed 16-byte payload but always

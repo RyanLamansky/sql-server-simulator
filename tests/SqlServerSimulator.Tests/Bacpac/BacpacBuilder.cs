@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Globalization;
 using System.IO.Compression;
 using System.Text;
 using System.Xml.Linq;
@@ -609,6 +610,14 @@ public sealed partial class BacpacBuilder
                 return;
             case "tinyint":
                 EncodeFixedRaw(stream, column.Nullable, 1, value, buf => buf[0] = Convert.ToByte(value));
+                return;
+            // IEEE 754 little-endian at the storage width, on the same
+            // fixed-raw prefix rule as the integer family.
+            case "float":
+                EncodeFixedRaw(stream, column.Nullable, 8, value, buf => BinaryPrimitives.WriteDoubleLittleEndian(buf, Convert.ToDouble(value, CultureInfo.InvariantCulture)));
+                return;
+            case "real":
+                EncodeFixedRaw(stream, column.Nullable, 4, value, buf => BinaryPrimitives.WriteSingleLittleEndian(buf, Convert.ToSingle(value, CultureInfo.InvariantCulture)));
                 return;
             case "bit":
                 // bit is always 1-byte length-prefixed regardless of nullability.

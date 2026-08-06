@@ -415,17 +415,28 @@ public sealed class TableBuilder
     };
 
     /// <summary>Emits the table-type-flavored column element (SqlTableTypeSimpleColumn).</summary>
+    /// <summary>
+    /// A <c>SqlTableTypeSimpleColumn</c>, written the way DacFx writes one.
+    /// </summary>
+    /// <remarks>
+    /// The nullability convention is the <em>opposite</em> of
+    /// <see cref="ColumnElement"/>'s: DacFx emits the property only when it
+    /// differs from the element kind's default, and a table-type column
+    /// defaults to NOT NULL where a table column defaults to nullable. Writing
+    /// the table convention here would make the builder disagree with real
+    /// bacpacs and hide a loader that reads the wrong default.
+    /// </remarks>
     internal XElement TableTypeColumnElement(XNamespace ns, ColumnDef column)
     {
         var qualifiedName = $"[{SchemaName}].[{TableName}].[{column.Name}]";
         var element = new XElement(ns + "Element",
             new XAttribute("Type", "SqlTableTypeSimpleColumn"),
             new XAttribute("Name", qualifiedName));
-        if (!column.Nullable)
+        if (column.Nullable)
         {
             element.Add(new XElement(ns + "Property",
                 new XAttribute("Name", "IsNullable"),
-                new XAttribute("Value", "False")));
+                new XAttribute("Value", "True")));
         }
         element.Add(new XElement(ns + "Relationship",
             new XAttribute("Name", "TypeSpecifier"),

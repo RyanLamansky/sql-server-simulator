@@ -58,6 +58,8 @@ partial class Simulation
                 return Simulation.TryParseCreateSpatial(context);
             case Name synonymWord when synonymWord.Value.Equals("SYNONYM", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateSynonym(context);
+            case ReservedKeyword { Keyword: Keyword.Statistics }:
+                return Simulation.TryParseCreateStatistics(context);
             case Name assemblyWord when assemblyWord.Value.Equals("ASSEMBLY", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateAssembly(context);
             case ReservedKeyword { Keyword: Keyword.Or }:
@@ -2502,7 +2504,7 @@ partial class Simulation
         return modifier.Keyword == Keyword.Clustered;
     }
 
-    private static string AutoConstraintName(string tableName, KeyConstraintKind kind, int[] fullOrdinals, IReadOnlyList<HeapColumn> heapColumns)
+    internal static string AutoConstraintName(string tableName, KeyConstraintKind kind, int[] fullOrdinals, IReadOnlyList<HeapColumn> heapColumns)
     {
         const ulong fnvOffset = 14695981039346656037;
         const ulong fnvPrime = 1099511628211;
@@ -2656,15 +2658,10 @@ partial class Simulation
                 createDate: context.Batch.CurrentStatement.UtcNow);
             resolved.Add(fk);
 
-            // Cascade-cycle / multiple-cascade-paths check (Msg 1785): walks
-            // the existing FK graph plus already-resolved-but-not-yet-committed
-            // FKs to keep CREATE TABLE atomic. The walk treats CASCADE / SET
-            // NULL / SET DEFAULT all as "cascading" actions (real SQL Server's
-            // probe-confirmed behavior — Msg 1785 fires on any non-NO_ACTION
-            // path that closes a cycle or duplicates a path).
+            // Cascade-cycle / multiple-cascade-paths check (Msg 1785).
             if (fk.DeleteAction != ReferentialAction.NoAction || fk.UpdateAction != ReferentialAction.NoAction)
             {
-                if (CascadeWouldFormCycleOrDuplicate(fk, resolved))
+                if (CascadeWouldFormCycleOrDuplicate(fk, resolved, context))
                     throw SimulatedSqlException.CascadeCycleOrMultiplePathsRejected(fk.Name, childTable.Name);
             }
         }
@@ -2731,121 +2728,153 @@ partial class Simulation
     }
 
     /// <summary>
-    /// True when adding <paramref name="newFk"/>'s cascade action(s) would
-    /// close a cycle in the cascade graph or introduce multiple cascade paths
-    /// from a single root to a single sink. Walks the union of every table's
-    /// already-committed <see cref="HeapTable.OutgoingForeignKeys"/> plus
-    /// <paramref name="resolvedDuringThisStatement"/> so the per-FK validation
-    /// inside one CREATE TABLE statement sees the FKs queued earlier in the
-    /// same statement.
+    /// True when <paramref name="newFk"/>'s referential actions would make the
+    /// database's cascade graph one real SQL Server refuses with Msg 1785.
     /// </summary>
-    private static bool CascadeWouldFormCycleOrDuplicate(ForeignKey newFk, List<ForeignKey> resolvedDuringThisStatement)
+    /// <remarks>
+    /// <para>
+    /// The graph runs parent → child: deleting (or updating the key of) a
+    /// parent row fires the action on the matching child rows. An edge
+    /// <em>reaches</em> its child when its action for that operation isn't
+    /// NO_ACTION, but only CASCADE <em>propagates</em> — SET NULL and SET
+    /// DEFAULT write the child row rather than deleting it, so nothing fires
+    /// from the child in turn. One operation on one root table then has to
+    /// land on each table at most once: a second arrival is the "multiple
+    /// cascade paths" half of the message, and an arrival back at the root is
+    /// the "cycles" half.
+    /// </para>
+    /// <para>
+    /// Delete and update are analysed as separate trees, since a constraint
+    /// can cascade on one and not the other. Roots are restricted to the
+    /// tables that can reach <paramref name="newFk"/>'s child: the graph was
+    /// valid before this edge, so any new violation has to run through it.
+    /// </para>
+    /// <para>
+    /// Probed against SQL Server 2025 over independently-built graphs — a
+    /// shared one lets an earlier rejection change what the next case is even
+    /// asking. What the boundary turns on is propagation, and both halves of
+    /// the rule show it. A parent whose child is reached by SET NULL and whose
+    /// grandchild is reached by CASCADE from that child is accepted, while the
+    /// same shape with CASCADE on the first hop is refused. A two-table loop of
+    /// SET NULLs is likewise accepted, where the same loop with one edge
+    /// CASCADE is refused: there the delete travels round it and the SET NULL
+    /// closes the circle. Both accepted shapes turn up in production schemas,
+    /// so treating every non-NO_ACTION edge as propagating refuses graphs real
+    /// creates.
+    /// </para>
+    /// </remarks>
+    private static bool CascadeWouldFormCycleOrDuplicate(ForeignKey newFk, List<ForeignKey> resolvedDuringThisStatement, ParserContext context)
     {
-        var allEdges = new List<ForeignKey>();
-        // Existing FKs already wired up across the database (other tables).
-        // The new FK's child table's OutgoingForeignKeys hasn't been mutated
-        // yet (commit phase comes after); skip-step is unnecessary.
-        var allTables = EnumerateAllHeapTables(newFk.ChildTable);
-        foreach (var t in allTables)
-            allEdges.AddRange(t.OutgoingForeignKeys);
-        // Include FKs queued earlier in this statement but exclude newFk
-        // itself — the cycle question is "does newFk close a cycle using
-        // other existing edges", not "is newFk's own edge reachable".
-        foreach (var fk in resolvedDuringThisStatement)
+        // Every committed FK in the database plus the ones queued earlier in
+        // this statement — CREATE TABLE resolves its whole FK list before
+        // committing any of it, so neither set alone is the full graph.
+        var edges = new List<ForeignKey>();
+        foreach (var schema in context.CurrentDatabase.Schemas.Values)
         {
-            if (!ReferenceEquals(fk, newFk))
-                allEdges.Add(fk);
+            foreach (var table in schema.HeapTables.Values)
+                edges.AddRange(table.OutgoingForeignKeys);
         }
+        edges.AddRange(resolvedDuringThisStatement);
 
-        // Self-reference with cascading action: 1-edge cycle (probe-confirmed
-        // — real SQL Server rejects `CREATE TABLE t (... ON DELETE CASCADE)`
-        // where the FK is self-referencing).
-        if (ReferenceEquals(newFk.ChildTable, newFk.ReferencedTable))
-            return true;
-
-        // 1) Cycle: a path of cascading FKs from newFk.ReferencedTable back
-        // to newFk.ChildTable using the other edges. If found, newFk closes a
-        // cycle.
-        if (PathExistsCascading(allEdges, newFk.ReferencedTable, newFk.ChildTable))
-            return true;
-        // 2) Multiple cascade paths: two distinct cascading paths from some
-        // ancestor to newFk.ChildTable. The minimal check is: another existing
-        // cascading FK already targets newFk.ChildTable from a different path
-        // that shares an ancestor with newFk's path. The simulator's
-        // approximation is conservative — if there are two cascading FKs
-        // targeting newFk.ChildTable from distinct parents, treat as multiple
-        // paths. Real SQL Server's exact check is graph reachability; this
-        // approximation matches the probe-confirmed self-reference case and
-        // the canonical two-table-cycle case.
-        var cascadingIntoChild = 0;
-        foreach (var e in allEdges)
-        {
-            if (ReferenceEquals(e.ChildTable, newFk.ChildTable)
-                && (e.DeleteAction != ReferentialAction.NoAction || e.UpdateAction != ReferentialAction.NoAction))
-            {
-                cascadingIntoChild++;
-            }
-        }
-        // newFk was excluded from allEdges; the self-reference 1-cycle case
-        // is short-circuited above.
-        return false;
+        return CascadeTreeIsInvalid(edges, newFk, forDelete: true)
+            || CascadeTreeIsInvalid(edges, newFk, forDelete: false);
     }
 
-    private static bool PathExistsCascading(List<ForeignKey> edges, HeapTable from, HeapTable to)
+    private static ReferentialAction ActionFor(ForeignKey fk, bool forDelete) =>
+        forDelete ? fk.DeleteAction : fk.UpdateAction;
+
+    /// <summary>
+    /// Runs both Msg 1785 rules over the delete tree or the update tree of
+    /// <paramref name="edges"/>.
+    /// </summary>
+    private static bool CascadeTreeIsInvalid(List<ForeignKey> edges, ForeignKey newFk, bool forDelete)
     {
-        // DFS over cascading edges only. Each edge goes from ChildTable to
-        // ReferencedTable in the "DELETE parent → cascades to child"
-        // direction, so we follow edges where ReferencedTable == current.
-        var visited = new HashSet<HeapTable>(ReferenceEqualityComparer.Instance);
-        var stack = new Stack<HeapTable>();
-        stack.Push(from);
-        while (stack.Count > 0)
+        var reaching = new List<ForeignKey>();
+        foreach (var e in edges)
         {
-            var current = stack.Pop();
-            if (!visited.Add(current))
-                continue;
-            if (ReferenceEquals(current, to))
+            if (ActionFor(e, forDelete) != ReferentialAction.NoAction)
+                reaching.Add(e);
+        }
+        if (reaching.Count == 0)
+            return false;
+        if (ActionFor(newFk, forDelete) == ReferentialAction.NoAction)
+            return false;
+
+        var childrenOf = new Dictionary<HeapTable, List<ForeignKey>>(ReferenceEqualityComparer.Instance);
+        foreach (var e in reaching)
+        {
+            if (!childrenOf.TryGetValue(e.ReferencedTable, out var list))
+                childrenOf[e.ReferencedTable] = list = [];
+            list.Add(e);
+        }
+
+        foreach (var root in CascadeAncestorsOf(newFk.ChildTable, reaching))
+        {
+            if (CascadeReachesATableTwice(root, childrenOf, forDelete))
                 return true;
-            foreach (var e in edges)
-            {
-                if ((e.DeleteAction == ReferentialAction.NoAction && e.UpdateAction == ReferentialAction.NoAction)
-                    || !ReferenceEquals(e.ReferencedTable, current))
-                {
-                    continue;
-                }
-                stack.Push(e.ChildTable);
-            }
         }
         return false;
     }
 
-    private static IEnumerable<HeapTable> EnumerateAllHeapTables(HeapTable seed)
+    /// <summary>
+    /// Every table from which <paramref name="target"/> is reachable, plus
+    /// <paramref name="target"/> itself — the only roots whose traversal can
+    /// involve a newly added edge into it.
+    /// </summary>
+    private static List<HeapTable> CascadeAncestorsOf(HeapTable target, List<ForeignKey> reaching)
     {
-        // Walk the database that owns the seed table's schema. The CREATE
-        // path doesn't expose the database directly, so reach it through any
-        // referenced table's incoming-FK back-pointer chain or via the
-        // simulator's current schema. The simulator only has one database
-        // active per Simulation, so just iterate from seed's neighbors. For
-        // the limited cascade-cycle check we only need tables reachable from
-        // seed by following FK edges; a small DFS suffices.
-        var visited = new HashSet<HeapTable>(ReferenceEqualityComparer.Instance) { seed };
-        var stack = new Stack<HeapTable>();
-        stack.Push(seed);
-        while (stack.Count > 0)
+        var parentsOf = new Dictionary<HeapTable, List<HeapTable>>(ReferenceEqualityComparer.Instance);
+        foreach (var e in reaching)
         {
-            var t = stack.Pop();
-            yield return t;
-            foreach (var e in t.OutgoingForeignKeys)
+            if (!parentsOf.TryGetValue(e.ChildTable, out var list))
+                parentsOf[e.ChildTable] = list = [];
+            list.Add(e.ReferencedTable);
+        }
+        var seen = new HashSet<HeapTable>(ReferenceEqualityComparer.Instance) { target };
+        var order = new List<HeapTable> { target };
+        for (var i = 0; i < order.Count; i++)
+        {
+            foreach (var parent in parentsOf.GetValueOrDefault(order[i]) ?? [])
             {
-                if (visited.Add(e.ReferencedTable))
-                    stack.Push(e.ReferencedTable);
-            }
-            foreach (var e in t.IncomingForeignKeys)
-            {
-                if (visited.Add(e.ChildTable))
-                    stack.Push(e.ChildTable);
+                if (seen.Add(parent))
+                    order.Add(parent);
             }
         }
+        return order;
+    }
+
+    /// <summary>
+    /// Whether one operation on <paramref name="root"/> would fire referential
+    /// actions at the same table twice, or arrive back at the root. Traversal
+    /// leaves a table only when it was CASCADE-reached — a SET NULL / SET
+    /// DEFAULT arrival writes the row and stops there, which is why a loop of
+    /// them never travels.
+    /// </summary>
+    private static bool CascadeReachesATableTwice(HeapTable root, Dictionary<HeapTable, List<ForeignKey>> childrenOf, bool forDelete)
+    {
+        var reachedBy = new Dictionary<HeapTable, int>(ReferenceEqualityComparer.Instance);
+        var expanded = new HashSet<HeapTable>(ReferenceEqualityComparer.Instance) { root };
+        var frontier = new Queue<HeapTable>();
+        frontier.Enqueue(root);
+        while (frontier.Count > 0)
+        {
+            var table = frontier.Dequeue();
+            foreach (var edge in childrenOf.GetValueOrDefault(table) ?? [])
+            {
+                var child = edge.ChildTable;
+                // Coming back to the root closes a loop the operation would
+                // travel — a self-reference is the one-edge case.
+                if (ReferenceEquals(child, root))
+                    return true;
+                var count = reachedBy.GetValueOrDefault(child) + 1;
+                if (count > 1)
+                    return true;
+                reachedBy[child] = count;
+                if (ActionFor(edge, forDelete) == ReferentialAction.Cascade && expanded.Add(child))
+                    frontier.Enqueue(child);
+            }
+        }
+        return false;
     }
 
     /// <summary>

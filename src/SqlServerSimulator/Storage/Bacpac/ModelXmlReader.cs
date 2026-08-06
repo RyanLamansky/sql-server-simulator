@@ -157,6 +157,9 @@ internal static class ModelXmlReader
 
     private static void RunPhase(List<XElement> elements, DbConnection connection, BacpacImportResult result, int phase, HashSet<string> viewNames, string bracketedDb, HashSet<string> deferredComputedTables, bool isLastPhase)
     {
+        // Inline TVFs whose first CREATE attempt failed; drained at the end of
+        // the phase, once their siblings exist.
+        var deferredInlineTvfs = new List<XElement>();
         foreach (var element in elements)
         {
             var type = element.Attribute("Type")?.Value!;
@@ -171,6 +174,15 @@ internal static class ModelXmlReader
                     ("SqlUserDefinedDataType", 1) => Run(() => EmitUserDefinedDataType(element, name, connection)),
                     ("SqlSequence", 1) => Run(() => EmitSequence(element, name, connection)),
                     ("SqlRole", 1) => Run(() => EmitRole(element, name, connection)),
+                    // Principals: a login is a server object and its user a
+                    // database one, so both precede everything that can name
+                    // them. Document order puts the login ahead of its user.
+                    // Role membership waits for phase 6, where every role and
+                    // user exists whatever order the model listed them in, and
+                    // still lands before the phase-7 permission statements.
+                    ("SqlLogin", 1) => Run(() => EmitLogin(element, name, connection)),
+                    ("SqlUser", 1) => Run(() => EmitUser(element, name, connection)),
+                    ("SqlRoleMembership", 6) => Run(() => EmitRoleMembership(element, connection)),
                     ("SqlTableType", 1) => Run(() => EmitTableType(element, name, connection, result)),
                     ("SqlXmlSchemaCollection", 1) => Run(() => EmitXmlSchemaCollection(element, name, connection)),
                     // Full-text catalog: no table dependencies (its AUTHORIZATION
@@ -195,6 +207,10 @@ internal static class ModelXmlReader
                     ("SqlView", 6) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlView", "QueryScript")),
                     ("SqlScalarFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlScalarFunction", "BodyScript")),
                     ("SqlMultiStatementTableValuedFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlMultiStatementTableValuedFunction", "BodyScript")),
+                    // An inline TVF carries BodyScript like the other function
+                    // kinds — the RETURN and its parenthesized query are part
+                    // of the body, not a view-style QueryScript.
+                    ("SqlInlineTableValuedFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlInlineTableValuedFunction", "BodyScript", deferredInlineTvfs)),
                     ("SqlProcedure", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlProcedure", "BodyScript")),
                     ("SqlDmlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDmlTrigger", "BodyScript")),
                     ("SqlDatabaseDdlTrigger", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlDatabaseDdlTrigger", "BodyScript")),
@@ -207,6 +223,9 @@ internal static class ModelXmlReader
                     // so the per-SqlTable computed-column pass completes
                     // before the first SqlIndex emission runs.
                     ("SqlIndex", 8) => Run(() => EmitIndex(element, name, connection, result)),
+                    // Statistics follow the indexes so their stats_ids land
+                    // past every index id, the numbering real reports.
+                    ("SqlStatistic", 9) => Run(() => EmitStatistic(element, name, connection)),
                     // XML indexes + full-text indexes land in phase 8: both need
                     // the table (phase 2) and its clustered PK / unique KEY INDEX
                     // (phase 3). A secondary XML index additionally needs its
@@ -261,6 +280,40 @@ internal static class ModelXmlReader
             if (!handled && isLastPhase)
                 result.AddSkipped(new BacpacSkipped(type, name, "Element type not yet handled by the loader."));
         }
+
+        DrainDeferredInlineTvfs(deferredInlineTvfs, connection, result);
+    }
+
+    /// <summary>
+    /// Re-attempts the inline TVFs that failed their first CREATE, looping
+    /// while each pass lands at least one. What survives a pass that made no
+    /// progress is failing for its own reasons rather than for declaration
+    /// order, and records the simulator's diagnostic as a skip.
+    /// </summary>
+    private static void DrainDeferredInlineTvfs(List<XElement> deferred, DbConnection connection, BacpacImportResult result)
+    {
+        while (deferred.Count > 0)
+        {
+            var retry = new List<XElement>();
+            foreach (var element in deferred)
+            {
+                EmitProgrammableObject(
+                    element, element.Attribute("Name")?.Value, connection, result,
+                    "SqlInlineTableValuedFunction", "BodyScript", retry);
+            }
+            if (retry.Count == deferred.Count)
+            {
+                // No progress — report each remaining failure for real.
+                foreach (var element in retry)
+                {
+                    EmitProgrammableObject(
+                        element, element.Attribute("Name")?.Value, connection, result,
+                        "SqlInlineTableValuedFunction", "BodyScript");
+                }
+                return;
+            }
+            deferred = retry;
+        }
     }
 
     private static bool Run(Action action)
@@ -277,6 +330,7 @@ internal static class ModelXmlReader
     private static bool IsHandledByAnotherPhase(string type) => type
         is "SqlDatabaseOptions" or "SqlSchema" or "SqlUserDefinedDataType"
         or "SqlSequence" or "SqlRole" or "SqlTableType" or "SqlXmlSchemaCollection"
+        or "SqlLogin" or "SqlUser" or "SqlRoleMembership"
         or "SqlFullTextCatalog"
         or "SqlFilegroup"
         or "SqlPartitionFunction" or "SqlPartitionScheme" or "SqlColumnStoreIndex"
@@ -284,9 +338,10 @@ internal static class ModelXmlReader
         or "SqlPrimaryKeyConstraint" or "SqlUniqueConstraint"
         or "SqlCheckConstraint" or "SqlDefaultConstraint"
         or "SqlForeignKeyConstraint"
-        or "SqlIndex" or "SqlXmlIndex" or "SqlFullTextIndex"
+        or "SqlIndex" or "SqlXmlIndex" or "SqlFullTextIndex" or "SqlStatistic"
         or "SqlView"
         or "SqlScalarFunction" or "SqlMultiStatementTableValuedFunction"
+        or "SqlInlineTableValuedFunction"
         or "SqlProcedure" or "SqlDmlTrigger" or "SqlDatabaseDdlTrigger"
         or "SqlExtendedProperty"
         or "SqlPermissionStatement";
@@ -531,7 +586,7 @@ internal static class ModelXmlReader
             var colName = col.Attribute("Name")?.Value;
             if (colType == "SqlTableTypeSimpleColumn")
             {
-                columnDdls.Add(TranslateSimpleColumn(col, colName, result));
+                columnDdls.Add(TranslateSimpleColumn(col, colName, result, nullableByDefault: false));
             }
             else
             {
@@ -560,7 +615,7 @@ internal static class ModelXmlReader
                         .FirstOrDefault()?.Attribute("Name")?.Value;
                     if (string.IsNullOrEmpty(colRef))
                         continue;
-                    cols.Add(colRef[(colRef.LastIndexOf('.') + 1)..]);
+                    cols.Add(Leaf(colRef));
                 }
                 if (cols.Count > 0)
                     pkClauses.Add($"PRIMARY KEY ({string.Join(", ", cols)})");
@@ -622,6 +677,90 @@ internal static class ModelXmlReader
         command.CommandText = $"CREATE ROLE {bracketedName}{authClause};";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE LOGIN [name] WITH PASSWORD = '…'</c> for a
+    /// <c>SqlLogin</c> element, skipping one the server already holds.
+    /// </summary>
+    /// <remarks>
+    /// A login is server-scoped rather than database-scoped, so importing a
+    /// second bacpac carrying the same login into one
+    /// <see cref="Simulation"/> would otherwise collide. The password is the
+    /// generated placeholder DacFx exports — the source's real hash never
+    /// leaves the server.
+    /// </remarks>
+    private static void EmitLogin(XElement element, string? bracketedName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(bracketedName))
+            throw new InvalidDataException("bacpac: SqlLogin element missing Name attribute.");
+        if (PrincipalExists(connection, "sys.server_principals", Unbracket(bracketedName)))
+            return;
+
+        var password = ReadStringProperty(element, "Password") ?? Guid.NewGuid().ToString();
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE LOGIN {bracketedName} WITH PASSWORD = '{password.Replace("'", "''", StringComparison.Ordinal)}';";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE USER [name] { FOR LOGIN [login] | WITHOUT LOGIN }</c>
+    /// for a <c>SqlUser</c> element. The <c>Login</c> relationship names the
+    /// server principal the user maps to; a user with none is a loginless one.
+    /// </summary>
+    private static void EmitUser(XElement element, string? bracketedName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(bracketedName))
+            throw new InvalidDataException("bacpac: SqlUser element missing Name attribute.");
+        if (PrincipalExists(connection, "sys.database_principals", Unbracket(bracketedName)))
+            return;
+
+        var login = ReadSingleReference(element, "Login");
+        var loginClause = string.IsNullOrEmpty(login) ? " WITHOUT LOGIN" : $" FOR LOGIN {login}";
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE USER {bracketedName}{loginClause};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>ALTER ROLE [role] ADD MEMBER [member]</c> for a
+    /// <c>SqlRoleMembership</c> element. The element carries no Name of its
+    /// own — both principals arrive as relationships.
+    /// </summary>
+    private static void EmitRoleMembership(XElement element, DbConnection connection)
+    {
+        var member = ReadSingleReference(element, "Member")
+            ?? throw new InvalidDataException("bacpac: SqlRoleMembership missing Member.");
+        var role = ReadSingleReference(element, "Role")
+            ?? throw new InvalidDataException("bacpac: SqlRoleMembership missing Role.");
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"ALTER ROLE {role} ADD MEMBER {member};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Whether <paramref name="catalogView"/> already lists a principal named
+    /// <paramref name="name"/>.
+    /// </summary>
+    private static bool PrincipalExists(DbConnection connection, string catalogView, string name)
+    {
+        using var lookup = connection.CreateCommand();
+#pragma warning disable CA2100 // catalogView is one of two literals chosen by the caller; the name is parameterized
+        lookup.CommandText = $"SELECT COUNT(*) FROM {catalogView} WHERE name = @n";
+#pragma warning restore CA2100
+        var nameParam = lookup.CreateParameter();
+        nameParam.ParameterName = "@n";
+        nameParam.Value = name;
+        _ = lookup.Parameters.Add(nameParam);
+        return Convert.ToInt32(lookup.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) > 0;
     }
 
     /// <summary>
@@ -830,13 +969,8 @@ internal static class ModelXmlReader
     /// column-list positions where the simulator's parser expects a bare
     /// identifier reference.
     /// </summary>
-    private static string? ExtractColumnLeaf(string? qualifiedColumnName)
-    {
-        if (string.IsNullOrEmpty(qualifiedColumnName))
-            return null;
-        var lastDot = qualifiedColumnName.LastIndexOf('.');
-        return lastDot < 0 ? qualifiedColumnName : qualifiedColumnName[(lastDot + 1)..];
-    }
+    private static string? ExtractColumnLeaf(string? qualifiedColumnName) =>
+        string.IsNullOrEmpty(qualifiedColumnName) ? null : Leaf(qualifiedColumnName);
 
     /// <summary>
     /// Returns true when the column's type-reference is a UDDT alias (e.g.
@@ -864,17 +998,28 @@ internal static class ModelXmlReader
     /// IDENTITY defaults to (1,1) and appends NOT FOR REPLICATION when
     /// <c>IdentityIsNotForReplication=True</c>; ROWGUIDCOL only emits when
     /// <c>IsRowGuidColumn=True</c>; the explicit NULL/NOT NULL marker comes
-    /// from <c>IsNullable</c> (default True per probe).
+    /// from <c>IsNullable</c>.
     /// </summary>
-    private static string TranslateSimpleColumn(XElement columnElement, string? qualifiedColumnName, BacpacImportResult result)
+    /// <remarks>
+    /// <paramref name="nullableByDefault"/> says what an absent
+    /// <c>IsNullable</c> property means. DacFx writes the
+    /// property only when it differs from the element kind's own default, and
+    /// the two kinds disagree: a <c>SqlSimpleColumn</c> omits it for a
+    /// <em>nullable</em> column and writes <c>IsNullable="False"</c> for
+    /// NOT NULL, while a <c>SqlTableTypeSimpleColumn</c> omits it for a
+    /// <em>NOT NULL</em> column and writes <c>IsNullable="True"</c> for
+    /// nullable (verified by diffing a model's table-type columns against the
+    /// same model imported by DacFx). Reading a table type on the column
+    /// default silently makes every one of its NOT NULL columns nullable.
+    /// </remarks>
+    private static string TranslateSimpleColumn(XElement columnElement, string? qualifiedColumnName, BacpacImportResult result, bool nullableByDefault = true)
     {
         if (string.IsNullOrEmpty(qualifiedColumnName))
             throw new InvalidDataException("bacpac: SqlSimpleColumn missing Name attribute.");
 
         // Name shape: [schema].[table].[column] — take the trailing bracketed
         // segment as the column leaf.
-        var lastDot = qualifiedColumnName.LastIndexOf('.');
-        var columnLeaf = lastDot < 0 ? qualifiedColumnName : qualifiedColumnName[(lastDot + 1)..];
+        var columnLeaf = Leaf(qualifiedColumnName);
 
         // Capture explicit-or-absent for IsNullable: absent means "inherit
         // the column-type's default". For builtins that's NULL (ANSI default);
@@ -885,7 +1030,7 @@ internal static class ModelXmlReader
         // (NOT NULL default) — emitting "NULL" explicitly would override
         // the alias and cause BCP NULL-marker misalignment downstream.
         var isNullableExplicit = ReadStringProperty(columnElement, "IsNullable") is not null;
-        var isNullable = ReadBoolProperty(columnElement, "IsNullable", defaultValue: true);
+        var isNullable = ReadBoolProperty(columnElement, "IsNullable", nullableByDefault);
         var isIdentity = ReadBoolProperty(columnElement, "IsIdentity", defaultValue: false);
         var isRowGuid = ReadBoolProperty(columnElement, "IsRowGuidColumn", defaultValue: false);
         var identityNotForReplication = ReadBoolProperty(columnElement, "IdentityIsNotForReplication", defaultValue: false);
@@ -934,7 +1079,12 @@ internal static class ModelXmlReader
             else
                 result.AddWarning($"Column '{qualifiedColumnName}' declares COLLATE '{columnCollation}' which isn't recognized — clause dropped, column inherits the database default.");
         }
-        var nullability = isNullableExplicit ? (isNullable ? " NULL" : " NOT NULL") : "";
+        // An absent property still needs a marker when the element kind's
+        // default is NOT NULL — T-SQL's own default is nullable, so leaving it
+        // off would flip the column. Absent-and-nullable stays unmarked, which
+        // is what lets a UDDT-aliased column inherit the alias's nullability
+        // rather than have an explicit NULL override it.
+        var nullability = isNullableExplicit || !isNullable ? (isNullable ? " NULL" : " NOT NULL") : "";
         return $"{columnLeaf} {typeDdl}{collateClause}{identityClause}{rowGuidClause}{generatedClause}{nullability}";
     }
 
@@ -1053,14 +1203,67 @@ internal static class ModelXmlReader
             ?? []];
 
     /// <summary>
-    /// Extracts the bracketed leaf of a 1/2/3-part qualified name.
+    /// Extracts the bracketed leaf of a 1/2/3/4-part qualified name.
     /// <c>[s].[t].[c]</c> → <c>[c]</c>, <c>[s].[t]</c> → <c>[t]</c>,
     /// <c>[t]</c> → <c>[t]</c>.
     /// </summary>
+    /// <remarks>
+    /// The split has to ignore dots <em>inside</em> a bracketed segment: an
+    /// identifier may legally contain one, and real schemas do it constantly
+    /// (Entity Framework's own migration history table carries
+    /// <c>[dbo].[PK_dbo.__MigrationHistory]</c>). Splitting on the last raw
+    /// dot returns the fragment <c>__MigrationHistory]</c>, which lands as a
+    /// syntax error at the stray bracket rather than as anything diagnosable.
+    /// A closing bracket is escaped by doubling, so a <c>]]</c> pair keeps the
+    /// segment open.
+    /// </remarks>
     private static string Leaf(string qualifiedName)
     {
-        var lastDot = qualifiedName.LastIndexOf('.');
-        return lastDot < 0 ? qualifiedName : qualifiedName[(lastDot + 1)..];
+        var lastSeparator = -1;
+        var inBrackets = false;
+        for (var i = 0; i < qualifiedName.Length; i++)
+        {
+            var c = qualifiedName[i];
+            if (c == '[')
+            {
+                inBrackets = true;
+            }
+            else if (c == ']' && inBrackets)
+            {
+                // "]]" is an escaped literal bracket, not the segment's end.
+                if (i + 1 < qualifiedName.Length && qualifiedName[i + 1] == ']')
+                    i++;
+                else
+                    inBrackets = false;
+            }
+            else if (c == '.' && !inBrackets)
+            {
+                lastSeparator = i;
+            }
+        }
+        return lastSeparator < 0 ? qualifiedName : qualifiedName[(lastSeparator + 1)..];
+    }
+
+    /// <summary>
+    /// Reads one <c>SqlIndexedColumnSpecification</c> to the key-list form the
+    /// CREATE parser wants — the column's bracketed leaf plus <c>DESC</c> when
+    /// the spec carries <c>IsAscending=False</c>. Null when the spec names no
+    /// column.
+    /// </summary>
+    /// <remarks>
+    /// Direction is per key column and defaults to ascending, so the property
+    /// only appears on descending keys. Dropping it silently reverses the
+    /// order the index delivers, which is invisible until a query relies on
+    /// the index for ORDER BY elimination.
+    /// </remarks>
+    private static string? ReadIndexedColumn(XElement specification)
+    {
+        var column = ReadSingleReference(specification, "Column");
+        if (column is null)
+            return null;
+        return ReadBoolProperty(specification, "IsAscending", defaultValue: true)
+            ? Leaf(column)
+            : Leaf(column) + " DESC";
     }
 
     /// <summary>
@@ -1078,11 +1281,11 @@ internal static class ModelXmlReader
         var columnRefs = element.Elements(Ns + "Relationship")
             .FirstOrDefault(r => r.Attribute("Name")?.Value == "ColumnSpecifications")
             ?.Elements(Ns + "Entry").Elements(Ns + "Element")
-            .Select(spec => ReadSingleReference(spec, "Column"))
+            .Select(ReadIndexedColumn)
             .OfType<string>()
             .ToList()
             ?? throw new InvalidDataException($"bacpac: {(isPrimary ? "PK" : "UQ")} on '{definingTable}' missing ColumnSpecifications.");
-        var columnLeaves = string.Join(", ", columnRefs.Select(Leaf));
+        var columnLeaves = string.Join(", ", columnRefs);
 
         // UQ defaults to NONCLUSTERED, PK to CLUSTERED. IsClustered=False
         // flips PK to NONCLUSTERED; True flips UQ to CLUSTERED (rare).
@@ -1129,10 +1332,11 @@ internal static class ModelXmlReader
         var updateAction = TranslateReferentialAction(ReadStringProperty(element, "OnUpdateAction"));
         var deleteClause = deleteAction is null ? "" : $" ON DELETE {deleteAction}";
         var updateClause = updateAction is null ? "" : $" ON UPDATE {updateAction}";
+        var withClause = HasAnnotation(element, IsNotTrustedAnnotation) ? "WITH NOCHECK " : "";
 
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = $"ALTER TABLE {definingTable} ADD CONSTRAINT {Leaf(constraintName)} FOREIGN KEY ({childList}) REFERENCES {foreignTable} ({parentList}){deleteClause}{updateClause};";
+        command.CommandText = $"ALTER TABLE {definingTable} {withClause}ADD CONSTRAINT {Leaf(constraintName)} FOREIGN KEY ({childList}) REFERENCES {foreignTable} ({parentList}){deleteClause}{updateClause};";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
     }
@@ -1152,7 +1356,7 @@ internal static class ModelXmlReader
     };
 
     /// <summary>
-    /// Emits <c>ALTER TABLE table ADD CONSTRAINT name CHECK (raw_expression)</c>.
+    /// Emits <c>ALTER TABLE table [WITH NOCHECK] ADD CONSTRAINT name CHECK (raw_expression)</c>.
     /// The CheckExpressionScript property body is raw T-SQL — feeds directly
     /// to the simulator's CHECK parser.
     /// </summary>
@@ -1164,13 +1368,39 @@ internal static class ModelXmlReader
             ?? throw new InvalidDataException($"bacpac: CHECK '{constraintName}' missing DefiningTable.");
         var script = ReadScriptProperty(element, "CheckExpressionScript")
             ?? throw new InvalidDataException($"bacpac: CHECK '{constraintName}' missing CheckExpressionScript.");
+        var withClause = HasAnnotation(element, IsNotTrustedAnnotation) ? "WITH NOCHECK " : "";
 
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = $"ALTER TABLE {definingTable} ADD CONSTRAINT {Leaf(constraintName)} CHECK ({script});";
+        command.CommandText = $"ALTER TABLE {definingTable} {withClause}ADD CONSTRAINT {Leaf(constraintName)} CHECK ({script});";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
     }
+
+    /// <summary>
+    /// The annotation DacFx stamps on a constraint whose <c>is_not_trusted</c>
+    /// is set — a bare presence marker carrying no value.
+    /// </summary>
+    private const string IsNotTrustedAnnotation = "IsNotTrustedPropertyAnnotation";
+
+    /// <summary>
+    /// Whether the element carries the named annotation. Trust state rides an
+    /// <c>&lt;Annotation&gt;</c> rather than a <c>&lt;Property&gt;</c>, so a
+    /// property-only read misses it and every constraint lands trusted.
+    /// </summary>
+    private static bool HasAnnotation(XElement element, string annotationType) =>
+        element.Elements(Ns + "Annotation").Any(a => a.Attribute("Type")?.Value == annotationType);
+
+    /// <summary>
+    /// The constraint name carried on a <c>SqlInlineConstraintAnnotation</c>,
+    /// which is where a constraint written inline in its table's DDL keeps the
+    /// server-generated name it was given. Null when the element has no such
+    /// annotation.
+    /// </summary>
+    private static string? ReadInlineConstraintName(XElement element) =>
+        element.Elements(Ns + "Annotation")
+            .FirstOrDefault(a => a.Attribute("Type")?.Value == "SqlInlineConstraintAnnotation")
+            ?.Attribute("Name")?.Value;
 
     /// <summary>
     /// Builds the inline computed-column DDL fragment <c>[col] AS (expr)</c>
@@ -1584,7 +1814,15 @@ internal static class ModelXmlReader
     /// FunctionBody relationship. The emitter concatenates HeaderContents +
     /// body verbatim and runs the result through the simulator's parser.
     /// </summary>
-    private static void EmitProgrammableObject(XElement element, string? name, DbConnection connection, BacpacImportResult result, string objectType, string bodyPropertyName)
+    /// <remarks>
+    /// When a <c>retry</c> list is supplied, a CREATE that fails is queued
+    /// there instead of being recorded as skipped, for the caller to attempt
+    /// again once its siblings have landed. Most module bodies bind lazily, so
+    /// document order doesn't matter for them — but an inline TVF derives its
+    /// output columns at CREATE, so it binds immediately and a body calling a
+    /// scalar function the model declares later fails on the first pass.
+    /// </remarks>
+    private static void EmitProgrammableObject(XElement element, string? name, DbConnection connection, BacpacImportResult result, string objectType, string bodyPropertyName, List<XElement>? retry = null)
     {
         if (string.IsNullOrEmpty(name))
             throw new InvalidDataException($"bacpac: {objectType} missing Name attribute.");
@@ -1622,8 +1860,15 @@ internal static class ModelXmlReader
         }
         catch (SimulatedSqlException ex)
         {
-            result.AddSkipped(new BacpacSkipped(objectType, name,
-                $"CREATE {objectType} failed: {ex.Message}"));
+            if (retry is not null)
+            {
+                retry.Add(element);
+            }
+            else
+            {
+                result.AddSkipped(new BacpacSkipped(objectType, name,
+                    $"CREATE {objectType} failed: {ex.Message}"));
+            }
         }
         catch (NotSupportedException ex)
         {
@@ -1654,7 +1899,7 @@ internal static class ModelXmlReader
         var columnRefs = element.Elements(Ns + "Relationship")
             .FirstOrDefault(r => r.Attribute("Name")?.Value == "ColumnSpecifications")
             ?.Elements(Ns + "Entry").Elements(Ns + "Element")
-            .Select(spec => ReadSingleReference(spec, "Column"))
+            .Select(ReadIndexedColumn)
             .OfType<string>()
             .ToList()
             ?? throw new InvalidDataException($"bacpac: SqlIndex '{indexName}' missing ColumnSpecifications.");
@@ -1665,14 +1910,19 @@ internal static class ModelXmlReader
 
         var uniqueClause = isUnique ? "UNIQUE " : "";
         var clusteringClause = isClustered ? "CLUSTERED " : "NONCLUSTERED ";
-        var keyList = string.Join(", ", columnRefs.Select(Leaf));
+        var keyList = string.Join(", ", columnRefs);
         var includeClause = includeRefs.Count == 0
             ? ""
             : $" INCLUDE ({string.Join(", ", includeRefs.Select(Leaf))})";
+        // A filtered index's predicate is a script property, not a reference;
+        // dropping it would turn a filtered UNIQUE index into an unconditional
+        // one, which changes what the load rejects as a duplicate.
+        var filterPredicate = ReadScriptProperty(element, "FilterPredicate");
+        var whereClause = string.IsNullOrWhiteSpace(filterPredicate) ? "" : $" WHERE {filterPredicate}";
 
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = $"CREATE {uniqueClause}{clusteringClause}INDEX {Leaf(indexName)} ON {indexedObject} ({keyList}){includeClause};";
+        command.CommandText = $"CREATE {uniqueClause}{clusteringClause}INDEX {Leaf(indexName)} ON {indexedObject} ({keyList}){includeClause}{whereClause};";
 #pragma warning restore CA2100
         try
         {
@@ -1688,6 +1938,30 @@ internal static class ModelXmlReader
             result.AddSkipped(new BacpacSkipped("SqlIndex", indexName,
                 $"CREATE INDEX on '{indexedObject}' failed: {ex.Message}"));
         }
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE STATISTICS name ON table (cols)</c> for a
+    /// <c>SqlStatistic</c> element. Name is 3-part
+    /// (<c>[schema].[table].[statistic]</c>); the <c>Subject</c> relationship
+    /// names the table and <c>Columns</c> the ordered column list.
+    /// </summary>
+    private static void EmitStatistic(XElement element, string? statisticName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(statisticName))
+            throw new InvalidDataException("bacpac: SqlStatistic missing Name attribute.");
+
+        var subject = ReadSingleReference(element, "Subject")
+            ?? throw new InvalidDataException($"bacpac: SqlStatistic '{statisticName}' missing Subject.");
+        var columns = ReadMultipleReferences(element, "Columns");
+        if (columns.Count == 0)
+            throw new InvalidDataException($"bacpac: SqlStatistic '{statisticName}' has no Columns.");
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE STATISTICS {Leaf(statisticName)} ON {subject} ({string.Join(", ", columns.Select(Leaf))});";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
     }
 
     /// <summary>
@@ -1827,8 +2101,20 @@ internal static class ModelXmlReader
     /// <summary>
     /// Emits <c>ALTER TABLE table ADD CONSTRAINT name DEFAULT (raw_expression) FOR column</c>.
     /// </summary>
+    /// <remarks>
+    /// A default written inline in the source table's DDL carries no Name
+    /// attribute of its own — the server-generated <c>DF__…</c> name shows up
+    /// on a sibling <c>SqlInlineConstraintAnnotation</c> instead, the same
+    /// shape <see cref="EmitKeyConstraint"/> reads for an unnamed UNIQUE.
+    /// Taking the name from there reproduces the source database's own
+    /// constraint name rather than letting the simulator allocate a different
+    /// one.
+    /// </remarks>
     private static void EmitDefaultConstraint(XElement element, string? constraintName, DbConnection connection)
     {
+        constraintName = string.IsNullOrEmpty(constraintName)
+            ? ReadInlineConstraintName(element)
+            : constraintName;
         if (string.IsNullOrEmpty(constraintName))
             throw new InvalidDataException("bacpac: SqlDefaultConstraint missing Name attribute.");
         var definingTable = ReadSingleReference(element, "DefiningTable")

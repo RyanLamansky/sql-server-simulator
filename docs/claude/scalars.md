@@ -239,7 +239,9 @@ The rules below describe the *runtime* value; the width bounds it.
   Anchoring is decided by leading / trailing `%` in the pattern: a leading `%` strips the start anchor (find-anywhere); a trailing `%` strips the end anchor; without either, the pattern is anchored at both ends and only a full-subject match returns 1.
   Leading and trailing `%` characters are consumed by the anchoring decision rather than becoming segments — that's what makes `PATINDEX('%abc%', 'xabcx')` return 2 (position of `abc`) rather than 1 (the position an empty leading match would report).
   The reported position counts UTF-16 units, codepoints under an `_SC_` collation, matching CHARINDEX's dispatch.
-  Subject NULL raises Msg 8116 (asymmetric with NULL pattern, which silently returns NULL).
+  The subject's rejection is about its **type**, not its value: a bare `NULL` literal has none for the binder to match, so it raises **Msg 8116**, while a subject that carries a string type and happens to hold NULL — a typed `CAST(NULL AS varchar(50))`, a NULL-valued variable, a column — propagates NULL like every other string scalar (probe-confirmed against SQL Server 2025).
+A scalar UDF that patindexes its own `varchar` parameter is the shape that meets this: the parameter carries a type, so a NULL argument answers NULL rather than raising.
+  A NULL *pattern* returns NULL whatever its type.
   Subject non-string raises Msg 8116; pattern non-string implicitly coerces to the subject's string family.
   The subject takes a `text` / `ntext` document but not an `image`, and the pattern refuses all three — see *Legacy LOB arguments* below.
   Result type is `int` for bounded subjects and `bigint` for `varchar(MAX)` / `nvarchar(MAX)` / legacy LOB family.

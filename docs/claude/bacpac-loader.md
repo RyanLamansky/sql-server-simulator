@@ -53,17 +53,43 @@ Deferred-computed-column failures (phase 8, for the rare UDF-forward-ref table) 
 
 | Phase | Elements |
 |---|---|
-| 1 | DB options + schemas + UDDTs + sequences + roles + table types + XML schema collections + **full-text catalogs** + **filegroups** (registered on `Database.Filegroups` so `sys.filegroups` / `sys.data_spaces` surface them — no physical file model) + partition function/scheme/columnstore (silent skip) |
+| 1 | DB options + schemas + UDDTs + sequences + roles + **logins + users** + table types + XML schema collections + **full-text catalogs** + **filegroups** (registered on `Database.Filegroups` so `sys.filegroups` / `sys.data_spaces` surface them — no physical file model) + partition function/scheme/columnstore (silent skip) |
 | 2 | Tables (columns + computed columns inline at model ordinal, defaults inline; a computed expression that forward-references a not-yet-created UDF makes the CREATE TABLE throw, so that one table is re-created with computed columns stripped and they defer to phase 8) |
 | 3 | Constraints (PK / UQ / CHECK / DEFAULT — DACFx already parenthesizes `DefaultExpressionScript` (`(NEXT VALUE FOR …)`), so `EmitDefaultConstraint` wraps only an unparenthesized script; wrapping an already-`(…)` script would double the parens the `ALTER … DEFAULT (…)` parser re-derives, diverging from real's single-pair `sys.default_constraints.definition`) |
 | 4 | Foreign keys |
 | 5 | Deferred system-versioning links (`ALTER TABLE … SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))`) |
-| 6 | Views |
-| 7 | Programmable objects (procs, scalar / multi-stmt TVFs, DML + DDL triggers, GRANT statements) |
+| 6 | Views + **role memberships** (`ALTER ROLE … ADD MEMBER`; waits until every role and user exists whatever order the model listed them in, and still lands before the phase-7 GRANTs) |
+| 7 | Programmable objects (procs, scalar / **inline** / multi-stmt TVFs, DML + DDL triggers, GRANT statements). An inline TVF binds its body at CREATE to derive the output columns, so one naming a function declared later in the model fails its first attempt and is re-tried at the end of the phase, looping while each pass lands at least one |
 | 8 | Deferred computed columns (only for tables phase 2 fell back on — a forward UDF reference; these append at the end, so their `sys.columns.column_id` lands after the simple columns rather than at the model ordinal) + indexes (order matters: computed cols before filtered indexes that reference them) + **XML indexes** (`CREATE [PRIMARY] XML INDEX`; primaries precede secondaries in DACFx's name-sorted document order, so a secondary's `USING XML INDEX` reference resolves) + **full-text indexes** (`CREATE FULLTEXT INDEX … KEY INDEX … ON catalog`; needs the table's clustered PK / unique KEY INDEX from phase 3 + the catalog from phase 1) |
-| 9 | Extended properties (incl. the database-DDL-trigger + filegroup host kinds — `@level0type=N'TRIGGER'` / `N'FILEGROUP'`) |
+| 9 | Extended properties (incl. the database-DDL-trigger + filegroup host kinds — `@level0type=N'TRIGGER'` / `N'FILEGROUP'`) + **statistics** (`CREATE STATISTICS`; after the indexes so each `stats_id` lands past every index id, the numbering real reports) |
 
 After all 9 phases: BCP data load (parallel per-table with LPT scheduling — see `BacpacReader.cs`).
+
+## Name and property conventions the model relies on
+
+- **Bracketed names split on separator dots only.** An identifier may contain a
+  dot, and real schemas do it constantly — Entity Framework ships
+  `[dbo].[PK_dbo.__MigrationHistory]`. `ModelXmlReader.Leaf` walks the string
+  tracking bracket depth (a `]]` pair being an escaped literal bracket) rather
+  than taking the last raw dot, which would return the fragment
+  `__MigrationHistory]`.
+- **`IsNullable` is written only when it differs from the element kind's own
+  default, and the kinds disagree.** A `SqlSimpleColumn` omits it for a
+  *nullable* column and writes `IsNullable="False"` for NOT NULL; a
+  `SqlTableTypeSimpleColumn` omits it for a *NOT NULL* column and writes
+  `IsNullable="True"` for nullable. `TranslateSimpleColumn` takes the default
+  as a parameter for that reason. `BacpacBuilder` mirrors both conventions —
+  writing one of them for both would hide a loader reading the wrong default.
+- **Trust state and inline-constraint names ride `<Annotation>` elements, not
+  `<Property>`.** `IsNotTrustedPropertyAnnotation` is a bare presence marker
+  that becomes `WITH NOCHECK`; a constraint written inline in its table's DDL
+  carries no `Name` attribute and keeps its server-generated name on a
+  `SqlInlineConstraintAnnotation` instead.
+- **A `SqlIndexedColumnSpecification` carries `IsAscending="False"` for a
+  descending key** and nothing at all for an ascending one; a filtered index's
+  predicate is the `FilterPredicate` *script* property. Dropping either loads
+  an index that reads differently from the one exported — a filtered UNIQUE
+  index becomes an unconditional one.
 
 ## BCP wire format
 

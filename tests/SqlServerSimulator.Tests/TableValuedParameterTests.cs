@@ -746,4 +746,40 @@ public sealed class TableValuedParameterTests
     [TestMethod]
     public void TypeId_Unknown_ReturnsNull()
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select type_id('dbo.bogus')"));
+
+    // --- Table-type column nullability and the backing table's PRIMARY KEY ---
+
+    [TestMethod]
+    public void TableTypeColumn_ReportsItsDeclaredNullability()
+        => AreEqual("a=0 b=0 c=1", new Simulation().ExecuteScalar("""
+            create type dbo.tt as table (a int not null, b nvarchar(50) not null, c int null);
+            select string_agg(concat(c.name, '=', c.is_nullable), ' ') within group (order by c.column_id)
+            from sys.table_types tt
+            join sys.columns c on c.object_id = tt.type_table_object_id
+            where tt.name = 'tt'
+            """));
+
+    /// <summary>
+    /// A table type's PRIMARY KEY lives on its backing type table, which real
+    /// homes in the sys schema and reports through sys.key_constraints — the
+    /// pair DacFx reads to re-emit the key clause.
+    /// </summary>
+    [TestMethod]
+    public void TableTypePrimaryKey_ReportsThroughKeyConstraints()
+        => AreEqual("PK/1", new Simulation().ExecuteScalar("""
+            create type dbo.tt as table (a int not null primary key, b int);
+            select concat(kc.type, '/', kc.unique_index_id)
+            from sys.key_constraints kc
+            join sys.table_types tt on tt.type_table_object_id = kc.parent_object_id
+            where tt.name = 'tt'
+            """));
+
+    [TestMethod]
+    public void TableTypePrimaryKey_IsNamedAfterItsBackingTable()
+        => StartsWith("PK__TT_tt", (string)new Simulation().ExecuteScalar("""
+            create type dbo.tt as table (a int not null primary key, b int);
+            select kc.name from sys.key_constraints kc
+            join sys.table_types tt on tt.type_table_object_id = kc.parent_object_id
+            where tt.name = 'tt'
+            """)!);
 }

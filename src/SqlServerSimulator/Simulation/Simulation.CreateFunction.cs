@@ -13,12 +13,14 @@ partial class Simulation
     /// <c>ALTER FUNCTION</c> — followed by either:
     /// <list type="bullet">
     /// <item><c>RETURNS &lt;scalar-type&gt; [WITH RETURNS NULL ON NULL INPUT]
-    /// AS BEGIN ... END</c> — scalar UDF, stored as a
+    /// [AS] BEGIN ... END</c> — scalar UDF, stored as a
     /// <see cref="ScalarFunction"/>.</item>
-    /// <item><c>RETURNS TABLE [WITH SCHEMABINDING | ENCRYPTION] AS RETURN
+    /// <item><c>RETURNS TABLE [WITH SCHEMABINDING | ENCRYPTION] [AS] RETURN
     /// [(] &lt;SELECT&gt; [)]</c> — inline table-valued function, stored as
     /// an <see cref="InlineTableValuedFunction"/>.</item>
     /// </list>
+    /// The <c>AS</c> introducing the body is optional for every function kind
+    /// — see <see cref="ConsumeOptionalBodyAs"/>.
     /// Both kinds land in the target <see cref="Schema.Functions"/> dict
     /// keyed by name.
     /// </summary>
@@ -48,12 +50,7 @@ partial class Simulation
     /// simulator records <c>WITH SCHEMABINDING</c> on
     /// <see cref="UserDefinedFunction.IsSchemaBound"/> but doesn't track the
     /// dependency, so a DROP of a referenced table succeeds and the TVF
-    /// later fails at call time when re-resolving. Nullability of TVF output
-    /// columns is conservatively reported as nullable in <c>sys.columns</c>
-    /// — real SQL Server propagates per-projection nullability following the
-    /// same rules as SELECT INTO (which the simulator already implements
-    /// via <see cref="Expression.ResultIsNullable"/>, but isn't wired
-    /// through to the TVF schema-inference path).
+    /// later fails at call time when re-resolving.
     /// </para>
     /// <para>
     /// <strong>ALTER</strong>: the replacement keeps the function's
@@ -172,11 +169,10 @@ partial class Simulation
         var isSchemaBound = context.Token is ReservedKeyword { Keyword: Keyword.With }
             && ParseInlineTvfOptions(context);
 
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        _ = ConsumeOptionalBodyAs(context);
 
         // BEGIN/END required for MS-TVF bodies (same shape as scalar UDF).
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Begin })
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Begin })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var commandText = context.Command.CommandText;
@@ -346,13 +342,11 @@ partial class Simulation
             }
         }
 
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-
         // AS EXTERNAL NAME assembly.[class].method → the body lives in a
-        // registered CLR assembly rather than in T-SQL.
-        context.MoveNextRequired();
-        if (context.Token is ReservedKeyword { Keyword: Keyword.External })
+        // registered CLR assembly rather than in T-SQL. The CLR form needs the
+        // AS, since EXTERNAL only follows it.
+        var sawAs = ConsumeOptionalBodyAs(context);
+        if (sawAs && context.Token is ReservedKeyword { Keyword: Keyword.External })
             return ParseClrScalarTail(context, schema, functionName, parameters, returnType, isSchemaBound, isAlter, createOrAlter);
 
         // BEGIN/END required for scalar UDF bodies. Capture span between
@@ -467,6 +461,30 @@ partial class Simulation
     /// INPUT</c> in the <c>WITH</c> slot of a TVF raises Msg 487 (probe-
     /// confirmed — that option is scalar-only).
     /// </summary>
+    /// <summary>
+    /// Steps past the <c>AS</c> that introduces a function body, if it's
+    /// there. Returns whether one was consumed; the cursor ends on the first
+    /// body token either way.
+    /// </summary>
+    /// <remarks>
+    /// SQL Server's <c>CREATE FUNCTION</c> grammar takes the keyword as
+    /// optional for all three function kinds — scalar, inline table-valued and
+    /// multi-statement table-valued — so <c>RETURNS nvarchar(4000) BEGIN … END</c>
+    /// creates the same function as <c>RETURNS nvarchar(4000) AS BEGIN … END</c>
+    /// (probe-confirmed against SQL Server 2025). Hand-written functions do
+    /// omit it, so requiring the keyword drops them on import.
+    /// <c>CREATE PROCEDURE</c> does <em>not</em> share the licence — omitting
+    /// the keyword there is Msg 102 at the following token — so the procedure
+    /// parser keeps requiring it.
+    /// </remarks>
+    private static bool ConsumeOptionalBodyAs(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
+            return false;
+        context.MoveNextRequired();
+        return true;
+    }
+
     private static bool ParseInlineTvfTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, bool isAlter, bool createOrAlter)
     {
         context.MoveNextRequired(); // step past TABLE
@@ -476,9 +494,8 @@ partial class Simulation
         var isSchemaBound = context.Token is ReservedKeyword { Keyword: Keyword.With }
             && ParseInlineTvfOptions(context);
 
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Return })
+        _ = ConsumeOptionalBodyAs(context);
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Return })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         // Optional `(` before the SELECT; if present, the matching `)` ends
@@ -648,9 +665,11 @@ partial class Simulation
     /// Msg 4506 (duplicate column name) before returning.
     /// </summary>
     /// <remarks>
-    /// Nullability is conservatively set to <see langword="true"/> on every
-    /// output column — see the fidelity-gap note in
-    /// <see cref="TryParseCreateFunction"/>.
+    /// Per-column nullability comes from the body's own projection inference
+    /// (<see cref="Selection.ColumnNullability"/>), the same rules the TDS
+    /// COLMETADATA fNullable flag reports. That inference declines the joined
+    /// and multi-source shapes, which keep the conservative
+    /// <see langword="true"/>.
     /// </remarks>
     private static HeapColumn[] InferInlineTvfOutputColumns(
         ParserContext outerContext,
@@ -692,6 +711,7 @@ partial class Simulation
 
         var columns = new HeapColumn[selection.Schema.Length];
         var seenNames = new HashSet<string>(outerContext.Batch.CurrentDatabase.Collation);
+        var nullability = selection.ColumnNullability;
         for (var i = 0; i < selection.Schema.Length; i++)
         {
             var name = selection.ColumnNames[i];
@@ -699,7 +719,8 @@ partial class Simulation
                 throw SimulatedSqlException.InlineTvfMissingColumnName(i + 1);
             if (!seenNames.Add(name))
                 throw SimulatedSqlException.DuplicateColumnInViewOrFunction(name, functionName);
-            columns[i] = new HeapColumn(name, selection.Schema[i], maxLength: null, nullable: true);
+            var nullable = nullability is null || i >= nullability.Length || nullability[i];
+            columns[i] = new HeapColumn(name, selection.Schema[i], maxLength: null, nullable: nullable);
         }
         return columns;
     }

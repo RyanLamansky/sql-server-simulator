@@ -336,4 +336,62 @@ public sealed class ScalarFunctionTests
     public void CreateFunction_UnknownWithOption_Rejected()
         => Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
             "create function dbo.bad(@v int) returns int with native_compilation as begin return @v end"));
+
+    // --- The body-introducing AS is optional for every function kind ---
+
+    /// <summary>
+    /// SQL Server's <c>CREATE FUNCTION</c> grammar takes the body-introducing
+    /// <c>AS</c> as optional for all three function kinds; <c>CREATE
+    /// PROCEDURE</c> doesn't share the licence. Probe-confirmed against SQL
+    /// Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void ScalarFunction_WithoutAs_Creates()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("""
+            create function dbo.f (@s nvarchar(10))
+            returns nvarchar(20)
+            begin
+                return @s + 'x'
+            end
+            """);
+        AreEqual("hix", sim.ExecuteScalar("select dbo.f('hi')"));
+    }
+
+    [TestMethod]
+    public void InlineTvf_WithoutAs_Creates()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("""
+            create function dbo.f (@n int)
+            returns table
+            return (select @n as v)
+            """);
+        AreEqual(3, sim.ExecuteScalar("select v from dbo.f(3)"));
+    }
+
+    [TestMethod]
+    public void MultiStatementTvf_WithoutAs_Creates()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("""
+            create function dbo.f (@n int)
+            returns @r table (v int)
+            begin
+                insert into @r values (@n)
+                return
+            end
+            """);
+        AreEqual(9, sim.ExecuteScalar("select v from dbo.f(9)"));
+    }
+
+    [TestMethod]
+    public void Procedure_WithoutAs_RaisesMsg102()
+        => AreEqual("Incorrect syntax near 'BEGIN'.", new Simulation().AssertSqlError("""
+            create procedure dbo.p
+            BEGIN
+                select 1 as v
+            end
+            """, 102).Message);
 }

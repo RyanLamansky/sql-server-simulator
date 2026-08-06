@@ -528,6 +528,27 @@ One row per (index, column):
 `is_descending_key` reflects the per-column DESC flag from CREATE INDEX.
 `column_id` is the 1-based full-column ordinal from `sys.columns` (mapped back from the storage ordinal stored on the index).
 
+## `CREATE STATISTICS` / `DROP STATISTICS`
+
+`CREATE STATISTICS <name> ON <table> (<column> [, …]) [WITH <option> [, …]]` records a standalone statistics object on the table; `DROP STATISTICS <table>.<name> [, …]` removes one (each entry addressing its own table, so the leaf is the statistic and everything before it the table).
+What's modeled is the **declaration**, not a histogram — the simulator makes no cardinality estimates, so a statistic changes nothing about how a query runs.
+What it does carry is catalog identity: `sys.stats` rows with `user_created = 1` and `sys.stats_columns` rows in the declared column order, which is what DacFx re-exports, SSMS scripts, and a bacpac's `SqlStatistic` elements round-trip through.
+
+`stats_id` is drawn from the **same per-table sequence the index ids use**, continuing past the highest one in use — an index-backed statistic shares its index's id, so a table whose PK takes index_id 1 gives its first standalone statistic stats_id 2.
+
+Of the WITH options only `NORECOMPUTE` is observable (`sys.stats.no_recompute`); the sampling family (`FULLSCAN`, `SAMPLE n {PERCENT | ROWS}`, `PERSIST_SAMPLE_PERCENT`, `INCREMENTAL`, `MAXDOP`, `AUTO_DROP`) describes how real would scan the data to build a histogram there isn't one of here, so those parse and discard.
+
+Diagnostics, probe-confirmed against SQL Server 2025:
+
+| Case | Error |
+|---|---|
+| Name the table already carries — **including an index's name**, since statistics and indexes share one per-table name space | **Msg 1927** sev 16 state 2, `There are already statistics on table '<table>' named '<name>'.` |
+| Missing table | **Msg 1088** state 12 (shared with `CREATE INDEX`) |
+| Missing column | **Msg 1911** |
+| `DROP STATISTICS` of one the table doesn't carry | **Msg 3701** sev **11** state 7, `Cannot drop the statistics '<written name>', because it does not exist or you do not have permission.` |
+
+Auto-created column statistics (the `_WA_Sys_*` rows real materializes on first predicate use) still aren't modeled — see [`catalog-views.md`](catalog-views.md).
+
 ## `DBCC SHOW_STATISTICS(<table>, <stat>) WITH HISTOGRAM`
 
 DacFx's `sqlpackage /Action:Export` runs one `dbcc show_statistics(N'[schema].[table]', N'<index-or-stat-name>') with histogram` per table (using the PK / clustered-index statistic name) before bulk-reading it, to chunk the table into extraction ranges — so the DATA phase of a bacpac export needs this parsed.

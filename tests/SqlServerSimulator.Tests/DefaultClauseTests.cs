@@ -153,8 +153,8 @@ public sealed class DefaultClauseTests
     // SSMS-emitted DDL scripts wrap the DEFAULT body in parens around a
     // named constraint: `ALTER TABLE t ADD CONSTRAINT df DEFAULT
     // (newsequentialid()) FOR col`. Real SQL Server accepts both the bare
-    // and parenthesized forms here. Probed against Optimizely Configured
-    // Commerce v4.x's starting-database script on 2026-05-17.
+    // and parenthesized forms here. Probed against a generated
+    // starting-database script on 2026-05-17.
     [TestMethod]
     public void NewSequentialId_AlterTableAddNamedDefault_Accepted()
     {

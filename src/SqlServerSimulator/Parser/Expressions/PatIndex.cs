@@ -15,7 +15,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <remarks>
 /// Behavioral fingerprint (probe-confirmed against SQL Server 2025):
 /// <list type="bullet">
-/// <item><description>Subject NULL → <strong>Msg 8116</strong> (argument data type NULL is invalid for argument 2 of patindex function); pattern NULL → NULL.</description></item>
+/// <item><description>Subject written as the bare <c>NULL</c> literal → <strong>Msg 8116</strong> (argument data type NULL is invalid for argument 2 of patindex function); a typed subject holding NULL, and a NULL pattern, both → NULL.</description></item>
 /// <item><description>Subject non-string → Msg 8116 with the actual type name.</description></item>
 /// <item><description>Pattern non-string → silent CONVERT to the subject's string type (probe: <c>PATINDEX(123, 'abc')</c> returns 0, treated as <c>PATINDEX('123', 'abc')</c>).</description></item>
 /// <item><description>Result type: <c>int</c> for non-MAX subjects; <c>bigint</c> for <c>varchar(MAX)</c> / <c>nvarchar(MAX)</c>.</description></item>
@@ -39,16 +39,16 @@ internal sealed class PatIndex : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var s = this.subject.Run(runtime);
-        // Subject NULL is an error, not a NULL propagation — probe-verified
-        // (real SQL Server raises Msg 8116 on subject NULL but accepts a
-        // NULL pattern and returns NULL).
-        if (s.IsNull)
-            throw SimulatedSqlException.InvalidArgumentDataType("NULL", argumentIndex: 2, "patindex");
+        RejectUntypedNullSubject(this.subject);
         if (!SqlType.IsStringCategory(s.Type))
             throw SimulatedSqlException.InvalidArgumentDataType(s.Type.SqlServerName, argumentIndex: 2, "patindex");
 
         var isBig = IsBigResult(s.Type);
         SqlType resultType = isBig ? SqlType.BigInt : SqlType.Int32;
+        // A typed subject holding NULL propagates, like every other string
+        // scalar; only the untyped literal is refused, above.
+        if (s.IsNull)
+            return SqlValue.Null(resultType);
         var p = this.pattern.Run(runtime);
         // The subject takes a text / ntext document (it is searched, not
         // transformed); the pattern refuses every legacy LOB.
@@ -84,12 +84,34 @@ internal sealed class PatIndex : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         _ = StringScalars.BindArgument(this.pattern, batch, resolveColumnType, "patindex");
+        RejectUntypedNullSubject(this.subject);
         var subjectType = this.subject.GetSqlType(batch, resolveColumnType);
         // The subject is matched rather than transformed, so it takes no
         // legacy-LOB rejection — but the match still needs a definite
         // collation, so an unresolved one reports from either operand.
         StringScalars.RequireSettledCollation(subjectType, "patindex");
         return IsBigResult(subjectType) ? SqlType.BigInt : SqlType.Int32;
+    }
+
+    /// <summary>
+    /// Raises <strong>Msg 8116</strong> for a subject written as the bare
+    /// <c>NULL</c> literal.
+    /// </summary>
+    /// <remarks>
+    /// The rejection is about the argument's <em>type</em>, not its value: a
+    /// literal <c>NULL</c> has none, so the binder has nothing to match the
+    /// parameter against. A subject that carries a string type and happens to
+    /// hold NULL — a typed <c>CAST(NULL AS varchar(50))</c>, a NULL-valued
+    /// variable, a column — answers NULL like any other NULL-propagating
+    /// scalar (probe-confirmed against SQL Server 2025). A scalar UDF that
+    /// patindexes its own <c>varchar</c> parameter is the shape that meets
+    /// this, since the parameter carries a type whatever value arrives. A NULL
+    /// <em>pattern</em> answers NULL whatever its type.
+    /// </remarks>
+    private static void RejectUntypedNullSubject(Expression subject)
+    {
+        if (IsUntypedNullLiteral(subject))
+            throw SimulatedSqlException.InvalidArgumentDataType("NULL", argumentIndex: 2, "patindex");
     }
 
     /// <summary>

@@ -1241,13 +1241,12 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Per-projection-column nullability for result-set metadata (the TDS
-    /// COLMETADATA fNullable flag). Computed for the no-join shape with at
-    /// most one source, where <see cref="Expression.ResultIsNullable"/>'s
-    /// rules (direct refs preserve base-column nullability, literals NOT NULL,
-    /// other expressions nullable) match SQL Server's result metadata; joined
-    /// or multi-source shapes return null and the wire falls back to claiming
-    /// every column nullable — outer joins NULL-fill the inner side, so
-    /// base-column nullability alone would over-claim NOT NULL there. The
+    /// COLMETADATA fNullable flag), following
+    /// <see cref="Expression.ResultIsNullable"/>'s rules (direct refs preserve
+    /// base-column nullability, literals NOT NULL, other expressions nullable)
+    /// over a per-source NULL-fill map, so a column on the preserved side of
+    /// an outer join keeps its base nullability while one on the NULL-filled
+    /// side reads nullable whatever the base column says. The
     /// zero-source (FROM-less) case is included so a bare literal projection
     /// reports NOT NULL like real (<c>select 1</c> → <c>Int</c>, not
     /// <c>IntN</c>); a column reference can't appear without a source, so the
@@ -1264,13 +1263,12 @@ internal sealed partial class Selection
         BatchContext parseBatch,
         Func<MultiPartName, SqlType> resolveColumnType)
     {
-        if (sources.Length > 1 || joins.Length != 0)
-            return null;
+        var nullFilled = NullFilledSources(sources, joins);
 
         bool ResolveNullable(MultiPartName name)
         {
             var (s, c) = FindSourceColumn(sources, name);
-            return s == -1 || sources[s].Columns[c].Nullable;
+            return s == -1 || nullFilled[s] || sources[s].Columns[c].Nullable;
         }
 
         var context = new NullabilityContext(parseBatch, ResolveNullable, resolveColumnType);
@@ -1278,6 +1276,59 @@ internal sealed partial class Selection
         for (var i = 0; i < expressions.Count; i++)
             nullability[i] = expressions[i].ResultIsNullable(context);
         return nullability;
+    }
+
+    /// <summary>
+    /// Per-source flags: true where an outer join can emit the source's slot
+    /// NULL-filled, so every column it offers reads nullable regardless of the
+    /// base column's own declaration.
+    /// </summary>
+    /// <remarks>
+    /// Mirrors the fold the executor runs: <c>joins[level - 1]</c> attaches
+    /// the operand spanning <c>[level, level + GroupCount)</c> to the
+    /// accumulated left spine <c>[start, level)</c>. LEFT and OUTER APPLY
+    /// NULL-fill the right operand, RIGHT the left spine, and FULL both; a
+    /// parenthesized join group recurses so its interior structure is read the
+    /// same way. Flags only ever turn on — a slot NULL-filled by any join in
+    /// the chain stays nullable downstream.
+    /// </remarks>
+    internal static bool[] NullFilledSources(FromSource[] sources, JoinSpec[] joins)
+    {
+        var nullFilled = new bool[sources.Length];
+        if (joins.Length > 0)
+            MarkNullFilled(joins, start: 0, count: sources.Length, nullFilled);
+        return nullFilled;
+    }
+
+    private static void MarkNullFilled(JoinSpec[] joins, int start, int count, bool[] nullFilled)
+    {
+        var level = start + 1;
+        var end = start + count;
+        while (level < end && level - 1 < joins.Length)
+        {
+            var join = joins[level - 1];
+            var span = Math.Min(join.GroupCount, end - level);
+            switch (join.Kind)
+            {
+                case JoinKind.Left or JoinKind.OuterApply:
+                    for (var i = level; i < level + span; i++)
+                        nullFilled[i] = true;
+                    break;
+                case JoinKind.Right:
+                    for (var i = start; i < level; i++)
+                        nullFilled[i] = true;
+                    break;
+                case JoinKind.Full:
+                    for (var i = start; i < level + span; i++)
+                        nullFilled[i] = true;
+                    break;
+                default:
+                    break;
+            }
+            if (span > 1)
+                MarkNullFilled(joins, level, span, nullFilled);
+            level += span;
+        }
     }
 
     /// <summary>

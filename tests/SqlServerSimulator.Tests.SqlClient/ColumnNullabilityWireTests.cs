@@ -276,8 +276,19 @@ public sealed class ColumnNullabilityWireTests
         IsTrue(columns[4].AllowDBNull);   // constant-false leaves only that ELSE
     }
 
+    /// <summary>
+    /// A join reports each side against its own NULL-fill exposure: an INNER
+    /// join preserves both operands' base nullability, while an outer join's
+    /// NULL-filled side reads nullable however its base column is declared.
+    /// Probe-confirmed against SQL Server 2025 through
+    /// <c>sys.dm_exec_describe_first_result_set</c>.
+    /// </summary>
     [TestMethod]
-    public async Task JoinedSelect_FallsBackToAllNullable()
+    [DataRow("join", false, false)]
+    [DataRow("left join", false, true)]
+    [DataRow("right join", true, false)]
+    [DataRow("full join", true, true)]
+    public async Task JoinedSelect_ReportsPerSideNullability(string joinKeyword, bool leftNullable, bool rightNullable)
     {
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, """
@@ -289,13 +300,11 @@ public sealed class ColumnNullabilityWireTests
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand(
-            "select a.id, b.id from a join b on b.aid = a.id", connection);
+            $"select a.id, b.id from a {joinKeyword} b on b.aid = a.id", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
 
-        // Joined shapes don't model outer-join NULL-filling in the
-        // inference, so every column claims nullable — the safe over-claim.
         var columns = reader.GetColumnSchema();
-        IsTrue(columns[0].AllowDBNull);
-        IsTrue(columns[1].AllowDBNull);
+        AreEqual(leftNullable, columns[0].AllowDBNull);
+        AreEqual(rightNullable, columns[1].AllowDBNull);
     }
 }

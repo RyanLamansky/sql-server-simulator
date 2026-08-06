@@ -916,4 +916,96 @@ public sealed class ForeignKeyTests
         AreEqual(1, sim.ExecuteScalar("select count(*) from p"));
         AreEqual(1, sim.ExecuteScalar("select count(*) from c where pid = 1"));
     }
+
+    // --- The Msg 1785 cascade rule: only CASCADE propagates a delete ---
+    //
+    // An edge *reaches* its child when its action isn't NO_ACTION, but only
+    // CASCADE *propagates* — SET NULL and SET DEFAULT write the child row
+    // rather than deleting it, so nothing fires from that child in turn. One
+    // operation on one root then has to land on each table at most once: a
+    // second arrival is "multiple cascade paths", an arrival back at the root
+    // is "cycles". Each case below is probed against SQL Server 2025 over its
+    // own tables — sharing a set lets an earlier rejection change what the
+    // next case is asking. Full table in docs/claude/foreign-keys.md.
+
+    /// <summary>
+    /// The SET NULL first hop stops the delete, so C is reached once and the
+    /// triangle is accepted.
+    /// </summary>
+    [TestMethod]
+    public void SetNullFirstHop_DoesNotFormASecondCascadePath()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create table a (id int not null primary key);
+            create table b (id int not null primary key,
+                aid int null references a (id) on delete set null);
+            create table c (id int not null primary key,
+                bid int null references b (id) on delete cascade,
+                aid int null references a (id) on delete cascade);
+            select count(*) from c
+            """));
+
+    [TestMethod]
+    public void CascadeFirstHop_FormsASecondCascadePath_RaisesMsg1785()
+        => new Simulation().AssertSqlError("""
+            create table a (id int not null primary key);
+            create table b (id int not null primary key,
+                aid int null references a (id) on delete cascade);
+            create table c (id int not null primary key,
+                bid int null references b (id) on delete cascade,
+                aid int null references a (id) on delete cascade)
+            """, 1785);
+
+    /// <summary>
+    /// A loop of SET NULLs never travels, so real accepts it — the shape a
+    /// pair of tables each holding an optional reference to the other takes.
+    /// </summary>
+    [TestMethod]
+    public void SetNullLoop_IsAccepted()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create table x (id int not null primary key, yid int null);
+            create table y (id int not null primary key,
+                xid int null references x (id) on delete set null);
+            alter table x add constraint fk_x_y foreign key (yid) references y (id) on delete set null;
+            select count(*) from x
+            """));
+
+    [TestMethod]
+    public void LoopWithOneCascade_RaisesMsg1785()
+        => new Simulation().AssertSqlError("""
+            create table x (id int not null primary key, yid int null);
+            create table y (id int not null primary key,
+                xid int null references x (id) on delete cascade);
+            alter table x add constraint fk_x_y foreign key (yid) references y (id) on delete set null
+            """, 1785);
+
+    [TestMethod]
+    public void PlainCascadeChain_IsAccepted()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create table a (id int not null primary key);
+            create table b (id int not null primary key,
+                aid int null references a (id) on delete cascade);
+            create table c (id int not null primary key,
+                bid int null references b (id) on delete cascade);
+            select count(*) from c
+            """));
+
+    /// <summary>
+    /// Two roots that reach the same sink independently each land on it once.
+    /// </summary>
+    [TestMethod]
+    public void TwoIndependentCascadeParents_AreAccepted()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create table a (id int not null primary key);
+            create table b (id int not null primary key);
+            create table c (id int not null primary key,
+                aid int null references a (id) on delete cascade,
+                bid int null references b (id) on delete cascade);
+            select count(*) from c
+            """));
+
+    [TestMethod]
+    public void SelfReferencingCascade_RaisesMsg1785()
+        => new Simulation().AssertSqlError(
+            "create table a (id int not null primary key, pid int null references a (id) on delete cascade)",
+            1785);
 }

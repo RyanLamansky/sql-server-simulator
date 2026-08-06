@@ -50,13 +50,29 @@ internal sealed class TableType(
     DateTime createDate,
     HeapColumn[] columns,
     (KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)[] pendingKeys,
-    (string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)[] pendingChecks)
+    (string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)[] pendingChecks,
+    int[] keyConstraintObjectIds)
     : SchemaObject(name, typeTableObjectId, schema.SchemaId, createDate)
 {
     public Schema Schema = schema;
 
     public override string ObjectTypeCode => "TT";
     public override string ObjectTypeDescription => "TYPE_TABLE";
+
+    /// <summary>
+    /// One object id per entry of <see cref="PendingKeys"/>, allocated at
+    /// CREATE TYPE, so the backing type table's PRIMARY KEY / UNIQUE
+    /// constraints have a stable identity to report in
+    /// <c>sys.key_constraints</c>. Each <see cref="Clone"/> re-resolves the
+    /// constraints for its own <c>@t</c>, but the catalog describes the type.
+    /// </summary>
+    public readonly int[] KeyConstraintObjectIds = keyConstraintObjectIds;
+
+    /// <summary>
+    /// The backing type table's name — <c>TT_&lt;type&gt;_&lt;object_id:X8&gt;</c>,
+    /// the convention real uses and <c>sys.objects</c> reports.
+    /// </summary>
+    public string BackingTableName => $"TT_{this.Name}_{this.ObjectId:X8}";
 
     /// <summary>
     /// Per-database <c>user_type_id</c> (allocated via

@@ -225,8 +225,12 @@ Same set + reset rules: every DML statement updates the count; control-flow stat
 ## INSERT … SELECT
 `INSERT [INTO] target [(cols)] SELECT …` accepts the full Selection grammar — WHERE/JOIN/GROUP BY/aggregates/ORDER BY/TOP/OFFSET-FETCH/UNION/INTERSECT/EXCEPT all work source-side.
 
-Source-kind dispatch after the OUTPUT-clause parse: `Values` token → existing tuple-parsing path; `Select` token → `Selection.Parse(…).Execute()`.
+Source-kind dispatch after the OUTPUT-clause parse: `Values` token → existing tuple-parsing path; `Select` token → `Selection.Parse(…).Execute()`; `(` → the same SELECT path, parenthesized.
 Both funnel into one shared per-row encode loop (defaults / identity / rowversion / computed / constraints / OUTPUT).
+
+**A parenthesized source** — `INSERT INTO t (cols) (SELECT …)`, nesting to any depth — is accepted, and the query inside is parsed at the open-paren count so the closing `)` reads as its terminator rather than a stray token.
+Those parens are only reachable once an explicit column list has been consumed: with no column list the leading `(` is read as the start of one, and the `SELECT` inside it is Msg 102 — which is what real reports for `INSERT INTO t (SELECT …)` too, from the same ambiguity.
+One divergence stands: real refuses an `ORDER BY` inside the parens (Msg 102 at the keyword) where the simulator executes it — see [`backlog.md`](backlog.md).
 
 **Full buffering**: source materializes to `List<SqlValue[]>` before any destination write — makes self-insert (`INSERT t SELECT … FROM t`) safe.
 

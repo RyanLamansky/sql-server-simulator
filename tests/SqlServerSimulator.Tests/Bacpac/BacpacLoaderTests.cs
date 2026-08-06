@@ -2099,6 +2099,99 @@ public class BacpacLoaderTests
         AreEqual(offset, command.ExecuteScalar());
     }
 
+    /// <summary>
+    /// A constraint name may legally contain a dot, and real schemas do it
+    /// constantly — Entity Framework's own migration-history table ships
+    /// <c>PK_dbo.__MigrationHistory</c>. The loader has to split the bacpac's
+    /// bracketed name on separator dots only, or the leaf it emits is a
+    /// fragment ending in a stray bracket.
+    /// </summary>
+    [TestMethod]
+    public void ConstraintNamesContainingADot_Load()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Parent", t => t
+                .Column("Id", "int")
+                .PrimaryKey("PK_dbo.Parent", "Id"))
+            .Table("dbo", "Child", t => t
+                .Column("Id", "int")
+                .Column("ParentId", "int")
+                .Column("Status", "nvarchar(20)", nullable: true)
+                .Column("Age", "int")
+                .PrimaryKey("PK_dbo.Child", "Id")
+                .ForeignKey("FK_dbo.Child_dbo.Parent_ParentId", ["ParentId"], "dbo", "Parent", ["Id"])
+                .Check("CK_dbo.Child_Age", "[Age] > 0")
+                .Default("DF.Child_Status", "Status", "'active'"))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+
+        AreEqual("PK_dbo.Child PK_dbo.Parent", sim.ExecuteScalar(
+            "SELECT STRING_AGG(name, ' ') WITHIN GROUP (ORDER BY name) FROM sys.key_constraints"));
+        AreEqual("FK_dbo.Child_dbo.Parent_ParentId", sim.ExecuteScalar("SELECT name FROM sys.foreign_keys"));
+        AreEqual("CK_dbo.Child_Age", sim.ExecuteScalar("SELECT name FROM sys.check_constraints"));
+        AreEqual("DF.Child_Status", sim.ExecuteScalar("SELECT name FROM sys.default_constraints"));
+    }
+
+    /// <summary>
+    /// float / real ride the BCP wire as IEEE 754 little-endian at their
+    /// storage width, on the fixed-raw prefix rule the integer family uses.
+    /// </summary>
+    [TestMethod]
+    public void FloatAndRealColumns_RoundTripThroughBcp()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "M", t => t
+                .Column("Id", "int")
+                .Column("D", "float")
+                .Column("S", "real")
+                .Column("N", "float", nullable: true)
+                .Row(1, 1.5d, 2.25f, 3.5d)
+                .Row(2, -0.125d, -4.5f, null))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+
+        AreEqual(2, sim.ExecuteScalar("SELECT COUNT(*) FROM M"));
+        AreEqual(1.375d, sim.ExecuteScalar("SELECT SUM(D) FROM M"));
+        // SUM over real promotes to float, as on real SQL Server.
+        AreEqual(-2.25d, sim.ExecuteScalar("SELECT SUM(S) FROM M"));
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(N) FROM M"));
+    }
+
+    /// <summary>
+    /// DacFx writes a column's <c>IsNullable</c> property only when it differs
+    /// from the element kind's own default, and the two kinds disagree: a
+    /// table column omits it for a nullable column, a table-type column omits
+    /// it for a NOT NULL one. Reading the type on the table's default makes
+    /// every one of its NOT NULL columns nullable.
+    /// </summary>
+    [TestMethod]
+    public void TableTypeColumns_DefaultToNotNull()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .TableType("dbo", "TT", t => t
+                .Column("A", "int")
+                .Column("B", "nvarchar(50)")
+                .Column("C", "int", nullable: true))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+
+        AreEqual("A=0 B=0 C=1", sim.ExecuteScalar("""
+            SELECT STRING_AGG(CONCAT(c.name, '=', c.is_nullable), ' ') WITHIN GROUP (ORDER BY c.column_id)
+            FROM sys.table_types tt
+            JOIN sys.columns c ON c.object_id = tt.type_table_object_id
+            WHERE tt.name = 'TT'
+            """));
+    }
+
     private static object ParseTemporal(string sqlType, string literal) =>
         sqlType.StartsWith("datetimeoffset", StringComparison.Ordinal)
             ? DateTimeOffset.Parse(literal, CultureInfo.InvariantCulture)

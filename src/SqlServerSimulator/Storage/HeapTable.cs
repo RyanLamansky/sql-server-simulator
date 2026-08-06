@@ -369,6 +369,12 @@ internal sealed class HeapTable : SchemaObject
     public readonly List<Index> Indexes = [];
 
     /// <summary>
+    /// <c>CREATE STATISTICS</c>-declared standalone statistics, in creation
+    /// order. Catalog-only — see <see cref="UserStatistic"/>.
+    /// </summary>
+    public readonly List<UserStatistic> UserStatistics = [];
+
+    /// <summary>
     /// Indexed views (<c>Schemas.View</c> with a unique clustered index) whose
     /// body references this table as a base. Populated at CREATE INDEX-on-view
     /// time from the view's referenced tables. A base-table INSERT / UPDATE

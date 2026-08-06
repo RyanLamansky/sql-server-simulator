@@ -849,6 +849,46 @@ internal static partial class BuiltInResources
                     ];
                 }
             }
+
+            // A table type's PRIMARY KEY / UNIQUE lives on its backing type
+            // table, which real homes in the sys schema and reports here
+            // alongside ordinary tables' constraints — DacFx's table-type
+            // scripting reads the pair to re-emit the key clause. The
+            // constraint is system-named after that backing table, never after
+            // the type, and the type's own PendingKeys are the shape (each
+            // @t clone re-resolves its own copies).
+            var sysSchemaId = SqlValue.FromInt32(Database.SysSchemaId);
+            foreach (var tableType in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
+            {
+                var backingName = tableType.BackingTableName;
+                var parentObjectId = SqlValue.FromInt32(tableType.ObjectId);
+                var createdAt = SqlValue.FromDateTime(tableType.CreateDate);
+                var modifiedAt = SqlValue.FromDateTime(tableType.ModifyDate);
+                for (var i = 0; i < tableType.PendingKeys.Length; i++)
+                {
+                    var (kind, declaredName, fullOrdinals, _, _, _) = tableType.PendingKeys[i];
+                    var isPk = kind == KeyConstraintKind.PrimaryKey;
+                    var name = declaredName
+                        ?? Simulation.AutoConstraintName(backingName, kind, fullOrdinals, tableType.Columns);
+                    yield return [
+                        SqlValue.FromSystemName(name),
+                        SqlValue.FromInt32(tableType.KeyConstraintObjectIds[i]),
+                        nullPrincipal,
+                        sysSchemaId,
+                        parentObjectId,
+                        isPk ? pkType : uqType,
+                        isPk ? pkTypeDesc : uqTypeDesc,
+                        createdAt,
+                        modifiedAt,
+                        trueBit, // is_ms_shipped — the backing table is the engine's
+                        falseBit,
+                        falseBit,
+                        SqlValue.FromInt32(i + 1),
+                        declaredName is null ? trueBit : falseBit,
+                        trueBit,
+                    ];
+                }
+            }
         }
     }
 

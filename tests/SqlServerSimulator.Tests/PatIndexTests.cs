@@ -66,13 +66,23 @@ public sealed class PatIndexTests
         => IsInstanceOfType<DBNull>(ExecuteScalar("select PATINDEX(NULL, 'abc')"));
 
     /// <summary>
-    /// Probe-confirmed: PATINDEX with a NULL subject raises Msg 8116 rather
-    /// than propagating NULL — asymmetric with the NULL pattern (which
-    /// returns NULL silently).
+    /// Probe-confirmed: the rejection is about the subject's <em>type</em>,
+    /// not its value. A bare <c>NULL</c> literal has no type for the binder to
+    /// match, so it raises Msg 8116; a subject that carries a string type and
+    /// happens to hold NULL propagates NULL like any other string scalar.
     /// </summary>
     [TestMethod]
-    public void NullSubject_RaisesMsg8116()
-        => AreEqual(8116, ConvertToInt(AssertSqlError("select PATINDEX('%a%', cast(NULL as varchar(10)))", 8116)));
+    public void UntypedNullSubject_RaisesMsg8116()
+        => AreEqual(8116, ConvertToInt(AssertSqlError("select PATINDEX('%a%', NULL)", 8116)));
+
+    [TestMethod]
+    public void TypedNullSubject_ReturnsNull()
+        => IsInstanceOfType<DBNull>(ExecuteScalar("select PATINDEX('%a%', cast(NULL as varchar(10)))"));
+
+    [TestMethod]
+    public void NullValuedVariableSubject_ReturnsNull()
+        => IsInstanceOfType<DBNull>(ExecuteScalar(
+            "declare @v varchar(1000) = NULL; select PATINDEX('%a%', @v)"));
 
     [TestMethod]
     public void IntegerSubject_RaisesMsg8116()

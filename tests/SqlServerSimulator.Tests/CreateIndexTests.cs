@@ -579,9 +579,9 @@ public sealed class CreateIndexTests
     // full storage-tuning option set (PAD_INDEX / IGNORE_DUP_KEY / ONLINE /
     // ALLOW_ROW_LOCKS / ALLOW_PAGE_LOCKS / etc.) plus an `ON [PRIMARY]`
     // filegroup placement. The simulator has no B-tree storage and no
-    // filegroup model, so both trailers parse-and-discard. Probed against
-    // the Optimizely Configured Commerce v4.x starting-database script on
-    // 2026-05-17 (1.6 MB, 17 K lines, all 700 `ON [PRIMARY]` occurrences).
+    // filegroup model, so both trailers parse-and-discard. Probed against a
+    // generated starting-database script on 2026-05-17 (1.6 MB, 17 K lines,
+    // all 700 `ON [PRIMARY]` occurrences).
 
     [TestMethod]
     public void CreateIndex_WithFullOptionsAndOnPrimary_Accepted()

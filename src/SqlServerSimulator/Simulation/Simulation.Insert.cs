@@ -144,6 +144,7 @@ partial class Simulation
             // diagnostics are the view's own, measured against its projection.
             ReservedKeyword { Keyword: Keyword.Values } => EvaluateArityCheckedTuples(context, destinationColumns, hasExplicitColumnList),
             ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns.Length, hasExplicitColumnList),
+            Operator { Character: '(' } => ExecuteParenthesizedSelectSource(context, destinationColumns.Length, hasExplicitColumnList),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
 
@@ -371,6 +372,7 @@ partial class Simulation
             {
                 ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns.Length, hasExplicitColumnList, identityColumn, destinationTable),
                 ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns.Length),
+                Operator { Character: '(' } => ExecuteParenthesizedSelectSource(context, destinationColumns.Length, hasExplicitColumnList, identityColumn, destinationTable),
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
         }
@@ -941,19 +943,66 @@ partial class Simulation
     /// (<c>INSERT t SELECT … FROM t</c>) safe — the source materializes
     /// before any destination write.
     /// </summary>
-    private static List<SqlValue[]> ExecuteSelectSource(
+    /// <summary>
+    /// Runs an <c>INSERT</c>'s SELECT source when it's written parenthesized —
+    /// <c>INSERT INTO t (cols) (SELECT …)</c> — consuming the wrapping parens
+    /// around the query <see cref="ExecuteSelectSource"/> reads.
+    /// </summary>
+    /// <remarks>
+    /// The parens are only reachable once an explicit column list has been
+    /// consumed: with no column list the leading <c>(</c> is read as the start
+    /// of one, and the <c>SELECT</c> inside it is Msg 102 — which is what real
+    /// reports for <c>INSERT INTO t (SELECT …)</c> too, from the same
+    /// ambiguity (probe-confirmed against SQL Server 2025). Nesting is
+    /// accepted to any depth, matching the parenthesized query expression
+    /// real's grammar takes here.
+    /// </remarks>
+    private static List<SqlValue[]> ExecuteParenthesizedSelectSource(
         ParserContext context,
         int expectedColumnCount,
         bool hasExplicitColumnList,
         HeapColumn? identityColumn = null,
         HeapTable? destinationTable = null)
     {
+        var depth = 0;
+        while (context.Token is Operator { Character: '(' })
+        {
+            depth++;
+            context.MoveNextRequired();
+        }
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Select })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        // Parsing at the open-paren count is what makes the query parser read
+        // the closing `)` as its terminator rather than as a stray token — the
+        // same depth a derived table's body is parsed at, and the reason an
+        // ORDER BY inside the parens is refused here as it is there.
+        var rows = ExecuteSelectSource(context, expectedColumnCount, hasExplicitColumnList, identityColumn, destinationTable, (uint)depth);
+
+        while (depth > 0)
+        {
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            depth--;
+            context.MoveNextOptional();
+        }
+        return rows;
+    }
+
+    private static List<SqlValue[]> ExecuteSelectSource(
+        ParserContext context,
+        int expectedColumnCount,
+        bool hasExplicitColumnList,
+        HeapColumn? identityColumn = null,
+        HeapTable? destinationTable = null,
+        uint parseDepth = 0)
+    {
         var wasInsertSource = context.InInsertSourceSelect;
         context.InInsertSourceSelect = true;
         Selection selection;
         try
         {
-            selection = Selection.Parse(context, depth: 0);
+            selection = Selection.Parse(context, parseDepth);
         }
         finally
         {

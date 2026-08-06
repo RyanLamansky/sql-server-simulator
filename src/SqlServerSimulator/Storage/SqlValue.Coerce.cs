@@ -1463,8 +1463,7 @@ internal readonly partial struct SqlValue
     // CAST(CAST(<literal> AS <date-type>) AS varbinary(20)). The layouts
     // documented at each helper match the bytes SSMS emits in BACPAC-style
     // INSERT statements (`CAST(0x… AS DateTimeOffset)`), which is how
-    // Optimizely Configured Commerce and many other partner products
-    // serialize their seed-data date columns.
+    // generated seed-data scripts commonly serialize their date columns.
     //
     // Common to time(N) / datetime2(N) / datetimeoffset(N):
     //   scale byte 0–7, then a little-endian unsigned integer giving the

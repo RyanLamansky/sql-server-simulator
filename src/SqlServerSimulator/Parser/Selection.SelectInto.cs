@@ -46,10 +46,17 @@ partial class Selection
         // backed by Selection, OPENJSON) drops identity even on direct refs.
         var identityEligible = sources.Length == 1 && joins.Length == 0 && sources[0].BackingTable is not null;
 
+        // The destination's declaration follows the same inference the wire's
+        // COLMETADATA reports, NULL-fill map included: a column read from the
+        // inner side of an outer join has to land nullable however its base
+        // column is declared, or the first NULL-extended row contradicts the
+        // table just created for it.
+        var nullFilled = NullFilledSources(sources, joins);
+
         bool ResolveColumnNullable(MultiPartName name)
         {
             var (s, c) = FindSourceColumn(sources, name);
-            return s == -1 || sources[s].Columns[c].Nullable;
+            return s == -1 || nullFilled[s] || sources[s].Columns[c].Nullable;
         }
 
         var nullabilityContext = new NullabilityContext(parseBatch, ResolveColumnNullable, resolveColumnType);

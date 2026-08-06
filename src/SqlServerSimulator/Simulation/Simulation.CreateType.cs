@@ -161,7 +161,12 @@ partial class Simulation
             createDate: context.Batch.CurrentStatement.UtcNow,
             columns: [.. heapColumns!],
             pendingKeys: [.. pendingKeys],
-            pendingChecks: [.. pendingChecks]);
+            pendingChecks: [.. pendingChecks],
+            // One object id per key so the backing type table's PK / UNIQUE
+            // constraints hold a stable identity in sys.key_constraints. The
+            // constraints themselves are re-resolved per clone (each @t gets
+            // its own), but the catalog reports the type's, not a clone's.
+            keyConstraintObjectIds: [.. pendingKeys.Select(_ => context.CurrentDatabase.AllocateObjectId())]);
         schema.TableTypes[typeName.Leaf] = tableType;
         RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");
         return true;

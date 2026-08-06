@@ -282,8 +282,13 @@ partial class Simulation
     /// applies the explicit column-rename list when one was supplied (Msg
     /// 8158 / 8159 on count mismatch); otherwise validates that every
     /// projection has a name (Msg 4511) and that names don't duplicate
-    /// (Msg 4506). Nullability is conservatively True — same fidelity gap
-    /// as inline TVFs.
+    /// (Msg 4506). Per-column nullability comes from the body's own
+    /// projection inference (<see cref="Selection.ColumnNullability"/>) — the
+    /// same rules the TDS COLMETADATA fNullable flag reports, so a view's
+    /// <c>sys.columns</c> row and a direct read of its body agree. That
+    /// inference declines the joined and multi-source shapes (an outer join
+    /// NULL-fills the inner side, which base-column nullability alone would
+    /// miss), and those keep the conservative True.
     /// </summary>
     private static HeapColumn[] ComputeViewOutputColumns(Collation collation, Selection bodySelection, List<string>? renameList, string viewName)
     {
@@ -305,6 +310,7 @@ partial class Simulation
         }
 
         var seen = new HashSet<string>(collation);
+        var nullability = bodySelection.ColumnNullability;
         var output = new HeapColumn[projectionCount];
         for (var i = 0; i < projectionCount; i++)
         {
@@ -313,7 +319,8 @@ partial class Simulation
                 throw SimulatedSqlException.CreateViewMissingColumnName(i + 1);
             if (!seen.Add(name))
                 throw SimulatedSqlException.DuplicateColumnInViewOrFunction(name, viewName);
-            output[i] = new HeapColumn(name, bodySelection.Schema[i], maxLength: null, nullable: true);
+            var nullable = nullability is null || i >= nullability.Length || nullability[i];
+            output[i] = new HeapColumn(name, bodySelection.Schema[i], maxLength: null, nullable: nullable);
         }
         return output;
     }

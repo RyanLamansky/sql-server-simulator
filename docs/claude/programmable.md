@@ -162,8 +162,16 @@ Adopting rather than re-stamping also keeps the value live: because the body re-
 `StatementContext.UtcNow` is seeded at construction as the floor against that, so an un-inherited body batch still serves a live instant rather than year 1; the adoption on top of it is what makes the instant the *right* one.
 Regression coverage: `CurrentTimeFunctionTests`.
 
+## The body-introducing `AS` is optional
+
+SQL Server's `CREATE FUNCTION` grammar takes the `AS` before a function body as **optional**, for all three function kinds — `RETURNS nvarchar(4000) BEGIN … END` creates the same scalar UDF as `RETURNS nvarchar(4000) AS BEGIN … END`, and the inline (`RETURNS TABLE RETURN (…)`) and multi-statement (`RETURNS @r TABLE (…) BEGIN … END`) forms take the same licence.
+`CREATE PROCEDURE` does **not** share it: omitting the keyword there is Msg 102 at the following token.
+Probe-confirmed against SQL Server 2025.
+Hand-written functions do omit it, so a parser that required the keyword drops them on import.
+`ConsumeOptionalBodyAs` in `Simulation.CreateFunction.cs` is the single seam — the CLR form still needs the keyword, since `EXTERNAL` only follows it.
+
 ## Scalar user-defined functions
-`CREATE FUNCTION schema.name(@p type [= default], ...) RETURNS <type> [WITH RETURNS NULL ON NULL INPUT] AS BEGIN ... END`, called as `SELECT schema.fn(args)`.
+`CREATE FUNCTION schema.name(@p type [= default], ...) RETURNS <type> [WITH RETURNS NULL ON NULL INPUT] [AS] BEGIN ... END`, called as `SELECT schema.fn(args)`.
 Body source captured between outer `BEGIN`/`END` (BEGIN TRAN/TRANSACTION/DISTRIBUTED skipped during nesting) and re-tokenized per call; parameters seed a child `BatchContext.Variables`, value-form RETURN lands in `BatchContext.UdfFrame.ReturnedValue`.
 Probed against SQL Server 2025.
 

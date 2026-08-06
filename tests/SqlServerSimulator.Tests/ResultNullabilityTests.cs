@@ -330,4 +330,82 @@ public sealed class ResultNullabilityTests
     [DataRow("(select top 1 nn from nb)", true)]
     public void StructuralRule_ProjectsProbedNullability(string projection, bool expected)
         => AreEqual(expected, ProjectsNullable(projection), projection);
+
+    // --- Module output columns and the per-source NULL-fill map ---
+    //
+    // A view's and an inline TVF's sys.columns rows read the same inference,
+    // so their metadata and a direct read of their body agree. A join reads
+    // each source against a per-source NULL-fill map: LEFT and OUTER APPLY
+    // NULL-fill the right operand, RIGHT the left spine, FULL both.
+    // Probe-confirmed against SQL Server 2025 through
+    // sys.dm_exec_describe_first_result_set.
+
+    [TestMethod]
+    public void ViewColumn_KeepsTheBaseColumnsNullability()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int not null, b int null)",
+            "create view v as select a, b from t");
+        AreEqual("a=0 b=1", sim.ExecuteScalar("""
+            select string_agg(concat(c.name, '=', c.is_nullable), ' ') within group (order by c.column_id)
+            from sys.columns c where c.object_id = object_id('v')
+            """));
+    }
+
+    [TestMethod]
+    public void ViewOverAnInnerJoin_KeepsBothSidesNullability()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int not null, v int null); create table u (id int not null, w int not null)",
+            "create view v as select t.id, t.v, u.w from t join u on u.id = t.id");
+        AreEqual("id=0 v=1 w=0", sim.ExecuteScalar("""
+            select string_agg(concat(c.name, '=', c.is_nullable), ' ') within group (order by c.column_id)
+            from sys.columns c where c.object_id = object_id('v')
+            """));
+    }
+
+    [TestMethod]
+    public void ViewOverALeftJoin_MakesTheNullFilledSideNullable()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int not null, v int null); create table u (id int not null, w int not null)",
+            "create view v as select t.id, u.w from t left join u on u.id = t.id");
+        AreEqual("id=0 w=1", sim.ExecuteScalar("""
+            select string_agg(concat(c.name, '=', c.is_nullable), ' ') within group (order by c.column_id)
+            from sys.columns c where c.object_id = object_id('v')
+            """));
+    }
+
+    [TestMethod]
+    public void InlineTvfColumn_KeepsTheBaseColumnsNullability()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int not null, b int null)",
+            "create function dbo.f() returns table return (select a, b from t)");
+        AreEqual("a=0 b=1", sim.ExecuteScalar("""
+            select string_agg(concat(c.name, '=', c.is_nullable), ' ') within group (order by c.column_id)
+            from sys.columns c where c.object_id = object_id('dbo.f')
+            """));
+    }
+
+    /// <summary>
+    /// A destination column read from the NULL-filled side of an outer join
+    /// has to land nullable, or the first NULL-extended row contradicts the
+    /// table just created for it.
+    /// </summary>
+    [TestMethod]
+    public void SelectInto_ThroughALeftJoin_DeclaresTheInnerSideNullable()
+        => AreEqual("id=0 v=0 w=1", new Simulation().ExecuteScalar("""
+            create table a (id int not null, v int not null);
+            create table b (id int not null, w int not null);
+            insert a values (1, 10), (2, 20);
+            insert b values (1, 100);
+            select a.id, a.v, b.w into dest from a left join b on b.id = a.id;
+            select string_agg(concat(c.name, '=', c.is_nullable), ' ') within group (order by c.column_id)
+            from sys.columns c where c.object_id = object_id('dest')
+            """));
 }

@@ -998,6 +998,39 @@ internal static partial class BuiltInResources
                 nullName, // replica_name
             ];
         }
+        // CREATE STATISTICS-declared standalone statistics: user_created = 1,
+        // stats_id drawn from the same per-table sequence the index ids use.
+        var trueBit = SqlValue.FromBoolean(true);
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                var tableObjectId = SqlValue.FromInt32(table.ObjectId);
+                foreach (var statistic in table.UserStatistics)
+                {
+                    yield return
+                    [
+                        tableObjectId,
+                        SqlValue.FromSystemName(statistic.Name),
+                        SqlValue.FromInt32(statistic.StatsId),
+                        falseBit, // auto_created
+                        trueBit,  // user_created
+                        statistic.NoRecompute ? trueBit : falseBit,
+                        falseBit, // has_filter
+                        nullFilter,
+                        falseBit, // is_temporary
+                        falseBit, // is_incremental
+                        falseBit, // has_persisted_sample
+                        zeroInt,  // stats_generation_method
+                        methodDesc,
+                        falseBit, // auto_drop
+                        primaryRole,
+                        primaryRoleDesc,
+                        nullName, // replica_name
+                    ];
+                }
+            }
+        }
         // Indexed-view statistics: one index-backed stat per view index
         // (stats_id = index_id, name = index name), matching real SQL Server.
         foreach (var schema in database.Schemas.Values)
@@ -1128,6 +1161,23 @@ internal static partial class BuiltInResources
                         : IndexKeyColumnIds(identity.Index!, table);
                     foreach (var row in EmitStatsColumns(tableObjectId, SqlValue.FromInt32(identity.IndexId), columnIds, identity.Type == 1))
                         yield return row;
+                }
+                // CREATE STATISTICS columns, in declared order — the leading
+                // one is what a histogram would describe, so the order is the
+                // statistic's identity as much as its members are.
+                foreach (var statistic in table.UserStatistics)
+                {
+                    var statsId = SqlValue.FromInt32(statistic.StatsId);
+                    for (var i = 0; i < statistic.ColumnFullOrdinals.Length; i++)
+                    {
+                        yield return
+                        [
+                            tableObjectId,
+                            statsId,
+                            SqlValue.FromInt32(i + 1),
+                            SqlValue.FromInt32(table.Columns[statistic.ColumnFullOrdinals[i]].ColumnId),
+                        ];
+                    }
                 }
             }
             // Indexed views: one stats_columns row per view-index key column
