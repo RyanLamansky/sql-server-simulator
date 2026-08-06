@@ -709,6 +709,13 @@ partial class Simulation
 
         var selection = ParseBodyQuery(parser, rejectsNextValueFor: true);
 
+        // Msg 1033: an inline function is one of the five constructs the
+        // message names, so its ORDER BY needs a companion TOP / OFFSET /
+        // FETCH — the same test the view and CTE bodies run (probe-confirmed
+        // 2026-08-06).
+        if (selection.HasOrderBy && !selection.HasTopOrOffsetOrFetch)
+            throw SimulatedSqlException.OrderByInvalidInCte();
+
         var columns = new HeapColumn[selection.Schema.Length];
         var seenNames = new HashSet<string>(outerContext.Batch.CurrentDatabase.Collation);
         var nullability = selection.ColumnNullability;

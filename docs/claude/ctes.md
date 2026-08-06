@@ -18,6 +18,10 @@ Errors:
 - **Msg 530**: MAXRECURSION exceeded.
 - **Msg 239** duplicate CTE name; **Msg 8158**/**8159** rename-list count mismatch; **Msg 1033** ORDER BY in CTE body without TOP/OFFSET/FETCH.
 
+**Msg 1033 covers all five constructs its own text names**, not just the CTE: a view body, an inline function's body, a derived table, and every subquery shape (scalar, `EXISTS`, the quantified comparisons, `IN`) take the same test — `HasOrderBy && !HasTopOrOffsetOrFetch` — at four seams: `Simulation.With.cs` and `Simulation.CreateView.cs` for the two stored bodies, the derived-table arm of the FROM parser, and `Expression.ParseSubqueryRejectingNextValueFor`, which every subquery funnels through.
+A companion `TOP`, `OFFSET` or `FETCH` clears it in each (probe-confirmed against SQL Server 2025 on 2026-08-06; `OFFSET 0 ROWS` clears the rejection without dropping a row).
+The parenthesized `INSERT … (SELECT …)` source is *not* one of them and takes a stricter rule — real refuses an ORDER BY there even with TOP, as Msg 156 — see [`backlog.md`](backlog.md).
+
 ## Recursive-member restrictions
 
 SQL Server forbids a set of constructs in a recursive CTE's **recursive member**, each with its own error.

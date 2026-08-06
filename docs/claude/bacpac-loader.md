@@ -90,6 +90,26 @@ After all 9 phases: BCP data load (parallel per-table with LPT scheduling — se
   predicate is the `FilterPredicate` *script* property. Dropping either loads
   an index that reads differently from the one exported — a filtered UNIQUE
   index becomes an unconditional one.
+- **`DspName` is the schema provider, not the compatibility level.** The root
+  attribute names the version the exporting tool targeted; the database's own
+  level rides a `CompatibilityMode` property when it differs. The two coincide
+  often enough to look interchangeable (AdventureWorks exports Sql170 at level
+  170, WideWorldImporters Sql130 at 130), so DspName alone reads correctly
+  until a model carries a database set below its server — then it silently
+  imports at the wrong level, which matters because the level gates behavior.
+  DspName is the fallback; the property wins.
+- **`RecoveryMode` is DacFx's encoding, not `sys.databases`'.** The property is
+  omitted for the FULL default and written as `1` for SIMPLE / `2` for
+  BULK_LOGGED, where the catalog column encodes 1 / 2 / 3 as FULL /
+  BULK_LOGGED / SIMPLE — so the loader translates rather than casting
+  (probe-confirmed by exporting a database at each of the three settings).
+- **`IsReadOnly` has to be applied after the data load.** The model walk runs
+  in phase 1, so a READ_ONLY set there would make the database refuse the rest
+  of its own import; `BacpacImportResult.DatabaseIsReadOnly` records it and
+  `BacpacReader` applies it once every row has landed. DacFx does emit the
+  property for a read-only source (probe-confirmed) — an earlier reading that
+  it omits one came from `READONLY` table-valued *parameters* matching the same
+  attribute name in an unrelated element.
 
 ## BCP wire format
 

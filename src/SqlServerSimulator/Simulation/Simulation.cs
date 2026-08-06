@@ -52,6 +52,12 @@ public sealed partial class Simulation
         var msdb = this.Databases[MsdbDatabaseName];
         msdb.CrossDatabaseChaining = true;
         msdb.Trustworthy = true;
+        // Recovery models real ships: master / tempdb / msdb SIMPLE, model FULL
+        // (probe-confirmed). A new user database inherits model's, which is the
+        // Database field's own default.
+        this.Databases[MasterDatabaseName].RecoveryModel = RecoveryModel.Simple;
+        this.Databases[TempdbDatabaseName].RecoveryModel = RecoveryModel.Simple;
+        msdb.RecoveryModel = RecoveryModel.Simple;
         SeedMsdbPolicyHealthView(msdb);
         SeedMsdbPolicyConfigurationView(msdb);
         SeedMsdbPolicyAutomationFunction(msdb);

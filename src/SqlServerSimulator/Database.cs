@@ -297,6 +297,17 @@ internal sealed class Database
     public bool IsReadOnly;
 
     /// <summary>
+    /// The database's recovery model, reported through
+    /// <c>sys.databases.recovery_model</c> / <c>recovery_model_desc</c>. Set by
+    /// <c>ALTER DATABASE … SET RECOVERY</c> and by a bacpac import carrying the
+    /// source's value; drives nothing else, since the simulator has no
+    /// transaction log. Seeded per database in the constructor — real ships
+    /// <c>master</c> / <c>tempdb</c> / <c>msdb</c> SIMPLE and <c>model</c>
+    /// FULL, which every new user database inherits.
+    /// </summary>
+    public RecoveryModel RecoveryModel = RecoveryModel.Full;
+
+    /// <summary>
     /// Raises <strong>Msg 3906</strong> (<c>Failed to update database "&lt;n&gt;"
     /// because the database is read-only.</c>) when this database is
     /// <see cref="IsReadOnly"/>. Called from the write seams — the per-row DML

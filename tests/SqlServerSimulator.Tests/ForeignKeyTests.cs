@@ -121,6 +121,23 @@ public sealed class ForeignKeyTests
         Assert.Contains("Could not drop object 'p'", ex.Message);
     }
 
+    /// <summary>
+    /// Msg 3726 names the table as the statement wrote it, minus brackets —
+    /// so a schema-qualified or bracketed DROP reports the qualified form
+    /// where an unqualified one reports the bare name (probe-confirmed against
+    /// SQL Server 2025). Reporting the stored leaf matches only the first.
+    /// </summary>
+    [TestMethod]
+    [DataRow("drop table p", "Could not drop object 'p'")]
+    [DataRow("drop table dbo.p", "Could not drop object 'dbo.p'")]
+    [DataRow("drop table [dbo].[p]", "Could not drop object 'dbo.p'")]
+    public void DropParent_WhenReferenced_NamesTheTableAsWritten(string dropStatement, string expected)
+        => Assert.Contains(expected, new Simulation().AssertSqlError($"""
+            create table p (id int not null primary key);
+            create table c (id int not null primary key, p_id int not null references p(id));
+            {dropStatement}
+            """, 3726).Message);
+
     [TestMethod]
     public void DropChild_DetachesIncomingRefs_AndAllowsDroppingParent()
         => AreEqual(0, new Simulation().ExecuteScalar("""
@@ -915,6 +932,85 @@ public sealed class ForeignKeyTests
             """);
         AreEqual(1, sim.ExecuteScalar("select count(*) from p"));
         AreEqual(1, sim.ExecuteScalar("select count(*) from c where pid = 1"));
+    }
+
+    // --- The aliased DELETE form enforces parent-side FKs like the plain one ---
+    //
+    // `DELETE <alias> FROM …` runs a different execution path from
+    // `DELETE FROM t WHERE …`, and that path decides up front whether it needs
+    // to decode each row's full old values. Parent-side FK handling reads those
+    // decoded rows and does nothing when they're absent — so omitting the
+    // incoming-FK term from that decision silently disabled *every* referential
+    // action for the aliased form: no Msg 547, no cascade, no SET NULL. It left
+    // orphaned children behind rather than failing loudly, which is why these
+    // pin the resulting state and not just the error.
+
+    /// <summary>
+    /// Every spelling that addresses the same parent row has to refuse it —
+    /// the aliased form with and without a join, and joined to a table
+    /// variable (the shape an INSTEAD OF trigger body takes against DELETED).
+    /// </summary>
+    [TestMethod]
+    [DataRow("delete from p where id = 1")]
+    [DataRow("delete x from p x where x.id = 1")]
+    [DataRow("delete x from p x inner join c on c.pid = x.id")]
+    [DataRow("declare @d table (id int); insert @d values (1); delete x from @d d inner join p x on x.id = d.id")]
+    public void ParentSideForeignKey_IsEnforcedByEveryDeleteForm(string deleteStatement)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (id int not null primary key);
+            create table c (id int not null primary key, pid int not null references p(id));
+            insert p values (1), (2);
+            insert c values (10, 1)
+            """);
+        _ = sim.AssertSqlError(deleteStatement, 547);
+        // The refusal has to leave the row in place — an enforcement path that
+        // raised after tombstoning would still corrupt the table.
+        AreEqual(2, sim.ExecuteScalar("select count(*) from p"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from c"));
+    }
+
+    /// <summary>
+    /// CASCADE and SET NULL read the same decoded rows the Msg 547 check does,
+    /// so the aliased form has to run them too.
+    /// </summary>
+    [TestMethod]
+    public void ReferentialActions_FireThroughTheAliasedDeleteForm()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (id int not null primary key);
+            create table cas (id int not null primary key, pid int null references p(id) on delete cascade);
+            create table sn (id int not null primary key, pid int null references p(id) on delete set null);
+            insert p values (1), (2);
+            insert cas values (10, 1), (11, 2);
+            insert sn values (20, 1), (21, 2);
+            delete x from p x where x.id = 1
+            """);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from p"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from cas"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sn where pid is null"));
+    }
+
+    /// <summary>
+    /// Msg 547 names the table's own database, not the simulator's default —
+    /// the same rule Msg 515 follows.
+    /// </summary>
+    [TestMethod]
+    public void ParentSideForeignKeyViolation_NamesTheTablesOwnDatabase()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create database other",
+            """
+            use other;
+            create table p (id int not null primary key);
+            create table c (id int not null primary key, pid int not null references p(id));
+            insert p values (1);
+            insert c values (10, 1)
+            """);
+        Assert.Contains("in database \"other\"", sim.AssertSqlError("use other; delete from p where id = 1", 547).Message);
     }
 
     // --- The Msg 1785 cascade rule: only CASCADE propagates a delete ---

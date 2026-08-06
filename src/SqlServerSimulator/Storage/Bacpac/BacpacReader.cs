@@ -56,7 +56,10 @@ internal static class BacpacReader
         // entries.
         var workItems = BuildTableWorkItems(buffer, database, result);
         if (workItems.Count == 0)
+        {
+            ApplyDeferredDatabaseOptions(database, result);
             return;
+        }
 
         // Parallel data load. Worker count is bounded by both the caller's
         // requested cap (-1 → Environment.ProcessorCount, matching
@@ -82,6 +85,19 @@ internal static class BacpacReader
             });
         }
         Task.WaitAll(tasks);
+
+        ApplyDeferredDatabaseOptions(database, result);
+    }
+
+    /// <summary>
+    /// Applies the database options that can only land once every row has
+    /// been inserted — the read-only access mode, which would otherwise
+    /// refuse the load's own writes.
+    /// </summary>
+    private static void ApplyDeferredDatabaseOptions(Database database, BacpacImportResult result)
+    {
+        if (result.DatabaseIsReadOnly)
+            database.IsReadOnly = true;
     }
 
     /// <summary>

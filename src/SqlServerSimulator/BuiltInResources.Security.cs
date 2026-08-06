@@ -118,7 +118,12 @@ internal static partial class BuiltInResources
         [
             new("name", SqlType.SystemName, 128, false),
             new("principal_id", SqlType.Int32, null, false),
-            new("type", charTwo, 2, false),
+            // char(1), not the char(2) sys.objects uses for its own type
+            // column — a principal's discriminator is a single letter and real
+            // declares the column to match, so a char(2) here comes back
+            // trailing-space padded (probe-confirmed: DATALENGTH is 1 on real,
+            // and sys.server_principals already had it right).
+            new("type", charOne, 1, false),
             new("type_desc", nvarchar60Catalog, 60, true),
             new("default_schema_name", SqlType.SystemName, 128, true),
             new("create_date", SqlType.DateTime, null, false),
@@ -554,9 +559,9 @@ internal static partial class BuiltInResources
         var nullSid = SqlValue.Null(SqlType.Varbinary);
         var nullLanguageName = SqlValue.Null(SqlType.SystemName);
         var nullLanguageLcid = SqlValue.Null(SqlType.Int32);
-        // 4-letter padding to fit char(2) — the type column is 2 bytes in
-        // real SQL Server's catalog. SqlValue.FromChar pads to declared length.
-        var charTwo = SqlType.GetChar(2);
+        // char(1): a principal's discriminator is a single letter and real
+        // declares the column that width, unlike sys.objects' char(2) type.
+        var charOne = SqlType.GetChar(1);
         foreach (var p in database.Principals.Values.OrderBy(p => p.PrincipalId))
         {
             var createDate = SqlValue.FromDateTime(p.CreateDate);
@@ -566,7 +571,7 @@ internal static partial class BuiltInResources
             yield return [
                 SqlValue.FromSystemName(p.Name),
                 SqlValue.FromInt32(p.PrincipalId),
-                SqlValue.FromChar(charTwo, p.TypeCode),
+                SqlValue.FromChar(charOne, p.TypeCode),
                 SqlValue.FromNVarchar(p.TypeDescription),
                 // An application role carries a tracked default schema
                 // (CREATE APPLICATION ROLE … DEFAULT_SCHEMA, defaulting to

@@ -31,7 +31,9 @@ public sealed class ApplicationRoleTests
     public void CreateApplicationRole_ProjectsTypeA()
     {
         var sim = Seeded();
-        AreEqual("A", ((string)sim.ExecuteScalar("select type from sys.database_principals where name = 'app1'")!).Trim());
+        // No Trim: sys.database_principals.type is char(1) on real, so the
+        // value arrives unpadded — see TypeColumn_IsCharOne.
+        AreEqual("A", sim.ExecuteScalar("select type from sys.database_principals where name = 'app1'"));
         AreEqual("APPLICATION_ROLE", sim.ExecuteScalar("select type_desc from sys.database_principals where name = 'app1'"));
         AreEqual("dbo", sim.ExecuteScalar("select default_schema_name from sys.database_principals where name = 'app1'"));
         IsFalse((bool)sim.ExecuteScalar("select is_fixed_role from sys.database_principals where name = 'app1'")!);

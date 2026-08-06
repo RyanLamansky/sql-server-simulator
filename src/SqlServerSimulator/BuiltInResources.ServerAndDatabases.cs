@@ -1073,11 +1073,6 @@ internal static partial class BuiltInResources
         foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation))
         {
             var snapshotOn = db.AllowSnapshotIsolation;
-            // master / tempdb / msdb ship SIMPLE; model is FULL and every user
-            // database inherits that (probe-confirmed against a fresh
-            // CREATE DATABASE).
-            var isSimpleRecovery = !Collation.Baseline.Equals(db.Name, "model")
-                && Simulation.SystemDatabaseNames.Contains(db.Name);
             // Service Broker is enabled everywhere but master and model
             // (probe-confirmed: tempdb, msdb and a freshly created user
             // database all read 1). Broker itself isn't modeled — this is the
@@ -1105,8 +1100,13 @@ internal static partial class BuiltInResources
                 SqlValue.FromByte((byte)(snapshotOn ? 1 : 0)),
                 SqlValue.FromNVarchar(snapshotOn ? "ON" : "OFF"),
                 SqlValue.FromBoolean(db.ReadCommittedSnapshot),
-                SqlValue.FromByte(isSimpleRecovery ? (byte)3 : (byte)1),
-                SqlValue.FromNVarchar(isSimpleRecovery ? "SIMPLE" : "FULL"),
+                SqlValue.FromByte((byte)db.RecoveryModel),
+                SqlValue.FromNVarchar(db.RecoveryModel switch
+                {
+                    RecoveryModel.Simple => "SIMPLE",
+                    RecoveryModel.BulkLogged => "BULK_LOGGED",
+                    _ => "FULL",
+                }),
                 SqlValue.FromByte(2),
                 checksum,
                 trueBit,  // is_auto_create_stats_on

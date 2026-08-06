@@ -107,6 +107,17 @@ Every column an FK can legally name is stored — a PERSISTED computed column ha
 
 ### Parent side (DELETE / UPDATE / MERGE-DELETE / MERGE-UPDATE)
 
+**The enforcement reads each deleted row's decoded old values, so every DELETE path has to decide it needs them.**
+`DELETE` has two execution paths — the no-FROM `DELETE FROM t WHERE …` and the aliased `DELETE <alias> FROM …` — and each decides up front whether to decode a full old row (an output clause, a trigger, system-versioning, or an incoming FK all require it).
+Both funnel into `CommitDelete`, whose parent-side pass builds its row list from the decoded values and does nothing when every one of them is null.
+Omitting the incoming-FK term from either path's decision therefore disables **every** referential action for that path silently — no Msg 547, no CASCADE, no SET NULL — leaving orphaned children rather than failing.
+The aliased path did exactly that until 2026-08-06; `ForeignKeyTests` now pins all four spellings (plain, aliased, aliased-with-join, and joined to a table variable — the shape an INSTEAD OF trigger body takes against `DELETED`) and asserts the resulting row counts, not just the error.
+
+**Msg 547 names the table's own database**, like Msg 515 — not the simulator's default database name, which the whole 547 family hardcoded until the same date.
+
+**Which constraint is named when several conflict**: the first in `table.IncomingForeignKeys`, i.e. creation order, matching real's own first-by-object-id choice.
+Two databases built from one model by different tools can order their FKs differently, so the *name* in the message can differ between them even though both picked "first" correctly.
+
 After parent-side mutations, `EnforceIncomingForeignKeys` (for DELETE) and `EnforceIncomingFkOnUpdate` (for UPDATE) walk `table.IncomingForeignKeys`.
 For each FK:
 

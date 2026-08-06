@@ -211,9 +211,48 @@ partial class Simulation
         {
             var column = destinationTable.Columns[i];
             if (!column.Nullable && rowValues[i].IsNull)
-                throw SimulatedSqlException.CannotInsertNull(column.Name, destinationTable.Name, verb);
+                throw SimulatedSqlException.CannotInsertNull(column.Name, QualifyForNullMessage(destinationTable), verb);
         }
     }
+
+    /// <summary>
+    /// The table name as Msg 515 spells it, which differs by table kind
+    /// (probe-confirmed against SQL Server 2025): a permanent table is named
+    /// <c>database.schema.table</c>, a temp table is qualified into
+    /// <c>tempdb.dbo</c>, and a table variable is named bare.
+    /// </summary>
+    /// <remarks>
+    /// Real writes a temp table's <em>internal</em> name — the declared name
+    /// padded with underscores to a fixed width plus a per-session numeric
+    /// suffix. The simulator names it <c>tempdb.dbo.#t</c>: the database and
+    /// schema are what identify the table for a reader, and the padding
+    /// encodes a session-local identity nothing consumes.
+    /// </remarks>
+    private static string QualifyForNullMessage(HeapTable table)
+    {
+        if (table.IsTableVariable)
+            return table.Name;
+        if (table.OwningDatabase is { } owner)
+            return QualifyTableName(table, owner);
+        return $"{TempdbDatabaseName}.{Database.DefaultSchemaName}.{table.Name}";
+    }
+
+    /// <summary>
+    /// The database name the constraint-violation messages (the Msg 547
+    /// family) put in their <c>in database "…"</c> slot: the table's own
+    /// owning database, or <c>tempdb</c> for a temp table or table variable,
+    /// which is where real serves those from.
+    /// </summary>
+    internal static string DatabaseNameFor(HeapTable table) =>
+        table.OwningDatabase?.Name ?? TempdbDatabaseName;
+
+    /// <summary>
+    /// The <c>schema.table</c> half of the same messages.
+    /// </summary>
+    internal static string SchemaQualifiedName(HeapTable table, Database? database) =>
+        database is null
+            ? $"{Database.DefaultSchemaName}.{table.Name}"
+            : QualifyTableName(table, database)[(database.Name.Length + 1)..];
 
     /// <summary>
     /// Evaluates each declared CHECK constraint against the new row. A
@@ -245,7 +284,14 @@ partial class Simulation
             if (check.IsDisabled)
                 continue;
             if (check.Predicate.Run(runtime) == false)
-                throw SimulatedSqlException.CheckConstraintViolation(check.Name, destinationTable.Name, check.InlineColumn, verb);
+            {
+                throw SimulatedSqlException.CheckConstraintViolation(
+                    check.Name,
+                    DatabaseNameFor(destinationTable),
+                    SchemaQualifiedName(destinationTable, destinationTable.OwningDatabase),
+                    check.InlineColumn,
+                    verb);
+            }
         }
     }
 

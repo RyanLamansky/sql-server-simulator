@@ -578,7 +578,13 @@ partial class Simulation
 
             var runtime = new RuntimeContext(ResolveByName, context.Batch);
             if (constraint.Predicate.Run(runtime) == false)
-                throw SimulatedSqlException.AlterCheckConstraintConflict(constraint.Name, table.Name, constraint.InlineColumn);
+            {
+                throw SimulatedSqlException.AlterCheckConstraintConflict(
+                    constraint.Name,
+                    DatabaseNameFor(table),
+                    SchemaQualifiedName(table, table.OwningDatabase),
+                    constraint.InlineColumn);
+            }
         }
     }
 
@@ -615,7 +621,8 @@ partial class Simulation
             if (!ParentRowMatches(fk, childKey))
             {
                 var (parentQualified, childColumnPhrase) = FormatForeignKeyTarget(fk, context.CurrentDatabase);
-                throw SimulatedSqlException.AlterForeignKeyConflict(fk.Name, parentQualified, childColumnPhrase, fk.IsSelfReferencing);
+                throw SimulatedSqlException.AlterForeignKeyConflict(
+                    fk.Name, DatabaseNameFor(table), parentQualified, childColumnPhrase, fk.IsSelfReferencing);
             }
         }
     }

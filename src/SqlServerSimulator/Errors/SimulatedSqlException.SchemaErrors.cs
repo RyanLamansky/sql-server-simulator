@@ -1549,9 +1549,11 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 3726: <c>DROP TABLE</c> targeted a table that
     /// is still referenced by at least one FOREIGN KEY constraint from
-    /// another (or the same) table. The simulator names the parent target
-    /// only; real SQL Server emits a trailing Msg 1753 with the FK name list
-    /// which the simulator omits (informational only).
+    /// another (or the same) table. <paramref name="tableName"/> is the name
+    /// as the statement wrote it, minus brackets — real echoes the written
+    /// form rather than qualifying or unqualifying it. Real also emits a
+    /// trailing Msg 1753 with the FK name list, which the simulator omits
+    /// (informational only).
     /// </summary>
     internal static SimulatedSqlException CannotDropTableReferencedByForeignKey(string tableName) =>
         new($"Could not drop object '{tableName}' because it is referenced by a FOREIGN KEY constraint.", 3726, 16, 1);

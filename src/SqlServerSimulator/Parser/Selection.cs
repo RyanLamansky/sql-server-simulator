@@ -2857,6 +2857,14 @@ internal sealed partial class Selection
                 if (context.Token is not Operator { Character: ')' })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
 
+                // Msg 1033: a derived table is one of the five constructs the
+                // message names, and its ORDER BY needs a companion TOP /
+                // OFFSET / FETCH — the same test the view and CTE bodies run
+                // (probe-confirmed 2026-08-06: `FROM (SELECT v FROM … ORDER BY v) d`
+                // raises, and adding TOP or OFFSET clears it).
+                if (derivedSelection.HasOrderBy && !derivedSelection.HasTopOrOffsetOrFetch)
+                    throw SimulatedSqlException.OrderByInvalidInCte();
+
                 // A derived table has no native name, so the alias is
                 // mandatory: real reports Msg 102 near the closing ')' when
                 // it's missing (probe-confirmed 2026-07-31).

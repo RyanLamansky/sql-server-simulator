@@ -158,6 +158,44 @@ public sealed class CommonTableExpressionTests
     public void Cte_OrderByWithTop_Allowed()
         => AreEqual(3, WithSourceTable().ExecuteScalar("with c as (select top 1 id from src order by id desc) select id from c"));
 
+    /// <summary>
+    /// Msg 1033 covers all five constructs its own text names — a view, an
+    /// inline function, a derived table, a subquery and a CTE — not just the
+    /// CTE and view bodies. Probe-confirmed against SQL Server 2025 on
+    /// 2026-08-06; the derived-table, subquery and inline-function forms were
+    /// accepted here before.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from (select id from src order by id) d")]
+    [DataRow("select 1 where 1 in (select id from src order by id)")]
+    [DataRow("select 1 where exists (select id from src order by id)")]
+    [DataRow("select (select id from src order by id) as r")]
+    public void OrderByWithoutTopOrOffset_RaisesMsg1033_InEveryNestedConstruct(string sql)
+        => WithSourceTable().AssertSqlError(sql, 1033,
+            "The ORDER BY clause is invalid in views, inline functions, derived tables, subqueries, and common table expressions, unless TOP, OFFSET or FOR XML is also specified.");
+
+    [TestMethod]
+    public void InlineFunctionBody_OrderByWithoutTop_RaisesMsg1033()
+    {
+        var sim = WithSourceTable();
+        _ = sim.AssertSqlError(
+            "create function dbo.f() returns table return (select id from src order by id)", 1033);
+    }
+
+    /// <summary>
+    /// A companion TOP, OFFSET or FETCH clears it in each of them.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from (select top 1 id from src order by id) d", 1)]
+    // OFFSET 0 skips nothing, so the derived table still yields every row —
+    // what it clears is the rejection, not the rows.
+    [DataRow("select * from (select id from src order by id offset 0 rows) d", 3)]
+    // src's lowest id is 1, so the TOP 1 subquery yields it and the WHERE passes.
+    [DataRow("select 1 where 1 in (select top 1 id from src order by id)", 1)]
+    [DataRow("select (select top 1 id from src order by id) as r", 1)]
+    public void OrderByWithTopOrOffset_IsAllowedInEveryNestedConstruct(string sql, int expectedRows)
+        => AreEqual(expectedRows, WithSourceTable().ExecuteScalar($"select count(*) from ({sql}) q(c1)"));
+
     [TestMethod]
     public void Cte_OrderByWithOffsetFetch_Allowed()
         => AreEqual(2, WithSourceTable().ExecuteScalar("with c as (select id from src order by id desc offset 1 rows fetch next 1 rows only) select id from c"));

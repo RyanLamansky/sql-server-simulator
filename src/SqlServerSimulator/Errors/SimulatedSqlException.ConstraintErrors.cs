@@ -62,16 +62,15 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 515: an INSERT or UPDATE supplied (or fell
-    /// through to) <c>NULL</c> for a column whose declaration disallows
-    /// nulls. The fixed text uses the database-qualified table name; the
-    /// simulator's single-database model emits <c>"claude.dbo.&lt;t&gt;"</c>'s
-    /// shape with the simulator's default database name.
+    /// through to) <c>NULL</c> for a column whose declaration disallows nulls.
+    /// <paramref name="qualifiedTableName"/> is the table as real names it
+    /// here — see the caller for the per-kind qualification.
     /// <paramref name="verb"/> picks between <c>"INSERT"</c> (the default)
     /// and <c>"UPDATE"</c> for the trailing <c>"… fails."</c> clause —
     /// real SQL Server emits the per-statement verb verbatim there.
     /// </summary>
-    internal static SimulatedSqlException CannotInsertNull(string columnName, string tableName, string verb = "INSERT") =>
-        new($"Cannot insert the value NULL into column '{columnName}', table '{Simulation.DefaultDatabaseName}.dbo.{tableName}'; column does not allow nulls. {verb} fails.", 515, 16, 2);
+    internal static SimulatedSqlException CannotInsertNull(string columnName, string qualifiedTableName, string verb = "INSERT") =>
+        new($"Cannot insert the value NULL into column '{columnName}', table '{qualifiedTableName}'; column does not allow nulls. {verb} fails.", 515, 16, 2);
 
     /// <summary>
     /// Mimics SQL Server error 547: an INSERT / UPDATE / MERGE row failed a
@@ -80,10 +79,10 @@ partial class SimulatedSqlException
     /// table-level CHECK omits it — matching the real-server probe. The DB
     /// name slot uses <see cref="Simulation.DefaultDatabaseName"/>.
     /// </summary>
-    internal static SimulatedSqlException CheckConstraintViolation(string constraintName, string tableName, string? inlineColumn, string verb = "INSERT")
+    internal static SimulatedSqlException CheckConstraintViolation(string constraintName, string databaseName, string qualifiedTableName, string? inlineColumn, string verb = "INSERT")
     {
         var columnSuffix = inlineColumn is null ? "" : $", column '{inlineColumn}'";
-        return new($"The {verb} statement conflicted with the CHECK constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"dbo.{tableName}\"{columnSuffix}.", 547, 16, 0);
+        return new($"The {verb} statement conflicted with the CHECK constraint \"{constraintName}\". The conflict occurred in database \"{databaseName}\", table \"{qualifiedTableName}\"{columnSuffix}.", 547, 16, 0);
     }
 
     /// <summary>
@@ -126,12 +125,12 @@ partial class SimulatedSqlException
     /// </list>
     /// </summary>
     internal static SimulatedSqlException ForeignKeyConflictOnChild(
-        string verb, string constraintName, string referencedSchema, string referencedTable, string? referencedColumn, bool isSelfReferencing)
+        string verb, string constraintName, string databaseName, string referencedSchema, string referencedTable, string? referencedColumn, bool isSelfReferencing)
     {
         var keyKindWord = isSelfReferencing ? "FOREIGN KEY SAME TABLE" : "FOREIGN KEY";
         var columnSuffix = referencedColumn is null ? "" : $", column '{referencedColumn}'";
         return new(
-            $"The {verb} statement conflicted with the {keyKindWord} constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"{referencedSchema}.{referencedTable}\"{columnSuffix}.",
+            $"The {verb} statement conflicted with the {keyKindWord} constraint \"{constraintName}\". The conflict occurred in database \"{databaseName}\", table \"{referencedSchema}.{referencedTable}\"{columnSuffix}.",
             547, 16, 0);
     }
 
@@ -144,11 +143,11 @@ partial class SimulatedSqlException
     /// the child (referring) side, not the referenced side (probe-confirmed).
     /// </summary>
     internal static SimulatedSqlException ForeignKeyConflictOnParent(
-        string verb, string constraintName, string childSchema, string childTable, string? childColumn)
+        string verb, string constraintName, string databaseName, string childSchema, string childTable, string? childColumn)
     {
         var columnSuffix = childColumn is null ? "" : $", column '{childColumn}'";
         return new(
-            $"The {verb} statement conflicted with the REFERENCE constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"{childSchema}.{childTable}\"{columnSuffix}.",
+            $"The {verb} statement conflicted with the REFERENCE constraint \"{constraintName}\". The conflict occurred in database \"{databaseName}\", table \"{childSchema}.{childTable}\"{columnSuffix}.",
             547, 16, 0);
     }
 
@@ -159,12 +158,12 @@ partial class SimulatedSqlException
     /// <c>"ALTER TABLE"</c>. Probe-confirmed against SQL Server 2025
     /// (2026-05-13).
     /// </summary>
-    internal static SimulatedSqlException AlterForeignKeyConflict(string constraintName, string referencedTableQualified, string? referencedColumn, bool isSelfReferencing)
+    internal static SimulatedSqlException AlterForeignKeyConflict(string constraintName, string databaseName, string referencedTableQualified, string? referencedColumn, bool isSelfReferencing)
     {
         var keyKindWord = isSelfReferencing ? "FOREIGN KEY SAME TABLE" : "FOREIGN KEY";
         var columnSuffix = referencedColumn is null ? "" : $", column '{referencedColumn}'";
         return new(
-            $"The ALTER TABLE statement conflicted with the {keyKindWord} constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"{referencedTableQualified}\"{columnSuffix}.",
+            $"The ALTER TABLE statement conflicted with the {keyKindWord} constraint \"{constraintName}\". The conflict occurred in database \"{databaseName}\", table \"{referencedTableQualified}\"{columnSuffix}.",
             547, 16, 0);
     }
 
@@ -174,11 +173,11 @@ partial class SimulatedSqlException
     /// shape as the runtime CHECK variant but with the verb fixed to
     /// <c>"ALTER TABLE"</c>. Probe-confirmed against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException AlterCheckConstraintConflict(string constraintName, string tableName, string? inlineColumn)
+    internal static SimulatedSqlException AlterCheckConstraintConflict(string constraintName, string databaseName, string qualifiedTableName, string? inlineColumn)
     {
         var columnSuffix = inlineColumn is null ? "" : $", column '{inlineColumn}'";
         return new(
-            $"The ALTER TABLE statement conflicted with the CHECK constraint \"{constraintName}\". The conflict occurred in database \"{Simulation.DefaultDatabaseName}\", table \"dbo.{tableName}\"{columnSuffix}.",
+            $"The ALTER TABLE statement conflicted with the CHECK constraint \"{constraintName}\". The conflict occurred in database \"{databaseName}\", table \"{qualifiedTableName}\"{columnSuffix}.",
             547, 16, 0);
     }
 }

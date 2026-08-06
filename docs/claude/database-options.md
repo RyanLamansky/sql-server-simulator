@@ -2,6 +2,8 @@
 
 Closed accept-list parser (`RecognizedDatabaseOptions` in `Simulation.Alter.cs`) covering every database-scope toggle SqlPackage emits from a bacpac's `SqlDatabaseOptions` element.
 Most options parse-and-discard; only the seven "load-bearing" toggles (`COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY` / `READ_WRITE`) drive actual behavior.
+`RECOVERY` is tracked without driving anything — the simulator has no transaction log, but `sys.databases.recovery_model` / `recovery_model_desc` report it, and a bacpac carries the source database's value, so an imported database describes itself the way the original did.
+Real ships `master` / `tempdb` / `msdb` SIMPLE and `model` FULL, which every new user database inherits (probe-confirmed).
 
 ## Target database
 

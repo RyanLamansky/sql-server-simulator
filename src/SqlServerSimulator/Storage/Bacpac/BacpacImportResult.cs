@@ -24,6 +24,15 @@ public sealed class BacpacImportResult
     internal readonly Dictionary<string, bool[]> TableColumnIsAlias = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Whether the model declared <c>IsReadOnly=True</c>. The access mode has
+    /// to be applied after the data load — setting it during the model walk
+    /// would make the database refuse the rest of its own import — so the
+    /// model pass records it here and <see cref="BacpacReader"/> applies it
+    /// once every row has landed.
+    /// </summary>
+    internal bool DatabaseIsReadOnly;
+
+    /// <summary>
     /// Model.xml elements the loader didn't translate to a CREATE statement.
     /// Each entry names the element type (e.g. <c>SqlFullTextIndex</c>) and
     /// the failing element's <c>Name</c> attribute when present.

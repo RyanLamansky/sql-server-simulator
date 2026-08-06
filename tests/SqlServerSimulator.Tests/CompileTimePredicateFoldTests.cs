@@ -38,6 +38,22 @@ public sealed class CompileTimePredicateFoldTests
         simulation.ExecuteScalar<int>($"select count(*) from ({sql}) q(c1)");
 
     /// <summary>
+    /// Counts a statement's rows without wrapping it in a derived table, for
+    /// the cases that carry an <c>ORDER BY</c> with no <c>TOP</c> / <c>OFFSET</c>
+    /// — Msg 1033 refuses those inside a derived table, on real as here, so
+    /// <see cref="RowCount"/>'s wrapper would measure the wrapper's own
+    /// rejection instead of the statement.
+    /// </summary>
+    private static int UnwrappedRowCount(Simulation simulation, string sql)
+    {
+        using var reader = simulation.ExecuteReader(sql);
+        var rows = 0;
+        while (reader.Read())
+            rows++;
+        return rows;
+    }
+
+    /// <summary>
     /// <c>NOT</c> asks its operand whether it can ever be FALSE, and an
     /// <c>OR</c> answers from its own operands — so <c>NOT (x OR NULL = 1)</c>
     /// keeps nothing, since the OR is never FALSE and the NOT is therefore
@@ -648,7 +664,7 @@ public sealed class CompileTimePredicateFoldTests
     [DataRow("select a from t order by coalesce(a, 61)")]
     [DataRow("select a from t order by case when a > 1 then 1 else 2 end")]
     public void ArmSettledOnALiveValue_StillSorts(string sql) =>
-        AreEqual(3, RowCount(Seeded(), sql));
+        AreEqual(3, UnwrappedRowCount(Seeded(), sql));
 
     [TestMethod]
     // A CASE real folds to a constant feeds the folds that read one: NULLIF's

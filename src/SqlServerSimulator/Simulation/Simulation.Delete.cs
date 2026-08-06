@@ -327,10 +327,17 @@ partial class Simulation
                 continue;
 
             SqlValue[]? fullValues = null;
+            // The incoming-FK term is load-bearing, not an optimization:
+            // CommitDelete's parent-side enforcement reads the decoded old
+            // rows, and skips silently when every one of them is null. Without
+            // it a joined DELETE tombstones a referenced parent row and leaves
+            // the child orphaned — where the no-FROM path raises Msg 547 — so
+            // the two forms have to agree on when the full row is needed.
             var needsFull = output is not null
                 || HasAfterTrigger(context.Batch, table, TriggerActions.Delete)
                 || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Delete)
-                || table.SystemVersioning is not null;
+                || table.SystemVersioning is not null
+                || table.IncomingForeignKeys.Count > 0;
             if (needsFull)
             {
                 fullValues = DecodeFullRow(table, targetBytes);

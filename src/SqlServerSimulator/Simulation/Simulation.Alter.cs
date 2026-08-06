@@ -126,6 +126,7 @@ partial class Simulation
             UnquotedString { ContextualKeyword: ContextualKeyword.Db_Chaining } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.CrossDatabaseChaining),
             UnquotedString { ContextualKeyword: ContextualKeyword.Read_Only } => TryParseAlterDatabaseSetAccessMode(context, target, readOnly: true),
             UnquotedString { ContextualKeyword: ContextualKeyword.Read_Write } => TryParseAlterDatabaseSetAccessMode(context, target, readOnly: false),
+            UnquotedString recovery when recovery.Value.Equals("RECOVERY", StringComparison.OrdinalIgnoreCase) => TryParseAlterDatabaseSetRecovery(context, target),
             UnquotedString unquoted when RecognizedDatabaseOptions.TryGetValue(unquoted.Value, out var kind) => ConsumeDatabaseOptionTail(context, kind),
             _ => false,
         };
@@ -178,6 +179,43 @@ partial class Simulation
             throw SimulatedSqlException.OptionCannotBeSetInDatabase(readOnly ? "READ_ONLY" : "READ_WRITE", target.Name);
 
         target.IsReadOnly = readOnly;
+        return true;
+    }
+
+    /// <summary>
+    /// Parses <c>ALTER DATABASE name SET RECOVERY { FULL | BULK_LOGGED | SIMPLE }</c>.
+    /// </summary>
+    /// <remarks>
+    /// The simulator has no transaction log, so the setting drives nothing —
+    /// but it is what <c>sys.databases.recovery_model</c> /
+    /// <c>recovery_model_desc</c> report, and a bacpac carries the source
+    /// database's value, so tracking it is what lets an imported database
+    /// describe itself the way the original did. An unrecognized value falls
+    /// through to the caller's Msg 102 path.
+    /// </remarks>
+    private static bool TryParseAlterDatabaseSetRecovery(ParserContext context, Database target)
+    {
+        // FULL tokenizes as a reserved keyword; BULK_LOGGED and SIMPLE as
+        // bare identifiers.
+        var model = context.GetNextRequired() switch
+        {
+            ReservedKeyword { Keyword: Keyword.Full } => RecoveryModel.Full,
+            Name or UnquotedString => context.Token switch
+            {
+                UnquotedString { Value: var v } when v.Equals("SIMPLE", StringComparison.OrdinalIgnoreCase) => RecoveryModel.Simple,
+                UnquotedString { Value: var v } when v.Equals("BULK_LOGGED", StringComparison.OrdinalIgnoreCase) => RecoveryModel.BulkLogged,
+                Name { Value: var v } when v.Equals("SIMPLE", StringComparison.OrdinalIgnoreCase) => RecoveryModel.Simple,
+                Name { Value: var v } when v.Equals("BULK_LOGGED", StringComparison.OrdinalIgnoreCase) => RecoveryModel.BulkLogged,
+                _ => (RecoveryModel?)null,
+            },
+            _ => null,
+        };
+        if (model is null)
+            return false;
+        if (context.Batch.IsSkipping)
+            return true;
+
+        target.RecoveryModel = model.Value;
         return true;
     }
 

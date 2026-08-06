@@ -1284,14 +1284,25 @@ internal abstract class Expression
         if (context.ScalarOnlyOperand)
             throw ScalarOnlyOperandError(context);
         var saved = context.EnterNextValueForScope(NextValueForScope.Nested);
+        Selection subquery;
         try
         {
-            return Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+            subquery = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
         }
         finally
         {
             context.NextValueForRejection = saved;
         }
+
+        // Msg 1033: a subquery is one of the five constructs the message names,
+        // so its ORDER BY needs a companion TOP / OFFSET / FETCH — the same
+        // test the view, CTE and derived-table bodies run. Every subquery shape
+        // funnels through here, so the scalar form, EXISTS, the quantified
+        // comparisons and IN all take it (probe-confirmed 2026-08-06).
+        if (subquery.HasOrderBy && !subquery.HasTopOrOffsetOrFetch)
+            throw SimulatedSqlException.OrderByInvalidInCte();
+
+        return subquery;
     }
 
     /// <summary>

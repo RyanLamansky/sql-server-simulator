@@ -28,11 +28,22 @@ internal static class ModelXmlReader
     private static readonly XNamespace Ns = "http://schemas.microsoft.com/sqlserver/dac/Serialization/2012/02";
 
     /// <summary>
-    /// Parses the compatibility level out of the root DataSchemaModel's
-    /// <c>DspName</c> (e.g. <c>…Sql130DatabaseSchemaProvider</c> → 130) and
-    /// applies it to <paramref name="database"/>. A missing / unparsable /
-    /// unrecognized level leaves the construction-time default untouched.
+    /// Parses a level out of the root DataSchemaModel's <c>DspName</c> (e.g.
+    /// <c>…Sql130DatabaseSchemaProvider</c> → 130) and applies it to
+    /// <paramref name="database"/>. A missing / unparsable / unrecognized
+    /// level leaves the construction-time default untouched.
     /// </summary>
+    /// <remarks>
+    /// This is the <em>fallback</em>: DspName names the schema provider the
+    /// model was written against, which is the exporting tool's target
+    /// version, not the database's own compatibility level. The two coincide
+    /// often enough to look interchangeable — AdventureWorks exports Sql170 at
+    /// level 170 and WideWorldImporters Sql130 at 130 — but a database set
+    /// below its server's level carries an explicit <c>CompatibilityMode</c>
+    /// property (a Sql170-provider model at level 160), and
+    /// <see cref="TranslateDatabaseOption"/> emits that during the phase-1
+    /// walk, after this runs, so the declared level wins.
+    /// </remarks>
     private static void ApplyCompatibilityLevel(XElement root, Database database)
     {
         var dsp = root.Attribute("DspName")?.Value;
@@ -409,6 +420,10 @@ internal static class ModelXmlReader
             if (name is null || value is null)
                 continue;
 
+            // Recorded rather than emitted — see BacpacImportResult.DatabaseIsReadOnly.
+            if (name == "IsReadOnly" && IsTrue(value))
+                result.DatabaseIsReadOnly = true;
+
             var sql = TranslateDatabaseOption(name, value, bracketedDb);
             if (sql is null)
                 continue;
@@ -447,14 +462,20 @@ internal static class ModelXmlReader
         "IsAcceleratedDatabaseRecoveryOn" => $"ALTER DATABASE {bracketedDb} SET ACCELERATED_DATABASE_RECOVERY = {OnOff(value)};",
         "IsOptimizedLockingOn" => $"ALTER DATABASE {bracketedDb} SET OPTIMIZED_LOCKING = {OnOff(value)};",
         "IsReadCommittedSnapshot" => $"ALTER DATABASE {bracketedDb} SET READ_COMMITTED_SNAPSHOT {OnOff(value)};",
-        // The access mode is deliberately not emitted. DacFx omits it from
-        // SqlDatabaseOptions even when exporting a read-only database (verified
-        // against the WideWorldImporters and AdventureWorks models, neither of
-        // which carries the property), and this element is handled in phase 1 —
-        // before the schema and data load — so a READ_ONLY emitted here would
-        // refuse the rest of its own import. Carrying it wants a post-load hook.
+        "IsAllowSnapshotIsolation" => $"ALTER DATABASE {bracketedDb} SET ALLOW_SNAPSHOT_ISOLATION {OnOff(value)};",
+        // The database's compatibility level gates real behavior — the
+        // simulator's own compat-170 surface among it — so a model that
+        // declares one has to reach the database, or every import runs at the
+        // simulator's default level whatever it was exported from.
+        "CompatibilityMode" => $"ALTER DATABASE {bracketedDb} SET COMPATIBILITY_LEVEL = {value};",
+        // The access mode can't be applied here: this element is handled in
+        // phase 1, before the schema and data load, so a READ_ONLY emitted now
+        // would refuse the rest of its own import. It's applied by
+        // ApplyDeferredDatabaseOptions once the load finishes.
         "IsReadOnly" => null,
-        // Enum-shaped options. RecoveryMode: 1=FULL, 2=BULK_LOGGED, 3=SIMPLE.
+        // Enum-shaped options. RecoveryMode is written only when it isn't the
+        // FULL default: 1 = SIMPLE, 2 = BULK_LOGGED (probe-confirmed by
+        // exporting a database at each of the three settings).
         "RecoveryMode" => $"ALTER DATABASE {bracketedDb} SET RECOVERY {RecoveryMode(value)};",
         // IsCursorDefaultScopeGlobal: True → GLOBAL, False → LOCAL.
         "IsCursorDefaultScopeGlobal" => $"ALTER DATABASE {bracketedDb} SET CURSOR_DEFAULT {(IsTrue(value) ? "GLOBAL" : "LOCAL")};",
@@ -496,9 +517,8 @@ internal static class ModelXmlReader
 
     private static string RecoveryMode(string value) => value switch
     {
-        "1" => "FULL",
+        "1" => "SIMPLE",
         "2" => "BULK_LOGGED",
-        "3" => "SIMPLE",
         _ => "FULL",
     };
 

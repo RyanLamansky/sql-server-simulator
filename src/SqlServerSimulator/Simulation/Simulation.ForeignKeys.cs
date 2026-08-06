@@ -237,7 +237,8 @@ partial class Simulation
         var refColumn = fk.ReferencedColumnOrdinals.Length == 1
             ? fk.ReferencedTable.Columns[fk.ReferencedColumnOrdinals[0]].Name
             : null;
-        return SimulatedSqlException.ForeignKeyConflictOnChild(verb, fk.Name, refSchema, fk.ReferencedTable.Name, refColumn, fk.IsSelfReferencing);
+        return SimulatedSqlException.ForeignKeyConflictOnChild(
+            verb, fk.Name, DatabaseNameFor(fk.ReferencedTable), refSchema, fk.ReferencedTable.Name, refColumn, fk.IsSelfReferencing);
     }
 
     private static SimulatedSqlException BuildParentSideViolation(ForeignKey fk, ParserContext context, string verb)
@@ -246,7 +247,8 @@ partial class Simulation
         var childColumn = fk.ChildColumnOrdinals.Length == 1
             ? fk.ChildTable.Columns[fk.ChildColumnOrdinals[0]].Name
             : null;
-        return SimulatedSqlException.ForeignKeyConflictOnParent(verb, fk.Name, childSchema, fk.ChildTable.Name, childColumn);
+        return SimulatedSqlException.ForeignKeyConflictOnParent(
+            verb, fk.Name, DatabaseNameFor(fk.ChildTable), childSchema, fk.ChildTable.Name, childColumn);
     }
 
     private static string ResolveSchemaName(Database database, int schemaId)

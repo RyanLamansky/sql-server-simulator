@@ -208,25 +208,121 @@ public sealed class ReadOnlyDatabaseTests
     }
 
     /// <summary>
-    /// A bacpac import lands writable. DacFx omits the access mode from
-    /// <c>SqlDatabaseOptions</c> (verified against the WideWorldImporters and
-    /// AdventureWorks models), and an <c>IsReadOnly</c> property is deliberately
-    /// not translated: the element is read in phase 1, before the schema and
-    /// data load, so a READ_ONLY set there would refuse the rest of its own
-    /// import.
+    /// A bacpac declaring <c>IsReadOnly=True</c> imports read-only — DacFx does
+    /// emit the property (probe-confirmed by exporting a database SET
+    /// READ_ONLY), so dropping it would leave a database writable that real's
+    /// own import refuses every write to.
     /// </summary>
+    /// <remarks>
+    /// The access mode can't be applied during the model walk: that runs in
+    /// phase 1, before the schema and data load, so a READ_ONLY set there
+    /// would make the database refuse the rest of its own import. It's
+    /// deferred until every row has landed, which is what the row-count
+    /// assertion here pins — the flag must arrive *after* the data, not
+    /// instead of it.
+    /// </remarks>
     [TestMethod]
-    public void BacpacImport_LandsWritable_EvenWithAnIsReadOnlyProperty()
+    public void BacpacImport_DeclaringReadOnly_LandsReadOnlyWithItsDataIntact()
     {
         using var bacpac = BacpacBuilder.Create()
             .DatabaseOption("IsReadOnly", "True")
+            .Table("dbo", "T", t => t.Column("Id", "int").Row(1).Row(2))
+            .Build();
+
+        var simulation = new Simulation();
+        simulation.ImportBacpac(bacpac, out var diag, new BacpacImportOptions { DatabaseName = "imported" });
+
+        IsEmpty(diag.Skipped);
+        AreEqual(2, simulation.ExecuteScalar("select count(*) from dbo.T"));
+        IsTrue((bool)simulation.ExecuteScalar("select is_read_only from sys.databases where name = 'imported'")!);
+        _ = simulation.AssertSqlError("insert dbo.T values (3)", 3906);
+    }
+
+    /// <summary>
+    /// A bacpac's <c>RecoveryMode</c> uses DacFx's own encoding, which is not
+    /// <c>sys.databases.recovery_model</c>'s: the property is omitted for the
+    /// FULL default and written as 1 for SIMPLE / 2 for BULK_LOGGED
+    /// (probe-confirmed by exporting a database at each setting).
+    /// </summary>
+    [TestMethod]
+    [DataRow(null, "FULL")]
+    [DataRow("1", "SIMPLE")]
+    [DataRow("2", "BULK_LOGGED")]
+    public void BacpacImport_CarriesTheRecoveryModel(string? recoveryMode, string expected)
+    {
+        var builder = BacpacBuilder.Create().Table("dbo", "T", t => t.Column("Id", "int").Row(1));
+        if (recoveryMode is not null)
+            builder = builder.DatabaseOption("RecoveryMode", recoveryMode);
+        using var bacpac = builder.Build();
+
+        var simulation = new Simulation();
+        simulation.ImportBacpac(bacpac, out _, new BacpacImportOptions { DatabaseName = "imported" });
+
+        AreEqual(expected, simulation.ExecuteScalar(
+            "select recovery_model_desc from sys.databases where name = 'imported'"));
+    }
+
+    /// <summary>
+    /// The compatibility level comes from the model's own
+    /// <c>CompatibilityMode</c> property when it carries one. The root
+    /// <c>DspName</c> names the schema provider the model was written against,
+    /// which is the exporting tool's version rather than the database's level —
+    /// the two coincide often enough to look interchangeable, but a database
+    /// set below its server's level carries the property and it has to win.
+    /// </summary>
+    [TestMethod]
+    public void BacpacImport_CompatibilityModeBeatsTheProviderVersion()
+    {
+        // A Sql170-provider model whose database sits at 160 — the shape that
+        // separates the two sources.
+        using var bacpac = BacpacBuilder.Create()
+            .CompatibilityLevel(170)
+            .DatabaseOption("CompatibilityMode", "160")
             .Table("dbo", "T", t => t.Column("Id", "int").Row(1))
             .Build();
 
         var simulation = new Simulation();
         simulation.ImportBacpac(bacpac, out _, new BacpacImportOptions { DatabaseName = "imported" });
 
-        IsFalse((bool)simulation.ExecuteScalar("select is_read_only from sys.databases where name = 'imported'")!);
-        AreEqual(1, simulation.ExecuteNonQuery("insert dbo.T values (2)"));
+        AreEqual((byte)160, simulation.ExecuteScalar(
+            "select compatibility_level from sys.databases where name = 'imported'"));
+    }
+
+    /// <summary>
+    /// With no <c>CompatibilityMode</c> property the provider version is the
+    /// only signal, and stays the fallback.
+    /// </summary>
+    [TestMethod]
+    public void BacpacImport_WithoutCompatibilityMode_FallsBackToTheProviderVersion()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .CompatibilityLevel(130)
+            .Table("dbo", "T", t => t.Column("Id", "int").Row(1))
+            .Build();
+
+        var simulation = new Simulation();
+        simulation.ImportBacpac(bacpac, out _, new BacpacImportOptions { DatabaseName = "imported" });
+
+        AreEqual((byte)130, simulation.ExecuteScalar(
+            "select compatibility_level from sys.databases where name = 'imported'"));
+    }
+
+    /// <summary>
+    /// <c>IsAllowSnapshotIsolation</c> is load-bearing: without it a SNAPSHOT
+    /// transaction that runs on the source database raises Msg 3952 here.
+    /// </summary>
+    [TestMethod]
+    public void BacpacImport_CarriesAllowSnapshotIsolation()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .DatabaseOption("IsAllowSnapshotIsolation", "True")
+            .Table("dbo", "T", t => t.Column("Id", "int").Row(1))
+            .Build();
+
+        var simulation = new Simulation();
+        simulation.ImportBacpac(bacpac, out _, new BacpacImportOptions { DatabaseName = "imported" });
+
+        AreEqual("ON", simulation.ExecuteScalar(
+            "select snapshot_isolation_state_desc from sys.databases where name = 'imported'"));
     }
 }

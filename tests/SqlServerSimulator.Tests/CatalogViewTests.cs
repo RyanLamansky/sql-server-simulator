@@ -1088,6 +1088,21 @@ public sealed class CatalogViewTests
     // === sys.database_principals: default_schema_name / sid / authentication_type ===
 
     /// <summary>
+    /// <c>type</c> is <c>char(1)</c>, not the <c>char(2)</c> that
+    /// <c>sys.objects</c> uses for its own type column: a principal's
+    /// discriminator is a single letter and real declares the column to match,
+    /// so the value arrives unpadded (probe-confirmed against SQL Server 2025 —
+    /// <c>DATALENGTH</c> is 1 there, and <c>sys.server_principals</c> already
+    /// agreed). A char(2) declaration silently trailing-space pads every read.
+    /// </summary>
+    [TestMethod]
+    [DataRow("sys.database_principals", "dbo")]
+    [DataRow("sys.server_principals", "sa")]
+    public void PrincipalTypeColumn_IsCharOne(string catalogView, string principal)
+        => AreEqual(1, new Simulation().ExecuteScalar(
+            $"select datalength(type) from {catalogView} where name = '{principal}'"));
+
+    /// <summary>
     /// Probe-confirmed per-principal rules: dbo carries the well-known
     /// <c>0x01</c> sid and the only <c>INSTANCE</c> authentication_type, guest
     /// carries <c>0x00</c> and defaults to its own schema, the catalog
