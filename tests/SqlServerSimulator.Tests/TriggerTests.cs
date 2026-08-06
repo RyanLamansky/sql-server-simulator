@@ -8,8 +8,11 @@ namespace SqlServerSimulator;
 /// <c>DROP TRIGGER</c>, <c>DISABLE / ENABLE TRIGGER</c>, <c>ALTER TRIGGER</c>,
 /// <c>CREATE OR ALTER TRIGGER</c>, the <c>INSERTED</c> / <c>DELETED</c>
 /// pseudo-tables, multi-action triggers, multiple triggers per table,
-/// trigger-error rollback, recursion suppression, and
-/// <c>TRIGGER_NESTLEVEL()</c>. INSTEAD OF triggers and DDL triggers are
+/// trigger-error rollback, recursion suppression,
+/// <c>TRIGGER_NESTLEVEL()</c>, and the joined shapes a production body is
+/// built out of — an aliased <c>UPDATE ... FROM ... JOIN INSERTED</c>, an OR
+/// in that join's ON clause, and a set-based <c>INSERT ... SELECT</c> out of
+/// the pseudo-table. INSTEAD OF triggers and DDL triggers are
 /// out of scope for this bundle. All behaviors probe-confirmed against
 /// SQL Server 2025.
 /// </summary>
@@ -899,5 +902,208 @@ public sealed class TriggerTests
         var log = ReadAuditLog(connection);
         HasCount(1, log);
         AreEqual(2, log[0].Id);  // @@ROWCOUNT was 2 (matched the INSERT's count).
+    }
+
+    // === Joined UPDATE through INSERTED ===
+    //
+    // A production AFTER INSERT body rarely reads one row. It reaches its own
+    // table through an alias and joins the pseudo-table:
+    //
+    //     update n set n.tag = ... from t_node n join inserted i on n.id = i.id
+    //
+    // which is the same family as the aliased `delete <alias> from ...` form —
+    // a form that enforced no parent-side referential action at all until it
+    // was probed. The shapes below are what such bodies are built out of: an
+    // OR in that join's ON clause, a scalar UDF in the SET, a set-based
+    // INSERT..SELECT out of INSERTED, and the nested dispatch the body's own
+    // updates cause. Every value is probe-confirmed against SQL Server 2025.
+
+    private static DbConnection SeededNodes()
+    {
+        var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table t_node (
+                id int primary key,
+                parent_id int null,
+                tag nvarchar(50) not null,
+                state int not null);
+            create table t_node_log (node_id int not null, tag nvarchar(50) not null);
+            create table t_gate (name nvarchar(50) not null, value nvarchar(50) not null);
+            insert t_node values (1, null, 'root', 9), (2, null, 'other', 9);
+            """).ExecuteNonQuery();
+        return connection;
+    }
+
+    private static List<(int Id, int? ParentId, string Tag, int State)> ReadNodes(DbConnection connection)
+    {
+        using var reader = connection.CreateCommand(
+            "select id, parent_id, tag, state from t_node order by id").ExecuteReader();
+        var rows = new List<(int, int?, string, int)>();
+        while (reader.Read())
+        {
+            rows.Add((
+                reader.GetInt32(0),
+                reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                reader.GetString(2),
+                reader.GetInt32(3)));
+        }
+        return rows;
+    }
+
+    private static List<(int NodeId, string Tag)> ReadNodeLog(DbConnection connection)
+    {
+        using var reader = connection.CreateCommand(
+            "select node_id, tag from t_node_log order by node_id, tag").ExecuteReader();
+        var rows = new List<(int, string)>();
+        while (reader.Read())
+            rows.Add((reader.GetInt32(0), reader.GetString(1)));
+        return rows;
+    }
+
+    [TestMethod]
+    public void JoinedUpdateThroughInserted_RewritesEveryInsertedRow()
+    {
+        using var connection = SeededNodes();
+        // Two character classes, like the production functions this mirrors:
+        // the first turns separators into a dash, the second drops what is
+        // left. The dash has to sit inside the second class's keep set or the
+        // loop replaces its own output forever.
+        _ = connection.CreateCommand("""
+            create function dbo.t_norm(@s nvarchar(50)) returns nvarchar(50)
+            as
+            begin
+                while patindex('%[ _.]%', @s) > 0
+                    set @s = stuff(@s, patindex('%[ _.]%', @s), 1, '-');
+                while patindex('%[^a-z0-9-]%', @s) > 0
+                    set @s = stuff(@s, patindex('%[^a-z0-9-]%', @s), 1, '');
+                return @s;
+            end
+            """).ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create trigger tr_node on t_node after insert
+            as
+                update n set n.tag = dbo.t_norm(n.tag) from t_node n join inserted i on n.id = i.id
+            """).ExecuteNonQuery();
+        _ = connection.CreateCommand(
+            "insert t_node values (10, 1, 'New Tag #1', 0), (11, 2, 'New Tag #2', 0)").ExecuteNonQuery();
+        var nodes = ReadNodes(connection);
+        HasCount(4, nodes);
+        // The join confines the rewrite to INSERTED, so the seeded rows keep
+        // their tags. Case survives the `[^a-z0-9-]` filter: under a
+        // case-insensitive collation that range already covers A-Z, so the
+        // class matches neither case and the filter strips neither.
+        AreEqual((1, null, "root", 9), nodes[0]);
+        AreEqual((2, null, "other", 9), nodes[1]);
+        AreEqual((10, 1, "New-Tag-1", 0), nodes[2]);
+        AreEqual((11, 2, "New-Tag-2", 0), nodes[3]);
+    }
+
+    [TestMethod]
+    public void JoinedUpdateThroughInserted_OrInTheOnClause_AlsoReachesTheParents()
+    {
+        using var connection = SeededNodes();
+        _ = connection.CreateCommand("""
+            create trigger tr_node on t_node after insert
+            as
+                update n set n.state = 1 from t_node n join inserted i
+                    on n.id = i.id or n.id = i.parent_id
+                where i.state = 0
+            """).ExecuteNonQuery();
+        _ = connection.CreateCommand(
+            "insert t_node values (10, 1, 'a', 0), (11, 2, 'b', 0)").ExecuteNonQuery();
+        // Both arms fire: the inserted rows by id, and rows 1 and 2 because
+        // the inserted rows name them as parents. A hash join can't answer an
+        // OR, so this is the nested-loop path.
+        var states = ReadNodes(connection).Select(n => (n.Id, n.State)).ToList();
+        HasCount(4, states);
+        AreEqual((1, 1), states[0]);
+        AreEqual((2, 1), states[1]);
+        AreEqual((10, 1), states[2]);
+        AreEqual((11, 1), states[3]);
+    }
+
+    [TestMethod]
+    public void JoinedUpdateThroughInserted_OrInTheOnClause_DrivesOnlyFromQualifyingInsertedRows()
+    {
+        using var connection = SeededNodes();
+        _ = connection.CreateCommand("""
+            create trigger tr_node on t_node after insert
+            as
+                update n set n.state = 1 from t_node n join inserted i
+                    on n.id = i.id or n.id = i.parent_id
+                where i.state = 0
+            """).ExecuteNonQuery();
+        // Row 12 names parent 1 but the WHERE eliminates it; row 13 names
+        // parent 2 and survives. Asserting the discrimination rather than a
+        // bare absence is what makes this fail if the body never ran at all:
+        // parent 2 has to move and parent 1 has to stay.
+        _ = connection.CreateCommand(
+            "insert t_node values (12, 1, 'c', 5), (13, 2, 'd', 0)").ExecuteNonQuery();
+        var states = ReadNodes(connection).Select(n => (n.Id, n.State)).ToList();
+        HasCount(4, states);
+        AreEqual((1, 9), states[0]);
+        AreEqual((2, 1), states[1]);
+        AreEqual((12, 5), states[2]);
+        AreEqual((13, 1), states[3]);
+    }
+
+    [TestMethod]
+    public void SetBasedInsertFromInserted_GatedOnAnotherTable()
+    {
+        using var connection = SeededNodes();
+        _ = connection.CreateCommand("""
+            create trigger tr_node on t_node after insert
+            as
+                insert t_node_log select i.id, i.tag from inserted i
+                    inner join t_gate g on g.name = 'enabled' and g.value = 'true'
+            """).ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t_node values (10, 1, 'Gate Closed', 0)").ExecuteNonQuery();
+        IsEmpty(ReadNodeLog(connection));
+
+        _ = connection.CreateCommand("insert t_gate values ('enabled', 'true')").ExecuteNonQuery();
+        _ = connection.CreateCommand(
+            "insert t_node values (11, 1, 'Gate Open', 0), (12, 2, 'Gate Open 2', 0)").ExecuteNonQuery();
+        // One log row per inserted row, from the one gate row — and the tag is
+        // INSERTED's, which is the row as written rather than as any later
+        // statement leaves it.
+        var log = ReadNodeLog(connection);
+        HasCount(2, log);
+        AreEqual((11, "Gate Open"), log[0]);
+        AreEqual((12, "Gate Open 2"), log[1]);
+    }
+
+    [TestMethod]
+    public void AfterInsertBodyUpdates_EachFireTheAfterUpdateTrigger()
+    {
+        using var connection = SeededNodes();
+        _ = connection.CreateCommand("""
+            create trigger tr_node_au on t_node after update
+            as
+                insert t_node_log select d.id, 'au' from deleted d
+            """).ExecuteNonQuery();
+        _ = connection.CreateCommand("""
+            create trigger tr_node_ai on t_node after insert
+            as
+            begin
+                update n set n.tag = n.tag from t_node n join inserted i on n.id = i.id;
+                update n set n.state = 1 from t_node n join inserted i
+                    on n.id = i.id or n.id = i.parent_id
+                where i.state = 0;
+            end
+            """).ExecuteNonQuery();
+        _ = connection.CreateCommand(
+            "insert t_node values (10, 1, 'a', 0), (11, 2, 'b', 0)").ExecuteNonQuery();
+        // Six, not two: the AFTER UPDATE trigger fires once per statement in
+        // the AFTER INSERT body, over that statement's own DELETED set — the
+        // first update reaches the two inserted rows, the second reaches those
+        // two plus both parents. A no-op self-assignment still counts.
+        var log = ReadNodeLog(connection);
+        HasCount(6, log);
+        AreEqual((1, "au"), log[0]);
+        AreEqual((2, "au"), log[1]);
+        AreEqual((10, "au"), log[2]);
+        AreEqual((10, "au"), log[3]);
+        AreEqual((11, "au"), log[4]);
+        AreEqual((11, "au"), log[5]);
     }
 }

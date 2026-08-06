@@ -33,6 +33,11 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) fire on the DDL t
 - **INSERTED / DELETED pseudo-tables** — bare 1-part names resolve through the new `TriggerFrame.Inserted` / `TriggerFrame.Deleted` slots ahead of the schema / temp-table dispatch.
   Both pseudo-tables are always materialized (matching real SQL Server): an INSERT trigger sees an empty `deleted`, a DELETE trigger sees an empty `inserted`, an UPDATE trigger sees both populated.
   Pseudo-tables are `HeapTable` instances flagged `IsTableVariable` so writes don't touch the regular transaction undo log; columns are shared by reference from the parent table (for table parents) or the view's `OutputColumns` (for view parents).
+- **The joined shapes a production body is written in** — a body rarely reads one row.
+  It reaches its own parent table through an alias and *joins* the pseudo-table: `UPDATE n SET n.tag = dbo.f(n.tag) FROM t n JOIN INSERTED i ON n.id = i.id`, the same family as the aliased `DELETE <alias> FROM …` form.
+  An **OR in that join's ON clause** (`ON n.id = i.id OR n.id = i.parent_id`) is the idiom for reaching an inserted row *and* the row it names as parent, and it drives only from the INSERTED rows a `WHERE` leaves standing.
+  A **scalar UDF in the SET** evaluates per row, and a set-based `INSERT … SELECT FROM INSERTED JOIN <gate>` writes one row per inserted row — carrying INSERTED's values, which are the rows as written rather than as a later statement in the same body leaves them.
+  The body's own UPDATEs dispatch the parent's AFTER UPDATE trigger once per statement over that statement's DELETED set, a no-op self-assignment included.
 - **Multiple triggers per table** — every enabled AFTER trigger matching the firing action runs, ordered by `sp_settriggerorder` at the two ends (see [Firing order](#firing-order)).
   Unpinned triggers follow the per-schema dictionary's enumeration, which is **not** guaranteed to be creation order and isn't asserted anywhere; SQL Server leaves the middle unspecified too.
   At most one INSTEAD OF per action per target.
