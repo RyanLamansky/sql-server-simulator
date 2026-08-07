@@ -164,6 +164,11 @@ partial class Simulation
         {
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
+            // The body's Sch-S / IS holds are recorded against this inner
+            // batch, which the dispatch loop never sees — so without this the
+            // referencing statement's own release leaves them behind and they
+            // outlive the connection entirely.
+            innerBatch.ReleaseStatementSchemaLocks();
         }
     }
 }

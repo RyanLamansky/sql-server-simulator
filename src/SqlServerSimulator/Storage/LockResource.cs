@@ -188,6 +188,16 @@ internal enum LockAcquireOutcome
 
     /// <summary>The caller was chosen as the deadlock victim (same-thread conflict or wait-for cycle).</summary>
     Deadlocked,
+
+    /// <summary>
+    /// The command was cancelled while waiting — its <c>CommandTimeout</c>
+    /// elapsed, a client sent an attention, or an in-process caller called
+    /// <c>Cancel()</c>. Distinct from <see cref="TimedOut"/>, which is the
+    /// session's own <c>SET LOCK_TIMEOUT</c> and reports Msg 1222; a
+    /// cancellation reports whatever the command surface reports for an
+    /// aborted execution.
+    /// </summary>
+    Cancelled,
 }
 
 internal sealed class LockManager
@@ -197,6 +207,15 @@ internal sealed class LockManager
     /// reads and writes lock state inside <c>lock (this.gate)</c>.
     /// </summary>
     internal readonly object gate = new();
+
+    /// <summary>
+    /// How long a blocked waiter sleeps before re-checking its command's
+    /// cancellation. Only an upper bound on noticing a cancel — a lock
+    /// release Pulses the gate and wakes every waiter immediately — so it
+    /// trades a little idle wake-up work for a bounded response to a
+    /// CommandTimeout.
+    /// </summary>
+    private const int CancellationPollMillis = 25;
 
     /// <summary>
     /// The simulation this manager coordinates, assigned right after
@@ -236,6 +255,12 @@ internal sealed class LockManager
                 throw SimulatedSqlException.LockRequestTimeOutExceeded();
             case LockAcquireOutcome.Deadlocked:
                 throw SimulatedSqlException.TransactionDeadlocked(owner.Spid);
+            case LockAcquireOutcome.Cancelled:
+                // The same -2 / 0 split the command surface makes: a
+                // CommandTimeout is Msg -2, a caller's Cancel() is Msg 0.
+                throw owner.TryResolveOwner()?.ExecutionTimedOut == true
+                    ? SimulatedSqlException.ExecutionTimeoutExpired()
+                    : SimulatedSqlException.CommandCancelled();
         }
     }
 
@@ -272,6 +297,12 @@ internal sealed class LockManager
 
             var deadline = timeoutMillis < 0 ? -1L : Environment.TickCount64 + timeoutMillis;
             var waited = false;
+            // The waiting session's own execution token — the one a
+            // CommandTimeout, a TDS attention and an in-process Cancel() all
+            // signal. Taken from the session rather than threaded through
+            // every caller: a lock wait is the session's, so the session is
+            // where the answer already lives.
+            var cancellation = owner.TryResolveOwner()?.ExecutionCancellationToken ?? CancellationToken.None;
 
             while (true)
             {
@@ -308,8 +339,23 @@ internal sealed class LockManager
                 try
                 {
                     waited = true;
-                    if (!Monitor.Wait(this.gate, remaining))
-                        return LockAcquireOutcome.TimedOut;
+                    // Monitor.Wait can't observe a token, so the wait is
+                    // sliced: a blocked statement has to notice its own
+                    // CommandTimeout, and SET LOCK_TIMEOUT's default of
+                    // "wait forever" would otherwise make a block permanent.
+                    // The slice only bounds how long cancellation goes
+                    // unnoticed — a release still Pulses and wakes it at once,
+                    // so this costs nothing on the granted path.
+                    var slice = remaining == Timeout.Infinite
+                        ? CancellationPollMillis
+                        : Math.Min(remaining, CancellationPollMillis);
+                    if (!Monitor.Wait(this.gate, slice))
+                    {
+                        if (cancellation.IsCancellationRequested)
+                            return LockAcquireOutcome.Cancelled;
+                        if (timeoutMillis > 0 && Environment.TickCount64 >= deadline)
+                            return LockAcquireOutcome.TimedOut;
+                    }
                 }
                 finally
                 {

@@ -117,6 +117,10 @@ Each FETCH moves the row-U (`Cursor.MoveScrollLock` releases the row scrolled of
 A concurrent writer of the held row blocks on the U-X conflict; a positioned UPDATE upgrades the row to X via the normal writer path (same-owner re-entrance lets the cursor's U and the writer's X coexist).
 
 Statement-scoped locks live in `BatchContext.StatementSchemaLocks` and release in `DispatchOneStatement`'s `finally`.
+**A synthesized child batch has its own list that the dispatch loop never sees**, so every site that builds one to parse or run a module body has to release it itself — a view or inline-TVF body binding takes Sch-S / IS on everything it names, and nothing else will let them go.
+Missing that release does not merely hold a lock for too long: the locks outlive the connection (teardown releases the transaction, the application locks and the temp tables, not these), so they persist for the life of the `Simulation`, held by a SPID whose session no longer exists.
+The symptom is a later Sch-M — an `ALTER`, a startup re-applying its programmable objects — blocking forever against a holder nobody can find.
+`ModuleCreationLockLeakTests` walks every module kind, created and invoked, and asserts `sys.dm_tran_locks` is empty; a new body-inspection site that forgets the release fails there rather than in a consumer's startup.
 Transaction-scoped locks live in `SimulatedDbTransaction.HeldLocks` and release in `Commit()` / `Rollback()` / dispose-implicit-rollback.
 Savepoint partial rollbacks (`ROLLBACK TRAN <savepoint>`) do NOT release locks — matches real SQL Server (probe-confirmed).
 
@@ -347,6 +351,12 @@ When a conflict-driven wait would block, `LockManager.Acquire`:
 `SET LOCK_TIMEOUT N` → `connection.LockTimeoutMillis`.
 Negative = wait forever (default), `0` = fail-fast on first conflict, positive `N` = wait up to `N` ms before raising Msg 1222.
 Applies uniformly to schema locks, data locks, and row locks.
+
+**A blocked wait also observes the command's own cancellation** — its `CommandTimeout`, a TDS attention, or an in-process `Cancel()`.
+Without that, `SET LOCK_TIMEOUT`'s default of "wait forever" makes any block permanent, whatever the client asked for.
+`Monitor.Wait` can't take a token, so the wait is sliced (`LockManager.CancellationPollMillis`) and re-checks between slices; the slice bounds only how long a cancel goes unnoticed, since a release still `Pulse`s and wakes every waiter at once, so nothing is added to the granted path.
+The token is resolved from the waiting `SessionToken`'s own connection rather than threaded through every caller — a lock wait belongs to the session, which is where the answer already is, and the alternative (an optional parameter on `Acquire`) would oblige 40 existing test call sites to pass one.
+The two deadlines keep their own errors: `SET LOCK_TIMEOUT` elapsing is Msg 1222, while a cancellation reports what the command surface reports for an aborted execution — **Msg -2** for a `CommandTimeout` and **Msg 0** for a caller's `Cancel()`, the same split `SimulatedDbCommand` already makes.
 
 ## Hint surface
 

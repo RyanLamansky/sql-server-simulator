@@ -704,32 +704,44 @@ partial class Simulation
         // the CREATE statement's own current-time freeze to evaluate a
         // GETDATE() / SYSDATETIME() column.
         innerBatch.AdoptStatementFreezeFrom(outerContext.Batch);
-        var parser = innerBatch.Parser;
-        parser.MoveNextRequired();
-
-        var selection = ParseBodyQuery(parser, rejectsNextValueFor: true);
-
-        // Msg 1033: an inline function is one of the five constructs the
-        // message names, so its ORDER BY needs a companion TOP / OFFSET /
-        // FETCH — the same test the view and CTE bodies run (probe-confirmed
-        // 2026-08-06).
-        if (selection.HasOrderBy && !selection.HasTopOrOffsetOrFetch)
-            throw SimulatedSqlException.OrderByInvalidInCte();
-
-        var columns = new HeapColumn[selection.Schema.Length];
-        var seenNames = new HashSet<string>(outerContext.Batch.CurrentDatabase.Collation);
-        var nullability = selection.ColumnNullability;
-        for (var i = 0; i < selection.Schema.Length; i++)
+        try
         {
-            var name = selection.ColumnNames[i];
-            if (string.IsNullOrEmpty(name))
-                throw SimulatedSqlException.InlineTvfMissingColumnName(i + 1);
-            if (!seenNames.Add(name))
-                throw SimulatedSqlException.DuplicateColumnInViewOrFunction(name, functionName);
-            var nullable = nullability is null || i >= nullability.Length || nullability[i];
-            columns[i] = new HeapColumn(name, selection.Schema[i], maxLength: null, nullable: nullable);
+            var parser = innerBatch.Parser;
+            parser.MoveNextRequired();
+
+            var selection = ParseBodyQuery(parser, rejectsNextValueFor: true);
+
+            // Msg 1033: an inline function is one of the five constructs the
+            // message names, so its ORDER BY needs a companion TOP / OFFSET /
+            // FETCH — the same test the view and CTE bodies run (probe-confirmed
+            // 2026-08-06).
+            if (selection.HasOrderBy && !selection.HasTopOrOffsetOrFetch)
+                throw SimulatedSqlException.OrderByInvalidInCte();
+
+            var columns = new HeapColumn[selection.Schema.Length];
+            var seenNames = new HashSet<string>(outerContext.Batch.CurrentDatabase.Collation);
+            var nullability = selection.ColumnNullability;
+            for (var i = 0; i < selection.Schema.Length; i++)
+            {
+                var name = selection.ColumnNames[i];
+                if (string.IsNullOrEmpty(name))
+                    throw SimulatedSqlException.InlineTvfMissingColumnName(i + 1);
+                if (!seenNames.Add(name))
+                    throw SimulatedSqlException.DuplicateColumnInViewOrFunction(name, functionName);
+                var nullable = nullability is null || i >= nullability.Length || nullability[i];
+                columns[i] = new HeapColumn(name, selection.Schema[i], maxLength: null, nullable: nullable);
+            }
+            return columns;
         }
-        return columns;
+        finally
+        {
+            // Binding the body takes Sch-S / IS on everything it names, and
+            // this batch never reaches the dispatch loop that would release
+            // them — so it releases its own. In a finally because the
+            // validation above throws: a CREATE that fails its own checks must
+            // not leave the locks its partial parse already took.
+            innerBatch.ReleaseStatementSchemaLocks();
+        }
     }
 
     /// <summary>

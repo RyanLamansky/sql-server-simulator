@@ -129,6 +129,9 @@ partial class Simulation
         {
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
+            // As in the view body: the Sch-S / IS the body took are recorded
+            // against this inner batch, which the dispatch loop never sees.
+            innerBatch.ReleaseStatementSchemaLocks();
         }
     }
 }
