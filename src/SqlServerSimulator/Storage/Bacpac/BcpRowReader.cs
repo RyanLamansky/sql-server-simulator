@@ -40,28 +40,64 @@ namespace SqlServerSimulator.Storage.Bacpac;
 internal static class BcpRowReader
 {
     /// <summary>
-    /// Reads one row from <paramref name="stream"/>, decoding one
-    /// <see cref="SqlValue"/> per column in <paramref name="columns"/>.
+    /// Resolves the wire shape of every column in <paramref name="columns"/>,
+    /// once for the table's whole BCP stream. Which shape a column takes
+    /// depends only on its declared type, its nullability and whether it was
+    /// declared through a UDDT alias — none of which vary from row to row — so
+    /// the dispatch runs once per column here instead of once per column per
+    /// row.
     /// <paramref name="columnIsAlias"/> marks per-column whether the column
     /// was declared via a UDDT alias — those columns use the 1-byte-prefix
     /// wire format even for fixed-raw types like int/bit/etc.
-    /// Returns null when the stream is at EOF (no more rows).
     /// </summary>
-    public static SqlValue[]? TryReadRow(BufferedStream stream, ReadOnlySpan<HeapColumn> columns, ReadOnlySpan<bool> columnIsAlias)
+    public static ColumnDecoder[] ResolveDecoders(ReadOnlySpan<HeapColumn> columns, ReadOnlySpan<bool> columnIsAlias)
+    {
+        var decoders = new ColumnDecoder[columns.Length];
+        for (var i = 0; i < columns.Length; i++)
+            decoders[i] = ResolveDecoder(columns[i], i < columnIsAlias.Length && columnIsAlias[i]);
+        return decoders;
+    }
+
+    /// <summary>
+    /// Reads one row from <paramref name="stream"/> into <paramref name="into"/>,
+    /// decoding one <see cref="SqlValue"/> per entry in <paramref name="decoders"/>
+    /// (as produced by <see cref="ResolveDecoders"/>). Every slot is written, so
+    /// the buffer is caller-owned scratch to reuse across rows: nothing
+    /// downstream retains it — the encoder copies what it needs into the row
+    /// bytes — and a <see cref="SqlValue"/> is 32 bytes, so a per-row buffer is
+    /// one of the larger costs of a load.
+    /// Returns false when the stream is at EOF (no more rows).
+    /// </summary>
+    public static bool TryReadRow(BufferedStream stream, ReadOnlySpan<ColumnDecoder> decoders, SqlValue[] into)
     {
         // Peek one byte to detect EOF without throwing.
         var firstByte = stream.ReadByte();
         if (firstByte < 0)
-            return null;
+            return false;
         var pushback = new PushbackStream(stream, (byte)firstByte);
 
-        var values = new SqlValue[columns.Length];
-        for (var i = 0; i < columns.Length; i++)
-            values[i] = DecodeColumn(ref pushback, columns[i], i < columnIsAlias.Length && columnIsAlias[i]);
-        return values;
+        for (var i = 0; i < decoders.Length; i++)
+            into[i] = Decode(ref pushback, decoders[i]);
+        return true;
     }
 
-    private static SqlValue DecodeColumn(ref PushbackStream stream, HeapColumn column, bool isAliasTyped)
+    private static SqlValue Decode(ref PushbackStream stream, ColumnDecoder decoder)
+    {
+        var type = decoder.Type;
+        return decoder.Form switch
+        {
+            WireForm.FixedRaw => ReadFixedRaw(ref stream, nullable: false, decoder.Width, type, decoder.Build!),
+            WireForm.FixedRawNullable => ReadFixedRaw(ref stream, nullable: true, decoder.Width, type, decoder.Build!),
+            WireForm.LengthPrefixed1 => ReadLengthPrefixed1(ref stream, decoder.Width, type, decoder.Build!),
+            WireForm.Decimal => ReadDecimal(ref stream, type),
+            WireForm.EightByte => ReadEightBytePrefixed(ref stream, type, decoder.Payload),
+            WireForm.Varchar2 => ReadVarchar2(ref stream, type),
+            WireForm.Varbinary2 => ReadVarbinary2(ref stream, type),
+            _ => throw new InvalidOperationException($"unknown WireForm {decoder.Form}"),
+        };
+    }
+
+    private static ColumnDecoder ResolveDecoder(HeapColumn column, bool isAliasTyped)
     {
         var type = column.Type;
         // UDDT-aliased columns use 1-byte-prefix wire format regardless of
@@ -69,80 +105,131 @@ internal static class BcpRowReader
         // 1-byte-prefix path when the alias flag is set.
         var nullable = column.Nullable || isAliasTyped;
 
-        // Fixed-width raw types — no prefix when NOT NULL, 1-byte prefix when
-        // nullable (0xFF = NULL, else width). Reference-equality on the
-        // simulator's type singletons. Money/smallmoney probe as fixed-raw
-        // despite the prereqs-doc matrix's "length-prefixed fixed" claim
-        // (probe-confirmed against AW's SpecialOffer.DiscountPct on
-        // 2026-05-15: 4 raw bytes with value 0 for the first row, no prefix).
-        if (type == SqlType.Int32) return ReadFixedRaw(ref stream, nullable, 4, type, b => SqlValue.FromInt32(BinaryPrimitives.ReadInt32LittleEndian(b)));
-        if (type == SqlType.BigInt) return ReadFixedRaw(ref stream, nullable, 8, type, b => SqlValue.FromInt64(BinaryPrimitives.ReadInt64LittleEndian(b)));
-        if (type == SqlType.SmallInt) return ReadFixedRaw(ref stream, nullable, 2, type, b => SqlValue.FromInt16(BinaryPrimitives.ReadInt16LittleEndian(b)));
-        if (type == SqlType.TinyInt) return ReadFixedRaw(ref stream, nullable, 1, type, b => SqlValue.FromByte(b[0]));
-        // bit is always 1-byte length-prefixed (1 byte prefix == 1, then 1
-        // raw byte for the value). Probe-confirmed via AW's plain-bit
-        // Production.Document.FolderFlag on 2026-05-15.
-        if (type == SqlType.Bit) return ReadLengthPrefixed1(ref stream, 1, type, b => SqlValue.FromBoolean(b[0] != 0));
-        if (type == SqlType.DateTime) return ReadFixedRaw(ref stream, nullable, 8, type, DecodeDateTime);
-        if (type == SqlType.SmallDateTime) return ReadFixedRaw(ref stream, nullable, 4, type, DecodeSmallDateTime);
-        if (type == SqlType.Date) return ReadFixedRaw(ref stream, nullable, 3, type, DecodeDate);
-        if (type == SqlType.Money) return ReadFixedRaw(ref stream, nullable, 8, type, b => DecodeMoney(b, type));
-        if (type == SqlType.SmallMoney) return ReadFixedRaw(ref stream, nullable, 4, type, b => DecodeSmallMoney(b, type));
-        // float / real are IEEE 754 little-endian at their storage width, on
-        // the same fixed-raw prefix rule as the integer family. A float(n) with
-        // n <= 24 is real and carries the 4-byte singleton, so the declared
-        // type already names the width.
-        if (type == SqlType.Float) return ReadFixedRaw(ref stream, nullable, 8, type, b => SqlValue.FromDouble(BinaryPrimitives.ReadDoubleLittleEndian(b)));
-        if (type == SqlType.Real) return ReadFixedRaw(ref stream, nullable, 4, type, b => SqlValue.FromSingle(BinaryPrimitives.ReadSingleLittleEndian(b)));
-
-        // Length-prefixed fixed — always 1-byte length prefix even when
-        // NOT NULL. uniqueidentifier has fixed 16-byte payload but always
-        // emits its 0x10 prefix per probe.
-        if (type == SqlType.UniqueIdentifier) return ReadLengthPrefixed1(ref stream, 16, type, b => SqlValue.FromGuid(new Guid(b)));
-
-        // Decimal/numeric — see ReadDecimal for the full wire layout (the
-        // BCP form prepends an inline precision + scale + sign before the
-        // mantissa, which the TDS wire spec does not).
-        if (type is DecimalSqlType decimalType) return ReadDecimal(ref stream, decimalType);
-
-        // datetime2 / time / datetimeoffset — precision-dependent fixed width
-        // (probe-confirmed via AW HumanResources.Shift on 2026-05-15: time(7)
-        // NOT NULL = 5 raw bytes, no prefix). Width comes from the
-        // precision-specific singleton fields.
-        // DacFx writes time / datetime2 / datetimeoffset at their *maximum*
-        // width with the value scaled to 7 fractional digits, whatever the
-        // column's declared precision — verified against a sqlpackage export
-        // carrying precisions 0, 3 and 7 side by side. Every bacpac exercised
-        // before this used precision-7 columns only, where the declared and
-        // maximum widths coincide, which is why the per-precision width read
-        // correctly there and nowhere else.
-        if (type is TimeSqlType) return ReadFixedRaw(ref stream, nullable, 5, type, b => DecodeTime(b, type));
-        if (type is DateTime2SqlType) return ReadFixedRaw(ref stream, nullable, 8, type, b => DecodeDateTime2(b, type));
-        if (type is DateTimeOffsetSqlType) return ReadFixedRaw(ref stream, nullable, 10, type, b => DecodeDateTimeOffset(b, type));
-
-        // 8-byte LE length-prefix types (MAX text/binary, xml, CLR-UDT family).
-        // 0xFFFFFFFFFFFFFFFF = NULL; otherwise N bytes inline (no TDS-PLP
-        // chunk markers — probe-confirmed against AW on 2026-05-15).
-        if (type is XmlSqlType) return ReadEightBytePrefixed(ref stream, type, EightBytePayload.Xml);
-        if (type is GeographySqlType) return ReadEightBytePrefixed(ref stream, type, EightBytePayload.Geography);
-        if (type is GeometrySqlType) return ReadEightBytePrefixed(ref stream, type, EightBytePayload.Geometry);
-        if (type is HierarchyIdSqlType) return ReadEightBytePrefixed(ref stream, type, EightBytePayload.HierarchyId);
-        if (type is VarcharSqlType vc && vc.length == -1) return ReadEightBytePrefixed(ref stream, type, EightBytePayload.VarcharMax);
-        if (type is NVarcharSqlType nv && nv.length == -1) return ReadEightBytePrefixed(ref stream, type, EightBytePayload.NVarcharMax);
-        if (type is VarbinarySqlType vb && vb.length == -1) return ReadEightBytePrefixed(ref stream, type, EightBytePayload.VarbinaryMax);
-
-        // Variable-length bounded (text/binary) — 2-byte LE prefix, 0xFFFF = NULL.
+        // Every SqlType matched below is sealed and derives straight from
+        // SqlType, so a type pattern is an exact match rather than a
+        // hierarchy test; for the types the simulator holds as a lone
+        // singleton (the integer, money, float and legacy-datetime families,
+        // uniqueidentifier) it is also exactly the identity test a
+        // `type == SqlType.Int32` comparison would make.
         return type switch
         {
-            VarcharSqlType => ReadVarchar2(ref stream, type),
-            NVarcharSqlType => ReadVarchar2(ref stream, type),
-            SystemNameSqlType => ReadVarchar2(ref stream, type),
-            NCharSqlType => ReadVarchar2(ref stream, type),
-            CharSqlType => ReadVarchar2(ref stream, type),
-            VarbinarySqlType => ReadVarbinary2(ref stream, type),
-            BinarySqlType => ReadVarbinary2(ref stream, type),
+            // Fixed-width raw types — no prefix when NOT NULL, 1-byte prefix
+            // when nullable (0xFF = NULL, else width). Money/smallmoney probe
+            // as fixed-raw despite the prereqs-doc matrix's "length-prefixed
+            // fixed" claim (probe-confirmed against AW's
+            // SpecialOffer.DiscountPct on 2026-05-15: 4 raw bytes with value 0
+            // for the first row, no prefix).
+            Int32SqlType => FixedRaw(type, nullable, 4, static (b, _) => SqlValue.FromInt32(BinaryPrimitives.ReadInt32LittleEndian(b))),
+            BigIntSqlType => FixedRaw(type, nullable, 8, static (b, _) => SqlValue.FromInt64(BinaryPrimitives.ReadInt64LittleEndian(b))),
+            SmallIntSqlType => FixedRaw(type, nullable, 2, static (b, _) => SqlValue.FromInt16(BinaryPrimitives.ReadInt16LittleEndian(b))),
+            TinyIntSqlType => FixedRaw(type, nullable, 1, static (b, _) => SqlValue.FromByte(b[0])),
+            DateTimeSqlType => FixedRaw(type, nullable, 8, static (b, _) => DecodeDateTime(b)),
+            SmallDateTimeSqlType => FixedRaw(type, nullable, 4, static (b, _) => DecodeSmallDateTime(b)),
+            DateSqlType => FixedRaw(type, nullable, 3, static (b, _) => DecodeDate(b)),
+            MoneySqlType => FixedRaw(type, nullable, 8, DecodeMoney),
+            SmallMoneySqlType => FixedRaw(type, nullable, 4, DecodeSmallMoney),
+
+            // float / real are IEEE 754 little-endian at their storage width,
+            // on the same fixed-raw prefix rule as the integer family. A
+            // float(n) with n <= 24 is real and carries the 4-byte singleton,
+            // so the declared type already names the width.
+            FloatSqlType => FixedRaw(type, nullable, 8, static (b, _) => SqlValue.FromDouble(BinaryPrimitives.ReadDoubleLittleEndian(b))),
+            RealSqlType => FixedRaw(type, nullable, 4, static (b, _) => SqlValue.FromSingle(BinaryPrimitives.ReadSingleLittleEndian(b))),
+
+            // datetime2 / time / datetimeoffset — fixed width, but DacFx writes
+            // all three at their *maximum* width with the value scaled to 7
+            // fractional digits, whatever the column's declared precision —
+            // verified against a sqlpackage export carrying precisions 0, 3 and
+            // 7 side by side. Every bacpac exercised before this used
+            // precision-7 columns only, where the declared and maximum widths
+            // coincide, which is why a per-precision width read correctly there
+            // and nowhere else.
+            TimeSqlType => FixedRaw(type, nullable, 5, DecodeTime),
+            DateTime2SqlType => FixedRaw(type, nullable, 8, DecodeDateTime2),
+            DateTimeOffsetSqlType => FixedRaw(type, nullable, 10, DecodeDateTimeOffset),
+
+            // Length-prefixed fixed — 1-byte length prefix even when NOT NULL.
+            // bit carries it despite being a 1-byte type (probe-confirmed via
+            // AW's plain-bit Production.Document.FolderFlag on 2026-05-15), and
+            // uniqueidentifier emits its 0x10 prefix ahead of a payload whose
+            // width never varies.
+            BitSqlType => Prefixed1(type, 1, static (b, _) => SqlValue.FromBoolean(b[0] != 0)),
+            UniqueIdentifierSqlType => Prefixed1(type, 16, static (b, _) => SqlValue.FromGuid(new Guid(b))),
+
+            // Decimal/numeric — see ReadDecimal for the full wire layout (the
+            // BCP form prepends an inline precision + scale + sign before the
+            // mantissa, which the TDS wire spec does not).
+            DecimalSqlType => Simple(type, WireForm.Decimal),
+
+            // 8-byte LE length-prefix types (MAX text/binary, xml, CLR-UDT
+            // family). 0xFFFFFFFFFFFFFFFF = NULL; otherwise N bytes inline (no
+            // TDS-PLP chunk markers — probe-confirmed against AW on
+            // 2026-05-15). The MAX arms precede their bounded counterparts
+            // below, which take a 2-byte prefix instead.
+            XmlSqlType => EightByte(type, EightBytePayload.Xml),
+            GeographySqlType => EightByte(type, EightBytePayload.Geography),
+            GeometrySqlType => EightByte(type, EightBytePayload.Geometry),
+            HierarchyIdSqlType => EightByte(type, EightBytePayload.HierarchyId),
+            VarcharSqlType { length: -1 } => EightByte(type, EightBytePayload.VarcharMax),
+            NVarcharSqlType { length: -1 } => EightByte(type, EightBytePayload.NVarcharMax),
+            VarbinarySqlType { length: -1 } => EightByte(type, EightBytePayload.VarbinaryMax),
+
+            // Variable-length bounded (text/binary) — 2-byte LE prefix,
+            // 0xFFFF = NULL.
+            VarcharSqlType or NVarcharSqlType or SystemNameSqlType or NCharSqlType or CharSqlType => Simple(type, WireForm.Varchar2),
+            VarbinarySqlType or BinarySqlType => Simple(type, WireForm.Varbinary2),
+
             _ => throw new NotSupportedException($"BCP decoder doesn't yet handle type {type}."),
         };
+    }
+
+    private static ColumnDecoder FixedRaw(SqlType type, bool nullable, int width, ByteSpanDecoder build) =>
+        new(type, nullable ? WireForm.FixedRawNullable : WireForm.FixedRaw, width, build, default);
+
+    private static ColumnDecoder Prefixed1(SqlType type, int width, ByteSpanDecoder build) =>
+        new(type, WireForm.LengthPrefixed1, width, build, default);
+
+    private static ColumnDecoder EightByte(SqlType type, EightBytePayload payload) =>
+        new(type, WireForm.EightByte, 0, null, payload);
+
+    private static ColumnDecoder Simple(SqlType type, WireForm form) =>
+        new(type, form, 0, null, default);
+
+    /// <summary>
+    /// The wire shape one column's bytes arrive in, resolved by
+    /// <see cref="ResolveDecoder"/>.
+    /// </summary>
+    internal enum WireForm : byte
+    {
+        /// <summary>Raw bytes at the column's width, no prefix.</summary>
+        FixedRaw,
+        /// <summary>1-byte prefix (0xFF = NULL, else the width) then raw bytes.</summary>
+        FixedRawNullable,
+        /// <summary>Same bytes as <see cref="FixedRawNullable"/>, for the types that carry the prefix even when NOT NULL.</summary>
+        LengthPrefixed1,
+        /// <summary>1-byte prefix then a self-describing payload — see <see cref="ReadDecimal"/>.</summary>
+        Decimal,
+        /// <summary>8-byte LE prefix then N bytes inline, materialized per <see cref="ColumnDecoder.Payload"/>.</summary>
+        EightByte,
+        /// <summary>2-byte LE prefix then N bytes of UTF-16-LE text.</summary>
+        Varchar2,
+        /// <summary>2-byte LE prefix then N raw bytes.</summary>
+        Varbinary2,
+    }
+
+    /// <summary>
+    /// One column's resolved wire shape, reused for every row of the table.
+    /// <see cref="Build"/> is non-null exactly for the three fixed-width forms
+    /// and <see cref="Width"/> is meaningful only there; <see cref="Payload"/>
+    /// is read only by <see cref="WireForm.EightByte"/>.
+    /// </summary>
+    internal readonly struct ColumnDecoder(SqlType type, WireForm form, int width, ByteSpanDecoder? build, EightBytePayload payload)
+    {
+        public readonly SqlType Type = type;
+        public readonly WireForm Form = form;
+        public readonly int Width = width;
+        public readonly ByteSpanDecoder? Build = build;
+        public readonly EightBytePayload Payload = payload;
     }
 
     /// <summary>
@@ -151,7 +238,7 @@ internal static class BcpRowReader
     /// identical across the 8-byte-prefix family but the final coercion to
     /// a value differs by SqlType.
     /// </summary>
-    private enum EightBytePayload
+    internal enum EightBytePayload
     {
         VarcharMax,
         NVarcharMax,
@@ -217,7 +304,12 @@ internal static class BcpRowReader
         };
     }
 
-    private delegate SqlValue ByteSpanDecoder(ReadOnlySpan<byte> bytes);
+    /// <summary>
+    /// Materializes a fixed-width column's raw bytes. Takes the column's
+    /// <see cref="SqlType"/> as an argument rather than closing over it so
+    /// every implementation is non-capturing and caches into a static.
+    /// </summary>
+    internal delegate SqlValue ByteSpanDecoder(ReadOnlySpan<byte> bytes, SqlType type);
 
     private static SqlValue ReadFixedRaw(ref PushbackStream stream, bool nullable, int width, SqlType type, ByteSpanDecoder build)
     {
@@ -231,7 +323,7 @@ internal static class BcpRowReader
         }
         Span<byte> bytes = stackalloc byte[width];
         stream.ReadExact(bytes);
-        return build(bytes);
+        return build(bytes, type);
     }
 
     private static SqlValue ReadLengthPrefixed1(ref PushbackStream stream, int expectedWidth, SqlType type, ByteSpanDecoder build)
@@ -243,7 +335,7 @@ internal static class BcpRowReader
             throw new InvalidDataException($"BCP: expected length-prefixed-fixed width {expectedWidth} or 0xFF, got 0x{prefix:X2}.");
         Span<byte> bytes = stackalloc byte[expectedWidth];
         stream.ReadExact(bytes);
-        return build(bytes);
+        return build(bytes, type);
     }
 
     /// <summary>
@@ -256,7 +348,7 @@ internal static class BcpRowReader
     /// destination <see cref="DecimalSqlType"/> for the storage scale and
     /// uses the on-disk scale only for the value calculation.
     /// </summary>
-    private static SqlValue ReadDecimal(ref PushbackStream stream, DecimalSqlType type)
+    private static SqlValue ReadDecimal(ref PushbackStream stream, SqlType type)
     {
         var prefix = stream.ReadOneByte();
         if (prefix == 0xFF)
@@ -325,6 +417,16 @@ internal static class BcpRowReader
         return SqlValue.FromDateTimeOffset(type, new DateTimeOffset(utc, TimeSpan.Zero).ToOffset(TimeSpan.FromMinutes(minutesOffset)));
     }
 
+    /// <summary>
+    /// Payload size up to which <see cref="ReadVarchar2"/> takes a bounded
+    /// column's wire bytes off the stack. Those bytes die with the call —
+    /// the decoded string is what survives — so a heap array per string per
+    /// row buys nothing. Sized in bytes of UTF-16, so this covers a 512-char
+    /// value; anything wider falls back to the heap rather than growing the
+    /// frame without bound, matching <c>RowEncoder</c>'s scratch rule.
+    /// </summary>
+    private const int StackTextBytes = 1024;
+
     private static SqlValue ReadVarchar2(ref PushbackStream stream, SqlType type)
     {
         Span<byte> prefixBytes = stackalloc byte[2];
@@ -332,7 +434,7 @@ internal static class BcpRowReader
         var byteLength = BinaryPrimitives.ReadUInt16LittleEndian(prefixBytes);
         if (byteLength == 0xFFFF)
             return SqlValue.Null(type);
-        var data = new byte[byteLength];
+        var data = byteLength <= StackTextBytes ? stackalloc byte[byteLength] : new byte[byteLength];
         stream.ReadExact(data);
         // DACFx writes BCP payloads for every character column as UTF-16-LE
         // regardless of varchar vs nvarchar declaration (probe-confirmed

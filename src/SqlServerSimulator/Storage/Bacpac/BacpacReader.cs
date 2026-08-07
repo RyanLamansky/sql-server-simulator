@@ -272,13 +272,15 @@ internal static class BacpacReader
             wireToFullOrdinal.Add(i);
         }
         var wireCols = wireColumns.ToArray();
-        var wireAlias = wireIsAlias.ToArray();
+        // The wire shape of a column is fixed for the whole stream, so resolve
+        // it once here rather than re-deciding it per row.
+        var decoders = BcpRowReader.ResolveDecoders(wireCols, wireIsAlias.ToArray());
 
         // Fast path: no persisted computed column, so the wire layout IS the
         // stored layout (non-persisted computed columns aren't stored) — encode
         // the N wire values directly, matching any DML-produced row shape.
         if (!hasPersistedComputed)
-            return LoadWireRows(bcpStream, table, wireCols, wireAlias);
+            return LoadWireRows(bcpStream, table, wireCols, decoders);
 
         // Compute path: a persisted computed column participates in storage but
         // isn't on the wire. Read the wire values into their full-table
@@ -297,12 +299,13 @@ internal static class BacpacReader
         var batch = new Parser.BatchContext(command);
 
         var rowCount = 0;
-        while (true)
+        // Both buffers are rewritten in full every iteration — the wire copy
+        // covers every non-computed column and EvaluateComputedColumns covers
+        // the rest — so one pair serves the whole stream.
+        var wireValues = new SqlValue[decoders.Length];
+        var full = new SqlValue[table.Columns.Length];
+        while (BcpRowReader.TryReadRow(bcpStream, decoders, wireValues))
         {
-            var wireValues = BcpRowReader.TryReadRow(bcpStream, wireCols, wireAlias);
-            if (wireValues is null)
-                break;
-            var full = new SqlValue[table.Columns.Length];
             for (var w = 0; w < wireValues.Length; w++)
                 full[wireOrdinals[w]] = wireValues[w];
             Simulation.EvaluateComputedColumns(table, full, batch);
@@ -315,14 +318,14 @@ internal static class BacpacReader
         return rowCount;
     }
 
-    private static int LoadWireRows(BufferedStream bcpStream, HeapTable table, HeapColumn[] wireCols, bool[] wireAlias)
+    private static int LoadWireRows(BufferedStream bcpStream, HeapTable table, HeapColumn[] wireCols, BcpRowReader.ColumnDecoder[] decoders)
     {
         var rowCount = 0;
-        while (true)
+        // One row buffer for the whole stream — EncodeRow copies what it needs
+        // into the row bytes, so no value outlives the iteration.
+        var values = new SqlValue[decoders.Length];
+        while (BcpRowReader.TryReadRow(bcpStream, decoders, values))
         {
-            var values = BcpRowReader.TryReadRow(bcpStream, wireCols, wireAlias);
-            if (values is null)
-                break;
             var rowBytes = RowEncoder.EncodeRow(wireCols, values, table.Heap);
             _ = table.Heap.Insert(rowBytes);
             rowCount++;
