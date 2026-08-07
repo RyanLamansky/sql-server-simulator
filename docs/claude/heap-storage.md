@@ -33,6 +33,15 @@ It counts *slots* rather than live rows — a tombstone keeps its directory entr
 The 6-byte forward reference is written over the slot's existing payload, so a shorter extent would spill into the neighbouring slot.
 Every SQL-reachable row clears that floor (the encoder's header alone — flags, fixed offset, column count, NULL bitmap — is at least 6 bytes), so a `Debug.Assert` on `SlotExtent` is a tripwire on the encoder's minimum rather than a runtime check.
 
+**A row the heap copies is encoded into a reused buffer.**
+`RowEncoder.EncodeRow` allocates the row's exact-length array and hands it back, which is what a caller that retains the bytes needs — a result-set row list, an array literal, an undo-log payload.
+A caller that hands them straight to a heap and drops them takes `RowEncoder.EncodeRowInto` instead: it writes into a caller-owned buffer, grows it only on a longer row, and returns the length, so a loop costs one buffer rather than one array per row.
+Nothing downstream can retain that buffer — `Heap.Insert` / `UpdateAt` take a `ReadOnlySpan<byte>` and copy into the page, and the undo log captures the *old* payload it read from the page.
+The bulk paths run through it: both bacpac row loops, `SELECT … INTO`, the TDS bulk load, and the three `ALTER TABLE` rebuild loops.
+The buffer is cleared over the row's length before the value pass, which the encoding depends on — the NULL bitmap and the bit-column runs are written with `|=`, a NULL fixed-length column is skipped rather than written, and TagB (byte 1) is never written at all — and that is the same zeroing a fresh array would have paid for.
+Measured on a bacpac import: WideWorldImporters-Full **2906 MB → 2456 MB** of allocation and AdventureWorks **692 MB → 622 MB**, both at unchanged wall clock.
+The row-at-a-time DML paths (`INSERT` / `UPDATE` / `MERGE` and the FK-cascade, trigger and legacy-LOB writers) allocate per row, because they thread the image through `BatchContext.ProbeKeyRangesForWrite(HeapTable, byte[])`, which reads it but takes an array: that signature and `RowDecoder.DecodeColumn` under it would have to take a span first, since handing them a reused buffer would also reach `Heap.Insert` with a length longer than the row.
+
 **The encode is lossy in exactly one place, and the value form has to reproduce it.**
 `varchar` / `char` / `text` encode through their collation's ANSI code page, whose encoder fallback is `?`, so a character the page can't carry is lost on the way to bytes — a narrowing real SQL Server performs too.
 Every other family's value factory normalizes its payload at construction (`FromTime` quantizes to the declared precision, `FromDecimal` re-tags to the declared scale, `FromChar` pads by byte count, `FromDateTime` quantizes to 1/300 s, `FromMoney` scales to a long), so for those `Decode(Encode(v))` is the identity.

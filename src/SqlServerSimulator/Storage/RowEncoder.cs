@@ -111,6 +111,32 @@ internal static class RowEncoder
     /// </remarks>
     public static byte[] EncodeRow(ReadOnlySpan<HeapColumn> schema, ReadOnlySpan<SqlValue> values, Heap? lobStore = null)
     {
+        byte[]? exact = null;
+        _ = EncodeRowInto(schema, values, lobStore, ref exact);
+        // Starting from null, the encoder allocated the row's exact length, so
+        // the buffer IS the row — callers that retain it can rely on Length.
+        return exact!;
+    }
+
+    /// <summary>
+    /// Row-buffer-reusing form of
+    /// <see cref="EncodeRow(ReadOnlySpan{HeapColumn}, ReadOnlySpan{SqlValue}, Heap?)"/>,
+    /// for the callers that hand the bytes to a heap and drop them: it writes
+    /// into <paramref name="buffer"/>, growing it only when the row doesn't
+    /// fit, and returns the row's length. Pass the same buffer across a loop's
+    /// iterations and a per-row array becomes one per loop; a caller that
+    /// retains the bytes wants the allocating overload instead, since a reused
+    /// buffer is longer than its row and is overwritten by the next one.
+    /// </summary>
+    /// <remarks>
+    /// The row's bytes are zeroed before the value pass, which the encoding
+    /// depends on: the NULL bitmap and the bit-column runs are written with
+    /// <c>|=</c>, a NULL fixed-length column is skipped rather than written,
+    /// and TagB (byte 1) is never written at all. A freshly allocated array
+    /// arrives zeroed and is used as-is; a reused one is cleared.
+    /// </remarks>
+    public static int EncodeRowInto(ReadOnlySpan<HeapColumn> schema, ReadOnlySpan<SqlValue> values, Heap? lobStore, ref byte[]? buffer)
+    {
         if (schema.Length == 0)
             throw new ArgumentException("Row must have at least one column.", nameof(schema));
         if (schema.Length != values.Length)
@@ -246,12 +272,19 @@ internal static class RowEncoder
             totalLength = headerOverhead + varDataLength;
         }
 
-        var bytes = new byte[totalLength];
+        // A fresh array is already zeroed; a reused one carries the previous
+        // row and has to be cleared — see the remarks on why the encoding
+        // needs it.
+        if (buffer is null || buffer.Length < totalLength)
+            buffer = new byte[totalLength];
+        else
+            buffer.AsSpan(0, totalLength).Clear();
+        var bytes = buffer.AsSpan(0, totalLength);
 
         bytes[0] = hasVar
             ? (byte)(TagA_NullBitmap | TagA_VarSection | (varOffsetEntrySize == 4 ? TagA_WideVarOffsets : 0))
             : TagA_NullBitmap;
-        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(2, 2), checked((ushort)fixedEnd));
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.Slice(2, 2), checked((ushort)fixedEnd));
 
         var fixedOffset = 4;
         var bitByteOffset = -1;
@@ -277,17 +310,17 @@ internal static class RowEncoder
             {
                 var width = t.FixedLength;
                 if (!values[i].IsNull)
-                    _ = t.Encode(values[i], bytes.AsSpan(fixedOffset, width));
+                    _ = t.Encode(values[i], bytes.Slice(fixedOffset, width));
                 fixedOffset += width;
                 bitsInRun = 0;
             }
         }
 
-        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(fixedEnd, 2), checked((ushort)n));
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.Slice(fixedEnd, 2), checked((ushort)n));
 
         if (hasVar)
         {
-            BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(bitmapEnd, 2), checked((ushort)varColumnCount));
+            BinaryPrimitives.WriteUInt16LittleEndian(bytes.Slice(bitmapEnd, 2), checked((ushort)varColumnCount));
 
             var offsetArrayStart = bitmapEnd + 2;
             var dataPos = offsetArrayStart + (varOffsetEntrySize * varColumnCount);
@@ -300,19 +333,19 @@ internal static class RowEncoder
                 if (!values[i].IsNull)
                 {
                     var width = varByteCounts[i];
-                    WriteVarPayload(schema[i], values[i], chainPointers[i], bytes.AsSpan(dataPos, width));
+                    WriteVarPayload(schema[i], values[i], chainPointers[i], bytes.Slice(dataPos, width));
                     dataPos += width;
                 }
 
                 if (varOffsetEntrySize == 4)
-                    BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offsetArrayStart + (4 * varIndex), 4), checked((uint)dataPos));
+                    BinaryPrimitives.WriteUInt32LittleEndian(bytes.Slice(offsetArrayStart + (4 * varIndex), 4), checked((uint)dataPos));
                 else
-                    BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(offsetArrayStart + (2 * varIndex), 2), checked((ushort)dataPos));
+                    BinaryPrimitives.WriteUInt16LittleEndian(bytes.Slice(offsetArrayStart + (2 * varIndex), 2), checked((ushort)dataPos));
                 varIndex++;
             }
         }
 
-        return bytes;
+        return totalLength;
     }
 
     /// <summary>

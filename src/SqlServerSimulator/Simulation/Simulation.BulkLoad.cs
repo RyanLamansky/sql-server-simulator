@@ -174,6 +174,8 @@ partial class Simulation
         var hasTriggers = plan.FireTriggers && HasAfterTrigger(batch, table, TriggerActions.Insert);
         var triggerRows = hasTriggers ? new List<SqlValue[]>(rows.Count) : null;
         var nullResolver = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch);
+        // One encoded-row buffer for the whole load — Insert copies into the page.
+        byte[]? encoded = null;
 
         foreach (var sourceRow in rows)
         {
@@ -255,7 +257,8 @@ partial class Simulation
                 EnforceOutgoingForeignKeys(table, [rowValues], context, "INSERT");
 
             table.OwningDatabase?.RejectWriteWhenReadOnly();
-            var (pageIndex, slotIndex) = table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, storedValues, table.Heap), batch.CurrentUndoLog);
+            var length = RowEncoder.EncodeRowInto(table.StoredColumns, storedValues, table.Heap, ref encoded);
+            var (pageIndex, slotIndex) = table.Heap.Insert(encoded.AsSpan(0, length), batch.CurrentUndoLog);
             if (IsLockableTable(table))
             {
                 batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);

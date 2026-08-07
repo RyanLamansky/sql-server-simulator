@@ -304,14 +304,15 @@ internal static class BacpacReader
         // the rest — so one pair serves the whole stream.
         var wireValues = new SqlValue[decoders.Length];
         var full = new SqlValue[table.Columns.Length];
+        byte[]? rowBytes = null;
         while (BcpRowReader.TryReadRow(bcpStream, decoders, wireValues))
         {
             for (var w = 0; w < wireValues.Length; w++)
                 full[wireOrdinals[w]] = wireValues[w];
             Simulation.EvaluateComputedColumns(table, full, batch);
             var stored = Simulation.ProjectStoredValues(table, full);
-            var rowBytes = RowEncoder.EncodeRow(table.StoredColumns, stored, table.Heap);
-            _ = table.Heap.Insert(rowBytes);
+            var length = RowEncoder.EncodeRowInto(table.StoredColumns, stored, table.Heap, ref rowBytes);
+            _ = table.Heap.Insert(rowBytes.AsSpan(0, length));
             rowCount++;
         }
 
@@ -322,12 +323,14 @@ internal static class BacpacReader
     {
         var rowCount = 0;
         // One row buffer for the whole stream — EncodeRow copies what it needs
-        // into the row bytes, so no value outlives the iteration.
+        // into the row bytes, so no value outlives the iteration — and one
+        // encoded-bytes buffer beside it, since Insert copies into the page.
         var values = new SqlValue[decoders.Length];
+        byte[]? rowBytes = null;
         while (BcpRowReader.TryReadRow(bcpStream, decoders, values))
         {
-            var rowBytes = RowEncoder.EncodeRow(wireCols, values, table.Heap);
-            _ = table.Heap.Insert(rowBytes);
+            var length = RowEncoder.EncodeRowInto(wireCols, values, table.Heap, ref rowBytes);
+            _ = table.Heap.Insert(rowBytes.AsSpan(0, length));
             rowCount++;
         }
 

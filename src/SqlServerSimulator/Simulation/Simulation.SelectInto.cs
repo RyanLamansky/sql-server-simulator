@@ -103,6 +103,8 @@ partial class Simulation
         var resultSet = selection.Execute(batch).WithRowCountLimit(batch.Connection.RowCountLimit);
         var rowCount = 0;
         var undoLog = batch.Connection.CurrentTransaction?.UndoLog;
+        // One encoded-row buffer for the whole copy — Insert copies into the page.
+        byte[]? encoded = null;
         foreach (var sourceValues in resultSet.RowValues)
         {
             for (var i = 0; i < destColumns.Length; i++)
@@ -110,10 +112,10 @@ partial class Simulation
                 if (destColumns[i].Identity is { } identity && !sourceValues[i].IsNull)
                     identity.ObserveExplicit(sourceValues[i].CoerceTo(SqlType.BigInt).AsInt64);
             }
-            var encoded = RowEncoder.EncodeRow(destTable.StoredColumns, sourceValues, destTable.Heap);
+            var length = RowEncoder.EncodeRowInto(destTable.StoredColumns, sourceValues, destTable.Heap, ref encoded);
             // Use the active undo log so a containing tx's ROLLBACK unwinds
             // the row writes alongside the table creation entry.
-            var (newPage, newSlot) = destTable.Heap.Insert(encoded, undoLog);
+            var (newPage, newSlot) = destTable.Heap.Insert(encoded.AsSpan(0, length), undoLog);
             if (IsLockableTable(destTable))
                 batch.AcquireRowLockTxScoped(destTable, newPage, newSlot, LockMode.Exclusive);
             rowCount++;

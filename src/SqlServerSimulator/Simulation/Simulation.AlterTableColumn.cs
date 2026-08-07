@@ -336,6 +336,8 @@ partial class Simulation
         var newHeap = new Heap();
         var newStoredColumns = table.StoredColumns;
 
+        // One encoded-row buffer for the rebuild — Insert copies into the page.
+        byte[]? encoded = null;
         foreach (var oldBytes in oldHeap.EnumerateRows())
         {
             var newStoredValues = new SqlValue[newStoredColumns.Length];
@@ -356,8 +358,8 @@ partial class Simulation
                 newStorageIndex++;
             }
 
-            var encoded = RowEncoder.EncodeRow(newStoredColumns, newStoredValues, newHeap);
-            _ = newHeap.Insert(encoded);
+            var length = RowEncoder.EncodeRowInto(newStoredColumns, newStoredValues, newHeap, ref encoded);
+            _ = newHeap.Insert(encoded.AsSpan(0, length));
         }
 
         table.Heap = newHeap;
@@ -1053,6 +1055,8 @@ partial class Simulation
 
         var oldHeap = table.Heap;
         var newHeap = new Heap();
+        // One encoded-row buffer for the rebuild — Insert copies into the page.
+        byte[]? encoded = null;
         foreach (var oldBytes in oldHeap.EnumerateRows())
         {
             var newStoredValues = new SqlValue[newStoredColumns.Length];
@@ -1118,8 +1122,8 @@ partial class Simulation
                 }
             }
 
-            var encoded = RowEncoder.EncodeRow(newStoredColumns, newStoredValues, newHeap);
-            _ = newHeap.Insert(encoded);
+            var length = RowEncoder.EncodeRowInto(newStoredColumns, newStoredValues, newHeap, ref encoded);
+            _ = newHeap.Insert(encoded.AsSpan(0, length));
         }
 
         table.Heap = newHeap;
@@ -1146,6 +1150,8 @@ partial class Simulation
 
         var oldHeap = table.Heap;
         var newHeap = new Heap();
+        // One encoded-row buffer for the rebuild — Insert copies into the page.
+        byte[]? encoded = null;
         foreach (var oldBytes in oldHeap.EnumerateRows())
         {
             var newStoredValues = new SqlValue[newStoredCount];
@@ -1156,8 +1162,8 @@ partial class Simulation
                     continue;
                 newStoredValues[mapped] = RowDecoder.DecodeColumn(oldStoredColumns, oldBytes, i, oldHeap);
             }
-            var encoded = RowEncoder.EncodeRow(newStoredColumns, newStoredValues, newHeap);
-            _ = newHeap.Insert(encoded);
+            var length = RowEncoder.EncodeRowInto(newStoredColumns, newStoredValues, newHeap, ref encoded);
+            _ = newHeap.Insert(encoded.AsSpan(0, length));
         }
 
         table.Heap = newHeap;
