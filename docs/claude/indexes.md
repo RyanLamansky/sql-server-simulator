@@ -620,6 +620,9 @@ Shapes that keep indexing cleanly: inner-join projections (the form AdventureWor
   `IGNORE_DUP_KEY = ON` is the one with observable fallout: real skips the duplicate row and continues (probe-confirmed — the surviving rows insert, `@@ROWCOUNT` counts only those, and a severity-10 Msg 3604 `Duplicate key was ignored.` rides the info stream once per statement), while the simulator raises Msg 2601 and fails the INSERT.
   The flag isn't stored either, so `sys.indexes.ignore_dup_key` reports 0 for a declared-ON index.
   Tracked in [`backlog.md`](backlog.md).
+- **A unique index keyed on a *non-persisted* computed column is carried but not enforced**: the key exists in `sys.indexes` / `sys.index_columns` and every read path treats the index normally, but the duplicate check reads keys out of stored bytes and such a column has no storage slot, so INSERT and UPDATE skip that one index rather than raise Msg 2601.
+  AdventureWorks' `AK_SalesOrderHeader_SalesOrderNumber` is the shape — real enforces it.
+  Persisting the column, or keying the index on stored columns, enforces as usual.
 - **No partition-aware index storage**: `partition_ordinal` always 0, `data_space_id` always 1 (PRIMARY).
 - **DROP INDEX comma list not atomic**: each entry resolves independently.
   Real SQL Server rolls back all on any failure.

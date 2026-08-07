@@ -634,4 +634,43 @@ public sealed class CommonTableExpressionTests
         _ = sim.AssertSqlError(
             "create function dbo.f() returns int as begin return (with c as (select id from dbo.b) select max(id) from c) end", 156);
     }
+
+    /// <summary>
+    /// A recursive member sees the CTE's columns under the names the
+    /// <c>WITH cte (…)</c> list declares, not the anchor's own projection
+    /// names — which is what lets AdventureWorks' <c>uspGetBillOfMaterials</c>
+    /// family write <c>[RecursionLevel] + 1</c> against an anchor whose
+    /// matching column is the unaliased literal <c>0</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select c.n + 1, c.lvl + 1 from c where c.n < 4")]
+    [DataRow("select n + 1, lvl + 1 from c where n < 4")]
+    [DataRow("select x.n + 1, [lvl] + 1 from c x where x.n < 4")]
+    public void RecursiveMember_ReadsTheDeclaredColumnNames(string recursiveMember)
+        => AreEqual(
+            "1:0 2:1 3:2 4:3",
+            new Simulation().ExecuteScalar(
+                $"""
+                with c(n, lvl) as (select 1, 0 union all {recursiveMember})
+                select string_agg(concat(n, ':', lvl), ' ') within group (order by n) from c
+                """));
+
+    /// <summary>
+    /// Real binds the recursive member against the declared list whatever its
+    /// length, so the arity mismatch is what surfaces — Msg 8158 / 8159, not a
+    /// Msg 207 on the name the member read (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void RecursiveMember_ColumnListArityMismatch_ReportsTheArityError()
+    {
+        var sim = new Simulation();
+        sim.AssertSqlError(
+            "with c(a) as (select 1, 0 union all select a + 1, 0 from c where a < 3) select * from c",
+            8158,
+            "'c' has more columns than were specified in the column list.");
+        sim.AssertSqlError(
+            "with c(a, b, d) as (select 1, 0 union all select a + 1, 0 from c where a < 3) select * from c",
+            8159,
+            "'c' has fewer columns than were specified in the column list.");
+    }
 }

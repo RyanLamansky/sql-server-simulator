@@ -86,8 +86,9 @@ partial class Simulation
         // one RuntimeContext each reused across the loop — see CLAUDE.md's
         // per-row resolver contract.
         byte[]?[] tuple = [];
-        SqlValue ResolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, tuple, name);
-        var (resolvers, belowRuntimes) = BuildChainResolvers(batch, chain, ResolveTuple);
+        Func<MultiPartName, SqlValue> resolveTuple = null!;
+        resolveTuple = name => ResolveAcrossMutationTuple(sources, tuple, name, batch, resolveTuple);
+        var (resolvers, belowRuntimes) = BuildChainResolvers(batch, chain, resolveTuple);
         var resolveOutput = resolvers[^1];
         var runtime = new RuntimeContext(resolveOutput, batch);
         var topLevel = chain.Views.Length - 1;

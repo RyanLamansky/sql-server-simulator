@@ -17,13 +17,22 @@ internal sealed class XmlDmlParser(
     string? defaultNamespace,
     Dictionary<string, string> prefixes,
     ParserContext context,
-    Func<string, SqlType>? resolveColumnType)
+    Func<string, SqlType>? resolveColumnType,
+    Schemas.XmlSchemaCollection? schemaCollection)
 {
     private readonly string text = text;
     private readonly string? defaultNamespace = defaultNamespace;
     private readonly Dictionary<string, string> prefixes = prefixes;
     private readonly ParserContext context = context;
     private readonly Func<string, SqlType>? resolveColumnType = resolveColumnType;
+
+    /// <summary>
+    /// The receiver's <c>xml(&lt;collection&gt;)</c> binding, or null for an
+    /// untyped receiver — the one input that can make an element target of
+    /// <c>replace value of</c> legal.
+    /// </summary>
+    private readonly Schemas.XmlSchemaCollection? schemaCollection = schemaCollection;
+
     private int index;
 
     /// <summary>Parses the whole statement, leaving nothing unconsumed.</summary>
@@ -70,18 +79,58 @@ internal sealed class XmlDmlParser(
         // unbracketed path reports 2337 whatever it selects.
         if (!target.Singleton)
             throw SimulatedSqlException.XmlDmlReplaceTargetNotSingleton(target.Describe());
-        if (target.Kind is not (XmlDmlNodeKind.Attribute or XmlDmlNodeKind.Text))
+        if (target.Kind is not (XmlDmlNodeKind.Attribute or XmlDmlNodeKind.Text) && !this.TargetHasSimpleTypedContent(target))
             throw SimulatedSqlException.XmlDmlReplaceTargetNotSimpleContent(target.Describe());
 
         this.SkipWhitespace();
         if (this.Current is '<')
             throw SimulatedSqlException.XmlDmlReplaceWithConstructedXml();
-        var value = this.ParseTerms(terminator: '\0');
-        this.SkipWhitespace();
-        return this.index < this.text.Length
-            ? throw this.SyntaxError()
-            : XmlDml.CreateReplaceValueOf(target, value, this.defaultNamespace, this.prefixes);
+
+        // Real takes a whole XQuery expression here, not a term list, so the
+        // rest of the text compiles through the read methods' own engine with
+        // the `sql:` accessors admitted — which is what evaluates
+        // `data(/IndividualSurvey/TotalPurchaseYTD)[1] + sql:column("inserted.LineTotal")`.
+        var accessors = new XmlSqlAccessorScope();
+        var value = XmlQueryEngine.CompileBody(this.text[this.index..], this.defaultNamespace, this.prefixes, "modify()", accessors);
+        this.ResolveAccessorNames(accessors);
+        return XmlDml.CreateReplaceValueOf(target, value, [.. accessors.Accessors], this.defaultNamespace, this.prefixes);
     }
+
+    /// <summary>
+    /// Validates each <c>sql:variable</c> the value expression named — the
+    /// lookup is what reports Msg 137 for one never declared, exactly as the
+    /// term-based accessor path reports it.
+    /// </summary>
+    /// <remarks>
+    /// A <c>sql:column</c> is <em>not</em> resolved here: an UPDATE's SET list
+    /// parses ahead of its FROM clause, so <c>sql:column("inserted.LineTotal")</c>
+    /// names a source that isn't in scope yet. Those bind in
+    /// <see cref="Expressions.XmlModify.GetSqlType"/>, which the statement calls
+    /// with its own full scope — real's binding point, and still compile time.
+    /// </remarks>
+    private void ResolveAccessorNames(XmlSqlAccessorScope accessors)
+    {
+        foreach (var accessor in accessors.Accessors)
+        {
+            if (!accessor.IsColumn)
+                _ = this.context.Batch.GetVariableSlot(BareVariableName(accessor.Name));
+        }
+    }
+
+    /// <summary>The variable name without the <c>@</c> the XQuery text writes; the Variables dict is keyed without it.</summary>
+    private static string BareVariableName(string name) => name.StartsWith('@') ? name[1..] : name;
+
+    /// <summary>
+    /// Whether <paramref name="target"/> selects an element the receiver's
+    /// schema collection types with simple content — the only way an element
+    /// (rather than an attribute or a <c>text()</c> node) is a legal
+    /// <c>replace value of</c> target. An untyped receiver has no collection
+    /// and so answers false, which is real's Msg 2356.
+    /// </summary>
+    private bool TargetHasSimpleTypedContent(XmlDmlPath target) =>
+        target.Kind == XmlDmlNodeKind.Element
+        && this.schemaCollection is { } collection
+        && collection.GetSimpleContentElementNames().Contains(target.Name);
 
     private XmlDml ParseInsert()
     {

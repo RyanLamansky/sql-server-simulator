@@ -22,6 +22,15 @@ Errors:
 A companion `TOP`, `OFFSET` or `FETCH` clears it in each (probe-confirmed against SQL Server 2025 on 2026-08-06; `OFFSET 0 ROWS` clears the rejection without dropping a row).
 The parenthesized `INSERT … (SELECT …)` source is *not* one of them and takes a stricter rule — real refuses an ORDER BY there even with TOP, as Msg 156 — see [`backlog.md`](backlog.md).
 
+## The declared column list scopes the recursive member
+
+A recursive member sees the CTE's columns under the names the `WITH cte (a, b, …)` list declares, not the names the anchor's own projection carries.
+AdventureWorks' `uspGetBillOfMaterials` family is the shape that turns on it: the anchor projects an unaliased literal `0` in its last slot and the recursive member reads `[RecursionLevel] + 1` against it, unqualified.
+So the list installs on the binding before the recursive branches parse, whether the self-reference is aliased (`FROM BOM_cte cte`) or not.
+
+Real still reports the **arity** mismatch only after the whole body binds — a recursive member naming a declared column resolves against the list whatever its length — so `WITH c(a) AS (SELECT 1, 0 UNION ALL SELECT a + 1, 0 FROM c …)` is **Msg 8158** rather than a Msg 207 on `a` (probe-confirmed against SQL Server 2025, both directions).
+A list that disagrees with the anchor's arity is resized against the anchor's own names for the duration of the member's parse and left for that check to reject.
+
 ## Recursive-member restrictions
 
 SQL Server forbids a set of constructs in a recursive CTE's **recursive member**, each with its own error.

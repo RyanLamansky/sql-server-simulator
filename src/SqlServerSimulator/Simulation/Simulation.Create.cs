@@ -149,9 +149,27 @@ partial class Simulation
             throw SimulatedSqlException.InvalidColumnName(reference);
         }
 
+        // A computed column's own nullability is what its expression's is —
+        // real derives it with the same rules it derives a projection's
+        // COLMETADATA flag with, so `CONCAT(a, b)` and `ISNULL(b, 0)` are NOT
+        // NULL while `a + b` and `LEN(a)` are nullable (probe-confirmed cell
+        // for cell). The declaration matters: a history table's matching column
+        // has to agree, which is what SYSTEM_VERSIONING's shape check reads.
+        bool ResolveComputedReferenceNullable(MultiPartName reference)
+        {
+            foreach (var existing in heapColumns)
+            {
+                if (existing is not null && context.Batch.CurrentDatabase.Collation.Equals(existing.Name, reference.Leaf))
+                    return existing.Nullable;
+            }
+            return true;
+        }
+
         foreach (var pending in pendingComputed)
         {
             var resolvedType = pending.Expression.GetSqlType(context.Batch, ResolveComputedReference);
+            var inferredNullable = pending.Expression.ResultIsNullable(
+                new NullabilityContext(context.Batch, ResolveComputedReferenceNullable, ResolveComputedReference));
             // Pull the declared length off the resolved type for the var-length
             // string/binary families so EnforceMaxLength sees the same cap that
             // GetSqlType inferred. Char/binary fixed-length types report their
@@ -178,7 +196,7 @@ partial class Simulation
                 pending.Name,
                 resolvedType,
                 maxLength: computedMaxLength,
-                nullable: pending.Nullable && !IsPendingPrimaryKeyOrdinal(pendingKeys, pending.Index),
+                nullable: pending.Nullable && inferredNullable && !IsPendingPrimaryKeyOrdinal(pendingKeys, pending.Index),
                 computedExpression: pending.Expression,
                 isPersisted: pending.Persisted,
                 computedDefinition: pending.Definition);

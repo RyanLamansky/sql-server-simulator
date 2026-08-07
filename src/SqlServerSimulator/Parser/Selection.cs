@@ -905,6 +905,21 @@ internal sealed partial class Selection
     {
         if (expression is null)
             return null;
+        // A module body binds without running, so an operand naming a parameter
+        // has no value to read — its slot is empty and would report Msg 1060 as
+        // if it were NULL. Real settles that one from the operand's declared
+        // type, which is why `TOP (@rows)` over an `int` parameter creates while
+        // the `nvarchar` and `decimal(5, 2)` spellings are refused at CREATE.
+        // A written constant keeps the ordinary value check, since real refuses
+        // `TOP (NULL)` and `TOP (1.5)` at CREATE too (probe-confirmed).
+        if (batch.CreateTimeBinding && !expression.IsWrittenConstant)
+        {
+            var declared = expression.GetSqlType(batch, name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
+            return SqlType.IsIntegerCategory(declared) || declared is DecimalSqlType { scale: 0 }
+                ? null
+                : throw SimulatedSqlException.TopFetchRequiresInteger();
+        }
+
         var resolved = expression.Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
         var count = ClampRowCount(resolved);
         return kind switch

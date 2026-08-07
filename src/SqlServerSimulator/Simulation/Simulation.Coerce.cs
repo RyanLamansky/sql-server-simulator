@@ -701,7 +701,7 @@ partial class Simulation
 
         foreach (var index in destinationTable.Indexes)
         {
-            if (!index.IsUnique || index.IsDisabled)
+            if (!index.IsUnique || index.IsDisabled || !index.KeysAreStored)
                 continue;
             if (index.Filter is not null && Simulation.EvaluateIndexFilter(index.Filter, destinationTable, rowValues, batch) != true)
                 continue;

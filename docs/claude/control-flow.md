@@ -194,6 +194,12 @@ Inside `IF` / `WHILE` / `BEGIN…END`, `BatchContext.BlockDepth > 0` triggers Ms
 Same end state (statement rejected), different code.
 Inner CommandText-equivalent contexts (procedure / function / trigger / dynamic-SQL bodies) get a fresh `BatchContext` and the flag resets, so a CREATE PROCEDURE as the first statement of a proc body succeeds (real SQL Server raises Msg 156 here — related minor divergence; no real application emits nested CREATE PROCEDUREs).
 
+### Separators between the THEN branch and `ELSE`
+
+Real allows statement separators in that slot: `IF @o = 1 PRINT 'a'; ELSE PRINT 'b'` parses, as does a run of them and the `BEGIN … END; ELSE` form — AdventureWorks' `ddlDatabaseTriggerLog` writes the first shape.
+The separators are consumed only when an `ELSE` actually follows, so an IF with none leaves its terminator for the dispatch loop and the next statement still runs.
+An `ELSE IF` chain threads the same rule at every arm.
+
 ## Statement-terminating vs batch-aborting errors (unified continue-on-error)
 
 In SQL Server most errors are **statement-terminating, not batch-terminating**: the failed statement ends but the batch continues to the next one (unless `SET XACT_ABORT ON`, or a batch/connection-aborting severity).

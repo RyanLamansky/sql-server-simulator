@@ -299,6 +299,8 @@ internal static class BacpacReader
         var batch = new Parser.BatchContext(command);
 
         var rowCount = 0;
+        var identityOrdinal = IdentityOrdinalOf(wireCols);
+        long? identityMax = null;
         // Both buffers are rewritten in full every iteration — the wire copy
         // covers every non-computed column and EvaluateComputedColumns covers
         // the rest — so one pair serves the whole stream.
@@ -307,6 +309,8 @@ internal static class BacpacReader
         byte[]? rowBytes = null;
         while (BcpRowReader.TryReadRow(bcpStream, decoders, wireValues))
         {
+            if (identityOrdinal >= 0)
+                TrackIdentityMax(wireValues[identityOrdinal], ref identityMax);
             for (var w = 0; w < wireValues.Length; w++)
                 full[wireOrdinals[w]] = wireValues[w];
             Simulation.EvaluateComputedColumns(table, full, batch);
@@ -316,12 +320,16 @@ internal static class BacpacReader
             rowCount++;
         }
 
+        if (identityOrdinal >= 0)
+            ObserveIdentityMax(wireCols[identityOrdinal], identityMax);
         return rowCount;
     }
 
     private static int LoadWireRows(BufferedStream bcpStream, HeapTable table, HeapColumn[] wireCols, BcpRowReader.ColumnDecoder[] decoders)
     {
         var rowCount = 0;
+        var identityOrdinal = IdentityOrdinalOf(wireCols);
+        long? identityMax = null;
         // One row buffer for the whole stream — EncodeRow copies what it needs
         // into the row bytes, so no value outlives the iteration — and one
         // encoded-bytes buffer beside it, since Insert copies into the page.
@@ -329,12 +337,58 @@ internal static class BacpacReader
         byte[]? rowBytes = null;
         while (BcpRowReader.TryReadRow(bcpStream, decoders, values))
         {
+            if (identityOrdinal >= 0)
+                TrackIdentityMax(values[identityOrdinal], ref identityMax);
             var length = RowEncoder.EncodeRowInto(wireCols, values, table.Heap, ref rowBytes);
             _ = table.Heap.Insert(rowBytes.AsSpan(0, length));
             rowCount++;
         }
 
+        if (identityOrdinal >= 0)
+            ObserveIdentityMax(wireCols[identityOrdinal], identityMax);
         return rowCount;
+    }
+
+    /// <summary>
+    /// The ordinal of <paramref name="columns"/>' IDENTITY column, or -1 when
+    /// it has none. A table carries at most one.
+    /// </summary>
+    private static int IdentityOrdinalOf(HeapColumn[] columns)
+    {
+        for (var i = 0; i < columns.Length; i++)
+        {
+            if (columns[i].Identity is not null)
+                return i;
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// Folds one loaded row's identity value into the running maximum. Tracked
+    /// per stream and applied once rather than observed per row, which keeps
+    /// the counter's lock off the load loop.
+    /// </summary>
+    private static void TrackIdentityMax(SqlValue value, ref long? runningMax)
+    {
+        if (value.IsNull)
+            return;
+        var current = value.CoerceTo(SqlType.BigInt).AsInt64;
+        if (runningMax is not long seen || current > seen)
+            runningMax = current;
+    }
+
+    /// <summary>
+    /// Advances the column's identity counter past every value the load
+    /// carried, the way an <c>IDENTITY_INSERT ON</c> insert of the same rows
+    /// would. Without it the counter sits at its declared seed and the first
+    /// insert into an imported table re-issues a key the data already holds —
+    /// real's own import leaves <c>IDENT_CURRENT</c> at the loaded maximum.
+    /// </summary>
+    private static void ObserveIdentityMax(HeapColumn column, long? loadedMax)
+    {
+        if (loadedMax is long value)
+            column.Identity!.ObserveExplicit(value);
     }
 
     /// <summary>

@@ -1285,6 +1285,73 @@ public class BacpacLoaderTests
         AreEqual(0, sim.ExecuteScalar("SELECT stoplist_id FROM sys.fulltext_indexes WHERE object_id = OBJECT_ID('dbo.Doc');"));
     }
 
+    /// <summary>
+    /// A module body's <c>CONTAINS</c> / <c>FREETEXT</c> binds at CREATE, so
+    /// the full-text index has to be in place before the loader emits the
+    /// procedures — AdventureWorks' <c>uspSearchCandidateResumes</c> is the
+    /// shape that turns on the ordering (real refuses the CREATE with Msg 7601
+    /// when the table isn't indexed).
+    /// </summary>
+    [TestMethod]
+    public void FullTextIndex_PrecedesModuleBodies_SoAContainsProcedureCreates()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Doc", t => t
+                .Column("Id", "int")
+                .Column("Summary", "nvarchar(200)", nullable: true)
+                .PrimaryKey("PK_Doc", "Id"))
+            .FullTextCatalog("MyCatalog")
+            .FullTextIndex("dbo", "Doc", "MyCatalog", "PK_Doc", ("Summary", 1033, null))
+            .Procedure("dbo", "SearchDocs", "CREATE PROCEDURE dbo.SearchDocs @q nvarchar(100) AS SELECT Id FROM dbo.Doc WHERE CONTAINS(Summary, @q)")
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.procedures WHERE name = 'SearchDocs'"));
+    }
+
+    /// <summary>
+    /// The loaded data's own maximum is where an imported table's identity
+    /// counter has to sit — real's import leaves <c>IDENT_CURRENT</c> there, so
+    /// the first insert continues the sequence instead of re-issuing a key the
+    /// data already holds.
+    /// </summary>
+    [TestMethod]
+    public void IdentityColumn_CounterAdvancesPastTheLoadedRows()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "T", t => t
+                .Column("Id", "int", identity: true)
+                .Column("V", "nvarchar(20)", nullable: true)
+                .PrimaryKey("PK_T", "Id")
+                .Row(7, "a").Row(11, "b").Row(9, "c"))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(11m, sim.ExecuteScalar("SELECT IDENT_CURRENT('dbo.T')"));
+        _ = sim.ExecuteNonQuery("INSERT dbo.T (V) VALUES (N'd')");
+        AreEqual(12, sim.ExecuteScalar("SELECT Id FROM dbo.T WHERE V = N'd'"));
+    }
+
+    /// <summary>An empty table keeps its declared seed — there is nothing to advance past.</summary>
+    [TestMethod]
+    public void IdentityColumn_NoRows_KeepsTheDeclaredSeed()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "T", t => t
+                .Column("Id", "int", identity: true, identitySeed: 100)
+                .Column("V", "nvarchar(20)", nullable: true))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(100m, sim.ExecuteScalar("SELECT IDENT_CURRENT('dbo.T')"));
+    }
+
     [TestMethod]
     public void ExtendedProperty_OnDdlTriggerHost_LandsWithClassObjectOrColumn()
     {

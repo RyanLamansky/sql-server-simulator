@@ -36,13 +36,18 @@ internal sealed class XmlModify : Expression
     /// <see cref="XmlMethodCall"/> raises for the opposite mistake.
     /// <paramref name="resolveColumnType"/> supplies types for
     /// <c>sql:column</c> references, and is null where no column scope exists.
+    /// <paramref name="schemaCollection"/> is the receiver's
+    /// <c>xml(&lt;collection&gt;)</c> binding when the caller already knows it
+    /// (an UPDATE names its target ahead of the SET list, whose columns are in
+    /// no FROM scope yet); null falls back to resolving it off the receiver.
     /// </summary>
     public static XmlModify Parse(
         Expression instance,
         string instanceName,
         string methodName,
         ParserContext context,
-        Func<string, SqlType>? resolveColumnType)
+        Func<string, SqlType>? resolveColumnType,
+        Schemas.XmlSchemaCollection? schemaCollection = null)
     {
         if (!methodName.Equals("modify", StringComparison.Ordinal))
             throw SimulatedSqlException.XmlNonMutatorInMutatorPosition(methodName);
@@ -54,12 +59,17 @@ internal sealed class XmlModify : Expression
         if (!context.Batch.CreateTimeBinding && Simulation.IncorrectSetOptionNames(context) is { } setOptions)
             throw SimulatedSqlException.IncorrectSetOptions(context.Batch.CurrentStatement.StatementVerb, setOptions);
 
+        // A typed receiver contributes its schema collection: an element whose
+        // declared type holds a value is a legal `replace value of` target,
+        // where the same element over untyped xml is Msg 2356.
+        var collection = schemaCollection ?? XmlMethodCall.ResolveTargetSchemaCollection(instance, context);
+
         context.MoveNextRequired();
         var xquery = XmlMethodCall.ConstantString(Expression.Parse(context), context, "XML method path");
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
-        return new XmlModify(instance, instanceName, XmlDml.Parse(xquery, context, resolveColumnType));
+        return new XmlModify(instance, instanceName, XmlDml.Parse(xquery, context, resolveColumnType, collection));
     }
 
     public override SqlValue Run(RuntimeContext runtime)
@@ -73,12 +83,23 @@ internal sealed class XmlModify : Expression
     /// <summary>
     /// The edited instance keeps its type. Resolving the target's own type
     /// here is what reports Msg 258 for a non-xml UPDATE column at compile
-    /// time, matching real's binder.
+    /// time, matching real's binder — and the statement calls this with its
+    /// whole scope, which is why the XML-DML text's <c>sql:column</c>
+    /// references bind here rather than while the SET list parses (the FROM
+    /// clause they may name comes after it).
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var type = this.instance.GetSqlType(batch, resolveColumnType);
-        return type is XmlSqlType ? type : throw SimulatedSqlException.CannotCallMethodsOn(type.SqlServerName);
+        if (type is not XmlSqlType)
+            throw SimulatedSqlException.CannotCallMethodsOn(type.SqlServerName);
+        foreach (var accessor in this.dml.ValueAccessors)
+        {
+            if (accessor.IsColumn)
+                _ = resolveColumnType(XmlDml.ColumnNameOf(accessor.Name));
+        }
+
+        return type;
     }
 
     internal override string DebugDisplay() => $"{this.instanceName}.modify(…)";

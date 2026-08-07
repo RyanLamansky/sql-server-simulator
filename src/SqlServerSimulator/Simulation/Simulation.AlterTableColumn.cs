@@ -253,6 +253,23 @@ partial class Simulation
             throw SimulatedSqlException.InvalidColumnName(reference);
         }
 
+        // Same rule CREATE TABLE applies: the expression's own nullability is
+        // the column's.
+        bool ResolveReferenceNullable(MultiPartName reference)
+        {
+            foreach (var existing in table.Columns)
+            {
+                if (collation.Equals(existing.Name, reference.Leaf))
+                    return existing.Nullable;
+            }
+            foreach (var sibling in heapColumns)
+            {
+                if (sibling is not null && collation.Equals(sibling.Name, reference.Leaf))
+                    return sibling.Nullable;
+            }
+            return true;
+        }
+
         foreach (var pc in pendingComputed)
         {
             // Same PERSISTED gate CREATE TABLE applies, under ALTER's own verb
@@ -267,7 +284,8 @@ partial class Simulation
                 RejectNondeterministicPersisted(batch.Parser, scope, pc.Name, table.Name, pc.Definition);
             }
             var computedType = pc.Expression.GetSqlType(batch, ResolveReference);
-            heapColumns[pc.Index] = new HeapColumn(pc.Name, computedType, maxLength: null, nullable: pc.Nullable, computedExpression: pc.Expression, isPersisted: pc.Persisted, computedDefinition: pc.Definition);
+            var inferredNullable = pc.Expression.ResultIsNullable(new NullabilityContext(batch, ResolveReferenceNullable, ResolveReference));
+            heapColumns[pc.Index] = new HeapColumn(pc.Name, computedType, maxLength: null, nullable: pc.Nullable && inferredNullable, computedExpression: pc.Expression, isPersisted: pc.Persisted, computedDefinition: pc.Definition);
         }
     }
 

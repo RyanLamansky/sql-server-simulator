@@ -162,7 +162,7 @@ partial class Simulation
             // check below since the three-part shape lands here instead.
             if (setTarget.Count == 2 && XmlMethodCall.IsKnownMethodName(columnName) && context.Token is Operator { Character: '(' })
             {
-                rawAssignments.Add(ParseXmlMutatorSetClause(context, setTarget[0], columnName));
+                rawAssignments.Add(ParseXmlMutatorSetClause(context, leadingIdent, leadingTable, setTarget[0], columnName));
                 if (context.Token is Operator { Character: ',' })
                     continue;
                 break;
@@ -249,16 +249,47 @@ partial class Simulation
     /// a plain new value. <c>sql:column()</c> references inside the XQuery
     /// bind through the target-table scope the SET list already parses under.
     /// </summary>
-    private static (string ColumnName, Expression Expr) ParseXmlMutatorSetClause(ParserContext context, string columnName, string methodName)
+    /// <remarks>
+    /// The re-read carries the write target's own qualifier — the leading name
+    /// exactly as the statement wrote it — because a bare column name resolves
+    /// against every FROM source, and an assignment target is scoped to the
+    /// write target alone. AdventureWorks' <c>Person.iuPerson</c> is the shape
+    /// that separates the two: <c>UPDATE Person.Person SET Demographics.modify(…)
+    /// FROM inserted</c>, where <c>inserted</c> carries a <c>Demographics</c> of
+    /// its own and the unqualified read would be Msg 209.
+    /// </remarks>
+    private static (string ColumnName, Expression Expr) ParseXmlMutatorSetClause(
+        ParserContext context, MultiPartName targetName, HeapTable? targetTable, string columnName, string methodName)
     {
         var resolver = context.OuterTypeResolver;
         var expression = XmlModify.Parse(
-            new Reference(columnName),
+            new Reference(targetName.WithAddedPart(columnName)),
             columnName,
             methodName,
             context,
-            resolver is null ? null : name => resolver(new MultiPartName(name)));
+            resolver is null ? null : name => resolver(XmlDml.ColumnNameOf(name)),
+            XmlSchemaCollectionOf(context, targetTable, columnName));
         return (columnName, expression);
+    }
+
+    /// <summary>
+    /// The <c>xml(&lt;collection&gt;)</c> binding <paramref name="columnName"/>
+    /// carries on <paramref name="targetTable"/>, or null when the column is
+    /// untyped — or when the statement is the alias form, whose target the FROM
+    /// clause only names after the SET list has parsed.
+    /// </summary>
+    private static Schemas.XmlSchemaCollection? XmlSchemaCollectionOf(ParserContext context, HeapTable? targetTable, string columnName)
+    {
+        if (targetTable is null)
+            return null;
+        var collation = context.CurrentDatabase.Collation;
+        foreach (var column in targetTable.Columns)
+        {
+            if (collation.Equals(column.Name, columnName))
+                return column.XmlSchemaCollection;
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -598,10 +629,18 @@ partial class Simulation
         var seen = new HashSet<(int Page, int Slot)>();
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
 
+        // Hoisted per-row scaffolding: one mutable tuple slot and one cached
+        // self-referencing lambda, so a non-persisted computed column's own
+        // column references re-enter the same resolver without allocating a
+        // delegate per resolution per row.
+        byte[]?[] currentTuple = [];
+        Func<MultiPartName, SqlValue> resolveTuple = null!;
+        resolveTuple = name => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch, resolveTuple);
+
         foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, context.Batch, outerResolver: null))
         {
-            var localTuple = tuple;
-            SqlValue ResolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, localTuple, name);
+            currentTuple = tuple;
+            var ResolveTuple = resolveTuple;
 
             if (where is not null && where.Run(new RuntimeContext(ResolveTuple, context.Batch)) != true)
                 continue;
@@ -1329,20 +1368,23 @@ partial class Simulation
     /// Multi-source column resolver for joined UPDATE / DELETE: resolves a
     /// reference against any source's columns by qualifier-aware lookup,
     /// decodes the column from the source's tuple slot. NULL-filled tuple
-    /// slots (LEFT JOIN no-match) surface as typed NULL.
+    /// slots (LEFT JOIN no-match) surface as typed NULL, and a non-persisted
+    /// computed column evaluates its expression the way the SELECT path's
+    /// resolver does — which is what lets AdventureWorks'
+    /// <c>Sales.iduSalesOrderDetail</c> read <c>inserted.LineTotal</c>, a
+    /// column with no storage slot of its own.
     /// </summary>
-    private static SqlValue ResolveAcrossMutationTuple(FromSource[] sources, byte[]?[] tuple, MultiPartName name)
+    private static SqlValue ResolveAcrossMutationTuple(
+        FromSource[] sources, byte[]?[] tuple, MultiPartName name, BatchContext batch, Func<MultiPartName, SqlValue> selfRecursive)
     {
         var (s, c) = Selection.FindSourceColumn(sources, name);
         if (s == -1)
             throw SimulatedSqlException.InvalidColumnName(name);
 
         var bytes = tuple[s];
-        if (bytes is null)
-            return SqlValue.Null(sources[s].Columns[c].Type);
-
-        var ord = sources[s].StorageOrdinals?[c] ?? c;
-        return RowDecoder.DecodeColumn(sources[s].StoredSchema, bytes, ord, sources[s].LobStore);
+        return bytes is null
+            ? SqlValue.Null(sources[s].Columns[c].Type)
+            : Selection.DecodeOrCompute(sources[s], c, bytes, batch, selfRecursive);
     }
 
     /// <summary>
@@ -1469,7 +1511,7 @@ partial class Simulation
             for (var x = 0; x < table.Indexes.Count; x++)
             {
                 var index = table.Indexes[x];
-                if (!index.IsUnique || index.IsDisabled)
+                if (!index.IsUnique || index.IsDisabled || !index.KeysAreStored)
                     continue;
                 if (index.Filter is { } rowFilter)
                 {

@@ -78,6 +78,29 @@ internal sealed class Index(
     public readonly int[] KeyStorageOrdinals = BuildKeyStorageOrdinals(keyColumns);
 
     /// <summary>
+    /// Whether every key column has a storage slot, which the uniqueness
+    /// enforcement reads keys through. False only for an index keyed on a
+    /// <em>non-persisted</em> computed column — real enforces one (it is what
+    /// backs AdventureWorks' <c>AK_SalesOrderHeader_SalesOrderNumber</c>), the
+    /// simulator carries it as metadata and leaves it unenforced, since the
+    /// existing-row side of the check reads stored bytes rather than
+    /// re-evaluating an expression per row.
+    /// </summary>
+    public bool KeysAreStored
+    {
+        get
+        {
+            foreach (var ordinal in this.KeyStorageOrdinals)
+            {
+                if (ordinal < 0)
+                    return false;
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>
     /// INCLUDE-clause column storage ordinals, in declaration order. Empty
     /// when no INCLUDE was specified. A non-persisted computed column has
     /// no storage slot, so its entry is <c>-1</c> — ambiguous across

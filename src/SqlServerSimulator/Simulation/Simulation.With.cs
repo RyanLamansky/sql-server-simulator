@@ -132,7 +132,7 @@ partial class Simulation
             var binding = new CteBinding(cteName.Value, []);
             bindings[cteName.Value] = binding;
 
-            var body = ParseCteBodyRecordingReads(context, binding);
+            var body = ParseCteBodyRecordingReads(context, binding, renameList);
 
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -178,7 +178,7 @@ partial class Simulation
     /// attached list into the statement's, where the ordinary execution-time
     /// SELECT check picks it up.
     /// </summary>
-    private static Selection ParseCteBodyRecordingReads(ParserContext context, CteBinding binding)
+    private static Selection ParseCteBodyRecordingReads(ParserContext context, CteBinding binding, string[]? renameList)
     {
         var outerSecurables = context.SecurableSink;
         var outerReadColumns = context.ReadColumnSink;
@@ -193,7 +193,7 @@ partial class Simulation
             Selection body;
             try
             {
-                body = ParseCteBody(context, binding);
+                body = ParseCteBody(context, binding, renameList);
             }
             finally
             {
@@ -221,12 +221,26 @@ partial class Simulation
     /// transparently inside a single branch.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Anchor branches (no self-reference) precede recursive branches (one
     /// self-reference each); ordering is enforced via Msg 247. The first
     /// branch's schema becomes the binding's reference schema; subsequent
     /// recursive branches must match column-for-column (Msg 240).
+    /// </para>
+    /// <para>
+    /// A recursive member sees the CTE's columns under the names the
+    /// <c>WITH cte (a, b, …)</c> list declares, not the names the anchor's own
+    /// projection carries — which is what lets AdventureWorks'
+    /// <c>uspGetBillOfMaterials</c> family write <c>[RecursionLevel] + 1</c>
+    /// against an anchor whose matching column is the unaliased literal
+    /// <c>0</c>. So the list installs before the recursive branches parse.
+    /// Real still reports the arity mismatch (Msg 8158 / 8159) only after the
+    /// whole body binds — a recursive member naming a declared column resolves
+    /// against the list whatever its length — so a list that disagrees with the
+    /// anchor is resized here and left for the caller's check to reject.
+    /// </para>
     /// </remarks>
-    private static Selection ParseCteBody(ParserContext context, CteBinding binding)
+    private static Selection ParseCteBody(ParserContext context, CteBinding binding, string[]? renameList)
     {
         var firstBranch = Selection.ParseIntersectChain(context, depth: 1, outerTypeResolver: null, isFirstBranch: true, namesOwnCollation: false);
 
@@ -236,7 +250,9 @@ partial class Simulation
         };
 
         binding.Schema = firstBranch.Schema;
-        binding.ColumnNames = firstBranch.ColumnNames;
+        binding.ColumnNames = renameList is null
+            ? firstBranch.ColumnNames
+            : ResizeCteColumnNames(renameList, firstBranch.ColumnNames);
         binding.IsRecursivePartParse = true;
 
         try
@@ -345,6 +361,24 @@ partial class Simulation
         context.Batch.HasSessionScopedReference = true;
 
         return Selection.FromRecursiveCte([.. anchors], [.. recursives], binding);
+    }
+
+    /// <summary>
+    /// The declared column names a self-reference exposes, sized to the
+    /// anchor's own column count. Returns <paramref name="renameList"/> itself
+    /// when the two already agree, which is every well-formed CTE; a list that
+    /// disagrees is truncated or padded from <paramref name="anchorNames"/> so
+    /// the FromSource's names and columns stay the same length until the
+    /// caller's Msg 8158 / 8159 check rejects the statement.
+    /// </summary>
+    private static string[] ResizeCteColumnNames(string[] renameList, string[] anchorNames)
+    {
+        if (renameList.Length == anchorNames.Length)
+            return renameList;
+        var sized = new string[anchorNames.Length];
+        for (var i = 0; i < sized.Length; i++)
+            sized[i] = i < renameList.Length ? renameList[i] : anchorNames[i];
+        return sized;
     }
 
     private static void ValidateRecursiveBranchTypes(Selection branch, Storage.SqlType[] anchorSchema, string[] anchorColumnNames, string cteName)

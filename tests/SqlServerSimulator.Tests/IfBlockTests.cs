@@ -394,4 +394,33 @@ public sealed class IfBlockTests
             create table t (id int check (id > 0));
             if 1=1 insert t values (-1)
             """, 547);
+
+    /// <summary>
+    /// Real allows statement separators between the THEN branch and
+    /// <c>ELSE</c> — AdventureWorks' <c>ddlDatabaseTriggerLog</c> writes
+    /// <c>IF … PRINT 'a'; ELSE PRINT 'b';</c>, and a run of them is accepted
+    /// too (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("if @o = 1 select 'then' else select 'else'")]
+    [DataRow("if @o = 1 select 'then'; else select 'else'")]
+    [DataRow("if @o = 1 select 'then';; else select 'else'")]
+    [DataRow("if @o = 1 begin select 'then'; end; else select 'else'")]
+    public void SeparatorBeforeElse_TakesTheElseBranch(string statement)
+        => AreEqual("else", new Simulation().ExecuteScalar($"declare @o int = 0; {statement}"));
+
+    /// <summary>
+    /// The separator is consumed only when an <c>ELSE</c> actually follows, so
+    /// an IF with none leaves it for the dispatch loop and the next statement
+    /// still runs.
+    /// </summary>
+    [TestMethod]
+    public void SeparatorAfterAnIfWithNoElse_LeavesTheNextStatementIntact()
+        => AreEqual("after", new Simulation().ExecuteScalar("declare @o int = 0; if @o = 1 select 'then'; select 'after'"));
+
+    /// <summary>An <c>ELSE IF</c> chain threads the same separators.</summary>
+    [TestMethod]
+    public void SeparatorBeforeElseIf_ReachesTheLastArm()
+        => AreEqual("other", new Simulation().ExecuteScalar(
+            "declare @v int = 3; if @v = 1 select 'one'; else if @v = 2 select 'two'; else select 'other'"));
 }

@@ -438,4 +438,49 @@ public sealed class ComputedColumnTests
         _ = sim.AssertSqlError("insert t (a) values (-5)", 547);
         _ = sim.AssertSqlError("insert t (a) values (null)", 515);
     }
+
+    /// <summary>
+    /// A computed column's declared nullability is its expression's, derived
+    /// with the rules real derives a projection's COLMETADATA flag with —
+    /// probed cell for cell against SQL Server 2025. It is load-bearing beyond
+    /// the catalog: a system-versioned base and its history table have to agree
+    /// on it, which is what WideWorldImporters' <c>Warehouse.StockItems</c>
+    /// (a <c>CONCAT</c> computed column against a NOT NULL history column)
+    /// turns on. The table carries <c>a int NOT NULL</c>, <c>b int NULL</c>,
+    /// <c>s nvarchar(10) NOT NULL</c> and <c>u nvarchar(10) NULL</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("a", false)]
+    [DataRow("b", true)]
+    [DataRow("1", false)]
+    [DataRow("a + b", true)]
+    [DataRow("s + u", true)]
+    [DataRow("s + s", false)]
+    [DataRow("len(s)", true)]
+    [DataRow("cast(a as bigint)", true)]
+    [DataRow("coalesce(b, 0)", true)]
+    [DataRow("isnull(b, 0)", false)]
+    [DataRow("case when a = 1 then 1 else 2 end", false)]
+    [DataRow("getdate()", false)]
+    [DataRow("concat(s, u)", false)]
+    [DataRow("abs(a)", true)]
+    [DataRow("a * 2", true)]
+    public void ComputedColumn_NullabilityFollowsTheExpression(string expression, bool expectedNullable)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(
+            $"create table t (a int not null, b int null, s nvarchar(10) not null, u nvarchar(10) null, cc as {expression})");
+        Assert.AreEqual(expectedNullable, (bool)sim.ExecuteScalar("select is_nullable from sys.columns where object_id = object_id('t') and name = 'cc'")!);
+    }
+
+    /// <summary>The same inference runs on the <c>ALTER TABLE … ADD</c> path.</summary>
+    [TestMethod]
+    public void ComputedColumn_AddedByAlterTable_NullabilityFollowsTheExpression()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a nvarchar(10) not null, b nvarchar(10) null)");
+        _ = sim.ExecuteNonQuery("alter table t add cc as concat(a, b), dd as a + b");
+        Assert.IsFalse((bool)sim.ExecuteScalar("select is_nullable from sys.columns where object_id = object_id('t') and name = 'cc'")!);
+        Assert.IsTrue((bool)sim.ExecuteScalar("select is_nullable from sys.columns where object_id = object_id('t') and name = 'dd'")!);
+    }
 }

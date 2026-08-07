@@ -65,7 +65,7 @@ partial class Simulation
             foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
                 yield return o;
 
-            hadElse = context.Token is ReservedKeyword { Keyword: Keyword.Else };
+            hadElse = TryConsumeSeparatorsBeforeElse(context);
             if (hadElse)
             {
                 context.MoveNextRequired(); // consume ELSE
@@ -93,6 +93,31 @@ partial class Simulation
         // branch's last statement already set @@ROWCOUNT.
         if (!outerSkipping && thenSkip && !hadElse)
             connection.LastStatementRowCount = 0;
+    }
+
+    /// <summary>
+    /// Reports whether an <c>ELSE</c> follows the THEN branch, stepping over
+    /// the statement separators real allows between the two — <c>IF … PRINT 'a';
+    /// ELSE PRINT 'b'</c> and any run of <c>;</c> in that slot, the shape
+    /// AdventureWorks' <c>ddlDatabaseTriggerLog</c> writes. The separators are
+    /// consumed only when an <c>ELSE</c> actually follows, so an IF with no ELSE
+    /// leaves its terminator for the dispatch loop.
+    /// </summary>
+    private static bool TryConsumeSeparatorsBeforeElse(ParserContext context)
+    {
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Else })
+            return true;
+        if (context.Token is not Operator { Character: ';' })
+            return false;
+
+        var beforeSeparators = context.SaveCheckpoint();
+        while (context.Token is Operator { Character: ';' })
+            context.MoveNextOptional();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Else })
+            return true;
+
+        context.RestoreCheckpoint(beforeSeparators);
+        return false;
     }
 
     /// <summary>

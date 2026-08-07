@@ -138,7 +138,7 @@ internal readonly struct XmlDmlTerm
     {
         XmlDmlTermKind.Literal => this.Literal,
         XmlDmlTermKind.Variable => runtime.Batch.Variables[this.Name].Value,
-        _ => runtime.ResolveColumn(new MultiPartName(this.Name)),
+        _ => runtime.ResolveColumn(XmlDml.ColumnNameOf(this.Name)),
     };
 
     /// <summary>
@@ -298,8 +298,21 @@ internal sealed class XmlDml
     /// <summary>The placement of an <c>insert</c>'s content.</summary>
     public readonly XmlDmlPosition Position;
 
-    /// <summary>The <c>with</c> value terms of a <c>replace value of</c>; empty otherwise.</summary>
-    public readonly XmlDmlTerm[] Value;
+    /// <summary>
+    /// The compiled <c>with</c> expression of a <c>replace value of</c>, or
+    /// null for the other two statements. Real takes a whole XQuery expression
+    /// here — AdventureWorks' <c>Sales.iduSalesOrderDetail</c> writes
+    /// <c>data(…)[1] + sql:column("inserted.LineTotal")</c> — so it compiles
+    /// through the same engine a read method's path does, with
+    /// <see cref="ValueAccessors"/> naming the slots the row fills.
+    /// </summary>
+    public readonly XmlQueryExpr? Value;
+
+    /// <summary>
+    /// The <c>sql:variable</c> / <c>sql:column</c> accessors <see cref="Value"/>
+    /// reads, each with the slot its value is written to before evaluation.
+    /// </summary>
+    public readonly XmlSqlAccessorRef[] ValueAccessors;
 
     /// <summary>
     /// The prolog's namespace scope. A direct element constructor resolves its
@@ -315,7 +328,8 @@ internal sealed class XmlDml
         XmlDmlPath target,
         XmlDmlItem[] content,
         XmlDmlPosition position,
-        XmlDmlTerm[] value,
+        XmlQueryExpr? value,
+        XmlSqlAccessorRef[] valueAccessors,
         string? defaultElementNamespace,
         Dictionary<string, string> prefixes)
     {
@@ -324,21 +338,27 @@ internal sealed class XmlDml
         this.Content = content;
         this.Position = position;
         this.Value = value;
+        this.ValueAccessors = valueAccessors;
         this.defaultElementNamespace = defaultElementNamespace;
         this.prefixes = prefixes;
     }
 
     /// <summary>Builds a parsed <c>delete</c>.</summary>
     public static XmlDml CreateDelete(XmlDmlPath target, string? defaultElementNamespace, Dictionary<string, string> prefixes) =>
-        new(XmlDmlKind.Delete, target, [], XmlDmlPosition.Into, [], defaultElementNamespace, prefixes);
+        new(XmlDmlKind.Delete, target, [], XmlDmlPosition.Into, null, [], defaultElementNamespace, prefixes);
 
     /// <summary>Builds a parsed <c>insert</c>.</summary>
     public static XmlDml CreateInsert(XmlDmlPath target, XmlDmlItem[] content, XmlDmlPosition position, string? defaultElementNamespace, Dictionary<string, string> prefixes) =>
-        new(XmlDmlKind.Insert, target, content, position, [], defaultElementNamespace, prefixes);
+        new(XmlDmlKind.Insert, target, content, position, null, [], defaultElementNamespace, prefixes);
 
     /// <summary>Builds a parsed <c>replace value of</c>.</summary>
-    public static XmlDml CreateReplaceValueOf(XmlDmlPath target, XmlDmlTerm[] value, string? defaultElementNamespace, Dictionary<string, string> prefixes) =>
-        new(XmlDmlKind.ReplaceValueOf, target, [], XmlDmlPosition.Into, value, defaultElementNamespace, prefixes);
+    public static XmlDml CreateReplaceValueOf(
+        XmlDmlPath target,
+        XmlQueryExpr value,
+        XmlSqlAccessorRef[] valueAccessors,
+        string? defaultElementNamespace,
+        Dictionary<string, string> prefixes) =>
+        new(XmlDmlKind.ReplaceValueOf, target, [], XmlDmlPosition.Into, value, valueAccessors, defaultElementNamespace, prefixes);
 
     /// <summary>
     /// Parses one XML-DML statement, applying every check real settles at
@@ -346,10 +366,14 @@ internal sealed class XmlDml
     /// a <c>sql:column</c> reference when the caller has a column scope (the
     /// UPDATE SET list); null leaves such a term's atomicity to execution.
     /// </summary>
-    public static XmlDml Parse(string xquery, ParserContext context, Func<string, SqlType>? resolveColumnType)
+    public static XmlDml Parse(
+        string xquery,
+        ParserContext context,
+        Func<string, SqlType>? resolveColumnType,
+        Schemas.XmlSchemaCollection? schemaCollection)
     {
         var (defaultNamespace, prefixes, body) = XmlQueryEngine.ParsePrologAndBody(xquery);
-        return new XmlDmlParser(body, defaultNamespace, prefixes, context, resolveColumnType).ParseStatement();
+        return new XmlDmlParser(body, defaultNamespace, prefixes, context, resolveColumnType, schemaCollection).ParseStatement();
     }
 
     /// <summary>
@@ -378,7 +402,7 @@ internal sealed class XmlDml
                     Remove(node);
                 break;
             case XmlDmlKind.ReplaceValueOf when selected.Count > 0:
-                ReplaceValue(selected[0], Atomize(this.Value, runtime));
+                ReplaceValue(selected[0], this.EvaluateReplacement(navigator, runtime));
                 break;
             case XmlDmlKind.Insert when selected.Count > 0:
                 this.InsertContent(selected[0], runtime);
@@ -496,6 +520,64 @@ internal sealed class XmlDml
     /// removes it, so the owning element comes back self-closing — real's
     /// answer to <c>replace value of (…/text())[1] with ""</c>.
     /// </summary>
+    /// <summary>
+    /// The column reference a <c>sql:column</c> argument writes. Real takes the
+    /// multi-part form — AdventureWorks' <c>Sales.iduSalesOrderDetail</c> reads
+    /// <c>sql:column("inserted.LineTotal")</c> — so the dots separate qualifiers
+    /// rather than belonging to one name, and a bracketed segment unwraps.
+    /// </summary>
+    internal static MultiPartName ColumnNameOf(string written)
+    {
+        var dot = written.IndexOf('.', StringComparison.Ordinal);
+        if (dot < 0)
+            return new MultiPartName(Unbracket(written));
+
+        var name = new MultiPartName(Unbracket(written[..dot]));
+        foreach (var part in written[(dot + 1)..].Split('.'))
+            name = name.WithAddedPart(Unbracket(part));
+        return name;
+
+        static string Unbracket(string part) =>
+            part.Length >= 2 && part[0] == '[' && part[^1] == ']' ? part[1..^1].Replace("]]", "]", StringComparison.Ordinal) : part;
+    }
+
+    /// <summary>
+    /// Evaluates the <c>with</c> expression against the instance being
+    /// mutated, with each <c>sql:</c> accessor's value written into the scope
+    /// the compiled expression reads. A NULL accessor binds the empty sequence,
+    /// which atomizes to nothing — real's own reading.
+    /// </summary>
+    private string EvaluateReplacement(XPathNavigator instance, RuntimeContext runtime)
+    {
+        XmlVariableScope? scope = null;
+        if (this.ValueAccessors.Length > 0)
+        {
+            scope = new XmlVariableScope();
+            foreach (var accessor in this.ValueAccessors)
+            {
+                var value = accessor.IsColumn
+                    ? runtime.ResolveColumn(ColumnNameOf(accessor.Name))
+                    : runtime.Batch.Variables[accessor.Name.StartsWith('@') ? accessor.Name[1..] : accessor.Name].Value;
+                scope.Write(accessor.Slot, value.IsNull ? [] : [Selection.ScalarForXmlText(value)]);
+            }
+        }
+
+        var items = scope is null
+            ? XmlQueryEngine.Select(instance, this.Value!)
+            : XmlQueryEngine.Select(instance, this.Value!, scope);
+        if (items.Count == 1)
+            return XmlQueryValues.StringValue(items[0]);
+
+        var text = new StringBuilder();
+        foreach (var item in items)
+        {
+            if (text.Length > 0)
+                _ = text.Append(' ');
+            _ = text.Append(XmlQueryValues.StringValue(item));
+        }
+        return text.ToString();
+    }
+
     private static void ReplaceValue(XObject target, string replacement)
     {
         switch (target)
@@ -508,6 +590,16 @@ internal sealed class XmlDml
                 break;
             case XText text:
                 text.Value = replacement;
+                break;
+
+            // An element target is the typed-instance case: the collection
+            // says the element holds a value, so the write replaces its content
+            // and leaves its attributes standing.
+            case XElement element when replacement.Length == 0:
+                element.Nodes().Remove();
+                break;
+            case XElement element:
+                element.ReplaceNodes(new XText(replacement));
                 break;
         }
     }

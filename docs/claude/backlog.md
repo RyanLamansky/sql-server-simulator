@@ -338,6 +338,20 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
+- **A `UNIQUE` index keyed on a non-persisted computed column is carried but not enforced** — the index exists in full (catalog rows, reads, `CREATE`), yet INSERT / UPDATE step past it instead of raising Msg 2601, because both enforcement paths read key values out of stored bytes and such a column has no storage slot.
+  AdventureWorks' `AK_SalesOrderHeader_SalesOrderNumber` is the shape, and real enforces it.
+  Closing it means giving the enforcement a key-value seam that evaluates the expression per row on both sides of the comparison — the affected rows already carry the value on their full-row snapshot, so the work is the *existing-row* side, which today seeks over stored key bytes.
+  See [`indexes.md`](indexes.md#fidelity-gaps).
+
+- **A typed `xml` value isn't normalized against its schema on write** — real stores `<Total>1</Total>` for an `xsd:decimal` element the insert wrote as `1.00`; the simulator keeps the text it was given.
+  The schema collection is read for the two static questions the XQuery layer asks it (an element's cardinality, and whether its content is simple) and for nothing else, so neither validation (real's Msg 6923) nor value normalization runs.
+  See [`xml.md`](xml.md#modify--xml-dml).
+- **The XML-DML mutator's error prefix names only the method** — real writes `XQuery [dbo.t.d.modify()]` for a column receiver where the simulator writes `XQuery [modify()]`; the receiver's written name is in scope at the raise site, so this is threading it through the diagnostics rather than new analysis.
+- **An alias-form UPDATE resolves no schema collection for its mutator** — `UPDATE a SET a.d.modify(…) FROM t AS a` names its target through the FROM clause, which parses after the SET list, so a typed element target there is still Msg 2356 where the table-name form reads.
+  Closing it means deferring the mutator's compile until the FROM clause has identified the target, the same deferral OUTPUT wants on that path.
+- **Msg 13525 renders a MAX length uppercase** — real's temporal shape-mismatch message writes `nvarchar(max)` where the simulator writes `nvarchar(MAX)`, off `SqlType.SqlServerName`'s own casing.
+  Worth checking which other messages inherit it before changing the shared renderer.
+
 - **A text pointer's row half is a hash of the cell's value, not of the row** — the pointer `TEXTPTR` hands out is derived from (column name, cell value), with a per-table cache binding the pair to the row address the statements settled on, which is what carries one pointer through the chunked `WRITETEXT`-then-`UPDATETEXT` idiom (see [`legacy-lob.md`](legacy-lob.md#the-pointer-encoding)).
   Three consequences follow, each probed against real and each wanting the row address at `TEXTPTR` evaluation time — which the expression layer doesn't see, since a FROM source yields row bytes and drops the RID:
   two rows of one column holding the **same value** share a pointer and resolve to the first;

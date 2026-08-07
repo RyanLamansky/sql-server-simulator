@@ -1230,6 +1230,41 @@ partial class SimulatedSqlException
         new($"Period column '{columnName}' in a system-versioned temporal table cannot be nullable.", 13587, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 13513: <c>PERIOD FOR SYSTEM_TIME</c> named two
+    /// <c>datetime2</c> columns of different declared precision. Probe-confirmed
+    /// wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException TemporalPeriodColumnPrecisionMismatch() =>
+        new("SYSTEM_TIME period columns cannot have different datatype precision.", 13513, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13575: <c>ALTER TABLE … ADD PERIOD FOR
+    /// SYSTEM_TIME</c> over a table holding a row whose end-of-period value
+    /// isn't the maximum its declared precision can carry. Real checks the end
+    /// column alone — a start ahead of its end passes. Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException AddPeriodEndNotMaxDatetime(string qualifiedTableName) =>
+        new($"ADD PERIOD FOR SYSTEM_TIME failed because table '{qualifiedTableName}' contains records where end of period is not equal to MAX datetime.", 13575, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13597: <c>ALTER TABLE … ADD PERIOD FOR
+    /// SYSTEM_TIME</c> on a table that already carries one. Real raises it
+    /// ahead of every column check. Probe-confirmed wording.
+    /// </summary>
+    internal static SimulatedSqlException TemporalPeriodAlreadyDefined(string qualifiedTableName) =>
+        new($"Temporal SYSTEM_TIME period is already defined on table '{qualifiedTableName}'.", 13597, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4924: <c>ALTER TABLE … ADD PERIOD FOR
+    /// SYSTEM_TIME</c> named a column the table doesn't have — which a computed
+    /// column counts as, real not offering one as a period candidate at all.
+    /// The table is named unqualified, as the sibling 4924 forms name it.
+    /// Probe-confirmed.
+    /// </summary>
+    internal static SimulatedSqlException AddPeriodColumnDoesNotExist(string columnName, string tableName) =>
+        new($"ADD PERIOD FOR SYSTEM_TIME failed because column '{columnName}' does not exist in table '{tableName}'.", 4924, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 13536: <c>INSERT</c> supplied an explicit
     /// value for a column declared <c>GENERATED ALWAYS AS ROW START / END</c>.
     /// Period columns are engine-populated and not user-writable. Probe-

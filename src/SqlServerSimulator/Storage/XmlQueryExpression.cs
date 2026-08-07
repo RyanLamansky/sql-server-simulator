@@ -171,9 +171,13 @@ internal abstract class XmlQueryExpr(XmlStaticKind kind, XmlOccurrence occurrenc
 internal sealed class XmlLiteralExpr(object value, XmlStaticKind kind, string typeName)
     : XmlQueryExpr(kind, XmlOccurrence.ExactlyOne, typeName)
 {
-    private readonly object value = value;
+    /// <summary>
+    /// The literal item. Public so the compiler can read a written string back
+    /// out — the argument of a <c>sql:</c> accessor is a name, not a value.
+    /// </summary>
+    public readonly object Value = value;
 
-    public override void Evaluate(in XmlQueryFrame frame, List<object> results) => results.Add(this.value);
+    public override void Evaluate(in XmlQueryFrame frame, List<object> results) => results.Add(this.Value);
 }
 
 /// <summary>The context item, <c>.</c>.</summary>
@@ -671,6 +675,54 @@ internal sealed class XmlVariableBinding(string name, int slot, XmlQueryExpr sou
 
     /// <summary>Un-suffixed node-form type name a reference to this variable carries.</summary>
     public readonly string NodeType = source.NodeTypeBase();
+}
+
+/// <summary>
+/// One <c>sql:variable("@v")</c> / <c>sql:column("c")</c> accessor an XML-DML
+/// expression names: which of the two forms it is, the name it reads, and the
+/// <see cref="XmlVariableScope"/> slot the value lands in before evaluation.
+/// The SQL side owns the reading — the XQuery evaluator only sees the slot.
+/// </summary>
+internal sealed class XmlSqlAccessorRef(bool isColumn, string name, int slot)
+{
+    /// <summary>True for <c>sql:column</c>, false for <c>sql:variable</c>.</summary>
+    public readonly bool IsColumn = isColumn;
+
+    /// <summary>The column name, or the variable name with its <c>@</c> as written.</summary>
+    public readonly string Name = name;
+
+    /// <summary>Index into the evaluation's <see cref="XmlVariableScope"/>.</summary>
+    public readonly int Slot = slot;
+}
+
+/// <summary>
+/// Collects the <c>sql:</c> accessors one compiled expression names, handing
+/// each a slot out of the compiling parser's own numbering. Passing one to the
+/// compiler is what admits the accessors at all — a read method compiles
+/// without one and keeps refusing them.
+/// </summary>
+internal sealed class XmlSqlAccessorScope
+{
+    /// <summary>The accessors seen, in compile order.</summary>
+    public readonly List<XmlSqlAccessorRef> Accessors = [];
+
+    /// <summary>Records one accessor at <paramref name="slot"/>.</summary>
+    public void Add(bool isColumn, string name, int slot) => this.Accessors.Add(new XmlSqlAccessorRef(isColumn, name, slot));
+}
+
+/// <summary>
+/// A compiled <c>sql:</c> accessor: reads the sequence the SQL side bound to
+/// its slot. Typed <c>xdt:untypedAtomic ?</c> — the value's own SQL type is
+/// what real reports, and untyped is the reading that takes its meaning from
+/// the other operand rather than refusing a comparison outright.
+/// </summary>
+internal sealed class XmlSqlAccessorExpr(int slot)
+    : XmlQueryExpr(XmlStaticKind.Untyped, XmlOccurrence.ZeroOrOne, "xdt:untypedAtomic")
+{
+    private readonly int slot = slot;
+
+    public override void Evaluate(in XmlQueryFrame frame, List<object> results) =>
+        results.AddRange(frame.Variables!.Read(this.slot));
 }
 
 /// <summary>A <c>$</c>-variable reference, resolved to its binding at compile time.</summary>

@@ -310,10 +310,16 @@ partial class Simulation
         var seen = new HashSet<(int Page, int Slot)>();
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
 
+        // Hoisted per-row scaffolding — see ExecuteJoinedUpdate for why the
+        // lambda is cached and self-referencing rather than a local function.
+        byte[]?[] currentTuple = [];
+        Func<MultiPartName, SqlValue> resolveTuple = null!;
+        resolveTuple = name => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch, resolveTuple);
+
         foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, context.Batch, outerResolver: null))
         {
-            var localTuple = tuple;
-            SqlValue ResolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, localTuple, name);
+            currentTuple = tuple;
+            var ResolveTuple = resolveTuple;
 
             if (where is not null && where.Run(new RuntimeContext(ResolveTuple, context.Batch)) != true)
                 continue;

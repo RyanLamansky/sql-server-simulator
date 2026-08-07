@@ -153,9 +153,14 @@ internal static class ModelXmlReader
         // stripped; phase 8 appends those columns once the functions exist.
         var deferredComputedTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Full-text indexes whose phase-5 attempt failed — their KEY INDEX is a
+        // standalone unique index rather than a PK / UNIQUE constraint, so it
+        // only exists once phase 8 has run. Retried there.
+        var deferredFullTextIndexes = new List<XElement>();
+
         const int LastPhase = 9;
         for (var phase = 1; phase <= LastPhase; phase++)
-            RunPhase(elements, connection, result, phase, viewNames, bracketedDb, deferredComputedTables, isLastPhase: phase == LastPhase);
+            RunPhase(elements, connection, result, phase, viewNames, bracketedDb, deferredComputedTables, deferredFullTextIndexes, isLastPhase: phase == LastPhase);
     }
 
     /// <summary>
@@ -166,7 +171,7 @@ internal static class ModelXmlReader
     /// </summary>
     private static string BracketName(string name) => $"[{name.Replace("]", "]]", StringComparison.Ordinal)}]";
 
-    private static void RunPhase(List<XElement> elements, DbConnection connection, BacpacImportResult result, int phase, HashSet<string> viewNames, string bracketedDb, HashSet<string> deferredComputedTables, bool isLastPhase)
+    private static void RunPhase(List<XElement> elements, DbConnection connection, BacpacImportResult result, int phase, HashSet<string> viewNames, string bracketedDb, HashSet<string> deferredComputedTables, List<XElement> deferredFullTextIndexes, bool isLastPhase)
     {
         // Inline TVFs whose first CREATE attempt failed; drained at the end of
         // the phase, once their siblings exist.
@@ -244,7 +249,15 @@ internal static class ModelXmlReader
                     // every `PXML_*` primary precedes the `XML{PATH,PROPERTY,
                     // VALUE}_*` secondaries in document order.
                     ("SqlXmlIndex", 8) => Run(() => EmitXmlIndex(element, name, connection)),
-                    ("SqlFullTextIndex", 8) => Run(() => EmitFullTextIndex(element, name, connection)),
+                    // Full-text indexes go in ahead of the module bodies: a
+                    // body's CONTAINS / FREETEXT binds at CREATE, so a procedure
+                    // written against a full-text-indexed table is Msg 7601 when
+                    // its index isn't there yet — which is what refused
+                    // AdventureWorks' uspSearchCandidateResumes. Phase 5 has the
+                    // table and its PK / UNIQUE constraints; the rarer case
+                    // where the KEY INDEX is a standalone unique index defers to
+                    // its old phase-8 home.
+                    ("SqlFullTextIndex", 5) => Run(() => EmitFullTextIndex(element, name, connection, deferredFullTextIndexes)),
                     // A non-PRIMARY filegroup (PRIMARY is built-in, never emitted
                     // as an element) registers on the target database so
                     // sys.filegroups / sys.data_spaces surface it and DacFx
@@ -293,6 +306,24 @@ internal static class ModelXmlReader
         }
 
         DrainDeferredInlineTvfs(deferredInlineTvfs, connection, result);
+
+        // Phase 8 is where the standalone unique indexes land, so a full-text
+        // index whose KEY INDEX is one gets its second — and reporting — try.
+        if (phase == 8)
+        {
+            foreach (var element in deferredFullTextIndexes)
+            {
+                try
+                {
+                    EmitFullTextIndex(element, element.Attribute("Name")?.Value, connection, deferred: null);
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
+                {
+                    result.AddSkipped(new BacpacSkipped("SqlFullTextIndex", element.Attribute("Name")?.Value, $"Load failed: {ex.GetType().Name}: {ex.Message}"));
+                }
+            }
+            deferredFullTextIndexes.Clear();
+        }
     }
 
     /// <summary>
@@ -2080,7 +2111,14 @@ internal static class ModelXmlReader
     /// (see <c>docs/claude/full-text.md</c>); query-time predicates stay
     /// skip-with-diagnostic.
     /// </summary>
-    private static void EmitFullTextIndex(XElement element, string? elementName, DbConnection connection)
+    /// <remarks>
+    /// <paramref name="deferred"/> is the phase-5 retry list: a CREATE that
+    /// fails because the KEY INDEX is a standalone unique index (phase 8) parks
+    /// the element there instead of raising, and phase 8 re-runs it with a null
+    /// list so the second failure reports for real. Null means "this is the
+    /// retry" (or a caller with no deferral to offer).
+    /// </remarks>
+    private static void EmitFullTextIndex(XElement element, string? elementName, DbConnection connection, List<XElement>? deferred)
     {
         if (string.IsNullOrEmpty(elementName))
             throw new InvalidDataException("bacpac: SqlFullTextIndex element missing Name attribute.");
@@ -2115,7 +2153,20 @@ internal static class ModelXmlReader
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
         command.CommandText = $"CREATE FULLTEXT INDEX ON {indexedObject} ({string.Join(", ", columnClauses)}) KEY INDEX {Leaf(keyName)} ON {catalog};";
 #pragma warning restore CA2100
-        _ = command.ExecuteNonQuery();
+        if (deferred is null)
+        {
+            _ = command.ExecuteNonQuery();
+            return;
+        }
+
+        try
+        {
+            _ = command.ExecuteNonQuery();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
+        {
+            deferred.Add(element);
+        }
     }
 
     /// <summary>

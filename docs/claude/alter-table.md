@@ -180,6 +180,20 @@ Real follows Msg 4925 / 4926 with a terminating **Msg 1750**, which the simulato
 
 `ADD | DROP PERSISTED` and `ADD | DROP MASKED` raise `NotSupportedException`; see [`backlog.md`](backlog.md) for the probe data.
 
+## ADD PERIOD FOR SYSTEM_TIME
+
+`ALTER TABLE t ADD PERIOD FOR SYSTEM_TIME (startCol, endCol)` is `DROP PERIOD`'s inverse: both named columns become `GENERATED ALWAYS AS ROW START | END`, `sys.periods` gains its row, and the period is live immediately — an `INSERT` that omits the two columns has them filled the way a versioned table's does.
+It is what `SET (SYSTEM_VERSIONING = ON)` needs, so the pair re-arms a table whose period was dropped, which is the deactivate-load-reactivate cycle WideWorldImporters' `DataLoadSimulation` procedures script.
+
+Checks run in real's own probed order:
+
+1. **Msg 13597** when the table already carries a period, ahead of every column check.
+2. Per column, start then end: **Msg 4924** when the column doesn't exist (a *computed* column counts as absent — real doesn't offer one as a candidate), then **Msg 13501** when it isn't `datetime2`, then **Msg 13587** when it's nullable.
+3. **Msg 13513** when the two `datetime2` precisions disagree (each precision on its own is fine).
+4. **Msg 13575** when an existing row's end-of-period value falls short of the maximum its declared precision holds; an empty table passes, and the check reads the end column alone — a start ahead of its end doesn't raise.
+
+Naming the same column twice is legal, as on real, and leaves that one column marked ROW START.
+
 ## DROP PERIOD FOR SYSTEM_TIME
 
 `ALTER TABLE t DROP PERIOD FOR SYSTEM_TIME` removes the period row and turns its two columns into ordinary ones — they keep their type, nullability and `column_id` but lose `GENERATED ALWAYS AS ROW START | END`, so `sys.periods` empties and `sys.tables.temporal_type` reads `NON_TEMPORAL_TABLE`.

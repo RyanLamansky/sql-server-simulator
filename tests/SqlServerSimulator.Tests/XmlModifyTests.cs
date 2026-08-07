@@ -574,6 +574,112 @@ public sealed class XmlModifyTests
             6306,
             "Invalid XQuery expression passed to XML data type method.");
 
+    /// <summary>
+    /// A collection typing <c>t:b</c> as <c>xsd:string</c> and <c>t:n</c> as
+    /// <c>xsd:decimal</c> — both simple content, so both are legal
+    /// <c>replace value of</c> targets where the untyped spelling is Msg 2356.
+    /// </summary>
+    private const string SimpleContentCollection = """
+        create xml schema collection tsc as N'<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+          targetNamespace="urn:t" xmlns:t="urn:t" elementFormDefault="qualified">
+          <xsd:element name="r"><xsd:complexType><xsd:sequence>
+            <xsd:element name="b" type="xsd:string" minOccurs="0"/>
+            <xsd:element name="n" type="xsd:decimal" minOccurs="0"/>
+          </xsd:sequence></xsd:complexType></xsd:element></xsd:schema>'
+        """;
+
+    private static Simulation WithSimpleContentCollection()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(SimpleContentCollection);
+        return sim;
+    }
+
+    /// <summary>
+    /// An element the receiver's collection types with simple content is a
+    /// legal target — the schema binding is the whole difference between this
+    /// and <see cref="ReplaceValueOf_UntypedElementTarget_Raises2356"/>.
+    /// </summary>
+    [TestMethod]
+    public void ReplaceValueOf_TypedElementTarget_Rewrites() =>
+        AreEqual(
+            "<t:r xmlns:t=\"urn:t\"><t:b>bye</t:b><t:n>1.5</t:n></t:r>",
+            WithSimpleContentCollection().ExecuteScalar(
+                """
+                declare @x xml(tsc) = N'<t:r xmlns:t="urn:t"><t:b>hi</t:b><t:n>1.5</t:n></t:r>';
+                set @x.modify('declare namespace t="urn:t"; replace value of (/t:r/t:b)[1] with "bye"');
+                select @x
+                """));
+
+    /// <summary>
+    /// The <c>with</c> clause is a whole XQuery expression, not a term list —
+    /// the shape AdventureWorks' <c>Sales.iduSalesOrderDetail</c> writes.
+    /// </summary>
+    [TestMethod]
+    public void ReplaceValueOf_ArithmeticOverTheInstance_Rewrites() =>
+        AreEqual(
+            "<t:r xmlns:t=\"urn:t\"><t:b>hi</t:b><t:n>3.5</t:n></t:r>",
+            WithSimpleContentCollection().ExecuteScalar(
+                """
+                declare @x xml(tsc) = N'<t:r xmlns:t="urn:t"><t:b>hi</t:b><t:n>1.5</t:n></t:r>';
+                set @x.modify('declare namespace t="urn:t"; replace value of (/t:r/t:n)[1] with data(/t:r/t:n)[1] + 2');
+                select @x
+                """));
+
+    /// <summary>The typed binding reaches a column receiver too, not only a variable.</summary>
+    [TestMethod]
+    public void ReplaceValueOf_TypedColumnTarget_Rewrites()
+    {
+        var sim = WithSimpleContentCollection();
+        _ = sim.ExecuteNonQuery("create table dbo.u3 (id int primary key, d xml(tsc))");
+        _ = sim.ExecuteNonQuery("insert dbo.u3 values (1, N'<t:r xmlns:t=\"urn:t\"><t:b>hi</t:b></t:r>')");
+        _ = sim.ExecuteNonQuery("update dbo.u3 set d.modify('declare namespace t=\"urn:t\"; replace value of (/t:r/t:b)[1] with \"bye\"')");
+        AreEqual("<t:r xmlns:t=\"urn:t\"><t:b>bye</t:b></t:r>", sim.ExecuteScalar("select d from dbo.u3"));
+    }
+
+    /// <summary>Untyped <c>xml</c> keeps real's refusal — an element there holds no value.</summary>
+    [TestMethod]
+    public void ReplaceValueOf_UntypedElementTarget_Raises2356() =>
+        new Simulation().AssertSqlError(
+            "declare @x xml = '<r><b>hi</b></r>'; set @x.modify('replace value of (/r/b)[1] with \"bye\"'); select @x",
+            2356,
+            "XQuery [modify()]: The target of 'replace value of' must be a non-metadata attribute or an element with simple typed content, found 'element(b,xdt:untyped) ?'");
+
+    /// <summary>
+    /// The mutator's target is the write target, not whatever the FROM clause
+    /// also happens to call <c>d</c> — AdventureWorks' <c>Person.iuPerson</c>
+    /// updates <c>Person.Person</c> from <c>inserted</c>, which carries a
+    /// <c>Demographics</c> of its own.
+    /// </summary>
+    [TestMethod]
+    public void JoinedUpdate_UnqualifiedMutatorTarget_BindsToTheWriteTarget()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.m1 (id int primary key, d xml)");
+        _ = sim.ExecuteNonQuery("create table dbo.m3 (id int primary key, d xml)");
+        _ = sim.ExecuteNonQuery("insert dbo.m1 values (1, N'<r a=\"x\"/>')");
+        _ = sim.ExecuteNonQuery("insert dbo.m3 values (1, N'<r a=\"other\"/>')");
+        _ = sim.ExecuteNonQuery("update dbo.m1 set d.modify('replace value of (/r/@a)[1] with \"q\"') from dbo.m3 where dbo.m1.id = dbo.m3.id");
+        AreEqual("<r a=\"q\"/>", sim.ExecuteScalar("select d from dbo.m1"));
+    }
+
+    /// <summary>
+    /// <c>sql:column</c> takes the multi-part form, and it binds against the
+    /// whole statement's scope rather than the write target alone — the FROM
+    /// clause it names parses after the SET list.
+    /// </summary>
+    [TestMethod]
+    public void JoinedUpdate_SqlColumnNamesAJoinedSource_Substitutes()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.m1 (id int primary key, d xml)");
+        _ = sim.ExecuteNonQuery("create table dbo.m2 (id int primary key, tag nvarchar(20))");
+        _ = sim.ExecuteNonQuery("insert dbo.m1 values (1, N'<r a=\"x\"><b>1</b></r>')");
+        _ = sim.ExecuteNonQuery("insert dbo.m2 values (1, N'zz')");
+        _ = sim.ExecuteNonQuery("update dbo.m1 set d.modify('replace value of (/r/@a)[1] with sql:column(\"m2.tag\")') from dbo.m2 where dbo.m1.id = dbo.m2.id");
+        AreEqual("<r a=\"zz\"><b>1</b></r>", sim.ExecuteScalar("select d from dbo.m1"));
+    }
+
     [TestMethod]
     public void Modify_OnTypedColumn_EditsWithoutSchemaValidation()
     {

@@ -1242,4 +1242,109 @@ public sealed class TemporalTableTests
             "drop index ix_extra on CustomersHistory");
         AreEqual(1, simulation.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('dbo.CustomersHistory')"));
     }
+
+    /// <summary>
+    /// A plain table with two <c>datetime2</c> NOT NULL columns takes
+    /// <c>ALTER TABLE … ADD PERIOD FOR SYSTEM_TIME</c>: both columns become
+    /// GENERATED ALWAYS AS ROW START / END and <c>sys.periods</c> gains its
+    /// row, which is the statement WideWorldImporters'
+    /// <c>DataLoadSimulation.ReactivateTemporalTablesAfterDataLoad</c> re-arms
+    /// its temporal tables with. Probed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void AddPeriod_MarksBothColumnsGeneratedAlways()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table q (Id int not null primary key, Vf datetime2 not null, Vt datetime2 not null)");
+        _ = sim.ExecuteNonQuery("alter table q add period for system_time (Vf, Vt)");
+        AreEqual("SYSTEM_TIME", sim.ExecuteScalar("select name from sys.periods where object_id = object_id('q')"));
+        AreEqual((byte)1, sim.ExecuteScalar("select generated_always_type from sys.columns where object_id = object_id('q') and name = 'Vf'"));
+        AreEqual((byte)2, sim.ExecuteScalar("select generated_always_type from sys.columns where object_id = object_id('q') and name = 'Vt'"));
+    }
+
+    /// <summary>
+    /// The period is live immediately: an INSERT that omits both columns has
+    /// them filled, the end at the maximum its precision carries.
+    /// </summary>
+    [TestMethod]
+    public void AddPeriod_ThenInsert_FillsBothPeriodColumns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table q (Id int not null primary key, Vf datetime2 not null, Vt datetime2 not null);
+            alter table q add period for system_time (Vf, Vt);
+            insert q (Id) values (1)
+            """);
+        AreEqual(new DateTime(9999, 12, 31, 23, 59, 59).AddTicks(9999999), sim.ExecuteScalar("select Vt from q"));
+    }
+
+    /// <summary>
+    /// <c>ADD PERIOD</c> is what <c>SET (SYSTEM_VERSIONING = ON)</c> needs, so
+    /// the pair re-arms a table whose period was dropped — the
+    /// deactivate-load-reactivate cycle WideWorldImporters scripts.
+    /// </summary>
+    [TestMethod]
+    public void DropPeriod_ThenAddPeriod_ReArmsVersioning()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            CreateTemporalCustomers,
+            "alter table Customers set (system_versioning = off)",
+            "alter table Customers drop period for system_time",
+            "alter table Customers add period for system_time (Vf, Vt)",
+            "alter table Customers set (system_versioning = on (history_table = dbo.CustomersHistory, data_consistency_check = on))");
+        AreEqual((byte)2, sim.ExecuteScalar("select temporal_type from sys.tables where object_id = object_id('Customers')"));
+    }
+
+    /// <summary>
+    /// Real's own check order, one shape at a time: the period already being
+    /// defined beats every column check, and per column the type check beats
+    /// the nullability one, with the start column checked before the end.
+    /// </summary>
+    [TestMethod]
+    [DataRow("Id int not null, Vf datetime2 not null, Vt datetime2 not null", "Vf, Vt", 13597, "Temporal SYSTEM_TIME period is already defined on table 'simulated.dbo.q'.", true)]
+    [DataRow("Id int not null, Vf datetime2 not null, Vt datetime2 not null", "Vf, nosuch", 4924, "ADD PERIOD FOR SYSTEM_TIME failed because column 'nosuch' does not exist in table 'q'.", false)]
+    [DataRow("Id int not null, Vf datetime not null, Vt datetime2 not null", "Vf, Vt", 13501, "Temporal generated always column 'Vf' has invalid data type.", false)]
+    [DataRow("Id int not null, Vf datetime2 null, Vt int not null", "Vf, Vt", 13587, "Period column 'Vf' in a system-versioned temporal table cannot be nullable.", false)]
+    [DataRow("Id int not null, Vf datetime2(3) not null, Vt datetime2(7) not null", "Vf, Vt", 13513, "SYSTEM_TIME period columns cannot have different datatype precision.", false)]
+    [DataRow("Id int not null, Vf datetime2 not null, Vt datetime2 not null", "Vf, cc", 4924, "ADD PERIOD FOR SYSTEM_TIME failed because column 'cc' does not exist in table 'q'.", false)]
+    public void AddPeriod_Refusals(string columns, string periodColumns, int expectedNumber, string expectedMessage, bool addPeriodFirst)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table q ({columns}, cc as Id + 1)");
+        if (addPeriodFirst)
+            _ = sim.ExecuteNonQuery("alter table q add period for system_time (Vf, Vt)");
+        sim.AssertSqlError($"alter table q add period for system_time ({periodColumns})", expectedNumber, expectedMessage);
+    }
+
+    /// <summary>
+    /// Real refuses the adoption when an existing row's end-of-period value
+    /// falls short of the maximum its precision holds; an empty table and one
+    /// already at the maximum both pass.
+    /// </summary>
+    [TestMethod]
+    public void AddPeriod_RowWithEndShortOfMaxDatetime_Raises13575()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table q (Id int not null primary key, Vf datetime2 not null, Vt datetime2 not null);
+            insert q values (1, '2020-01-01', '2021-01-01')
+            """);
+        sim.AssertSqlError(
+            "alter table q add period for system_time (Vf, Vt)",
+            13575,
+            "ADD PERIOD FOR SYSTEM_TIME failed because table 'simulated.dbo.q' contains records where end of period is not equal to MAX datetime.");
+    }
+
+    [TestMethod]
+    public void AddPeriod_RowAlreadyAtMaxDatetime_Succeeds()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table q (Id int not null primary key, Vf datetime2 not null, Vt datetime2 not null);
+            insert q values (1, '2020-01-01', '9999-12-31 23:59:59.9999999');
+            alter table q add period for system_time (Vf, Vt)
+            """);
+        AreEqual("SYSTEM_TIME", sim.ExecuteScalar("select name from sys.periods where object_id = object_id('q')"));
+    }
 }

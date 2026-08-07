@@ -338,8 +338,19 @@ Every shape above was probed one at a time.
 Deleting the top-level element leaves an empty instance (`''`).
 
 **`replace value of`** — writes the target's string value.
-The `with` expression is a value: a literal, a `sql:variable` / `sql:column`, or a parenthesized sequence of those, which atomizes to the terms' text joined by a single space.
+The `with` clause is a whole **XQuery expression**, compiled through the same engine a read method's path takes: a literal, a path, arithmetic over them, a function call, and the two `sql:` accessors, which the compiler resolves to slots the SQL side fills before each evaluation.
+AdventureWorks' `Sales.iduSalesOrderDetail` is the shape that turns on it — `replace value of (/IndividualSurvey/TotalPurchaseYTD)[1] with data(/IndividualSurvey/TotalPurchaseYTD)[1] + sql:column("inserted.LineTotal")`.
+A sequence atomizes to its items' text joined by a single space; a NULL accessor binds the empty sequence, which atomizes to nothing.
 Replacing a text node's value with the empty string removes the node, so its element comes back self-closing.
+
+`sql:column` takes the **multi-part** form (`sql:column("inserted.LineTotal")`, brackets optional), and it binds against the **whole statement's scope** rather than the write target alone — an UPDATE's SET list parses ahead of its FROM clause, so the reference is resolved at the statement's own compile-time bind, where the FROM sources are in scope.
+`sql:variable` is checked while the modify text parses, since a variable is batch-scoped (Msg 137 for one never declared).
+
+An **element target** is legal when the receiver's `xml(collection)` binding types that element with simple content — real refuses it over untyped `xml` with Msg 2356 and accepts it over a typed instance, whether the receiver is a variable or a column.
+The write replaces the element's content and leaves its attributes standing.
+An element counts as simply typed when its `type` attribute names a built-in XSD type or a named `xsd:simpleType` the collection declares, or when its own first child is an inline `xsd:simpleType`; anything the reader can't place that way stays complex, which keeps real's Msg 2356 rather than admitting a write real refuses.
+
+The mutator's **target** is the write target, never whatever the FROM clause also happens to call by that name: `UPDATE Person.Person SET Demographics.modify(…) FROM inserted` writes `Person.Person`'s column even though `inserted` carries a `Demographics` of its own (AdventureWorks' `Person.iuPerson`), because the re-read carries the leading name exactly as the statement wrote it.
 
 Across all three, a path that matches nothing is a **no-op**, not an error.
 
@@ -358,7 +369,7 @@ The messages quote that static type, and the simulator reproduces the notation: 
 | `insert … into` a non-element / non-document | **Msg 2240** — `… The target of 'insert into' must be an element/document node, found 'text ?'` |
 | `insert … before/after` an attribute or the document | **Msg 2249** — `… The target of 'insert before/after' must be an element/PI/comment/text node, found '…'` |
 | `replace value of` target not statically at-most-one | **Msg 2337** — `… The target of 'replace' must be at most one node, found 'text *'` |
-| `replace value of` an untyped element | **Msg 2356** — `… must be a non-metadata attribute or an element with simple typed content, found 'element(a,xdt:untyped) ?'` |
+| `replace value of` an untyped element (a typed one whose collection gives it simple content is accepted) | **Msg 2356** — `… must be a non-metadata attribute or an element with simple typed content, found 'element(a,xdt:untyped) ?'` |
 | `replace value of … with <b/>` | **Msg 9310** — `… The 'with' clause of 'replace value of' cannot contain constructed XML.` |
 | `replace value of` with no `with` | **Msg 2205** — `XQuery [modify()]: "with" was expected.` |
 | `delete .` or a `delete` of an atomic value | **Msg 2264** — `… Only non-document nodes may be deleted, found '…'` |
@@ -390,7 +401,10 @@ This is the only place an `xml` payload is re-serialized — an unmodified value
 
 ### Divergences
 
-- **Typed xml is edited as untyped.** The `xml(collection)` binding is metadata only (no XSD parse anywhere in the simulator), so a `.modify()` on a typed column neither validates the result (real's **Msg 6923**) nor types the `with` value against the schema (real's **Msg 2247**), and `replace value of` still requires a `text()` / attribute target where real would accept the typed element itself.
+- **A typed edit isn't validated.** The collection is read for the two static questions it answers — an element's cardinality and whether its content is simple — and for nothing else, so a `.modify()` on a typed column neither validates the result (real's **Msg 6923**) nor types the `with` value against the schema (real's **Msg 2247**). A stored value isn't normalized against its schema either: real writes `<Total>1</Total>` where the simulator keeps the `<Total>1.00</Total>` the insert supplied.
+- **The `with` expression computes in `double`**, like every other numeric in the XQuery evaluator, where real computes a schema-typed operand in its declared type — visible in the last digits of a long decimal chain.
+- **The mutator's error prefix names only the method**: real writes `XQuery [dbo.t.d.modify()]` for a column receiver where the simulator writes `XQuery [modify()]`.
+- **An alias-form UPDATE resolves no collection**: `UPDATE a SET a.d.modify(…) FROM t AS a` names its target through the FROM clause, which parses after the SET list, so a typed element target there is still Msg 2356. The table-name form (which is what AdventureWorks and every ORM emit) resolves it.
 - Real's **Msg 2209 quotes a token** the simulator's recursive-descent parser may name differently — `insert <b/> into /r extra` is real's `'r'` and the simulator's own stopping token.
 - **`SET t.col.modify(…)`** reports Msg 102 near `'.'` where real reports it near `'modify'`.
 - A **prolog prefix** used by a constructor is re-declared on the inserted element whether or not the insertion point already binds it; real omits the declaration when the prefix is already in scope.

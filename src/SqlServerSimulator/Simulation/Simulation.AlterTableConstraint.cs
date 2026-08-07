@@ -34,6 +34,11 @@ partial class Simulation
         // Cursor on ADD; advance to the next element.
         context.MoveNextRequired();
 
+        // `PERIOD` is a contextual keyword, so it reaches this dispatch as an
+        // ordinary word — and would otherwise be read as a column name.
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Period })
+            return ParseAddPeriod(context, tableName);
+
         // A column-add carries its own comma list (and its own rollback), so it
         // consumes the rest of the statement; a constraint list loops here.
         if (context.Token is ReservedKeyword { Keyword: Keyword.Column }
@@ -998,6 +1003,134 @@ partial class Simulation
                 break;
         }
     }
+
+    /// <summary>
+    /// Parses <c>ALTER TABLE … ADD PERIOD FOR SYSTEM_TIME (startCol, endCol)</c>
+    /// — the inverse of <see cref="ParseDropPeriod"/>, and the statement WWI's
+    /// <c>DataLoadSimulation.ReactivateTemporalTablesAfterDataLoad</c> re-arms
+    /// its temporal tables with. Both named columns become <c>GENERATED ALWAYS
+    /// AS ROW START | END</c>, so <c>sys.periods</c> gains its row and an
+    /// <c>INSERT</c> that omits them fills them the way a versioned table's
+    /// does. Naming the same column twice is legal, as it is on real.
+    /// </summary>
+    /// <remarks>
+    /// The checks run in real's own probed order: the table already carrying a
+    /// period is <b>Msg 13597</b> ahead of everything; then, start column then
+    /// end column, the column must exist (<b>Msg 4924</b> — a computed column
+    /// counts as absent), be <c>datetime2</c> (<b>Msg 13501</b>) and be NOT NULL
+    /// (<b>Msg 13587</b>); then the two precisions must agree (<b>Msg 13513</b>);
+    /// then no existing row may carry an end value short of the maximum its
+    /// precision can hold (<b>Msg 13575</b>, which an empty table passes).
+    /// </remarks>
+    private static bool ParseAddPeriod(ParserContext context, MultiPartName tableName)
+    {
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.For })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.System_Time })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Name startName)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Operator { Character: ',' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Name endName)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+
+        if (context.Batch.IsSkipping)
+            return true;
+
+        if (!context.Batch.TryResolveTable(tableName, out var table))
+            throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+        if (table.PeriodColumns is not null)
+            throw SimulatedSqlException.TemporalPeriodAlreadyDefined(QualifyTableName(table, context.CurrentDatabase));
+
+        var collation = context.CurrentDatabase.Collation;
+        var startOrdinal = RequirePeriodColumn(table, collation, startName.Value, tableName.Leaf);
+        var endOrdinal = RequirePeriodColumn(table, collation, endName.Value, tableName.Leaf);
+        if (((DateTime2SqlType)table.Columns[startOrdinal].Type).precision
+            != ((DateTime2SqlType)table.Columns[endOrdinal].Type).precision)
+        {
+            throw SimulatedSqlException.TemporalPeriodColumnPrecisionMismatch();
+        }
+
+        RequireEveryRowAtMaxPeriodEnd(table, endOrdinal, QualifyTableName(table, context.CurrentDatabase));
+
+        // End first, so the degenerate `(vf, vf)` real accepts leaves the one
+        // column marked ROW START, as real leaves it.
+        var columns = (HeapColumn[])table.Columns.Clone();
+        columns[endOrdinal] = WithGeneratedAlways(columns[endOrdinal], GeneratedAlwaysAsRow.End);
+        columns[startOrdinal] = WithGeneratedAlways(columns[startOrdinal], GeneratedAlwaysAsRow.Start);
+        table.Columns = columns;
+        table.PeriodColumns = (startOrdinal, endOrdinal);
+        table.RecomputeStorageProjections();
+        return true;
+    }
+
+    /// <summary>
+    /// The ordinal of <paramref name="columnName"/> on <paramref name="table"/>,
+    /// checked against everything a period column has to be. A computed column
+    /// reports as absent — real doesn't offer one as a candidate.
+    /// </summary>
+    private static int RequirePeriodColumn(HeapTable table, Collation collation, string columnName, string tableLeaf)
+    {
+        for (var i = 0; i < table.Columns.Length; i++)
+        {
+            var column = table.Columns[i];
+            if (!collation.Equals(column.Name, columnName) || column.Computed is not null)
+                continue;
+            if (column.Type is not DateTime2SqlType)
+                throw SimulatedSqlException.TemporalGeneratedColumnInvalidType(column.Name);
+            return column.Nullable
+                ? throw SimulatedSqlException.TemporalPeriodColumnNullable(column.Name)
+                : i;
+        }
+
+        throw SimulatedSqlException.AddPeriodColumnDoesNotExist(columnName, tableLeaf);
+    }
+
+    /// <summary>
+    /// Raises Msg 13575 when any existing row's end-of-period value falls short
+    /// of the maximum its declared precision can hold — real's own precondition
+    /// for adopting the column as a row-end (probe-confirmed at both
+    /// <c>datetime2(7)</c> and <c>datetime2(3)</c>, and an empty table passes).
+    /// </summary>
+    private static void RequireEveryRowAtMaxPeriodEnd(HeapTable table, int endOrdinal, string qualifiedTableName)
+    {
+        var endType = (DateTime2SqlType)table.Columns[endOrdinal].Type;
+        var maxEnd = System.DateTime.MaxValue.AddTicks(-(System.DateTime.MaxValue.Ticks % endType.ticksPerUnit));
+        var storageOrdinal = table.StorageOrdinals[endOrdinal];
+        foreach (var row in table.Heap.EnumerateRows())
+        {
+            var value = RowDecoder.DecodeColumn(table.StoredColumns, row, storageOrdinal, table.Heap);
+            if (value.IsNull || value.AsDateTime2 != maxEnd)
+                throw SimulatedSqlException.AddPeriodEndNotMaxDatetime(qualifiedTableName);
+        }
+    }
+
+    /// <summary>
+    /// A copy of <paramref name="column"/> carrying <paramref name="generatedAs"/>,
+    /// the inverse of <see cref="WithoutGeneratedAlways"/> and keeping the same
+    /// <c>column_id</c> the drop preserves.
+    /// </summary>
+    private static HeapColumn WithGeneratedAlways(HeapColumn column, GeneratedAlwaysAsRow generatedAs) =>
+        new(column.Name,
+            column.Type,
+            column.MaxLength,
+            column.Nullable,
+            identity: column.Identity,
+            defaultExpression: column.Default,
+            generatedAs: generatedAs,
+            collation: column.Collation,
+            isRowGuidCol: column.IsRowGuidCol)
+        {
+            DefaultConstraint = column.DefaultConstraint,
+            ColumnId = column.ColumnId,
+            IsSparse = column.IsSparse,
+        };
 
     /// <summary>
     /// Parses <c>ALTER TABLE … DROP PERIOD FOR SYSTEM_TIME</c>. The period row

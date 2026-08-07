@@ -781,6 +781,19 @@ Index key / INCLUDE columns carry full ordinals, so `sys.index_columns` / `sys.s
 
 The `COLUMNS_UPDATED()` bitmask is keyed on these ids and sized from the watermark, so a dropped column keeps its bit position — see [`triggers.md`](triggers.md#change-detection-intrinsics).
 
+## Computed-column nullability
+
+`sys.columns.is_nullable` for a computed column is the **expression's** nullability, derived with the rules real derives a projection's COLMETADATA `fNullable` flag with (see [`tds-endpoint.md`](tds-endpoint.md)) — probe-confirmed cell for cell against SQL Server 2025:
+
+| expression (over `a int NOT NULL`, `b int NULL`, `s nvarchar NOT NULL`, `u nvarchar NULL`) | `is_nullable` |
+|---|---|
+| `a` / `1` / `s + s` / `isnull(b, 0)` / `case when a = 1 then 1 else 2 end` / `getdate()` / `concat(s, u)` | 0 |
+| `b` / `a + b` / `s + u` / `len(s)` / `cast(a as bigint)` / `coalesce(b, 0)` / `abs(a)` / `a * 2` | 1 |
+
+The inference runs on both declaration paths (`CREATE TABLE` and `ALTER TABLE … ADD`) and composes with the two rules that can only tighten it: a declared `PERSISTED NOT NULL`, and a `PRIMARY KEY` naming the column.
+
+It is load-bearing beyond the catalog — a system-versioned base table and its history sibling have to agree on it, which is what WideWorldImporters' `Warehouse.StockItems` turns on: a `CONCAT` computed column against a `NOT NULL` history column, where inferring nullable would refuse the `SYSTEM_VERSIONING = ON` with Msg 13519.
+
 ## Key column direction
 
 `ASC` / `DESC` on a key column is captured for `CREATE INDEX` (on `IndexKeyColumn.IsDescending`) and for `PRIMARY KEY` / `UNIQUE` constraints (on `KeyConstraint`, parallel to its `StorageOrdinals`), and surfaces identically from `sys.index_columns.is_descending_key` and `INDEXKEY_PROPERTY(…, 'IsDescending')`.

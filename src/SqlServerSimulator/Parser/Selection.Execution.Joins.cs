@@ -1037,7 +1037,7 @@ internal sealed partial class Selection
     /// caller's resolver, but are guaranteed by Msg 1759 to land only on
     /// stored columns.
     /// </summary>
-    private static SqlValue DecodeOrCompute(
+    internal static SqlValue DecodeOrCompute(
         FromSource source,
         int columnIndex,
         byte[] bytes,

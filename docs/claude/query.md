@@ -227,6 +227,15 @@ An **unaliased** derived table is still accepted, where real requires the alias 
   Requires an ORDER BY (else **Msg 1062**); also forces the buffered path.
 - Both flags ride the existing TOP parse (`topPercent` / `topWithTies` on the projection build) and are honored by the buffered, windowed, and aggregate projection paths via `ComputeTopCap`.
 
+### The operand's type, and where it is checked
+
+The row count is resolved per execution — the operand may carry a parameter or a variable, which is exactly what EF's `Skip` / `Take` emit — and validated once at parse for the immediate rejection real gives a bad literal: real accepts any integer-family value and any exact numeric at **scale 0**, everything else (a fractional scale, another family, NULL) being **Msg 1060**, and a negative one Msg 127.
+
+A **module body** binds without running, so an operand naming a parameter has no value to read.
+Real settles that one from the operand's *declared type* instead, which is why `SELECT TOP (@rows)` over an `int` parameter creates while the `nvarchar` and `decimal(5, 2)` spellings are refused at CREATE — WideWorldImporters' five `Website.SearchFor*` procedures are the shape that turns on it.
+A **written constant** keeps the ordinary value check even at bind time, since real refuses `TOP (NULL)` and `TOP (1.5)` at CREATE too (probe-confirmed).
+`OFFSET` / `FETCH` take the same operands and the same split.
+
 ### Top-N heap
 
 A plain `TOP (n)` over an ORDER BY doesn't sort its buffer at all: `ProjectBuffered` feeds rows into a bounded max-heap of `n` entries (`TopNRowHeap` in `Selection.Execution.OrderBy.cs`) whose root is the worst row admitted, so once it is full a candidate is rejected on a single `CompareOrderKeys`.

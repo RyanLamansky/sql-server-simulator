@@ -23,7 +23,8 @@ internal sealed class XmlQueryParser(
     string? defaultNamespace,
     Dictionary<string, string> prefixes,
     string method,
-    FrozenSet<string>? schemaSingletonElements = null)
+    FrozenSet<string>? schemaSingletonElements = null,
+    XmlSqlAccessorScope? sqlAccessors = null)
 {
     /// <summary>The XQuery namespace an unprefixed function name lives in.</summary>
     private const string FunctionNamespace = "http://www.w3.org/2004/07/xpath-functions";
@@ -40,6 +41,12 @@ internal sealed class XmlQueryParser(
     /// what makes <c>.value()</c> accept a schema-typed path real accepts.
     /// </summary>
     private readonly FrozenSet<string>? schemaSingletonElements = schemaSingletonElements;
+
+    /// <summary>
+    /// Where a <c>sql:</c> accessor records the slot it reads, or null in a
+    /// read method — which is what keeps the accessors refused there.
+    /// </summary>
+    private readonly XmlSqlAccessorScope? sqlAccessors = sqlAccessors;
 
     /// <summary>The <c>$</c>-variable bindings in scope, innermost last.</summary>
     private readonly List<XmlVariableBinding> scope = [];
@@ -727,7 +734,7 @@ internal sealed class XmlQueryParser(
         throw this.SyntaxError();
     }
 
-    private XmlFunctionCallExpr ParseFunctionCall(string name)
+    private XmlQueryExpr ParseFunctionCall(string name)
     {
         this.SkipWhitespace();
         this.index++;
@@ -755,7 +762,7 @@ internal sealed class XmlQueryParser(
     /// parameter's own singleton rule. A prefixed name resolves through the
     /// prolog first, so an undeclared prefix is Msg 2229 rather than Msg 2395.
     /// </summary>
-    private XmlFunctionCallExpr ResolveFunction(string name, XmlQueryExpr[] arguments)
+    private XmlQueryExpr ResolveFunction(string name, XmlQueryExpr[] arguments)
     {
         var local = name;
         var colon = name.IndexOf(':', StringComparison.Ordinal);
@@ -768,7 +775,7 @@ internal sealed class XmlQueryParser(
                 case "fn":
                     break;
                 case "sql":
-                    throw new NotSupportedException($"XQuery accessor 'sql:{local}()' in a read method is not modeled.");
+                    return this.ResolveSqlAccessor(local, arguments);
                 case "xs":
                     throw new NotSupportedException($"XQuery constructor function 'xs:{local}()' is not modeled.");
                 default:
@@ -784,6 +791,27 @@ internal sealed class XmlQueryParser(
         return this.predicateDepth == 0 && local is "last" or "position"
             ? throw SimulatedSqlException.XQueryPositionOutsidePredicate(this.method, local)
             : this.BuildBuiltIn(local, arguments);
+    }
+
+    /// <summary>
+    /// Compiles <c>sql:variable("@v")</c> / <c>sql:column("c")</c> into a slot
+    /// the SQL side fills before evaluation. Only an expression compiled with a
+    /// <see cref="XmlSqlAccessorScope"/> — the XML-DML mutator's — admits them;
+    /// a read method (<c>.value()</c> / <c>.query()</c> / …) compiles without
+    /// one and keeps reporting the accessors as unmodeled.
+    /// </summary>
+    private XmlSqlAccessorExpr ResolveSqlAccessor(string local, XmlQueryExpr[] arguments)
+    {
+        if (this.sqlAccessors is not { } accessors)
+            throw new NotSupportedException($"XQuery accessor 'sql:{local}()' in a read method is not modeled.");
+        if (local is not ("variable" or "column"))
+            throw SimulatedSqlException.XQueryNoSuchFunction(this.method, "sql", local);
+        if (arguments.Length != 1 || arguments[0] is not XmlLiteralExpr { Value: string name })
+            throw this.SyntaxError();
+
+        var slot = this.slotCount++;
+        accessors.Add(local[0] == 'c', name, slot);
+        return new XmlSqlAccessorExpr(slot);
     }
 
     /// <summary>Checks one call against the library's signature for that name.</summary>

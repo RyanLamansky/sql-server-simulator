@@ -129,4 +129,53 @@ public class TopTests
         AreEqual("102", ex.Data["HelpLink.EvtID"]);
         AreEqual($"Incorrect syntax near '{operatorCharacter}'.", ex.Message);
     }
+
+    /// <summary>
+    /// A module body binds without running, so the operand has no value to
+    /// read — real settles the question from the operand's declared type
+    /// instead, which is what makes WideWorldImporters' <c>Website.SearchFor*</c>
+    /// procedures creatable (probe-confirmed: the <c>int</c> parameter creates
+    /// and the rest are refused at CREATE).
+    /// </summary>
+    [TestMethod]
+    [DataRow("@n int")]
+    [DataRow("@n bigint")]
+    public void Top_ParameterOperandInAProcBody_Creates(string parameter)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (v int)");
+        _ = sim.ExecuteNonQuery("insert t values (1), (2), (3)");
+        _ = sim.ExecuteNonQuery($"create procedure dbo.p {parameter} as select top(@n) v from t order by v");
+        AreEqual(2, sim.ExecuteScalar("declare @c int; create table #r (v int); insert #r exec dbo.p 2; select count(*) from #r"));
+    }
+
+    /// <summary>
+    /// The type check still fires at CREATE for an operand real refuses —
+    /// each of these is Msg 1060 on the CREATE itself, not at EXEC.
+    /// </summary>
+    [TestMethod]
+    [DataRow("@n nvarchar(10)", "select top(@n) v from t")]
+    [DataRow("@n decimal(5, 2)", "select top(@n) v from t")]
+    [DataRow("@n int", "select top(null) v from t")]
+    [DataRow("@n int", "select top(1.5) v from t")]
+    public void Top_NonIntegerOperandInAProcBody_Raises1060(string parameter, string body)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (v int)");
+        sim.AssertSqlError(
+            $"create procedure dbo.p {parameter} as {body}",
+            1060,
+            "The number of rows provided for a TOP or FETCH clauses row count parameter must be an integer.");
+    }
+
+    /// <summary><c>OFFSET</c> / <c>FETCH</c> take the same parameter operands.</summary>
+    [TestMethod]
+    public void OffsetFetch_ParameterOperandsInAProcBody_Create()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (v int)");
+        _ = sim.ExecuteNonQuery("insert t values (1), (2), (3)");
+        _ = sim.ExecuteNonQuery("create procedure dbo.p @skip int, @take int as select v from t order by v offset @skip rows fetch next @take rows only");
+        AreEqual(2, sim.ExecuteScalar("create table #r (v int); insert #r exec dbo.p 1, 1; select v from #r"));
+    }
 }

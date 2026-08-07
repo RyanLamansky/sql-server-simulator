@@ -84,6 +84,20 @@ internal static class XmlQueryEngine
         new XmlQueryParser(body, defaultNamespace, prefixes, method).ParseBody();
 
     /// <summary>
+    /// Compiles a prolog-stripped body that may name <c>sql:variable</c> /
+    /// <c>sql:column</c> — the value expression of an XML-DML statement, whose
+    /// accessors <paramref name="sqlAccessors"/> collects for the SQL side to
+    /// fill before each evaluation.
+    /// </summary>
+    public static XmlQueryExpr CompileBody(
+        string body,
+        string? defaultNamespace,
+        Dictionary<string, string> prefixes,
+        string method,
+        XmlSqlAccessorScope sqlAccessors) =>
+        new XmlQueryParser(body, defaultNamespace, prefixes, method, schemaSingletonElements: null, sqlAccessors).ParseBody();
+
+    /// <summary>
     /// Evaluates a compiled <c>.value()</c> expression against
     /// <paramref name="xmlText"/>. Returns the first selected item's string
     /// value, or null when the expression selects nothing — the caller maps
@@ -159,6 +173,14 @@ internal static class XmlQueryEngine
     /// <summary>Runs <paramref name="compiled"/> from an existing context node.</summary>
     public static List<object> Select(XPathNavigator context, XmlQueryExpr compiled) =>
         compiled.Evaluate(new XmlQueryFrame(context, 1, 1));
+
+    /// <summary>
+    /// Runs <paramref name="compiled"/> from an existing context node with
+    /// <paramref name="scope"/>'s slots already filled — how an XML-DML value
+    /// expression reads the <c>sql:</c> accessors the row supplies.
+    /// </summary>
+    public static List<object> Select(XPathNavigator context, XmlQueryExpr compiled, XmlVariableScope scope) =>
+        compiled.Evaluate(new XmlQueryFrame(context, 1, 1, scope));
 
     /// <summary>
     /// Serializes one selected node the way SQL Server returns it: empty

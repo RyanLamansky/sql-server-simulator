@@ -168,7 +168,7 @@ internal sealed class XmlMethodCall : Expression
     /// variable declared <c>xml(&lt;collection&gt;)</c>. Everything else —
     /// a literal, a CAST, an expression — is untyped, as it is on real.
     /// </summary>
-    private static XmlSchemaCollection? ResolveTargetSchemaCollection(Expression target, ParserContext context)
+    internal static XmlSchemaCollection? ResolveTargetSchemaCollection(Expression target, ParserContext context)
     {
         if (target is VariableReference variable)
             return context.Batch.GetVariableSlot(variable.VariableName).XmlSchemaCollection;

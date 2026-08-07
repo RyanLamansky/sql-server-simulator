@@ -57,13 +57,20 @@ Deferred-computed-column failures (phase 8, for the rare UDF-forward-ref table) 
 | 2 | Tables (columns + computed columns inline at model ordinal, defaults inline; a computed expression that forward-references a not-yet-created UDF makes the CREATE TABLE throw, so that one table is re-created with computed columns stripped and they defer to phase 8) |
 | 3 | Constraints (PK / UQ / CHECK / DEFAULT — DACFx already parenthesizes `DefaultExpressionScript` (`(NEXT VALUE FOR …)`), so `EmitDefaultConstraint` wraps only an unparenthesized script; wrapping an already-`(…)` script would double the parens the `ALTER … DEFAULT (…)` parser re-derives, diverging from real's single-pair `sys.default_constraints.definition`) |
 | 4 | Foreign keys |
-| 5 | Deferred system-versioning links (`ALTER TABLE … SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))`) |
+| 5 | Deferred system-versioning links (`ALTER TABLE … SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))`) + **full-text indexes** (`CREATE FULLTEXT INDEX … KEY INDEX … ON catalog`; needs the table from phase 2, the catalog from phase 1 and the KEY INDEX, which for a PK / UNIQUE constraint landed in phase 3 — one whose KEY INDEX is a standalone unique index instead fails here and is retried at the end of phase 8, where it reports for real) |
 | 6 | Views + **role memberships** (`ALTER ROLE … ADD MEMBER`; waits until every role and user exists whatever order the model listed them in, and still lands before the phase-7 GRANTs) |
 | 7 | Programmable objects (procs, scalar / **inline** / multi-stmt TVFs, DML + DDL triggers, GRANT statements). An inline TVF binds its body at CREATE to derive the output columns, so one naming a function declared later in the model fails its first attempt and is re-tried at the end of the phase, looping while each pass lands at least one |
-| 8 | Deferred computed columns (only for tables phase 2 fell back on — a forward UDF reference; these append at the end, so their `sys.columns.column_id` lands after the simple columns rather than at the model ordinal) + indexes (order matters: computed cols before filtered indexes that reference them) + **XML indexes** (`CREATE [PRIMARY] XML INDEX`; primaries precede secondaries in DACFx's name-sorted document order, so a secondary's `USING XML INDEX` reference resolves) + **full-text indexes** (`CREATE FULLTEXT INDEX … KEY INDEX … ON catalog`; needs the table's clustered PK / unique KEY INDEX from phase 3 + the catalog from phase 1) |
+| 8 | Deferred computed columns (only for tables phase 2 fell back on — a forward UDF reference; these append at the end, so their `sys.columns.column_id` lands after the simple columns rather than at the model ordinal) + indexes (order matters: computed cols before filtered indexes that reference them) + **XML indexes** (`CREATE [PRIMARY] XML INDEX`; primaries precede secondaries in DACFx's name-sorted document order, so a secondary's `USING XML INDEX` reference resolves) + the **full-text-index retries** phase 5 deferred |
 | 9 | Extended properties (incl. the database-DDL-trigger + filegroup host kinds — `@level0type=N'TRIGGER'` / `N'FILEGROUP'`) + **statistics** (`CREATE STATISTICS`; after the indexes so each `stats_id` lands past every index id, the numbering real reports) |
 
 After all 9 phases: BCP data load (parallel per-table with LPT scheduling — see `BacpacReader.cs`).
+
+**Why full-text indexes moved off phase 8**: a module body's `CONTAINS` / `FREETEXT` binds at CREATE, so a procedure written against a full-text-indexed table is real's own **Msg 7601** when the index isn't there yet — which is what refused AdventureWorks' `uspSearchCandidateResumes` while the indexes landed after the phase-7 module bodies.
+
+**Identity counters follow the loaded data.**
+Each table's load tracks its IDENTITY column's maximum and advances the counter past it once the stream ends, the way an `IDENTITY_INSERT ON` insert of the same rows would.
+Real's own import leaves `IDENT_CURRENT` at the loaded maximum, so without this the counter sits at its declared seed and the first insert into an imported table re-issues a key the data already holds (AdventureWorks' `Sales.SalesOrderDetail`: 121 317 rows, counter at 1).
+An empty table keeps its declared seed.
 
 ## Name and property conventions the model relies on
 
@@ -229,18 +236,21 @@ CI runs against synthetic builders in seconds.
 
 **AdventureWorks2025** — 100% row coverage (760,167 / 760,167 rows, zero BCP-file failures).
 5/5 schemas, 71/71 tables, 90/90 FKs, 89/89 CHECKs, 152/152 DEFAULTs, 89/95 indexes, 11/20 views, 10/10 procs, 11/11 functions, 10/10 DML triggers, 1/1 DDL trigger, 538/538 extended properties, 8/8 XML indexes, 1/1 full-text catalog, 3/3 full-text indexes, 2/2 indexed-view `SqlIndex` elements.
-**Import skips are 0.**
+**Import skips are 0**, which took the recursive-CTE column-list scope ([`ctes.md`](ctes.md)), the `IF … ; ELSE` separator ([`control-flow.md`](control-flow.md)), the full-text-before-modules phase move above, and three XML-DML rules — the mutator target's scope, the `with` clause as a whole XQuery expression, and a typed element as a `replace value of` target ([`xml.md`](xml.md)).
+All four recursive procedures, the full-text search procedure and both XML-writing triggers execute against the imported database with results identical to the live reference.
 The DacFx-export element gap vs the Microsoft original is 0 missing; property diffs are 0.
 One divergence surfaces as an "extra" element: AW's system-named UNIQUE constraint on `Production.Document.rowguid` is scripted anonymously (name in an annotation) by DacFx normally, but *named* once the table has a full-text index — and the simulator's auto-generated constraint name (FNV-based) differs from real's object-id-derived one (a documented quirk), so the named form doesn't byte-match.
 Doesn't block real import (verified: aw-export re-imports into a live SQL Server 2025, both view indexes present at index_id 1 / CLUSTERED / unique).
 
 **WideWorldImporters-Standard** — end-to-end clean.
 48/48 tables, 26/26 sequences, 9/9 roles, 4/4 table types, 8/8 computed columns, 7/7 CHECK constraints, 42/42 procedures, 94/94 indexes, 3/3 views, 1/1 scalar function, 2/2 encryption-key GRANTs, 414/414 extended properties, 4.7M rows.
-**Zero remaining Skipped categories.**
+**Zero remaining Skipped categories**, which took the `TOP (@parameter)` bind rule ([`query.md`](query.md)), `ALTER TABLE … ADD PERIOD FOR SYSTEM_TIME` ([`alter-table.md`](alter-table.md)) and computed-column nullability inference ([`catalog-views.md`](catalog-views.md)) — the last of which is what lets `Warehouse.StockItems` adopt its history table.
 
 **WideWorldImporters-Full** — same row volume + schema as Standard, adds partitioning + columnstore + one natively-compiled procedure + 17 system-versioned base→history pairings.
 Loader survives with `SqlPartitionFunction` / `SqlPartitionScheme` / `SqlColumnStoreIndex` as silent skips (storage-organization decorations with no semantic effect on row-store queries — same pattern as `SqlFilegroup`).
 After the NATIVE_COMPILATION + BEGIN ATOMIC parser support, **WWI-Full reaches zero remaining Skipped categories** — every element type loads cleanly.
+
+**Insite.Commerce** (Optimizely Configured Commerce) — imports clean, zero skips and zero warnings; the third reference bacpac, and the one whose schema is application-shaped rather than sample-shaped.
 
 **Cross-check probes** capture each reference DB's per-column COUNT / MIN / MAX / SUM / SUM(DATALENGTH) against the live SQL Server 2025 reference instance.
 WideWorldImporters-Standard cross-checks 100% clean (51/51 tables, every per-column metric byte-equal, zero divergences).
