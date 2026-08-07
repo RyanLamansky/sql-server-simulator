@@ -934,6 +934,18 @@ partial class Simulation
         {
             context.MoveNextRequired();
 
+            // Real tolerates one trailing comma before the closing paren of a
+            // CREATE TABLE element list — after a column or a table-level
+            // constraint alike — and nowhere else. Not `DECLARE @t TABLE`, not
+            // `CREATE TYPE … AS TABLE` (both share this parser and both refuse
+            // it), not an INSERT column list, a VALUES list, an index key list,
+            // a constraint's own column list, or `ALTER TABLE … ADD`. Two
+            // commas and a leading comma stay Msg 102 as well: only the single
+            // trailing one is admitted, which is why this tests for the paren
+            // rather than looping. All probe-confirmed against SQL Server 2025.
+            if (!isTableVariable && !isTableType && context.Token is Operator { Character: ')' } && heapColumns.Count > 0)
+                break;
+
             // Table-level constraint: `[CONSTRAINT name] PRIMARY KEY | UNIQUE (cols)`
             // or `[CONSTRAINT name] CHECK (predicate)`. Forks before the
             // column path because PRIMARY/UNIQUE/CHECK/CONSTRAINT are reserved

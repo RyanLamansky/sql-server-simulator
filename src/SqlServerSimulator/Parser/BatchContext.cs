@@ -1435,6 +1435,17 @@ internal sealed class BatchContext
     /// set @VX = 5</c> succeeds, as does a fullwidth <c>@ｖx</c>
     /// declaration referenced as <c>@vx</c>.
     /// </summary>
+    /// <summary>
+    /// Where each declared variable's <c>DECLARE</c> was written, as the
+    /// statement's 0-based offset in the batch text. A loop body re-dispatches
+    /// its statements, so the same <c>DECLARE</c> executes once per pass and
+    /// must not report Msg 134 the second time — T-SQL hoists the declaration
+    /// and leaves only the assignment behind. The offset is what separates
+    /// that from a genuine second <c>DECLARE</c> of the same name, which stays
+    /// an error however unreachable it is.
+    /// </summary>
+    public readonly Dictionary<string, int> VariableDeclarationSites = new(VariableNameComparer);
+
     internal static readonly StringComparer VariableNameComparer =
         StringComparer.Create(
             System.Globalization.CultureInfo.InvariantCulture,

@@ -216,6 +216,16 @@ Timing: the gate is a **batch-level compile check, not a runtime one** — a nev
 - **The LOGIN7 option flags** — `Network/Login7Request.cs` reads name / credential / database fields and ignores `OptionFlags2`, whose `fODBC` bit is what a client uses to request the `ANSI_DEFAULTS` bundle (`QUOTED_IDENTIFIER` included) at connect time.
   The session default is ON either way, which is what SqlClient asks for, so the omission shows only for a client that deliberately connects with QI OFF.
 
+## Trailing comma in a `CREATE TABLE` element list
+
+Real tolerates **one** trailing comma before the closing paren of a `CREATE TABLE` element list, after a column or a table-level constraint alike:
+`create table t (A int not null, B int not null,)` and `create table t (A int, constraint pk primary key (A),)` both create the table.
+
+The leniency is exclusively that list, which is narrower than "column-definition lists" suggests.
+`DECLARE @t TABLE (a int,)` and `CREATE TYPE … AS TABLE (a int,)` both refuse it, even though all three share `ParseColumnList` — so the admission is gated on `!isTableVariable && !isTableType`, the flags that parser already carries.
+Refused everywhere else too, each probe-confirmed against SQL Server 2025: two commas, a leading comma, a constraint's own column list (`primary key (A,)`), an INSERT column list, a `VALUES` list, an index key list, `ALTER TABLE … ADD`, and a select list.
+Only the single trailing comma is admitted, which is why the parser tests for the closing paren after a separator rather than looping.
+
 ## Trailing-token tightening
 
 The per-statement dispatch normalizer advances one token past a parser that stopped on its last-consumed token (many statement parsers rely on this), so a lone *unexpected* trailing token after a statement was silently swallowed — `SELECT id FROM t LIMIT 2` parsed `LIMIT` as the source's alias and the normalizer dropped the dangling `2`.

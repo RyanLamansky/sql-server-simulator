@@ -14,7 +14,21 @@ Assignment coercion routes through `Cast.ApplyCoercion` so the slot's declared t
 - Multi-row last-row-wins post-ORDER-BY (per-row evaluation, last write wins).
 - The dispatch drains rows for side-effects and yields a `SimulatedNonQuery` rather than a result set (matches SQL Server's no-result-set-envelope behavior for SELECT-assign).
 
-**Errors**: Msg 137 use-before-declare (existing factory); Msg 134 duplicate DECLARE (also fires for parameter+DECLARE collision); Msg 141 mixed assignment + retrieval; standard CAST errors propagate from coercion (Msg 245, Msg 8115, etc.).
+**Re-execution is not re-declaration.**
+A loop body re-dispatches its statements, so the same `DECLARE` runs once per pass — which is legal, because T-SQL hoists the declaration to the batch and leaves only the assignment behind.
+The two are told apart by *where the declaration was written*: `BatchContext.VariableDeclarationSites` records each variable against the batch-text offset of the `DECLARE` that introduced it, so a re-execution reports the same offset and a second textual `DECLARE` a different one.
+Offset alone can't settle `DECLARE @a int, @a int` — one statement naming the same variable twice, which real still refuses — so the parse also tracks the names the current statement has already introduced.
+On a re-execution the slot is kept and only the initializer runs again, which is exactly what real does (all probe-confirmed against SQL Server 2025):
+
+| shape | result | why |
+| --- | --- | --- |
+| `DECLARE @q int = 5` in a 3-pass loop, `@q + 1` summed | **18** | the initializer re-runs every pass (6+6+6), rather than running once and carrying (6+7+8) |
+| `DECLARE @q int` in a 3-pass loop, incremented | **6** | no initializer means no reset — the value carries (1+2+3) |
+| `DECLARE @t TABLE` in a 3-pass loop, one insert each | **3 rows** | a re-executed declaration does not start an empty table |
+
+The initializer is execution-scoped, so it must not run under `IsSkipping` — the pass that *ends* a `WHILE` still walks the body to get past it, and assigning there would overwrite the last real iteration's value with NULL.
+
+**Errors**: Msg 137 use-before-declare (existing factory); Msg 134 duplicate DECLARE (also fires for parameter+DECLARE collision, and stays an error however unreachable the second declaration is — the check is compile-scoped over the batch text); Msg 141 mixed assignment + retrieval; standard CAST errors propagate from coercion (Msg 245, Msg 8115, etc.).
 `DECLARE @v INT NOT NULL` and `DECLARE @v INT = DEFAULT` raise Msg 102 / 156 respectively (DECLARE doesn't accept column-style constraints — falls out of grammar mismatch).
 The optional `AS` before the type (`DECLARE @v AS INT`) is accepted, and an initializer-less DECLARE may end the batch (`DECLARE @x int`, `DECLARE @x varchar(20)`) — the type-spec parse tolerates end-of-input rather than requiring a following token.
 

@@ -24,6 +24,9 @@ partial class Simulation
         var rowsAffected = (int?)null;
         var sawScalar = false;
         var variableIndex = 0;
+        // Names this one DECLARE statement has already introduced, so a
+        // repeat within the same statement stays Msg 134.
+        var declaredHere = new List<string>();
 
         do
         {
@@ -37,12 +40,28 @@ partial class Simulation
             // duplicate name raises Msg 134 even when either declaration
             // sits in a dead branch (probe-confirmed against SQL Server
             // 2025). Only the initializer is execution-scoped.
-            if (context.Batch.Variables.ContainsKey(variableName)
+            //
+            // But a loop body re-dispatches its statements, so the *same*
+            // DECLARE runs again on every pass, and re-running one is legal:
+            // T-SQL hoists the declaration and leaves only the assignment
+            // behind. The two cases are told apart by where the declaration
+            // was written — a re-execution reports the same statement offset,
+            // a second textual DECLARE a different one. `declaredHere` covers
+            // the remaining case that offset alone cannot: `DECLARE @a int,
+            // @a int` is one statement naming the same variable twice, which
+            // real still refuses (all probe-confirmed).
+            var declarationSite = context.Batch.CurrentStatement.StartIndex;
+            var alreadyDeclared = context.Batch.Variables.ContainsKey(variableName)
                 || context.Batch.TableVariables.ContainsKey(variableName)
-                || context.Batch.CursorVariables.ContainsKey(variableName))
-            {
+                || context.Batch.CursorVariables.ContainsKey(variableName);
+            var reExecution = alreadyDeclared
+                && !declaredHere.Contains(variableName, BatchContext.VariableNameComparer)
+                && context.Batch.VariableDeclarationSites.TryGetValue(variableName, out var priorSite)
+                && priorSite == declarationSite;
+            if (alreadyDeclared && !reExecution)
                 throw SimulatedSqlException.VariableAlreadyDeclared(variableName);
-            }
+            declaredHere.Add(variableName);
+            context.Batch.VariableDeclarationSites[variableName] = declarationSite;
 
             // Optional AS keyword between name and type spec — `DECLARE @v AS INT`.
             context.MoveNextRequired();
@@ -55,7 +74,8 @@ partial class Simulation
                 // slot (CURSOR_STATUS('variable','@c') → -2 until SET) in the
                 // frame's cursor-variable namespace. No type spec follows.
                 case ReservedKeyword { Keyword: Keyword.Cursor }:
-                    context.Batch.CursorVariables[variableName] = null;
+                    if (!reExecution)
+                        context.Batch.CursorVariables[variableName] = null;
                     context.MoveNextOptional();
                     sawScalar = true;
                     continue;
@@ -71,7 +91,7 @@ partial class Simulation
                 case ReservedKeyword { Keyword: Keyword.Table }:
                     if (sawScalar)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
-                    ParseDeclareTableVariable(context, variableName);
+                    ParseDeclareTableVariable(context, variableName, reExecution);
                     return context.Token is Operator { Character: ',' }
                         ? throw SimulatedSqlException.SyntaxErrorNear(context)
                         : null;
@@ -84,7 +104,7 @@ partial class Simulation
             // A multi-part name unambiguously means user-defined type (built-
             // in scalars are 1-part only); for 1-part names, table-type
             // lookup runs first with fallback to the scalar path.
-            if (context.Token is Name firstNameToken && TryParseDeclareTableTypeVariable(context, firstNameToken, variableName, variableIndex))
+            if (context.Token is Name firstNameToken && TryParseDeclareTableTypeVariable(context, firstNameToken, variableName, variableIndex, reExecution))
             {
                 sawScalar = true;
                 continue;
@@ -106,10 +126,26 @@ partial class Simulation
                 }
             }
 
-            context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, initialValue, parameter: null)
+            if (reExecution)
             {
-                XmlSchemaCollection = xmlSchemaCollection,
-            };
+                // The slot stays; only the initializer runs again. Without one
+                // the value carries into the next pass untouched, which is
+                // what real does (probe-confirmed: an un-initialized DECLARE
+                // in a three-pass loop accumulates rather than resetting).
+                // Skip mode still parses the body — the pass that ends a WHILE
+                // walks it to advance past it — and the initializer is
+                // execution-scoped, so assigning there would overwrite the
+                // last real iteration's value with NULL.
+                if (hasInitializer && !context.Batch.IsSkipping)
+                    context.Batch.Variables[variableName].Value = initialValue;
+            }
+            else
+            {
+                context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, initialValue, parameter: null)
+                {
+                    XmlSchemaCollection = xmlSchemaCollection,
+                };
+            }
             sawScalar = true;
         } while (context.Token is Operator { Character: ',' });
 
@@ -206,7 +242,7 @@ partial class Simulation
     /// confirmed); 1-part names only commit on a successful TableTypes
     /// lookup so built-in scalars still resolve.
     /// </summary>
-    private static bool TryParseDeclareTableTypeVariable(ParserContext context, Name firstNameToken, string variableName, int variableIndex)
+    private static bool TryParseDeclareTableTypeVariable(ParserContext context, Name firstNameToken, string variableName, int variableIndex, bool reExecution)
     {
         // Peek for `.` continuation. Multi-part means user-defined type
         // (built-in scalars are always 1-part).
@@ -220,7 +256,7 @@ partial class Simulation
             if (context.Batch.TryResolveTableType(objectName, out var tableType))
             {
                 context.MoveNextOptional();
-                RegisterTableTypeVariable(context, variableName, tableType);
+                RegisterTableTypeVariable(context, variableName, tableType, reExecution);
                 return true;
             }
             // Multi-part may also resolve to an alias type — fall through to
@@ -239,12 +275,15 @@ partial class Simulation
         if (!context.Batch.TryResolveTableType(new MultiPartName(firstNameToken.Value), out var singleType))
             return false;
         context.MoveNextOptional();
-        RegisterTableTypeVariable(context, variableName, singleType);
+        RegisterTableTypeVariable(context, variableName, singleType, reExecution);
         return true;
     }
 
-    private static void RegisterTableTypeVariable(ParserContext context, string variableName, TableType tableType) =>
-        context.Batch.TableVariables[variableName] = tableType.Clone("@" + variableName, context.Batch);
+    private static void RegisterTableTypeVariable(ParserContext context, string variableName, TableType tableType, bool reExecution)
+    {
+        if (!reExecution)
+            context.Batch.TableVariables[variableName] = tableType.Clone("@" + variableName, context.Batch);
+    }
 
     /// <summary>
     /// Parses the column-list body of <c>DECLARE @t TABLE (...)</c> and
@@ -279,7 +318,7 @@ partial class Simulation
     /// <see cref="BatchContext.Variables"/> dict's convention).
     /// </para>
     /// </remarks>
-    private static void ParseDeclareTableVariable(ParserContext context, string variableName)
+    private static void ParseDeclareTableVariable(ParserContext context, string variableName, bool reExecution)
     {
         var fullName = "@" + variableName;
         // The false return (skip mode) is ignored here: table-variable
@@ -298,7 +337,12 @@ partial class Simulation
             keyConstraints: keyConstraints,
             checkConstraints: checkConstraints,
             isTableVariable: true);
-        context.Batch.TableVariables[variableName] = heapTable;
+        // A re-executed DECLARE does not empty the table: real accumulates
+        // across the loop's passes (probe-confirmed — three inserts in a
+        // three-pass loop leave three rows). The column list is still parsed,
+        // because the cursor has to advance past it either way.
+        if (!reExecution)
+            context.Batch.TableVariables[variableName] = heapTable;
     }
 
     /// <summary>
