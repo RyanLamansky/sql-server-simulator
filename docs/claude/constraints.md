@@ -52,6 +52,9 @@ An unnamed inline CHECK auto-names as the column-level shape `CK__<table>__<colu
 A computed column takes several inline constraints in any order — `PERSISTED PRIMARY KEY CHECK (cc > 0)`, the reverse, and the doubly-named `CONSTRAINT ck CHECK (…) CONSTRAINT uq UNIQUE` all parse — so `ParseComputedColumnInlineConstraint` loops rather than reading one constraint.
 A PRIMARY KEY naming the computed column promotes it to NOT NULL, inline and table-level alike, exactly as it does a regular column: the promotion happens where the computed `HeapColumn` is materialized, since `ParseColumnList`'s promotion loop walks the column list while that slot is still an unresolved placeholder.
 
+A **UNIQUE** constraint takes a *non-persisted* computed column and enforces it, evaluating the value per row; a **PRIMARY KEY** still needs it persisted and non-nullable (**Msg 1711**, with real's trailing `Could not create constraint or index. See previous errors.`).
+The determinism and precision preconditions real puts on any such key — **Msg 2729** / **Msg 2799** — and how the enforcement reads it are in [`indexes.md`](indexes.md#computed-columns-as-index-keys); a UNIQUE constraint takes the same gates a `CREATE INDEX` does, since it is the same index underneath.
+
 A **non-persisted** computed column is rejected, with the message depending on how the predicate reaches it (probe-confirmed split, the same shape the FK family has):
 
 | Form | Error |

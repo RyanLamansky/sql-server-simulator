@@ -19,7 +19,7 @@ internal enum KeyConstraintKind
 /// declaration ordinals) so the enforcement loop can decode key columns
 /// directly from row bytes via <see cref="RowDecoder"/>.
 /// </summary>
-internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals, int objectId, bool isClustered, bool ignoreDupKey, DateTime createDate, bool[]? descending = null)
+internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals, int[] fullOrdinals, int objectId, bool isClustered, bool ignoreDupKey, DateTime createDate, bool[]? descending = null)
 {
     public readonly KeyConstraintKind Kind = kind;
 
@@ -45,6 +45,34 @@ internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] s
     public readonly string Name = name;
 
     public readonly int[] StorageOrdinals = storageOrdinals;
+
+    /// <summary>
+    /// The same key columns as positions in <c>HeapTable.Columns</c>, parallel
+    /// to <see cref="StorageOrdinals"/>. A <em>non-persisted computed</em> key
+    /// column has no storage slot — its <see cref="StorageOrdinals"/> entry is
+    /// <c>-1</c> — so this is what names it, and the enforcement paths read its
+    /// value off an evaluated full row rather than out of row bytes.
+    /// </summary>
+    public readonly int[] FullOrdinals = fullOrdinals;
+
+    /// <summary>
+    /// True when every key column has a storage slot, which is what the seek
+    /// path reads keys through. False only for a key naming a non-persisted
+    /// computed column, whose enforcement scans and evaluates instead.
+    /// </summary>
+    public bool KeysAreStored
+    {
+        get
+        {
+            foreach (var ordinal in this.StorageOrdinals)
+            {
+                if (ordinal < 0)
+                    return false;
+            }
+
+            return true;
+        }
+    }
 
     /// <summary>
     /// Per-key-column <c>DESC</c> flags, parallel to

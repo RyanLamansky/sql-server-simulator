@@ -1301,6 +1301,7 @@ public sealed partial class Simulation
                 batch.CurrentStatement.StatementScopedValues = null;
                 batch.CurrentStatement.SubqueryResults = null;
                 batch.CurrentStatement.CatalogViewRows = null;
+                batch.CurrentStatement.ComputedUniqueKeys = null;
                 batch.RcsiStatementSnapshotXid = null;
                 batch.BumpRowStamp();
                 // The cached plan is shared across principals; re-run the

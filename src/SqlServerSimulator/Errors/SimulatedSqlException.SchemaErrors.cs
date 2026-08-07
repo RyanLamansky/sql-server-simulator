@@ -986,7 +986,36 @@ partial class SimulatedSqlException
     /// implies-nullable shortcut). Real SQL Server uses identical wording.
     /// </summary>
     internal static SimulatedSqlException ComputedColumnPkRequiresPersisted(string columnName, string tableName) =>
-        new($"Cannot define PRIMARY KEY constraint on column '{columnName}' in table '{tableName}'. The computed column has to be persisted and not nullable.", 1711, 16, 1);
+        new($"Cannot define PRIMARY KEY constraint on column '{columnName}' in table '{tableName}'. The computed column has to be persisted and not nullable.{ConstraintFailureSuffix}", 1711, 16, 1);
+
+    /// <summary>
+    /// The sentence real appends to an index-eligibility failure that arrived
+    /// through a <c>PRIMARY KEY</c> / <c>UNIQUE</c> constraint rather than a
+    /// bare <c>CREATE INDEX</c> — the constraint's own creation is what
+    /// "could not be created", and the index error is the "previous error".
+    /// Probe-confirmed on Msg 1711 / 2729 / 2799 alike.
+    /// </summary>
+    private const string ConstraintFailureSuffix = " Could not create constraint or index. See previous errors.";
+
+    /// <summary>
+    /// Mimics SQL Server error 2729: a computed column named as an index,
+    /// statistics or partition key whose expression isn't deterministic — the
+    /// value would differ between the stored key and a fresh evaluation.
+    /// <paramref name="viaConstraint"/> appends real's constraint suffix.
+    /// Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ComputedColumnNotDeterministicForIndex(string columnName, string qualifiedTableName, bool viaConstraint) =>
+        new($"Column '{columnName}' in table '{qualifiedTableName}' cannot be used in an index or statistics or as a partition key because it is non-deterministic.{(viaConstraint ? ConstraintFailureSuffix : "")}", 2729, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2799: a non-persisted computed column named as
+    /// an index or statistics key whose expression touches <c>float</c> /
+    /// <c>real</c> anywhere — real won't key on a value it can't reproduce bit
+    /// for bit. <paramref name="viaConstraint"/> appends real's constraint
+    /// suffix. Probe-confirmed wording against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ComputedColumnImpreciseForIndex(string indexName, string qualifiedTableName, string columnName, bool viaConstraint) =>
+        new($"Cannot create index or statistics '{indexName}' on table '{qualifiedTableName}' because the computed column '{columnName}' is imprecise and not persisted. Consider removing column from index or statistics key or marking computed column persisted.{(viaConstraint ? ConstraintFailureSuffix : "")}", 2799, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 8102: an UPDATE statement targeted an identity

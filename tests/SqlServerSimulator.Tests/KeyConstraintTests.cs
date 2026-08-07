@@ -416,14 +416,64 @@ public sealed class KeyConstraintTests
         Assert.Contains("(10)", ex.Message);
     }
 
+    /// <summary>
+    /// A UNIQUE constraint keys on a non-persisted computed column, and is
+    /// enforced — the value is evaluated per row rather than read from a
+    /// storage slot it doesn't have. Msg 2627 names the computed value.
+    /// </summary>
     [TestMethod]
-    public void Unique_OnNonPersistedComputed_NotSupported()
+    public void Unique_OnNonPersistedComputed_Enforced()
     {
-        // Real SQL Server allows this; the simulator defers UNIQUE-on-non-
-        // persisted because enforcement would need per-row expression
-        // evaluation rather than storage-ordinal lookup.
-        _ = Assert.Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "create table t (a int not null, c as a * 10, unique (c))"));
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int not null, c as a * 10, constraint uq_t unique (c));
+            insert t(a) values (1), (2)
+            """);
+        var ex = simulation.AssertSqlError("insert t(a) values (1)", 2627);
+        Assert.Contains("UNIQUE KEY constraint 'uq_t'", ex.Message);
+        Assert.Contains("(10)", ex.Message);
+    }
+
+    /// <summary>Two rows of one statement collide with each other, not only with what is already stored.</summary>
+    [TestMethod]
+    public void Unique_OnNonPersistedComputed_CollidesWithinOneStatement()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (a int not null, c as a * 10, unique (c));
+            insert t(a) values (1), (1)
+            """, 2627);
+
+    /// <summary>An UPDATE that moves the computed key onto another row's is refused.</summary>
+    [TestMethod]
+    public void Unique_OnNonPersistedComputed_UpdateIntoCollision_Raises2627()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table t (id int not null primary key, a int not null, c as a * 10, unique (c));
+            insert t(id, a) values (1, 1), (2, 2)
+            """);
+        _ = simulation.AssertSqlError("update t set a = 1 where id = 2", 2627);
+        // A key that stands still is not a collision with itself.
+        _ = simulation.ExecuteNonQuery("update t set a = a where id = 2");
+    }
+
+    /// <summary>
+    /// Real's two preconditions for keying on a non-persisted computed column:
+    /// the expression must be deterministic (Msg 2729) and precise (Msg 2799).
+    /// </summary>
+    [TestMethod]
+    public void Unique_OnNonPersistedComputed_NonDeterministic_Raises2729()
+        => new Simulation().AssertSqlError(
+            "create table t (a int not null, c as getdate(), unique (c))",
+            2729,
+            "Column 'c' in table 'dbo.t' cannot be used in an index or statistics or as a partition key because it is non-deterministic. Could not create constraint or index. See previous errors.");
+
+    [TestMethod]
+    public void Unique_OnNonPersistedComputed_Imprecise_Raises2799()
+    {
+        var ex = new Simulation().AssertSqlError(
+            "create table t (a float not null, c as a * 2, constraint uq_t unique (c))", 2799);
+        Assert.Contains("'uq_t' on table 'dbo.t' because the computed column 'c' is imprecise and not persisted", ex.Message);
+        Assert.Contains("Could not create constraint or index. See previous errors.", ex.Message);
     }
 
     [TestMethod]
@@ -459,12 +509,29 @@ public sealed class KeyConstraintTests
             select count(*) from t
             """));
 
+    /// <summary>
+    /// The ALTER form takes the same key, and validates the rows already
+    /// present — Msg 1505 when two of them share the computed value.
+    /// </summary>
     [TestMethod]
-    public void AlterTable_AddUnique_OnNonPersistedComputed_NotSupported()
-        => _ = Assert.Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery("""
+    public void AlterTable_AddUnique_OnNonPersistedComputed_Enforced()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
             create table t (a int not null, c as a + 1);
+            insert t(a) values (1), (2);
+            alter table t add constraint uq_t unique (c)
+            """);
+        _ = simulation.AssertSqlError("insert t(a) values (1)", 2627);
+    }
+
+    [TestMethod]
+    public void AlterTable_AddUnique_OnNonPersistedComputed_ExistingDuplicate_Raises1505()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (a int not null, c as a + 1);
+            insert t(a) values (5), (5);
             alter table t add unique (c)
-            """));
+            """, 1505);
 
     [TestMethod]
     public void MergeInsert_DuplicateKey_RaisesMsg2627()

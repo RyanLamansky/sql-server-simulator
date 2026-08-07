@@ -691,4 +691,133 @@ public sealed class CreateIndexTests
             create table t (id int not null, a int);
             drop index t.nope
             """, 3701);
+
+    /// <summary>
+    /// A unique index keys on a non-persisted computed column and enforces it —
+    /// the value is evaluated per row, since the column has no storage slot.
+    /// AdventureWorks' <c>AK_SalesOrderHeader_SalesOrderNumber</c> is the shape.
+    /// Probed against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void UniqueIndex_OnNonPersistedComputed_Enforced()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int not null primary key, a int not null, b int not null, c as a + b);
+            create unique index ix_t on t (c);
+            insert t (id, a, b) values (1, 1, 2)
+            """);
+        var ex = sim.AssertSqlError("insert t (id, a, b) values (2, 2, 1)", 2601);
+        Assert.Contains("unique index 'ix_t'", ex.Message);
+        Assert.Contains("The duplicate key value is (3)", ex.Message);
+    }
+
+    /// <summary>A composite key mixing a stored and a computed column reports both components.</summary>
+    [TestMethod]
+    public void UniqueIndex_CompositeStoredAndComputedKey_Enforced()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int not null primary key, g int not null, a int not null, c as a + 1);
+            create unique index ix_t on t (g, c);
+            insert t values (1, 1, 10), (2, 2, 10)
+            """);
+        var ex = sim.AssertSqlError("insert t values (3, 1, 10)", 2601);
+        Assert.Contains("The duplicate key value is (1, 11)", ex.Message);
+    }
+
+    /// <summary>Two NULL computed keys collide, the same NULLs-equal rule a stored key follows.</summary>
+    [TestMethod]
+    public void UniqueIndex_OnNonPersistedComputed_NullKeysCollide()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int not null primary key, a int null, c as a + 1);
+            create unique index ix_t on t (c);
+            insert t (id, a) values (1, null)
+            """);
+        var ex = sim.AssertSqlError("insert t (id, a) values (2, null)", 2601);
+        Assert.Contains("The duplicate key value is (<NULL>)", ex.Message);
+    }
+
+    /// <summary>An UPDATE that moves the computed key onto another row's is refused; a standing key isn't.</summary>
+    [TestMethod]
+    public void UniqueIndex_OnNonPersistedComputed_UpdateIntoCollision_Raises2601()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int not null primary key, a int not null, c as a + 1);
+            create unique index ix_t on t (c);
+            insert t values (1, 10), (2, 20)
+            """);
+        _ = sim.AssertSqlError("update t set a = 10 where id = 2", 2601);
+        _ = sim.ExecuteNonQuery("update t set a = a where id = 2");
+    }
+
+    /// <summary>Existing duplicate data blocks the CREATE, naming the computed value.</summary>
+    [TestMethod]
+    public void UniqueIndex_OnNonPersistedComputed_ExistingDuplicate_Raises1505()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int not null primary key, a int not null, c as a + 1);
+            insert t values (1, 5), (2, 5)
+            """);
+        var ex = sim.AssertSqlError("create unique index ix_t on t (c)", 1505);
+        Assert.Contains("The duplicate key value is (6)", ex.Message);
+    }
+
+    /// <summary>
+    /// Real's two preconditions for any index or statistics key naming a
+    /// non-persisted computed column: deterministic (Msg 2729) and precise
+    /// (Msg 2799). Both gate a non-unique index and CREATE STATISTICS too, and
+    /// a persisted column takes neither.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create index ix_t on t (cn)", 2729)]
+    [DataRow("create unique index ix_t on t (cn)", 2729)]
+    [DataRow("create statistics st_t on t (cn)", 2729)]
+    [DataRow("create index ix_t on t (cf)", 2799)]
+    [DataRow("create unique index ix_t on t (cf)", 2799)]
+    [DataRow("create statistics st_t on t (cf)", 2799)]
+    public void ComputedKeyColumn_NotIndexable_Raises(string statement, int expectedNumber)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (i int not null, f float not null, cn as getdate(), cf as f * 2)");
+        _ = sim.AssertSqlError(statement, expectedNumber);
+    }
+
+    /// <summary>
+    /// Imprecision reaches any <c>float</c> / <c>real</c> in the expression, not
+    /// just the column's own type — a narrowing CAST over one doesn't launder it.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(f as int)")]
+    [DataRow("cast(sqrt(i) as int)")]
+    [DataRow("convert(int, convert(float, i))")]
+    [DataRow("i + cast(1.5e0 as int)")]
+    [DataRow("r + 1")]
+    public void ComputedKeyColumn_ImpreciseThroughANarrowingCast_Raises2799(string expression)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table t (i int not null, f float not null, r real not null, c as {expression})");
+        _ = sim.AssertSqlError("create index ix_t on t (c)", 2799);
+    }
+
+    /// <summary>
+    /// A decimal-only expression is precise, and a persisted column skips the
+    /// precision gate outright — its value is stored, so nothing is re-evaluated.
+    /// (A persisted <em>nondeterministic</em> column can't exist in the first
+    /// place: PERSISTED itself refuses one with Msg 4936.)
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (d decimal(10, 2) not null, c as d * 2)")]
+    [DataRow("create table t (f float not null, c as f * 2 persisted)")]
+    public void ComputedKeyColumn_Indexable_Succeeds(string createTable)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(createTable);
+        _ = sim.ExecuteNonQuery("create index ix_t on t (c)");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.indexes where name = 'ix_t'"));
+    }
 }

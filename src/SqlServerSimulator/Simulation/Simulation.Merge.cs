@@ -1656,7 +1656,7 @@ partial class Simulation
             }
             if (pseudoAffected.Count > 0)
             {
-                EnforceKeyConstraintsForUpdate(destinationTable, pseudoAffected);
+                EnforceKeyConstraintsForUpdate(destinationTable, pseudoAffected, context.Batch);
                 EnforceUniqueIndexesForUpdate(destinationTable, pseudoAffected, context.Batch);
             }
         }

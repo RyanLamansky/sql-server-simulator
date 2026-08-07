@@ -745,7 +745,7 @@ partial class Simulation
                 : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, ProjectMutationOutput(affected, output), affected.Count);
         }
 
-        EnforceKeyConstraintsForUpdate(table, affected);
+        EnforceKeyConstraintsForUpdate(table, affected, context.Batch);
         EnforceUniqueIndexesForUpdate(table, affected, context.Batch);
 
         // Outgoing FK check on the post-update rows (UPDATE may have rewritten
@@ -995,6 +995,20 @@ partial class Simulation
                 return $"{database.Name}.{entry.Key}.{table.Name}";
         }
         return $"{database.Name}.{table.Name}";
+    }
+
+    /// <summary>
+    /// <c>schema.table</c> — the two-part form the messages that name a table
+    /// without its database use (Msg 2729 / 2799, probe-confirmed).
+    /// </summary>
+    internal static string SchemaQualifyTableName(HeapTable table, Database database)
+    {
+        foreach (var entry in database.Schemas)
+        {
+            if (entry.Value.SchemaId == table.SchemaId)
+                return $"{entry.Key}.{table.Name}";
+        }
+        return table.Name;
     }
 
     /// <summary>
@@ -1398,7 +1412,7 @@ partial class Simulation
     /// snapshot via (b) only fires when a non-affected row's existing key
     /// genuinely collides with the new value (a true violation).
     /// </summary>
-    private static void EnforceKeyConstraintsForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected)
+    private static void EnforceKeyConstraintsForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, BatchContext batch)
     {
         if (table.KeyConstraints.Count == 0)
             return;
@@ -1414,6 +1428,7 @@ partial class Simulation
         var storedColumns = table.StoredColumns;
         var lobStore = table.Heap;
         var affectedKeys = new AffectedKeyIndex?[table.KeyConstraints.Count];
+        var existingComputedKeys = new HashSet<SqlValueKey>?[table.KeyConstraints.Count];
 
         for (var i = 0; i < affected.Count; i++)
         {
@@ -1424,6 +1439,21 @@ partial class Simulation
                 var constraint = table.KeyConstraints[c];
                 if (constraint.IsDisabled)
                     continue;
+
+                // A UNIQUE constraint over a non-persisted computed column
+                // compares evaluated full rows — see the unique-index path.
+                if (!constraint.KeysAreStored)
+                {
+                    if (!ComputedKeyMoved(constraint.FullOrdinals, affected[i], table, batch))
+                        continue;
+                    if (ComputedKeySharedByAnotherAffectedRow(affected, i, constraint.FullOrdinals, table, filter: null, batch))
+                        throw KeyConstraintViolationOnComputedKey(table, constraint, affected[i].FullNew);
+                    var unaffected = existingComputedKeys[c] ??= BuildComputedKeySet(table, constraint.FullOrdinals, filter: null, batch, affectedAddrs);
+                    if (unaffected.Contains(new SqlValueKey(ReadKeyByFullOrdinals(constraint.FullOrdinals, affected[i].FullNew))))
+                        throw KeyConstraintViolationOnComputedKey(table, constraint, affected[i].FullNew);
+                    continue;
+                }
+
                 if (!KeyTupleMoved(constraint.StorageOrdinals, myStored, affected[i], table))
                     continue;
 
@@ -1502,6 +1532,7 @@ partial class Simulation
         SqlValue[]? existingRowValues = null;
         var qualifiedTableName = $"{Database.DefaultSchemaName}.{table.Name}";
         var affectedKeys = new AffectedKeyIndex?[table.Indexes.Count];
+        var existingComputedKeys = new HashSet<SqlValueKey>?[table.Indexes.Count];
 
         for (var i = 0; i < affected.Count; i++)
         {
@@ -1511,7 +1542,7 @@ partial class Simulation
             for (var x = 0; x < table.Indexes.Count; x++)
             {
                 var index = table.Indexes[x];
-                if (!index.IsUnique || index.IsDisabled || !index.KeysAreStored)
+                if (!index.IsUnique || index.IsDisabled)
                     continue;
                 if (index.Filter is { } rowFilter)
                 {
@@ -1522,8 +1553,11 @@ partial class Simulation
                 // unfiltered index only, which is why this is the else arm: a
                 // filter can read columns outside the key, so a row whose key
                 // stood still can still have moved into the filtered set and
-                // collided there.
-                else if (!KeyTupleMoved(index.KeyStorageOrdinals, myStored, affected[i], table))
+                // collided there. A computed key is compared on the full row,
+                // where the old image is only available when the caller kept one.
+                else if (index.KeysAreStored
+                    ? !KeyTupleMoved(index.KeyStorageOrdinals, myStored, affected[i], table)
+                    : !ComputedKeyMoved(index.KeyFullOrdinals, affected[i], table, batch))
                 {
                     continue;
                 }
@@ -1531,6 +1565,20 @@ partial class Simulation
                 // A filtered index counts only the affected rows inside its set,
                 // so the filter is evaluated once per row here rather than once
                 // per pair as the walk this replaces did.
+                // A key naming a non-persisted computed column has no storage
+                // ordinals to compare, so both halves of the check read the
+                // evaluated full row: the affected rows against each other, and
+                // the unaffected rows out of a set built once for the statement.
+                if (!index.KeysAreStored)
+                {
+                    if (ComputedKeySharedByAnotherAffectedRow(affected, i, index.KeyFullOrdinals, table, index.Filter, batch))
+                        throw UniqueIndexViolationOnComputedKey(index, qualifiedTableName, myFull);
+                    var unaffected = existingComputedKeys[x] ??= BuildComputedKeySet(table, index.KeyFullOrdinals, index.Filter, batch, affectedAddrs);
+                    if (unaffected.Contains(new SqlValueKey(ReadKeyByFullOrdinals(index.KeyFullOrdinals, myFull))))
+                        throw UniqueIndexViolationOnComputedKey(index, qualifiedTableName, myFull);
+                    continue;
+                }
+
                 var keyed = affectedKeys[x] ??= AffectedKeyIndex.Build(
                     storedSnapshots,
                     index.KeyStorageOrdinals,
@@ -1584,6 +1632,78 @@ partial class Simulation
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Whether another affected row's post-update key equals row
+    /// <paramref name="self"/>'s, over a key read by full ordinal — the
+    /// computed-key counterpart of <see cref="AffectedKeyIndex"/>.
+    /// </summary>
+    /// <remarks>
+    /// Built per call rather than memoized like its stored-key sibling: an
+    /// UPDATE that moves a computed key on many rows is rare enough that the
+    /// pairwise-free hash build is the whole win, and the set is small (one
+    /// entry per affected row).
+    /// </remarks>
+    private static bool ComputedKeySharedByAnotherAffectedRow(
+        List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
+        int self,
+        int[] fullOrdinals,
+        HeapTable table,
+        BooleanExpression? filter,
+        BatchContext batch)
+    {
+        var mine = new SqlValueKey(ReadKeyByFullOrdinals(fullOrdinals, affected[self].FullNew));
+        for (var i = 0; i < affected.Count; i++)
+        {
+            if (i == self)
+                continue;
+            if (filter is not null && EvaluateIndexFilter(filter, table, affected[i].FullNew, batch) != true)
+                continue;
+            if (mine.Equals(new SqlValueKey(ReadKeyByFullOrdinals(fullOrdinals, affected[i].FullNew))))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether the UPDATE moved this row's computed key. The pre-update image
+    /// comes from the caller's captured <c>FullOld</c> when it kept one and from
+    /// the row's own heap slot otherwise — validation runs before the rewrite,
+    /// so the slot still holds the old bytes. A row with no pre-update state
+    /// (MERGE's pending inserts) counts as moved.
+    /// </summary>
+    private static bool ComputedKeyMoved(
+        int[] fullOrdinals,
+        (int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld) row,
+        HeapTable table,
+        BatchContext batch)
+    {
+        SqlValue[] oldFull;
+        if (row.FullOld is { } captured)
+        {
+            oldFull = captured;
+        }
+        else
+        {
+            if (row.PageIndex < 0 || table.Heap.ReadSlotBytes(row.PageIndex, row.SlotIndex) is not { } oldBytes)
+                return true;
+            SqlValue[]? buffer = null;
+            oldFull = DecodeFullRowWithComputed(table, oldBytes, batch, ref buffer);
+        }
+
+        // The captured old image carries stored values only, so its computed
+        // slots are re-evaluated here rather than trusted.
+        var evaluated = (SqlValue[])oldFull.Clone();
+        EvaluateComputedColumns(table, evaluated, batch);
+        foreach (var ordinal in fullOrdinals)
+        {
+            if (!row.FullNew[ordinal].Equals(evaluated[ordinal]))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>

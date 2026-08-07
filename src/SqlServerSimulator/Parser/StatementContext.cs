@@ -45,6 +45,20 @@ internal sealed class StatementContext
     public Dictionary<object, object>? SubqueryResults;
 
     /// <summary>
+    /// Existing rows' key tuples for each unique index or constraint whose key
+    /// names a <em>non-persisted computed</em> column, keyed by the index /
+    /// constraint instance (reference identity). Such a key can't be seeked —
+    /// the per-<c>Heap</c> seek cache indexes stored bytes and the value has no
+    /// storage slot — so the set is built from one scan and probed per row,
+    /// which is what keeps a multi-row INSERT linear rather than re-scanning
+    /// the table for every row. Cleared by the dispatch loop at the top of each
+    /// statement iteration: the statement is the span over which the caller
+    /// owns every write to the heap, and each row it admits is added here as it
+    /// goes.
+    /// </summary>
+    public Dictionary<object, HashSet<SqlValueKey>>? ComputedUniqueKeys;
+
+    /// <summary>
     /// Fully-drained catalog-view rows, keyed by the view and the database it
     /// was scoped to (both by reference identity), so every later read of the
     /// same view within the statement is served from here rather than

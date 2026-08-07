@@ -134,7 +134,7 @@ partial class Simulation
         var storedValues = ProjectStoredValues(destination, fullRowValues);
         // The table-variable grammar exposes no constraint WITH clause, so no
         // key here can carry IGNORE_DUP_KEY and neither call can ask to skip.
-        _ = EnforceKeyConstraints(destination, storedValues, batch);
+        _ = EnforceKeyConstraints(destination, fullRowValues, storedValues, batch);
         _ = EnforceUniqueIndexes(destination, fullRowValues, storedValues, batch);
         _ = destination.Heap.Insert(RowEncoder.EncodeRow(destination.StoredColumns, storedValues, destination.Heap));
     }
@@ -562,6 +562,79 @@ partial class Simulation
     }
 
     /// <summary>
+    /// The full row with its <b>computed columns evaluated</b> — what a key or
+    /// filter naming a non-persisted computed column has to be read from, since
+    /// such a column occupies no storage slot and the plain decode leaves it
+    /// NULL.
+    /// </summary>
+    private static SqlValue[] DecodeFullRowWithComputed(HeapTable table, ReadOnlySpan<byte> rowBytes, BatchContext batch, ref SqlValue[]? buffer)
+    {
+        var full = DecodeFullRow(table, rowBytes, ref buffer);
+        EvaluateComputedColumns(table, full, batch);
+        return full;
+    }
+
+    /// <summary>One key tuple, read by full ordinal off an evaluated full row.</summary>
+    private static SqlValue[] ReadKeyByFullOrdinals(int[] fullOrdinals, SqlValue[] fullRow)
+    {
+        var key = new SqlValue[fullOrdinals.Length];
+        for (var i = 0; i < fullOrdinals.Length; i++)
+            key[i] = fullRow[fullOrdinals[i]];
+        return key;
+    }
+
+    /// <summary>
+    /// Every key tuple the table's live rows carry over <paramref name="fullOrdinals"/>,
+    /// with the computed components evaluated — the existing-row side of a
+    /// uniqueness check whose key no seek can reach.
+    /// </summary>
+    /// <remarks>
+    /// Built once and probed per row rather than re-scanned per row: a key with
+    /// a non-persisted computed component can't use the per-<c>Heap</c> seek
+    /// cache (which indexes stored bytes), so without this a K-row statement
+    /// would scan the whole table K times. <paramref name="excludedAddresses"/>
+    /// drops the rows the statement is itself rewriting, whose new keys the
+    /// caller compares among themselves.
+    /// </remarks>
+    private static HashSet<SqlValueKey> BuildComputedKeySet(
+        HeapTable table,
+        int[] fullOrdinals,
+        BooleanExpression? filter,
+        BatchContext batch,
+        HashSet<(int Page, int Slot)>? excludedAddresses)
+    {
+        var keys = new HashSet<SqlValueKey>();
+        SqlValue[]? buffer = null;
+        foreach (var (page, slot, rowBytes) in table.Heap.EnumerateRowsWithAddress())
+        {
+            if (excludedAddresses is not null && excludedAddresses.Contains((page, slot)))
+                continue;
+            var full = DecodeFullRowWithComputed(table, rowBytes, batch, ref buffer);
+            if (filter is not null && EvaluateIndexFilter(filter, table, full, batch) != true)
+                continue;
+            _ = keys.Add(new SqlValueKey(ReadKeyByFullOrdinals(fullOrdinals, full)));
+        }
+
+        return keys;
+    }
+
+    /// <summary>
+    /// The statement-scoped existing-key set for one unique key whose columns
+    /// include a non-persisted computed column, built on first use and then
+    /// extended with each row the statement admits — so the rows a multi-row
+    /// INSERT adds collide with each other exactly as they would with rows
+    /// already on disk.
+    /// </summary>
+    private static HashSet<SqlValueKey> ComputedKeySetFor(
+        HeapTable table, object key, int[] fullOrdinals, BooleanExpression? filter, BatchContext batch)
+    {
+        var cache = batch.CurrentStatement.ComputedUniqueKeys ??= new Dictionary<object, HashSet<SqlValueKey>>(ReferenceEqualityComparer.Instance);
+        if (!cache.TryGetValue(key, out var keys))
+            cache[key] = keys = BuildComputedKeySet(table, fullOrdinals, filter, batch, excludedAddresses: null);
+        return keys;
+    }
+
+    /// <summary>
     /// Finds a row whose key tuple equals the new row's, raising Msg 2627 with
     /// the offending constraint's name. Skips when the table has no PK/UNIQUE
     /// constraints. Each constraint either seeks the shared per-<c>Heap</c>
@@ -581,7 +654,7 @@ partial class Simulation
     /// the cost of materializing whole rows for tables that have just a small
     /// composite key.
     /// </summary>
-    private static RowKeyVerdict EnforceKeyConstraints(HeapTable destinationTable, SqlValue[] storedRowValues, BatchContext batch)
+    private static RowKeyVerdict EnforceKeyConstraints(HeapTable destinationTable, SqlValue[] rowValues, SqlValue[] storedRowValues, BatchContext batch)
     {
         if (destinationTable.KeyConstraints.Count == 0)
             return RowKeyVerdict.Unique;
@@ -593,6 +666,19 @@ partial class Simulation
             // while it's out the constraint isn't enforced (probe-confirmed).
             if (constraint.IsDisabled)
                 continue;
+            // A UNIQUE constraint over a non-persisted computed column probes
+            // the statement's key set — see the unique-index path for why.
+            if (!constraint.KeysAreStored)
+            {
+                var keys = ComputedKeySetFor(destinationTable, constraint, constraint.FullOrdinals, filter: null, batch);
+                if (!keys.Add(new SqlValueKey(ReadKeyByFullOrdinals(constraint.FullOrdinals, rowValues))))
+                {
+                    return constraint.IgnoreDupKey
+                        ? ReportIgnoredDuplicate(batch)
+                        : throw KeyConstraintViolationOnComputedKey(destinationTable, constraint, rowValues);
+                }
+                continue;
+            }
             if (!TryPrepareKeySeek(destinationTable, constraint.StorageOrdinals, storedRowValues, out var commons, out var probe))
             {
                 (scanned ??= []).Add(constraint);
@@ -656,6 +742,27 @@ partial class Simulation
         return SimulatedSqlException.ViolationOfKeyConstraint(constraint.ViolationKindWord, constraint.Name, table.Name, sb.ToString());
     }
 
+    /// <summary>
+    /// Msg 2627 / Msg 2601 rendered from a full row rather than a stored one —
+    /// the shape a key naming a non-persisted computed column needs, since that
+    /// column's value exists only on the evaluated full row.
+    /// </summary>
+    private static SimulatedSqlException KeyConstraintViolationOnComputedKey(HeapTable table, KeyConstraint constraint, SqlValue[] fullRow)
+    {
+        var sb = new StringBuilder();
+        for (var i = 0; i < constraint.FullOrdinals.Length; i++)
+        {
+            if (i > 0)
+                _ = sb.Append(", ");
+            _ = sb.Append(FormatKeyValue(fullRow[constraint.FullOrdinals[i]]));
+        }
+        return SimulatedSqlException.ViolationOfKeyConstraint(constraint.ViolationKindWord, constraint.Name, table.Name, sb.ToString());
+    }
+
+    /// <inheritdoc cref="KeyConstraintViolationOnComputedKey"/>
+    private static SimulatedSqlException UniqueIndexViolationOnComputedKey(Storage.Index index, string qualifiedTableName, SqlValue[] fullRow) =>
+        SimulatedSqlException.ViolationOfUniqueIndex(index.Name, qualifiedTableName, FormatIndexKeyValues(ReadKeyByFullOrdinals(index.KeyFullOrdinals, fullRow)));
+
     /// <summary>Msg 2601 for <paramref name="index"/>. Shared by the INSERT and
     /// UPDATE enforcement paths.</summary>
     private static SimulatedSqlException UniqueIndexViolation(Storage.Index index, string qualifiedTableName, SqlValue[] storedValues)
@@ -701,10 +808,27 @@ partial class Simulation
 
         foreach (var index in destinationTable.Indexes)
         {
-            if (!index.IsUnique || index.IsDisabled || !index.KeysAreStored)
+            if (!index.IsUnique || index.IsDisabled)
                 continue;
             if (index.Filter is not null && Simulation.EvaluateIndexFilter(index.Filter, destinationTable, rowValues, batch) != true)
                 continue;
+
+            // A key naming a non-persisted computed column can't be seeked, so
+            // it probes the statement's own key set instead — built from one
+            // scan and extended with each admitted row.
+            if (!index.KeysAreStored)
+            {
+                var fullOrdinals = index.KeyFullOrdinals;
+                var keys = ComputedKeySetFor(destinationTable, index, fullOrdinals, index.Filter, batch);
+                var candidate = new SqlValueKey(ReadKeyByFullOrdinals(fullOrdinals, rowValues));
+                if (!keys.Add(candidate))
+                {
+                    return index.IgnoreDupKey
+                        ? ReportIgnoredDuplicate(batch)
+                        : throw UniqueIndexViolationOnComputedKey(index, qualifiedTableName, rowValues);
+                }
+                continue;
+            }
 
             if (TryPrepareKeySeek(destinationTable, index.KeyStorageOrdinals, storedRowValues, out var commons, out var probe))
             {

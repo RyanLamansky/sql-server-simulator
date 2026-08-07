@@ -609,6 +609,28 @@ Aggregates outside the disallowed set (`STRING_AGG` and friends) are **left alon
 
 Shapes that keep indexing cleanly: inner-join projections (the form AdventureWorks' two indexed views take), `SUM` + `COUNT_BIG` grouped views over NOT NULL columns, and filtered projections.
 
+## Computed columns as index keys
+
+A **non-persisted** computed column is a legal key for an index, a UNIQUE constraint and statistics — AdventureWorks' `AK_SalesOrderHeader_SalesOrderNumber` is the shape — and real puts two preconditions on it, both of which the simulator applies at every declaration site (`CREATE INDEX`, inline and table-level `UNIQUE` at `CREATE TABLE`, `ALTER TABLE … ADD CONSTRAINT`, `CREATE STATISTICS`):
+
+- **Msg 2729** — the expression must be **deterministic**, off the same walk `OBJECTPROPERTY`'s `IsDeterministic` and PERSISTED's own Msg 4936 use.
+- **Msg 2799** — it must be **precise**, meaning no `float` / `real` anywhere in it.
+  That reaches past the column's own resolved type: `CAST(f AS int)`, `CAST(SQRT(i) AS int)`, `CONVERT(int, CONVERT(float, i))` and `i + CAST(1.5e0 AS int)` are all imprecise even though each lands on `int`, so the check reads the definition's tokens for an approximate column, an explicit `float` / `real` conversion target, a float-returning built-in and a scientific-notation literal (`ComputedColumnPrecision`).
+  A **persisted** column skips this one — its value is stored, so nothing is re-evaluated.
+
+Both gates fire for a *non-unique* index and for `CREATE STATISTICS` as readily as for a unique one, and both append real's `Could not create constraint or index. See previous errors.` when the failure arrived through a constraint rather than a bare `CREATE INDEX` — the same suffix Msg 1711 carries when a `PRIMARY KEY` names a non-persisted computed column (which stays refused: a PK needs the value stored and non-nullable).
+
+### How the key is read
+
+Those two gates are what make the key well defined: the value is then a reproducible function of the row's stored columns, so it can be evaluated per row rather than stored.
+The enforcement paths carry a **full ordinal** beside each key column's storage ordinal (`Index.KeyFullOrdinals`, `KeyConstraint.FullOrdinals`) — a non-persisted computed column's storage entry is `-1` — and read such a key off an evaluated full row instead of out of row bytes.
+NULLs collide as they do for a stored key, and Msg 2601 / 2627 / 1505 quote the computed value.
+
+The existing-row side can't use the per-`Heap` seek cache, which indexes stored bytes.
+So it scans **once per statement** into a hash set of key tuples (`StatementContext.ComputedUniqueKeys`), and each row the statement admits is added as it goes — which is what makes the rows of one multi-row INSERT collide with each other, and keeps a K-row statement at one scan rather than K.
+Measured on AdventureWorks' 31 465-row `Sales.SalesOrderHeader`: inserting 10 rows and inserting 200 cost the same, where the per-row scan they replace would have been 20× apart.
+The UPDATE path builds the same set once per statement, excluding the rows it is itself rewriting, and compares those against each other separately; a row whose computed key stands still skips its own check exactly as a stored key does.
+
 ## Fidelity gaps
 
 - **`filter_definition` edge cases**: the column is rendered (see [Filtered-index `filter_definition`](#filtered-index-filter_definition)) and byte-matches SQL Server across the common filtered grammar, but two literal-typing corners diverge: an integer literal larger than `int` range renders `(5000000000)` where SQL Server types it as `numeric` and renders `(5000000000.)` (trailing dot), and a scale-0 decimal literal likewise omits the trailing dot.
@@ -620,9 +642,6 @@ Shapes that keep indexing cleanly: inner-join projections (the form AdventureWor
   `IGNORE_DUP_KEY = ON` is the one with observable fallout: real skips the duplicate row and continues (probe-confirmed — the surviving rows insert, `@@ROWCOUNT` counts only those, and a severity-10 Msg 3604 `Duplicate key was ignored.` rides the info stream once per statement), while the simulator raises Msg 2601 and fails the INSERT.
   The flag isn't stored either, so `sys.indexes.ignore_dup_key` reports 0 for a declared-ON index.
   Tracked in [`backlog.md`](backlog.md).
-- **A unique index keyed on a *non-persisted* computed column is carried but not enforced**: the key exists in `sys.indexes` / `sys.index_columns` and every read path treats the index normally, but the duplicate check reads keys out of stored bytes and such a column has no storage slot, so INSERT and UPDATE skip that one index rather than raise Msg 2601.
-  AdventureWorks' `AK_SalesOrderHeader_SalesOrderNumber` is the shape — real enforces it.
-  Persisting the column, or keying the index on stored columns, enforces as usual.
 - **No partition-aware index storage**: `partition_ordinal` always 0, `data_space_id` always 1 (PRIMARY).
 - **DROP INDEX comma list not atomic**: each entry resolves independently.
   Real SQL Server rolls back all on any failure.

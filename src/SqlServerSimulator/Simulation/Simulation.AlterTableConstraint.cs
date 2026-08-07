@@ -360,24 +360,24 @@ partial class Simulation
             }
         }
 
+        var name = explicitName ?? AutoConstraintName(table.Name, kind, fullOrdinals, table.Columns);
         var storageOrdinals = new int[fullOrdinals.Length];
         for (var i = 0; i < fullOrdinals.Length; i++)
         {
             var col = table.Columns[fullOrdinals[i]];
             if (col.IsLob)
                 throw SimulatedSqlException.KeyColumnInvalidType(col.Name, table.Name);
-            // Non-persisted computed columns have no storage ordinal — UNIQUE
-            // on one would need expression evaluation in the enforcement loop
-            // (not modeled). PRIMARY KEY on a non-persisted computed already
-            // raised Msg 8111 above (computed columns are nullable by default
-            // and the existing nullable check catches it — probe-confirmed
-            // at ALTER ADD, the wording differs from CREATE TABLE's Msg 1711).
-            if (col.Computed is not null && !col.IsPersisted)
-                throw new NotSupportedException("UNIQUE on a non-persisted computed column isn't modeled.");
+            // A non-persisted computed column is a legal UNIQUE key — its value
+            // is evaluated per row by the enforcement paths — subject to the
+            // determinism / precision gate CREATE INDEX applies. PRIMARY KEY on
+            // one already raised Msg 8111 above (computed columns are nullable
+            // by default and the existing nullable check catches it —
+            // probe-confirmed at ALTER ADD, the wording differs from CREATE
+            // TABLE's Msg 1711).
+            RejectComputedKeyColumnNotIndexable(context.Batch, table, col, name, viaConstraint: true);
             storageOrdinals[i] = table.StorageOrdinals[fullOrdinals[i]];
         }
 
-        var name = explicitName ?? AutoConstraintName(table.Name, kind, fullOrdinals, table.Columns);
         var isClustered = clustered ?? (kind == KeyConstraintKind.PrimaryKey);
 
         // One clustered index per table, counting a clustered PK / UNIQUE
@@ -394,8 +394,8 @@ partial class Simulation
                 throw SimulatedSqlException.MoreThanOneClusteredIndex(table.Name, existingClustered);
         }
 
-        var constraint = new KeyConstraint(kind, name, storageOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered, ignoreDupKey, context.Batch.CurrentStatement.UtcNow, [.. descending]);
-        ValidateExistingRowsForKeyConstraint(table, constraint);
+        var constraint = new KeyConstraint(kind, name, storageOrdinals, fullOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered, ignoreDupKey, context.Batch.CurrentStatement.UtcNow, [.. descending]);
+        ValidateExistingRowsForKeyConstraint(table, constraint, context.Batch);
         table.KeyConstraints.Add(constraint);
         return true;
     }
@@ -521,32 +521,33 @@ partial class Simulation
     /// Linear-scan validation of existing rows against a new PK / UQ
     /// constraint. Raises Msg 1505 on the first duplicate key tuple.
     /// </summary>
-    private static void ValidateExistingRowsForKeyConstraint(HeapTable table, KeyConstraint constraint)
+    private static void ValidateExistingRowsForKeyConstraint(HeapTable table, KeyConstraint constraint, BatchContext batch)
     {
-        var seen = new List<SqlValue[]>();
+        // Hashed rather than compared against every prior key — see
+        // ValidateExistingRowsForUniqueIndex for why.
+        var seen = new HashSet<SqlValueKey>();
         var storedColumns = table.StoredColumns;
         var lobStore = table.Heap;
+        SqlValue[]? fullRow = null;
         foreach (var rowBytes in table.Heap.EnumerateRows())
         {
-            var key = new SqlValue[constraint.StorageOrdinals.Length];
-            for (var k = 0; k < constraint.StorageOrdinals.Length; k++)
-                key[k] = RowDecoder.DecodeColumn(storedColumns, rowBytes, constraint.StorageOrdinals[k], lobStore);
-
-            foreach (var prior in seen)
+            SqlValue[] key;
+            if (constraint.KeysAreStored)
             {
-                var match = true;
-                for (var k = 0; k < key.Length; k++)
-                {
-                    if (!prior[k].Equals(key[k]))
-                    {
-                        match = false;
-                        break;
-                    }
-                }
-                if (match)
-                    throw SimulatedSqlException.DuplicateKeyOnCreate("dbo." + table.Name, constraint.Name, FormatIndexKeyValues(key));
+                key = new SqlValue[constraint.StorageOrdinals.Length];
+                for (var k = 0; k < constraint.StorageOrdinals.Length; k++)
+                    key[k] = RowDecoder.DecodeColumn(storedColumns, rowBytes, constraint.StorageOrdinals[k], lobStore);
             }
-            seen.Add(key);
+            else
+            {
+                // A key naming a non-persisted computed column exists only on
+                // an evaluated full row.
+                fullRow = DecodeFullRowWithComputed(table, rowBytes, batch, ref fullRow);
+                key = ReadKeyByFullOrdinals(constraint.FullOrdinals, fullRow);
+            }
+
+            if (!seen.Add(new SqlValueKey(key)))
+                throw SimulatedSqlException.DuplicateKeyOnCreate("dbo." + table.Name, constraint.Name, FormatIndexKeyValues(key));
         }
     }
 

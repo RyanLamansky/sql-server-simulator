@@ -247,7 +247,7 @@ partial class Simulation
                 EnforceCheckConstraints(table, rowValues, batch);
 
             var storedValues = ProjectStoredValues(table, rowValues);
-            if (EnforceKeyConstraints(table, storedValues, batch) == RowKeyVerdict.SkipDuplicate
+            if (EnforceKeyConstraints(table, rowValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate
                 || EnforceUniqueIndexes(table, rowValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate)
             {
                 continue;

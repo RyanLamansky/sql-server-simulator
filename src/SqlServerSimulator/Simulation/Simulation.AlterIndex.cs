@@ -169,7 +169,7 @@ partial class Simulation
                 if (collation.Equals(constraint.Name, indexName))
                 {
                     RejectNamedIndexTarget(form, namedPartition, constraint.Name, table.Name);
-                    ApplyToConstraint(table, constraint, form, ignoreDupKey);
+                    ApplyToConstraint(table, constraint, form, ignoreDupKey, context.Batch);
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
                 }
@@ -215,7 +215,7 @@ partial class Simulation
             // would be Msg 1973 (probe-confirmed).
             if (form == AlterIndexForm.Reorganize && constraint.IsDisabled)
                 continue;
-            ApplyToConstraint(table, constraint, form, ignoreDupKey);
+            ApplyToConstraint(table, constraint, form, ignoreDupKey, context.Batch);
         }
         foreach (var index in table.Indexes)
         {
@@ -268,7 +268,7 @@ partial class Simulation
     /// succeeds on a table carrying a PRIMARY KEY.
     /// </summary>
     private static void ApplyToConstraint(
-        HeapTable table, KeyConstraint constraint, AlterIndexForm form, bool? ignoreDupKey)
+        HeapTable table, KeyConstraint constraint, AlterIndexForm form, bool? ignoreDupKey, BatchContext batch)
     {
         switch (form)
         {
@@ -277,7 +277,7 @@ partial class Simulation
                 break;
             case AlterIndexForm.Rebuild:
                 if (constraint.IsDisabled)
-                    ValidateExistingRowsForKeyConstraint(table, constraint);
+                    ValidateExistingRowsForKeyConstraint(table, constraint, batch);
                 constraint.IsDisabled = false;
                 break;
             case AlterIndexForm.Reorganize:

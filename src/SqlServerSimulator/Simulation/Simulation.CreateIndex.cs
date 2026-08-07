@@ -213,6 +213,7 @@ partial class Simulation
         for (var i = 0; i < keyColumns.Count; i++)
         {
             var fullOrdinal = ResolveColumnOrdinal(context.Batch.CurrentDatabase.Collation, table, keyColumns[i].Name);
+            RejectComputedKeyColumnNotIndexable(context.Batch, table, table.Columns[fullOrdinal], indexName, viaConstraint: false);
             resolvedKeyColumns[i] = new IndexKeyColumn(table.StorageOrdinals[fullOrdinal], fullOrdinal, keyColumns[i].IsDescending);
         }
         var resolvedIncludeColumns = new int[includeColumnNames.Count];
@@ -334,45 +335,41 @@ partial class Simulation
     /// </summary>
     private static void ValidateExistingRowsForUniqueIndex(HeapTable table, StoredIndex index, BatchContext batch, string qualifiedTableName)
     {
-        var seen = new List<SqlValue[]>();
+        // Hashed rather than compared against every prior key: the walk this
+        // replaces was quadratic in the table's row count, which a computed key
+        // (whose every key read evaluates an expression) makes twice as costly.
+        var seen = new HashSet<SqlValueKey>();
         var storedColumns = table.StoredColumns;
         var lobStore = table.Heap;
-        var rowValues = index.Filter is null ? null : new SqlValue[table.Columns.Length];
+
+        // A filter, or a key naming a non-persisted computed column, needs the
+        // whole row — the latter because the value exists nowhere else.
+        var needsFullRow = index.Filter is not null || !index.KeysAreStored;
+        SqlValue[]? fullRow = null;
 
         foreach (var rowBytes in table.Heap.EnumerateRows())
         {
-            if (index.Filter is { } filter && rowValues is not null)
+            if (needsFullRow)
             {
-                for (var c = 0; c < table.Columns.Length; c++)
-                {
-                    var storageOrd = table.StorageOrdinals[c];
-                    rowValues[c] = storageOrd >= 0
-                        ? RowDecoder.DecodeColumn(storedColumns, rowBytes, storageOrd, lobStore)
-                        : SqlValue.Null(table.Columns[c].Type);
-                }
-                if (EvaluateIndexFilter(filter, table, rowValues, batch) != true)
+                fullRow = DecodeFullRowWithComputed(table, rowBytes, batch, ref fullRow);
+                if (index.Filter is { } filter && EvaluateIndexFilter(filter, table, fullRow, batch) != true)
                     continue;
             }
 
-            var key = new SqlValue[index.KeyColumns.Length];
-            for (var k = 0; k < index.KeyColumns.Length; k++)
-                key[k] = RowDecoder.DecodeColumn(storedColumns, rowBytes, index.KeyColumns[k].StorageOrdinal, lobStore);
-
-            foreach (var prior in seen)
+            SqlValue[] key;
+            if (index.KeysAreStored)
             {
-                var match = true;
-                for (var k = 0; k < key.Length; k++)
-                {
-                    if (!prior[k].Equals(key[k]))
-                    {
-                        match = false;
-                        break;
-                    }
-                }
-                if (match)
-                    throw SimulatedSqlException.DuplicateKeyOnCreate(qualifiedTableName, index.Name, FormatIndexKeyValues(key));
+                key = new SqlValue[index.KeyColumns.Length];
+                for (var k = 0; k < index.KeyColumns.Length; k++)
+                    key[k] = RowDecoder.DecodeColumn(storedColumns, rowBytes, index.KeyColumns[k].StorageOrdinal, lobStore);
             }
-            seen.Add(key);
+            else
+            {
+                key = ReadKeyByFullOrdinals(index.KeyFullOrdinals, fullRow!);
+            }
+
+            if (!seen.Add(new SqlValueKey(key)))
+                throw SimulatedSqlException.DuplicateKeyOnCreate(qualifiedTableName, index.Name, FormatIndexKeyValues(key));
         }
     }
 

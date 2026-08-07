@@ -2137,24 +2137,30 @@ partial class Simulation
             if ((pending.Clustered ?? (pending.Kind == KeyConstraintKind.PrimaryKey)) && ++clusteredCount > 1)
                 throw SimulatedSqlException.MultipleClusteredConstraints(tableName);
 
+            var constraintName = pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns);
             var storageOrdinals = new int[pending.FullOrdinals.Length];
             for (var i = 0; i < pending.FullOrdinals.Length; i++)
             {
                 var fullOrdinal = pending.FullOrdinals[i];
                 var column = heapColumns[fullOrdinal];
-                if (column.Computed is not null && !column.IsPersisted)
-                {
-                    if (pending.Kind == KeyConstraintKind.PrimaryKey)
-                        throw SimulatedSqlException.ComputedColumnPkRequiresPersisted(column.Name, tableName);
-                    throw new NotSupportedException("UNIQUE on a non-persisted computed column isn't modeled.");
-                }
+                // A PRIMARY KEY needs the value stored and non-nullable; UNIQUE
+                // takes a non-persisted computed column, subject to the same
+                // determinism / precision gate CREATE INDEX applies.
+                if (column.Computed is not null && !column.IsPersisted && pending.Kind == KeyConstraintKind.PrimaryKey)
+                    throw SimulatedSqlException.ComputedColumnPkRequiresPersisted(column.Name, tableName);
                 if (column.IsLob)
                     throw SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName);
                 if (pending.Kind == KeyConstraintKind.PrimaryKey && column.Nullable)
                     throw SimulatedSqlException.PrimaryKeyOnNullableColumn(tableName);
+                RejectComputedKeyColumnNotIndexable(
+                    database, heapColumns, $"{Database.DefaultSchemaName}.{tableName}", column, constraintName, viaConstraint: true);
 
-                var storageOrdinal = 0;
-                for (var k = 0; k < fullOrdinal; k++)
+                // A non-persisted computed column occupies no storage slot, so
+                // its key entry is -1 — the same sentinel HeapTable's own
+                // projection uses, and what tells the enforcement paths to
+                // evaluate the expression instead of decoding bytes.
+                var storageOrdinal = column.IsStored ? 0 : -1;
+                for (var k = 0; storageOrdinal >= 0 && k < fullOrdinal; k++)
                 {
                     if (heapColumns[k].IsStored)
                         storageOrdinal++;
@@ -2165,7 +2171,7 @@ partial class Simulation
             var isClustered = pending.Clustered ?? (pending.Kind == KeyConstraintKind.PrimaryKey);
             if (isClustered)
                 clusteredAt = c;
-            prepared[c] = (pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns), storageOrdinals, isClustered);
+            prepared[c] = (constraintName, storageOrdinals, isClustered);
         }
 
         // The clustered constraint takes the first object id, then the rest go
@@ -2186,7 +2192,7 @@ partial class Simulation
         {
             var (name, storageOrdinals, isClustered) = prepared[c];
             return new KeyConstraint(
-                pendingKeys[c].Kind, name, storageOrdinals, database.AllocateObjectId(),
+                pendingKeys[c].Kind, name, storageOrdinals, pendingKeys[c].FullOrdinals, database.AllocateObjectId(),
                 isClustered, pendingKeys[c].IgnoreDupKey, createDate, pendingKeys[c].Descending);
         }
     }
@@ -2982,6 +2988,55 @@ partial class Simulation
     /// col&gt;, 112)</c> is persistable where style 0 is not, which is the
     /// conversion-style rule the shared walk already carries).
     /// </summary>
+    /// <summary>
+    /// The two preconditions real puts on a <b>non-persisted</b> computed
+    /// column named as an index, statistics or constraint key: the expression
+    /// has to be deterministic (<b>Msg 2729</b>) and precise (<b>Msg 2799</b>).
+    /// Together they are what make keying on one well defined — the value is
+    /// then a reproducible function of the row's stored columns, which is what
+    /// the enforcement paths evaluate per row.
+    /// </summary>
+    /// <remarks>
+    /// A persisted computed column stores its value and takes neither check.
+    /// <paramref name="viaConstraint"/> appends the sentence real adds when the
+    /// failure arrived through a PRIMARY KEY / UNIQUE constraint rather than a
+    /// bare CREATE INDEX; <paramref name="indexName"/> is what Msg 2799 quotes,
+    /// which for a constraint is the constraint's own name.
+    /// Probe-confirmed against SQL Server 2025, including that the pair gates a
+    /// <em>non-unique</em> index and <c>CREATE STATISTICS</c> just as it gates a
+    /// unique one.
+    /// </remarks>
+    internal static void RejectComputedKeyColumnNotIndexable(
+        BatchContext batch, HeapTable table, HeapColumn column, string indexName, bool viaConstraint) =>
+        RejectComputedKeyColumnNotIndexable(
+            batch.CurrentDatabase,
+            table.Columns,
+            // Two-part here, unlike most of ALTER TABLE's three-part messages —
+            // real names `dbo.t` in both Msg 2729 and Msg 2799 (probe-confirmed).
+            SchemaQualifyTableName(table, batch.CurrentDatabase),
+            column,
+            indexName,
+            viaConstraint);
+
+    /// <inheritdoc cref="RejectComputedKeyColumnNotIndexable(BatchContext, HeapTable, HeapColumn, string, bool)"/>
+    internal static void RejectComputedKeyColumnNotIndexable(
+        Database database,
+        IReadOnlyList<HeapColumn> scopeColumns,
+        string qualifiedTableName,
+        HeapColumn column,
+        string indexName,
+        bool viaConstraint)
+    {
+        if (column.Computed is null || column.IsPersisted || column.ComputedDefinition is not { } definition)
+            return;
+
+        HeapColumn[] scope = [.. scopeColumns];
+        if (!Schemas.ModuleDeterminism.IsComputedColumnDeterministic(database, scope, definition))
+            throw SimulatedSqlException.ComputedColumnNotDeterministicForIndex(column.Name, qualifiedTableName, viaConstraint);
+        if (!Schemas.ComputedColumnPrecision.IsPrecise(scope, column.Type, definition))
+            throw SimulatedSqlException.ComputedColumnImpreciseForIndex(indexName, qualifiedTableName, column.Name, viaConstraint);
+    }
+
     private static void RejectNondeterministicPersisted(
         ParserContext context, List<HeapColumn?> scope, string columnName, string tableName, string definition)
     {

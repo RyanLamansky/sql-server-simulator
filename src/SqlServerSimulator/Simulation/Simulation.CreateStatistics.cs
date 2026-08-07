@@ -101,6 +101,9 @@ partial class Simulation
             }
             if (ordinal < 0)
                 throw SimulatedSqlException.IndexColumnMissing(columnNames[i]);
+            // Statistics take the same determinism / precision gate an index
+            // key does — real's Msg 2729 / 2799 both name "index or statistics".
+            RejectComputedKeyColumnNotIndexable(context.Batch, table, table.Columns[ordinal], statisticsName, viaConstraint: false);
             ordinals[i] = ordinal;
         }
 

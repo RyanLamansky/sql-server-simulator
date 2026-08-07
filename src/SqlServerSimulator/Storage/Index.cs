@@ -78,13 +78,21 @@ internal sealed class Index(
     public readonly int[] KeyStorageOrdinals = BuildKeyStorageOrdinals(keyColumns);
 
     /// <summary>
-    /// Whether every key column has a storage slot, which the uniqueness
-    /// enforcement reads keys through. False only for an index keyed on a
-    /// <em>non-persisted</em> computed column — real enforces one (it is what
-    /// backs AdventureWorks' <c>AK_SalesOrderHeader_SalesOrderNumber</c>), the
-    /// simulator carries it as metadata and leaves it unenforced, since the
-    /// existing-row side of the check reads stored bytes rather than
-    /// re-evaluating an expression per row.
+    /// The same key columns as positions in <c>HeapTable.Columns</c>, parallel
+    /// to <see cref="KeyStorageOrdinals"/> — what names a non-persisted
+    /// computed key column, whose storage entry is <c>-1</c>. Materialized here
+    /// so the enforcement paths don't rebuild it out of
+    /// <see cref="KeyColumns"/> per row.
+    /// </summary>
+    public readonly int[] KeyFullOrdinals = BuildKeyFullOrdinals(keyColumns);
+
+    /// <summary>
+    /// Whether every key column has a storage slot, which is what the <b>seek</b>
+    /// path reads keys through. False only for an index keyed on a
+    /// <em>non-persisted</em> computed column — the shape backing
+    /// AdventureWorks' <c>AK_SalesOrderHeader_SalesOrderNumber</c> — whose
+    /// uniqueness is enforced instead by evaluating the expression per row
+    /// against a statement-scoped key set.
     /// </summary>
     public bool KeysAreStored
     {
@@ -158,6 +166,14 @@ internal sealed class Index(
     /// See <c>docs/claude/indexes.md</c>.
     /// </summary>
     public bool IsDisabled;
+
+    private static int[] BuildKeyFullOrdinals(IndexKeyColumn[] keyColumns)
+    {
+        var ordinals = new int[keyColumns.Length];
+        for (var i = 0; i < keyColumns.Length; i++)
+            ordinals[i] = keyColumns[i].ColumnOrdinal;
+        return ordinals;
+    }
 
     private static int[] BuildKeyStorageOrdinals(IndexKeyColumn[] keyColumns)
     {

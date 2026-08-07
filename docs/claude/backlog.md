@@ -338,10 +338,22 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
-- **A `UNIQUE` index keyed on a non-persisted computed column is carried but not enforced** — the index exists in full (catalog rows, reads, `CREATE`), yet INSERT / UPDATE step past it instead of raising Msg 2601, because both enforcement paths read key values out of stored bytes and such a column has no storage slot.
-  AdventureWorks' `AK_SalesOrderHeader_SalesOrderNumber` is the shape, and real enforces it.
-  Closing it means giving the enforcement a key-value seam that evaluates the expression per row on both sides of the comparison — the affected rows already carry the value on their full-row snapshot, so the work is the *existing-row* side, which today seeks over stored key bytes.
-  See [`indexes.md`](indexes.md#fidelity-gaps).
+- **Approximate arithmetic reads nullable where real reads NOT NULL** — the projection-nullability inference (`Expression.ResultIsNullable`, which drives COLMETADATA's `fNullable`, `SELECT … INTO`'s destination and a computed column's `is_nullable`) calls every arithmetic operator nullable.
+  Real exempts one case, probed cell for cell against SQL Server 2025 on both the projection and computed-column sides:
+
+  | expression (over `f float NOT NULL`, `r real NOT NULL`, `i int NOT NULL`, `d decimal NOT NULL`) | result | real's `is_nullable` |
+  |---|---|---|
+  | `f * f`, `f * i`, `f * 2`, `f / f`, `f - f` | float | 0 |
+  | `r * r`, `r + r` | real | 0 |
+  | `r * i`, `r * 2` | real | 1 |
+  | `f * CAST(2 AS float)`, `r * CAST(2 AS real)` | float / real | 1 |
+  | `f * d`, `f * 2.0` | float | 1 |
+  | `i * i`, `-f` | int / float | 1 |
+
+  The rule the table fits: an arithmetic operator whose result type is **approximate** is NOT NULL when both operands are NOT NULL *and* each operand's conversion to the result type preserves every value — `int` → `float(53)` does, `int` → `real(24)` and `decimal` → `float` do not, and a `CAST` operand is nullable in its own right so it never reaches the question.
+  Unary minus and exact-numeric arithmetic stay nullable throughout.
+  `SqlType.ConversionPreservesEveryValue` already answers the conversion half for the CASE-arm rule, so closing this is a rule in `TwoSidedExpression.ResultIsNullable` rather than new analysis.
+  Metadata-only, and it pre-dates the computed-column consumer.
 
 - **A typed `xml` value isn't normalized against its schema on write** — real stores `<Total>1</Total>` for an `xsd:decimal` element the insert wrote as `1.00`; the simulator keeps the text it was given.
   The schema collection is read for the two static questions the XQuery layer asks it (an element's cardinality, and whether its content is simple) and for nothing else, so neither validation (real's Msg 6923) nor value normalization runs.
