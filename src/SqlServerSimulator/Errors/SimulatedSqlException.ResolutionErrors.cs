@@ -130,6 +130,21 @@ partial class SimulatedSqlException
         new($"Procedure or function {name} has too many arguments specified.", 8144, 16, state);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 8178 — an <c>sp_executesql</c> parameter that
+    /// the declaration string declares but no argument supplies. An explicit
+    /// <c>NULL</c> counts as supplied; OUTPUT parameters need supplying like
+    /// any other; and where several are missing, the <em>first declared</em>
+    /// one is named. The quoted query is the two argument strings verbatim —
+    /// the declarations parenthesized, then the statement, with whatever
+    /// spacing they were written with. Wording, severity and state all
+    /// probe-confirmed against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ParameterizedQueryExpectsParameter(
+        string parameterDefinitions, string statement, string parameterName) =>
+        new($"The parameterized query '({parameterDefinitions}){statement}' expects the parameter "
+            + $"'{parameterName}', which was not supplied.", 8178, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 217 — fired when scalar UDF / proc / trigger /
     /// view recursion exceeds the 32-level cap (probe-confirmed verbatim).
     /// Backed by <see cref="SimulatedDbConnection.NestingLevel"/>; the call

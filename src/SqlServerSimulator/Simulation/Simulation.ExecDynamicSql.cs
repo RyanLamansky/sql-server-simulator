@@ -91,19 +91,42 @@ partial class Simulation
         var context = batch.Parser;
 
         // Argument 1: SQL text (literal or @-variable, coerced to string).
+        // A leading `@name =` is accepted and the name discarded: real binds
+        // sp_executesql's first two arguments purely by position and does not
+        // check what they were called, so `@stmt =`, `@statement =`, `@sql =`
+        // and even `@nonsense =` all run the same statement (probe-confirmed).
+        // Writing the second parameter's name first doesn't reorder them
+        // either — real takes `@params = N'@x int', @stmt = N'…'` as
+        // statement-then-declarations and tries to run `@x int` as the batch.
+        // This is what the SSMS / DacFx "create the stub if absent" idiom
+        // emits, so it is the common spelling rather than an exotic one.
+        // Whether an argument was named matters even though its name is
+        // discarded: real's Msg 119 counts the whole list, so naming the
+        // first argument obliges every later one to be named too.
+        var sawNamedArgument = TryConsumeSpExecuteSqlArgumentName(context) is not null;
         var (sqlRaw, _) = ParseSpExecuteSqlValueArg(context, batch);
         var sqlValue = sqlRaw.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
         var hasMoreArgs = context.Token is Operator { Character: ',' };
 
         // Argument 2 (optional): parameter-declaration string.
         List<SpExecuteSqlParam>? declaredParams = null;
+        // Kept verbatim: Msg 8178 quotes the two argument strings exactly as
+        // written, spacing included.
+        var paramDefsText = "";
         if (hasMoreArgs)
         {
             context.MoveNextRequired();
+            if (TryConsumeSpExecuteSqlArgumentName(context) is not null)
+                sawNamedArgument = true;
+            else if (sawNamedArgument)
+                throw SimulatedSqlException.MustPassParameterAsNamed();
             var (paramDefsRaw, _) = ParseSpExecuteSqlValueArg(context, batch);
             var paramDefs = paramDefsRaw.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
             if (!paramDefs.IsNull)
-                declaredParams = ParseSpExecuteSqlParamDefinitions(paramDefs.AsString, batch.Connection);
+            {
+                paramDefsText = paramDefs.AsString;
+                declaredParams = ParseSpExecuteSqlParamDefinitions(paramDefsText, batch.Connection);
+            }
             hasMoreArgs = context.Token is Operator { Character: ',' };
         }
 
@@ -112,21 +135,15 @@ partial class Simulation
         while (hasMoreArgs)
         {
             context.MoveNextRequired();
-            string? argName = null;
-            if (context.Token is AtPrefixedString candidateName)
-            {
-                var checkpoint = context.SaveCheckpoint();
-                context.MoveNextRequired();
-                if (context.Token is Operator { Character: '=' })
-                {
-                    argName = candidateName.Value;
-                    context.MoveNextRequired();
-                }
-                else
-                {
-                    context.RestoreCheckpoint(checkpoint);
-                }
-            }
+            // Unlike the first two, a trailing value argument's name is
+            // load-bearing: real matches it against the declaration list, so
+            // `@y = 2, @x = 1` binds by name rather than by position
+            // (probe-confirmed), and an OUTPUT writeback needs it.
+            var argName = TryConsumeSpExecuteSqlArgumentName(context);
+            if (argName is not null)
+                sawNamedArgument = true;
+            else if (sawNamedArgument)
+                throw SimulatedSqlException.MustPassParameterAsNamed();
             var (argValue, argOutputSlot) = ParseSpExecuteSqlValueArg(context, batch);
             argumentValues.Add((argName, argValue, argOutputSlot));
             hasMoreArgs = context.Token is Operator { Character: ',' };
@@ -153,6 +170,12 @@ partial class Simulation
             var positional = 0;
             var bound = new SqlValue?[declaredParams.Count];
             var boundOutputSlots = new VariableSlot?[declaredParams.Count];
+            // Real checks the declarations for completeness *before* it
+            // complains about a name it doesn't recognize, so an unknown name
+            // alongside a missing declared one reports the missing one
+            // (probe-confirmed) — hence the flag rather than an immediate
+            // throw.
+            var sawUnknownName = false;
             foreach (var (name, value, outputSlot) in argumentValues)
             {
                 int idx;
@@ -174,7 +197,10 @@ partial class Simulation
                         }
                     }
                     if (idx < 0)
-                        throw SimulatedSqlException.MustDeclareScalarVariable(name);
+                    {
+                        sawUnknownName = true;
+                        continue;
+                    }
                 }
                 bound[idx] = value;
                 boundOutputSlots[idx] = outputSlot;
@@ -182,12 +208,27 @@ partial class Simulation
             for (var i = 0; i < declaredParams.Count; i++)
             {
                 var param = declaredParams[i];
-                var initialValue = bound[i]?.CoerceTo(param.Type) ?? SqlValue.Null(param.Type);
+                // Every declared parameter has to be supplied — an explicit
+                // NULL counts, an omission does not, and OUTPUT parameters are
+                // no exception. Where several are missing real names the first
+                // declared one, which is what this loop's order gives.
+                // The stored name is unprefixed (it keys a variable slot); the
+                // message spells it the way the declaration did.
+                if (bound[i] is null)
+                    throw SimulatedSqlException.ParameterizedQueryExpectsParameter(paramDefsText, sqlText, "@" + param.Name);
+                var initialValue = bound[i]!.Value.CoerceTo(param.Type);
                 var slot = new VariableSlot(param.Type, declaredMaxLength: null, initialValue, parameter: null);
                 preDeclared[param.Name] = slot;
                 if (param.IsOutput && boundOutputSlots[i] is { } caller)
                     outputBindings.Add((param, caller));
             }
+
+            // Only once every declaration is satisfied does an unrecognized
+            // argument name become the complaint — real reports the missing
+            // declaration first when both are wrong. The name is empty, which
+            // is why real's message carries a double space.
+            if (sawUnknownName)
+                throw SimulatedSqlException.TooManyArgumentsToFunction("");
         }
 
         var dynamicBatch = ExecuteDynamicBatch(batch, sqlText, preDeclared);
@@ -215,6 +256,28 @@ partial class Simulation
     /// (<see cref="ParseExecArgument"/>) but doesn't enforce the no-mixed-
     /// position rule — sp_executesql's grammar is more permissive.
     /// </summary>
+    /// <summary>
+    /// Consumes an <c>@name =</c> prefix and returns the name, leaving the
+    /// cursor on the value. Returns null with the cursor unmoved when the next
+    /// token isn't one — an <c>@</c>-variable holding the argument's value
+    /// looks identical until the following token settles it, which is why this
+    /// runs off a checkpoint rather than a single-token peek.
+    /// </summary>
+    private static string? TryConsumeSpExecuteSqlArgumentName(ParserContext context)
+    {
+        if (context.Token is not AtPrefixedString candidate)
+            return null;
+        var checkpoint = context.SaveCheckpoint();
+        context.MoveNextRequired();
+        if (context.Token is Operator { Character: '=' })
+        {
+            context.MoveNextRequired();
+            return candidate.Value;
+        }
+        context.RestoreCheckpoint(checkpoint);
+        return null;
+    }
+
     private static (SqlValue Value, VariableSlot? OutputSlot) ParseSpExecuteSqlValueArg(ParserContext context, BatchContext batch)
     {
         if (context.Token is AtPrefixedString varRef)

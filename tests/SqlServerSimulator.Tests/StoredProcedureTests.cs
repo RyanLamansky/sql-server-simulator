@@ -419,6 +419,169 @@ public sealed class StoredProcedureTests
         AreEqual(123, reader.GetInt32(0));
     }
 
+    // === sp_executesql's first two arguments bind by POSITION ===
+    //
+    // Real accepts a `@name =` prefix on them and does not check the name:
+    // `@stmt`, `@statement`, `@sql` and `@nonsense` all run the statement
+    // (probe-confirmed against SQL Server 2025). Only the trailing value
+    // arguments are matched against the declaration list. `@statement =` is
+    // what the SSMS / DacFx "create the stub if it isn't there" idiom emits,
+    // so this is the common spelling rather than an exotic one.
+
+    [TestMethod]
+    [DataRow("@stmt")]
+    [DataRow("@statement")]
+    [DataRow("@sql")]
+    [DataRow("@nonsense")]      // real doesn't check the name, so neither do we
+    [DataRow("@STATEMENT")]     // and the comparison is case-insensitive anyway
+    public void SpExecuteSql_FirstArgumentByAnyName_Runs(string name)
+    {
+        using var connection = Open();
+        AreEqual(7, connection.CreateCommand($"exec sp_executesql {name} = N'select 7'").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void SpExecuteSql_SecondArgumentByName_Runs()
+    {
+        using var connection = Open();
+        AreEqual(42, connection.CreateCommand(
+            "exec sp_executesql @stmt = N'select @p * 2', @params = N'@p int', @p = 21").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void SpExecuteSql_NamesDoNotReorderTheFirstTwoArguments()
+    {
+        // Naming the declarations first doesn't make them the declarations.
+        // Msg 8178 quotes the query it assembled, so the message itself shows
+        // which argument became which: the first one *written* is the
+        // statement whatever it was called (probe-confirmed).
+        using var connection = Open();
+        var ex = Throws<DbException>(() => connection.CreateCommand(
+            "exec sp_executesql @params = N'select 5 as v', @stmt = N'@x int'").ExecuteScalar());
+        AreEqual("8178", ex.Data["HelpLink.EvtID"]);
+        StringContains(ex.Message, "'(@x int)select 5 as v'");
+    }
+
+    // === Every declared parameter has to be supplied ===
+
+    [TestMethod]
+    public void SpExecuteSql_DeclaredParameterNotSupplied_Raises8178()
+    {
+        using var connection = Open();
+        var ex = Throws<DbException>(() => connection.CreateCommand(
+            "exec sp_executesql N'select @x as v', N'@x int'").ExecuteScalar());
+        AreEqual("8178", ex.Data["HelpLink.EvtID"]);
+        // The quoted text is the two argument strings verbatim.
+        StringContains(ex.Message, "The parameterized query '(@x int)select @x as v' expects the parameter '@x', which was not supplied.");
+    }
+
+    [TestMethod]
+    public void SpExecuteSql_ExplicitNullSatisfiesADeclaredParameter()
+    {
+        using var connection = Open();
+        AreEqual(DBNull.Value, connection.CreateCommand(
+            "exec sp_executesql N'select @x as v', N'@x int', @x = null").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void SpExecuteSql_SeveralMissing_NamesTheFirstDeclared()
+    {
+        using var connection = Open();
+        var ex = Throws<DbException>(() => connection.CreateCommand(
+            "exec sp_executesql N'select @x + @y as v', N'@x int, @y int', @y = 2").ExecuteScalar());
+        StringContains(ex.Message, "expects the parameter '@x'");
+    }
+
+    [TestMethod]
+    public void SpExecuteSql_OutputParameterMustBeSuppliedToo()
+    {
+        using var connection = Open();
+        var ex = Throws<DbException>(() => connection.CreateCommand(
+            "declare @o int; exec sp_executesql N'set @o = 1', N'@o int output'").ExecuteScalar());
+        AreEqual("8178", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void SpExecuteSql_UndeclaredArgumentName_Raises8144()
+    {
+        using var connection = Open();
+        // Real names an empty procedure here, so the message carries the
+        // double space that leaves behind.
+        var ex = Throws<DbException>(() => connection.CreateCommand(
+            "exec sp_executesql N'select 1 as v', N'@x int', @x = 1, @zz = 2").ExecuteScalar());
+        AreEqual("8144", ex.Data["HelpLink.EvtID"]);
+        StringContains(ex.Message, "Procedure or function  has too many arguments specified.");
+    }
+
+    [TestMethod]
+    public void SpExecuteSql_MissingDeclarationBeatsAnUnknownName()
+    {
+        // Both are wrong; real reports the missing declaration first.
+        using var connection = Open();
+        var ex = Throws<DbException>(() => connection.CreateCommand(
+            "exec sp_executesql N'select @x as v', N'@x int', @zz = 1").ExecuteScalar());
+        AreEqual("8178", ex.Data["HelpLink.EvtID"]);
+    }
+
+    [TestMethod]
+    public void SpExecuteSql_PositionalAfterNamed_Raises119()
+    {
+        // The rule spans the whole argument list, so naming the *first*
+        // argument already obliges the second to be named.
+        using var connection = Open();
+        _ = AssertSqlError(connection,
+            "exec sp_executesql @stmt = N'select @x as v', N'@x int', @x = 9", 119);
+    }
+
+    [TestMethod]
+    public void SpExecuteSql_TrailingValueArgumentsBindByName()
+    {
+        // Supplied in the opposite order to the declarations: name-matched
+        // gives x=1, positional would give x=2.
+        using var connection = Open();
+        using var reader = connection.CreateCommand(
+            "exec sp_executesql N'select @x as x, @y as y', N'@x int, @y int', @y = 2, @x = 1").ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(1, reader.GetInt32(0));
+        AreEqual(2, reader.GetInt32(1));
+    }
+
+    [TestMethod]
+    public void SpExecuteSql_CreateStubIfAbsentIdiom_Creates()
+    {
+        // The reported shape, verbatim in structure: the guard, the two-part
+        // procedure name, the named @statement, and a body that is just `AS`.
+        using var connection = Open();
+        _ = connection.CreateCommand("""
+            IF NOT EXISTS (SELECT * FROM sys.objects
+                           WHERE object_id = OBJECT_ID(N'[dbo].[xchk_stub]') AND type in (N'P', N'PC'))
+            BEGIN
+               EXEC dbo.sp_executesql @statement = N'CREATE PROCEDURE [dbo].[xchk_stub] AS'
+            END
+            """).ExecuteNonQuery();
+        AreEqual(1, connection.CreateCommand(
+            "select count(*) from sys.objects where name = 'xchk_stub' and type = 'P'").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void SpExecuteSql_CreateStubIfAbsentIdiom_IsIdempotent()
+    {
+        using var connection = Open();
+        const string Idiom = """
+            IF NOT EXISTS (SELECT * FROM sys.objects
+                           WHERE object_id = OBJECT_ID(N'[dbo].[xchk_stub2]') AND type in (N'P', N'PC'))
+            BEGIN
+               EXEC dbo.sp_executesql @statement = N'CREATE PROCEDURE [dbo].[xchk_stub2] AS'
+            END
+            """;
+        _ = connection.CreateCommand(Idiom).ExecuteNonQuery();
+        // The guard has to see the procedure the first run created, or the
+        // second run raises Msg 2714 on the duplicate name.
+        _ = connection.CreateCommand(Idiom).ExecuteNonQuery();
+        AreEqual(1, connection.CreateCommand(
+            "select count(*) from sys.objects where name = 'xchk_stub2' and type = 'P'").ExecuteScalar());
+    }
+
     [TestMethod]
     public void Catalog_Sys_Procedures_Lists_Created_Procs()
     {

@@ -433,6 +433,78 @@ public sealed class ObjectIdTests
             "select object_name(parent_object_id) from sys.objects where object_id = object_id('df1')"));
     }
 
+    // === The per-statement freeze ===
+    //
+    // A call whose arguments read no column answers the same thing for every
+    // row, so it is evaluated once per statement — as real does, where it is a
+    // constant scalar in the plan. Resolving a name that matches nothing is
+    // the expensive direction (a hit stops at the first dictionary holding it;
+    // a miss walks every schema's objects and every table's constraints), so
+    // re-running it per row made the ubiquitous
+    // `WHERE object_id = OBJECT_ID(N'[dbo].[missing]')` guard quadratic. These
+    // pin the freeze's *boundaries*, which is where it could go wrong.
+
+    [TestMethod]
+    public void ObjectIdFreeze_DoesNotOutliveTheStatement()
+    {
+        // The object appears between two statements of the same batch, so the
+        // second must not be served the first's NULL.
+        var sim = new Simulation();
+        using var reader = sim.CreateOpenConnection().CreateCommand("""
+            select object_id('freeze_t') as before_create;
+            create table freeze_t (a int);
+            select object_id('freeze_t') as after_create;
+            """).ExecuteReader();
+        IsTrue(reader.Read());
+        IsTrue(reader.IsDBNull(0));
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read());
+        IsFalse(reader.IsDBNull(0));
+    }
+
+    [TestMethod]
+    public void ObjectIdFreeze_DoesNotOutliveALoopIteration()
+    {
+        // A WHILE body re-dispatches its statements, so each pass re-resolves.
+        var sim = new Simulation();
+        AreEqual(1, sim.ExecuteScalar("""
+            declare @seen int = 0, @i int = 0;
+            while @i < 2
+            begin
+                if object_id('loop_t') is not null set @seen = 1;
+                if @i = 0 create table loop_t (a int);
+                set @i = @i + 1;
+            end
+            select @seen;
+            """));
+    }
+
+    [TestMethod]
+    public void ObjectIdOfAColumn_IsNotFrozen()
+    {
+        // The argument reads a column, so the call is row-dependent and each
+        // row has to resolve its own name — freezing here would answer every
+        // row with the first one's id.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table freeze_a (x int); create table freeze_b (x int);
+            create table names (n sysname);
+            insert names values ('freeze_a'), ('freeze_b');
+            """);
+        AreEqual(2, sim.ExecuteScalar("select count(distinct object_id(n)) from names"));
+    }
+
+    [TestMethod]
+    public void ObjectIdOfAMissingName_StillAnswersNullEveryRow()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table freeze_rows (x int); insert freeze_rows values (1), (2), (3)");
+        AreEqual(3, sim.ExecuteScalar(
+            "select count(*) from freeze_rows where object_id(N'[dbo].[no_such_object]') is null"));
+        AreEqual(0, sim.ExecuteScalar(
+            "select count(*) from freeze_rows where object_id(N'[dbo].[no_such_object]') is not null"));
+    }
+
     private static void IsFalseDbNull(DbDataReader reader)
     {
         using (reader)

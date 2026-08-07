@@ -670,3 +670,13 @@ That scoping is what lets `sp_MSforeachdb`'s `'USE [?]; …'` idiom run each com
 - Remaining arguments bind values to declared params (positional or named); `OUTPUT` keyword on an `@variable`-valued arg writes the dynamic batch's final variable value back to the caller's slot at exit.
 - The pre-declared `@`-variables exist as the dynamic batch's own `Variables` dict — they don't leak into the outer scope.
 - Probe-confirmed: `sp_executesql` works with no parameters (`EXEC sp_executesql N'SELECT 42'`).
+- **The first two arguments bind by position and their names are not checked.**
+  A `@name =` prefix is accepted and discarded, so `@stmt =`, `@statement =`, `@sql =` and even `@nonsense =` all run the same statement — probe-confirmed.
+  Naming them doesn't reorder them either: `@params = N'select 5 as v', @stmt = N'@x int'` takes the *first written* argument as the statement, which Msg 8178 then quotes back as `'(@x int)select 5 as v'`.
+  This matters because `EXEC dbo.sp_executesql @statement = N'CREATE PROCEDURE …'` is what the SSMS / DacFx "create the stub if it isn't there" idiom emits, wrapped in an `IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(…) AND type in (N'P', N'PC'))` guard — one of the most common generated scripts there is.
+  Only the *trailing* value arguments are matched against the declaration list, where the name is load-bearing (`@y = 2, @x = 1` binds by name, and an OUTPUT writeback needs it).
+- **Every declared parameter must be supplied** — **Msg 8178**, quoting the two argument strings verbatim as `'(<declarations>)<statement>'`, spacing and all.
+  An explicit `NULL` counts as supplied; an omission does not; OUTPUT parameters are no exception; and where several are missing the **first declared** one is named.
+  An argument name matching no declaration is **Msg 8144** (`Procedure or function  has too many arguments specified.` — real names an empty procedure there, hence the double space), and a missing declaration is reported *ahead* of an unknown name when both are wrong.
+  Once any argument has been given as `@name = value`, every later one must be too — **Msg 119**, and the rule spans the whole list, so naming the first argument already obliges the second.
+  All of it probe-confirmed against SQL Server 2025, severity and state included.

@@ -210,6 +210,11 @@ Backs `OBJECT_ID()` plus `sys.tables` / `sys.objects` / `sys.columns.object_id`.
 **`OBJECT_ID(name [, type])`** scalar (`Parser/Expressions/ObjectId.cs`): returns the `int` ObjectId of the named object, or NULL when not found / wrong type / malformed name.
 The name is a runtime string parsed as a 1–3-part dotted identifier with bracket-quoting (`'[dbo].[foo]'`, `'dbo.foo'`, `'simulated.dbo.foo'` all resolve identically); 4-segment names return NULL (linked-server form unmodeled).
 The type filter is compared against the object's `char(2)` type code, so ANSI padding decides what whitespace it tolerates (all probe-confirmed): `'U'`, `'u'` and `'U '` match user tables, while `'U  '` and `'PK '` are a character too long to be a `char(2)` value at all, and `' U'` / `'U' + char(9)` are different `char(2)` values.
+
+**Frozen for the statement when its arguments read no column** (`StatementContext.StatementScopedValues`, the mechanism the `RAND()` call-site family uses).
+Real does the same — it is a constant scalar in the plan — and the cost of not doing it is severe in one direction: resolving a name that matches **nothing** is the expensive case, because a hit stops at the first dictionary holding it while a miss walks every schema's tables, views and procedures and then every table's constraints before answering NULL.
+Re-evaluated per row, the ubiquitous `WHERE object_id = OBJECT_ID(N'[dbo].[missing]')` guard measured **6.9 s** over a 300-table database against real's 3 ms; frozen, 16 ms.
+The freeze is bounded by what a statement can observe: it is cleared at the top of each statement iteration, so a `CREATE` earlier in the same batch and a `WHILE` body's later pass both see fresh answers, and an argument that reads a column makes the call row-dependent so it is not frozen at all.
 `'XX'` and `''` → NULL for the ordinary reason.
 Modeled codes: `U` (table), `V` (view, catalog views included), `P` (procedure), `FN` / `IF` (scalar UDF / inline TVF), `TR` (DML trigger), `SN` (synonym), and the five constraint families `PK` / `UQ` / `C` / `D` / `F`; the rest → NULL until those features land.
 A NULL on any argument propagates NULL.
