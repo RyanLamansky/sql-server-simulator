@@ -44,6 +44,11 @@ internal sealed class DataLength(ParserContext context) : Expression
             // report that width: real sizes the value by its own magnitude, so
             // a decimal(38, 0) holding 1 reports 5 rather than the column's 17.
             DecimalSqlType => DecimalSqlType.ValueWidth(value.AsDecimal38.Magnitude),
+            // xml reports the size of real's parsed binary form, not of the
+            // text the simulator stores — two instances that parse identically
+            // report the same size. GetVariableByteCount stays the text count,
+            // which is what the storage layer needs.
+            XmlSqlType => XmlBinarySize.Measure(value.AsString),
             { IsFixedLength: true } => value.Type.FixedLength,
             _ => value.Type.GetVariableByteCount(value),
         };

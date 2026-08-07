@@ -6,6 +6,20 @@ The value of shipping this is grammar compatibility: applications with `WITH (NO
 
 Implementation lives in [`src/SqlServerSimulator/Parser/Selection.Hints.cs`](../../src/SqlServerSimulator/Parser/Selection.Hints.cs).
 
+## Inline join-algorithm hints
+
+`MERGE` / `HASH` / `LOOP` / `REMOTE` between the join type and `JOIN` — `INNER MERGE JOIN`, `LEFT OUTER HASH JOIN`, `FULL LOOP JOIN`.
+Accept-and-discard: the hint names the physical operator real should use, and the simulator picks its own strategy, so it can never change an answer (probe-confirmed — hinted and unhinted forms return identical rows).
+Distinct from the statement-level `OPTION (MERGE JOIN)` spelling, which is parsed separately.
+
+Real accepts all four hints against **every** join type, including combinations that look implausible: `FULL LOOP JOIN` and `RIGHT LOOP JOIN` are both legal, so there is no pairing to refuse.
+It does require the type keyword, and refuses three shapes (all probe-confirmed):
+
+- `CROSS <hint> JOIN` → **Msg 156** naming the hint as a keyword.
+- Two hints (`INNER MERGE HASH JOIN`) → **Msg 102** on the second.
+- A word that isn't a hint (`INNER NONSENSE JOIN`) → **Msg 155** `'nonsense' is not a recognized join option.` — this position's own error, not the generic syntax one.
+
+
 ## Table hints
 
 Position varies by site (probe-confirmed against SQL Server 2025):

@@ -3203,12 +3203,53 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Consumes the optional inline join-algorithm hint that may sit between a
+    /// join type and <c>JOIN</c> — <c>INNER MERGE JOIN</c>,
+    /// <c>LEFT OUTER HASH JOIN</c>, <c>FULL LOOP JOIN</c>. Accept-and-discard:
+    /// the hint names the physical operator real should use, and the simulator
+    /// picks its own strategy, so it cannot change an answer (probe-confirmed —
+    /// hinted and unhinted forms return identical rows).
+    /// </summary>
+    /// <remarks>
+    /// Real accepts all four hints against every join type, including the
+    /// combinations that look implausible (<c>FULL LOOP JOIN</c> is legal), and
+    /// requires the type keyword: a bare <c>HASH JOIN</c> or <c>MERGE JOIN</c>
+    /// is refused, and so is <c>CROSS MERGE JOIN</c>, which is why neither the
+    /// CROSS arm nor the bare-<c>JOIN</c> arm calls this. A word here that
+    /// isn't a hint is Msg 155 rather than the generic syntax error, and a
+    /// second hint is Msg 102 on the second one.
+    /// </remarks>
+    private static void ConsumeOptionalJoinHint(ParserContext context)
+    {
+        if (!IsJoinHint(context.Token))
+        {
+            // Only a bare identifier reaches Msg 155; a reserved keyword here
+            // is the ordinary "that isn't JOIN" syntax error the caller raises.
+            if (context.Token is UnquotedString word)
+                throw SimulatedSqlException.NotARecognizedJoinOption(word.Value);
+            return;
+        }
+        context.MoveNextRequired();
+        if (IsJoinHint(context.Token))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    private static bool IsJoinHint(Token? token) => token switch
+    {
+        ReservedKeyword { Keyword: Keyword.Merge } => true,
+        UnquotedString word => BuiltInToken.Equals(word.Value, "HASH")
+            || BuiltInToken.Equals(word.Value, "LOOP")
+            || BuiltInToken.Equals(word.Value, "REMOTE"),
+        _ => false,
+    };
+
+    /// <summary>
     /// If <see cref="ParserContext.Token"/> is one of the JOIN-introducing
     /// keywords (<c>INNER</c> / <c>LEFT</c> / <c>RIGHT</c> / <c>FULL</c> /
     /// <c>CROSS</c> / bare <c>JOIN</c>), consumes it (plus an optional
-    /// <c>OUTER</c> after LEFT/RIGHT/FULL and the required <c>JOIN</c>
-    /// keyword) and returns the join kind. Returns false otherwise (no
-    /// advancement).
+    /// <c>OUTER</c> after LEFT/RIGHT/FULL, an optional join-algorithm hint,
+    /// and the required <c>JOIN</c> keyword) and returns the join kind.
+    /// Returns false otherwise (no advancement).
     /// </summary>
     private static bool TryParseJoinKeyword(ParserContext context, out JoinKind kind)
     {
@@ -3220,6 +3261,7 @@ internal sealed partial class Selection
         {
             case Keyword.Inner:
                 context.MoveNextRequired();
+                ConsumeOptionalJoinHint(context);
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 kind = JoinKind.Inner;
@@ -3233,6 +3275,7 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
                 if (context.Token is ReservedKeyword { Keyword: Keyword.Outer })
                     context.MoveNextRequired();
+                ConsumeOptionalJoinHint(context);
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.RecursiveBranchConstructs.OuterJoin = true;
@@ -3243,6 +3286,7 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
                 if (context.Token is ReservedKeyword { Keyword: Keyword.Outer })
                     context.MoveNextRequired();
+                ConsumeOptionalJoinHint(context);
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.RecursiveBranchConstructs.OuterJoin = true;
@@ -3253,6 +3297,7 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
                 if (context.Token is ReservedKeyword { Keyword: Keyword.Outer })
                     context.MoveNextRequired();
+                ConsumeOptionalJoinHint(context);
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.RecursiveBranchConstructs.OuterJoin = true;
@@ -3271,7 +3316,13 @@ internal sealed partial class Selection
                     kind = JoinKind.CrossApply;
                     return true;
                 }
-                throw SimulatedSqlException.SyntaxErrorNear(context);
+                // CROSS takes no join-algorithm hint (real refuses
+                // `CROSS MERGE JOIN`), and names the offending word as a
+                // keyword when it is one — MERGE being the case that reaches
+                // here in practice.
+                throw context.Token is ReservedKeyword crossKeyword
+                    ? SimulatedSqlException.SyntaxErrorNearKeyword(crossKeyword)
+                    : SimulatedSqlException.SyntaxErrorNear(context);
 
             // OUTER as a leading keyword introduces OUTER APPLY (the
             // LEFT/RIGHT/FULL OUTER forms consume OUTER inside their own

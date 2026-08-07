@@ -668,4 +668,13 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException IndexHintNeedsWithKeyword() =>
         new("Incorrect syntax near 'INDEX'. If this is intended as a part of a table hint, A WITH keyword and parenthesis are now required. See SQL Server Books Online for proper syntax.", 1018, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 155 — a word sitting between a join type and
+    /// <c>JOIN</c> that isn't one of the four inline join-algorithm hints
+    /// (<c>MERGE</c> / <c>HASH</c> / <c>LOOP</c> / <c>REMOTE</c>). Wording,
+    /// severity and state probe-confirmed against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException NotARecognizedJoinOption(string word) =>
+        new($"'{word}' is not a recognized join option.", 155, 15, 1);
 }

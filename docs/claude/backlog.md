@@ -318,6 +318,9 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **A GROUP BY view's aggregate column is Msg 4403** where real reports **Msg 4406** — real splits by which column the write names, `SET <group-by column>` being 4403 and `SET <aggregate column>` 4406 since the aggregate is a derived field (probe-confirmed, through a chained view too).
   `RejectionReason` settles the whole view before any column is looked at, so the per-column gate never runs on a shape that already failed; letting the 4406 walk run first on an aggregate / DISTINCT body is the work.
   → [`programmable.md`](programmable.md#updatable-views-dml-through-views).
+- **A bare join-algorithm hint with no join type names the wrong token** — `FROM a HASH JOIN b` is Msg 102 near `join` where real is Msg 102 near `hash`, and `FROM a MERGE JOIN b` is Msg 102 near `join` where real is Msg 156 near the keyword `join`.
+  Both engines refuse the statement; the hint word is simply consumed as the source's alias before the failure, so the error lands one token later.
+  Reproducing it means recognizing a hint word in the alias position when `JOIN` follows — see [`query-hints.md`](query-hints.md#inline-join-algorithm-hints).
 - **A function call with a trailing comma reports the arity error, not the syntax error** — `ISNULL(1, 2,)` is Msg 174 (`requires 2 argument(s)`) where real is Msg 102 near `)`.
   The argument-count check runs on what parsed, so the empty final argument is counted rather than rejected; real refuses the list first.
   Both engines refuse the call, and only malformed input reaches it.

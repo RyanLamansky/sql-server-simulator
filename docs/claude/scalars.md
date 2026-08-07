@@ -485,6 +485,11 @@ Probe-confirmed against SQL Server 2025:
   A **`decimal` / `numeric`** operand is sized by the magnitude the value actually holds, *not* by its declared precision — one sign byte plus as many 32-bit mantissa words as the unscaled magnitude needs, so 5 / 9 / 13 / 17 bytes as `|unscaled|` crosses 2^32 / 2^64 / 2^96.
   `CAST(1 AS decimal(38, 0))` reports 5 while the column that stores it occupies 17, and the scale counts toward the magnitude, so `decimal(38, 10)` holding `1.0` reports 9 for an unscaled 10^10.
   The rule is uniform across columns, variables, literals, arithmetic and aggregate results (every band boundary probe-confirmed), which is why `DecimalSqlType.ValueWidth` is separate from the `StorageWidth` the row encoder lays out — the two answer different questions and only the encoder's is precision-driven.
+  An **`xml`** operand is sized the same way — by real's *parsed binary* form rather than by the text, so two instances that parse identically report the same size (`<a/>` and `<a></a>` are both 16, and CDATA measures as the text it carries).
+  `Storage/XmlBinarySize.cs` carries the rules: a 5-byte document overhead; a **name dictionary** where a name costs `9 + 2 × len` on first appearance and a flat 3 thereafter, so a document of repeated elements grows far more slowly than one of distinct ones; `2 + 2 × len` for a text or comment node, counted in **UTF-16 code units** (an astral character costs two); `5 + 2 × target + 2 × value` for a processing instruction; one byte for an element carrying any attribute, then `nameRef − 1` plus `2 + 2 × len(value)` per attribute; and a **7-bit varint length prefix**, so every counted string gains a byte at 128 characters and another at 16384.
+  Whitespace-only element content is not a node at all.
+  Namespaces price separately: a declaration is `20 + 4 × len(uri) + 2 × len(prefix)`, re-declaring a prefix already seen is `4 + 2 × len(uri)`, and re-pointing the *default* namespace at a URI the document hasn't carried is `6 + 4 × len(uri)` — the one asymmetry, since a named prefix takes the cheaper form however new its URI.
+  `XmlDataLengthCorpusTests` is the guard: 49 documents plus the varint boundaries, every expected value read from the reference server, including shapes the rules were not derived from.
 
 ## Gzip scalars: `COMPRESS` / `DECOMPRESS`
 
