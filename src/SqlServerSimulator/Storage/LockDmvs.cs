@@ -12,7 +12,10 @@ namespace SqlServerSimulator.Storage;
 /// Neither DMV takes the manager's gate during enumeration — concurrent
 /// acquires / releases may shift the result between rows, but the
 /// per-resource snapshot stays consistent because <see cref="LockResource.Holders"/>
-/// is read field-by-field and a torn row is not possible.
+/// is read field-by-field and a torn row is not possible. That a blocked
+/// session appears at all rests on the acquirer keeping its registration set
+/// for the whole wait rather than per wait slice, so a waiter re-checking its
+/// conflict can't read as idle here.
 /// </summary>
 internal static class LockDmvs
 {

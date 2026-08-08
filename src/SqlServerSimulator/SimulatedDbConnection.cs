@@ -453,9 +453,12 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <summary>
     /// Resource this connection is currently blocked waiting to acquire,
     /// or <c>null</c> when not in a wait state. Set under the
-    /// <see cref="LockManager"/> gate just before <see cref="Monitor.Wait(object, int)"/>
-    /// suspends the caller; cleared in the wait's <c>finally</c> so an
-    /// exception (Msg 1222 / 1205) leaves no stale edge. Read by
+    /// <see cref="LockManager"/> gate when the acquisition first blocks and
+    /// left set until it finishes — the wait re-checks its conflict between
+    /// <see cref="Monitor.Wait(object, int)"/> slices, and dropping the edge
+    /// there would read as "not blocked" to the DMVs, which enumerate without
+    /// the gate. Cleared once on the way out, exception paths (Msg 1222 /
+    /// 1205) included, so no stale edge survives. Read by
     /// other connections' cycle-detection walks (under the same gate, so
     /// the snapshot is consistent) to spot a wait-for-graph cycle that
     /// includes this connection.

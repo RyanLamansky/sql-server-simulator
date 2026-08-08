@@ -304,40 +304,44 @@ internal sealed class LockManager
             // where the answer already lives.
             var cancellation = owner.TryResolveOwner()?.ExecutionCancellationToken ?? CancellationToken.None;
 
-            while (true)
+            try
             {
-                if (TryGrant(resource, mode, owner))
-                    return waited ? LockAcquireOutcome.GrantedAfterWait : LockAcquireOutcome.Granted;
-
-                // Same-thread conflict → immediate Msg 1205. This thread
-                // is the executor for both the caller and a conflicting
-                // holder; no progress possible.
-                if (IsConflictingHolderOnSameThread(resource, mode, owner))
-                    return LockAcquireOutcome.Deadlocked;
-
-                // Cross-thread cycle detection. Walk the wait-for graph
-                // from each conflicting holder; if any walk reaches the
-                // caller, a cycle exists and the caller is the victim.
-                if (WouldCreateCycle(resource, mode, owner))
-                    return LockAcquireOutcome.Deadlocked;
-
-                // Timeout==0 = fail-fast.
-                if (timeoutMillis == 0)
-                    return LockAcquireOutcome.TimedOut;
-
-                var remaining = deadline < 0 ? Timeout.Infinite : (int)Math.Max(0, deadline - Environment.TickCount64);
-                if (timeoutMillis > 0 && remaining == 0)
-                    return LockAcquireOutcome.TimedOut;
-
-                // Mark the caller as waiting on this resource so other
-                // connections' cycle walks can see the edge. Cleared in
-                // finally so an exception path (Msg 1222 / 1205) leaves
-                // no stale wait state. Set under the gate, read under
-                // the gate — snapshot is consistent.
-                owner.WaitingOnResource = resource;
-                owner.WaitingForMode = mode;
-                try
+                while (true)
                 {
+                    if (TryGrant(resource, mode, owner))
+                        return waited ? LockAcquireOutcome.GrantedAfterWait : LockAcquireOutcome.Granted;
+
+                    // Same-thread conflict → immediate Msg 1205. This thread
+                    // is the executor for both the caller and a conflicting
+                    // holder; no progress possible.
+                    if (IsConflictingHolderOnSameThread(resource, mode, owner))
+                        return LockAcquireOutcome.Deadlocked;
+
+                    // Cross-thread cycle detection. Walk the wait-for graph
+                    // from each conflicting holder; if any walk reaches the
+                    // caller, a cycle exists and the caller is the victim.
+                    if (WouldCreateCycle(resource, mode, owner))
+                        return LockAcquireOutcome.Deadlocked;
+
+                    // Timeout==0 = fail-fast.
+                    if (timeoutMillis == 0)
+                        return LockAcquireOutcome.TimedOut;
+
+                    var remaining = deadline < 0 ? Timeout.Infinite : (int)Math.Max(0, deadline - Environment.TickCount64);
+                    if (timeoutMillis > 0 && remaining == 0)
+                        return LockAcquireOutcome.TimedOut;
+
+                    // Mark the caller as waiting on this resource so other
+                    // connections' cycle walks can see the edge. Written once
+                    // and left set for the whole wait — a re-check between
+                    // slices must not drop the edge, because the DMVs read it
+                    // without the gate (see LockDmvs) and would report a
+                    // blocked session as idle for as long as this thread stays
+                    // descheduled mid-check. Cleared once on the way out, so
+                    // an exception path (Msg 1222 / 1205) leaves no stale
+                    // wait state either.
+                    owner.WaitingOnResource = resource;
+                    owner.WaitingForMode = mode;
                     waited = true;
                     // Monitor.Wait can't observe a token, so the wait is
                     // sliced: a blocked statement has to notice its own
@@ -357,7 +361,12 @@ internal sealed class LockManager
                             return LockAcquireOutcome.TimedOut;
                     }
                 }
-                finally
+            }
+            finally
+            {
+                // Guarded so an uncontended acquire — the overwhelming
+                // majority — doesn't write the session's wait fields at all.
+                if (waited)
                 {
                     owner.WaitingOnResource = null;
                     owner.WaitingForMode = null;

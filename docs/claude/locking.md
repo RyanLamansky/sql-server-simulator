@@ -399,9 +399,11 @@ Per-isolation reader behavior:
   Row generator at `LockDmvs.EnumerateDmTranLocks`.
 - **`sys.dm_os_waiting_tasks`** — one row per currently-blocked connection: `session_id` (waiter's SPID), `wait_type` (`LCK_M_<mode>`), `resource_description`, `blocking_session_id` (one conflicting holder's SPID).
   Row generator at `LockDmvs.EnumerateDmOsWaitingTasks`.
-  Waiter / mode state lives in `SimulatedDbConnection.WaitingOnResource` / `WaitingForMode` (set inside `LockManager.Acquire`'s wait, cleared in `finally`).
+  Waiter / mode state lives in `SimulatedDbConnection.WaitingOnResource` / `WaitingForMode`, written when the wait begins and cleared once the acquisition leaves.
 
 Neither DMV takes the manager's gate during enumeration — concurrent acquires / releases may shift the result between rows, but per-resource snapshots stay consistent (Holders list is read field-by-field; the struct copy can't tear).
+That gate-free read is why the waiter registration spans the **whole** wait rather than each `Monitor.Wait` slice: a waiter that cleared and re-set it around every slice reads as idle for the length of its own between-slice re-check, and the re-checking thread can be descheduled there while holding the gate.
+Measured over a tight poll of a session blocked on a row-U conflict, that window swallowed 0.01% of observations on an idle 16-core box and 0.19–0.81% with the participants pinned to one core — enough to fail the `sys.dm_os_waiting_tasks` / `sys.dm_tran_locks` / `sp_who` blocked-session tests on a loaded CI runner, and zero once the registration is held across slices.
 
 ## Hint-conflict detection
 

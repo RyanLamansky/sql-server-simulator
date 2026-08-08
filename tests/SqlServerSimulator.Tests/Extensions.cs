@@ -171,4 +171,34 @@ static class Extensions
         var ex = simulation.AssertSqlError(commandText, errorNumber);
         Assert.AreEqual(expectedMessage, ex.Message);
     }
+
+    /// <summary>
+    /// Ceiling for "the state a concurrency test set up became observable".
+    /// Only ever waited out on the failure path, where the assertion that
+    /// follows reports the last sample.
+    /// </summary>
+    private const int PollTimeoutMs = 10_000;
+
+    /// <summary>
+    /// Samples <paramref name="probe"/> until <paramref name="settled"/>
+    /// accepts the value or the deadline passes, then hands the last sample
+    /// back for the caller to assert on. This is what a test observing
+    /// another connection's blocked state needs instead of a fixed sleep:
+    /// the background thread holding that statement reaches the lock whenever
+    /// the machine schedules it, so any single wall-clock guess is a bet a
+    /// loaded CI runner eventually loses. Returning the sample rather than
+    /// asserting keeps the caller's own assertion — and its failure message —
+    /// intact.
+    /// </summary>
+    public static async Task<T> PollUntil<T>(Func<T> probe, Func<T, bool> settled, CancellationToken cancellationToken)
+    {
+        var deadline = Environment.TickCount64 + PollTimeoutMs;
+        while (true)
+        {
+            var sample = probe();
+            if (settled(sample) || Environment.TickCount64 >= deadline)
+                return sample;
+            await Task.Delay(10, cancellationToken);
+        }
+    }
 }

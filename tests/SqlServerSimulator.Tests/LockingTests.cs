@@ -1,6 +1,7 @@
 using System.Data.Common;
 using SqlServerSimulator.Storage;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.Extensions;
 
 namespace SqlServerSimulator;
 
@@ -734,11 +735,13 @@ public sealed class LockingTests
         }, TestContext.CancellationToken);
 
         IsTrue(started.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(150, TestContext.CancellationToken);
 
         var holderSpid = (short)holder.CreateCommand("select @@spid").ExecuteScalar()!;
         var waiterSpid = (short)waiter.CreateCommand("select @@spid").ExecuteScalar()!;
-        var rowsCount = (int)observer.CreateCommand($"select count(*) from sys.dm_os_waiting_tasks where session_id = {waiterSpid} and blocking_session_id = {holderSpid}").ExecuteScalar()!;
+        var rowsCount = await PollUntil(
+            () => (int)observer.CreateCommand($"select count(*) from sys.dm_os_waiting_tasks where session_id = {waiterSpid} and blocking_session_id = {holderSpid}").ExecuteScalar()!,
+            rows => rows == 1,
+            TestContext.CancellationToken);
         AreEqual(1, rowsCount);
 
         _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
@@ -768,11 +771,13 @@ public sealed class LockingTests
         }, TestContext.CancellationToken);
 
         IsTrue(started.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(150, TestContext.CancellationToken);
 
-        var waitRows = (int)observer.CreateCommand(
-            "select count(*) from sys.dm_tran_locks where request_status = 'WAIT'")
-            .ExecuteScalar()!;
+        var waitRows = await PollUntil(
+            () => (int)observer.CreateCommand(
+                "select count(*) from sys.dm_tran_locks where request_status = 'WAIT'")
+                .ExecuteScalar()!,
+            rows => rows >= 1,
+            TestContext.CancellationToken);
         IsGreaterThanOrEqualTo(1, waitRows);
 
         _ = holder.CreateCommand("commit tran").ExecuteNonQuery();

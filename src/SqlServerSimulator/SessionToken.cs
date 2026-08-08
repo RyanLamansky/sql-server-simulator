@@ -70,8 +70,8 @@ internal sealed class SessionToken(int spid)
     /// <summary>
     /// The <see cref="LockResource"/> this session is currently blocked on, or
     /// <c>null</c> when it isn't waiting. Set and cleared inside
-    /// <c>LockManager</c>'s gate so the cycle detector and the lock DMVs read
-    /// a consistent wait-for graph.
+    /// <c>LockManager</c>'s gate so the cycle detector reads a consistent
+    /// wait-for graph.
     /// </summary>
     public LockResource? WaitingOnResource;
 

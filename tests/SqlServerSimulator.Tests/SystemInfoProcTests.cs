@@ -1,6 +1,7 @@
 using System.Data.Common;
 using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.Extensions;
 
 namespace SqlServerSimulator;
 
@@ -355,9 +356,13 @@ public sealed class SystemInfoProcTests
         }, TestContext.CancellationToken);
 
         IsTrue(readerStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(200, TestContext.CancellationToken);
 
-        var who = Run(observer, "exec sp_who").Sets[0].Rows;
+        // Polled rather than slept on: the reader shows up as suspended only
+        // once its thread actually reaches the conflicting lock.
+        var who = await PollUntil(
+            () => Run(observer, "exec sp_who").Sets[0].Rows,
+            rows => rows.Find(r => (short)r[0]! == readerSpid) is { } row && ((string)row[2]!).TrimEnd() == "suspended",
+            TestContext.CancellationToken);
         var blocked = who.Find(r => (short)r[0]! == readerSpid)!;
         AreEqual("suspended", ((string)blocked[2]!).TrimEnd());
         AreEqual(writerSpid.ToString(CultureInfo.InvariantCulture), ((string)blocked[5]!).TrimEnd());
