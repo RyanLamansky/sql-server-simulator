@@ -831,6 +831,11 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        // Real refuses the read-only database ahead of every resolution here —
+        // a TRANSFER naming a missing object still reports Msg 3906
+        // (probe-confirmed).
+        context.CurrentDatabase.RejectWriteWhenReadOnly();
+
         if (!context.CurrentDatabase.Schemas.TryGetValue(destSchemaName, out var destSchema))
             throw SimulatedSqlException.CannotAlterSchemaDoesNotExist(destSchemaName);
         // ALTER on the destination schema is the first half of real's gate, and
@@ -1074,7 +1079,7 @@ partial class Simulation
             // ALTER TABLE needs ALTER on the object (object-scope suffices —
             // probe M5b); a non-privileged principal gets Msg 1088 state 13.
             // Temp tables / table variables are session-owned and exempt.
-            alterTarget.OwningDatabase?.RejectWriteWhenReadOnly();
+            alterTarget.OwningDatabase?.RejectWriteWhenReadOnly(state: 12);
             if (!alterTarget.IsTableVariable
                 && !BatchContext.IsLocalTempName(alterTarget.Name)
                 && !BatchContext.IsGlobalTempName(alterTarget.Name)

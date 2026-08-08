@@ -1190,7 +1190,7 @@ internal readonly partial struct SqlValue
     {
         var d = this.Type == SqlType.Float ? this.AsDouble : (double)this.AsSingle;
         if (SqlType.IsStringCategory(target))
-            return FromString(target, FormatDouble(d, this.Type == SqlType.Float ? 15 : 7));
+            return FromString(target, this.FormatApproximateWithStyle(0));
         if (target is DecimalSqlType targetDecimal)
             return FromDecimal(targetDecimal, FloatToDecimal38(d, targetDecimal, this.Type));
         if (target == SqlType.DateTime)
@@ -1237,18 +1237,6 @@ internal readonly partial struct SqlValue
                 out var d) && !double.IsNaN(d) && !double.IsInfinity(d)
                     ? d
                     : throw SimulatedSqlException.ConvertingDataTypeError(sourceType, "float");
-
-    /// <summary>
-    /// Formats a <see cref="double"/> using SQL Server's <c>float → varchar</c>
-    /// default representation. Switches to scientific notation outside the
-    /// 6-significant-figure plain-decimal range; the simulator approximates
-    /// this with .NET's <c>"G15"</c> (or <c>"G7"</c> for real). Exact matching
-    /// of SQL Server's lowercase-e / 3-digit-exponent textual form is
-    /// pending — the broader cast-length-not-enforced limitation already
-    /// applies here.
-    /// </summary>
-    private static string FormatDouble(double value, int significantDigits) =>
-        value.ToString("G" + significantDigits, System.Globalization.CultureInfo.InvariantCulture);
 
     private SqlValue CoerceToDecimal(DecimalSqlType target) => this.Type switch
     {

@@ -377,8 +377,8 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   A reference in a **restricted clause** (Msg 11720) or a **conditional arm** (Msg 11741) inside a statement that also carries an `ORDER BY` keeps its own message where real reports Msg 11723 — those two fire where the reference parses, which is before the `ORDER BY` is read, while `DISTINCT` and `TOP` are known by then and do report real's.
   A reference in a **windowed aggregate**'s argument (`SUM(NEXT VALUE FOR s) OVER ()`) is Msg 11725 where real is 11720, the trailing `OVER` likewise being read after the argument.
   Closing either wants the site-level refusal deferred to the end of the query spec, which needs a catch-all resolution point for the expression sites outside a `SELECT` (`PRINT`, a `SET` initializer) so a pending refusal can't leak as a silent acceptance.
-- **`SET LANGUAGE` doesn't move `@@DATEFIRST`** — real sets the language's own first weekday when the language changes (`French` reads 1, `us_english` 7), and leaves an explicit `SET DATEFIRST` standing when the language it names is already the current one (probed 2026-08-06).
-  `SET DATEFIRST` itself ships (see [`scalars.md`](scalars.md#set-datefirst-and-the-parts-that-read-it)); what this wants is the per-language table `SET LANGUAGE` would read, which is the same table the month / weekday names and the date-format order would need.
+- **`SET LANGUAGE` doesn't move `SET DATEFORMAT`** — real carries the language's own date-part order (`sys.syslanguages.dateformat`, `dmy` for most of the set against us_english's `mdy`), which decides how an ambiguous date string parses.
+  `SET LANGUAGE` itself ships, `@@DATEFIRST` coupling included (see [`scalars.md`](scalars.md#set-language-and-the-datefirst-it-moves)), and the column is projected; what's left is `SET DATEFORMAT` carrying semantic effect at all, which is the same seam the month / weekday names would need.
 - **Msg 3930's write gate covers DML and object DDL only** — a doomed transaction (see [`transactions.md`](transactions.md#set-xact_abort)) refuses `INSERT` / `UPDATE` / `DELETE` / `MERGE`, `CREATE` / `ALTER` / `DROP` / `TRUNCATE`, `SAVE TRANSACTION` and `COMMIT`, where real refuses everything that writes to the log — a `GRANT`, an `sp_rename`, an extended-property write still run here.
   Each is a `RejectWriteInDoomedTransaction` call at the statement's own entry; the shared seam every one of them routes through is what doesn't exist.
 - **Msg 245 is transaction-aborting on real without `XACT_ABORT`** — a conversion failure rolls the transaction back and reads `XACT_STATE()` −1 from a `CATCH` even under `SET XACT_ABORT OFF` (probed 2026-08-06), where the simulator treats it as statement-terminating like its neighbours until the option is on.
@@ -502,9 +502,6 @@ Worth a look before re-affirming or changing.
 - **CHECKSUM_AGG** uses an order-independent XOR fold.
   Rationale: same-multiset-same-checksum preserved, bit-identical wasn't required.
   Review: has any consumer needed bit-identical checksums (e.g. replication-comparison parity)?
-- **`float` CAST/CONVERT** text formatting uses .NET `G15`/`G7` rather than SQL Server's `1e+015`-style scientific.
-  Rationale: .NET formatting is the default; the specific format wasn't a fidelity-oracle requirement.
-  Review: do users hit float-as-string comparisons in real workloads?
 
 ## Won't-model / explicitly excluded
 

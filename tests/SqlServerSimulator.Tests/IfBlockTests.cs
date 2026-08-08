@@ -185,9 +185,11 @@ public sealed class IfBlockTests
     }
 
     [TestMethod]
-    public void BeginDistributedTran_NotSupported()
-        => Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "begin distributed tran"));
+    public void BeginDistributedTran_RoutesToTheTransactionPath()
+        // The BEGIN disambiguation sends DISTRIBUTED to TryParseBeginTransaction
+        // rather than reading a compound block; the semantics live in
+        // SqlTransactionStatementTests.
+        => AreEqual(1, new Simulation().ExecuteScalar("begin distributed tran; select @@trancount"));
 
     // ---- @@ROWCOUNT ----
 

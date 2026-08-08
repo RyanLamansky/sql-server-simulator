@@ -105,6 +105,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return this.ParseSchemaElements(context, elementScope: null);
 
+        context.CurrentDatabase.RejectWriteWhenReadOnly();
+
         // CREATE SCHEMA isn't a modeled named permission — Msg 15247 for a
         // non-privileged principal (probe M3).
         if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))

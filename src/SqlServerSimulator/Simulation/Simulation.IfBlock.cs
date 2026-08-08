@@ -233,10 +233,10 @@ partial class Simulation
                     foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
                         yield return o;
 
-                    // RETURN propagates through WHILE (unlike BREAK / CONTINUE
-                    // which we catch). Exit the loop without clearing — the
-                    // outer DispatchStatementsUntil also stops on ReturnSignaled.
-                    if (batch.ReturnSignaled)
+                    // RETURN and GOTO propagate through WHILE (unlike BREAK /
+                    // CONTINUE which we catch). Exit the loop without clearing
+                    // — the outer DispatchStatementsUntil also stops on both.
+                    if (batch.ReturnSignaled || batch.PendingGotoLabel is not null)
                         goto ExitLoop;
 
                     switch (batch.LoopControl)
@@ -429,7 +429,7 @@ partial class Simulation
         // skipped block) likewise leaves the cursor mid-statement with no
         // recovery scan, so short-circuit the "expect END" check to let the one
         // error surface instead of a spurious Msg 102 near the abandoned token.
-        if (batch.ReturnSignaled || batch.BatchAborted)
+        if (batch.ReturnSignaled || batch.BatchAborted || batch.PendingGotoLabel is not null)
             yield break;
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.End })
@@ -499,7 +499,7 @@ partial class Simulation
         foreach (var o in DispatchStatementsUntil(batch, endKeyword: Keyword.End))
             yield return o;
 
-        if (batch.ReturnSignaled || batch.BatchAborted)
+        if (batch.ReturnSignaled || batch.BatchAborted || batch.PendingGotoLabel is not null)
             yield break;
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.End })

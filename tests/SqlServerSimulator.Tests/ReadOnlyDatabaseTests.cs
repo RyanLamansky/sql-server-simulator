@@ -146,6 +146,139 @@ public sealed class ReadOnlyDatabaseTests
     }
 
     /// <summary>
+    /// The session's own database, read-only, carrying one table with an index,
+    /// a second schema, a principal and a full-text catalog — everything the
+    /// non-table statements below need a target for.
+    /// </summary>
+    private static Simulation WithReadOnlySelf()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create schema s1",
+            """
+            create table dbo.t (id int not null constraint pk_t primary key, label nvarchar(20));
+            create index ix_t on dbo.t (label);
+            create fulltext catalog ftc0;
+            create user u1 without login;
+            create role r1
+            """,
+            "alter database current set read_only");
+        return simulation;
+    }
+
+    private const string SelfRefusalMessage = "Failed to update database \"simulated\" because the database is read-only.";
+
+    /// <summary>
+    /// Every remaining catalog-writing statement carries the refusal too — the
+    /// permission family, <c>sp_rename</c>, the extended properties, schema
+    /// transfer, index <c>ALTER</c> / <c>DROP</c>, and the database-scoped
+    /// principal DDL. All at state 1 (probe-confirmed 2026-08-08).
+    /// </summary>
+    [TestMethod]
+    [DataRow("grant select on dbo.t to u1")]
+    [DataRow("revoke select on dbo.t from u1")]
+    [DataRow("deny select on dbo.t to u1")]
+    [DataRow("grant select on schema::dbo to u1")]
+    [DataRow("exec sp_rename 'dbo.t', 'tt'")]
+    [DataRow("exec sp_rename 'dbo.t.label', 'lbl', 'COLUMN'")]
+    [DataRow("exec sp_rename 'dbo.t.ix_t', 'ix2', 'INDEX'")]
+    [DataRow("exec sp_addextendedproperty @name = N'X', @value = N'Y', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N't'")]
+    [DataRow("alter schema s1 transfer dbo.t")]
+    [DataRow("alter index ix_t on dbo.t disable")]
+    [DataRow("alter index ix_t on dbo.t rebuild")]
+    [DataRow("alter index all on dbo.t rebuild")]
+    [DataRow("drop index ix_t on dbo.t")]
+    [DataRow("create user u2 without login")]
+    [DataRow("drop user u1")]
+    [DataRow("create role r2")]
+    [DataRow("drop role r1")]
+    [DataRow("alter role r1 add member u1")]
+    [DataRow("create application role ar with password = 'Pa$$w0rd!23'")]
+    [DataRow("drop assembly nosuchassembly")]
+    public void CatalogWritingStatements_OnAReadOnlyDatabase_RaiseMsg3906(string statement)
+    {
+        var ex = WithReadOnlySelf().AssertSqlError(statement, 3906);
+        AreEqual(SelfRefusalMessage, ex.Message);
+        AreEqual(16, ex.Class);
+        AreEqual(1, ex.State);
+    }
+
+    /// <summary>
+    /// <c>CREATE SCHEMA</c> has to open its own batch, so it can't ride the
+    /// DataRow list above.
+    /// </summary>
+    [TestMethod]
+    public void CreateSchema_OnAReadOnlyDatabase_RaisesMsg3906()
+        => WithReadOnlySelf().AssertSqlError("create schema s2", 3906, SelfRefusalMessage);
+
+    /// <summary>
+    /// <c>ALTER TABLE</c> is the one statement whose state is not 1 — every
+    /// sub-action reports state 12 (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter table dbo.t add extra int null")]
+    [DataRow("alter table dbo.t drop column label")]
+    [DataRow("alter table dbo.t alter column label nvarchar(40)")]
+    [DataRow("alter table dbo.t add constraint ck_t check (id > 0)")]
+    [DataRow("alter table dbo.t drop constraint pk_t")]
+    [DataRow("alter table dbo.t nocheck constraint all")]
+    [DataRow("alter table dbo.t rebuild")]
+    public void AlterTable_OnAReadOnlyDatabase_RaisesMsg3906AtState12(string statement)
+    {
+        var ex = WithReadOnlySelf().AssertSqlError(statement, 3906);
+        AreEqual(SelfRefusalMessage, ex.Message);
+        AreEqual(12, ex.State);
+    }
+
+    /// <summary>
+    /// The full-text statements report the subsystem's own <strong>Msg 7690</strong>
+    /// rather than Msg 3906, at a state per statement (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create fulltext catalog ftc1", 100)]
+    [DataRow("drop fulltext catalog ftc0", 102)]
+    [DataRow("create fulltext index on dbo.t (label) key index pk_t", 103)]
+    [DataRow("drop fulltext index on dbo.t", 105)]
+    public void FullTextStatements_OnAReadOnlyDatabase_RaiseMsg7690(string statement, int state)
+    {
+        var ex = WithReadOnlySelf().AssertSqlError(statement, 7690);
+        AreEqual("Full-text operation failed because database is read only.", ex.Message);
+        AreEqual(16, ex.Class);
+        AreEqual(state, ex.State);
+    }
+
+    /// <summary>
+    /// Where the refusal sits relative to name resolution differs per statement,
+    /// and real's order is what the simulator follows: <c>ALTER INDEX</c> reports
+    /// a missing table first and a missing index second, <c>DROP INDEX</c>
+    /// reports both of its own misses first, and <c>sp_rename</c> /
+    /// <c>sp_addextendedproperty</c> resolve their target before refusing.
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter index ix_t on dbo.nosuch disable", 1088)]
+    [DataRow("drop index ix_t on dbo.nosuch", 3701)]
+    [DataRow("drop index nosuch on dbo.t", 3701)]
+    [DataRow("exec sp_rename 'dbo.nosuch', 'x'", 15225)]
+    [DataRow("exec sp_rename 'dbo.t.nosuch', 'x', 'COLUMN'", 15248)]
+    [DataRow("exec sp_addextendedproperty @name = N'X', @value = N'Y', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N'nosuch'", 15135)]
+    [DataRow("alter table dbo.nosuch add extra int null", 4902)]
+    public void ResolutionErrorsThatOutrankTheRefusal(string statement, int expected)
+        => _ = WithReadOnlySelf().AssertSqlError(statement, expected);
+
+    /// <summary>
+    /// And the ones that don't: real refuses these before the name is looked at
+    /// all, so a target that doesn't exist still reports the read-only error.
+    /// </summary>
+    [TestMethod]
+    [DataRow("grant select on dbo.nosuch to u1")]
+    [DataRow("grant select on dbo.t to nosuchuser")]
+    [DataRow("alter schema s1 transfer dbo.nosuch")]
+    [DataRow("alter index nosuch on dbo.t disable")]
+    [DataRow("create user u1 without login")]
+    public void TheRefusalThatOutranksResolution(string statement)
+        => WithReadOnlySelf().AssertSqlError(statement, 3906, SelfRefusalMessage);
+
+    /// <summary>
     /// <c>master</c> and <c>tempdb</c> pin the option — <strong>Msg 5058</strong>
     /// at their own states (5 and 4), for either value asked for — while
     /// <c>model</c> and <c>msdb</c> accept it (all probe-confirmed).

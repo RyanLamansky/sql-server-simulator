@@ -29,6 +29,7 @@ partial class Simulation
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
+        context.CurrentDatabase.RejectWriteWhenReadOnly();
         // CREATE USER isn't a modeled named permission — a non-privileged
         // principal gets Msg 15247 (probe M3).
         if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
@@ -131,6 +132,7 @@ partial class Simulation
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
+        context.CurrentDatabase.RejectWriteWhenReadOnly();
         // CREATE ROLE isn't a modeled named permission — Msg 15247 for a
         // non-privileged principal (probe M3).
         if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
@@ -179,6 +181,7 @@ partial class Simulation
 
             if (context.Batch.IsSkipping)
                 return true;
+            context.CurrentDatabase.RejectWriteWhenReadOnly();
             // Membership changes need ALTER ANY ROLE (or ALTER / CONTROL on the
             // role, which the covering walk folds in). db_ddladmin does NOT
             // carry it — probe-confirmed, which is why ALTER ANY ROLE isn't in
@@ -234,6 +237,7 @@ partial class Simulation
         context.MoveNextOptional();
         if (context.Batch.IsSkipping)
             return true;
+        context.CurrentDatabase.RejectWriteWhenReadOnly();
         // DROP USER needs db_owner (no ALTER ANY USER model) — a non-privileged
         // principal gets Msg 15151 (probe B). DROP ROLE takes ALTER ANY ROLE
         // (or ALTER / CONTROL on the role) and its own 15151 wording, at

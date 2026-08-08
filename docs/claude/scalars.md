@@ -77,7 +77,25 @@ Outside 1..7 → **Msg 2742** class 16 state 1 echoing the value (`SET DATEFIRST
 A parameter that isn't an `int` — a literal past the int range, or a `bigint` variable — → **Msg 2743** class 16 state 3 (`SET DATEFIRST option requires integer parameter.`).
 Scoping matches `XACT_ABORT`: a procedure / trigger / dynamic-SQL body's own `SET` binds for the body and reverts on return, and a body with none inherits the caller's — see [`transactions.md`](transactions.md#set-xact_abort).
 
-Not modeled: `SET LANGUAGE` still parses-and-discards, so it doesn't move `@@DATEFIRST` the way real does (`SET LANGUAGE French` reads 1 there, and `us_english` restores 7 — but only when the language actually changes, so a `SET DATEFIRST 3` followed by `SET LANGUAGE us_english` on an already-us_english session keeps 3).
+### `SET LANGUAGE` and the DATEFIRST it moves
+
+`SET LANGUAGE` resolves an official language name or an alias against the 34 rows a stock instance installs (`Language.All`, captured verbatim from SQL Server 2025 on 2026-08-08 and projected by `sys.syslanguages`).
+The name may be written bare, quoted, delimited, or held in a variable; matching is case-insensitive but not accent-insensitive, since real compares against the stored name (`Français` has to carry its cedilla).
+
+What a successful one sets:
+
+- **`@@LANGUAGE`** — the *official* name, never the alias the statement was written with, so `SET LANGUAGE German` reads back `Deutsch`.
+- **`@@LANGID`** — the language's `langid` as `smallint`, 0 for the `us_english` default.
+- **`@@DATEFIRST`** — the language's own, which is the load-bearing coupling: German / French / most of the set are 1, while us_english / Japanese / Portuguese / Brazilian / both Chinese / Korean / Thai are 7.
+
+The DATEFIRST half yields to an **explicit `SET DATEFIRST` in the same batch**, and real scopes that precedence to the batch rather than the session: `SET DATEFIRST 3; SET LANGUAGE German` in one batch stays 3, while the same pair split across two batches ends on German's 1 (both probe-confirmed; the flag is `BatchContext.DateFirstSetExplicitly`).
+A `SET DATEFIRST` *after* the language simply wins as the later write.
+
+An unrecognized name is **Msg 2740** class 16 state 1 (`SET LANGUAGE failed because '<n>' is not an official language name or a language alias on this SQL Server.`), and the batch carries on past it.
+Inside a `BEGIN TRY` block real swallows the failure outright — nothing raised, no `CATCH` entered, the statement no-ops and the body continues (probe-confirmed, dynamic SQL included) — while an `IF` / `WHILE` / `BEGIN…END` body is not a TRY frame and still raises.
+
+**Not modeled**: the message language itself (every diagnostic stays English) and the `dateformat` half — `sys.syslanguages.dateformat` is projected but `SET DATEFORMAT` still parses-and-discards, so a language change doesn't move the date-string input order the way real's does.
+`sys.syslanguages`'s three name-list columns (`months` / `shortmonths` / `days`) are nullable on real and left NULL here for the same reason.
 
 **Implicit operand coercion** (date argument, all three functions): string operands route through `DatePartKinds.CoerceDateArgumentImplicit` → `CoerceTo(datetime2(7))`; integer operands → `CoerceTo(datetime)` (days-since-1900-01-01).
 `ParseDateTime2` also accepts a **bare time-of-day string** (`HH:mm[:ss[.fffffff]]`, anchored to 1900-01-01), so `DATEDIFF(second, '11:15:00', <time>)` / `DATEPART(microsecond, '11:15:00')` coerce like real (a Django DurationField/TimeField pattern) rather than raising Msg 241.
@@ -596,8 +614,8 @@ Constants whose values don't carry real session/server identity in the simulator
 - **`@@MAX_CONNECTIONS`** — constant 32767.
 - **`@@SERVERNAME`** — `"SIMULATED"`.
 - **`@@SERVICENAME`** — `"MSSQLSERVER"`.
-- **`@@LANGID`** — 0.
-- **`@@LANGUAGE`** — `"us_english"`.
+- **`@@LANGID`** — session state: the `langid` of the session's `SET LANGUAGE` as `smallint`, 0 for the `us_english` default.
+- **`@@LANGUAGE`** — session state: the *official* name of that language (the alias never reads back) — see [`SET LANGUAGE and the DATEFIRST it moves`](#set-language-and-the-datefirst-it-moves).
 - **`@@TEXTSIZE`** — session state (`SimulatedDbConnection.TextSize`), default -1 (unlimited — the value a fresh SqlClient login establishes, probe-confirmed).
   `SET TEXTSIZE` carries semantic effect: the byte cap clips MAX-typed / legacy-LOB values at the client boundary (result columns via the `TextSizeCursor` decorator installed by `SimulatedQueryResult.CreateClientCursor`, output parameters at write-back), never server-side computation, variable assignment, or stored data; `varchar(max)`/`text` truncate at 1 byte per char, `nvarchar(max)`/`ntext` at 2 with an odd byte floored, `varbinary(max)`/`image` at raw bytes, while `xml`, bounded var types, and UDTs are exempt.
   Value mapping: `-1` preserved verbatim, `0` and every other negative collapse to 4096; a past-int-range literal raises **Msg 1080**; issued inside a proc body it reverts at proc exit while the body's result sets keep their production-time cap (`ClientTextSize` stamped per statement).

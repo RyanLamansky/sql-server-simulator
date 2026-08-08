@@ -320,11 +320,23 @@ internal readonly partial struct SqlValue
     /// real). Probe-confirmed against SQL Server 2025 (2026-05-19); unknown
     /// styles raise Msg 281 with the source family name.
     /// </summary>
-    internal SqlValue CoerceFloatToStringWithStyle(SqlType target, int style)
+    internal SqlValue CoerceFloatToStringWithStyle(SqlType target, int style) =>
+        FromString(target, this.FormatApproximateWithStyle(style));
+
+    /// <summary>
+    /// The text half of <see cref="CoerceFloatToStringWithStyle"/>, for the
+    /// callers that need the rendering without a target string type. Style 0
+    /// is what a styleless conversion produces, so it also backs the implicit
+    /// / <c>CAST</c> path, the Msg 2627 key rendering and a filtered index's
+    /// <c>filter_definition</c>; style 126 is what the JSON and XML
+    /// serializers write. Both probe-confirmed against SQL Server 2025
+    /// (2026-08-08).
+    /// </summary>
+    internal string FormatApproximateWithStyle(int style)
     {
         var isReal = this.Type == SqlType.Real;
         var value = isReal ? (double)this.AsSingle : this.AsDouble;
-        var formatted = style switch
+        return style switch
         {
             0 => FormatFloatStyle0(value),
             1 => FormatFloatScientific(value, totalSignificantDigits: 8),
@@ -333,7 +345,6 @@ internal readonly partial struct SqlValue
             126 => FormatFloatScientific(value, totalSignificantDigits: isReal ? 8 : 16),
             _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, isReal ? "real" : "float"),
         };
-        return FromString(target, formatted);
     }
 
     /// <summary>

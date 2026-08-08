@@ -112,12 +112,6 @@ internal sealed class Value : Expression
             case AtAtKeyword.MaxConnections:
                 this.Constant = SqlValue.FromInt32(32767);
                 return;
-            case AtAtKeyword.LangId:
-                this.Constant = SqlValue.FromInt16(0);
-                return;
-            case AtAtKeyword.Language:
-                this.Constant = SqlValue.FromNVarchar("us_english");
-                return;
             case AtAtKeyword.ServiceName:
                 this.Constant = SqlValue.FromNVarchar("MSSQLSERVER");
                 return;

@@ -273,4 +273,97 @@ public sealed class HierarchyIdTests
     [DataRow("/3/4/7/8/15/16/79/", 7)]
     public void DataLength_HierarchyId_MeasuresOrdPathSerialization(string path, int expected)
         => AreEqual(expected, ExecuteScalar($"select datalength(hierarchyid::Parse('{path}'))"));
+
+    // Every tier boundary, byte-anchored against SQL Server 2025 (2026-08-08):
+    // the last ordinal a tier carries and the first the next one does, in both
+    // directions, out to real's own domain limits. The two widest tiers span
+    // 32 and 48 value bits, which is what puts the domain past int.
+    [TestMethod]
+    [DataRow("/3/", "78")]
+    [DataRow("/4/", "84")]
+    [DataRow("/7/", "9C")]
+    [DataRow("/8/", "A2")]
+    [DataRow("/15/", "BE")]
+    [DataRow("/16/", "C110")]
+    [DataRow("/79/", "DBF0")]
+    [DataRow("/80/", "E00440")]
+    [DataRow("/1103/", "EEEFC0")]
+    [DataRow("/1104/", "F00088")]
+    [DataRow("/5199/", "F7DDF8")]
+    [DataRow("/5200/", "F80000000220")]
+    [DataRow("/4294972495/", "FBFFFFBF77E0")]
+    [DataRow("/4294972496/", "FC00000000000110")]
+    [DataRow("/281479271683151/", "FFFFF7FFFFDFBBF0")]
+    [DataRow("/-1/", "3F80")]
+    [DataRow("/-8/", "3880")]
+    [DataRow("/-9/", "2DF8")]
+    [DataRow("/-72/", "2088")]
+    [DataRow("/-73/", "1BEEFC")]
+    [DataRow("/-4168/", "180044")]
+    [DataRow("/-4169/", "17FFFFBF77E0")]
+    [DataRow("/-4294971464/", "140000000220")]
+    [DataRow("/-281479271682120/", "1000000000000110")]
+    [DataRow("/1000000/-1000000/5200/", "F8003C9B7222FFF86380C7E00000000880")]
+    [DataRow("/100000.200000/", "F80005A4525F0001762E44")]
+    [DataRow("/281479271683150.1/", "FFFFF7FFFFDFBBE580")]
+    [DataRow("/1.281479271683151/", "67FFFFBFFFFEFDDF80")]
+    public void TierBoundaries_AreByteIdentical(string path, string expectedHex)
+    {
+        AreEqual(expectedHex, ToHex(ExecuteScalar($"select cast(hierarchyid::Parse('{path}') as varbinary(892))")));
+        AreEqual(path, ExecuteScalar($"select cast(0x{expectedHex} as hierarchyid).ToString()"));
+    }
+
+    // Outside the domain, Parse is Msg 6522 like any other malformed input —
+    // real reports its own HierarchyIdException 24001 there.
+    [TestMethod]
+    [DataRow("/281479271683152/")]
+    [DataRow("/-281479271682121/")]
+    [DataRow("/9223372036854775808/")]
+    // A non-final dotted label encodes as ordinal + 1, so one at the very top
+    // of the domain has nowhere to go — while the same value as the segment's
+    // *last* label is fine (see the byte-anchored rows above).
+    [DataRow("/281479271683151.1/")]
+    public void OutOfDomainOrdinal_RaisesMsg6522(string path)
+        => new Simulation().AssertSqlError($"select hierarchyid::Parse('{path}').ToString()", 6522);
+
+    // A computed ordinal past the top of the widest tier is real's other 6522
+    // form — state 2, naming WriteOrd rather than the parse.
+    [TestMethod]
+    public void GetDescendant_PastTheDomain_RaisesMsg6522State2()
+    {
+        var ex = new Simulation().AssertSqlError(
+            "select hierarchyid::Parse('/1/').GetDescendant(hierarchyid::Parse('/1/281479271683151/'), null).ToString()", 6522);
+        Assert.Contains("24006", ex.Message);
+        AreEqual(2, ex.State);
+    }
+
+    // Ordering still equals depth-first traversal across the wide tiers, which
+    // is the property the prefix-free tier codes exist to preserve.
+    [TestMethod]
+    public void OrderBy_SpansTheWideTiers()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (h hierarchyid not null);
+            insert t values
+                (hierarchyid::Parse('/281479271683151/')),
+                (hierarchyid::Parse('/-281479271682120/')),
+                (hierarchyid::Parse('/5200/')),
+                (hierarchyid::Parse('/5199/')),
+                (hierarchyid::Parse('/-4169/')),
+                (hierarchyid::Parse('/-4168/')),
+                (hierarchyid::Parse('/4294972496/')),
+                (hierarchyid::Parse('/4294972495/'))
+            """);
+        using var conn = sim.CreateOpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "select h.ToString() from t order by h";
+        using var reader = cmd.ExecuteReader();
+        var actual = new List<string>();
+        while (reader.Read())
+            actual.Add(reader.GetString(0));
+        AreEqual(
+            "/-281479271682120/,/-4169/,/-4168/,/5199/,/5200/,/4294972495/,/4294972496/,/281479271683151/",
+            string.Join(",", actual));
+    }
 }

@@ -315,10 +315,25 @@ internal sealed class Database
     /// the database being written rather than the session's, which is what a
     /// three-part write into a read-only database reports on real.
     /// </summary>
-    public void RejectWriteWhenReadOnly()
+    /// <param name="state">
+    /// The error state real reports at the calling site — 1 everywhere but
+    /// <c>ALTER TABLE</c>, which reports 12.
+    /// </param>
+    public void RejectWriteWhenReadOnly(byte state = 1)
     {
         if (this.IsReadOnly)
-            throw SimulatedSqlException.DatabaseIsReadOnly(this.Name);
+            throw SimulatedSqlException.DatabaseIsReadOnly(this.Name, state);
+    }
+
+    /// <summary>
+    /// The full-text subsystem's own read-only refusal — <strong>Msg 7690</strong>
+    /// rather than the Msg 3906 every other statement reports, at the state
+    /// belonging to the calling statement.
+    /// </summary>
+    public void RejectFullTextWriteWhenReadOnly(byte state)
+    {
+        if (this.IsReadOnly)
+            throw SimulatedSqlException.FullTextOperationOnReadOnlyDatabase(state);
     }
 
     private int nextObjectId = 100;

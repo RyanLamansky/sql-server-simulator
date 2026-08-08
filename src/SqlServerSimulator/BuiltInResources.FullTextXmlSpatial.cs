@@ -141,30 +141,48 @@ internal static partial class BuiltInResources
             });
         });
 
-        // sys.syslanguages: legacy per-language compatibility view. The
-        // simulator models only the default us_english language (langid 0 /
-        // lcid 1033), which is what a stock instance's default-language
-        // configuration (configuration_id 124, value_in_use 0) resolves to —
-        // SMO's server-settings query joins it by langid to name the default
-        // language. Load-bearing subset: langid / name / alias / lcid.
+        // sys.syslanguages: legacy per-language compatibility view, projecting
+        // every installed language from Language.All in langid order — the set
+        // SET LANGUAGE resolves against, and what a stock instance's
+        // default-language configuration (configuration_id 124, value_in_use 0)
+        // joins by langid to name the default. The three name-list columns
+        // (months / shortmonths / days) are nullable on real and left NULL
+        // here: no surface reads them, since message and date-name
+        // localization aren't modeled.
         Sys("syslanguages",
         [
             new("langid", SqlType.SmallInt, null, false),
+            new("dateformat", SqlType.GetNChar(3), 3, false),
+            new("datefirst", SqlType.TinyInt, null, false),
+            new("upgrade", SqlType.Int32, null, true),
             new("name", SqlType.NVarchar, 128, false),
             new("alias", SqlType.NVarchar, 128, false),
+            new("months", SqlType.NVarchar, 372, true),
+            new("shortmonths", SqlType.NVarchar, 132, true),
+            new("days", SqlType.NVarchar, 217, true),
             new("lcid", SqlType.Int32, null, false),
+            new("msglangid", SqlType.SmallInt, null, false),
         ], static (batch, database) =>
         {
             _ = (batch, database);
-            return
-            [
-                [
-                    SqlValue.FromInt16(0),
-                    SqlValue.FromNVarchar("us_english"),
-                    SqlValue.FromNVarchar("English"),
-                    SqlValue.FromInt32(1033),
-                ],
-            ];
+            var rows = new List<SqlValue[]>(Language.All.Length);
+            foreach (var language in Language.All)
+            {
+                rows.Add([
+                    SqlValue.FromInt16(language.LangId),
+                    SqlValue.FromString(SqlType.GetNChar(3), language.DateFormat),
+                    SqlValue.FromByte(language.DateFirst),
+                    SqlValue.FromInt32(0),
+                    SqlValue.FromNVarchar(language.Name),
+                    SqlValue.FromNVarchar(language.Alias),
+                    SqlValue.Null(NVarcharSqlType.Get(372, Collation.Baseline, Coercibility.CoercibleDefault)),
+                    SqlValue.Null(NVarcharSqlType.Get(132, Collation.Baseline, Coercibility.CoercibleDefault)),
+                    SqlValue.Null(NVarcharSqlType.Get(217, Collation.Baseline, Coercibility.CoercibleDefault)),
+                    SqlValue.FromInt32(language.Lcid),
+                    SqlValue.FromInt16(language.MsgLangId),
+                ]);
+            }
+            return rows;
         });
 
         // sys.xml_schema_collections: probe-confirmed 6-col shipped subset

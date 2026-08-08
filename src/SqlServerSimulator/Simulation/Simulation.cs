@@ -1580,11 +1580,45 @@ public sealed partial class Simulation
         // case where the first statement may legitimately be CREATE PROC.
         var nestedBlock = endKeyword is not null;
         if (nestedBlock)
+        {
             batch.BlockDepth++;
+            batch.DispatchLoopDepth++;
+        }
+        else
+        {
+            ScanBatchLabels(batch);
+        }
+
         try
         {
             while (context.Token is not null)
             {
+                // A GOTO is serviced by the innermost dispatch loop the label
+                // is inside — the one whose BEGIN…END nesting it shares or
+                // sits below. Every loop deeper than that unwinds first, the
+                // way they unwind for RETURN, so a jump out of a block or a
+                // loop body works and a jump to a label in the same body
+                // doesn't leave the body.
+                if (batch.PendingGotoLabel is { } gotoTarget)
+                {
+                    var label = batch.Labels[gotoTarget];
+                    if (nestedBlock && label.BlockDepth < batch.DispatchLoopDepth)
+                        yield break;
+                    context.RestoreCheckpoint(label.Checkpoint);
+                    // Jumping *into* blocks means their opening BEGIN never
+                    // ran; their closing ENDs still have to be stepped over.
+                    batch.PendingBlockEnds = label.BlockDepth - batch.DispatchLoopDepth;
+                    batch.PendingGotoLabel = null;
+                    continue;
+                }
+
+                if (batch.PendingBlockEnds > 0 && context.Token is ReservedKeyword { Keyword: Keyword.End })
+                {
+                    batch.PendingBlockEnds--;
+                    context.MoveNextOptional();
+                    continue;
+                }
+
                 // Early-exit on RETURN: stop dispatching once the batch has been
                 // signaled to exit. Any remaining statements (including the END
                 // terminator of an enclosing block) are abandoned — the caller
@@ -1649,7 +1683,10 @@ public sealed partial class Simulation
         finally
         {
             if (nestedBlock)
+            {
                 batch.BlockDepth--;
+                batch.DispatchLoopDepth--;
+            }
         }
     }
 
@@ -2458,6 +2495,14 @@ public sealed partial class Simulation
                     connection.LastStatementRowCount = 0;
                 break;
 
+            case ReservedKeyword { Keyword: Keyword.Goto }:
+                ParseGotoStatement(batch);
+                break;
+
+            case UnquotedString when IsLabelDeclaration(context):
+                ParseLabelDeclaration(context);
+                break;
+
             case ReservedKeyword { Keyword: Keyword.Print }:
                 ParsePrintStatement(batch);
                 context.RejectTrailingToken();
@@ -2529,12 +2574,10 @@ public sealed partial class Simulation
                     context.RestoreCheckpoint(checkpoint);
                     switch (afterBegin)
                     {
-                        case ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction }:
+                        case ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction or Keyword.Distributed }:
                             if (TryParseBeginTransaction(context) && !batch.IsSkipping)
                                 connection.LastStatementRowCount = 0;
                             break;
-                        case ReservedKeyword { Keyword: Keyword.Distributed }:
-                            throw new NotSupportedException("BEGIN DISTRIBUTED TRANSACTION isn't modeled (no distributed transaction coordinator).");
                         case UnquotedString { ContextualKeyword: ContextualKeyword.Try }:
                             foreach (var o in ParseTryCatch(batch))
                                 yield return o;
@@ -2809,7 +2852,7 @@ public sealed partial class Simulation
     }
 
     /// <summary>
-    /// Parses <c>BEGIN TRAN[SACTION] [name] [WITH MARK ['description']]</c>.
+    /// Parses <c>BEGIN [DISTRIBUTED] TRAN[SACTION] [name] [WITH MARK ['description']]</c>.
     /// Opens a fresh <see cref="SimulatedDbTransaction"/> on the connection
     /// when none is active (TRANCOUNT 0 → 1) or increments
     /// <see cref="SimulatedDbTransaction.TranCount"/> when one already is
@@ -2831,7 +2874,18 @@ public sealed partial class Simulation
     /// </remarks>
     private static bool TryParseBeginTransaction(ParserContext context)
     {
-        if (!context.MoveNext() || context.Token is not ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
+        if (!context.MoveNext())
+            return false;
+        // DISTRIBUTED asks for a transaction the coordinator would enlist
+        // remote resources in. Nothing here is remote — a four-part write is
+        // refused outright — so the statement opens the ordinary local
+        // transaction, which is what real does until something actually
+        // enlists: probe-confirmed that BEGIN DISTRIBUTED TRANSACTION matches
+        // BEGIN TRANSACTION on @@TRANCOUNT, nesting either way, XACT_STATE,
+        // COMMIT / ROLLBACK and even the WITH MARK diagnostics.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Distributed } && !context.MoveNext())
+            return false;
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
             return false;
         // Optional name (BEGIN TRANSACTION my_tx, or @v holding one). Cosmetic;
         // consume and ignore — but whether one was written decides Msg 3901.

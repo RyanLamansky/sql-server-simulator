@@ -92,17 +92,44 @@ public sealed class HierarchyIdOrdPathTests
     }
 
     [TestMethod]
-    [DataRow("/5200/")]     // above the modeled positive ceiling
-    [DataRow("/100000/")]   // 6-byte tier
-    [DataRow("/-4169/")]    // below the modeled negative floor
-    public void Encode_OutsideModeledTiers_RaisesNotSupported(string path) =>
-        _ = ThrowsExactly<NotSupportedException>(() => HierarchyIdOrdPath.Encode(HierarchyIdSqlType.ParsePath(path)));
+    // The four wide tiers, which carry the domain past int in both directions.
+    [DataRow("/5200/")]
+    [DataRow("/100000/")]
+    [DataRow("/4294972495/")]
+    [DataRow("/4294972496/")]
+    [DataRow("/281479271683151/")]
+    [DataRow("/-4169/")]
+    [DataRow("/-4294971464/")]
+    [DataRow("/-4294971465/")]
+    [DataRow("/-281479271682120/")]
+    [DataRow("/281479271683150.1/")]
+    [DataRow("/1.281479271683151/")]
+    public void Encode_ThenDecode_RoundTripsTheWideTiers(string path)
+    {
+        var bytes = HierarchyIdOrdPath.Encode(HierarchyIdSqlType.ParsePath(path));
+        AreEqual(path, HierarchyIdSqlType.PathToString(HierarchyIdOrdPath.Decode(bytes)));
+    }
 
     [TestMethod]
-    // A non-final dotted label of ordinal 5199 shifts to 5200 and overflows the
-    // modeled tier set, matching the ordinal-range ceiling.
-    public void Encode_NonFinalDottedOrdinalOverflow_RaisesNotSupported() =>
-        _ = ThrowsExactly<NotSupportedException>(() => HierarchyIdOrdPath.Encode(HierarchyIdSqlType.ParsePath("/5199.1/")));
+    // Outside the domain, the parse is what refuses (Msg 6522) — including a
+    // non-final dotted label at the very top, which encodes as ordinal + 1 and
+    // so has nowhere to go.
+    [DataRow("/281479271683152/")]
+    [DataRow("/-281479271682121/")]
+    [DataRow("/281479271683151.1/")]
+    public void ParsePath_OutsideTheDomain_RaisesMsg6522(string path) =>
+        AreEqual(6522, ThrowsExactly<SimulatedSqlException>(() => HierarchyIdSqlType.ParsePath(path)).Number);
+
+    [TestMethod]
+    // A *computed* ordinal past the top reaches the encoder instead, which is
+    // real's other 6522 form (state 2, naming WriteOrd).
+    public void Encode_ComputedOrdinalPastTheDomain_RaisesMsg6522State2()
+    {
+        var ex = ThrowsExactly<SimulatedSqlException>(
+            () => HierarchyIdOrdPath.Encode([[HierarchyIdOrdPath.DomainMax + 1]]));
+        AreEqual(6522, ex.Number);
+        AreEqual(2, ex.State);
+    }
 
     [TestMethod]
     [DataRow("58", "/1/")]

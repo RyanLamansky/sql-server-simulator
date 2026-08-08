@@ -55,7 +55,7 @@ internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other)
     /// the same wording SQL Server produces for an invalid input to
     /// <c>hierarchyid::Parse</c>.
     /// </summary>
-    public static int[][] ParsePath(string input)
+    public static long[][] ParsePath(string input)
     {
         ArgumentNullException.ThrowIfNull(input);
         if (input.Length == 0 || input[0] != '/' || input[^1] != '/')
@@ -63,7 +63,7 @@ internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other)
         if (input.Length == 1)
             return [];
         var inner = input.AsSpan(1, input.Length - 2);
-        var segments = new List<int[]>();
+        var segments = new List<long[]>();
         var start = 0;
         for (var i = 0; i <= inner.Length; i++)
         {
@@ -78,9 +78,9 @@ internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other)
         return [.. segments];
     }
 
-    private static int[] ParseSegment(ReadOnlySpan<char> segment, string fullInput)
+    private static long[] ParseSegment(ReadOnlySpan<char> segment, string fullInput)
     {
-        var labels = new List<int>();
+        var labels = new List<long>();
         var start = 0;
         for (var i = 0; i <= segment.Length; i++)
         {
@@ -89,12 +89,31 @@ internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other)
                 if (i == start)
                     throw SimulatedSqlException.InvalidHierarchyIdInput(fullInput);
                 var slice = segment[start..i];
-                if (!int.TryParse(slice, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var value))
+                // Labels span real's whole ordinal domain, which is wider
+                // than int; one outside it is as malformed as a non-numeric
+                // slice, and real reports the same Msg 6522 for both.
+                if (!long.TryParse(slice, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var value)
+                    || value < HierarchyIdOrdPath.DomainMin
+                    || value > HierarchyIdOrdPath.DomainMax)
+                {
                     throw SimulatedSqlException.InvalidHierarchyIdInput(fullInput);
+                }
                 labels.Add(value);
                 start = i + 1;
             }
         }
+
+        // Every label of a dotted segment but the last encodes as ordinal + 1
+        // (the order-preserving trick the terminator bit enables), so a
+        // non-final label at the very top of the domain has nowhere to encode:
+        // real refuses `/281479271683151.1/` while accepting both
+        // `/281479271683150.1/` and `/1.281479271683151/` (probe-confirmed).
+        for (var i = 0; i < labels.Count - 1; i++)
+        {
+            if (labels[i] == HierarchyIdOrdPath.DomainMax)
+                throw SimulatedSqlException.InvalidHierarchyIdInput(fullInput);
+        }
+
         return [.. labels];
     }
 
@@ -103,7 +122,7 @@ internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other)
     /// otherwise <c>/seg1/seg2/.../</c> where each segment is dot-joined
     /// labels.
     /// </summary>
-    public static string PathToString(int[][] path)
+    public static string PathToString(long[][] path)
     {
         if (path.Length == 0)
             return "/";

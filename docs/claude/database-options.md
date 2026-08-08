@@ -75,7 +75,8 @@ Neither flag is inherited from `model` — a new database starts with both off, 
 ## Read-only databases
 
 `ALTER DATABASE <name> SET { READ_ONLY | READ_WRITE }` moves `Database.IsReadOnly`, projected by `sys.databases.is_read_only` and by `DATABASEPROPERTYEX(name, 'Updateability')` (`READ_ONLY` / `READ_WRITE`).
-Every write to a read-only database is **Msg 3906** class 16 state 1 — `Failed to update database "<n>" because the database is read-only.` — the identical wording for DML and DDL, probe-confirmed against SQL Server 2025 (2026-08-04).
+Every write to a read-only database is **Msg 3906** class 16 — `Failed to update database "<n>" because the database is read-only.` — the identical wording for DML and DDL, probe-confirmed against SQL Server 2025 (2026-08-04, the states and the catalog-writing statements re-probed 2026-08-08).
+The state is **1** everywhere but `ALTER TABLE`, whose every sub-action (ADD / DROP / ALTER COLUMN, ADD / DROP CONSTRAINT, CHECK / NOCHECK, REBUILD) reports **12**.
 The error names the database that *would have been written*, so a three-part write out of another session database reports the target's name, the same rule the rowversion counter and trigger dispatch follow.
 
 **The check happens where the write happens**, which is what reproduces real's laziness.
@@ -83,7 +84,27 @@ An `UPDATE` or `DELETE` matching no row, an `INSERT … SELECT` producing none, 
 Writes to a table belonging to no database — a `#temp` table, a `##global` table, a table variable, a table-valued parameter — are unaffected however the session's own database is set, matching real's separate `tempdb`; `SELECT … INTO #t` reading a read-only table is legal, while `SELECT … INTO <permanent>` is not.
 
 Enforced at two kinds of seam: the per-row DML writes (INSERT / UPDATE / DELETE / MERGE / bulk load, keyed on `HeapTable.OwningDatabase`), and the DDL statements' own target resolution — the module `CREATE` / `ALTER` family through `ResolveModuleSchema`, plus `CREATE TABLE`, `SELECT … INTO`, `TRUNCATE`, `ALTER TABLE`, `CREATE INDEX`, `ALTER SEQUENCE`, the `CREATE` / `DROP` pairs for sequences, types and synonyms, and every `DROP` of a table, view, procedure, function, sequence, type or trigger.
-A `DROP` reports the ordinary not-found error first: real checks existence before the access mode.
+
+The catalog-writing statements carry it too: `GRANT` / `REVOKE` / `DENY`, `sp_rename` (object, column and index forms), `sp_addextendedproperty` and its update / drop siblings, `ALTER SCHEMA … TRANSFER`, `CREATE SCHEMA`, `CREATE` / `ALTER` / `DROP INDEX`, `CREATE STATISTICS`, `CREATE` / `DROP ASSEMBLY`, and the database-scoped principal DDL (`CREATE` / `DROP USER`, `CREATE` / `DROP ROLE`, `ALTER ROLE … ADD | DROP MEMBER`, the application-role trio).
+Login and server-role DDL don't: those write `master`, which can never be read-only.
+
+**Where the refusal sits relative to name resolution differs per statement**, and real's order is what each gate follows (all probe-confirmed):
+
+| Statement | Refused before or after resolution |
+|---|---|
+| `GRANT` / `REVOKE` / `DENY` | before — a missing object *or* principal still reports Msg 3906 |
+| `ALTER SCHEMA … TRANSFER` | before — a missing object still reports Msg 3906 |
+| `CREATE USER` / `CREATE ROLE` | before — an existing name still reports Msg 3906 |
+| `DROP ASSEMBLY` | before — a name no assembly holds still reports Msg 3906 |
+| `ALTER INDEX` | after the *table* (a missing one is Msg 1088), before the index |
+| `DROP INDEX` | after both — a missing table or index reports its own Msg 3701 |
+| `sp_rename` | after the target resolves (Msg 15225 / 15248 otherwise) |
+| `sp_addextendedproperty` | after the target resolves (Msg 15135 otherwise) |
+| `ALTER TABLE` | after the table resolves (Msg 4902 otherwise) |
+| every `DROP` of an object | after — real checks existence before the access mode |
+
+The **full-text** statements report the subsystem's own **Msg 7690** instead (`Full-text operation failed because database is read only.`), at severity 16 and a state per statement: `CREATE FULLTEXT CATALOG` 100, `DROP FULLTEXT CATALOG` 102, `CREATE FULLTEXT INDEX` 103, `DROP FULLTEXT INDEX` 105.
+`CREATE SCHEMA` raises Msg 3906 and then real's own trailing Msg 2759, of which the simulator reports the 3906.
 
 `master` and `tempdb` **pin** the option and raise **Msg 5058** class 16 for either value asked for — `Option '<READ_ONLY|READ_WRITE>' cannot be set in database '<n>'.` — at their own states, **5** for `master` and **4** for `tempdb`.
 `model` and `msdb` both accept it.
@@ -97,8 +118,6 @@ Carrying it wants a post-load hook.
 
 ### Not modeled yet
 
-- Real varies the Msg 3906 **state** at a few sites (`ALTER TABLE` reports state 12); the simulator raises state 1 everywhere.
-- A read-only `GRANT` / `REVOKE` / `DENY`, `sp_rename`, `sp_addextendedproperty`, `ALTER SCHEMA … TRANSFER`, `ALTER INDEX` / `DROP INDEX`, and the `CREATE` / `DROP` of schemas, roles, users and assemblies carry no gate yet — real raises Msg 3906 for all of them.
 - The database-level `OFFLINE` / `EMERGENCY` / `RESTRICTED_USER` states real also refuses writes in stay parse-and-discard.
 
 ## `COLLATE` clause

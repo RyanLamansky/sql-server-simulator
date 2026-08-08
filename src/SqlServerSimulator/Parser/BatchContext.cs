@@ -498,6 +498,60 @@ internal sealed class BatchContext
     public int CatchDepth;
 
     /// <summary>
+    /// Whether this batch has run a <c>SET DATEFIRST</c> of its own, which
+    /// makes a later <c>SET LANGUAGE</c> in the same batch leave
+    /// <c>@@DATEFIRST</c> alone. Real scopes that precedence to the batch
+    /// rather than the session, so the same pair split across two batches ends
+    /// on the language's value (probe-confirmed).
+    /// </summary>
+    public bool DateFirstSetExplicitly;
+
+    /// <summary>
+    /// Shared empty label map for the overwhelming majority of batches, which
+    /// declare none.
+    /// </summary>
+    public static readonly System.Collections.Frozen.FrozenDictionary<string, LabelTarget> NoLabels =
+        System.Collections.Frozen.FrozenDictionary<string, LabelTarget>.Empty;
+
+    /// <summary>
+    /// Every <c>label:</c> this batch or module body declares, mapped to the
+    /// cursor position immediately after it — the point a <c>GOTO</c> resumes
+    /// dispatch at. Filled once per batch root by
+    /// <c>Simulation.ScanBatchLabels</c>, which also settles the compile-phase
+    /// Msg 132 / 133 / 1026 refusals.
+    /// </summary>
+    public IReadOnlyDictionary<string, LabelTarget> Labels = NoLabels;
+
+    /// <summary>
+    /// The label a <c>GOTO</c> has asked for and the dispatch loop has yet to
+    /// jump to. Non-null makes <see cref="IsSkipping"/> true, so the nested
+    /// dispatch loops of any enclosing <c>BEGIN…END</c> / <c>WHILE</c> /
+    /// <c>TRY</c> unwind the way they do for <c>RETURN</c>, and the batch root
+    /// restores the label's checkpoint and clears this.
+    /// </summary>
+    public string? PendingGotoLabel;
+
+    /// <summary>
+    /// How many <c>END</c> tokens the dispatch loop still has to swallow after
+    /// a <c>GOTO</c> landed on a label nested deeper in <c>BEGIN…END</c> blocks
+    /// than the loop servicing the jump — the blocks execution entered
+    /// mid-body and so never opened. Zero for every jump that stays at or
+    /// climbs out of its own nesting.
+    /// </summary>
+    public int PendingBlockEnds;
+
+    /// <summary>
+    /// How many nested statement-dispatch loops are on the stack — one per
+    /// open <c>BEGIN…END</c> block, <c>BEGIN TRY</c> or <c>BEGIN CATCH</c>,
+    /// zero at the batch root. Distinct from <see cref="BlockDepth"/>, which
+    /// also counts an <c>IF</c> / <c>WHILE</c> that dispatches a single
+    /// statement rather than opening a loop of its own; a <c>GOTO</c> matches
+    /// against this one because it is what
+    /// <c>Simulation.ScanBatchLabels</c> can count from the tokens.
+    /// </summary>
+    public int DispatchLoopDepth;
+
+    /// <summary>
     /// True after a <c>RETURN</c> statement has fired in this batch. Drives
     /// early-exit propagation: the dispatch loop (and every enclosing
     /// construct — WHILE, BEGIN…END block) checks this and stops as soon as
@@ -1395,7 +1449,8 @@ internal sealed class BatchContext
         this.SkipModeFlag
         || this.LoopControl != LoopControl.None
         || this.ReturnSignaled
-        || this.ErrorSignaled;
+        || this.ErrorSignaled
+        || this.PendingGotoLabel is not null;
 
     /// <summary>The connection executing this batch.</summary>
     public SimulatedDbConnection Connection => this.Parser.Connection;

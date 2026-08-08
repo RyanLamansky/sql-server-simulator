@@ -5,7 +5,7 @@ namespace SqlServerSimulator.Storage;
 /// server stores, compares (unsigned bytewise = depth-first tree order),
 /// serializes over the TDS UDT wire, and reports via <c>DATALENGTH</c>. This is
 /// the simulator's canonical in-memory representation for <c>hierarchyid</c>
-/// (<see cref="SqlValue.FromHierarchyId(int[][])"/> encodes into it,
+/// (<see cref="SqlValue.FromHierarchyId(long[][])"/> encodes into it,
 /// <see cref="SqlValue.AsHierarchyId"/> decodes back), so a stored value's page
 /// bytes, its <c>CAST(node AS varbinary)</c> bytes, and its wire bytes are all
 /// the same buffer with zero re-encoding.
@@ -26,13 +26,13 @@ namespace SqlServerSimulator.Storage;
 /// that sorts a dotted continuation after the plain node and before its next
 /// sibling. Probe-anchored against SQL Server 2025 (2026-07-17).</para>
 ///
-/// <para><b>Modeled tier domain</b>: ordinals <c>-4168 .. 5199</c> (the twelve
-/// tiers in <see cref="Tiers"/>). Every tier boundary is byte-anchored by a live
-/// probe (see the encoder/decoder tests). Ordinals outside that window (the
-/// wider 6-byte tiers real supports) raise <see cref="NotSupportedException"/>
-/// on encode/decode; the storage layer still round-trips their raw bytes
-/// opaquely (BACPAC import stores them verbatim), only <c>ToString()</c> / the
-/// instance methods need a decode and so surface the limitation.</para>
+/// <para><b>Tier domain</b>: ordinals <c>-281479271682120 .. 281479271683151</c>
+/// — real's whole range, bounded by the two widest tiers' 48 value bits.
+/// Outside it, <c>hierarchyid::Parse</c> is Msg 6522 like any other malformed
+/// input, which is what real reports (its own
+/// <c>HierarchyIdException 24001</c>). Every tier boundary is byte-anchored by
+/// a live probe (see the encoder/decoder tests). Labels are <c>long</c> because
+/// the domain overflows <c>int</c> by a factor of ~65000.</para>
 ///
 /// <para>Tier table (V = value bit group MSB→LSB, digits = fixed structural
 /// bits, final bit = terminator; value spans the V groups, ordinal = base +
@@ -46,13 +46,23 @@ namespace SqlServerSimulator.Storage;
 /// <item><term>110</term><description><c>VV 0 V 1 VVV 1</c> — 16..79</description></item>
 /// <item><term>1110</term><description><c>VVV 0 VVV 0 V 1 VVV 1</c> — 80..1103</description></item>
 /// <item><term>11110</term><description><c>VVVVV 0 VVV 0 V 1 VVV 1</c> — 1104..5199</description></item>
+/// <item><term>111110</term><description><c>V×19 0 V×6 0 VVV 0 V 1 VVV 1</c> — 5200..4294972495</description></item>
+/// <item><term>111111</term><description><c>V×14 0 V×21 0 V×6 0 VVV 0 V 1 VVV 1</c> — 4294972496..281479271683151</description></item>
 /// <item><term>0011</term><description><c>VVVV 1</c> — -8..-1</description></item>
 /// <item><term>0010</term><description><c>VV 0 V 1 VVV 1</c> — -72..-9</description></item>
 /// <item><term>00011011</term><description><c>VVV 0 VVV 0 V 1 VVV 1</c> — -1096..-73</description></item>
 /// <item><term>00011010</term><description>same layout — -2120..-1097</description></item>
 /// <item><term>00011001</term><description>same layout — -3144..-2121</description></item>
 /// <item><term>00011000</term><description>same layout — -4168..-3145</description></item>
+/// <item><term>000101</term><description>the 111110 layout — -4294971464..-4169</description></item>
+/// <item><term>000100</term><description>the 111111 layout — -281479271682120..-4294971465</description></item>
 /// </list>
+///
+/// <para>The two widest tiers are wider than the ordinals that reach them: the
+/// negative 32-bit tier's own base is <c>-4294971464</c>, which puts its lowest
+/// 4168 values under the narrower tiers that already cover <c>-4168..-1</c>, so
+/// they never encode. Each tier's <c>MinOrdinal</c> is the first ordinal that
+/// actually picks it.</para>
 /// </remarks>
 internal static class HierarchyIdOrdPath
 {
@@ -92,6 +102,19 @@ internal static class HierarchyIdOrdPath
     private static readonly int[] Groups10 = [3, 3, 1, 3];
     private static readonly int[] Sep10 = [0, 0, 1, 1];
 
+    // Tails shared by the two widest tier pairs, each spanning six prefix bits:
+    // 32 value bits (5200.. and its negative mirror) and 48 (the rest).
+    private static readonly int[] Groups32 = [19, 6, 3, 1, 3];
+    private static readonly int[] Sep32 = [0, 0, 0, 1, 1];
+    private static readonly int[] Groups48 = [14, 21, 6, 3, 1, 3];
+    private static readonly int[] Sep48 = [0, 0, 0, 0, 1, 1];
+
+    /// <summary>The largest ordinal any tier encodes — real's own ceiling.</summary>
+    public const long DomainMax = 281479271683151;
+
+    /// <summary>The smallest ordinal any tier encodes — real's own floor.</summary>
+    public const long DomainMin = -281479271682120;
+
     private static readonly Tier[] Tiers =
     [
         new(0b01, 2, [2], [1], 0, 0, 3),
@@ -100,12 +123,16 @@ internal static class HierarchyIdOrdPath
         new(0b110, 3, Groups6, Sep6, 16, 16, 79),
         new(0b1110, 4, Groups10, Sep10, 80, 80, 1103),
         new(0b11110, 5, [5, 3, 1, 3], [0, 0, 1, 1], 1104, 1104, 5199),
+        new(0b111110, 6, Groups32, Sep32, 5200, 5200, 4294972495),
+        new(0b111111, 6, Groups48, Sep48, 4294972496, 4294972496, DomainMax),
         new(0b0011, 4, [4], [1], -16, -8, -1),
         new(0b0010, 4, Groups6, Sep6, -72, -72, -9),
         new(0b00011011, 8, Groups10, Sep10, -1096, -1096, -73),
         new(0b00011010, 8, Groups10, Sep10, -2120, -2120, -1097),
         new(0b00011001, 8, Groups10, Sep10, -3144, -3144, -2121),
         new(0b00011000, 8, Groups10, Sep10, -4168, -4168, -3145),
+        new(0b000101, 6, Groups32, Sep32, -4294971464, -4294971464, -4169),
+        new(0b000100, 6, Groups48, Sep48, DomainMin, DomainMin, -4294971465),
     ];
 
     /// <summary>
@@ -114,7 +141,7 @@ internal static class HierarchyIdOrdPath
     /// encodes to zero bytes.
     /// </summary>
     /// <exception cref="NotSupportedException">A label falls outside the modeled tier domain.</exception>
-    public static byte[] Encode(int[][] path)
+    public static byte[] Encode(long[][] path)
     {
         var writer = new BitWriter();
         foreach (var segment in path)
@@ -140,13 +167,13 @@ internal static class HierarchyIdOrdPath
     /// </summary>
     /// <exception cref="NotSupportedException">A label uses an unmodeled tier.</exception>
     /// <exception cref="InvalidDataException">The bit stream is malformed (read past end / dangling non-final label).</exception>
-    public static int[][] Decode(ReadOnlySpan<byte> source)
+    public static long[][] Decode(ReadOnlySpan<byte> source)
     {
         if (source.IsEmpty)
             return [];
         var reader = new BitReader(source);
-        var segments = new List<int[]>();
-        var current = new List<int>();
+        var segments = new List<long[]>();
+        var current = new List<long>();
         while (reader.HasMoreNonZeroBits())
         {
             var (ordinal, terminator) = ReadLabel(ref reader);
@@ -175,9 +202,9 @@ internal static class HierarchyIdOrdPath
     /// requiring byte equality, so canonicalization is enforced by construction.
     /// </summary>
     /// <exception cref="SimulatedSqlException">The input is not a canonical hierarchyid encoding (Msg 6522).</exception>
-    public static int[][] DecodeCanonical(ReadOnlySpan<byte> source)
+    public static long[][] DecodeCanonical(ReadOnlySpan<byte> source)
     {
-        int[][] path;
+        long[][] path;
         try
         {
             path = Decode(source);
@@ -193,8 +220,10 @@ internal static class HierarchyIdOrdPath
 
     private static void WriteLabel(ref BitWriter writer, long ordinal, bool terminator)
     {
-        var tier = FindTierByOrdinal(ordinal)
-            ?? throw new NotSupportedException($"hierarchyid OrdPath encoder: ordinal {ordinal} is outside the modeled tier range [-4168, 5199].");
+        // Parsing already rejects an out-of-domain label, so what reaches here
+        // is a *computed* ordinal — GetDescendant past the top of the widest
+        // tier — which real reports as Msg 6522's 24006 form.
+        var tier = FindTierByOrdinal(ordinal) ?? throw SimulatedSqlException.HierarchyIdResultTooBig();
         writer.WriteBits(tier.Prefix, tier.PrefixBits);
         var value = ordinal - tier.Base;
         var offset = tier.ValueBits;
@@ -207,7 +236,7 @@ internal static class HierarchyIdOrdPath
         }
     }
 
-    private static (int Ordinal, bool Terminator) ReadLabel(ref BitReader reader)
+    private static (long Ordinal, bool Terminator) ReadLabel(ref BitReader reader)
     {
         var tier = MatchTier(ref reader);
         long value = 0;
@@ -217,7 +246,7 @@ internal static class HierarchyIdOrdPath
             value = (value << tier.Groups[g]) | reader.ReadBits(tier.Groups[g]);
             terminator = reader.ReadBit();
         }
-        return (checked((int)(tier.Base + value)), terminator);
+        return (tier.Base + value, terminator);
     }
 
     /// <summary>
@@ -236,7 +265,7 @@ internal static class HierarchyIdOrdPath
                     return tier;
             }
         }
-        throw new NotSupportedException("hierarchyid OrdPath decoder: unrecognized ordinal tier prefix (unmodeled wide/6-byte tier).");
+        throw new NotSupportedException("hierarchyid OrdPath decoder: unrecognized ordinal tier prefix.");
     }
 
     private static Tier? FindTierByOrdinal(long ordinal)

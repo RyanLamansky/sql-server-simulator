@@ -317,6 +317,14 @@ Exponent is always 3 digits with explicit sign and lowercase `e`.
 `-0` preserves the negative sign.
 Unknown styles raise Msg 281 with `"float"` or `"real"` in the wording.
 
+**A styleless conversion is style 0**, and that is what every ordinary string surface takes: `CAST(<float> AS varchar)`, `CONVERT` with no style, `+` concatenation, `CONCAT` / `CONCAT_WS`, assignment to a string variable or column, `sql_variant` unwrapping, and the Msg 2627 duplicate-key rendering.
+So `CAST(CAST(1234567890 AS float) AS varchar(50))` is `1.23457e+009`, not `1234567890` — six significant digits, fixed-point only while the *rounded* magnitude stays in `[1e-4, 1e6)`.
+`real` takes the same six digits: `CAST(CAST(1234567 AS real) AS varchar(50))` is `1.23457e+006`.
+
+The two producers that don't are **JSON and XML**, which write **style 126** — the source-precision scientific form, sixteen significant digits for `float` and eight for `real`.
+That covers `FOR JSON`, `FOR XML`, `JSON_OBJECT` / `JSON_ARRAY`, and `JSON_MODIFY`'s written value: `JSON_OBJECT('f': CAST(1234567890 AS float))` is `{"f":1.234567890000000e+009}`.
+All probe-confirmed against SQL Server 2025 (2026-08-08); `SqlValue.FormatApproximateWithStyle` is the one renderer behind every one of them.
+
 **Varbinary ↔ string** (`SqlValue.CoerceBinaryToStringWithStyle` / `CoerceStringToBinaryWithStyle`):
 
 | Style | Output direction | Input direction |

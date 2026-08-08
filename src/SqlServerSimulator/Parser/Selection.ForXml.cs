@@ -846,10 +846,8 @@ partial class Selection
                 return value.AsBoolean ? "1" : "0";
             case SqlVariantSqlType:
                 return ScalarForXmlText(value.AsVariantInner);
-            case var _ when type == SqlType.Float:
-                return value.AsDouble.ToString("0.000000000000000e+000", CultureInfo.InvariantCulture);
-            case var _ when type == SqlType.Real:
-                return value.AsSingle.ToString("0.0000000e+000", CultureInfo.InvariantCulture);
+            case var _ when type == SqlType.Float || type == SqlType.Real:
+                return value.FormatApproximateWithStyle(126);
             case var _ when type == SqlType.Money || type == SqlType.SmallMoney:
                 return value.AsMoneyDecimal38.ToString();
             case BinarySqlType or VarbinarySqlType or ImageSqlType:

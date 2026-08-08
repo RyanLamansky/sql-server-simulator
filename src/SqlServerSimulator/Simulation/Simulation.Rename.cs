@@ -161,6 +161,10 @@ partial class Simulation
         if (SchemaBinding.FindReferencingModule(database, table) is not null)
             throw SimulatedSqlException.RenameParticipatesInEnforcedDependencies(objName);
 
+        // Real refuses a read-only database only once the rename has otherwise
+        // been accepted: an unresolvable @objname still reports its own Msg
+        // 15225 / 15248 (probe-confirmed).
+        database.RejectWriteWhenReadOnly();
         batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
         _ = schema.HeapTables.TryRemove(table.Name, out _);
         table.Name = newName;
@@ -204,6 +208,7 @@ partial class Simulation
         // Storage is by ordinal, so the name change needs no row re-encode — but
         // the schema-version bump invalidates any cached plan that resolved the
         // old name.
+        table.OwningDatabase?.RejectWriteWhenReadOnly();
         batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
         table.Columns[ordinal].Name = newName;
         BumpSchemaVersion();
@@ -229,6 +234,7 @@ partial class Simulation
         if (target is null)
             throw SimulatedSqlException.RenameAmbiguousOrWrongType("INDEX");
 
+        table.OwningDatabase?.RejectWriteWhenReadOnly();
         batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
         target.Name = newName;
         BumpSchemaVersion();

@@ -88,6 +88,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        context.CurrentDatabase.RejectWriteWhenReadOnly();
+
         // Database-scope CREATE ASSEMBLY gate (Msg 262 state 1) — probe-confirmed
         // ahead of the assembly-content checks.
         if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.CreateAssembly))
@@ -273,6 +275,9 @@ partial class Simulation
             return true;
 
         var database = context.CurrentDatabase;
+        // Real refuses ahead of the name lookup — a DROP naming no assembly in
+        // a read-only database still reports Msg 3906 (probe-confirmed).
+        database.RejectWriteWhenReadOnly();
         foreach (var name in names)
         {
             if (!database.Assemblies.TryGetValue(name, out var assembly))

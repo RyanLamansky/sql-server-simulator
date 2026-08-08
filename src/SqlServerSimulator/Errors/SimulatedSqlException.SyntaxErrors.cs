@@ -302,6 +302,42 @@ partial class SimulatedSqlException
         new($"SET DATEFIRST {value.ToString(System.Globalization.CultureInfo.InvariantCulture)} is out of range.", 2742, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 2740: <c>SET LANGUAGE</c> named neither an
+    /// official language name nor an alias. Probe-confirmed against SQL Server
+    /// 2025 (2026-08-08): Class 16, State 1, the batch continuing past it —
+    /// and swallowed entirely inside a <c>TRY</c> block, which is why the
+    /// caller checks the frame depth before raising.
+    /// </summary>
+    /// <summary>
+    /// Mimics SQL Server error 132: two <c>label:</c> declarations in one batch
+    /// or module body share a name. Probe-confirmed against SQL Server 2025
+    /// (2026-08-08): Class 15 — a compile-phase refusal, so it fires with no
+    /// <c>GOTO</c> referencing the label at all.
+    /// </summary>
+    internal static SimulatedSqlException DuplicateLabel(string label) =>
+        new($"The label '{label}' has already been declared. Label names must be unique within a query batch or stored procedure.", 132, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 133: a <c>GOTO</c> names a label its batch or
+    /// module body doesn't declare. Class 15, and settled while compiling — an
+    /// unreachable <c>GOTO</c> aborts the batch before any statement runs
+    /// (probe-confirmed).
+    /// </summary>
+    internal static SimulatedSqlException UndeclaredLabel(string label) =>
+        new($"A GOTO statement references the label '{label}' but the label has not been declared.", 133, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1026: a <c>GOTO</c> would enter a <c>TRY</c> or
+    /// <c>CATCH</c> block it isn't already inside. Jumping <em>out</em> of one
+    /// is legal (probe-confirmed); only entry is refused.
+    /// </summary>
+    internal static SimulatedSqlException GotoCannotJumpIntoTryOrCatch() =>
+        new("GOTO cannot be used to jump into a TRY or CATCH scope.", 1026, 15, 1);
+
+    internal static SimulatedSqlException LanguageNotFound(string name) =>
+        new($"SET LANGUAGE failed because '{name}' is not an official language name or a language alias on this SQL Server.", 2740, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 319: a CTE-prefixed statement (a <c>WITH</c>
     /// clause introducing a common table expression) followed another
     /// statement with no <c>;</c> separator. Probe-confirmed verbatim text /

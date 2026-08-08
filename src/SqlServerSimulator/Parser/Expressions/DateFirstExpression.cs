@@ -21,6 +21,41 @@ internal sealed class DateFirstExpression(ParserContext context) : Expression
 }
 
 /// <summary>
+/// Backs <c>@@LANGUAGE</c>: the official name of the session's
+/// <c>SET LANGUAGE</c> — the <c>name</c> column of <c>sys.syslanguages</c>, not
+/// the alias the statement may have been written with, so
+/// <c>SET LANGUAGE German</c> reads back <c>Deutsch</c> (probe-confirmed).
+/// </summary>
+internal sealed class LanguageExpression(ParserContext context) : Expression
+{
+    public override SqlValue Run(RuntimeContext runtime) =>
+        SqlValue.FromNVarchar(context.Connection.Language.Name);
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
+
+    internal override string DebugDisplay() => "@@LANGUAGE";
+}
+
+/// <summary>
+/// Backs <c>@@LANGID</c>: the <c>langid</c> of the session's
+/// <c>SET LANGUAGE</c>, as real's <c>smallint</c>. Default <c>0</c>
+/// (us_english).
+/// </summary>
+internal sealed class LangIdExpression(ParserContext context) : Expression
+{
+    public override SqlValue Run(RuntimeContext runtime) =>
+        SqlValue.FromInt16(context.Connection.Language.LangId);
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
+
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
+
+    internal override string DebugDisplay() => "@@LANGID";
+}
+
+/// <summary>
 /// Backs <c>@@OPTIONS</c>: SQL Server 2025's fresh-session default 5432
 /// (probe-confirmed 2026-05-22 — QUOTED_IDENTIFIER, ANSI_WARNINGS,
 /// ANSI_PADDING, ANSI_NULLS, ANSI_NULL_DFLT_ON, CONCAT_NULL_YIELDS_NULL), with

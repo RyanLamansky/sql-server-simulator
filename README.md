@@ -122,9 +122,8 @@ In general, when that happens the simulator raises `NotSupportedException` namin
 Write a bug report if you're blocked.
 A few examples:
 
-- Cross-database DML - writes through a 3-part name targeting a different database.
-  Cross-database reads work; issue `USE <db>` to switch first for writes.
-- `BEGIN DISTRIBUTED TRANSACTION`, `GOTO`/labels.
+- Cross-*server* DML - writes through a 4-part linked-server name.
+  Four-part reads work, as does cross-database DML inside one `Simulation`; open a connection on the target `Simulation` to write to it.
 - CLR stored procedures, table-valued functions, aggregates and UDTs; logon triggers; natively-compiled procedures beyond parser fidelity.
   CLR *scalar* functions work: set `EnableClr` on the `Simulation`, then `CREATE ASSEMBLY` and `CREATE FUNCTION ... AS EXTERNAL NAME`.
   Enabling it runs the assembly's code inside your process — .NET has no Code Access Security, so `PERMISSION_SET = SAFE` cannot be enforced.

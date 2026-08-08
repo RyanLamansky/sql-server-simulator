@@ -779,6 +779,10 @@ partial class Simulation
         {
             if (context.Batch.CurrentDatabase.Collation.Equals(table.Indexes[i].Name, indexName))
             {
+                // Real refuses the read-only database only once the index has
+                // resolved: a DROP INDEX naming a missing table or a missing
+                // index still reports its own Msg 3701 (probe-confirmed).
+                table.OwningDatabase?.RejectWriteWhenReadOnly();
                 if (table.Indexes[i].IsClustered && RetentionCleanupDependsOn(context, table))
                     throw SimulatedSqlException.CannotDropRetentionCleanupIndex(qualifiedTableName, indexName);
                 table.Indexes.RemoveAt(i);

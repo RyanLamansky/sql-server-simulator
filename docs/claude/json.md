@@ -56,7 +56,7 @@ JSON_OBJECT's key parse needs the `:` separator to not collide with the `::` typ
 Implementation: a `ParserContext.StopExpressionAtBareColon` flag, set transiently around the key parse, redirects the `Expression.Parse` postfix `:` case — single-colon rewinds and breaks out so the JSON_OBJECT body parser consumes the separator; double-colon still routes to `SpatialStaticCall` / `HierarchyIdStaticCall` unchanged.
 The flag is save/restored so a nested JSON_OBJECT inside another JSON_OBJECT's value position doesn't leak its key-parse state outward.
 
-Value formatting matches real SQL Server byte-for-byte except float / real (documented quirk — simulator emits .NET `G15` / `G7`, real SQL Server emits `1.234e+000`).
+Value formatting matches real SQL Server byte-for-byte, float / real included: every JSON producer writes CONVERT style 126 (source-precision scientific — sixteen significant digits for `float`, eight for `real`), where a styleless conversion to a string type writes style 0's compact form (see [`casting.md`](casting.md)).
 Specific mappings:
 - `bit` → unquoted `true` / `false`
 - integer / decimal / money — unquoted number, written as the SQL value carries it rather than formatted from the declared type, so an exact numeric's trailing zeros are whatever its type declares: `JSON_ARRAY(CAST(1 AS numeric(10, 2)))` is `[1.00]`, `JSON_OBJECT('a': CAST(1.5 AS numeric(10, 4)))` is `{"a":1.5000}`, `JSON_MODIFY('{"a":0}', '$.a', CAST(1 AS numeric(10, 2)))` is `{"a":1.00}`, and every `money` / `smallmoney` value shows its fixed scale of 4.
@@ -272,7 +272,7 @@ FOR JSON's own formatter (`AppendForJsonValue`) — it diverges from the JSON_* 
 | char / nchar / varchar / nvarchar / text / xml / other | quoted, JSON-escaped |
 
 The date/time types **drop an all-zero fractional second** (`…T00:00:00`, not `…T00:00:00.000`) while keeping the interior/trailing zeros of a non-zero fraction (`.100`, not `.1`).
-Unlike the JSON_* builders (which emit .NET `G15` / `G7` for float / real — a documented quirk), FOR JSON matches real's scientific notation exactly.
+FOR JSON and the JSON_* builders share one renderer and match real's scientific notation exactly.
 
 String escaping: `"` → `\"`, `\` → `\\`, **`/` → `\/`**, `\b` `\t` `\n` `\f` `\r`, other control chars < 0x20 → lowercase `\uXXXX`; chars ≥ 0x20 including non-ASCII stay verbatim — the same set the JSON_* builders write.
 Nested FOR JSON / `JSON_QUERY` / `JSON_OBJECT` / `JSON_ARRAY` columns embed as raw JSON (detected at compile time by `ColumnProducesRawJson`, unwrapping alias / parenthesis / scalar-subquery wrappers).

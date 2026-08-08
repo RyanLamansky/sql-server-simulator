@@ -448,11 +448,8 @@ partial class Selection
             case var _ when type == SqlType.Money || type == SqlType.SmallMoney:
                 _ = sb.Append(value.AsMoneyDecimal38.ToString());
                 return;
-            case var _ when type == SqlType.Float:
-                _ = sb.Append(value.AsDouble.ToString("0.000000000000000e+000", CultureInfo.InvariantCulture));
-                return;
-            case var _ when type == SqlType.Real:
-                _ = sb.Append(value.AsSingle.ToString("0.0000000e+000", CultureInfo.InvariantCulture));
+            case var _ when type == SqlType.Float || type == SqlType.Real:
+                _ = sb.Append(value.FormatApproximateWithStyle(126));
                 return;
             case BinarySqlType or VarbinarySqlType:
                 _ = sb.Append('"').Append(Convert.ToBase64String(value.AsBytes)).Append('"');

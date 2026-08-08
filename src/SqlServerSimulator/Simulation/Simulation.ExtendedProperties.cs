@@ -107,6 +107,11 @@ partial class Simulation
             level2Type, level2Name,
             name);
 
+        // The read-only refusal comes after the target resolves — an unknown
+        // target in a read-only database still reports Msg 15135
+        // (probe-confirmed).
+        batch.CurrentDatabase.RejectWriteWhenReadOnly();
+
         var props = batch.CurrentDatabase.ExtendedProperties;
         switch (op)
         {

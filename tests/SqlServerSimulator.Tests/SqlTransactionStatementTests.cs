@@ -311,4 +311,53 @@ public sealed class SqlTransactionStatementTests
         AreEqual(102, Throws<SimulatedSqlException>(
             () => conn.CreateCommand("begin tran t1 with nothing").ExecuteNonQuery()).Number);
     }
+
+    /// <summary>
+    /// <c>BEGIN DISTRIBUTED TRAN[SACTION]</c> asks the coordinator for a
+    /// transaction remote resources could enlist in. Nothing here is remote, so
+    /// it opens the ordinary local transaction — which is what real does until
+    /// something actually enlists: probe-confirmed (2026-08-08) that the two
+    /// spellings match on <c>@@TRANCOUNT</c>, on nesting in either order, on
+    /// <c>XACT_STATE</c>, and on <c>COMMIT</c> / <c>ROLLBACK</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("begin distributed tran")]
+    [DataRow("begin distributed transaction")]
+    [DataRow("begin distributed transaction mytx")]
+    [DataRow("declare @n varchar(30) = 't1'; begin distributed transaction @n")]
+    public void BeginDistributedTransaction_OpensALocalTransaction(string begin)
+    {
+        using var conn = NewSeededConnection();
+        AreEqual(1, conn.CreateCommand($"{begin}; select @@trancount").ExecuteScalar());
+        AreEqual((short)1, conn.CreateCommand("select xact_state()").ExecuteScalar());
+        _ = conn.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual(0, conn.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void BeginDistributedTransaction_NestsWithTheLocalForm()
+    {
+        using var conn = NewSeededConnection();
+        AreEqual(2, conn.CreateCommand("begin tran; begin distributed tran; select @@trancount").ExecuteScalar());
+        _ = conn.CreateCommand("commit; commit").ExecuteNonQuery();
+        AreEqual(2, conn.CreateCommand("begin distributed tran; begin tran; select @@trancount").ExecuteScalar());
+        _ = conn.CreateCommand("commit; commit").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public void BeginDistributedTransaction_RollbackUndoesItsWrites()
+    {
+        using var conn = NewSeededConnection();
+        _ = conn.CreateCommand("begin distributed transaction; insert t values (1, 10); rollback").ExecuteNonQuery();
+        AreEqual(0, CountRows(conn, "t"));
+    }
+
+    /// <summary>The unnamed <c>WITH MARK</c> refusal follows too (Msg 3901).</summary>
+    [TestMethod]
+    public void BeginDistributedTransaction_WithUnnamedMark_RaisesMsg3901()
+    {
+        using var conn = NewSeededConnection();
+        AreEqual(3901, Throws<SimulatedSqlException>(
+            () => conn.CreateCommand("begin distributed transaction with mark 'x'").ExecuteNonQuery()).Number);
+    }
 }

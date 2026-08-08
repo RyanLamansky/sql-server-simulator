@@ -55,11 +55,10 @@ The two characters of a compound op must be adjacent in source — probe-confirm
 The same helper drives `UPDATE t SET col op= expr` (both bare and `t.col` qualified forms; mixed plain/compound across multiple SET-list entries).
 **Table variables** (`DECLARE @t TABLE (...)`) ship — see [Table variables](table-variables.md) for the storage scope, grammar coverage, non-transactional semantics, and `OUTPUT … INTO @t`.
 
-## T-SQL control flow: `IF` / `BEGIN…END` / `WHILE` / `BREAK` / `CONTINUE` / `RETURN`
-`IF <boolean-expr> <stmt> [ELSE <stmt>]`, `BEGIN <stmt>+ END` compound blocks, `WHILE <boolean-expr> <stmt>` loops with `BREAK` / `CONTINUE`, bare `RETURN` for batch-level early-exit.
+## T-SQL control flow: `IF` / `BEGIN…END` / `WHILE` / `BREAK` / `CONTINUE` / `RETURN` / `GOTO`
+`IF <boolean-expr> <stmt> [ELSE <stmt>]`, `BEGIN <stmt>+ END` compound blocks, `WHILE <boolean-expr> <stmt>` loops with `BREAK` / `CONTINUE`, bare `RETURN` for batch-level early-exit, and `GOTO <label>` (its own section below).
 TRY/CATCH + THROW + ERROR_*() functions ship as a separate section below.
-Value-form `RETURN N` ships inside scalar-UDF bodies (see [`programmable.md`](programmable.md)) and raises Msg 178 in batch / proc scope.
-GOTO/labels and stored-procedure `RETURN N` aren't modeled.
+Value-form `RETURN N` ships inside scalar-UDF bodies (see [`programmable.md`](programmable.md)) and raises Msg 178 in batch / proc scope; a stored procedure's return value isn't modeled.
 Probed against SQL Server 2025.
 
 - **Body grammar**: exactly one statement.
@@ -193,6 +192,32 @@ Applies to any paren-wrapped non-boolean `IF` cond.
 Inside `IF` / `WHILE` / `BEGIN…END`, `BatchContext.BlockDepth > 0` triggers Msg 111; real SQL Server's parser surfaces Msg 156 ("Incorrect syntax near 'procedure'") at the same position.
 Same end state (statement rejected), different code.
 Inner CommandText-equivalent contexts (procedure / function / trigger / dynamic-SQL bodies) get a fresh `BatchContext` and the flag resets, so a CREATE PROCEDURE as the first statement of a proc body succeeds (real SQL Server raises Msg 156 here — related minor divergence; no real application emits nested CREATE PROCEDUREs).
+
+### `GOTO` and labels
+
+`GOTO <label>` jumps to a `label:` declaration elsewhere in the same batch or module body.
+A label is an **unquoted** identifier followed by a single `:` — real refuses the delimited spelling (`[my label]:` is Msg 102) — and label names are matched under the database collation, so `GOTO L` finds `l:`.
+
+**The label pass runs while the batch compiles**, ahead of every statement, which is what makes three refusals compile-phase (all class 15, all probe-confirmed against SQL Server 2025 on 2026-08-08):
+
+- **Msg 133** — `A GOTO statement references the label '<n>' but the label has not been declared.`
+  Fires even for a `GOTO` under an untaken branch, and a `PRINT` written before it produces no output.
+- **Msg 132** — `The label '<n>' has already been declared. Label names must be unique within a query batch or stored procedure.`
+  Fires with no `GOTO` referencing the label at all.
+- **Msg 1026** — `GOTO cannot be used to jump into a TRY or CATCH scope.`
+  Only *entry* is refused; jumping out of a TRY block is legal.
+
+`Simulation.ScanBatchLabels` is that pass.
+It walks the token stream once, tracking parenthesis depth and a stack of open `CASE` / `BEGIN…END` / `BEGIN TRY` / `BEGIN CATCH` constructs, and records each label's position plus the two nesting counts the jump needs.
+Reading a lone `:` at parenthesis depth zero is what separates a label from the `::` of `hierarchyid::Parse` / `SCHEMA::x` (two adjacent operators) and from `JSON_OBJECT('a': 1)`'s key separator (always inside parentheses).
+The whole walk is skipped unless the batch's raw text carries a `:` or the letters `goto` — two vectorized text searches almost every batch fails — so an ordinary batch pays nothing for the feature.
+
+**The jump is a flag, not an exception**, following the same rule as BREAK / CONTINUE / RETURN.
+`BatchContext.PendingGotoLabel` makes `IsSkipping` true, so every enclosing dispatch loop unwinds without demanding its own terminator, and the jump is serviced by the innermost loop the label is inside — compared on `BatchContext.DispatchLoopDepth`, which counts only the loops `BEGIN…END` / `BEGIN TRY` / `BEGIN CATCH` open (distinct from `BlockDepth`, which an `IF` / `WHILE` over a single statement also bumps).
+That is what lets `WHILE … BEGIN … GOTO l; l: … END` keep iterating while `WHILE … BEGIN … GOTO l; END l: …` leaves the loop.
+Jumping *into* a block — legal on real, which simply runs on from the label — leaves that block's opening `BEGIN` unexecuted, so `BatchContext.PendingBlockEnds` counts the `END`s the loop then steps over.
+
+Labels are scoped to their batch or module body: a procedure carries its own set, and reusing the caller's name is not a collision.
 
 ### Separators between the THEN branch and `ELSE`
 

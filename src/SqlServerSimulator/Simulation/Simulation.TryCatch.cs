@@ -99,6 +99,14 @@ partial class Simulation
             batch.Connection.OpenTryFrames--;
         }
 
+        // A GOTO out of the TRY body leaves the cursor mid-block with a jump
+        // pending; the batch root does the jump, so abandon the rest of the
+        // construct rather than demanding its END TRY. Jumping *into* a TRY or
+        // CATCH is refused while the batch compiles (Msg 1026), so the CATCH
+        // half never needs the same escape.
+        if (batch.PendingGotoLabel is not null)
+            yield break;
+
         // Consume END TRY.
         if (context.Token is not ReservedKeyword { Keyword: Keyword.End })
             throw SimulatedSqlException.SyntaxErrorNear(context);

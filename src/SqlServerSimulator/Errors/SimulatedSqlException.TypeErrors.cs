@@ -631,6 +631,15 @@ partial class SimulatedSqlException
         new($"A .NET Framework error occurred during execution of user-defined routine or aggregate \"hierarchyid\": Microsoft.SqlServer.Types.HierarchyIdException: 24001: SqlHierarchyId operation failed because input '{detail}' was not valid.", 6522, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 6522 state 2 with the <c>24006</c> inner
+    /// wording: a computed <c>hierarchyid</c> ordinal fell outside the OrdPath
+    /// domain, which is what <c>GetDescendant</c> reports past the top of the
+    /// widest tier (probe-confirmed against SQL Server 2025, 2026-08-08).
+    /// </summary>
+    internal static SimulatedSqlException HierarchyIdResultTooBig() =>
+        new("A .NET Framework error occurred during execution of user-defined routine or aggregate \"hierarchyid\": Microsoft.SqlServer.Types.HierarchyIdException: 24006: SqlHierarchyId.WriteOrd failed because its result is too big.", 6522, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 447: an explicit <c>COLLATE</c> clause was
     /// attached to a non-string expression (probe-confirmed wording:
     /// <c>"Expression type int is invalid for COLLATE clause."</c>).

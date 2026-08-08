@@ -115,19 +115,32 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 3906: a write reached a database whose access
     /// mode is <c>READ_ONLY</c>. Probe-confirmed against SQL Server 2025
-    /// (2026-08-04) — class 16 state 1, with the database name in double
-    /// quotes, and the identical wording for DML and DDL alike. Real names the
-    /// database that would have been written, so a three-part write out of
-    /// another session database reports the target's name.
+    /// (2026-08-04, states re-probed 2026-08-08) — class 16, with the database
+    /// name in double quotes, and the identical wording for DML and DDL alike.
+    /// Real names the database that would have been written, so a three-part
+    /// write out of another session database reports the target's name. The
+    /// state is 1 everywhere but <c>ALTER TABLE</c>, whose every sub-action
+    /// (ADD / DROP / ALTER COLUMN / ADD / DROP CONSTRAINT / CHECK / NOCHECK /
+    /// REBUILD) reports state 12.
     /// </summary>
     /// <remarks>
-    /// Real varies the state at a few sites (<c>ALTER TABLE</c> reports state
-    /// 12) and follows the <c>ALTER DATABASE</c> refusal with a trailing Msg
-    /// 5069, both of which the simulator flattens the way it flattens the other
-    /// ALTER DATABASE failures above.
+    /// Real follows the <c>ALTER DATABASE</c> refusal with a trailing Msg 5069,
+    /// which the simulator flattens the way it flattens the other ALTER
+    /// DATABASE failures above.
     /// </remarks>
-    internal static SimulatedSqlException DatabaseIsReadOnly(string databaseName) =>
-        new($"Failed to update database \"{databaseName}\" because the database is read-only.", 3906, 16, 1);
+    internal static SimulatedSqlException DatabaseIsReadOnly(string databaseName, byte state = 1) =>
+        new($"Failed to update database \"{databaseName}\" because the database is read-only.", 3906, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 7690: a full-text statement ran against a
+    /// read-only database. Real reports the full-text subsystem's own error
+    /// here rather than the Msg 3906 every other statement takes, and states
+    /// the statement: <c>CREATE FULLTEXT CATALOG</c> 100, <c>DROP FULLTEXT
+    /// CATALOG</c> 102, <c>CREATE FULLTEXT INDEX</c> 103, <c>DROP FULLTEXT
+    /// INDEX</c> 105 (probe-confirmed against SQL Server 2025, 2026-08-08).
+    /// </summary>
+    internal static SimulatedSqlException FullTextOperationOnReadOnlyDatabase(byte state) =>
+        new("Full-text operation failed because database is read only.", 7690, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 5058: <c>ALTER DATABASE … SET</c> names an

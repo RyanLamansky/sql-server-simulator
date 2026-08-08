@@ -256,6 +256,16 @@ public sealed class SimulatedDbConnection : DbConnection
     internal byte DateFirst = 7;
 
     /// <summary>
+    /// Session-scoped <c>SET LANGUAGE</c> value, defaulting to the instance's
+    /// <c>us_english</c>. Read by <c>@@LANGUAGE</c> (the official name) and
+    /// <c>@@LANGID</c>; a successful <c>SET LANGUAGE</c> also carries the
+    /// language's own <see cref="Language.DateFirst"/> into
+    /// <see cref="DateFirst"/> unless the batch has set that explicitly.
+    /// Message language itself isn't modeled — every diagnostic stays English.
+    /// </summary>
+    internal Language Language = Language.Default;
+
+    /// <summary>
     /// The three session options a procedure / trigger / dynamic-SQL body may
     /// change for its own duration only: real applies the change inside the
     /// body and restores the caller's value when the body returns

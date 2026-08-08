@@ -79,7 +79,7 @@ public sealed class CrashBoundaryTests
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
-        await using (var faulting = new SqlCommand("begin distributed transaction", connection))
+        await using (var faulting = new SqlCommand("waitfor time '23:59'", connection))
         {
             var exception = await Assert.ThrowsExactlyAsync<SqlException>(
                 async () => await faulting.ExecuteScalarAsync(TestContext.CancellationToken));

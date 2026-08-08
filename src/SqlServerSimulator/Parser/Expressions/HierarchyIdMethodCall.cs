@@ -117,7 +117,7 @@ internal sealed class HierarchyIdMethodCall : Expression
         };
     }
 
-    private SqlValue RunGetAncestor(int[][] path, RuntimeContext runtime)
+    private SqlValue RunGetAncestor(long[][] path, RuntimeContext runtime)
     {
         if (this.arguments.Length != 1)
             throw SimulatedSqlException.InvalidHierarchyIdInput("GetAncestor expects one argument");
@@ -130,12 +130,12 @@ internal sealed class HierarchyIdMethodCall : Expression
         if (depth > path.Length)
             return SqlValue.Null(SqlType.HierarchyId);
         var remaining = path.Length - depth;
-        var ancestor = new int[remaining][];
+        var ancestor = new long[remaining][];
         Array.Copy(path, ancestor, remaining);
         return SqlValue.FromHierarchyId(ancestor);
     }
 
-    private SqlValue RunGetDescendant(int[][] selfPath, RuntimeContext runtime)
+    private SqlValue RunGetDescendant(long[][] selfPath, RuntimeContext runtime)
     {
         if (this.arguments.Length != 2)
             throw SimulatedSqlException.InvalidHierarchyIdInput("GetDescendant expects two arguments");
@@ -194,13 +194,13 @@ internal sealed class HierarchyIdMethodCall : Expression
         // SQL Server's algorithm here is more subtle but isn't exercised by
         // the AW baseline; the current rule produces a result strictly
         // greater than c1 and (typically) less than c2.
-        var extended = new int[seg1.Length + 1];
+        var extended = new long[seg1.Length + 1];
         Array.Copy(seg1, extended, seg1.Length);
         extended[^1] = 1;
         return AppendSegment(selfPath, extended);
     }
 
-    private SqlValue RunIsDescendantOf(int[][] selfPath, RuntimeContext runtime)
+    private SqlValue RunIsDescendantOf(long[][] selfPath, RuntimeContext runtime)
     {
         if (this.arguments.Length != 1)
             throw SimulatedSqlException.InvalidHierarchyIdInput("IsDescendantOf expects one argument");
@@ -211,7 +211,7 @@ internal sealed class HierarchyIdMethodCall : Expression
         return SqlValue.FromBoolean(IsDescendantOrSelf(selfPath, other));
     }
 
-    private static bool IsDescendantOrSelf(int[][] descendant, int[][] ancestor)
+    private static bool IsDescendantOrSelf(long[][] descendant, long[][] ancestor)
     {
         if (descendant.Length < ancestor.Length)
             return false;
@@ -223,7 +223,7 @@ internal sealed class HierarchyIdMethodCall : Expression
         return true;
     }
 
-    private static bool IsDirectChildOfSelf(int[][] selfPath, int[][] child)
+    private static bool IsDirectChildOfSelf(long[][] selfPath, long[][] child)
     {
         if (child.Length != selfPath.Length + 1)
             return false;
@@ -235,7 +235,7 @@ internal sealed class HierarchyIdMethodCall : Expression
         return true;
     }
 
-    private static int CompareLabels(int[] left, int[] right)
+    private static int CompareLabels(long[] left, long[] right)
     {
         var common = Math.Min(left.Length, right.Length);
         for (var i = 0; i < common; i++)
@@ -247,15 +247,15 @@ internal sealed class HierarchyIdMethodCall : Expression
         return left.Length.CompareTo(right.Length);
     }
 
-    private static SqlValue AppendSegment(int[][] selfPath, int[] newSegment)
+    private static SqlValue AppendSegment(long[][] selfPath, long[] newSegment)
     {
-        var extended = new int[selfPath.Length + 1][];
+        var extended = new long[selfPath.Length + 1][];
         Array.Copy(selfPath, extended, selfPath.Length);
         extended[^1] = newSegment;
         return SqlValue.FromHierarchyId(extended);
     }
 
-    private static int[][] RequireHierarchyId(SqlValue value, string context) =>
+    private static long[][] RequireHierarchyId(SqlValue value, string context) =>
         value.Type == SqlType.HierarchyId
             ? value.AsHierarchyId
             : throw SimulatedSqlException.InvalidHierarchyIdInput($"{context} must be hierarchyid, got {value.Type}");

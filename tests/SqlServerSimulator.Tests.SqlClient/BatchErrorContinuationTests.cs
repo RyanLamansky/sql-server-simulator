@@ -110,16 +110,19 @@ public sealed class BatchErrorContinuationTests
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
+        Wire.ExecInProc(simulation, "create procedure dbo.p as select 1");
+
         // No SimulatedSqlException factory produces a class >= 17 (batch/
         // connection-terminating) severity, and deadlock (class 13) needs
         // concurrent sessions to provoke; NotSupportedException is the
-        // reachable batch-aborting case here (BEGIN DISTRIBUTED TRANSACTION),
-        // surfacing as a Msg 50000 error token that ends the batch. The insert
-        // after it must NOT run — the contrast with continued errors above.
+        // reachable batch-aborting case here (WITH RESULT SETS' AS OBJECT
+        // definition shorthand), surfacing as a Msg 50000 error token that
+        // ends the batch. The insert after it must NOT run — the contrast with
+        // continued errors above.
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
         {
             await using var command = new SqlCommand(
-                "create table #t (a int); begin distributed transaction; insert #t values (1)",
+                "create table #t (a int); exec dbo.p with result sets (as object dbo.nothing); insert #t values (1)",
                 connection);
             _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
         });

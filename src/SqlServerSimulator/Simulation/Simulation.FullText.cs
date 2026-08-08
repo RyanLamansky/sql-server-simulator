@@ -142,6 +142,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        context.CurrentDatabase.RejectFullTextWriteWhenReadOnly(state: 100);
+
         // Database-scope CREATE FULLTEXT CATALOG gate — real reports its own
         // Msg 7666 rather than the Msg 262 the other CREATE permissions use.
         if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.CreateFullTextCatalog))
@@ -333,6 +335,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        context.CurrentDatabase.RejectFullTextWriteWhenReadOnly(state: 103);
+
         if (!context.Batch.TryResolveTable(tableName, out var table)
             || table.IsTableVariable
             || BatchContext.IsLocalTempName(table.Name))
@@ -452,6 +456,7 @@ partial class Simulation
 
         if (context.Batch.IsSkipping)
             return true;
+        context.CurrentDatabase.RejectFullTextWriteWhenReadOnly(state: 102);
         // Real gates the drop on ALTER ANY FULLTEXT CATALOG (or CONTROL on the
         // catalog, a securable class the simulator's GRANT surface doesn't
         // carry). Denial is Msg 7641 (probe-confirmed), and a db_ddladmin member
@@ -477,6 +482,8 @@ partial class Simulation
 
         if (context.Batch.IsSkipping)
             return true;
+
+        context.CurrentDatabase.RejectFullTextWriteWhenReadOnly(state: 105);
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.InvalidObjectName(tableName);

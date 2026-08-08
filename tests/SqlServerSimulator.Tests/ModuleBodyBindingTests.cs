@@ -487,7 +487,11 @@ public sealed class ModuleBodyBindingTests
     public void UnmodeledFeatureInBody_DoesNotBlockTheCreate()
     {
         var sim = WithFixture();
-        sim.ExecuteBatches("create procedure dbo.punmodeled as begin distributed transaction");
+        sim.ExecuteBatches(
+            "create view dbo.vbt as select id, nm from dbo.bt",
+            // OUTPUT through a view is the unmodeled shape here; it binds
+            // cleanly and only the execution finds the gap.
+            "create procedure dbo.punmodeled as delete dbo.vbt output deleted.id");
         AreEqual(1, ObjectCount(sim, "punmodeled"));
         _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("exec dbo.punmodeled"));
     }

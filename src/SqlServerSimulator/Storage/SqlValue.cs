@@ -490,7 +490,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// order. Raises <see cref="NotSupportedException"/> if a label falls outside
     /// the modeled OrdPath tier range.
     /// </summary>
-    public static SqlValue FromHierarchyId(int[][] path)
+    public static SqlValue FromHierarchyId(long[][] path)
     {
         ArgumentNullException.ThrowIfNull(path);
         return new(SqlType.HierarchyId, 0, HierarchyIdOrdPath.Encode(path), isNull: false);
@@ -705,7 +705,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             : (SqlValue)this.reference!;
 
     /// <summary>Returns the hierarchyid path decoded to segment-array form. Throws if NULL or not a hierarchyid value; <see cref="NotSupportedException"/> if the stored bytes use an unmodeled OrdPath tier.</summary>
-    public int[][] AsHierarchyId => this.IsNull
+    public long[][] AsHierarchyId => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
         : this.Type != SqlType.HierarchyId
             ? throw new InvalidOperationException($"Value is {this.Type}, not hierarchyid.")

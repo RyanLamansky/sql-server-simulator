@@ -259,6 +259,11 @@ partial class Simulation
         }
 
         var database = context.CurrentDatabase;
+        // A database-scope permission row is a write to that database's
+        // catalog, so a read-only database refuses the whole family (the
+        // server-scope branch above wrote to master, which can never be
+        // read-only).
+        database.RejectWriteWhenReadOnly();
         SchemaObject? securableObject = null;
 
         // Resolve a USER::x securable to its target principal id (class 4).

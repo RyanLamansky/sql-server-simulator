@@ -13,9 +13,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// primitives; varbinary emits base64-quoted; datetime2 / smalldatetime use
 /// the <c>T</c>-separated ISO form (date / time keep their default ISO
 /// strings); other strings (including <c>uniqueidentifier</c>) go through
-/// the standard JSON string-escape path. <c>float</c> / <c>real</c> follow
-/// the simulator's existing G15 / G7 rendering rather than SQL Server's
-/// <c>1.234e+000</c> notation — documented quirk in CLAUDE.md.
+/// the standard JSON string-escape path. <c>float</c> / <c>real</c> take
+/// CONVERT style 126 — the source-precision scientific form every JSON
+/// producer writes (16 significant digits for float, 8 for real), where a
+/// styleless conversion to a string type would write style 0's compact form.
 /// </summary>
 internal static class JsonValueRender
 {
@@ -67,14 +68,9 @@ internal static class JsonValueRender
             _ = sb.Append(value.AsMoneyDecimal38.ToString());
             return;
         }
-        if (type == SqlType.Float)
+        if (type == SqlType.Float || type == SqlType.Real)
         {
-            _ = sb.Append(value.AsDouble.ToString("G15", CultureInfo.InvariantCulture));
-            return;
-        }
-        if (type == SqlType.Real)
-        {
-            _ = sb.Append(value.AsSingle.ToString("G7", CultureInfo.InvariantCulture));
+            _ = sb.Append(value.FormatApproximateWithStyle(126));
             return;
         }
         if (type is BinarySqlType or VarbinarySqlType)

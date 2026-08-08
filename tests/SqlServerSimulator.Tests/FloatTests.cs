@@ -324,4 +324,67 @@ public sealed class FloatTests
             select cast(f as varchar(30)) from @v
             """));
     }
+
+    [TestMethod]
+    [DataRow("cast(1234567890 as float)", "1.23457e+009")]
+    [DataRow("cast(1234567 as float)", "1.23457e+006")]
+    [DataRow("cast(1000000 as float)", "1e+006")]
+    [DataRow("cast(999999 as float)", "999999")]
+    [DataRow("cast(999999.4 as float)", "999999")]
+    [DataRow("cast(999999.5 as float)", "1e+006")]
+    [DataRow("cast(100000 as float)", "100000")]
+    [DataRow("cast(0.0001 as float)", "0.0001")]
+    [DataRow("cast(0.00009999 as float)", "9.999e-005")]
+    [DataRow("cast(0.00001234 as float)", "1.234e-005")]
+    [DataRow("cast(-0.000123456 as float)", "-0.000123456")]
+    [DataRow("cast(3.14159265358979 as float)", "3.14159")]
+    [DataRow("cast(1.0/3 as float)", "0.333333")]
+    [DataRow("cast(2 as float)/3", "0.666667")]
+    [DataRow("cast(1e20 as float)", "1e+020")]
+    [DataRow("cast(-1e20 as float)", "-1e+020")]
+    [DataRow("cast(1e300 as float)", "1e+300")]
+    [DataRow("cast(1e-300 as float)", "1e-300")]
+    [DataRow("cast(1.5 as real)", "1.5")]
+    [DataRow("cast(0.1 as real)", "0.1")]
+    [DataRow("cast(1234567 as real)", "1.23457e+006")]
+    [DataRow("cast(1e20 as real)", "1e+020")]
+    [DataRow("cast(1e-20 as real)", "1e-020")]
+    public void StylelessStringConversion_UsesConvertStyleZero(string expression, string expected)
+        // A conversion to a string type with no style given is style 0 on both
+        // types: six significant digits, fixed-point only while the rounded
+        // magnitude stays in [1e-4, 1e6) and three-digit scientific otherwise.
+        => AreEqual(expected, ExecuteScalar($"select cast({expression} as varchar(60))"));
+
+    [TestMethod]
+    [DataRow("convert(varchar(60), f)", "1.23457e+009")]
+    [DataRow("'v=' + cast(f as varchar(60))", "v=1.23457e+009")]
+    [DataRow("concat('v=', f)", "v=1.23457e+009")]
+    [DataRow("concat_ws('-', 'a', f)", "a-1.23457e+009")]
+    [DataRow("cast(cast(f as sql_variant) as varchar(60))", "1.23457e+009")]
+    [DataRow("cast(json_object('f': f) as varchar(60))", """{"f":1.234567890000000e+009}""")]
+    [DataRow("cast(json_array(f) as varchar(60))", "[1.234567890000000e+009]")]
+    [DataRow("cast(json_modify('{\"a\":1}', '$.a', f) as varchar(60))", """{"a":1.234567890000000e+009}""")]
+    [DataRow("cast((select f as a for json path) as varchar(60))", """[{"a":1.234567890000000e+009}]""")]
+    [DataRow("cast((select f as a for xml path('r')) as varchar(60))", "<r><a>1.234567890000000e+009</a></r>")]
+    public void StringSurfaces_SplitBetweenStyleZeroAndStyle126(string projection, string expected)
+    {
+        // Every ordinary string surface renders style 0; the JSON and XML
+        // serializers render style 126 (source precision — sixteen significant
+        // digits for float, eight for real).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (f float); insert t values (cast(1234567890 as float))");
+        AreEqual(expected, sim.ExecuteScalar($"select {projection} from t"));
+    }
+
+    [TestMethod]
+    public void KeyViolationMessage_RendersStyleZero()
+    {
+        var ex = new Simulation().AssertSqlError(
+            """
+            create table t (f float not null primary key);
+            insert t values (cast(1e20 as float)), (cast(1e20 as float))
+            """,
+            2627);
+        Assert.Contains("The duplicate key value is (1e+020).", ex.Message);
+    }
 }

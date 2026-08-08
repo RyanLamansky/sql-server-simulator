@@ -32,6 +32,7 @@ partial class Simulation
         var (password, defaultSchema) = ParseApplicationRoleOptions(context, requirePassword: true);
         if (context.Batch.IsSkipping)
             return true;
+        context.CurrentDatabase.RejectWriteWhenReadOnly();
 
         if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
             throw SimulatedSqlException.UserDoesNotHavePermission();
@@ -64,6 +65,7 @@ partial class Simulation
         var (password, defaultSchema, newName) = ParseAlterApplicationRoleOptions(context);
         if (context.Batch.IsSkipping)
             return true;
+        context.CurrentDatabase.RejectWriteWhenReadOnly();
 
         if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
             throw SimulatedSqlException.UserDoesNotHavePermission();
@@ -106,6 +108,7 @@ partial class Simulation
         var name = ParseApplicationRoleHeader(context);
         if (context.Batch.IsSkipping)
             return true;
+        context.CurrentDatabase.RejectWriteWhenReadOnly();
 
         if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
             throw SimulatedSqlException.UserDoesNotHavePermission();

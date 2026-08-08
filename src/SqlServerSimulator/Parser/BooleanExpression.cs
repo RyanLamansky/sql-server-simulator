@@ -116,8 +116,7 @@ internal abstract class BooleanExpression
             _ when type == SqlType.TinyInt => value.AsByte.ToString(CultureInfo.InvariantCulture),
             _ when type == SqlType.Bit => value.AsBoolean ? "1" : "0",
             _ when type == SqlType.Money || type == SqlType.SmallMoney => value.AsMoneyDecimal38.ToString(),
-            _ when type == SqlType.Float => value.AsDouble.ToString("G15", CultureInfo.InvariantCulture),
-            _ when type == SqlType.Real => value.AsSingle.ToString("G7", CultureInfo.InvariantCulture),
+            _ when type == SqlType.Float || type == SqlType.Real => value.FormatApproximateWithStyle(0),
             DecimalSqlType => value.AsDecimal38.ToString(),
             _ => null,
         };

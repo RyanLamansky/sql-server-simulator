@@ -263,6 +263,8 @@ internal abstract class Expression
             AtAtKeyword.CursorRows => new CursorRowsExpression(),
             AtAtKeyword.Options => new OptionsExpression(context),
             AtAtKeyword.DateFirst => new DateFirstExpression(context),
+            AtAtKeyword.Language => new LanguageExpression(context),
+            AtAtKeyword.LangId => new LangIdExpression(context),
             _ => new Value(doubleAtPrefixedString),
         },
         ReservedKeyword { Keyword: Keyword.Null } => new Value(),

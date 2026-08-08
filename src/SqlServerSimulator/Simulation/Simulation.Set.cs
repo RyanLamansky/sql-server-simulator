@@ -141,6 +141,36 @@ partial class Simulation
             context.Connection.DateFirst = requested is >= 1 and <= 7
                 ? (byte)requested
                 : throw SimulatedSqlException.DateFirstOutOfRange(requested);
+            context.Batch.DateFirstSetExplicitly = true;
+        }
+
+        // LANGUAGE carries the session's language for @@LANGUAGE / @@LANGID and
+        // — the load-bearing half — implicitly moves DATEFIRST to the one the
+        // language declares, unless this batch has already set DATEFIRST
+        // itself. The precedence is per batch, not per session: `SET DATEFIRST
+        // 3` then `SET LANGUAGE German` in one batch stays 3, while the same
+        // pair split across two batches ends at German's own 1 (both
+        // probe-confirmed). Neither the message language nor DATEFORMAT
+        // follows — diagnostics stay English and `SET DATEFORMAT` still
+        // parses-and-discards.
+        if (firstName.Equals("LANGUAGE", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping
+            && ReadIdentifierOptionValue(context) is { } languageName)
+        {
+            if (Language.Find(languageName) is { } language)
+            {
+                context.Connection.Language = language;
+                if (!context.Batch.DateFirstSetExplicitly)
+                    context.Connection.DateFirst = language.DateFirst;
+            }
+            else if (context.Batch.TryFrameDepth == 0)
+            {
+                // Real swallows the failed SET LANGUAGE inside a TRY block
+                // outright — no error raised and no CATCH entered, the
+                // statement simply no-ops and the body carries on
+                // (probe-confirmed, dynamic SQL included). Outside one it is
+                // an ordinary statement-terminating Msg 2740.
+                throw SimulatedSqlException.LanguageNotFound(languageName);
+            }
         }
 
         // XACT_ABORT promotes the statement-terminating run-time errors to
@@ -492,7 +522,9 @@ partial class Simulation
         // The variable form (`SET DATEFIRST @d`, `SET LOCK_TIMEOUT @n`) is
         // legal wherever an integer literal is.
         SetOptionKind.Integer => context.Token is Numeric { Value.IsNull: false } or AtPrefixedString,
-        SetOptionKind.Identifier => context.Token is Name or Literal,
+        // The variable form (`SET LANGUAGE @l`, `SET DATEFORMAT @f`) is legal
+        // wherever a bare identifier is.
+        SetOptionKind.Identifier => context.Token is Name or Literal or AtPrefixedString,
         SetOptionKind.IntegerOrIdent => context.Token is Numeric or Name or Literal,
         SetOptionKind.Binary => context.Token is Literal,
         _ => false,
@@ -516,6 +548,23 @@ partial class Simulation
             { Type: var type } slotValue when type == SqlType.Int32 || type == SqlType.SmallInt || type == SqlType.TinyInt =>
                 slotValue.CoerceTo(SqlType.Int32).AsInt32,
             _ => null,
+        },
+        _ => null,
+    };
+
+    /// <summary>
+    /// Reads the identifier an Identifier-shape SET option was given, from a
+    /// bare name, a quoted literal or a variable. Returns <see langword="null"/>
+    /// for a NULL variable, which real treats as naming no language at all.
+    /// </summary>
+    private static string? ReadIdentifierOptionValue(ParserContext context) => context.Token switch
+    {
+        Name name => name.Value,
+        Literal literal => literal.Value.IsNull ? null : literal.Value.AsString,
+        AtPrefixedString variable => context.Batch.GetVariableSlot(variable.Value).Value switch
+        {
+            { IsNull: true } => null,
+            var slotValue => slotValue.CoerceTo(SqlType.NVarchar).AsString,
         },
         _ => null,
     };

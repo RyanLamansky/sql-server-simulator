@@ -653,6 +653,17 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         this.commandText[startIndex..(this.Token?.StartIndex ?? this.commandText.Length)].TrimEnd();
 
     /// <summary>
+    /// Whether this batch's raw text carries anything a <c>label:</c> or a
+    /// <c>GOTO</c> could be spelled with — a necessary condition for both, so
+    /// a false reading lets the label pre-scan skip its token walk outright.
+    /// The two vectorized text searches are far cheaper than the walk they
+    /// replace, and almost every batch fails them.
+    /// </summary>
+    public bool MightCarryLabelsOrGoto =>
+        this.commandText.Contains(':', StringComparison.Ordinal)
+        || this.commandText.Contains("goto", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Restores a checkpoint captured by <see cref="SaveCheckpoint"/>.
     /// </summary>
     public void RestoreCheckpoint(Checkpoint checkpoint)

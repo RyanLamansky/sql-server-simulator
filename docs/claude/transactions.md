@@ -41,7 +41,11 @@ Probed against SQL Server 2025 (2026-08-05), with a transaction opened in an ear
 Real settles Msg 8728 while *compiling*, so on real it also fires inside a branch the batch never takes (`IF 1 = 0 BEGIN <the query> END` raises and the batch never starts).
 The simulator raises it while parsing the statement, which reaches the same place for the shapes that matter and additionally fires under the dispatch loop's skip mode.
 
-Not modeled: `BEGIN DISTRIBUTED TRANSACTION` → `NotSupportedException` at dispatch.
+## `BEGIN DISTRIBUTED TRANSACTION`
+
+`BEGIN DISTRIBUTED { TRAN | TRANSACTION } [name | @var]` asks the coordinator for a transaction remote resources could enlist in.
+Nothing here is remote — a four-part write is refused outright (see [`linked-servers.md`](linked-servers.md)) — so the statement opens the ordinary local transaction, which is exactly what real does until something actually enlists.
+Probe-confirmed against SQL Server 2025 (2026-08-08) that the two spellings match on `@@TRANCOUNT`, on nesting in either order, on `XACT_STATE()`, on `COMMIT` / `ROLLBACK`, and even on the `WITH MARK` diagnostics below; the parser shares `TryParseBeginTransaction` with the local form, consuming `DISTRIBUTED` and continuing.
 
 ## `WITH MARK`
 
