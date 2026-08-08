@@ -1090,6 +1090,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         _ when this.Type == SqlType.UniqueIdentifier => $"'{this.AsGuid:D}'",
         _ when this.Type == SqlType.HierarchyId => $"'{HierarchyIdSqlType.PathToString(this.AsHierarchyId)}'",
         DecimalSqlType => this.AsDecimal38.ToString(),
+        // G15 / G7 rather than the style 0 every user-visible surface takes:
+        // a debugger wants the value, and style 0's six significant digits
+        // would hide the difference between two floats that are not equal.
         _ when this.Type == SqlType.Float => this.AsDouble.ToString("G15", CultureInfo.InvariantCulture),
         _ when this.Type == SqlType.Real => this.AsSingle.ToString("G7", CultureInfo.InvariantCulture),
         _ when this.Type == SqlType.Money || this.Type == SqlType.SmallMoney => this.AsMoneyDecimal38.ToString(),

@@ -2169,10 +2169,22 @@ public sealed partial class Simulation
     /// error caught under <c>SET XACT_ABORT ON</c>. Consulted where a statement
     /// would write to the log — every DML statement (through
     /// <see cref="RunMutation"/>, which covers the DDL that routes through it),
-    /// <c>COMMIT</c> and <c>SAVE TRANSACTION</c>. Reads pass through: a
-    /// <c>SELECT</c> inside a doomed transaction answers normally
-    /// (probe-confirmed), and so does a <c>DECLARE</c>.
+    /// the object DDL keyed on its leading keyword, <c>COMMIT</c> and
+    /// <c>SAVE TRANSACTION</c>, plus the catalog writers whose leading token is
+    /// neither: the <c>GRANT</c> / <c>REVOKE</c> / <c>DENY</c> family,
+    /// <c>sp_rename</c> and the extended-property procedures. Reads pass
+    /// through: a <c>SELECT</c> inside a doomed transaction answers normally
+    /// (probe-confirmed), and so does a <c>DECLARE</c> or a <c>SET</c>.
     /// </summary>
+    /// <remarks>
+    /// The refusal comes <em>before</em> the statement's own name resolution —
+    /// a <c>GRANT</c> on a missing object, an <c>sp_rename</c> of a missing one
+    /// and an <c>sp_addextendedproperty</c> naming a missing table all report
+    /// Msg 3930 rather than their own not-found error, which is the opposite of
+    /// where the read-only gate sits for the latter two — and before that gate
+    /// too: a doomed transaction in a read-only database reports 3930, not
+    /// Msg 3906 (all probe-confirmed against SQL Server 2025, 2026-08-08).
+    /// </remarks>
     private static void RejectWriteInDoomedTransaction(SimulatedDbConnection connection)
     {
         if (connection.CurrentTransaction is { Doomed: true })

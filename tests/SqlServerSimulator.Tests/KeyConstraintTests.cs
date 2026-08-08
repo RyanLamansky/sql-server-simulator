@@ -619,4 +619,63 @@ public sealed class KeyConstraintTests
     [DataRow("create table t (a int identity(1,1) not null constraint pk_t primary key clustered, b int not null)")]
     public void SingleClusteredKey_Accepted(string sql)
         => _ = new Simulation().ExecuteNonQuery(sql);
+
+    /// <summary>
+    /// How Msg 2627 renders the offending key, across every key-eligible type.
+    /// Each expectation is the reference server's own text, captured
+    /// type-by-type on 2026-08-08; the rendering is not one per-type table but
+    /// three rules — a string raw, the opaque-identifier family lower case, and
+    /// everything else the ordinary implicit string conversion.
+    /// </summary>
+    [TestMethod]
+    // The implicit conversion, which is what CAST(<value> AS varchar) gives:
+    // the legacy datetime pair at style 0 rather than an ISO layout, …
+    [DataRow("datetime", "'2026-08-08 01:02:03.457'", "Aug  8 2026  1:02AM")]
+    [DataRow("smalldatetime", "'2026-08-08 01:02:00'", "Aug  8 2026  1:02AM")]
+    // … the modern temporal types trimmed to their declared precision, …
+    [DataRow("date", "'2026-08-08'", "2026-08-08")]
+    [DataRow("datetime2(0)", "'2026-08-08 01:02:03'", "2026-08-08 01:02:03")]
+    [DataRow("datetime2(3)", "'2026-08-08 01:02:03.456'", "2026-08-08 01:02:03.456")]
+    [DataRow("datetime2(7)", "'2026-08-08 01:02:03.4567891'", "2026-08-08 01:02:03.4567891")]
+    [DataRow("time(0)", "'01:02:03'", "01:02:03")]
+    [DataRow("time(2)", "'01:02:03.45'", "01:02:03.45")]
+    [DataRow("time(7)", "'01:02:03.4567891'", "01:02:03.4567891")]
+    [DataRow("datetimeoffset(0)", "'2026-08-08 01:02:03 +05:30'", "2026-08-08 01:02:03 +05:30")]
+    [DataRow("datetimeoffset(1)", "'2026-08-08 01:02:03.4 +05:30'", "2026-08-08 01:02:03.4 +05:30")]
+    [DataRow("datetimeoffset(7)", "'2026-08-08 01:02:03.4567891 -08:00'", "2026-08-08 01:02:03.4567891 -08:00")]
+    // … money at two decimals rather than its stored four, and float at style 0.
+    [DataRow("money", "12345.678", "12345.68")]
+    [DataRow("smallmoney", "1234.5678", "1234.57")]
+    [DataRow("decimal(10, 4)", "123.4500", "123.4500")]
+    [DataRow("float", "1234567890", "1.23457e+009")]
+    [DataRow("bit", "1", "1")]
+    [DataRow("bigint", "9223372036854775807", "9223372036854775807")]
+    // A string is raw — no quotes, and char's padding kept.
+    [DataRow("char(5)", "'ab'", "ab   ")]
+    [DataRow("nvarchar(10)", "N'caf'", "caf")]
+    // The opaque-identifier family is lower case, where each type's own
+    // conversion renders upper case on real.
+    [DataRow("uniqueidentifier", "'0E984725-C51C-4BF4-9960-E1C80E27ABA0'", "0e984725-c51c-4bf4-9960-e1c80e27aba0")]
+    [DataRow("varbinary(8)", "0xDEADBEEF", "0xdeadbeef")]
+    // hierarchyid reports its OrdPath bytes, not its path text.
+    [DataRow("hierarchyid", "hierarchyid::Parse('/1/2/')", "0x5b40")]
+    public void DuplicateKeyValue_RenderingPerType(string columnType, string literal, string expected)
+    {
+        var ex = new Simulation().AssertSqlError(
+            $"create table t (a {columnType} not null constraint pk_t primary key); insert t values ({literal}), ({literal})",
+            2627);
+        Assert.Contains($"The duplicate key value is ({expected}).", ex.Message);
+    }
+
+    /// <summary>A <c>sql_variant</c> key unwraps and its inner value takes the same rules.</summary>
+    [TestMethod]
+    [DataRow("cast(42 as int)", "42")]
+    [DataRow("cast('2026-08-08 01:02:03.457' as datetime)", "Aug  8 2026  1:02AM")]
+    public void DuplicateKeyValue_SqlVariantUnwraps(string literal, string expected)
+    {
+        var ex = new Simulation().AssertSqlError(
+            $"create table t (a sql_variant not null constraint pk_t primary key); insert t values ({literal}), ({literal})",
+            2627);
+        Assert.Contains($"The duplicate key value is ({expected}).", ex.Message);
+    }
 }

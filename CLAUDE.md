@@ -27,20 +27,20 @@ The living [`docs/claude/backlog.md`](docs/claude/backlog.md) — missing featur
 
 **Nothing is permanently out of scope.**
 Every gap is a *not yet*: scope statements in this file and under `docs/claude/` are descriptive snapshots of what's built, never decisions to exclude.
-Two people work on this, so the picking-of-battles is a cost ordering, not a boundary — read an unbuilt feature as queued, not closed.
+The picking-of-battles is a cost ordering, not a boundary — read an unbuilt feature as queued, not closed.
 The rare genuinely-settled call is marked **settled — don't re-pitch** and carries its reason; absent that marker, anything is fair game.
 
 ## Feature-bundle workflow
 
 1. **Probe.**
-   Behavior questions get answered against the real SQL Server 2025 reference (connection in user memory).
+   Behavior questions get answered against a real SQL Server 2025 reference (connection in user memory).
    Probe scaffolds live in `/tmp/<probe-name>/`, deleted after.
    Only graduated regression tests land in `*.Tests` / `*.Tests.EFCore`.
-   EF Core probes clean up with `DROP TABLE IF EXISTS`, **never** `Database.EnsureDeleted()` (the login can drop but not recreate the reference DB).
+   EF Core probes clean up with `DROP TABLE IF EXISTS`, **never** `Database.EnsureDeleted()`.
    A probe reveals *server* behavior, not *doc* content: don't write "Microsoft's docs claim X but…" without reading the MSDN page.
 2. **Surface decisions.**
-   Before writing code, surface 2–3 concrete design choices, recommend one each.
-   Before pitching a built-in as net-new, grep `Parser/Expression.cs:ResolveBuiltIn` + `Parser/Expressions/` — the catalog lags the code, and variants ride a flag on the existing class (`tryMode` on Convert, `isBig` on DateDiff, `kind` discriminators), not a new one.
+   Before writing code, if there are non-obvious design choices to be made, provide them to the user with a recommendation.
+   Ambitious, high-effort options will always be chosen by the user and don't need to be surfaced.
 3. **Implement + test.**
    `*.Tests` exercises public API; `*.Tests.EFCore` validates the oracle.
    `*.Tests.Internal` only for things genuinely unreachable from public SQL.
@@ -50,10 +50,8 @@ The rare genuinely-settled call is marked **settled — don't re-pitch** and car
    Deep-dives — *and feature-specific quirks/divergences* — live under `docs/claude/`; the Quirks section here is only for cross-cutting divergences with no feature-doc home.
 5. **Single-sentence commit.**
    Squashes capture end state.
-   Message = *what changed* + *why* + probe-confirmed facts (Msg numbers, wording, semantic decisions) future-me would re-derive from the diff; omit CI-visible status (test counts, build state) — GitHub surfaces it and it goes stale.
+   Message = *what changed* + *why*; omit CI-visible status (test counts, build state) — GitHub surfaces it and it goes stale.
    Don't run `git commit` — the user holds signing credentials.
-
-Behavioral claims below were probed against a live SQL Server 2025 reference instance unless flagged otherwise.
 
 ## Build / test
 
@@ -62,7 +60,7 @@ dotnet build
 dotnet test
 ```
 
-Projects live under `src/` (`SqlServerSimulator`, `SqlServerSimulator.EFCore`, `SqlServerSimulator.Analyzers`, `Example`) and `tests/` (the six test projects); the sln and both props files stay at the repo root, so `dotnet build` / `dotnet test` run from the root unchanged.
+Projects live under `src/` (`SqlServerSimulator`, `SqlServerSimulator.EFCore`, `SqlServerSimulator.Analyzers`, `Example`) and `tests/`; the sln and both props files stay at the repo root, so `dotnet build` / `dotnet test` run from the root unchanged.
 Shared build settings live in the root `Directory.Build.props` (TargetFramework, nullable, warnings-as-errors, `EnforceCodeStyleInBuild=true` — so `dotnet build` runs the IDE / SSS / MSTEST analyzers and fails on violations); package versions are centralized in `Directory.Packages.props` (NuGet CPM), with deliberate per-project divergences as visible `VersionOverride`s (Tests.Smo pins SqlClient 5.1.x, SMO's supported line, while Tests.SqlClient tests the current 7.x — the reason those two projects stay separate).
 Csprojs carry only per-project content.
 No separate `dotnet format` pass — it catches nothing build doesn't.
@@ -70,7 +68,7 @@ CI matrix: Debug + Release.
 `obj/` permission errors mean building outside the dev container; `rm -rf obj/ bin/` clears them.
 Building while another long-lived `dotnet` process runs can fail with tens of thousands of bogus `CS0246` "type or namespace not found" errors — MSBuild node reuse racing it, not a code or restore problem, and `rm -rf obj/ bin/` does not clear it.
 The tell is that identical back-to-back invocations alternate between failing and clean; build with `MSBUILDDISABLENODEREUSE=1` (add `-m:1` if it persists), or don't build concurrently.
-Line endings are LF everywhere: `.gitattributes` `eol=lf` forces an LF working tree on Windows and Linux alike, and `.editorconfig` `end_of_line = lf` makes IDE0055 enforce it — so a CRLF checkout fails the formatter, and the fix is `git add --renormalize .` (not disabling the rule).
+Line endings are LF everywhere: `.gitattributes` `eol=lf` forces an LF working tree on Windows and Linux alike, and `.editorconfig` `end_of_line = lf` makes IDE0055 enforce it — so a CRLF checkout fails the formatter.
 
 MSBuild's share of a round trip is a modest fixed cost and the tests themselves are the bulk of it — `SqlServerSimulator.Tests` most of all — so `--filter` saves real time on the csproj path too.
 That balance depends on generated directories staying out of MSBuild's default item globs (`DefaultItemExcludes` in the root `Directory.Build.props`): the globs walk a project folder on every evaluation, so a grown `TestResults` tree becomes the dominant cost of even a no-op build.
@@ -84,13 +82,12 @@ dotnet test tests/SqlServerSimulator.Tests/bin/Debug/net10.0/SqlServerSimulator.
 
 That's somewhat faster than `dotnet test <csproj> --no-build --filter`, which pays MSBuild's fixed cost on top; either serves a tight loop.
 Rebuild the one project (`dotnet build src/SqlServerSimulator/SqlServerSimulator.csproj`) when the DLL goes stale; full `dotnet build` + `dotnet test` is the pre-commit checkpoint.
-Absolute timings swing widely with the host filesystem — measure locally rather than trusting a number here — and the per-assembly `Duration:` in test output is execution time only, excluding process start and test discovery.
-Under method-level parallelism an assembly's wall clock can be no shorter than its slowest single test, so one multi-second wait sets the floor for the whole project.
+All tests use method-level parallelism.
 
 **No large binary files in the repo** (bacpacs included — the WWI/AW `.bacpac` fixtures live gitignored under `.vs/`, local-only).
 Tests get their data by scripting the key shapes in-code (`CREATE TABLE` + inserts, `BacpacBuilder` for import tests), never by committing a fixture blob.
 
-## Architecture — load-bearing patterns
+## Architecture
 
 Layout: `Storage/` (pages, types, row encoder/decoder, heap, constraints, lock manager + DMVs), `Parser/` (tokenizer, expressions, query planning + execution), `Simulation/` (per-statement-kind partials), `Schemas/` (`SchemaObject` hierarchy + alias/catalog-view/full-text/spatial/xml-schema-collection types), `Errors/` (exception factory partials), root (`Simulated*` ADO.NET front-door + `Simulation` / `Database` / `Schema` / supporting types).
 
@@ -122,22 +119,21 @@ A deferred source whose rows can't change across one enumeration — any **non-l
 `FromSource[]`; enumeration rows are `byte[]?[]`, one slot per source, null = NULL-filled outer-join side (LEFT/RIGHT/FULL/OUTER APPLY).
 Column resolution is qualifier-aware via `FindSourceColumn` / `ResolveAcrossTuple`; ambiguous unqualified name → Msg 209.
 Per-row resolution goes through a per-enumeration `SourceColumnMemo` (name → (source, column), keyed by string reference identity — execution-scoped per the plan-cache shared-plan contract); un-memoized re-resolution was the largest CPU cost of scan-bound joins/aggregates.
-**Per-row resolver loops use the hoisted-scaffolding pattern**: one mutable-capture tuple slot + one cached *self-referencing lambda* (never a local function passed as its own `selfRecursive` argument — that allocates a delegate per resolution per row; 41% of profile bytes) + one `RuntimeContext` per loop; follow it in executor loops.
-The same rule reaches the *arrays* a per-row loop fills: a grouping key, a hash-join bucket key and a group's projection under a bounded `TOP (n)` are all written into reused scratch and copied out only where something retains them (a group's first row, a heap admission), which is one allocation per group rather than per row.
-The aggregate executor also accumulates straight off the enumeration for a single grouping set instead of buffering the rows first — real pipelines its Filter into its aggregate the same way, which is observable in *which* error a row raises — see [`query.md`](docs/claude/query.md#streaming-accumulation-and-where-an-error-surfaces).
+**Per-row resolver loops use the hoisted-scaffolding pattern**: one mutable-capture tuple slot + one cached _self-referencing lambda_ (never a local function passed as its own `selfRecursive` argument — that allocates a delegate per resolution per row; 41% of profile bytes) + one `RuntimeContext` per loop; follow it in executor loops.
+The same rule reaches the _arrays_ a per-row loop fills: a grouping key, a hash-join bucket key and a group's projection under a bounded `TOP (n)` are all written into reused scratch and copied out only where something retains them (a group's first row, a heap admission), which is one allocation per group rather than per row.
+The aggregate executor also accumulates straight off the enumeration for a single grouping set instead of buffering the rows first — real pipelines its Filter into its aggregate the same way, which is observable in _which_ error a row raises — see [`query.md`](docs/claude/query.md#streaming-accumulation-and-where-an-error-surfaces).
 
 ### `MultiPartName`
-Readonly struct, up to 4 inline slots (SQL Server's grammar limit).
+Readonly struct, up to 4 inline slots.
 API: `Leaf`, `ImmediateQualifier` (null when unqualified — pair with `Collation.Baseline.Equals(name.ImmediateQualifier, "INSERTED")`, which folds null into `false`), `Count`, `ToString()`.
-5th segment → Msg 4104.
 
 ### Matching a name against a fixed vocabulary
 Three matchers, in cost order: a `switch` over string constants or `string.Equals(…, Ordinal[IgnoreCase])` (~1 ns, and a miss against a differently-sized literal is only a length check), `BuiltInToken` (spec-defined tokens — an ASCII-alphanumeric shortcut over an invariant `CompareInfo`, see [`collations.md`](docs/claude/collations.md#fixed-tokens-builtintoken)), and a `Collation` (the database's own semantics, mandatory for user identifiers).
 **Pick by the semantics the site needs, then keep the shape simple** — the measured traps run the other way from intuition:
 
-- A short chain of ordinal compares **beats** a `Frozen*` lookup (~2 ns against ~8 ns for six names, since each miss is a length check), so don't convert one.
+- A short chain of ordinal compares **beats** a `Frozen*` lookup, so don't convert one.
   Hashing pays off at `ResolveBuiltIn`'s scale, not an accept-list's.
-- Uppercasing into a `stackalloc` span to reach a span `switch` (the SSS003 / SSS007 shape) costs more than the chain it replaces at accept-list size — `ToUpperInvariant` isn't free.
+- Uppercasing into a `stackalloc` span to reach a span `switch` (the SSS003 / SSS007 shape) may cost more than the chain it replaces at accept-list size.
   It earns its keep across `ResolveBuiltIn`'s ~300 entries.
 - What does cost: **materializing a string to feed a lookup**, when the token already exposes `Source` as a span (`Frozen*.GetAlternateLookup<ReadOnlySpan<char>>` is the fix), and **repeating a compare per row** that a parse-time discriminator settles once (`XmlMethodCall`'s `XmlMethod`, `ObjectId.ClassifyTypeFilter`).
 
@@ -180,11 +176,11 @@ Field rosters live in the source XML docs; this captures only identity + load-be
   Owns the `ParserContext` (parse-time scratch) + batch-lifetime runtime state: `Variables`, `TableVariables` (`@t`), `CurrentUndoLog`, `CurrentTableVarUndoLog` (statement-only, disjoint from the tx-scoped log so `ROLLBACK TRAN` skips `@t`), `UdfFrame` / `ProcFrame` (non-null in a UDF/proc body — gates value-form `RETURN`).
   Exposes the **resolver contract** the parser depends on:
   - `TryResolveTable` — `#foo` → `Connection.TempTables` (any qualifier); `@t` → `TableVariables` (1-part only); else named schema (`dbo` unqualified); `SystemHeapTables` only as flat 1-part fallback.
-  - `TryResolveFunction` — 2-/3-part only (Msg 195 on bare 1-part).
+  - `TryResolveFunction` — 2-/3-part only.
     `TryResolveProcedure` accepts 1-part.
     `TryResolveTableType` accepts 1-part + `dbo` fallback.
   - `ParseObjectName(context, acceptTableVariable=false)` — 1-4-segment dotted form, compresses empty middle segments.
-    `acceptTableVariable` routes `@t` to a 1-part leaf at DML/FROM sites, rejects it elsewhere (Msg 102 at ALTER/DROP TABLE / TRUNCATE / CREATE / SELECT INTO).
+    `acceptTableVariable` routes `@t` to a 1-part leaf at DML/FROM sites, rejects it elsewhere.
   - Threaded into every `Expression.Run(RuntimeContext)` via `runtime.Batch`.
   - UDF/proc invocation allocates a child `BatchContext` via the body ctor: parameters pre-seed `Variables`, the frame is set, the body text re-tokenizes through a synthesized `SimulatedDbCommand`.
     UDF bodies discard yielded result sets; proc bodies forward them.
@@ -233,7 +229,6 @@ Field rosters live in the source XML docs; this captures only identity + load-be
   Two call sites with different concrete types is genuine polymorphism and goes unreported; polymorphism visible only outside the compilation (a call from a test assembly into an `internal` member) takes `#pragma warning disable SSS010` + rationale.
   Hits on `private` members overlap CA1859, which is already on; SSS010 is what extends the same fix to `internal` members, constructors and local functions.
 - **SSS011**: the same judgement in return position — a non-public method / local function whose **return type** is one of those collection interfaces should declare the concrete type when every `return` in its body produces it.
-  A materialized collection handed back as an interface charges the caller twice: virtual dispatch on every read, and a `foreach` that allocates the boxed enumerator instead of binding the concrete type's struct one.
   **Iterators are exempt by construction** — a `yield` body can only be declared as `IEnumerable<T>` / `IEnumerator<T>`, and deferred execution is the flexibility an interface return genuinely buys; the rest of the exemption list is SSS010's, plus `ref` returns.
   Evidence is the body's own returns (an expression body counts as one), read past nested lambdas and local functions; a `null` / `default` return contributes no type but blocks a *struct* replacement, a return whose own type is an interface settles the member as interface-returning, two different concrete types is polymorphism, and a throw-only body has nothing to judge.
   A separate id from SSS010 because the evidence is local rather than compilation-wide — and so one member carrying both can suppress them independently — but the two cascade into each other (a narrowed return makes a caller's argument concrete, and vice versa), so iterate them together.
@@ -251,7 +246,6 @@ Field rosters live in the source XML docs; this captures only identity + load-be
 - **Fields over auto-properties on non-public types** (SSS001 generalized).
 - **No internal `<see cref>` in public-API XML docs** — a cref to an internal type dangles in consumer IntelliSense and implies stability for a name we're free to rename; state the contract in prose (`"an unrecognized collation name raises ArgumentException"`, not a cref to internal `Collation.IsRecognized`).
 - **No conversation-scratch framing in code/docs/commits** — "Camp A/B", "this bundle", "Stage 1/2", "as we discussed" mean nothing to a future reader; describe behavior/motivation absolutely, cross-reference a sibling by the behavior it names, not the work-stage.
-  Pre-existing repo terms (e.g. transactions' "Bundle 1/2") are load-bearing — leave them.
 - **Gap vocabulary: a gap is "not built yet", never "out of scope".**
   `deliberate` / `intentional` may describe *how shipped behavior works* — an approximation, shortcut, or divergence chosen on purpose — but never *whether a gap closes*; attach those words to a shape, not to an absence.
   Skip the justifying clause too ("real rejects it anyway", "no consumer reads it"): it explains low priority but reads as closed.
@@ -263,7 +257,7 @@ Field rosters live in the source XML docs; this captures only identity + load-be
 
 ## SimulatedSqlException vs NotSupportedException
 
-- `SimulatedSqlException` for behavior matching SQL Server: invalid SQL, type mismatches, constraint violations, oversize columns, truncation.
+- `SimulatedSqlException` for behavior matching SQL Server.
   Mirrors number/class/state/message.
 - `NotSupportedException` for valid SQL Server features the simulator hasn't built.
   Name the unmodeled feature.

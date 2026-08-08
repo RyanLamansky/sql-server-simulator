@@ -87,8 +87,9 @@ Whether an error rolls back or dooms is a question about the **whole session sta
 
 A doomed transaction then:
 
-- refuses any statement that writes to the log with **Msg 3930** class 16 state 1 (*"The current transaction cannot be committed and cannot support operations that write to the log file. Roll back the transaction."*) — DML, object DDL, `SAVE TRANSACTION` and `COMMIT` alike, while a `SELECT` and a `DECLARE` complete normally.
+- refuses any statement that writes to the log with **Msg 3930** class 16 state 1 (*"The current transaction cannot be committed and cannot support operations that write to the log file. Roll back the transaction."*) — DML, object DDL, `SAVE TRANSACTION` and `COMMIT` alike, plus the catalog writers whose leading token is neither (the `GRANT` / `REVOKE` / `DENY` family, `sp_rename`, the extended-property procedures), while a `SELECT`, a `DECLARE` and a `SET` complete normally.
   Msg 3930 is itself batch-aborting and rolls the transaction back, and a nested `TRY` can catch it.
+  The refusal precedes the statement's own name resolution — a `GRANT` on a missing object, an `sp_rename` of a missing one and an `sp_addextendedproperty` naming a missing table all report Msg 3930 rather than their own not-found error, which is the opposite of where the read-only gate sits for the latter two — and it precedes that gate as well: a doomed transaction writing to a read-only database reports Msg 3930, not Msg 3906 (probe-confirmed against SQL Server 2025, 2026-08-08).
 - is rolled back at end of batch with **Msg 3998** class 16 state 1 (*"Uncommittable transaction is detected at the end of the batch. The transaction is rolled back."*), emitted after the batch's own results.
 - is cleared only by `ROLLBACK`, after which the batch runs on normally.
 
@@ -98,5 +99,4 @@ A doomed transaction then:
 
 The option also decides whether a client attention rolls an open transaction back — see the cancel bullet above.
 
-**Divergences.** Msg 3930's write gate covers DML (through `RunMutation`) and the `CREATE` / `ALTER` / `DROP` / `TRUNCATE` verbs; a `GRANT`, an `sp_rename` or an extended-property write inside a doomed transaction still runs.
-Msg 245 is transaction-aborting on real *without* the option — a conversion failure rolls the transaction back and reads `XACT_STATE() = -1` from a `CATCH` even under `XACT_ABORT OFF` — where the simulator treats it as statement-terminating like its neighbours until the option is on.
+**Divergences.** Msg 245 is transaction-aborting on real *without* the option — a conversion failure rolls the transaction back and reads `XACT_STATE() = -1` from a `CATCH` even under `XACT_ABORT OFF` — where the simulator treats it as statement-terminating like its neighbours until the option is on.

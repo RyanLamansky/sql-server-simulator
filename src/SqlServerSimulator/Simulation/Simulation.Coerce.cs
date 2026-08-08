@@ -903,35 +903,40 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Renders a key-tuple slot the way SQL Server's Msg 2627 does: NULL as
-    /// <c>&lt;NULL&gt;</c>, strings raw (no enclosing quotes), numerics in
-    /// invariant culture, byte arrays as <c>0x</c>-prefixed hex, date/time
-    /// values in their canonical ISO forms. Every key-eligible type is
-    /// covered explicitly — un-modeled types throw rather than reaching for
-    /// the debugger-only <see cref="object.ToString"/>, since the convention
-    /// here is that production paths never depend on debug-only formatting.
+    /// Renders a key-tuple slot the way SQL Server's Msg 2627 / 2601 do.
+    /// Probed against SQL Server 2025 across every key-eligible type
+    /// (2026-08-08), which settles it into three rules rather than a per-type
+    /// table:
+    /// <list type="bullet">
+    /// <item>NULL is <c>&lt;NULL&gt;</c>.</item>
+    /// <item>A string is its raw text — no quotes, and <c>char</c>'s padding
+    /// kept (<c>ab   </c> for a <c>char(5)</c>).</item>
+    /// <item>The opaque-identifier family is <b>lower case</b>: a
+    /// <c>uniqueidentifier</c>, and <c>0x</c>-prefixed hex for the binary types
+    /// and <c>hierarchyid</c> (which reports its OrdPath bytes, not its path
+    /// text). Both diverge from their own conversions, which are upper case —
+    /// <c>CAST(&lt;guid&gt; AS varchar)</c> and <c>CONVERT(varchar, &lt;bin&gt;, 1)</c>
+    /// each render upper case on real.</item>
+    /// <item>Everything else is the ordinary implicit string conversion, which
+    /// is exactly what <c>CAST(&lt;value&gt; AS varchar)</c> produces — so
+    /// <c>datetime</c> / <c>smalldatetime</c> take style 0's
+    /// <c>Aug  8 2026  1:02AM</c> rather than an ISO layout, <c>datetime2(n)</c>
+    /// / <c>time(n)</c> / <c>datetimeoffset(n)</c> trim to their declared
+    /// precision, <c>money</c> keeps two decimals rather than four, and
+    /// <c>float</c> takes style 0.</item>
+    /// </list>
+    /// A <c>sql_variant</c> unwraps and its inner value takes the same rules.
     /// </summary>
     private static string FormatKeyValue(SqlValue value) =>
         value.IsNull ? "<NULL>"
         : value.Type.Category == SqlTypeCategory.String ? value.AsString
         : value.Type switch
         {
-            _ when value.Type == SqlType.Int32 => value.AsInt32.ToString(CultureInfo.InvariantCulture),
-            _ when value.Type == SqlType.BigInt => value.AsInt64.ToString(CultureInfo.InvariantCulture),
-            _ when value.Type == SqlType.SmallInt => value.AsInt16.ToString(CultureInfo.InvariantCulture),
-            _ when value.Type == SqlType.TinyInt => value.AsByte.ToString(CultureInfo.InvariantCulture),
-            _ when value.Type == SqlType.Bit => value.AsBoolean ? "1" : "0",
+            SqlVariantSqlType => FormatKeyValue(value.AsVariantInner),
             _ when value.Type == SqlType.UniqueIdentifier => value.AsGuid.ToString("D", CultureInfo.InvariantCulture),
-            _ when value.Type == SqlType.Date => value.AsDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-            _ when value.Type == SqlType.DateTime => value.AsDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture),
-            _ when value.Type == SqlType.SmallDateTime => value.AsSmallDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture),
-            DateTime2SqlType => value.AsDateTime2.ToString("yyyy-MM-dd HH:mm:ss.fffffff", CultureInfo.InvariantCulture),
-            TimeSqlType => value.AsTime.ToString("c", CultureInfo.InvariantCulture),
-            DateTimeOffsetSqlType => value.AsDateTimeOffset.ToString("yyyy-MM-dd HH:mm:ss.fffffff zzz", CultureInfo.InvariantCulture),
-            _ when value.Type == SqlType.Float || value.Type == SqlType.Real => value.FormatApproximateWithStyle(0),
-            _ when value.Type == SqlType.Money || value.Type == SqlType.SmallMoney => value.AsMoneyDecimal38.ToString(),
-            VarbinarySqlType or BinarySqlType => $"0x{Convert.ToHexString(value.AsBytes)}",
-            DecimalSqlType => value.AsDecimal38.ToString(),
-            _ => throw new NotSupportedException($"No key-violation rendering for {value.Type}."),
+            _ when value.Type == SqlType.HierarchyId => $"0x{Convert.ToHexStringLower(value.AsHierarchyIdBytes)}",
+            VarbinarySqlType or BinarySqlType or ImageSqlType or RowVersionSqlType =>
+                $"0x{Convert.ToHexStringLower(value.AsBytes)}",
+            _ => value.CoerceTo(SqlType.NVarchar).AsString,
         };
 }

@@ -14,8 +14,8 @@ sealed class UnquotedString : Name
     /// First access parses <see cref="Span"/> via <see cref="Enum.TryParse{TEnum}(ReadOnlySpan{char}, bool, out TEnum)"/>
     /// (case-insensitive); the result is cached on the field so repeat reads at
     /// the same token are constant-time. A miss — or a pathological identifier
-    /// matching either sentinel name (<c>NotChecked</c> / <c>_</c>) — collapses
-    /// to <see cref="ContextualKeyword._"/>.
+    /// matching either sentinel name (<c>NotChecked</c> / <c>NotAKeyword</c>) —
+    /// collapses to <see cref="ContextualKeyword.NotAKeyword"/>.
     /// </summary>
     public ContextualKeyword ContextualKeyword
     {
@@ -24,9 +24,9 @@ sealed class UnquotedString : Name
             if (field == ContextualKeyword.NotChecked)
             {
                 field = Enum.TryParse<ContextualKeyword>(this.Span, ignoreCase: true, out var keyword)
-                    && keyword is not (ContextualKeyword.NotChecked or ContextualKeyword._)
+                    && keyword is not (ContextualKeyword.NotChecked or ContextualKeyword.NotAKeyword)
                     ? keyword
-                    : ContextualKeyword._;
+                    : ContextualKeyword.NotAKeyword;
             }
             return field;
         }

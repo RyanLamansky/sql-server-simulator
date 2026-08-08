@@ -57,6 +57,11 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
+        // Ahead of every resolution: real reports Msg 3930 for an sp_rename of
+        // a missing object too, where the read-only gate in each Rename* helper
+        // below yields to the not-found error (both probe-confirmed).
+        RejectWriteInDoomedTransaction(batch.Connection);
+
         var (objName, newName, objType) = ParseSpRenameArgs(arguments);
 
         // @objname / @newname are mandatory. Real raises Msg 201 on a missing

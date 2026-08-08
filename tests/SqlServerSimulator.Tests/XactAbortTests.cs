@@ -191,6 +191,78 @@ public sealed class XactAbortTests
             """));
     }
 
+    /// <summary>
+    /// The catalog writers whose leading token is neither DML nor a
+    /// <c>CREATE</c> / <c>ALTER</c> / <c>DROP</c> / <c>TRUNCATE</c> keyword take
+    /// the same refusal — and take it <em>before</em> their own name
+    /// resolution, so a missing target still reports Msg 3930 (probe-confirmed
+    /// against SQL Server 2025, 2026-08-08).
+    /// </summary>
+    [TestMethod]
+    [DataRow("GRANT SELECT ON t TO u1;")]
+    [DataRow("REVOKE SELECT ON t FROM u1;")]
+    [DataRow("DENY SELECT ON t TO u1;")]
+    [DataRow("GRANT SELECT ON SCHEMA::dbo TO u1;")]
+    [DataRow("GRANT SELECT ON dbo.nosuch TO u1;")]
+    [DataRow("GRANT SELECT ON t TO nosuchuser;")]
+    [DataRow("EXEC sp_rename 't', 'tt';")]
+    [DataRow("EXEC sp_rename 't.v', 'vv', 'COLUMN';")]
+    [DataRow("EXEC sp_rename 'dbo.nosuch', 'x';")]
+    [DataRow("EXEC sp_addextendedproperty @name = N'X', @value = N'Y', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N't';")]
+    [DataRow("EXEC sp_addextendedproperty @name = N'X', @value = N'Y', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N'nosuch';")]
+    [DataRow("EXEC sp_dropextendedproperty @name = N'X', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N't';")]
+    public void DoomedTransactionRefusesCatalogWrites(string write)
+    {
+        using var connection = Seeded();
+        _ = connection.CreateCommand("CREATE USER u1 WITHOUT LOGIN").ExecuteNonQuery();
+        AreEqual(3930, Scalar(connection, $"""
+            SET XACT_ABORT ON;
+            BEGIN TRAN;
+            BEGIN TRY
+                SELECT 1 / 0;
+            END TRY
+            BEGIN CATCH
+                BEGIN TRY
+                    {write}
+                END TRY
+                BEGIN CATCH
+                    SELECT ERROR_NUMBER();
+                END CATCH
+            END CATCH
+            ROLLBACK;
+            """));
+    }
+
+    /// <summary>
+    /// Msg 3930 outranks the read-only database's own Msg 3906 when both apply
+    /// (probe-confirmed), which is why the doomed check runs first.
+    /// </summary>
+    [TestMethod]
+    [DataRow("INSERT INTO t (id, v) VALUES (9, 1);")]
+    [DataRow("GRANT SELECT ON t TO u1;")]
+    public void DoomedTransaction_OutranksTheReadOnlyRefusal(string write)
+    {
+        using var connection = Seeded();
+        _ = connection.CreateCommand("CREATE USER u1 WITHOUT LOGIN").ExecuteNonQuery();
+        _ = connection.CreateCommand("ALTER DATABASE CURRENT SET READ_ONLY").ExecuteNonQuery();
+        AreEqual(3930, Scalar(connection, $"""
+            SET XACT_ABORT ON;
+            BEGIN TRAN;
+            BEGIN TRY
+                SELECT 1 / 0;
+            END TRY
+            BEGIN CATCH
+                BEGIN TRY
+                    {write}
+                END TRY
+                BEGIN CATCH
+                    SELECT ERROR_NUMBER();
+                END CATCH
+            END CATCH
+            ROLLBACK;
+            """));
+    }
+
     /// <summary>A read inside a doomed transaction answers normally.</summary>
     [TestMethod]
     public void DoomedTransactionStillReads()

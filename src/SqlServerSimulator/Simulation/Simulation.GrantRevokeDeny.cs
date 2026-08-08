@@ -211,6 +211,11 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        // A permission row is a log write whatever its scope, and the refusal
+        // precedes every resolution below — a GRANT naming a missing object or
+        // a missing principal still reports Msg 3930 (probe-confirmed).
+        RejectWriteInDoomedTransaction(context.Connection);
+
         // Server-scope GRANT / DENY / REVOKE. Three routes in: no ON clause with
         // every permission a recognized server permission (CONNECT SQL, VIEW
         // SERVER STATE, …), an explicit ON SERVER::x, or an ON LOGIN::x (class

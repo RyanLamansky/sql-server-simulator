@@ -2,7 +2,9 @@
 
 enum AtAtKeyword
 {
-    _ = 0, // "Default" value for the enum, indicating not a keyword.
+    /// <summary>Default value — this token is not an <c>@@</c>-keyword.</summary>
+    _ = 0,
+
     Connections,
     CpuBusy,
     CursorRows,

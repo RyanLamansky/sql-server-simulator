@@ -9,11 +9,43 @@ Sibling deep-dives: [`foreign-keys.md`](foreign-keys.md) (the FK family in full)
   A predicate over a computed column has its own persistence rules — [below](#computed-columns-in-a-check-constraint).
 - `PRIMARY KEY` / `UNIQUE` / secondary `CREATE INDEX`: no B-tree; reads, `UPDATE`/`DELETE`/`MERGE` target scans, **and key-uniqueness enforcement itself** go through the **incrementally-maintained** per-`Heap` seek acceleration (equality / IN / leading-column range / equality-prefix+range continuation / ORDER BY elimination / keyset).
   Seek shapes, mutation/MERGE seeking, journal mechanics, decline rules, residual-WHERE invariant in [`indexes.md`](indexes.md); the enforcement seek's own decline rules are [below](#key-uniqueness-enforcement-seeks-rather-than-scans).
-  Violations: PK/UNIQUE *constraints* raise Msg 2627; unique *indexes* raise Msg 2601.
+  Violations: PK/UNIQUE *constraints* raise Msg 2627; unique *indexes* raise Msg 2601 — the offending key's rendering is [below](#how-the-duplicate-key-value-renders).
   UNIQUE treats NULLs as equal (the signature SQL Server divergence from ANSI).
 - `FOREIGN KEY`: inline / table-level / named forms; all four referential actions on `ON DELETE`/`ON UPDATE`; enforced at INSERT/UPDATE/DELETE/MERGE; full `sys.foreign_keys` / `sys.foreign_key_columns`.
   Enforcement **seeks the shared `HeapSeekCache`** (live-byte verified, no residual WHERE).
   Referential-action, cascade-cycle, PK/UNIQUE-target, NULL-skip rules + Msg numbers in [`foreign-keys.md`](foreign-keys.md).
+
+## How the duplicate-key value renders
+
+The `The duplicate key value is (…)` tail of Msg 2627 / 2601 (and the
+`DuplicateKeyOnCreate` variant a `CREATE UNIQUE INDEX` over existing rows
+raises) is not a per-type table but three rules, probed across every
+key-eligible type against SQL Server 2025 (2026-08-08):
+
+1. **NULL** is `<NULL>`.
+2. **A string is its raw text** — no enclosing quotes, and `char`'s padding kept, so a `char(5)` holding `ab` renders `ab   `.
+3. **The opaque-identifier family is lower case**: a `uniqueidentifier`, and `0x`-prefixed hex for the binary types and for `hierarchyid` (which reports its OrdPath bytes, not its path text — `/1/2/` renders `0x5b40`).
+   Both diverge from their own conversions, which are *upper* case on real: `CAST(<guid> AS varchar)` gives `0E984725-…` and `CONVERT(varchar, <bin>, 1)` gives `0xDEADBEEF`.
+4. **Everything else is the ordinary implicit string conversion** — exactly what `CAST(<value> AS varchar)` produces.
+
+Rule 4 is the one that carries the surprises, and each is real's own:
+
+| Type | Renders as | Note |
+|---|---|---|
+| `datetime` / `smalldatetime` | `Aug  8 2026  1:02AM` | style 0, not an ISO layout (note the doubled spaces) |
+| `datetime2(3)` | `2026-08-08 01:02:03.456` | trimmed to the *declared* precision, not seven digits |
+| `time(2)` | `01:02:03.45` | likewise |
+| `datetimeoffset(1)` | `2026-08-08 01:02:03.4 +05:30` | likewise, offset kept |
+| `money` / `smallmoney` | `12345.68` | two decimals, not the four it stores |
+| `float` / `real` | `1.23457e+009` | style 0 — see [`casting.md`](casting.md) |
+| `decimal(10, 4)` | `123.4500` | declared scale preserved |
+
+A `sql_variant` key unwraps and its inner value takes the same rules, so a
+`datetime` inside one also renders `Aug  8 2026  1:02AM`.
+
+`Simulation.Coerce.FormatKeyValue` is the single renderer behind all three call
+sites; `KeyConstraintTests.DuplicateKeyValue_RenderingPerType` pins the table
+above type-by-type.
 
 ## One inline constraint of each kind per column (Msg 8148 / 8151)
 

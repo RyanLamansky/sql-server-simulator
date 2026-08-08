@@ -16,11 +16,27 @@ namespace SqlServerSimulator.Parser;
 /// happen to match a contextual keyword (e.g. <c>create table t (Output int)</c>)
 /// working without special casing — identifier positions never invoke the
 /// contextual lookup.
+///
+/// <para>The two sentinels lead; every member after them is a real contextual
+/// keyword, named exactly as it is spelled — <see cref="Enum.TryParse{TEnum}(ReadOnlySpan{char}, bool, out TEnum)"/>
+/// over the token's own span is the classifier — and kept alphabetical.
+/// Two sentinels rather than the one <see cref="Keyword"/> and
+/// <see cref="AtAtKeyword"/> carry, because classification here is lazy: the
+/// zero value has to mean "not looked at yet", which leaves
+/// <see cref="NotAKeyword"/> to carry the answer.</para>
 /// </remarks>
 enum ContextualKeyword
 {
-    NotChecked = 0, // Default field value — token hasn't been classified yet.
-    _,              // Classified: not a contextual keyword.
+    /// <summary>Default field value — this token hasn't been classified yet.</summary>
+    NotChecked = 0,
+
+    /// <summary>
+    /// Classified: this identifier is not a contextual keyword. Not to be
+    /// confused with <see cref="None"/>, which is the real T-SQL keyword
+    /// <c>NONE</c> (<c>WITH RESULT SETS NONE</c>).
+    /// </summary>
+    NotAKeyword,
+
     Abort,
     Action,
     After,

@@ -5,7 +5,13 @@
 /// </summary>
 enum Keyword
 {
-    _ = 0, // "Default" value for the enum, indicating not a keyword.
+    /// <summary>
+    /// Default value — this token is not a reserved keyword. Not to be confused
+    /// with <see cref="Default"/> or <see cref="Null"/>, which are the real
+    /// T-SQL keywords of those names.
+    /// </summary>
+    _ = 0,
+
     Add,
     All,
     Alter,

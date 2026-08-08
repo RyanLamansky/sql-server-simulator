@@ -42,6 +42,11 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
+        // Ahead of the target resolution, unlike the read-only gate below:
+        // real reports Msg 3930 even when the named table doesn't exist
+        // (probe-confirmed).
+        RejectWriteInDoomedTransaction(batch.Connection);
+
         string? name = null;
         var value = SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
         var hasValueArg = false;
