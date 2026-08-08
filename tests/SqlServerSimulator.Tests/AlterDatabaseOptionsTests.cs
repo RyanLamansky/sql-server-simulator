@@ -87,16 +87,15 @@ public class AlterDatabaseOptionsTests
     [DataRow("ALTER DATABASE simulated SET QUERY_STORE = ON (QUERY_CAPTURE_POLICY = (STALE_CAPTURE_POLICY_THRESHOLD = 24 HOURS, EXECUTION_COUNT = 30, TOTAL_COMPILE_CPU_TIME_MS = 1000, TOTAL_EXECUTION_CPU_TIME_MS = 100))")]
     // Multi-sub-option
     [DataRow("ALTER DATABASE simulated SET QUERY_STORE = ON (OPERATION_MODE = READ_WRITE, INTERVAL_LENGTH_MINUTES = 30, MAX_STORAGE_SIZE_MB = 1000, QUERY_CAPTURE_MODE = AUTO)")]
-    public void QueryStore_ParsesAndDiscards(string sql)
+    public void QueryStore_ShapeAccepted(string sql)
         => AreEqual(-1, new Simulation().ExecuteNonQuery(sql));
 
     [TestMethod]
     public void QueryStore_UnknownSubOption_RaisesSyntaxError()
     {
         // Probe-confirmed verbatim: SQL Server 2025 raises Msg 102 near the
-        // first unknown sub-option name; the simulator's parse-and-discard
-        // walks each sub-option through the closed accept-list and the first
-        // unknown name surfaces as Msg 102.
+        // first unknown sub-option name, and the parser dispatches each
+        // sub-option through a closed set that reaches the same error.
         var ex = new Simulation().AssertSqlError(
             "ALTER DATABASE simulated SET QUERY_STORE = ON (BOGUS_OPTION = 1)",
             102);

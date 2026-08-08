@@ -560,106 +560,6 @@ internal static partial class BuiltInResources
             // already carries it; database_files was the missing sibling.
             new("drop_lsn", lsnNumeric, null, true),
         ], EnumerateSysDatabaseFiles);
-
-        // sys.database_query_store_options: per-database view (join key is the
-        // current database context, not a database_id column). Query Store is
-        // never enabled in the simulator, so a user database returns exactly
-        // one OFF row and a system database (master/tempdb/model/msdb) returns
-        // zero rows — the exact split a live SQL Server 2025 returns
-        // (probe-confirmed 2026-07-15). SSMS's Query Store probe gates on
-        // OBJECT_ID(N'[sys].[database_query_store_options]') resolving and then
-        // reads actual_state. nvarchar(60) _desc columns carry the probed
-        // max_length=120 bytes; actual_state_additional_info is nvarchar(4000)
-        // (probed max_length=8000 bytes), surfaced as the empty string.
-        Sys("database_query_store_options",
-        [
-            new("desired_state", SqlType.SmallInt, null, false),
-            new("desired_state_desc", nvarchar60Catalog, 60, true),
-            new("actual_state", SqlType.SmallInt, null, false),
-            new("actual_state_desc", nvarchar60Catalog, 60, true),
-            new("readonly_reason", SqlType.Int32, null, true),
-            new("current_storage_size_mb", SqlType.BigInt, null, true),
-            new("flush_interval_seconds", SqlType.BigInt, null, true),
-            new("interval_length_minutes", SqlType.BigInt, null, true),
-            new("max_storage_size_mb", SqlType.BigInt, null, true),
-            new("stale_query_threshold_days", SqlType.BigInt, null, true),
-            new("max_plans_per_query", SqlType.BigInt, null, true),
-            new("query_capture_mode", SqlType.SmallInt, null, false),
-            new("query_capture_mode_desc", nvarchar60Catalog, 60, true),
-            new("capture_policy_execution_count", SqlType.Int32, null, true),
-            new("capture_policy_total_compile_cpu_time_ms", SqlType.BigInt, null, true),
-            new("capture_policy_total_execution_cpu_time_ms", SqlType.BigInt, null, true),
-            new("capture_policy_stale_threshold_hours", SqlType.Int32, null, true),
-            new("size_based_cleanup_mode", SqlType.SmallInt, null, false),
-            new("size_based_cleanup_mode_desc", nvarchar60Catalog, 60, true),
-            new("wait_stats_capture_mode", SqlType.SmallInt, null, false),
-            new("wait_stats_capture_mode_desc", nvarchar60Catalog, 60, true),
-            new("actual_state_additional_info", SqlType.NVarchar, 4000, true),
-        ], EnumerateSysDatabaseQueryStoreOptions);
-
-        // sys.query_store_runtime_stats: per-plan runtime-statistics capture.
-        // The simulator never runs Query Store, so no runtime stats are ever
-        // captured and the view is always empty. SSMS's Query Store probe does
-        // IF EXISTS (SELECT TOP(1) 1 FROM sys.query_store_runtime_stats), which
-        // must resolve and return zero rows. Column shape probe-confirmed
-        // against SQL Server 2025 (2026-07-15): the first nine metric groups
-        // carry NOT NULL last/min/max columns, the last four NULL.
-        Sys("query_store_runtime_stats",
-            BuildQueryStoreRuntimeStatsColumns(nvarchar60Catalog),
-            static (_, _) => EmptyCatalogRows);
-    }
-
-    /// <summary>
-    /// Column shape for <c>sys.query_store_runtime_stats</c>. The nine
-    /// "core" metrics (duration, cpu_time, logical/physical IO, clr_time,
-    /// dop, query_max_used_memory, rowcount) expose NOT NULL last/min/max
-    /// columns; the four "extended" metrics (num_physical_io_reads,
-    /// log_bytes_used, tempdb_space_used, page_server_io_reads) expose them
-    /// NULL — matching the probed SQL Server 2025 catalog shape. The view is
-    /// always empty, so the column set only ever backs metadata reads.
-    /// </summary>
-    private static HeapColumn[] BuildQueryStoreRuntimeStatsColumns(NVarcharSqlType nvarchar60Catalog)
-    {
-        var columns = new List<HeapColumn>
-        {
-            new("runtime_stats_id", SqlType.BigInt, null, false),
-            new("plan_id", SqlType.BigInt, null, false),
-            new("runtime_stats_interval_id", SqlType.BigInt, null, false),
-            new("execution_type", SqlType.TinyInt, null, false),
-            new("execution_type_desc", nvarchar60Catalog, 60, true),
-            new("first_execution_time", SqlType.GetDateTimeOffset(7), null, false),
-            new("last_execution_time", SqlType.GetDateTimeOffset(7), null, false),
-            new("count_executions", SqlType.BigInt, null, false),
-        };
-
-        void Metric(string metric, bool aggregatesNullable)
-        {
-            columns.Add(new("avg_" + metric, SqlType.Float, null, true));
-            columns.Add(new("last_" + metric, SqlType.BigInt, null, aggregatesNullable));
-            columns.Add(new("min_" + metric, SqlType.BigInt, null, aggregatesNullable));
-            columns.Add(new("max_" + metric, SqlType.BigInt, null, aggregatesNullable));
-            columns.Add(new("stdev_" + metric, SqlType.Float, null, true));
-        }
-
-        foreach (var metric in new[]
-        {
-            "duration", "cpu_time", "logical_io_reads", "logical_io_writes",
-            "physical_io_reads", "clr_time", "dop", "query_max_used_memory", "rowcount",
-        })
-        {
-            Metric(metric, aggregatesNullable: false);
-        }
-
-        foreach (var metric in new[]
-        {
-            "num_physical_io_reads", "log_bytes_used", "tempdb_space_used", "page_server_io_reads",
-        })
-        {
-            Metric(metric, aggregatesNullable: true);
-        }
-
-        columns.Add(new("replica_group_id", SqlType.BigInt, null, false));
-        return [.. columns];
     }
 
     /// <summary>
@@ -1129,10 +1029,9 @@ internal static partial class BuiltInResources
                 SqlValue.FromBoolean(db.CrossDatabaseChaining),
                 falseBit, // is_parameterization_forced
                 falseBit, // is_master_key_encrypted_by_server
-                // is_query_store_on stays 0 so it agrees with the OFF row
-                // sys.database_query_store_options projects; see that
-                // generator for why Query Store reads disabled.
-                falseBit, // is_query_store_on
+                // Any desired state but OFF reads on here, READ_ONLY included —
+                // the flag tracks desired_state, not actual_state.
+                SqlValue.FromBoolean(db.QueryStore.DesiredState != QueryStoreState.Off),
                 falseBit, // is_published
                 falseBit, // is_subscribed
                 falseBit, // is_merge_published
@@ -1336,56 +1235,6 @@ internal static partial class BuiltInResources
                 nullLsn,
             ];
         }
-    }
-
-    /// <summary>
-    /// Rows for <c>sys.database_query_store_options</c> — one OFF row per user
-    /// database, zero rows for a system database (master/tempdb/model/msdb per
-    /// <see cref="Simulation.SystemDatabaseNames"/>). The simulator never
-    /// enables Query Store, so the single row is a fixed "disabled" shape:
-    /// desired/actual OFF with <c>query_capture_mode</c> AUTO and NULL
-    /// capture-policy columns, the shape live pre-CUSTOM databases report
-    /// (probe-confirmed against the reference AW/WWI). A fresh SQL Server
-    /// 2025 database defaults to CUSTOM (4) with policy defaults, but DacFx's
-    /// bacpac model schema reads only <c>query_capture_mode</c> and cannot
-    /// express CUSTOM — exporting 4 produces a model.xml that real DacFx
-    /// rejects at import ("The option 4 for querystore query_capture_mode is
-    /// not supported"), so AUTO is the round-trippable choice. The join key
-    /// is the database context (<paramref name="database"/>), so a
-    /// three-part <c>master.sys.database_query_store_options</c> read
-    /// returns nothing.
-    /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysDatabaseQueryStoreOptions(Parser.BatchContext batch, Database database)
-    {
-        _ = batch;
-        if (Simulation.SystemDatabaseNames.Contains(database.Name))
-            yield break;
-
-        var off = SqlValue.FromNVarchar("OFF");
-        yield return [
-            SqlValue.FromInt16(0),                  // desired_state
-            off,                                    // desired_state_desc
-            SqlValue.FromInt16(0),                  // actual_state
-            off,                                    // actual_state_desc
-            SqlValue.FromInt32(0),                  // readonly_reason
-            SqlValue.FromInt64(0),                  // current_storage_size_mb
-            SqlValue.FromInt64(900),                // flush_interval_seconds
-            SqlValue.FromInt64(60),                 // interval_length_minutes
-            SqlValue.FromInt64(1000),               // max_storage_size_mb
-            SqlValue.FromInt64(30),                 // stale_query_threshold_days
-            SqlValue.FromInt64(200),                // max_plans_per_query
-            SqlValue.FromInt16(2),                  // query_capture_mode
-            SqlValue.FromNVarchar("AUTO"),          // query_capture_mode_desc
-            SqlValue.Null(SqlType.Int32),           // capture_policy_execution_count
-            SqlValue.Null(SqlType.BigInt),          // capture_policy_total_compile_cpu_time_ms
-            SqlValue.Null(SqlType.BigInt),          // capture_policy_total_execution_cpu_time_ms
-            SqlValue.Null(SqlType.Int32),           // capture_policy_stale_threshold_hours
-            SqlValue.FromInt16(0),                  // size_based_cleanup_mode
-            off,                                    // size_based_cleanup_mode_desc
-            SqlValue.FromInt16(0),                  // wait_stats_capture_mode
-            off,                                    // wait_stats_capture_mode_desc
-            SqlValue.FromNVarchar(string.Empty),    // actual_state_additional_info
-        ];
     }
 
     /// <summary>

@@ -1235,14 +1235,18 @@ public sealed class CatalogViewTests
     }
 
     /// <summary>
-    /// is_query_store_on stays 0 so it agrees with the OFF row
-    /// <c>sys.database_query_store_options</c> projects — the pair is read
-    /// together and must not contradict.
+    /// The pair is read together and must not contradict: is_query_store_on
+    /// follows the state <c>sys.database_query_store_options</c> projects, on
+    /// a fresh database and after a flip.
     /// </summary>
     [TestMethod]
     public void SysDatabases_IsQueryStoreOn_AgreesWithQueryStoreOptions()
     {
         var sim = new Simulation();
+        IsTrue((bool)sim.ExecuteScalar("select is_query_store_on from sys.databases where name = 'simulated'")!);
+        AreEqual("READ_WRITE", sim.ExecuteScalar("select actual_state_desc from sys.database_query_store_options"));
+
+        _ = sim.ExecuteNonQuery("alter database simulated set query_store = off");
         IsFalse((bool)sim.ExecuteScalar("select is_query_store_on from sys.databases where name = 'simulated'")!);
         AreEqual("OFF", sim.ExecuteScalar("select actual_state_desc from sys.database_query_store_options"));
     }

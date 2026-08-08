@@ -1764,6 +1764,86 @@ public class BacpacLoaderTests
         IsEmpty(diag.Skipped);
     }
 
+    /// <summary>
+    /// The QueryStore* properties fold into one <c>SET QUERY_STORE = ON (…)</c>
+    /// so the imported database reports the configuration the source did.
+    /// DesiredState 1 is READ_ONLY; the property encodings are DacFx's own
+    /// (probe-confirmed by exporting a configured database, 2026-08-08).
+    /// </summary>
+    [TestMethod]
+    public void DatabaseOptions_QueryStoreSubOptions_LandOnTheCatalogRow()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .DatabaseOption("QueryStoreDesiredState", "1")
+            .DatabaseOption("QueryStoreCaptureMode", "3")
+            .DatabaseOption("QueryStoreFlushInterval", "1200")
+            .DatabaseOption("QueryStoreIntervalLength", "5")
+            .DatabaseOption("QueryStoreMaxPlansPerQuery", "77")
+            .DatabaseOption("QueryStoreMaxStorageSize", "333")
+            .DatabaseOption("QueryStoreStaleQueryThreshold", "11")
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("READ_ONLY", sim.ExecuteScalar("select desired_state_desc from sys.database_query_store_options"));
+        AreEqual("NONE", sim.ExecuteScalar("select query_capture_mode_desc from sys.database_query_store_options"));
+        AreEqual(1200L, sim.ExecuteScalar("select flush_interval_seconds from sys.database_query_store_options"));
+        AreEqual(5L, sim.ExecuteScalar("select interval_length_minutes from sys.database_query_store_options"));
+        AreEqual(77L, sim.ExecuteScalar("select max_plans_per_query from sys.database_query_store_options"));
+        AreEqual(333L, sim.ExecuteScalar("select max_storage_size_mb from sys.database_query_store_options"));
+        AreEqual(11L, sim.ExecuteScalar("select stale_query_threshold_days from sys.database_query_store_options"));
+    }
+
+    /// <summary>
+    /// DacFx writes QueryStoreDesiredState ahead of the sub-options, so a model
+    /// declaring an off store still carries the configuration that only an
+    /// <c>= ON (…)</c> can set. The loader emits the block first and the OFF
+    /// after, which is what leaves both halves right.
+    /// </summary>
+    [TestMethod]
+    public void DatabaseOptions_QueryStoreOffWithSubOptions_StaysOff()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .DatabaseOption("QueryStoreDesiredState", "0")
+            .DatabaseOption("QueryStoreMaxStorageSize", "333")
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("OFF", sim.ExecuteScalar("select desired_state_desc from sys.database_query_store_options"));
+        AreEqual(333L, sim.ExecuteScalar("select max_storage_size_mb from sys.database_query_store_options"));
+    }
+
+    /// <summary>
+    /// An omitted QueryStore property takes DacFx's model default, not the
+    /// simulator's fresh-database one — and for capture mode and max storage
+    /// size those differ (ALL / 100, the SQL Server 2016 defaults DacFx's
+    /// schema still carries). Probe-confirmed against the reference
+    /// AdventureWorks, whose model omits both and whose sqlpackage import
+    /// reports exactly this row. DesiredState's default *is* READ_WRITE.
+    /// </summary>
+    [TestMethod]
+    public void DatabaseOptions_OmittedQueryStoreProperties_TakeDacFxDefaults()
+    {
+        using var bacpac = BacpacBuilder.Create().DatabaseOption("IsAnsiNullsOn", "True").Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("READ_WRITE", sim.ExecuteScalar("select desired_state_desc from sys.database_query_store_options"));
+        AreEqual("ALL", sim.ExecuteScalar("select query_capture_mode_desc from sys.database_query_store_options"));
+        AreEqual(100L, sim.ExecuteScalar("select max_storage_size_mb from sys.database_query_store_options"));
+        // The rest of DacFx's defaults agree with a fresh database's.
+        AreEqual(900L, sim.ExecuteScalar("select flush_interval_seconds from sys.database_query_store_options"));
+        AreEqual(60L, sim.ExecuteScalar("select interval_length_minutes from sys.database_query_store_options"));
+        AreEqual(30L, sim.ExecuteScalar("select stale_query_threshold_days from sys.database_query_store_options"));
+        AreEqual(200L, sim.ExecuteScalar("select max_plans_per_query from sys.database_query_store_options"));
+        AreEqual("AUTO", sim.ExecuteScalar("select size_based_cleanup_mode_desc from sys.database_query_store_options"));
+        AreEqual("ON", sim.ExecuteScalar("select wait_stats_capture_mode_desc from sys.database_query_store_options"));
+    }
+
     [TestMethod]
     public void PartitionFunction_PartitionScheme_ColumnStoreIndex_AreSilentlySkipped()
     {

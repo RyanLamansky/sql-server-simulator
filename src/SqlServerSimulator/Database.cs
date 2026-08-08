@@ -308,6 +308,18 @@ internal sealed class Database
     public RecoveryModel RecoveryModel = RecoveryModel.Full;
 
     /// <summary>
+    /// This database's Query Store configuration, set by
+    /// <c>ALTER DATABASE … SET QUERY_STORE</c> and reported through
+    /// <c>sys.database_query_store_options</c> and
+    /// <c>sys.databases.is_query_store_on</c>. Retained but inert — no query is
+    /// ever captured, so every <c>sys.query_store_*</c> capture view stays
+    /// empty whatever the state says. Replaced wholesale rather than mutated
+    /// in place, so a partly-parsed options block leaves the old values
+    /// standing.
+    /// </summary>
+    public QueryStoreOptions QueryStore = new();
+
+    /// <summary>
     /// Raises <strong>Msg 3906</strong> (<c>Failed to update database "&lt;n&gt;"
     /// because the database is read-only.</c>) when this database is
     /// <see cref="IsReadOnly"/>. Called from the write seams — the per-row DML

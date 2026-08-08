@@ -366,7 +366,8 @@ Where an entry carries a second clause it is because that fact changes what you'
   `OPENXML`'s patterns are **XPath 1.0** through the DOM, not the XQuery translator → [`xml.md`](docs/claude/xml.md).
 - **`geography` / `geometry`** — the parsed value model, WKT / WKB, the member surface, spatial indexes, the measures, the DE-9IM topological engines, validity and the derived points.
   Round-earth measures follow the **great elliptic arc**, which is not the geodesic → [`spatial.md`](docs/claude/spatial.md).
-- **`ALTER DATABASE SET <option>` and the database-level `COLLATE` clause** — most options parse-and-discard; the load-bearing ones (compat level, the snapshot pair, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY`) are listed in the doc → [`database-options.md`](docs/claude/database-options.md).
+- **`ALTER DATABASE SET <option>` and the database-level `COLLATE` clause** — most options parse-and-discard; the load-bearing ones (compat level, the snapshot pair, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY`, `QUERY_STORE`) are listed in the doc.
+  `QUERY_STORE` is the only one with a sub-grammar of its own, and its whole configuration is retained though nothing is ever captured → [`database-options.md`](docs/claude/database-options.md).
 - **Per-column / per-expression collation, coercibility precedence, the cross-collation error family, the per-collation ANSI code page, and the `LIKE` / `PATINDEX` matcher**.
   A subject is read as **characters, not UTF-16 units**, and collation is bound at compile time so an empty rowset raises → [`collations.md`](docs/claude/collations.md).
 - **Grammar-level rules** — new statement parsers, dispatch-loop separators, `QUOTED_IDENTIFIER` and its per-object capture, reserved-keyword gating, the trailing-token tightenings and the module batch-position pair → [`grammar.md`](docs/claude/grammar.md).
@@ -395,7 +396,7 @@ Entries that raise a *real* SQL Server error deliberately are **not** here; they
   `SET @v`, `IDENTITY_INSERT`, `NOCOUNT`, `LOCK_TIMEOUT`, `TEXTSIZE` (client-boundary LOB truncation — see [`scalars.md`](docs/claude/scalars.md)), `TRANSACTION ISOLATION LEVEL`, `QUOTED_IDENTIFIER` (and `ANSI_DEFAULTS`'s QI component), `XACT_ABORT`, `ROWCOUNT`, `DATEFIRST` and `LANGUAGE` carry semantic effect.
   `SET DATEFORMAT` not following `SET LANGUAGE` is the one coupling those leave open — see [`scalars.md`](docs/claude/scalars.md#set-language-and-the-datefirst-it-moves).
 - **`ALTER DATABASE … SET` / `COLLATE`** — see [`database-options.md`](docs/claude/database-options.md).
-  Most options parse-and-discard; `COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY` / `READ_WRITE` are load-bearing, and every option lands on the **named** database (`CURRENT` for the session's; an unhosted name is Msg 5011).
+  Most options parse-and-discard; `COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY` / `READ_WRITE`, `QUERY_STORE` are load-bearing, and every option lands on the **named** database (`CURRENT` for the session's; an unhosted name is Msg 5011).
 - **`MERGE … OUTPUT` through a view** → `NotSupportedException` (view-column projection through `INSERTED`/`DELETED` deferred); the other MERGE shapes ship — see [`dml.md`](docs/claude/dml.md).
 - Heap allocation tracking (flat page list, no IAM/PFS).
 - **`ALTER AUTHORIZATION`** in every form — there is no parser for the statement, so a schema's owner is settled once by `CREATE SCHEMA … AUTHORIZATION` and an object's follows its schema.

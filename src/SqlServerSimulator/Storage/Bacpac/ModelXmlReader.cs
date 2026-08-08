@@ -444,6 +444,22 @@ internal static class ModelXmlReader
             }
         }
 
+        // The QueryStore* family can't emit per property: every sub-option's
+        // statement is an `= ON (…)`, which also enables the store, and DacFx
+        // writes QueryStoreDesiredState *before* the sub-options — so a model
+        // declaring an off store with configured sub-options would re-enable
+        // itself. Harvested here and emitted as one block after the loop.
+        // Seeded with the two DacFx model defaults that differ from a fresh
+        // database's, which is what makes an omitted property land where a real
+        // DacFx import lands (probe-confirmed 2026-08-08 against the reference
+        // AdventureWorks, whose model omits both and whose sqlpackage import
+        // reports ALL / 100 rather than 2025's own AUTO / 1000).
+        var queryStore = new SortedDictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["QueryStoreCaptureMode"] = "1",
+            ["QueryStoreMaxStorageSize"] = "100",
+        };
+
         foreach (var property in element.Elements(Ns + "Property"))
         {
             var name = property.Attribute("Name")?.Value;
@@ -455,6 +471,12 @@ internal static class ModelXmlReader
             if (name == "IsReadOnly" && IsTrue(value))
                 result.DatabaseIsReadOnly = true;
 
+            if (name.StartsWith("QueryStore", StringComparison.Ordinal))
+            {
+                queryStore[name] = value;
+                continue;
+            }
+
             var sql = TranslateDatabaseOption(name, value, bracketedDb);
             if (sql is null)
                 continue;
@@ -464,7 +486,82 @@ internal static class ModelXmlReader
 #pragma warning restore CA2100
             _ = command.ExecuteNonQuery();
         }
+
+        EmitQueryStoreOptions(command, bracketedDb, queryStore);
     }
+
+    /// <summary>
+    /// Emits the harvested Query Store configuration: the sub-options first
+    /// (they need the store on to be settable), then the OFF the model asked
+    /// for. Real retains a disabled store's configuration, so the pair leaves
+    /// exactly the row the source reported — verified against a sqlpackage
+    /// import of a bacpac declaring state 0 with non-default sub-options.
+    /// </summary>
+    private static void EmitQueryStoreOptions(DbCommand command, string bracketedDb, SortedDictionary<string, string> queryStore)
+    {
+        var fragments = new List<string>();
+        var turnOff = false;
+        foreach (var (name, value) in queryStore)
+        {
+            if (name == "QueryStoreDesiredState")
+            {
+                turnOff = value == "0";
+                // 1 = READ_ONLY; 2 (READ_WRITE) and 3 (ERROR) both land on the
+                // READ_WRITE a bare `= ON` selects, which is also the state a
+                // model omitting the property declares — DacFx writes it only
+                // when it isn't READ_WRITE (probe-confirmed 2026-08-08 by
+                // exporting a database at each state).
+                if (value == "1")
+                    fragments.Add("OPERATION_MODE = READ_ONLY");
+            }
+            else if (TranslateQueryStoreSubOption(name, value) is { } fragment)
+            {
+                fragments.Add(fragment);
+            }
+        }
+
+        if (fragments.Count > 0)
+            ExecuteLoaderStatement(command, $"ALTER DATABASE {bracketedDb} SET QUERY_STORE = ON ({string.Join(", ", fragments)});");
+        if (turnOff)
+            ExecuteLoaderStatement(command, $"ALTER DATABASE {bracketedDb} SET QUERY_STORE = OFF;");
+    }
+
+    private static void ExecuteLoaderStatement(DbCommand command, string sql)
+    {
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = sql;
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Maps one <c>QueryStore*</c> property to its sub-option fragment inside
+    /// an <c>= ON ( … )</c> block, or null when the property has none.
+    /// Encodings probe-confirmed 2026-08-08 by configuring a database and
+    /// exporting it: the two mode properties carry the catalog's own codes and
+    /// the rest their catalog units. <c>QueryStoreSizeBasedCleanupMode</c> and
+    /// <c>QueryStoreWaitStatisticsCaptureMode</c> are named by the DacFx schema
+    /// but that export wrote neither at any value, so their arms are unreached
+    /// insurance rather than observed behavior.
+    /// </summary>
+    private static string? TranslateQueryStoreSubOption(string name, string value) => name switch
+    {
+        "QueryStoreCaptureMode" => "QUERY_CAPTURE_MODE = " + value switch
+        {
+            "1" => "ALL",
+            "3" => "NONE",
+            "4" => "CUSTOM",
+            _ => "AUTO",
+        },
+        "QueryStoreFlushInterval" => $"DATA_FLUSH_INTERVAL_SECONDS = {value}",
+        "QueryStoreIntervalLength" => $"INTERVAL_LENGTH_MINUTES = {value}",
+        "QueryStoreMaxPlansPerQuery" => $"MAX_PLANS_PER_QUERY = {value}",
+        "QueryStoreMaxStorageSize" => $"MAX_STORAGE_SIZE_MB = {value}",
+        "QueryStoreSizeBasedCleanupMode" => $"SIZE_BASED_CLEANUP_MODE = {(value == "0" ? "OFF" : "AUTO")}",
+        "QueryStoreStaleQueryThreshold" => $"CLEANUP_POLICY = (STALE_QUERY_THRESHOLD_DAYS = {value})",
+        "QueryStoreWaitStatisticsCaptureMode" => $"WAIT_STATS_CAPTURE_MODE = {OnOff(value == "0" ? "False" : "True")}",
+        _ => null,
+    };
 
     /// <summary>
     /// Maps a single <c>&lt;Property Name=X Value=Y /&gt;</c> on
@@ -512,24 +609,9 @@ internal static class ModelXmlReader
         "IsCursorDefaultScopeGlobal" => $"ALTER DATABASE {bracketedDb} SET CURSOR_DEFAULT {(IsTrue(value) ? "GLOBAL" : "LOCAL")};",
         // TARGET_RECOVERY_TIME requires a unit; bacpac always stores SECONDS.
         "TargetRecoveryTimePeriod" => $"ALTER DATABASE {bracketedDb} SET TARGET_RECOVERY_TIME = {value} SECONDS;",
-        // QueryStoreDesiredState: 0=OFF, 1=READ_ONLY, 2=READ_WRITE, 3=ERROR.
-        // The simulator's QUERY_STORE parser accepts ON/OFF + sub-options; emit
-        // the matching toggle. Sub-options (interval length, capture mode etc.)
-        // are bacpac metadata-only — the simulator doesn't act on them, so
-        // they're elided.
-        "QueryStoreDesiredState" => value == "0"
-            ? $"ALTER DATABASE {bracketedDb} SET QUERY_STORE = OFF;"
-            : $"ALTER DATABASE {bracketedDb} SET QUERY_STORE = ON;",
-        // Sub-options of QUERY_STORE — already covered by the desired-state
-        // emit above. The simulator doesn't enforce their values.
-        "QueryStoreIntervalLength" => null,
-        "QueryStoreFlushInterval" => null,
-        "QueryStoreCaptureMode" => null,
-        "QueryStoreMaxStorageSize" => null,
-        "QueryStoreSizeBasedCleanupMode" => null,
-        "QueryStoreMaxPlansPerQuery" => null,
-        "QueryStoreStaleQueryThreshold" => null,
-        "QueryStoreWaitStatisticsCaptureMode" => null,
+        // The whole QueryStore* family is harvested by the caller and emitted
+        // as one block — see TranslateQueryStoreSubOption for why it can't go
+        // property by property.
         // Collation handled in the caller (Skipped entry on mismatch).
         "Collation" => null,
         // sp_fulltext_database routes for the full-text-enabled toggle; the

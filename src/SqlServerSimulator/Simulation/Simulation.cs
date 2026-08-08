@@ -58,6 +58,13 @@ public sealed partial class Simulation
         this.Databases[MasterDatabaseName].RecoveryModel = RecoveryModel.Simple;
         this.Databases[TempdbDatabaseName].RecoveryModel = RecoveryModel.Simple;
         msdb.RecoveryModel = RecoveryModel.Simple;
+        // Query Store: model ships on, which is why a fresh user database does
+        // too (the QueryStoreOptions field default). master / tempdb refuse the
+        // option outright and msdb ships off (probe-confirmed against SQL
+        // Server 2025, 2026-08-08).
+        this.Databases[MasterDatabaseName].QueryStore.DesiredState = QueryStoreState.Off;
+        this.Databases[TempdbDatabaseName].QueryStore.DesiredState = QueryStoreState.Off;
+        msdb.QueryStore.DesiredState = QueryStoreState.Off;
         SeedMsdbPolicyHealthView(msdb);
         SeedMsdbPolicyConfigurationView(msdb);
         SeedMsdbPolicyAutomationFunction(msdb);

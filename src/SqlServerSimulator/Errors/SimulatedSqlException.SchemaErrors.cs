@@ -155,6 +155,21 @@ partial class SimulatedSqlException
             Collation.Baseline.Equals(databaseName, Simulation.TempdbDatabaseName) ? (byte)4 : (byte)5);
 
     /// <summary>
+    /// Mimics SQL Server error 12438: <c>ALTER DATABASE … SET QUERY_STORE</c>
+    /// named <c>master</c> or <c>tempdb</c>, the two databases real refuses to
+    /// host a Query Store on. Class 16 state 1, and — probe-confirmed against
+    /// SQL Server 2025 (2026-08-08) — every form of the option raises it, the
+    /// <c>= OFF</c> and <c>CLEAR</c> ones included, all wording the refusal as
+    /// being about enabling. <c>model</c> and <c>msdb</c> accept the option.
+    /// </summary>
+    /// <remarks>
+    /// Real follows it with a trailing Msg 5069, which the simulator flattens
+    /// the way it flattens the other ALTER DATABASE failures here.
+    /// </remarks>
+    internal static SimulatedSqlException QueryStoreCannotBeEnabledOnSystemDatabase(string databaseName) =>
+        new($"Cannot perform action because Query Store cannot be enabled on system database {databaseName}.", 12438, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 15664: a <c>sp_set_session_context</c> call
     /// targeted a key previously set with <c>@read_only = 1</c> in this
     /// session. Wording probe-confirmed against SQL Server 2025. Class 16 State 1.
