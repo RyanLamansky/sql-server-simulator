@@ -21,7 +21,7 @@ Probed against SQL Server 2025.
 - **`AUTHORIZATION owner`** and the embedded `<schema_element>` list both ship — see [CREATE SCHEMA's owner and its element list](#create-schemas-owner-and-its-element-list).
 - **"First in batch" is enforced** — `CREATE SCHEMA` after any dispatched statement raises **Msg 111 state 14** (`'CREATE SCHEMA' must be the first statement in a query batch.`), matching real; with no `GO`, a batch is one `CommandText`.
 - **`sys` and `INFORMATION_SCHEMA` host catalog views** (sys.schemas / sys.tables / sys.objects / sys.columns / INFORMATION_SCHEMA.TABLES / .COLUMNS / .SCHEMATA — see [`catalog-views.md`](catalog-views.md)).
-  Adding a user table via `CREATE TABLE sys.foo (…)` raises `NotSupportedException` ("Cannot CREATE TABLE in the built-in 'sys' schema"); same rejection for `INFORMATION_SCHEMA`.
+  Adding a user table via `CREATE TABLE sys.foo (…)` raises **Msg 2760**, the same permission-framed wording `CREATE SCHEMA sys` takes above; same rejection for `INFORMATION_SCHEMA`.
   Both `Schema` entries exist in `Database.Schemas` to carry their conventional ids and to be reachable from `sys.schemas`, but their `HeapTables` dicts stay empty — catalog views live in a separate `Simulation.CatalogViews` registry.
 - **Error wording**: Msg 208 wraps the qualified name in single quotes (`Invalid object name 'badschema.t'.`); Msg 3701 (DROP) does the same; Msg 4701 (TRUNCATE) carries only the leaf (probe-confirmed asymmetric — distinct error path).
 

@@ -83,14 +83,30 @@ internal abstract partial class SqlType
 
     /// <summary>
     /// True for types that always store their content off-row in a LOB page
-    /// chain — currently <c>text</c>, <c>ntext</c>, <c>image</c>. The MAX
-    /// variants of <c>varchar</c>/<c>nvarchar</c>/<c>varbinary</c> are LOB-
-    /// eligible at the <em>column</em> level (when <c>HeapColumn.MaxLength</c>
-    /// is the <see cref="MaxLengthSentinel"/>) but the <see cref="SqlType"/>
-    /// instance itself isn't always-LOB; row-level decisions consult both
-    /// signals via <c>HeapColumn.IsLob</c>.
+    /// chain — <c>text</c>, <c>ntext</c>, <c>image</c>, <c>xml</c> and the two
+    /// spatial types. The MAX variants of
+    /// <c>varchar</c>/<c>nvarchar</c>/<c>varbinary</c> are LOB-eligible at the
+    /// <em>column</em> level (when <c>HeapColumn.MaxLength</c> is the
+    /// <see cref="MaxLengthSentinel"/>) but the <see cref="SqlType"/> instance
+    /// itself isn't always-LOB; row-level decisions consult both signals via
+    /// <c>HeapColumn.IsLob</c>.
+    /// <para>These are also exactly the types real refuses to compare, which is
+    /// what makes this the predicate behind the DISTINCT and set-operator
+    /// gates — see <see cref="IsLegacyLob"/> for the narrower split the
+    /// per-family sort and grouping errors need.</para>
     /// </summary>
     public virtual bool IsLob => false;
+
+    /// <summary>
+    /// The three deprecated always-LOB types, which carry rejections the other
+    /// non-comparable types don't: their own Msg 306 in a sort or grouping
+    /// slot (where <c>xml</c> takes Msg 305 and spatial Msg 249), a Msg 8117
+    /// from <c>COUNT</c> (which accepts <c>xml</c> and spatial), and the string
+    /// scalars' Msg 8116 argument gate. Non-virtual because the answer is a
+    /// closed set of three, and the compile-time gates that read it are off
+    /// every per-row path.
+    /// </summary>
+    public bool IsLegacyLob => this is TextSqlType or NTextSqlType or ImageSqlType;
 
     /// <summary>
     /// Sentinel value used in <see cref="HeapColumn.MaxLength"/> /

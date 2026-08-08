@@ -1,4 +1,5 @@
 using System.Globalization;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
@@ -216,4 +217,14 @@ partial class SimulatedSqlException
     /// <remarks>Real emits this one without a trailing period, unlike <see cref="ClrPropertyNotFound"/>.</remarks>
     internal static SimulatedSqlException ClrMethodNotFound(string member, string clrTypeName) =>
         new($"Could not find method '{member}' for type '{clrTypeName}' in assembly 'Microsoft.SqlServer.Types'", 6506, 16, 10);
+
+    /// <summary>
+    /// Mimics SQL Server error 6210: a spatial operand reached <c>MAX</c> /
+    /// <c>MIN</c>, which order their input. Real leads its response with this
+    /// one and follows with the ordinary Msg 8117, so the pair travels together
+    /// out of <c>Aggregator.Create</c>. The other non-comparable families raise
+    /// 8117 alone.
+    /// </summary>
+    internal static SimulatedSqlException ClrTypeNotFullyComparable(SqlType type) =>
+        new($"CLR type '{type.SqlServerName}' is not fully comparable.", 6210, 16, 1);
 }

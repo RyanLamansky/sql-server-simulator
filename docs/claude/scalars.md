@@ -381,6 +381,8 @@ Binding the argument is also what carries an unknown column's Msg 207 out of a p
 
 The types are column-only besides: a local variable declared `text` / `ntext` / `image` raises **Msg 2739** (`The text, ntext, and image data types are invalid for local variables.`), so a string function only ever sees one through a column or a CAST.
 
+This is the *argument* rule; the slots these types can't reach at all — sorting, grouping, DISTINCT, the deduping set operators, the aggregates and comparison — are tabulated in [`legacy-lob.md`](legacy-lob.md#where-the-types-cant-go).
+
 ### Divergences
 
 - **`CHARINDEX(<needle>, <image>)`** reports Msg 8116 for argument 2 where real reports Msg 206 (`image is incompatible with varchar`); real accepts the pair when the needle is binary too, which needs the unbuilt binary CHARINDEX.

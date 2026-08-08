@@ -868,6 +868,20 @@ internal sealed partial class Selection
         source.BackingTable is { } table ? new ColumnReadTarget(table) : new ColumnReadTarget(source.BackingView!);
 
     /// <summary>
+    /// The sorting / grouping rejection for a type <see cref="SqlType.IsLob"/>
+    /// marks as non-comparable, dispatched to the number real gives that
+    /// family: <b>Msg 306</b> for the legacy <c>text</c> / <c>ntext</c> /
+    /// <c>image</c> trio, <b>Msg 305</b> for <c>xml</c>, and <b>Msg 249</b> —
+    /// the only one that names <paramref name="clause"/> — for the two spatial
+    /// types. DISTINCT and the deduping set operators make no such split; they
+    /// report one message across all three families.
+    /// </summary>
+    private static SimulatedSqlException NotComparableInClause(SqlType type, string clause) =>
+        type.IsLegacyLob ? SimulatedSqlException.LobTypesCannotBeComparedOrSorted()
+        : type is XmlSqlType ? SimulatedSqlException.XmlCannotBeComparedOrSorted()
+        : SimulatedSqlException.TypeNotComparableInClause(type, clause);
+
+    /// <summary>
     /// Raises <b>Msg 451</b> when <paramref name="type"/> reached an output
     /// slot still carrying an unresolved collation. The tail names the clause
     /// and the slot's 1-based ordinal — <c>SELECT</c> and <c>ORDER BY</c> count
@@ -1096,7 +1110,10 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.OrderByPositionOutOfRange(orderBy[i].Ordinal);
         }
 
-        // Msg 306: text/ntext/image can't appear in a sort or distinct slot.
+        // Msg 421: a non-comparable type can't appear in a DISTINCT projection.
+        // Unlike the sorting and grouping slots below, DISTINCT reports one
+        // message for the legacy LOB trio, xml and the spatial pair alike,
+        // naming the type — probe-confirmed against SQL Server 2025.
         // DISTINCT also has to compare the values it dedups, so an unresolved
         // collation reports here — as Msg 446 State 11, which names the
         // producing operator and DISTINCT together rather than taking either
@@ -1106,7 +1123,7 @@ internal sealed partial class Selection
             for (var i = 0; i < outputSchema.Length; i++)
             {
                 if (outputSchema[i].IsLob)
-                    throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
+                    throw SimulatedSqlException.TypeCannotBeSelectedAsDistinct(outputSchema[i]);
                 if (UnresolvedCollation.On(outputSchema[i]) is { } conflict)
                 {
                     throw SimulatedSqlException.UnresolvedCollationInOperation(
@@ -1135,8 +1152,20 @@ internal sealed partial class Selection
                 ? outputSchema[orderBy[i].Ordinal - 1]
                 : orderBy[i].Expr!.GetSqlType(parseBatch, ResolveOrderByType);
             if (keyType.IsLob)
-                throw SimulatedSqlException.LobTypesCannotBeComparedOrSorted();
+                throw NotComparableInClause(keyType, "ORDER BY");
             RequireSettledOutputCollation(keyType, "ORDER BY", i + 1);
+        }
+
+        // A grouping key is compared the same way a sort key is, and reports
+        // the same per-family error — probe-confirmed that real raises it over
+        // an empty rowset, so it binds here rather than at execution. Walking
+        // the deduplicated union rather than the sets themselves keeps a
+        // ROLLUP / CUBE expansion from re-typing one key per set it lands in.
+        foreach (var groupingKey in fromClause.AllGroupingExpressions)
+        {
+            var groupingKeyType = groupingKey.GetSqlType(parseBatch, ResolveColumnType);
+            if (groupingKeyType.IsLob)
+                throw NotComparableInClause(groupingKeyType, "GROUP BY");
         }
 
         // Every other clause has bound, so a select-list slot that couldn't

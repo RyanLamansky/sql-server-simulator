@@ -126,6 +126,14 @@ internal sealed partial class Selection
             // A branch carrying an explicit COLLATE, or a literal (which is
             // coercible-default), outranks its partner and resolves cleanly.
             combinedSchema[i] = SqlType.Promote(effectiveLeft, effectiveRight);
+            // A deduping operator has to compare the values it folds, so a type
+            // that can't be compared at all is refused outright — the legacy
+            // LOB trio, xml and the spatial pair alike, all naming the type in
+            // one message rather than splitting by family the way the sorting
+            // and grouping slots do. UNION ALL only concatenates and takes any
+            // of them.
+            if (kind != SetOpKind.UnionAll && (effectiveLeft.IsLob || effectiveRight.IsLob))
+                throw SimulatedSqlException.SetOpOperandNotComparable(combinedSchema[i]);
             if (effectiveLeft.Category == SqlTypeCategory.String && effectiveRight.Category == SqlTypeCategory.String)
             {
                 if (kind == SetOpKind.UnionAll)

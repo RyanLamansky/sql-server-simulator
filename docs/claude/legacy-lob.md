@@ -1,9 +1,39 @@
 # Legacy LOB operations
 
-Binary `SUBSTRING`, the text-pointer scalars `TEXTPTR` / `TEXTVALID`, and the `READTEXT` / `WRITETEXT` / `UPDATETEXT` statement trio they address rows for.
+Where `text` / `ntext` / `image` may and may not go, then the operations written for them: binary `SUBSTRING`, the text-pointer scalars `TEXTPTR` / `TEXTVALID`, and the `READTEXT` / `WRITETEXT` / `UPDATETEXT` statement trio they address rows for.
 Probe-confirmed against SQL Server 2025.
 
 Code: `Parser/Expressions/Substring.cs`, `Parser/Expressions/TextPointer.cs`, `Parser/Expressions/TextValid.cs`, `Simulation/Simulation.LegacyLobStatements.cs`, `Errors/SimulatedSqlException.LegacyLobErrors.cs`.
+
+## Where the types can't go
+
+The three types carry no comparison, which rules them out of every slot that orders, groups or dedups.
+Real splits the rejection across five numbers, and the split is not the one the type list suggests — `xml` and the two spatial types are non-comparable in exactly the same slots, and only some of the messages distinguish them from the legacy trio.
+All of it binds while compiling: probe-confirmed that an **empty** table raises every one of these.
+
+| Slot | `text` / `ntext` / `image` | `xml` | `geography` / `geometry` |
+|------|----------------------------|-------|--------------------------|
+| `ORDER BY`, `GROUP BY` | **Msg 306** state 2 — `The text, ntext, and image data types cannot be compared or sorted, except when using IS NULL or LIKE operator.` | **Msg 305** — the same sentence for one type, capitalized `XML`, and exempting only `IS NULL` | **Msg 249** — `The type "geography" is not comparable. It cannot be used in the ORDER BY clause.`, the one message that names the clause |
+| `DISTINCT` | **Msg 421** — `The text data type cannot be selected as DISTINCT because it is not comparable.` | Msg 421, same wording | Msg 421, same wording |
+| `UNION` / `INTERSECT` / `EXCEPT` | **Msg 5335** — `The data type text cannot be used as an operand to the UNION, INTERSECT or EXCEPT operators because it is not comparable.` | Msg 5335, same wording | Msg 5335, same wording |
+| `MAX` / `MIN` | **Msg 8117** — `Operand data type text is invalid for max operator.` | Msg 8117 | **Msg 6210** `CLR type 'geography' is not fully comparable.`, and then the Msg 8117 |
+| `COUNT` / `COUNT_BIG` | **Msg 8117** state 1 | accepted | accepted |
+| `COUNT(DISTINCT …)` | Msg 8117 **state 2** | Msg 8117 state 2 | Msg 8117 state 2 |
+| `=` / `<>` / `<` … | **Msg 402** against a string, **Msg 206** against anything else — see [`casting.md`](casting.md) | — | — |
+| `LIKE` | accepted, in either slot | **Msg 8116** naming argument 1 or 2 `of like function` | Msg 8116, same shape |
+| `UNION ALL`, `IS NULL`, `COUNT(*)` | accepted | accepted | accepted |
+
+Three readings of that table are worth keeping:
+
+- **DISTINCT and the deduping set operators make no family split.** One message each, naming the type, across all three families — which is why `SqlType.IsLob` (true for the legacy trio, `xml` and both spatial types) is exactly the predicate behind those two gates, while the sorting and grouping slots dispatch through the narrower `SqlType.IsLegacyLob`.
+- **`COUNT` refuses the legacy trio and nothing else.** Counting never compares, so real has no comparability reason to refuse any of them; it refuses the deprecated three anyway and counts `xml` and spatial happily. A `DISTINCT` inside the parentheses does need the comparison, and then all three families raise — at state 2, a split `MAX(DISTINCT …)` doesn't make (it stays at state 1).
+- **`MAX` / `MIN` over a spatial operand draws two errors.** Real leads the response with Msg 6210 and follows with the ordinary Msg 8117, so a client reading `Number` sees 6210; `Aggregator.MinMaxRejection` builds the pair through `SimulatedSqlException.Aggregate`.
+- **`LIKE` is the legacy trio's alone.** Msg 306's own wording advertises it as an exemption, and it holds — a `text` / `ntext` / `image` subject or pattern matches normally, while `xml` and the spatial types are refused with the ordinary argument-type Msg 8116 rather than any of the comparability numbers. `LikeExpression.Bind` is the gate, so it binds while compiling like the rest of them.
+
+The gates live in `Selection.Execution.cs` (`NotComparableInClause` for the sort and grouping slots, the DISTINCT loop above it), `Selection.Execution.SetOps.cs` and `Aggregator.Create`.
+A `varchar(MAX)` / `nvarchar(MAX)` / `varbinary(MAX)` column is comparable and takes none of this — the MAX forms are what the legacy trio is deprecated *in favour of*, and the whole table reads `accepted` for them.
+
+For the separate rule that keeps these types out of a string function's transformed argument (Msg 8116, naming type, position and function), see [`scalars.md`](scalars.md#legacy-lob-arguments).
 
 ## Binary `SUBSTRING`
 

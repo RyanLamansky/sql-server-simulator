@@ -532,6 +532,12 @@ Simplicity is what validity stops short of: a self-crossing `LINESTRING` is a va
 
 Diffed against SQL Server 2025 over the same 32-shape sweep as the [representative points](#representative-points-stcentroid-and-stpointonsurface) — exact on every one.
 
+## Where a spatial column can't go
+
+Neither type is comparable, so both are refused in every slot that orders, groups or dedups: **Msg 249** in `ORDER BY` / `GROUP BY` (the one message in the family that names the offending clause), **Msg 421** under `DISTINCT`, **Msg 5335** as an operand of `UNION` / `INTERSECT` / `EXCEPT`, and **Msg 6210** followed by **Msg 8117** from `MAX` / `MIN`.
+`COUNT` counts them, `COUNT(DISTINCT …)` doesn't.
+Tabulated against the other non-comparable types in [`legacy-lob.md`](legacy-lob.md#where-the-types-cant-go).
+
 ## The property form of a spatial column
 
 `SELECT Location.Lat FROM t` reads the property off the column, and so does the three-part `t.Location.Lat` / `q.Location.Lat` spelling through a source's own qualifier.

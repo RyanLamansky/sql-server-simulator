@@ -2709,6 +2709,21 @@ internal abstract class BooleanExpression
             return matched ^ this.negated;
         }
 
+        /// <summary>
+        /// <c>LIKE</c> takes the legacy <c>text</c> / <c>ntext</c> / <c>image</c>
+        /// trio — that exemption is written into Msg 306's own wording — but
+        /// refuses <c>xml</c> and the spatial pair in either slot, reporting the
+        /// ordinary argument-type <b>Msg 8116</b> against argument 1 (the
+        /// subject) or 2 (the pattern). Real binds it while compiling, so it
+        /// runs here rather than per value, and an <c>ESCAPE</c> clause doesn't
+        /// change which argument is named.
+        /// </summary>
+        private static void RejectUncomparableLikeArgument(SqlType type, int argumentIndex)
+        {
+            if (type.IsLob && !type.IsLegacyLob)
+                throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex, "like");
+        }
+
         internal override string DebugDisplay() => this.escape is null
             ? $"{left.DebugDisplay()} {(this.negated ? "NOT LIKE" : "LIKE")} {right.DebugDisplay()}"
             : $"{left.DebugDisplay()} {(this.negated ? "NOT LIKE" : "LIKE")} {right.DebugDisplay()} ESCAPE {this.escape.DebugDisplay()}";
@@ -2725,6 +2740,8 @@ internal abstract class BooleanExpression
 
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         {
+            RejectUncomparableLikeArgument(left.GetSqlType(batch, resolveColumnType), 1);
+            RejectUncomparableLikeArgument(right.GetSqlType(batch, resolveColumnType), 2);
             base.Bind(batch, resolveColumnType);
             _ = this.escape?.GetSqlType(batch, resolveColumnType);
         }

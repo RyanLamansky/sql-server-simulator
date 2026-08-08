@@ -200,15 +200,147 @@ public sealed class MaxTypesTests
         Assert.Contains("incompatible", ex.Message);
     }
 
+    /// <summary>
+    /// The sorting and grouping slots split their rejection by family — the
+    /// legacy trio takes Msg 306 at State 2, <c>xml</c> Msg 305 and the two
+    /// spatial types Msg 249, which is the only one that names the clause.
+    /// Probed against SQL Server 2025 (2026-08-08), on an empty table: all
+    /// three bind while compiling.
+    /// </summary>
     [TestMethod]
-    [DataRow("select v from t order by v")]
-    [DataRow("select distinct v from t")]
-    public void Text_OrderByOrDistinct_RaisesMsg306(string sql)
+    [DataRow("text", "select v from t order by v", 306, "text, ntext, and image")]
+    [DataRow("ntext", "select v from t order by v", 306, "text, ntext, and image")]
+    [DataRow("image", "select v from t group by v", 306, "text, ntext, and image")]
+    [DataRow("text", "select v from t group by v", 306, "text, ntext, and image")]
+    [DataRow("xml", "select v from t order by v", 305, "The XML data type cannot be compared or sorted")]
+    [DataRow("xml", "select v from t group by v", 305, "The XML data type cannot be compared or sorted")]
+    [DataRow("geography", "select v from t order by v", 249, "The type \"geography\" is not comparable. It cannot be used in the ORDER BY clause.")]
+    [DataRow("geometry", "select v from t group by v", 249, "The type \"geometry\" is not comparable. It cannot be used in the GROUP BY clause.")]
+    public void NotComparableType_SortOrGroupSlot_RaisesPerFamilyError(string columnType, string sql, int number, string fragment)
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table t ( v text )");
-        var ex = simulation.AssertSqlError(sql, 306);
-        Assert.Contains("text, ntext, and image", ex.Message);
+        _ = simulation.ExecuteNonQuery($"create table t ( v {columnType} )");
+        var ex = simulation.AssertSqlError(sql, number);
+        Assert.Contains(fragment, ex.Message);
+        Assert.AreEqual((byte)(number == 306 ? 2 : 1), ex.State);
+    }
+
+    /// <summary>
+    /// DISTINCT and the deduping set operators make no such split: one message
+    /// each, naming the type, for every non-comparable family. <c>UNION ALL</c>
+    /// only concatenates and takes all of them.
+    /// </summary>
+    [TestMethod]
+    [DataRow("text", "select distinct v from t", 421, "The text data type cannot be selected as DISTINCT")]
+    [DataRow("ntext", "select distinct id, v from t", 421, "The ntext data type cannot be selected as DISTINCT")]
+    [DataRow("image", "select distinct v from t", 421, "The image data type cannot be selected as DISTINCT")]
+    [DataRow("xml", "select distinct v from t", 421, "The xml data type cannot be selected as DISTINCT")]
+    [DataRow("geography", "select distinct v from t", 421, "The geography data type cannot be selected as DISTINCT")]
+    [DataRow("text", "select v from t union select v from t", 5335, "The data type text cannot be used as an operand to the UNION")]
+    [DataRow("image", "select v from t except select v from t", 5335, "The data type image cannot be used as an operand to the UNION")]
+    [DataRow("xml", "select v from t intersect select v from t", 5335, "The data type xml cannot be used as an operand to the UNION")]
+    [DataRow("geometry", "select v from t union select v from t", 5335, "The data type geometry cannot be used as an operand to the UNION")]
+    public void NotComparableType_DistinctOrDedupingSetOp_RaisesOneMessageNamingTheType(
+        string columnType, string sql, int number, string fragment)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"create table t ( id int, v {columnType} )");
+        var ex = simulation.AssertSqlError(sql, number);
+        Assert.Contains(fragment, ex.Message);
+    }
+
+    [TestMethod]
+    [DataRow("text")]
+    [DataRow("xml")]
+    [DataRow("geography")]
+    public void NotComparableType_UnionAll_Allowed(string columnType)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"create table t ( v {columnType} )");
+        Assert.AreEqual(0, simulation.ExecuteScalar("select count(*) from (select v from t union all select v from t) u"));
+    }
+
+    /// <summary>
+    /// COUNT refuses the legacy trio outright but counts <c>xml</c> and the
+    /// spatial types — until a DISTINCT asks it to fold duplicates. The
+    /// DISTINCT form reports State 2 where the plain one reports 1, a split
+    /// MAX / MIN don't make.
+    /// </summary>
+    [TestMethod]
+    [DataRow("text", "select count(v) from t", "count", (byte)1)]
+    [DataRow("ntext", "select count_big(v) from t", "count_big", (byte)1)]
+    [DataRow("image", "select count(distinct v) from t", "count", (byte)2)]
+    [DataRow("xml", "select count(distinct v) from t", "count", (byte)2)]
+    [DataRow("geography", "select count(distinct v) from t", "count", (byte)2)]
+    public void NotComparableType_Count_RaisesMsg8117(string columnType, string sql, string operatorName, byte state)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"create table t ( v {columnType} )");
+        var ex = simulation.AssertSqlError(sql, 8117);
+        Assert.Contains($"is invalid for {operatorName} operator", ex.Message);
+        Assert.AreEqual(state, ex.State);
+    }
+
+    [TestMethod]
+    [DataRow("xml")]
+    [DataRow("geography")]
+    [DataRow("geometry")]
+    public void XmlOrSpatial_UndistinctCount_Allowed(string columnType)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"create table t ( v {columnType} )");
+        Assert.AreEqual(0, simulation.ExecuteScalar("select count(v) from t"));
+    }
+
+    /// <summary>
+    /// <c>LIKE</c> is the one comparison the legacy trio keeps — Msg 306's own
+    /// wording names it as an exemption — while <c>xml</c> and the spatial pair
+    /// are refused in either slot with the ordinary argument-type Msg 8116.
+    /// </summary>
+    [TestMethod]
+    [DataRow("xml", "select v from t where v like '%a%'", 1)]
+    [DataRow("xml", "select v from t where 'abc' like v", 2)]
+    [DataRow("xml", "select v from t where v like '%a%' escape '!'", 1)]
+    [DataRow("geography", "select v from t where v like '%a%'", 1)]
+    [DataRow("geometry", "select v from t where 'abc' like v", 2)]
+    public void XmlOrSpatial_Like_RaisesMsg8116(string columnType, string sql, int argumentIndex)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"create table t ( v {columnType} )");
+        var ex = simulation.AssertSqlError(sql, 8116);
+        Assert.AreEqual(
+            $"Argument data type {columnType} is invalid for argument {argumentIndex} of like function.",
+            ex.Message);
+    }
+
+    [TestMethod]
+    [DataRow("text")]
+    [DataRow("ntext")]
+    [DataRow("image")]
+    public void LegacyLob_Like_Allowed(string columnType)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"create table t ( v {columnType} )");
+        Assert.AreEqual(0, simulation.ExecuteScalar("select count(*) from t where v like '%a%'"));
+    }
+
+    /// <summary>
+    /// A spatial operand reaching MAX / MIN draws two errors from real, the
+    /// CLR-type Msg 6210 ahead of the ordinary Msg 8117 — so the exception's
+    /// own number is 6210 and the 8117 follows in <c>Errors</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("geography", "max")]
+    [DataRow("geometry", "min")]
+    public void Spatial_MaxOrMin_LeadsWithMsg6210(string columnType, string aggregate)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"create table t ( v {columnType} )");
+        var ex = simulation.AssertSqlError($"select {aggregate}(v) from t", 6210);
+        Assert.AreEqual($"CLR type '{columnType}' is not fully comparable.", ex.Message);
+        Assert.AreEqual(2, ex.Errors.Count);
+        Assert.AreEqual(8117, ex.Errors[1].Number);
+        Assert.AreEqual($"Operand data type {columnType} is invalid for {aggregate} operator.", ex.Errors[1].Message);
     }
 
     [TestMethod]

@@ -83,14 +83,18 @@ internal abstract class Aggregator
     /// </summary>
     public static Aggregator Create(AggregateExpression aggregate, SqlType operandType, SqlType resultType, bool removable = false) => aggregate.Kind switch
     {
-        AggregateKind.Count => new CountAggregator(isStar: aggregate.Operand is null || aggregate.CountsRowsOnly, isBigCount: false, distinct: aggregate.Distinct),
-        AggregateKind.CountBig => new CountAggregator(isStar: aggregate.Operand is null || aggregate.CountsRowsOnly, isBigCount: true, distinct: aggregate.Distinct),
+        AggregateKind.Count => CountsUncountable(aggregate, operandType)
+            ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "count", CountState(aggregate))
+            : new CountAggregator(isStar: aggregate.Operand is null || aggregate.CountsRowsOnly, isBigCount: false, distinct: aggregate.Distinct),
+        AggregateKind.CountBig => CountsUncountable(aggregate, operandType)
+            ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "count_big", CountState(aggregate))
+            : new CountAggregator(isStar: aggregate.Operand is null || aggregate.CountsRowsOnly, isBigCount: true, distinct: aggregate.Distinct),
         AggregateKind.ApproxCountDistinct => new CountAggregator(isStar: false, isBigCount: true, distinct: true),
         AggregateKind.Max => operandType.IsLob || operandType is BitSqlType
-            ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "max")
+            ? throw MinMaxRejection(operandType, "max")
             : new MinMaxAggregator(resultType, isMax: true, removable),
         AggregateKind.Min => operandType.IsLob || operandType is BitSqlType
-            ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "min")
+            ? throw MinMaxRejection(operandType, "min")
             : new MinMaxAggregator(resultType, isMax: false, removable),
         AggregateKind.Sum => SumAggregator.Create(resultType, aggregate.Distinct),
         AggregateKind.Avg => AverageAggregator.Create(resultType, aggregate.Distinct),
@@ -101,4 +105,35 @@ internal abstract class Aggregator
         AggregateKind.ChecksumAgg => new ChecksumAggAggregator(),
         _ => throw new NotSupportedException($"Aggregator for {aggregate.Kind} not implemented yet."),
     };
+
+    /// <summary>
+    /// MAX / MIN's Msg 8117, with the second error real puts <em>ahead</em> of
+    /// it for a spatial operand: the CLR-type Msg 6210 leads the response, so a
+    /// caller reading <c>Number</c> sees 6210 and the 8117 follows in
+    /// <c>Errors</c>. Every other refused operand reports 8117 alone.
+    /// </summary>
+    private static SimulatedSqlException MinMaxRejection(SqlType operandType, string operatorName) =>
+        operandType is SpatialSqlType
+            ? SimulatedSqlException.Aggregate([
+                SimulatedSqlException.ClrTypeNotFullyComparable(operandType),
+                SimulatedSqlException.OperandDataTypeInvalid(operandType, operatorName)])
+            : SimulatedSqlException.OperandDataTypeInvalid(operandType, operatorName);
+
+    /// <summary>
+    /// COUNT and COUNT_BIG refuse the legacy <c>text</c> / <c>ntext</c> /
+    /// <c>image</c> trio outright, even though counting never compares a value.
+    /// <c>xml</c> and the spatial types they do count — until a DISTINCT asks
+    /// them to fold duplicates, which needs the comparison none of the three
+    /// families have. The star form carries no operand to refuse.
+    /// </summary>
+    private static bool CountsUncountable(AggregateExpression aggregate, SqlType operandType) =>
+        aggregate.Operand is not null && !aggregate.CountsRowsOnly
+        && (operandType.IsLegacyLob || (aggregate.Distinct && operandType.IsLob));
+
+    /// <summary>
+    /// Real reports <c>COUNT(DISTINCT &lt;legacy LOB&gt;)</c> at state 2 and the
+    /// undistinct form at state 1 — a split MAX / MIN don't make, where
+    /// <c>MAX(DISTINCT …)</c> stays at state 1.
+    /// </summary>
+    private static byte CountState(AggregateExpression aggregate) => aggregate.Distinct ? (byte)2 : (byte)1;
 }

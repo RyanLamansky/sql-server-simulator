@@ -10,6 +10,8 @@ The separate legacy rowset — [`OPENXML`](#openxml) over a `sp_xml_preparedocum
 Payload stored identically to `nvarchar(MAX)` (raw UTF-16 LE bytes).
 Type identity preserved through `sys.columns.user_type_id` / `sys.types`.
 
+`xml` carries no comparison, so it is refused wherever a value is sorted, grouped or deduped — its own **Msg 305** in `ORDER BY` / `GROUP BY`, and the family-blind **Msg 421** / **Msg 5335** / **Msg 8117** everywhere else, tabulated beside the other non-comparable types in [`legacy-lob.md`](legacy-lob.md#where-the-types-cant-go).
+
 **`XmlSchemaCollection`** carries id + name + schema_id + nullable principal_id + xsdText + create_date / modify_date.
 
 **`Schema.XmlSchemaCollections`** — per-schema dict; shares the type-namespace with `TableTypes` / `AliasTypes` (Msg 219 on duplicate).

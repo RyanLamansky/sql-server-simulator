@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
@@ -404,14 +405,46 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 306: a <c>text</c>, <c>ntext</c>, or
-    /// <c>image</c> column appeared in a context that requires comparison or
-    /// sorting (ORDER BY, GROUP BY, DISTINCT, or as an operand the simulator
-    /// would otherwise route to <see cref="IComparable"/>). <c>LIKE</c> and
-    /// <c>IS NULL</c>/<c>IS NOT NULL</c> are exempt and dispatch through
-    /// their dedicated paths before this check fires.
+    /// <c>image</c> column appeared in a sorting or grouping slot (ORDER BY,
+    /// GROUP BY, or as an operand the simulator would otherwise route to
+    /// <see cref="IComparable"/>). <c>LIKE</c> and <c>IS NULL</c>/<c>IS NOT
+    /// NULL</c> are exempt and dispatch through their dedicated paths before
+    /// this check fires. DISTINCT takes <see cref="TypeCannotBeSelectedAsDistinct"/>
+    /// instead, and the other non-comparable families take
+    /// <see cref="XmlCannotBeComparedOrSorted"/> / <see cref="TypeNotComparableInClause"/>.
+    /// State 2, probe-confirmed against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException LobTypesCannotBeComparedOrSorted() =>
-        new("The text, ntext, and image data types cannot be compared or sorted, except when using IS NULL or LIKE operator.", 306, 16, 1);
+        new("The text, ntext, and image data types cannot be compared or sorted, except when using IS NULL or LIKE operator.", 306, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 305: the <c>xml</c> sibling of
+    /// <see cref="LobTypesCannotBeComparedOrSorted"/>. Real gives <c>xml</c> its
+    /// own number and its own exemption list — <c>IS NULL</c> only, since
+    /// <c>LIKE</c> doesn't take an <c>xml</c> operand — and capitalizes the type
+    /// name where every neighbouring message lowercases it.
+    /// </summary>
+    internal static SimulatedSqlException XmlCannotBeComparedOrSorted() =>
+        new("The XML data type cannot be compared or sorted, except when using the IS NULL operator.", 305, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 249: the spatial sibling of
+    /// <see cref="LobTypesCannotBeComparedOrSorted"/>, and the only one of the
+    /// three that names the offending clause rather than the exemptions.
+    /// </summary>
+    internal static SimulatedSqlException TypeNotComparableInClause(SqlType type, string clause) =>
+        new($"The type \"{type.SqlServerName}\" is not comparable. It cannot be used in the {clause} clause.", 249, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 421: a non-comparable type reached a DISTINCT
+    /// projection. Unlike the sorting and grouping slots — which split by family
+    /// across Msg 306 / 305 / 249 — DISTINCT reports one message for all of
+    /// them, naming the type. The deduping set operators behave the same way
+    /// with their own number; see
+    /// <see cref="SetOpOperandNotComparable"/>.
+    /// </summary>
+    internal static SimulatedSqlException TypeCannotBeSelectedAsDistinct(SqlType type) =>
+        new($"The {type.SqlServerName} data type cannot be selected as DISTINCT because it is not comparable.", 421, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 120: <c>INSERT … SELECT</c> whose source

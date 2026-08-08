@@ -23,9 +23,13 @@ partial class SimulatedSqlException
     /// <c>time + time</c>). Distinct from Msg 206 (cross-type clash) and
     /// Msg 402 (incompatible date-family pair); fires when both operands are
     /// the same date-family type that has no arithmetic implementation.
+    /// <para><paramref name="state"/> is 1 everywhere but
+    /// <c>COUNT(DISTINCT &lt;legacy LOB&gt;)</c>, which real reports at state 2
+    /// — the DISTINCT operand is a second reason to refuse it, and
+    /// <c>MAX(DISTINCT …)</c> stays at state 1.</para>
     /// </summary>
-    internal static SimulatedSqlException OperandDataTypeInvalid(SqlType operand, string operatorName) =>
-        new($"Operand data type {FamilyRootName(operand)} is invalid for {operatorName} operator.", 8117, 16, 1);
+    internal static SimulatedSqlException OperandDataTypeInvalid(SqlType operand, string operatorName, byte state = 1) =>
+        new($"Operand data type {FamilyRootName(operand)} is invalid for {operatorName} operator.", 8117, 16, state);
 
     /// <summary>
     /// The untyped-<c>NULL</c> variant of <see cref="OperandDataTypeInvalid"/>:

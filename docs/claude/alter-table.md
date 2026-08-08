@@ -440,8 +440,10 @@ Blocker order: PK / UQ → outgoing FK → incoming FK → computed-column refs 
 | Column doesn't exist on the table | Msg 4924 | Shares the code with DROP COLUMN's missing-column path, distinct wording (`ALTER TABLE ALTER COLUMN failed because column 'X' does not exist…`). |
 | Column is a computed column | Msg 4928 | Phrasing: `Cannot alter column 'X' because it is 'COMPUTED'.` |
 | Column is rowversion / timestamp | Msg 4928 | Phrasing: `Cannot alter column 'X' because it is 'timestamp'.` |
-| Column is `GENERATED ALWAYS AS ROW START/END` | `NotSupportedException` | Real SQL Server has its own grammar rule here; not exercised by current EF Migrations emissions. |
-| ALTER COLUMN of an IDENTITY column to a non-integer type | `NotSupportedException` | Adding / removing identity itself is a parser-level Msg 156 in real SQL Server (the grammar excludes IDENTITY from the ALTER COLUMN clause). |
+| Column is `GENERATED ALWAYS AS ROW START/END` — a period column | Msg 13599 | `Period column 'X' in a system-versioned temporal table cannot be altered.` Checked ahead of the type reference, so a period column with an unparseable target type still reports 13599. |
+| ALTER COLUMN of an IDENTITY column to a non-integer type | Msg 2749 state 3 | `Identity column 'X' must be of data type int, bigint, smallint, tinyint, or decimal or numeric with a scale of 0…` Checked after the type resolves, since it reads the new type. The gate is `SqlType.IsIntegerCategory`, so the `decimal` / `numeric` scale-0 half of the message real honours isn't accepted yet — the same narrowing `CREATE TABLE` applies at state 2. |
+
+Adding or removing identity itself never reaches either check: real's `ALTER COLUMN` grammar has no IDENTITY slot, so it is a parse-level Msg 156.
 
 ### Preservation through the column instance swap
 
