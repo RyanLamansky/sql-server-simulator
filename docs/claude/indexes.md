@@ -47,7 +47,7 @@ After the `HeapTable` is built, `AddInlineIndexes` (`Simulation.CreateIndex.cs`)
 Column resolution, name-collision (Msg 2714 / 1911 wording via `IndexAlreadyExists` / `IndexColumnMissing`), and one-clustered-per-table (Msg 1902) run inside the CREATE TABLE atomic block, so a bad inline index rolls the table back.
 Inline indexes are **CREATE TABLE only** — table variables / table types leave the `INDEX` keyword to the column path, which rejects it.
 
-## Disabled indexes (`ALTER INDEX … DISABLE` / `… REBUILD`)
+## Disabled indexes
 
 `DISABLE` takes an index out of service and `REBUILD` puts it back; both live in `Simulation.AlterIndex.cs` alongside the `SET` form, and the state is `Index.IsDisabled` / `KeyConstraint.IsDisabled` (real allows disabling a constraint's backing index even though it refuses to change that constraint's `IGNORE_DUP_KEY` — Msg 1979).
 Probed against SQL Server 2025 throughout.

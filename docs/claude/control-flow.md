@@ -73,9 +73,9 @@ Probed against SQL Server 2025.
 - **Three-valued cond**: only an explicit `true` takes THEN; both `false` and UNKNOWN go to ELSE (`IF 1 = null …` → ELSE).
 - **`BEGIN` disambiguation**: peek the token after `BEGIN`.
   `TRAN`/`TRANSACTION` → existing `TryParseBeginTransaction`.
-  `DISTRIBUTED` → `NotSupportedException` (no DTC).
+  `DISTRIBUTED` → the same `TryParseBeginTransaction` path, since nothing here is remote and real behaves identically until something enlists — see [`transactions.md`](transactions.md).
   `TRY` (unquoted) → `ParseTryCatch` (see the TRY/CATCH section).
-  `ATOMIC` → `NotSupportedException` (natively-compiled SP atomic blocks).
+  `ATOMIC` → a compound block whose options map onto the session (the natively-compiled-procedure boundary is modeled at parser fidelity).
   Everything else → compound block.
   Implemented via `ParserContext.SaveCheckpoint`/`RestoreCheckpoint` so the transaction-start case re-parses through the unchanged `TryParseBeginTransaction` path.
 - **Empty `BEGIN END`** (and `BEGIN ; END` with only separators) → **Msg 102** near `'end'`.
@@ -253,7 +253,7 @@ Regression: `BatchErrorRecoveryTests` (both `SqlServerSimulator.Tests` and `.Tes
 
 **Classification** — `IsStatementTerminating`: continue when `ex.Class is >= 11 and <= 16 && ex.Number != 1205`, unless the error is batch-aborting (name-resolution set or `TerminatesBatch`, checked in an earlier branch).
 Severity ≤ 10 are informational (not raised as errors — they flow to `InfoMessage`); severity ≥ 17 are batch/connection-terminating → abort; deadlock (Msg 1205, class 13) is the one in-range exception → abort (its class-13 rollback fires first).
-No factory produces class ≥ 17, so the reachable batch-aborting cases are deadlock (concurrent sessions), `NotSupportedException` (e.g. `BEGIN DISTRIBUTED TRANSACTION`, propagates out of the stream to the caller / wire top-level `catch`), the name-resolution set, and an uncaught THROW.
+No factory produces class ≥ 17, so the reachable batch-aborting cases are deadlock (concurrent sessions), `NotSupportedException` (any unmodeled feature; it propagates out of the stream to the caller / wire top-level `catch`), the name-resolution set, and an uncaught THROW.
 
 **In-process rendering** — `SimulatedDbCommand` + `SimulatedDbDataReader` convert the outcome stream to exceptions ([`data-reader.md`](data-reader.md) has the reader detail).
 `ExecuteNonQuery` / `ExecuteScalar` drain the whole batch (all side effects persist), then throw one `SimulatedSqlException` whose `Errors` collection aggregates every statement error in batch order (`SimulatedSqlException.FromErrors`; a lone error is rethrown as-is).

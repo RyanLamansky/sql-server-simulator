@@ -52,7 +52,7 @@ The **anchor** member and a **non-recursive** CTE keep every one of these constr
 Two related rejections fire earlier and differ from real in *which* error, not in whether the query is refused: an `ORDER BY` in the CTE body is Msg 102 where real gives Msg 1033, and two self-references in one member surface as Msg 209 (ambiguous column) before the Msg 253 check meant for them.
 
 `OPTION (MAXRECURSION N)` parses inside `Selection.ParseQueryExpression` after ORDER BY/OFFSET/FETCH and writes to every binding in scope.
-Other hints (`OPTIMIZE FOR`, `RECOMPILE`, etc.) → `NotSupportedException`.
+The rest of the statement `OPTION (…)` list parses here too — see [`query-hints.md`](query-hints.md) for which hints carry meaning and which are accepted and discarded.
 EF emits non-recursive CTEs in some shapes (TPC inheritance, certain Distinct/OrderBy/Skip patterns); recursive CTEs only via raw SQL.
 
 ## An unread prefix — Msg 422

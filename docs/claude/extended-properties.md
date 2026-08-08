@@ -84,7 +84,7 @@ Pipeline: parse each arg expression → eval to nullable string → build `Exten
 
 The `'default'` wildcard at any level-name slot fans out across every object of that level-type under the parent (probe-confirmed).
 Missing target returns zero rows (distinct from the sproc path's Msg 15135).
-Unknown level0/1/2 type raises `NotSupportedException`.
+Unknown level0/1/2 type raises **Msg 15600** (`An invalid parameter or option was specified for procedure 'sp_addextendedproperty'.`), the same error the sproc path gives for a bad argument.
 
 ## Known gaps
 

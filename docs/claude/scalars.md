@@ -487,7 +487,7 @@ Probe-confirmed against SQL Server 2025:
   Every other operand — decimal / numeric / float / money / string / binary — raises **Msg 8117** (`OperandDataTypeInvalid`, wording `Operand data type <type> is invalid for '~' operator.`) with **no coercion attempt** (even a numeric string like `~'5'` rejects).
   `GetSqlType` enforces the same rule so projection schema and runtime agree.
 - **Highest-precedence operator** — binds tighter than `* / % + - & ^ |`, so `~2 * 3` = `(~2) * 3` = -9 and `~2 + 3 * 4` = `(~2) + (3*4)` = 9.
-  Because the operand parse consumes the full following chain, `BitwiseNot.Create` re-homes the prefix onto the chain's leftmost leaf via `TwoSidedExpression.SinkUnaryPrefixToLeftmostLeaf` (the unary analogue of `AdjustForPrecedence`).
+  It gets that for free from where it is parsed: `Expression.ParsePrimary` wraps only the *primary* that follows the `~`, so the operator never swallows a following operator chain and needs no re-homing afterwards.
 
 ## CHECKSUM family
 
@@ -872,7 +872,7 @@ Implementation: `Parser/Expressions/RegexpScalar.cs` (one node, four kinds), `Re
 
 ### `REGEXP_LIKE` is a predicate, not a scalar
 
-`SELECT REGEXP_LIKE('abc', 'a.c')` raises **Msg 156** on real, so the construct binds in the WHERE / HAVING / IF / CASE-WHEN / CHECK grammar (`BooleanExpression.ParsePredicateOperand`, beside `CONTAINS` / `FREETEXT` / `UPDATE(col)`) rather than in `ResolveBuiltIn`.
+`SELECT REGEXP_LIKE('abc', 'a.c')` raises **Msg 156** on real, so the construct binds in the WHERE / HAVING / IF / CASE-WHEN / CHECK grammar (`BooleanExpression.ParseAtom`, beside `CONTAINS` / `FREETEXT` / `UPDATE(col)`) rather than in `ResolveBuiltIn`.
 Its arity is enforced by the grammar too — a fourth argument or a bare `REGEXP_LIKE(x)` is **Msg 102** near the offending token, not the scalars' Msg 189.
 A NULL in any argument yields UNKNOWN, so `NOT REGEXP_LIKE(NULL, 'a')` doesn't pass either.
 

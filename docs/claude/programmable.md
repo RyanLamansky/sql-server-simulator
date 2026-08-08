@@ -601,7 +601,6 @@ All of them are catchable by `TRY` / `CATCH`.
 
 **Not modeled yet**:
 - The `AS OBJECT <table>` / `AS TYPE <table_type>` / `AS FOR XML` result-set definition shorthands → `NotSupportedException`.
-- `WITH RESULT SETS` on a system procedure.
 - **`rowversion`** rides the binary family in the implicit-conversion matrix; real treats `timestamp` more narrowly than `varbinary` there (it declines `nvarchar` and `sql_variant`).
 - A pair the gate **allows** but `SqlValue.CoerceTo` hasn't built raises that path's own error rather than converting — `decimal` / `money` / `float` → `varbinary`, `money` ↔ `float`, `<string>` → `image` / `hierarchyid`, `varbinary` → `datetime`.
   The same gaps show for a plain `CAST`, so they close there, not here.

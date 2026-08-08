@@ -200,7 +200,7 @@ Probed precedence among the four: **Msg 1776** (no matching parent key) beats **
 Placing them there covers `CREATE TABLE`'s table-level form, `ALTER TABLE … ADD CONSTRAINT`, and the `ALTER TABLE DROP COLUMN` ordinal-shift re-resolution from one site; the inline form's Msg 8183 fires earlier, in `ParseComputedColumnInlineConstraint`.
 As with Msg 1776, real's trailing informational **Msg 1750** (`Could not create constraint or index. See previous errors.`) is collapsed away.
 
-Real also rejects a *non-persisted* computed **referenced** column with **Msg 1784**, which the simulator never reaches: `UNIQUE` on a non-persisted computed column is itself unbuilt (`NotSupportedException`), so the parent key that FK would need can't exist.
+Real also rejects a *non-persisted* computed **referenced** column with **Msg 1784**, which the simulator doesn't reach: a non-persisted computed column is a legal UNIQUE key here (see [`indexes.md`](indexes.md)), so the parent key exists and the FK binds to it.
 
 ## DROP TABLE protection
 

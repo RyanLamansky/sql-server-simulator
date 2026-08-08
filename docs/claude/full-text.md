@@ -240,7 +240,7 @@ An unknown catalog name or unrecognized property returns NULL; property names ar
 ## Not modeled yet
 
 - **The `SEMANTIC*` rowsets** (`SEMANTICKEYPHRASETABLE`, `SEMANTICSIMILARITYTABLE`, `SEMANTICSIMILARITYDETAILSTABLE`) — `NotSupportedException` at parse, naming the function. `STATISTICAL_SEMANTICS` on a column parses and is discarded.
-- **`ALTER FULLTEXT CATALOG` / `INDEX`** (REORGANIZE / REBUILD / START/STOP POPULATION / ADD/DROP column) — `NotSupportedException` at parse.
+- **`ALTER FULLTEXT CATALOG` / `INDEX`** (REORGANIZE / REBUILD / START/STOP POPULATION / ADD/DROP column) — no parser at all, so the statement is Msg 102 at the `FULLTEXT` token rather than a named rejection.
 - **Filesystem-placement semantics** (`ON FILEGROUP` / `IN PATH`) — parse-and-discard.
 - **`sys.fulltext_document_types` / `sys.fulltext_stoplists`** — shipped empty (the stoplist registry is inert since only the system stoplist is modeled), and a custom `STOPLIST` isn't read.
 - **`sys.dm_fts_parser`** — real's word-breaker inspection DMV, the probe instrument behind the [word breaking](#word-breaking) rules above.

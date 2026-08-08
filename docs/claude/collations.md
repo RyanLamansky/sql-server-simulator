@@ -242,7 +242,7 @@ Sites routed through the active DB collation:
 - `CHAR(N)` / `NCHAR(N)` result type (`CharFromCode` / `NCharFromCode`).
 - `hierarchyid.ToString()` and spatial / XML method calls that return string-typed values.
 - `MERGE … OUTPUT $action` (`Simulation.Merge.MergeActionReference`).
-- `sys.fn_listextendedproperty` `value` projection column (`Selection.ListExtendedProperty`).
+- `sys.fn_listextendedproperty` `value` projection column (`Selection.ListExtendedProperty.cs`).
 - `SqlType.PromoteForArithmetic`'s string-concat path derives the result collation via `Collation.Resolve(a, b)` from the operands' coercibility ranks rather than defaulting to `Collation.Baseline`.
 - **`CAST` / `CONVERT` to a character type** (`Cast.ResultStringType`, shared by `Cast` and `ConvertExpression` at both `GetSqlType` and `Run`): a **character source** carries its collation and coercibility through; a **non-character source** yields the database default collation with `CoercibleDefault` coercibility.
   So `CAST(int AS varchar)` concatenates and compares cleanly with literals and other database-collation values (was `Collation.Baseline`, which raised Msg 457/468 under a non-baseline database — surfaced by SMO's `'extended_index_' + CAST(i.object_id AS varchar)` and `CONVERT(nvarchar(128), DATABASEPROPERTYEX(...))` patterns).

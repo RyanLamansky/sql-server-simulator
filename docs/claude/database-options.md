@@ -125,7 +125,8 @@ Carrying it wants a post-load hook.
 `ALTER DATABASE name COLLATE <name>` — separate top-level grammar, not under `SET`.
 Validates against `Collation.Recognized` (12 entries — see [`collations.md`](collations.md)).
 Stores on `Database.CollationName`.
-Unrecognized names raise `NotSupportedException` rather than silently accepting (silent acceptance would mean the bacpac loader silently mis-loads collation-sensitive data on non-default-collation models).
+An unrecognized *collation* name raises `NotSupportedException` rather than silently accepting — silent acceptance would mean the bacpac loader silently mis-loads collation-sensitive data on a non-default-collation model.
+(An unrecognized `SET` **option** name is a different path and never reaches an accept-list: the grammar has no production for it, so it is Msg 102 at the name.)
 
 `sys.databases.collation_name` and `DATABASEPROPERTYEX(db, 'Collation')` surface the declared name.
 

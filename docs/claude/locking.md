@@ -137,7 +137,7 @@ Three *global* structures held the connection strongly, and each held exactly th
 | Structure | Path to the connection | Pinned |
 | --- | --- | --- |
 | `LockResource.Hold.Owner` | `Database` → `Schema` → `HeapTable` → row / range / table `LockResource` → holder | every lock- or session-app-lock-holding session |
-| `HeapTable.OwnerConnection` | `Simulation.GlobalTempTables` → table | every `##temp` owner |
+| `HeapTable.OwnerSession` | `Simulation.GlobalTempTables` → table | every `##temp` owner |
 | `Simulation.ActiveSnapshotTxs` | set → `SimulatedDbTransaction` → its `Connection` | every open-snapshot session |
 
 `Simulation.Connections` held one too, but weakening it alone accomplishes nothing: the resource *is* the pin.

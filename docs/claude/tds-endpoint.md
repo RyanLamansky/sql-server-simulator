@@ -176,7 +176,7 @@ Dispatch (`TdsSession.Rpc.cs`):
 `TdsSession.Cursors.cs` handles the special-ProcID cursor family SSMS's query-editor grid and legacy ODBC / OLE DB server-cursor apps drive.
 `WellKnownProcId` in `TdsSession.Rpc.cs` maps both the well-known numeric ProcIDs (1 sp_cursor, 2 sp_cursoropen, 3 sp_cursorprepare, 4 sp_cursorexecute, 5 sp_cursorprepexec, 6 sp_cursorunprepare, 7 sp_cursorfetch, 8 sp_cursoroption, 9 sp_cursorclose) **and** the by-name form (SqlClient sends `CommandType.StoredProcedure` with `CommandText = "sp_cursoropen"` as ProcID 0 + name) to the dispatch.
 Each open cursor rides an engine `Cursor` (built by synthesizing a `DECLARE … CURSOR … FOR <stmt>; OPEN` batch and pulling the object out of `SimulatedDbConnection.Cursors` under an opaque `sss_apicursor_<handle>` name), stored in a per-session `Dictionary<int, ApiCursor>` — wire-protocol state, so on the session not the engine.
-Fetch drives `Cursor.Fetch` directly per row; positioned DML sets `Cursor.CurrentRid` to a buffered RID and runs a synthesized `UPDATE/DELETE … WHERE CURRENT OF <name>` so the full engine machinery (triggers, constraints, statement atomicity) fires.
+Fetch drives `Cursor.Fetch` directly per row; positioned DML sets `Cursor.CurrentRids` to a buffered RID and runs a synthesized `UPDATE/DELETE … WHERE CURRENT OF <name>` so the full engine machinery (triggers, constraints, statement atomicity) fires.
 Probed against SQL Server 2025.
 
 **sp_cursoropen**(@cursor OUT, @stmt, @scrollopt IN/OUT, @ccopt IN/OUT, @rowcount OUT) — builds + opens the cursor and writes a **metadata-only announce**: COLMETADATA for the projection plus a trailing `ROWSTAT` int column, **zero rows**.

@@ -46,7 +46,6 @@ Deferred-computed-column failures (phase 8, for the rare UDF-forward-ref table) 
 - **`BcpRowReader.cs`** — `*.BCP` → row decoder (the wire-format matrix below)
 - **`BacpacImportResult.cs`** — diagnostics carrier
 - **`BacpacImportOptions.cs`** — target-database-name + parallelism options
-- **`HierarchyIdWireDecoder.cs`** — see [`hierarchyid.md`](hierarchyid.md)
 - **`Spatial/SpatialBinaryCodec.cs`** — see [`spatial.md`](spatial.md)
 
 ## Model.xml — 9-phase dispatcher
