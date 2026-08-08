@@ -184,7 +184,10 @@ partial class Simulation
         // once the target has bound — probe-confirmed: a filtered index over a
         // missing table reports the missing object instead.
         if (ignoreDupKey && filter is not null)
-            throw SimulatedSqlException.IgnoreDupKeyOnFilteredIndex("create", indexName, table.Name);
+            throw SimulatedSqlException.IgnoreDupKeyOnFilteredIndex("create", indexName, qualifiedTableName);
+
+        if (filter is not null)
+            RejectComputedColumnInIndexFilter(context.Batch, table, indexName, qualifiedTableName, filter);
 
         foreach (var existing in table.Indexes)
         {
@@ -251,6 +254,39 @@ partial class Simulation
         table.Indexes.Add(index);
         RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");
         return true;
+    }
+
+    /// <summary>
+    /// Raises <b>Msg 10609</b> when a filtered index's predicate reads a
+    /// computed column. Real refuses it whether or not the column is
+    /// <c>PERSISTED</c>: deciding a row's membership means evaluating the
+    /// predicate, and real won't key an index's contents on an expression it
+    /// re-derives. The simulator accepting one was the more dangerous
+    /// divergence direction — its filter evaluation reads the column out of a
+    /// decoded row, where a non-persisted computed slot is NULL, so every such
+    /// row silently fell outside the filter.
+    /// </summary>
+    private static void RejectComputedColumnInIndexFilter(
+        BatchContext batch, HeapTable table, string indexName, string qualifiedTableName, BooleanExpression filter)
+    {
+        var collation = batch.CurrentDatabase.Collation;
+        string? offending = null;
+        filter.VisitOperandExpressions(operand => operand.VisitColumnReferences(name =>
+        {
+            if (offending is not null)
+                return;
+            foreach (var column in table.Columns)
+            {
+                if (collation.Equals(column.Name, name.Leaf) && column.Computed is not null)
+                {
+                    offending = column.Name;
+                    return;
+                }
+            }
+        }));
+
+        if (offending is not null)
+            throw SimulatedSqlException.FilteredIndexOnComputedColumn(indexName, qualifiedTableName, offending);
     }
 
     /// <summary>

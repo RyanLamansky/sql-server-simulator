@@ -137,6 +137,39 @@ For each FK:
 Statement-level atomicity continues to apply: a Msg 547 raised mid-cascade unwinds via the undo log, leaving the entire statement's mutations reverted.
 Cascade chains recurse up to `MaxCascadeDepth` (32) and then raise `NotSupportedException`.
 
+## A referential action fires the child's triggers
+
+A cascade is part of the firing statement, not nested work under it, and the child table's AFTER triggers fire accordingly (probe-confirmed against SQL Server 2025):
+
+- `ON DELETE CASCADE` fires the child's **AFTER DELETE** trigger; `ON DELETE SET NULL` / `SET DEFAULT` and `ON UPDATE CASCADE` are UPDATEs on the child and fire its **AFTER UPDATE** trigger with both images.
+- All of one table's cascaded rows arrive in a **single invocation**, the way an ordinary multi-row DML delivers them.
+- `TRIGGER_NESTLEVEL()` reads the statement's own level — **1** under a top-level DELETE, not 2 — because the cascade isn't nested under the parent's trigger.
+- Order is **deepest-first**: a grandchild's trigger fires, then the child's, then the trigger on the table the statement actually named.
+- `@@ROWCOUNT` inside the child's trigger is the **cascaded child** row count, while the statement's own `@@ROWCOUNT` as the client sees it stays the parent's — so the caller's value is saved and put back around the fire.
+- The `deleted` / `inserted` images carry computed columns evaluated, persisted or not.
+
+The dispatch lives in `FireCascadeTriggers` / `FireCascadeUpdateTriggers` (`Simulation.ForeignKeys.cs`), called after each level's own recursion so the deepest level reports first.
+
+**The rewrite recomputes the child's computed columns.** A cascade moves the FK columns, so anything computed from them moves with them — without that a PERSISTED computed column keeps its pre-cascade value on disk, which is visible in a plain `SELECT` and not only through a trigger.
+
+**A `CASCADE` and an INSTEAD OF trigger over the same verb are mutually exclusive.** The cascade writes the child rows itself, which is exactly what an INSTEAD OF trigger exists to intercept, so real refuses the combination from whichever side arrives second:
+
+- **Msg 2113** — `CREATE TRIGGER … INSTEAD OF DELETE | UPDATE` on a table already carrying a `CASCADE` on that verb, naming the table two-part. (Real's wording carries a doubled space in "This is  because"; the simulator reproduces it.)
+- **Msg 1787** — such a `CASCADE` declared on a table already carrying that trigger, naming the table unqualified and closing with `Could not create constraint or index. See previous errors.`
+
+The pairing is **action-matched and `CASCADE`-only**, which is narrower than the message's wording suggests — probed one cell at a time:
+
+| trigger | FK action | |
+|---|---|---|
+| `INSTEAD OF DELETE` | `ON DELETE CASCADE` | refused |
+| `INSTEAD OF UPDATE` | `ON UPDATE CASCADE` | refused |
+| `INSTEAD OF DELETE` | `ON DELETE SET NULL` / `SET DEFAULT` | allowed |
+| `INSTEAD OF DELETE` | `ON UPDATE CASCADE` | allowed |
+| `INSTEAD OF UPDATE` | `ON DELETE CASCADE` | allowed |
+| `INSTEAD OF INSERT` | any | allowed |
+
+Insite.Commerce is the shipping proof of the `SET NULL` row: it carries `Brand_Instead_Of_Delete` beside `FK_Brand_Vendor ON DELETE SET NULL`, and a gate keyed on "any non-NO_ACTION action" refuses a database real accepts.
+
 ## Computed columns in a foreign key
 
 CHECK constraints over computed columns follow the same 8183-vs-1764 split — see [`constraints.md`](constraints.md#computed-columns-in-a-check-constraint).

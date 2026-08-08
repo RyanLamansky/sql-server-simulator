@@ -998,6 +998,37 @@ partial class SimulatedSqlException
     private const string ConstraintFailureSuffix = " Could not create constraint or index. See previous errors.";
 
     /// <summary>
+    /// Mimics SQL Server error 2113: an <c>INSTEAD OF DELETE</c> / <c>UPDATE</c>
+    /// trigger on a table carrying a cascading foreign key. The two are
+    /// mutually exclusive because the cascade writes the child rows itself,
+    /// which an INSTEAD OF trigger exists to intercept.
+    /// </summary>
+    /// <remarks>
+    /// The doubled space in "This is  because" is real's own, reproduced
+    /// verbatim (probe-confirmed against SQL Server 2025).
+    /// </remarks>
+    internal static SimulatedSqlException InsteadOfTriggerOnCascadingForeignKey(string triggerName, string qualifiedTableName) =>
+        new($"Cannot create INSTEAD OF DELETE or INSTEAD OF UPDATE TRIGGER '{triggerName}' on table '{qualifiedTableName}'. This is  because the table has a FOREIGN KEY with cascading DELETE or UPDATE.", 2113, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1787: the same conflict reached from the other
+    /// side — a cascading foreign key declared on a table that already carries
+    /// an <c>INSTEAD OF DELETE</c> / <c>UPDATE</c> trigger. Names the table
+    /// unqualified and carries the constraint-failure suffix.
+    /// </summary>
+    internal static SimulatedSqlException CascadingForeignKeyOnInsteadOfTriggerTable(string constraintName, string tableName) =>
+        new($"Cannot define foreign key constraint '{constraintName}' with cascaded DELETE or UPDATE on table '{tableName}' because the table has an INSTEAD OF DELETE or UPDATE TRIGGER defined on it.{ConstraintFailureSuffix}", 1787, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10609: a filtered index's <c>WHERE</c> predicate
+    /// names a computed column. Real refuses it whether or not the column is
+    /// <c>PERSISTED</c> (probe-confirmed both ways), and names the table
+    /// two-part.
+    /// </summary>
+    internal static SimulatedSqlException FilteredIndexOnComputedColumn(string indexName, string qualifiedTableName, string columnName) =>
+        new($"Filtered index '{indexName}' cannot be created on table '{qualifiedTableName}' because the column '{columnName}' in the filter expression is a computed column. Rewrite the filter expression so that it does not include this column.", 10609, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2729: a computed column named as an index,
     /// statistics or partition key whose expression isn't deterministic — the
     /// value would differ between the stored key and a fresh evaluation.
@@ -1765,6 +1796,7 @@ partial class SimulatedSqlException
     /// filtered index"</c> at CREATE, <c>"Cannot alter filtered index"</c> at
     /// ALTER — under one message number; both probe-confirmed.
     /// </summary>
+    /// <remarks>Real names the table two-part (probe-confirmed: <c>sx.g2</c>).</remarks>
     internal static SimulatedSqlException IgnoreDupKeyOnFilteredIndex(string verb, string indexName, string tableName) =>
         new($"Cannot {verb} filtered index '{indexName}' on table '{tableName}' because the statement sets the IGNORE_DUP_KEY option to ON. Rewrite the statement so that it does not use the IGNORE_DUP_KEY option.", 10618, 16, 1);
 

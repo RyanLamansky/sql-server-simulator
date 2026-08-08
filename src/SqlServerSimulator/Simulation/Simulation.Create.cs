@@ -2681,6 +2681,15 @@ partial class Simulation
                 }
             }
 
+            // The mirror of the Msg 2113 gate on CREATE TRIGGER, matched the
+            // same way: only a CASCADE conflicts, and only with an INSTEAD OF
+            // trigger covering that same verb.
+            var cascadingVerbs =
+                (pf.DeleteAction == ReferentialAction.Cascade ? TriggerActions.Delete : 0)
+                | (pf.UpdateAction == ReferentialAction.Cascade ? TriggerActions.Update : 0);
+            if (cascadingVerbs != 0 && HasInsteadOfTriggerFor(context.CurrentDatabase, childTable, cascadingVerbs))
+                throw SimulatedSqlException.CascadingForeignKeyOnInsteadOfTriggerTable(fkName, childTable.Name);
+
             var fk = new ForeignKey(
                 fkName,
                 context.CurrentDatabase.AllocateObjectId(),
@@ -2988,6 +2997,29 @@ partial class Simulation
     /// col&gt;, 112)</c> is persistable where style 0 is not, which is the
     /// conversion-style rule the shared walk already carries).
     /// </summary>
+    /// <summary>
+    /// Whether <paramref name="table"/> carries an INSTEAD OF trigger covering
+    /// any of <paramref name="verbs"/> — the half of the cascade conflict a
+    /// foreign-key declaration has to check.
+    /// </summary>
+    private static bool HasInsteadOfTriggerFor(Database database, HeapTable table, TriggerActions verbs)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var trigger in schema.Triggers.Values)
+            {
+                if (ReferenceEquals(trigger.Parent, table)
+                    && trigger.Timing == TriggerTiming.InsteadOf
+                    && (trigger.Actions & verbs) != 0)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// The two preconditions real puts on a <b>non-persisted</b> computed
     /// column named as an index, statistics or constraint key: the expression

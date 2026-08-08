@@ -338,6 +338,23 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
+- **A trigger body that joins `deleted` to `inserted` can't read a non-persisted computed column** — the pseudo-tables share the parent's `HeapColumn` instances, so such a column stays computed there and is re-evaluated per read; the evaluation goes through the *query's* multi-source resolver, where the expression's own column names are ambiguous across the two pseudo-tables.
+  A legitimate statement fails outright with **Msg 209**, and no foreign key or cascade is needed to reach it:
+
+  ```sql
+  CREATE TABLE t (id int NOT NULL PRIMARY KEY, a int NOT NULL, c AS a * 10);
+  GO
+  CREATE TRIGGER trg ON t AFTER UPDATE AS
+    SELECT d.c, i.c FROM deleted d JOIN inserted i ON d.id = i.id;
+  GO
+  INSERT t (id, a) VALUES (1, 4);
+  UPDATE t SET a = 7 WHERE id = 1;   -- real: reads 40 and 70; simulator: Msg 209 "Ambiguous column name 'a'"
+  ```
+
+  Reading the column from one pseudo-table alone works, which is why the shape went unnoticed.
+  The fix is in `Selection.DecodeOrCompute`, which hands a computed column's expression the caller's whole-tuple resolver: a computed column may only name stored columns of *its own* row (Msg 1759 guarantees it), so it should resolve within its own source instead.
+  Worth doing with the per-row allocation in mind — the narrow resolver would be built per computed-column read, so it wants gating on the multi-source case that actually needs it.
+
 - **A typed `xml` value isn't normalized against its schema on write** — real stores `<Total>1</Total>` for an `xsd:decimal` element the insert wrote as `1.00`; the simulator keeps the text it was given.
   The schema collection is read for the two static questions the XQuery layer asks it (an element's cardinality, and whether its content is simple) and for nothing else, so neither validation (real's Msg 6923) nor value normalization runs.
   See [`xml.md`](xml.md#modify--xml-dml).

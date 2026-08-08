@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -96,7 +97,7 @@ partial class Simulation
         // are stored (else one full scan). Materialized before any cascade
         // mutation touches the heap.
         var matchingChildRows = new List<(int PageIndex, int SlotIndex, SqlValue[] FullValues)>();
-        foreach (var (pageIndex, slotIndex, childFull, _) in MatchChildRowsToParents(fk, affectedParentOldRows))
+        foreach (var (pageIndex, slotIndex, childFull, _) in MatchChildRowsToParents(fk, affectedParentOldRows, context.Batch))
             matchingChildRows.Add((pageIndex, slotIndex, childFull));
         if (matchingChildRows.Count == 0)
             return;
@@ -212,7 +213,7 @@ partial class Simulation
     // does have a slot). A parent key holding a NULL has no children to match,
     // which a referenced UNIQUE column reaches.
     private static IEnumerable<(int PageIndex, int SlotIndex, SqlValue[] ChildFull, int ParentIndex)> MatchChildRowsToParents(
-        ForeignKey fk, List<SqlValue[]> parentKeyRows)
+        ForeignKey fk, List<SqlValue[]> parentKeyRows, BatchContext batch)
     {
         if (!TryMapFkColumnsToStorage(fk.ChildTable, fk.ChildColumnOrdinals, out var childStorageOrdinals, out var commons))
             throw new InvalidOperationException($"FOREIGN KEY '{fk.Name}' has a child column that is not physically stored.");
@@ -226,7 +227,15 @@ partial class Simulation
             foreach (var (page, slot, bytes) in cache.MatchingRows(fk.ChildTable.Heap, fk.ChildTable.StoredColumns, childStorageOrdinals, commons, probe))
             {
                 if (seen.Add((page, slot)))
-                    yield return (page, slot, DecodeFullRow(fk.ChildTable, bytes), p);
+                {
+                    // Computed columns are evaluated here rather than left as
+                    // the decoder's NULL stand-ins: this snapshot is both the
+                    // base of the rewritten row and the `deleted` / `inserted`
+                    // image a cascade-fired trigger reads.
+                    var childFull = DecodeFullRow(fk.ChildTable, bytes);
+                    EvaluateComputedColumns(fk.ChildTable, childFull, batch);
+                    yield return (page, slot, childFull, p);
+                }
             }
         }
     }
@@ -277,6 +286,48 @@ partial class Simulation
         foreach (var (_, _, full) in matchingChildRows)
             oldRows.Add(full);
         EnforceIncomingForeignKeysOnDelete(childTable, oldRows, context, "DELETE", depth + 1);
+
+        // Deepest-first: the grandchild's trigger has already fired inside the
+        // recursion above, and the parent's own AFTER trigger fires once this
+        // whole cascade returns — real's order, probe-confirmed.
+        FireCascadeTriggers(childTable, TriggerActions.Delete, insertedRows: null, deletedRows: oldRows, updatedColumnOrdinals: null, context);
+    }
+
+    /// <summary>
+    /// Fires the child table's AFTER triggers for a referential action. Real
+    /// treats a cascade as part of the firing statement rather than as nested
+    /// work, so the trigger runs at the statement's own nesting level
+    /// (<c>TRIGGER_NESTLEVEL()</c> reads 1 under a top-level DELETE, not 2) and
+    /// sees <c>@@ROWCOUNT</c> equal to the number of <em>child</em> rows the
+    /// cascade touched — while the client's own <c>@@ROWCOUNT</c> for the
+    /// statement stays the parent's, which is why the caller's value is put
+    /// back afterwards. All of the cascade's rows for one table arrive in a
+    /// single invocation, as an ordinary multi-row DML would deliver them.
+    /// Probe-confirmed against SQL Server 2025.
+    /// </summary>
+    private static void FireCascadeTriggers(
+        HeapTable childTable,
+        TriggerActions action,
+        List<SqlValue[]>? insertedRows,
+        List<SqlValue[]>? deletedRows,
+        int[]? updatedColumnOrdinals,
+        ParserContext context)
+    {
+        if (!HasAfterTrigger(context.Batch, childTable, action))
+            return;
+
+        var affected = (insertedRows ?? deletedRows)!.Count;
+        var callerRowCount = context.Connection.LastStatementRowCount;
+        context.Connection.LastStatementRowCount = affected;
+        try
+        {
+            context.Batch.Connection.Simulation.FireTriggers(
+                context.Batch, childTable, action, insertedRows, deletedRows, affected, updatedColumnOrdinals);
+        }
+        finally
+        {
+            context.Connection.LastStatementRowCount = callerRowCount;
+        }
     }
 
     /// <summary>
@@ -324,7 +375,7 @@ partial class Simulation
             foreach (var (oldFull, _) in changedPairs)
                 oldKeys.Add(oldFull);
             var matching = new List<(int PageIndex, int SlotIndex, SqlValue[] Full, SqlValue[] ParentNew)>();
-            foreach (var (pageIndex, slotIndex, childFull, parentIndex) in MatchChildRowsToParents(fk, oldKeys))
+            foreach (var (pageIndex, slotIndex, childFull, parentIndex) in MatchChildRowsToParents(fk, oldKeys, context.Batch))
                 matching.Add((pageIndex, slotIndex, childFull, changedPairs[parentIndex].New));
             if (matching.Count == 0)
                 continue;
@@ -373,6 +424,10 @@ partial class Simulation
                     _ => throw new InvalidOperationException(),
                 };
             }
+            // The FK columns just moved, so anything computed from them has to
+            // move with them — a PERSISTED computed column otherwise keeps the
+            // pre-cascade value on disk (probe-confirmed: real recomputes).
+            EvaluateComputedColumns(childTable, newRow, context.Batch);
             var rewritten = RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap);
             if (IsLockableTable(childTable))
             {
@@ -386,6 +441,31 @@ partial class Simulation
         // those columns are themselves a key referenced by another FK, that
         // FK's UPDATE action fires.
         EnforceIncomingFkOnUpdate(childTable, newPairs, context, depth + 1);
+        FireCascadeUpdateTriggers(childTable, fk.ChildColumnOrdinals, newPairs, context);
+    }
+
+    /// <summary>
+    /// The UPDATE-flavoured cascade's trigger fire: <c>deleted</c> carries the
+    /// pre-cascade images and <c>inserted</c> the rewritten ones, with
+    /// <c>COLUMNS_UPDATED()</c> naming the FK columns the action moved.
+    /// </summary>
+    private static void FireCascadeUpdateTriggers(
+        HeapTable childTable,
+        int[] changedOrdinals,
+        List<(SqlValue[] OldFull, SqlValue[] NewFull)> pairs,
+        ParserContext context)
+    {
+        if (!HasAfterTrigger(context.Batch, childTable, TriggerActions.Update))
+            return;
+        var oldRows = new List<SqlValue[]>(pairs.Count);
+        var newRows = new List<SqlValue[]>(pairs.Count);
+        foreach (var (oldFull, newFull) in pairs)
+        {
+            oldRows.Add(oldFull);
+            newRows.Add(newFull);
+        }
+
+        FireCascadeTriggers(childTable, TriggerActions.Update, newRows, oldRows, changedOrdinals, context);
     }
 
     private static void CascadeSetChildKeysToValue(
@@ -409,6 +489,7 @@ partial class Simulation
                     ? EvaluateColumnDefault(childTable.Columns[ord], context)
                     : SqlValue.Null(childTable.Columns[ord].Type);
             }
+            EvaluateComputedColumns(childTable, newRow, context.Batch);
             var rewritten = RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap);
             if (IsLockableTable(childTable))
             {
@@ -423,6 +504,7 @@ partial class Simulation
         // UPDATE-flavored recursion so downstream incoming FKs see the right
         // verb context.
         EnforceIncomingFkOnUpdate(childTable, newPairs, context, depth + 1);
+        FireCascadeUpdateTriggers(childTable, fk.ChildColumnOrdinals, newPairs, context);
     }
 
     private static SqlValue EvaluateColumnDefault(HeapColumn column, ParserContext context)

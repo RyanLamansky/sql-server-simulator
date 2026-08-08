@@ -620,6 +620,14 @@ A **non-persisted** computed column is a legal key for an index, a UNIQUE constr
 
 Both gates fire for a *non-unique* index and for `CREATE STATISTICS` as readily as for a unique one, and both append real's `Could not create constraint or index. See previous errors.` when the failure arrived through a constraint rather than a bare `CREATE INDEX` — the same suffix Msg 1711 carries when a `PRIMARY KEY` names a non-persisted computed column (which stays refused: a PK needs the value stored and non-nullable).
 
+### A filter may not read a computed column
+
+Real refuses a filtered index whose `WHERE` names a computed column — **persisted or not** — with **Msg 10609**, naming the index, the table two-part and the offending column.
+Deciding a row's membership means evaluating the predicate, and real won't key an index's contents on a value it re-derives.
+
+The simulator accepted one, which was the over-permissive direction and quietly wrong with it: filter evaluation reads the column out of a decoded row, where a *non-persisted* computed slot is NULL, so every such row fell outside the filter.
+The gate sits after the `IGNORE_DUP_KEY`-on-a-filtered-index refusal and ahead of the duplicate-index-name check, which is real's own order (probe-confirmed both ways).
+
 ### How the key is read
 
 Those two gates are what make the key well defined: the value is then a reproducible function of the row's stored columns, so it can be evaluated per row rather than stored.

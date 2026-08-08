@@ -327,7 +327,7 @@ partial class Simulation
                 if (!index.IsUnique)
                     throw SimulatedSqlException.IgnoreDupKeyOnNonUniqueIndexAlter(index.Name);
                 if (index.Filter is not null)
-                    throw SimulatedSqlException.IgnoreDupKeyOnFilteredIndex("alter", index.Name, table.Name);
+                    throw SimulatedSqlException.IgnoreDupKeyOnFilteredIndex("alter", index.Name, SchemaQualifyTableName(table, context.CurrentDatabase));
                 index.IgnoreDupKey = value;
                 break;
         }

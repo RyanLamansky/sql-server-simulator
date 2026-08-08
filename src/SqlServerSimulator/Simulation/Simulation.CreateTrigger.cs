@@ -223,6 +223,23 @@ partial class Simulation
         // ALTER / CREATE OR ALTER replacing an existing trigger by the
         // same name is permitted; collision is only with a *different*
         // trigger covering an overlapping action.
+        // An INSTEAD OF trigger and a CASCADE on the same table and the same
+        // verb are mutually exclusive: the cascade writes the child rows
+        // itself, which is exactly what the trigger exists to intercept.
+        // The conflict is action-matched and CASCADE-only — an INSTEAD OF
+        // DELETE coexists with ON DELETE SET NULL / SET DEFAULT and with
+        // ON UPDATE CASCADE, and INSTEAD OF INSERT never conflicts
+        // (probe-confirmed across the matrix; Insite.Commerce's
+        // `Brand_Instead_Of_Delete` beside `FK_Brand_Vendor ON DELETE SET NULL`
+        // is the shipping shape that proves the SET NULL half).
+        if (timing == TriggerTiming.InsteadOf
+            && parent is HeapTable triggerTarget
+            && HasConflictingCascade(triggerTarget, actions))
+        {
+            throw SimulatedSqlException.InsteadOfTriggerOnCascadingForeignKey(
+                triggerName.Leaf, SchemaQualifyTableName(triggerTarget, context.CurrentDatabase));
+        }
+
         if (timing == TriggerTiming.InsteadOf)
         {
             foreach (var schema in context.CurrentDatabase.Schemas.Values)
@@ -540,4 +557,21 @@ partial class Simulation
             "TRIGGER");
         return true;
     }
+    /// <summary>
+    /// Whether an FK on <paramref name="table"/> cascades on a verb
+    /// <paramref name="actions"/> also covers — the only pairing real refuses.
+    /// </summary>
+    internal static bool HasConflictingCascade(HeapTable table, TriggerActions actions)
+    {
+        foreach (var fk in table.OutgoingForeignKeys)
+        {
+            if ((actions & TriggerActions.Delete) != 0 && fk.DeleteAction == ReferentialAction.Cascade)
+                return true;
+            if ((actions & TriggerActions.Update) != 0 && fk.UpdateAction == ReferentialAction.Cascade)
+                return true;
+        }
+
+        return false;
+    }
+
 }

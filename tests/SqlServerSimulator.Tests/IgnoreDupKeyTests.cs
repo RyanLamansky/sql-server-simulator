@@ -302,7 +302,7 @@ public sealed class IgnoreDupKeyTests
     [TestMethod]
     public void FilteredUniqueIndex_RaisesMsg10618()
         => AreEqual(
-            "Cannot create filtered index 'ux' on table 't' because the statement sets the IGNORE_DUP_KEY option to ON. "
+            "Cannot create filtered index 'ux' on table 'dbo.t' because the statement sets the IGNORE_DUP_KEY option to ON. "
             + "Rewrite the statement so that it does not use the IGNORE_DUP_KEY option.",
             new Simulation().AssertSqlError("""
                 create table t (id int);
@@ -383,7 +383,7 @@ public sealed class IgnoreDupKeyTests
     [TestMethod]
     public void AlterIndexSet_FilteredIndex_RaisesMsg10618WithAlterVerb()
         => AreEqual(
-            "Cannot alter filtered index 'ux' on table 't' because the statement sets the IGNORE_DUP_KEY option to ON. "
+            "Cannot alter filtered index 'ux' on table 'dbo.t' because the statement sets the IGNORE_DUP_KEY option to ON. "
             + "Rewrite the statement so that it does not use the IGNORE_DUP_KEY option.",
             new Simulation().AssertSqlError("""
                 create table t (id int, f int);

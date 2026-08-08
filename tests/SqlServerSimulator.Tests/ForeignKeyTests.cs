@@ -1104,4 +1104,208 @@ public sealed class ForeignKeyTests
         => new Simulation().AssertSqlError(
             "create table a (id int not null primary key, pid int null references a (id) on delete cascade)",
             1785);
+
+    /// <summary>
+    /// A referential action fires the <b>child</b> table's AFTER triggers.
+    /// Real treats the cascade as part of the firing statement, so the child's
+    /// trigger runs at the statement's own nesting level and all of the
+    /// cascade's rows for one table arrive in a single invocation. Probed
+    /// against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void CascadeDelete_FiresTheChildDeleteTrigger()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            """
+            create table tlog (seq int identity(1,1), note varchar(100));
+            create table par (id int not null primary key);
+            create table ch (id int not null primary key, pid int null references par(id) on delete cascade, a int not null, c as a * 10);
+            insert par values (1);
+            insert ch (id, pid, a) values (1, 1, 7), (2, 1, 8)
+            """,
+            """
+            create trigger trg_ch on ch after delete as
+              insert tlog(note) select concat('rows=', (select count(*) from deleted), ' nest=', TRIGGER_NESTLEVEL())
+            """);
+        _ = sim.ExecuteNonQuery("delete par where id = 1");
+        // One invocation carrying both cascaded rows, at the statement's level.
+        AreEqual("rows=2 nest=1", sim.ExecuteScalar("select note from tlog"));
+    }
+
+    /// <summary>The `deleted` image carries computed columns, persisted or not.</summary>
+    [TestMethod]
+    public void CascadeDelete_ChildTriggerSeesComputedColumns()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            """
+            create table tlog (note varchar(100));
+            create table par (id int not null primary key);
+            create table ch (id int not null primary key, pid int null references par(id) on delete cascade,
+                             a int not null, cn as a * 10, cp as a * 100 persisted);
+            insert par values (1);
+            insert ch (id, pid, a) values (1, 1, 7)
+            """,
+            "create trigger trg_ch on ch after delete as insert tlog select concat('cn=', cn, ' cp=', cp) from deleted");
+        _ = sim.ExecuteNonQuery("delete par where id = 1");
+        AreEqual("cn=70 cp=700", sim.ExecuteScalar("select note from tlog"));
+    }
+
+    /// <summary>
+    /// `ON DELETE SET NULL` and `ON UPDATE CASCADE` are UPDATEs on the child, so
+    /// they fire its AFTER UPDATE trigger with both images.
+    /// </summary>
+    [TestMethod]
+    public void SetNullCascade_FiresTheChildUpdateTrigger()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            """
+            create table tlog (note varchar(100));
+            create table par (id int not null primary key);
+            create table ch (id int not null primary key, pid int null references par(id) on delete set null);
+            insert par values (1);
+            insert ch values (1, 1)
+            """,
+            """
+            create trigger trg_ch on ch after update as
+              insert tlog select concat('old=', isnull(cast(d.pid as varchar(5)), '<N>'), ' new=', isnull(cast(i.pid as varchar(5)), '<N>'))
+              from deleted d join inserted i on d.id = i.id
+            """);
+        _ = sim.ExecuteNonQuery("delete par where id = 1");
+        AreEqual("old=1 new=<N>", sim.ExecuteScalar("select note from tlog"));
+    }
+
+    [TestMethod]
+    public void UpdateCascade_FiresTheChildUpdateTrigger()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            """
+            create table tlog (note varchar(100));
+            create table par (id int not null primary key);
+            create table ch (id int not null primary key, pid int null references par(id) on update cascade);
+            insert par values (5);
+            insert ch values (9, 5)
+            """,
+            "create trigger trg_ch on ch after update as insert tlog select concat('new=', i.pid) from inserted i");
+        _ = sim.ExecuteNonQuery("update par set id = 50 where id = 5");
+        AreEqual("new=50", sim.ExecuteScalar("select note from tlog"));
+    }
+
+    /// <summary>
+    /// Deepest-first: a grandchild's trigger fires before its parent's, and the
+    /// table the statement named fires last — all at the same nesting level.
+    /// </summary>
+    [TestMethod]
+    public void MultiLevelCascade_FiresDeepestFirst()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            """
+            create table tlog (seq int identity(1,1), note varchar(50));
+            create table par (id int not null primary key);
+            create table ch (id int not null primary key, pid int null references par(id) on delete cascade);
+            create table gc (id int not null primary key, cid int null references ch(id) on delete cascade);
+            insert par values (1); insert ch values (1, 1); insert gc values (100, 1)
+            """,
+            "create trigger trg_gc on gc after delete as insert tlog(note) select 'gc' from deleted",
+            "create trigger trg_ch on ch after delete as insert tlog(note) select 'ch' from deleted",
+            "create trigger trg_par on par after delete as insert tlog(note) select 'par' from deleted");
+        _ = sim.ExecuteNonQuery("delete par where id = 1");
+        AreEqual("gc ch par", sim.ExecuteScalar("select string_agg(note, ' ') within group (order by seq) from tlog"));
+    }
+
+    /// <summary>
+    /// The client's `@@ROWCOUNT` for the statement stays the parent's, even
+    /// though the trigger itself sees the cascaded child count.
+    /// </summary>
+    [TestMethod]
+    public void Cascade_LeavesTheStatementRowCountAlone()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            """
+            create table tlog (note varchar(50));
+            create table par (id int not null primary key);
+            create table ch (id int not null primary key, pid int null references par(id) on delete cascade);
+            insert par values (1);
+            insert ch values (1, 1), (2, 1), (3, 1)
+            """,
+            "create trigger trg_ch on ch after delete as insert tlog select concat('rc=', @@ROWCOUNT)");
+        AreEqual(1, sim.ExecuteScalar("delete par where id = 1; select @@ROWCOUNT"));
+        AreEqual("rc=3", sim.ExecuteScalar("select note from tlog"));
+    }
+
+    /// <summary>
+    /// A cascade rewrites the child's FK columns, so anything computed from
+    /// them moves too — a PERSISTED computed column would otherwise keep its
+    /// pre-cascade value on disk.
+    /// </summary>
+    [TestMethod]
+    public void UpdateCascade_RecomputesTheChildsComputedColumns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table par (id int not null primary key);
+            create table ch (id int not null primary key, pid int null references par(id) on update cascade,
+                             cp as isnull(pid, -1) persisted, cn as isnull(pid, -1));
+            insert par values (1);
+            insert ch (id, pid) values (1, 1);
+            update par set id = 9 where id = 1
+            """);
+        AreEqual("9 9 9", sim.ExecuteScalar("select concat(pid, ' ', cp, ' ', cn) from ch"));
+    }
+
+    /// <summary>
+    /// A <c>CASCADE</c> and an INSTEAD OF trigger covering the <b>same verb</b>
+    /// are mutually exclusive, refused from whichever side arrives second.
+    /// The pairing is action-matched and CASCADE-only: <c>SET NULL</c> /
+    /// <c>SET DEFAULT</c> never conflict, and an INSTEAD OF DELETE coexists
+    /// with <c>ON UPDATE CASCADE</c> (probe-confirmed across the matrix —
+    /// Insite.Commerce ships <c>Brand_Instead_Of_Delete</c> beside an
+    /// <c>ON DELETE SET NULL</c> foreign key).
+    /// </summary>
+    [TestMethod]
+    [DataRow("on delete set null", "delete")]
+    [DataRow("on delete set default", "delete")]
+    [DataRow("on update cascade", "delete")]
+    [DataRow("on delete cascade", "update")]
+    public void NonMatchingCascade_AndInsteadOfTrigger_Coexist(string action, string triggerVerb)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table par (id int not null primary key); "
+                + $"create table ch (id int not null primary key, pid int null default null references par(id) {action})",
+            $"create trigger trg_ch on ch instead of {triggerVerb} as select 1");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.triggers where name = 'trg_ch'"));
+    }
+
+    [TestMethod]
+    public void CascadingForeignKey_AndInsteadOfTrigger_AreMutuallyExclusive()
+    {
+        var triggerSecond = new Simulation();
+        _ = triggerSecond.ExecuteNonQuery("""
+            create table par (id int not null primary key);
+            create table ch (id int not null primary key, pid int null references par(id) on delete cascade)
+            """);
+        triggerSecond.AssertSqlError(
+            "create trigger trg_ch on ch instead of delete as select 1",
+            2113,
+            "Cannot create INSTEAD OF DELETE or INSTEAD OF UPDATE TRIGGER 'trg_ch' on table 'dbo.ch'. This is  because the table has a FOREIGN KEY with cascading DELETE or UPDATE.");
+        // INSTEAD OF INSERT doesn't collide with a cascading DELETE.
+        _ = triggerSecond.ExecuteNonQuery("create trigger trg_ins on ch instead of insert as select 1");
+
+        var fkSecond = new Simulation();
+        fkSecond.ExecuteBatches(
+            """
+            create table par (id int not null primary key);
+            create table ch (id int not null primary key, pid int null)
+            """,
+            "create trigger trg_ch on ch instead of delete as select 1");
+        var ex = fkSecond.AssertSqlError(
+            "alter table ch add constraint fk_ch foreign key (pid) references par(id) on delete cascade", 1787);
+        Assert.Contains("with cascaded DELETE or UPDATE on table 'ch' because the table has an INSTEAD OF DELETE or UPDATE TRIGGER", ex.Message);
+    }
 }

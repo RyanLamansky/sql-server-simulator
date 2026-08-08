@@ -820,4 +820,66 @@ public sealed class CreateIndexTests
         _ = sim.ExecuteNonQuery("create index ix_t on t (c)");
         AreEqual(1, sim.ExecuteScalar("select count(*) from sys.indexes where name = 'ix_t'"));
     }
+
+    /// <summary>
+    /// Real refuses a filtered index whose predicate reads a computed column,
+    /// <b>persisted or not</b> — deciding a row's membership means evaluating
+    /// the predicate, and it won't key an index's contents on a value it
+    /// re-derives. Probed against SQL Server 2025; the simulator accepting one
+    /// was the over-permissive direction, and its filter evaluation read the
+    /// non-persisted slot as NULL, so every such row fell outside the filter.
+    /// </summary>
+    [TestMethod]
+    [DataRow("c as a + 1", "c > 5")]
+    [DataRow("c as a + 1 persisted", "c > 5")]
+    [DataRow("c as a + 1", "a > 1 and c in (2, 3)")]
+    public void FilteredIndex_PredicateReadsAComputedColumn_Raises10609(string computed, string predicate)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table t (id int not null primary key, a int not null, {computed})");
+        sim.AssertSqlError(
+            $"create index ix_t on t (a) where {predicate}",
+            10609,
+            "Filtered index 'ix_t' cannot be created on table 'dbo.t' because the column 'c' in the filter expression is a computed column. Rewrite the filter expression so that it does not include this column.");
+    }
+
+    /// <summary>A predicate over ordinary columns is unaffected.</summary>
+    [TestMethod]
+    public void FilteredIndex_PredicateOverStoredColumns_Succeeds()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int not null primary key, a int not null, c as a + 1);
+            create index ix_t on t (a) where a > 5
+            """);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.indexes where name = 'ix_t'"));
+    }
+
+    /// <summary>
+    /// Error order, probe-confirmed both ways: Msg 10609 outranks the duplicate
+    /// index name, and the IGNORE_DUP_KEY refusal outranks Msg 10609.
+    /// </summary>
+    [TestMethod]
+    public void FilteredIndex_ComputedColumnErrorOrder()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int not null primary key, a int not null, c as a + 1);
+            create index dup on t (id)
+            """);
+        _ = sim.AssertSqlError("create index dup on t (a) where c > 5", 10609);
+        _ = sim.AssertSqlError("create unique index ix2 on t (a) where c > 5 with (ignore_dup_key = on)", 10618);
+    }
+
+    /// <summary>Msg 10618 names the table two-part, with its own schema.</summary>
+    [TestMethod]
+    public void FilteredIndex_IgnoreDupKey_NamesTheTableTwoPart()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create schema sx",
+            "create table sx.t (id int not null primary key, a int not null)");
+        var ex = sim.AssertSqlError("create unique index ix_t on sx.t (a) where a > 5 with (ignore_dup_key = on)", 10618);
+        Assert.Contains("on table 'sx.t'", ex.Message);
+    }
 }
