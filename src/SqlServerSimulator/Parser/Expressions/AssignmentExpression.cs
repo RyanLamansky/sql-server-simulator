@@ -29,7 +29,7 @@ internal sealed class AssignmentExpression(VariableSlot slot, Expression source)
     {
         var value = this.Source.Run(runtime);
         var coerced = Cast.ApplyCoercion(value, this.Slot.DeclaredType, this.Slot.DeclaredMaxLength);
-        this.Slot.Value = coerced;
+        this.Slot.Assign(coerced);
         return coerced;
     }
 

@@ -2570,7 +2570,8 @@ internal sealed partial class Selection
                             storedSchema: recursiveColumns,
                             storageOrdinals: null,
                             lobStore: null,
-                            rows: SelfReferenceRows(cteBinding));
+                            rows: SelfReferenceRows(cteBinding),
+                            writtenObjectName: cteBinding.Name);
                     }
 
                     if (cteBinding.Plan is null)
@@ -2600,7 +2601,12 @@ internal sealed partial class Selection
                         lobStore: null,
                         rows: [],
                         lateralPlan: cteBinding.Plan,
-                        lateralIsQueryBody: true);
+                        lateralIsQueryBody: true,
+                        // A CTE is an object with a name of its own, so real's
+                        // diagnostics report the CTE rather than the alias the
+                        // reference wrote — `FROM c AS q` names `c` (probed
+                        // 2026-08-08, GROUP BY containment and XQuery alike).
+                        writtenObjectName: cteBinding.Name);
                 }
 
                 // Catalog views (sys.tables / sys.objects / sys.schemas)
@@ -2699,7 +2705,8 @@ internal sealed partial class Selection
                         lateralPlan: Selection.ForView(resolvedView),
                         backingView: resolvedView,
                         viaSynonym: viewSynonym,
-                        autoElementName: viewAlias ?? objectName.ToString());
+                        autoElementName: viewAlias ?? objectName.ToString(),
+                        writtenObjectName: objectName.ToString());
                 }
 
                 // TVF call from FROM clause: `FROM schema.fn(args) [alias]`.

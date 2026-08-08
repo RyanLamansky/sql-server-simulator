@@ -76,7 +76,8 @@ internal sealed partial class Selection
             storageOrdinals: null,
             lobStore: null,
             rows: [],
-            lateralPlan: plan);
+            lateralPlan: plan,
+            xmlReceiverName: nodesCall.ReceiverName);
     }
 
     /// <summary>

@@ -190,7 +190,7 @@ partial class Simulation
                 var column = table.Columns[i];
                 if (column.Default is null || Array.IndexOf(targetOrdinals, i) >= 0)
                     continue;
-                rowValues[i] = CoerceForInsert(column.Default.Run(nullResolver), column.Type);
+                rowValues[i] = CoerceForInsert(column.Default.Run(nullResolver), column);
             }
 
             for (var i = 0; i < plan.TargetColumns.Length; i++)
@@ -203,12 +203,12 @@ partial class Simulation
                 // gets the default rather than being stored as NULL.
                 if (source.IsNull && !plan.KeepNulls && targetColumn.Default is not null)
                 {
-                    rowValues[ordinal] = CoerceForInsert(targetColumn.Default.Run(nullResolver), targetColumn.Type);
+                    rowValues[ordinal] = CoerceForInsert(targetColumn.Default.Run(nullResolver), targetColumn);
                     continue;
                 }
 
                 EnforceMaxLength(source, targetColumn, table.Name, batch.Connection);
-                rowValues[ordinal] = CoerceForInsert(source, targetColumn.Type);
+                rowValues[ordinal] = CoerceForInsert(source, targetColumn);
                 if (ReferenceEquals(targetColumn, identityColumn))
                     identityColumn!.Identity!.ObserveExplicit(rowValues[ordinal].CoerceTo(SqlType.BigInt).AsInt64);
             }

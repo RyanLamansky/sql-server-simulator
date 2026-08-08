@@ -454,7 +454,7 @@ public sealed class XmlFlworTests
             select n.ref.value('(.)[1]', 'nvarchar(10)') from dbo.doc cross apply doc.body.nodes('<v>{/r/a}</v>') as n(ref)
             """,
             2373,
-            "XQuery [nodes()]: 'nodes()' is not supported with constructed XML");
+            "XQuery [dbo.doc.body.nodes()]: 'nodes()' is not supported with constructed XML");
     }
 
     // ---- computed constructors --------------------------------------------

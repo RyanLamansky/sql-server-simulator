@@ -226,6 +226,27 @@ That last row is why the `(…)[1]` wrapper is idiomatic in every `.value()` cal
 **Msg 2210** rides the same static typing: a sequence — a comma list or an `if`'s two branches — may not put nodes beside atomic values, and the message names the atomic type first whichever side wrote it (`Heterogeneous sequences are not allowed: found 'xs:string' and 'element(a,xdt:untyped) *'`).
 Two atomic types are fine, so `(1, "a")` reads.
 
+### The receiver names the diagnostic
+
+Every XQuery diagnostic real raises is bracketed with the method that carried the expression, and a **column** receiver puts its own dotted path in front of it: `XQuery [dbo.xr.d.value()]`, `XQuery [sx.xr2.d.modify()]`.
+A **variable** receiver contributes nothing and reads as the bare `XQuery [value()]`.
+The rule is one lookup — the receiver's source and column — and it holds for all five methods, for `.modify()`'s XML-DML errors as much as the read methods', and wherever the call appears (a select list, a WHERE, a subquery, an UPDATE's SET list).
+
+The source half is the object **as the FROM clause wrote it**, with any alias ignored:
+
+| receiver's source | named |
+|---|---|
+| base table or view | as written — `xr`, `dbo.xr`, `ProbeScratch.dbo.xr`, `dbo.vx`; brackets stripped, alias ignored |
+| synonym | the synonym, never the object behind it |
+| temp table / table variable | `#tt` / `@t` |
+| CTE | the CTE's own name, even under an alias (`FROM c AS q` names `c`) |
+| derived table, `VALUES` constructor | the alias, there being no object name |
+| the row column a `.nodes()` produced | the **originating** receiver — `dbo.xr CROSS APPLY d.nodes(…) n(c)` names `dbo.xr.d`, and a chain of them keeps naming the first |
+| variable, literal, expression | nothing |
+
+That is `FromSource.WrittenObjectName`'s rule exactly, which the **GROUP BY containment** diagnostics read for the same reason (see [`query.md`](query.md)) — the two were probed independently and agree on every source kind, views and aliased CTEs included.
+An UPDATE mutator names its write target the same way: the table-name form directly, and the alias form through the FROM clause it resolved against, which is why the alias form's body compiles only once that clause has parsed.
+
 ### A schema collection narrows the cardinality
 
 Binding a value to an XML schema collection changes exactly one thing about how an expression compiles: a **named child step whose element the collection declares at most once is a singleton**, where the same step over untyped `xml` is plural.
@@ -263,7 +284,7 @@ Only the cardinality is read out of the schema: instance **validation** against 
 - Named axis steps (`child::` / `descendant::` / …), `NotSupportedException`.
 - **Msg 2396** — real refuses a `.query()` whose result is a top-level attribute (`/r/a/@x`) and **Msg 2390** the same for `.value()`; the simulator serializes the attribute instead.
   `.value()`'s 2390 can't be modeled while a `.nodes()` row is re-parsed as a document, since that is what makes the legitimate `n.ref.value('@x', …)` a top-level attribute read.
-- **Instance validation against a bound schema collection**, and the schema-derived **static type name** — the binding is read for element occurrence alone (see [A schema collection narrows the cardinality](#a-schema-collection-narrows-the-cardinality)), so nothing checks an INSERT / UPDATE / `.modify()` edit against the XSD and a diagnostic over a typed value still quotes `xdt:untypedAtomic`.
+- The schema-derived **static type name**: a diagnostic over a typed value still quotes `xdt:untypedAtomic` rather than the element's declared type.
 
 ### Divergences
 
@@ -274,6 +295,80 @@ Only the cardinality is read out of the schema: instance **validation** against 
 - **`position()` / `last()` legality is lexical.** The simulator allows them anywhere inside a written predicate, so a FLWOR nested in one can read them; real's rule is its own binder's.
 - `fn:min` / `fn:max` compare numerically; real compares by the operand's own type, so a string sequence orders differently.
 - **A constructed node re-parses.** Each evaluation splices the enclosed sequences into the literal markup and parses the result, so a value carrying markup-significant text is escaped by position rather than kept as a node identity; the serialized answer matches real for every probed shape.
+
+## Typed writes — validation and canonical form
+
+A write to an `xml(<collection>)` target isn't stored as written.
+Real validates the instance against the collection and stores it **canonicalized**, so `<Total>1.00</Total>` comes back as `<Total>1</Total>` — and the canonical text is what everything downstream reads, a trigger's `INSERTED` and an `OUTPUT` projection included, because the rewrite happens on the way in.
+Probed against SQL Server 2025 on 2026-08-08.
+
+It runs **per assigned value**, not per row: an `UPDATE` that never names the xml column neither re-reads the schema nor re-checks what is already stored.
+`Simulation.CoerceForInsert(SqlValue, HeapColumn)` is the seam — the coercion every write already performs per column — and `VariableSlot.Assign` is its sibling for a `DECLARE @x xml(c)` initializer and every later `SET`.
+The two halves live in `Storage/XmlSchemaValidation.cs` (the walk) and `Storage/XsdCanonical.cs` (the rendering).
+
+### Canonical form per primitive
+
+| type | written | stored |
+|---|---|---|
+| `decimal` and the whole integer family | `1.00`, `.5`, `+5.`, `-0.0`, `+007` | `1`, `0.5`, `5`, `0`, `7` |
+| `double` / `float` | `1.0E2`, `0.50`, `1000000`, `0.0000005`, `0`, `-0` | `100`, `0.5`, `1.0E6`, `5.0E-7`, `0.0E0`, `-0.0E0` |
+| `boolean` | `1`, `0` | `true`, `false` |
+| `string` | `  a  b  ` | `  a  b  ` (whiteSpace `preserve`) |
+| `normalizedString` | `  a <tab> b  ` | `  a   b  ` (`replace`) |
+| `token`, `anyURI`, `Name`, every non-string primitive | `  a  b  ` | `a b` (`collapse`) |
+| `dateTime` / `date` / `time` / the `g*` family | `…05.000+02:00`, `…05+00:00`, `…05-00:00`, `2020-01-02T24:00:00`, `24:00:00` | `…05+02:00`, `…05Z`, `…05Z`, `2020-01-03T00:00:00`, `00:00:00` |
+| `duration` | `P1Y2M3DT4H5M6.000S`, `P0Y` | `P1Y2M3DT4H5M6S`, `PT0S` |
+| `hexBinary` / `base64Binary` | `ABcd`, `YW Jj` | `ABCD`, `YWJj` |
+| a `list` | `  1.50   2.00  ` | `1.5 2` (each item canonicalized) |
+| a `union` | `2.50`, `1` under `decimal \| boolean` | `2.5`, `1` — the first member type that accepts it wins, so `1` doesn't become `true` |
+
+The approximate pair is the one rule that isn't XSD's own canonical form.
+Real renders `double` / `float` by XQuery's `fn:string` rule — plain notation inside `[1e-6, 1e6)`, scientific outside it with a mantissa in `[1, 10)` carrying at least one fractional digit and an exponent with no `+` and no padding — and caps the digits at SQL Server's own **15** for a `double` and **7** for a `float` rather than taking a shortest round trip, so `1234567890123456789` stores as `1.23456789012346E18` and `1.234568E18` respectively.
+Zero is always scientific (`0.0E0`), signed when it was written signed.
+`NaN` is refused outright, which XSD itself permits.
+
+### The validation errors
+
+Eight messages, each carrying real's own location trail — `/*:r[1]/*:a[1]` per element with same-named siblings numbered from one, `/*:r[1]/@*:k` for an attribute, and a namespaced name written `{uri}local`.
+
+| condition | error |
+|---|---|
+| a value its declared type doesn't admit — a facet violation and an out-of-range integer included | **Msg 6926** `Invalid simple type value: 'zz'. Location: …` |
+| an element the model didn't want here — undeclared, out of order, or in a namespace a wildcard doesn't name | **Msg 6965** `Invalid content. Expected element(s): '…'. Found: element '…' instead. Location: ….` (the only member ending in a period) |
+| a leftover child the model has nothing left to offer for | **Msg 6923** `Unexpected element(s): {uri}b. Location: …` |
+| the parent ended with the model still requiring an element | **Msg 6908** `Invalid content. Expected element(s): '…'. Location: …` (named against the parent) |
+| an attribute the type doesn't declare | **Msg 6905** state 3, `Attribute 'q' is not permitted in this context. Location: …` |
+| a `use="required"` attribute left out | **Msg 6906** `Required attribute 'k' is missing. Location: …` |
+| a root element the collection declares nowhere — including one written in no namespace against a qualified schema, which real refuses rather than skipping — or a `strict` wildcard's child that nothing declares | **Msg 6913** `Declaration not found for element '…'. Location: …` |
+| character data inside an element-only type | **Msg 6909** `Text node is not allowed at this location, …` |
+
+The expected-element list names what the model would have taken **at the position the walk stopped at**, not every name in the content particle — and a wildcard writes itself into it as `{uri}*` per namespace it names.
+That list is also what splits the two leftover-child errors: a model still willing to take something is Msg 6965 naming it, while one whose every particle has reached its `maxOccurs` has nothing to offer and reports Msg 6923.
+So against `dec?`, `<v><nope/></v>` is 6965 and `<v><dec>1</dec><nope/></v>` is 6923 (each probed on its own).
+
+The value model stays CONTENT-typed under validation: several top-level elements are as legal as they are for untyped `xml`, provided the collection declares each of them.
+
+### How the walk is built
+
+Compilation is .NET's `XmlSchemaSet` — the post-compilation infoset (`ElementSchemaType`, `ContentTypeParticle`, `AttributeUses`) is exactly the resolved shape needed, and hand-rolling XSD would be the whole of it.
+The **walk** is the simulator's own, because real's diagnostics distinguish cases .NET separates only by English prose: an out-of-order child and an over-occurring one are both `invalid child element` there, where real splits them into Msg 6965 and Msg 6923.
+.NET also skips a no-namespace root entirely where real raises Msg 6913.
+
+An `xsd:any` admits only the namespaces it names (`##any` / `##other` / `##targetNamespace` / `##local` and explicit URIs), and a child it admits is then typed against its own **global declaration** — real's `strict` processing, and what types AdventureWorks' `ContactRecord` inside the `xsd:any` its `AdditionalContactInfo` declares.
+Under `strict` (the default, and what an unspecified `processContents` means) a name the wildcard admits but nothing declares is Msg 6913, the same error an undeclared root takes; `lax` and `skip` let it through unvalidated.
+Everywhere the matcher can't place a particle it lets the children through, which is the direction that can only lose fidelity rather than reject an instance real accepts.
+
+An edited instance is written back through `XmlDml.Serialize` — the same probe-confirmed serializer `.modify()` uses, which self-closes an empty element with no space before the slash where `XDocument`'s own writer adds one.
+
+Evidence beyond the tests: **1,038 values** across all six AdventureWorks schema collections round-trip byte-identically through the validating write path.
+They were exported by real SQL Server and are therefore already in its canonical form, which makes them a free differential oracle for the renderer.
+
+### Divergences
+
+- **The bacpac loader doesn't validate.** It writes decoded wire values straight into the row rather than through the per-column coercion, so an import neither checks nor canonicalizes — harmless in practice because an exported bacpac already carries real's canonical text.
+- **No precision cap on `decimal`.** Real applies an internal one that rejects a 29-digit integer part and truncates a long fractional part (`0.1234567890123456789012345678` stores as `0.123456789`); the simulator canonicalizes the digits as written. Values of the size real data carries are unaffected.
+- **`CAST(… AS xml(<collection>))`** isn't parsed, so that third typed target neither validates nor canonicalizes; the column and variable forms do.
+- **Msg 6947 and the identity-constraint family** (`xsd:key` / `keyref` / `unique`) aren't checked, nor is `xsi:type` / `xsi:nil` honored.
 
 ## `.modify()` — XML-DML
 
@@ -401,10 +496,8 @@ This is the only place an `xml` payload is re-serialized — an unmodified value
 
 ### Divergences
 
-- **A typed edit isn't validated.** The collection is read for the two static questions it answers — an element's cardinality and whether its content is simple — and for nothing else, so a `.modify()` on a typed column neither validates the result (real's **Msg 6923**) nor types the `with` value against the schema (real's **Msg 2247**). A stored value isn't normalized against its schema either: real writes `<Total>1</Total>` where the simulator keeps the `<Total>1.00</Total>` the insert supplied.
-- **The `with` expression computes in `double`**, like every other numeric in the XQuery evaluator, where real computes a schema-typed operand in its declared type — visible in the last digits of a long decimal chain.
-- **The mutator's error prefix names only the method**: real writes `XQuery [dbo.t.d.modify()]` for a column receiver where the simulator writes `XQuery [modify()]`.
-- **An alias-form UPDATE resolves no collection**: `UPDATE a SET a.d.modify(…) FROM t AS a` names its target through the FROM clause, which parses after the SET list, so a typed element target there is still Msg 2356. The table-name form (which is what AdventureWorks and every ORM emit) resolves it.
+- **A typed edit's `with` value isn't typed against the schema** — real refuses one whose type doesn't match the target with **Msg 2247**, and computes a schema-typed operand in its declared type where the evaluator works in `double`, which shows in the last digits of a long decimal chain. The edit's *result* is validated and canonicalized like any other write to the column, since the mutator desugars to an ordinary assignment — see [Typed writes](#typed-writes--validation-and-canonical-form).
+- **A `.nodes()` over a derived table's pass-through column names the derived table**, where real resolves it back to the base column the projection forwards: `FROM (SELECT d FROM dbo.xr) dt CROSS APPLY dt.d.nodes(…) n(c)` makes a downstream `.value()` report `dt.d` against real's `dbo.xr.d`. A derived column with no base of its own (`(VALUES(@x)) v(z)`) names the source on both, as does a direct `.value()` on `dt.d` — the tracing is what `.nodes()` alone does.
 - Real's **Msg 2209 quotes a token** the simulator's recursive-descent parser may name differently — `insert <b/> into /r extra` is real's `'r'` and the simulator's own stopping token.
 - **`SET t.col.modify(…)`** reports Msg 102 near `'.'` where real reports it near `'modify'`.
 - A **prolog prefix** used by a constructor is re-declared on the inserted element whether or not the insertion point already binds it; real omits the declaration when the prefix is already in scope.

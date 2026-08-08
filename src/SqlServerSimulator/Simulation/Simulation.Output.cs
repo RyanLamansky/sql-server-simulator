@@ -362,7 +362,7 @@ partial class Simulation
                 // encoder's type check as a bare ArgumentException, which over
                 // the wire aborts the response mid-stream and the client
                 // reports a severe protocol error rather than anything useful.
-                targetValues[ordinal] = CoerceForInsert(projectedValues[i], this.Target.Columns[ordinal].Type);
+                targetValues[ordinal] = CoerceForInsert(projectedValues[i], this.Target.Columns[ordinal]);
                 covered[ordinal] = true;
             }
             for (var i = 0; i < targetValues.Length; i++)
@@ -376,7 +376,7 @@ partial class Simulation
                 targetValues[i] = column.Identity is { } identity
                     ? CoerceForIdentity(identity.GenerateNext(), column)
                     : column.Default is { } defaultExpression
-                        ? CoerceForInsert(defaultExpression.Run(new RuntimeContext(NoColumnResolver, this.batch)), column.Type)
+                        ? CoerceForInsert(defaultExpression.Run(new RuntimeContext(NoColumnResolver, this.batch)), column)
                         : SqlValue.Null(column.Type);
             }
             var undoLog = this.Target.IsTableVariable ? this.batch.CurrentTableVarUndoLog : this.batch.CurrentUndoLog;

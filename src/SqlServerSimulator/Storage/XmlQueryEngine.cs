@@ -47,12 +47,17 @@ internal static class XmlQueryEngine
     /// thing the schema binding changes about compilation, since real's static
     /// cardinality is what the typed and untyped paths disagree on.
     /// </summary>
-    public static XmlQueryExpr Compile(string xquery, string method, FrozenSet<string>? schemaSingletonElements = null)
+    public static XmlQueryExpr Compile(string xquery, string method, FrozenSet<string>? schemaSingletonElements = null, string? displayMethod = null)
     {
         var (defaultNamespace, prefixes, body) = ParsePrologAndBody(xquery);
         if (body.Length == 0)
             throw SimulatedSqlException.XQueryExpressionMissing();
-        var parser = new XmlQueryParser(body, defaultNamespace, prefixes, method, schemaSingletonElements);
+
+        // The two names differ once a receiver contributes a prefix: `method`
+        // stays the bare discriminator the rules below switch on, while
+        // `display` is what real writes between the diagnostics' brackets.
+        var display = displayMethod ?? method;
+        var parser = new XmlQueryParser(body, defaultNamespace, prefixes, display, schemaSingletonElements);
         var compiled = parser.ParseBody();
 
         // A node constructor is legal in query() and exist(), which hand the
@@ -62,9 +67,9 @@ internal static class XmlQueryEngine
         if (parser.ConstructsXml)
         {
             if (method.Equals("value", StringComparison.Ordinal))
-                throw SimulatedSqlException.XQueryConstructedXmlNotSupported(method, "data()");
+                throw SimulatedSqlException.XQueryConstructedXmlNotSupported(display, "data()");
             if (method.Equals("nodes", StringComparison.Ordinal))
-                throw SimulatedSqlException.XQueryConstructedXmlNotSupported(method, "'nodes()'");
+                throw SimulatedSqlException.XQueryConstructedXmlNotSupported(display, "'nodes()'");
         }
 
         // value() takes the first item of its result, but only where real types
@@ -72,7 +77,7 @@ internal static class XmlQueryEngine
         // never a bare `/r/a` (probe-confirmed: Msg 2389 even when the instance
         // holds exactly one match).
         if (method.Equals("value", StringComparison.Ordinal))
-            XmlQueryParser.RequireSingleton(compiled, "value()", method);
+            XmlQueryParser.RequireSingleton(compiled, "value()", display);
         return compiled;
     }
 

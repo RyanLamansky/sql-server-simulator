@@ -268,9 +268,45 @@ partial class Simulation
             methodName,
             context,
             resolver is null ? null : name => resolver(XmlDml.ColumnNameOf(name)),
-            XmlSchemaCollectionOf(context, targetTable, columnName));
+            XmlSchemaCollectionOf(context, targetTable, columnName),
+            // The alias form names its target through the FROM clause, which
+            // parses after this SET list — so neither the schema collection nor
+            // the object name real's diagnostics carry is knowable here, and
+            // the body's compile waits for both.
+            deferDml: targetTable is null,
+            receiverName: targetTable is null ? string.Empty : $"{targetName}.{columnName}");
         return (columnName, expression);
     }
+
+    /// <summary>
+    /// Compiles any deferred <c>.modify()</c> body in the SET list now that
+    /// <paramref name="table"/> is known. A no-op for the shapes that named
+    /// their target up front, whose bodies compiled while the list parsed.
+    /// <paramref name="writtenTargetName"/> is the target as the FROM clause
+    /// spelled it, which is what real's diagnostics name — the alias the SET
+    /// list wrote never appears there.
+    /// </summary>
+    private static void BindDeferredXmlMutators(
+        ParserContext context,
+        HeapTable table,
+        List<(string ColumnName, Expression Expr)> rawAssignments,
+        string writtenTargetName)
+    {
+        foreach (var (columnName, expr) in rawAssignments)
+        {
+            if (expr is XmlModify mutator)
+                mutator.BindDeferredDml(context, XmlSchemaCollectionOf(context, table, columnName), $"{writtenTargetName}.{columnName}");
+        }
+    }
+
+    /// <summary>
+    /// The name real's XQuery diagnostics give <paramref name="source"/>: the
+    /// object as the FROM clause wrote it, falling back to the alias for a
+    /// source carrying no object name of its own and to the table's own name
+    /// for neither.
+    /// </summary>
+    private static string WrittenNameOf(FromSource source, HeapTable table) =>
+        source.WrittenObjectName ?? source.Qualifier ?? table.Name;
 
     /// <summary>
     /// The <c>xml(&lt;collection&gt;)</c> binding <paramref name="columnName"/>
@@ -306,6 +342,7 @@ partial class Simulation
         Selection.DmlTopLimit? top,
         View? sourceView = null)
     {
+        BindDeferredXmlMutators(context, table, rawAssignments, targetName.ToString());
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, sourceView);
 
         // Compile-time bind of the predicate and the SET values, matching
@@ -606,6 +643,7 @@ partial class Simulation
         RejectIncorrectSetOptionsForWrite(table, context.Batch, "UPDATE");
         _ = context.Batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
 
+        BindDeferredXmlMutators(context, table, rawAssignments, WrittenNameOf(sources[targetIndex], table));
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase);
 
         // Compile-time bind of the predicate and the SET values — see
@@ -1223,7 +1261,7 @@ partial class Simulation
         {
             var raw = expr.Run(new RuntimeContext(resolver, context.Batch));
             EnforceMaxLength(raw, table.Columns[ordinal], table.Name, context.Connection);
-            newValues[ordinal] = CoerceForInsert(raw, table.Columns[ordinal].Type);
+            newValues[ordinal] = CoerceForInsert(raw, table.Columns[ordinal]);
         }
 
         for (var ci = 0; ci < table.Columns.Length; ci++)

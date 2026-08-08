@@ -45,7 +45,8 @@ internal sealed class FromSource(
     Synonym? viaSynonym = null,
     string? autoElementName = null,
     bool lateralIsQueryBody = false,
-    string? writtenObjectName = null)
+    string? writtenObjectName = null,
+    string? xmlReceiverName = null)
 {
     public readonly string? Qualifier = qualifier;
 
@@ -62,6 +63,19 @@ internal sealed class FromSource(
     /// </para>
     /// </summary>
     public readonly string? WrittenObjectName = writtenObjectName;
+
+    /// <summary>
+    /// What an XML method call on this source's column writes between the
+    /// brackets of its own diagnostics, replacing the ordinary
+    /// <c>&lt;source&gt;.&lt;column&gt;</c> reading. Non-null only for a
+    /// <c>.nodes()</c> source, whose row column reports the <em>originating</em>
+    /// receiver rather than its own alias — <c>dbo.xr CROSS APPLY
+    /// d.nodes(…) AS n(c)</c> names <c>dbo.xr.d</c> for a <c>.value()</c> on
+    /// <c>n.c</c> — so a chain of them keeps naming the column the instance
+    /// came from. Empty when that origin was a variable, which carries no
+    /// prefix at all.
+    /// </summary>
+    public readonly string? XmlReceiverName = xmlReceiverName;
 
     /// <summary>
     /// The name <c>FOR XML AUTO</c> / <c>FOR JSON AUTO</c> gives this source's
@@ -239,7 +253,8 @@ internal sealed class FromSource(
             heapPlan: this.HeapPlan, materializeOnce: this.MaterializeOnce, isPlaceholder: this.IsPlaceholder,
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
-            lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName);
+            lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName,
+            xmlReceiverName: this.XmlReceiverName);
 
     /// <summary>
     /// Returns a copy of this source reading <paramref name="rows"/> — the same
@@ -256,7 +271,8 @@ internal sealed class FromSource(
             heapPlan: this.HeapPlan, materializeOnce: this.MaterializeOnce, isPlaceholder: this.IsPlaceholder,
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
-            lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName);
+            lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName,
+            xmlReceiverName: this.XmlReceiverName);
 
     /// <summary>
     /// Returns a copy of this source with its deferred <see cref="LateralPlan"/>
@@ -270,7 +286,8 @@ internal sealed class FromSource(
             this.StorageOrdinals, this.LobStore, rows,
             lateralPlan: null, backingTable: this.BackingTable, backingView: this.BackingView,
             heapPlan: this.HeapPlan, materializeOnce: false, viaSynonym: this.ViaSynonym,
-            autoElementName: this.AutoElementName, writtenObjectName: this.WrittenObjectName);
+            autoElementName: this.AutoElementName, writtenObjectName: this.WrittenObjectName,
+            xmlReceiverName: this.XmlReceiverName);
 }
 
 /// <summary>

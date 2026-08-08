@@ -639,4 +639,151 @@ public sealed class XmlTests
     public void NonLeadingBom_Survives()
         => AreEqual("<a>x\uFEFFy</a>", new Simulation().ExecuteScalar(
             "create table t (x xml); insert t values (N'<a>x\uFEFFy</a>'); select cast(x as nvarchar(max)) from t"));
+
+    /// <summary>
+    /// A simulation holding the shapes the receiver-naming tests read through:
+    /// two tables in different schemas, a view, and a synonym.
+    /// </summary>
+    private static Simulation ReceiverNamed()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create schema sx");
+        _ = sim.ExecuteNonQuery("create table dbo.xr (id int, d xml)");
+        _ = sim.ExecuteNonQuery("create table sx.xr2 (id int, d xml)");
+        _ = sim.ExecuteNonQuery("create view dbo.vx as select id, d from dbo.xr");
+        _ = sim.ExecuteNonQuery("create synonym dbo.syn for dbo.xr");
+        return sim;
+    }
+
+    /// <summary>
+    /// Asserts that <paramref name="sql"/> reports its XQuery syntax error
+    /// under <paramref name="bracket"/> — the receiver name real prefixes the
+    /// method with. Every expectation below was probed against SQL Server 2025
+    /// on 2026-08-08.
+    /// </summary>
+    private static void AssertBracket(Simulation sim, string sql, string bracket) =>
+        sim.AssertSqlError(sql, 2209, $"XQuery [{bracket}]: Syntax error near '<eof>'");
+
+    /// <summary>
+    /// A column receiver names the object the FROM clause wrote — qualifier
+    /// included when it was written, and never the alias.
+    /// </summary>
+    [TestMethod]
+    public void ReceiverName_NamesTheObjectAsWritten()
+    {
+        var sim = ReceiverNamed();
+        AssertBracket(sim, "select d.value('(', 'int') from xr", "xr.d.value()");
+        AssertBracket(sim, "select d.value('(', 'int') from dbo.xr", "dbo.xr.d.value()");
+        AssertBracket(sim, "select d.value('(', 'int') from [dbo].[xr]", "dbo.xr.d.value()");
+        AssertBracket(sim, "select d.value('(', 'int') from sx.xr2", "sx.xr2.d.value()");
+        AssertBracket(sim, "select a.d.value('(', 'int') from dbo.xr as a", "dbo.xr.d.value()");
+        AssertBracket(sim, "select d.value('(', 'int') from dbo.xr as a", "dbo.xr.d.value()");
+    }
+
+    /// <summary>
+    /// A view is named by the view and a synonym by the synonym — the
+    /// reference as written, not the object behind it.
+    /// </summary>
+    [TestMethod]
+    public void ReceiverName_NamesTheReferenceNotItsBase()
+    {
+        var sim = ReceiverNamed();
+        AssertBracket(sim, "select d.value('(', 'int') from dbo.vx", "dbo.vx.d.value()");
+        AssertBracket(sim, "select d.value('(', 'int') from dbo.syn", "dbo.syn.d.value()");
+        AssertBracket(sim, "select s.d.value('(', 'int') from dbo.syn as s", "dbo.syn.d.value()");
+    }
+
+    /// <summary>
+    /// A source with no object name of its own is named by its alias — except
+    /// a CTE, which is an object and reports its own name however the
+    /// reference aliased it.
+    /// </summary>
+    [TestMethod]
+    public void ReceiverName_FallsBackToTheAliasWithoutAnObjectName()
+    {
+        var sim = ReceiverNamed();
+        AssertBracket(sim, "select dt.d.value('(', 'int') from (select d from dbo.xr) as dt", "dt.d.value()");
+        AssertBracket(sim, "select dt.z.value('(', 'int') from (select d as z from dbo.xr) as dt", "dt.z.value()");
+        AssertBracket(sim, "with c as (select d from dbo.xr) select d.value('(', 'int') from c", "c.d.value()");
+        AssertBracket(sim, "with c as (select d from dbo.xr) select q.d.value('(', 'int') from c as q", "c.d.value()");
+        AssertBracket(sim, "declare @t table (d xml); select d.value('(', 'int') from @t", "@t.d.value()");
+        AssertBracket(sim, "create table #tt (d xml); select d.value('(', 'int') from #tt", "#tt.d.value()");
+    }
+
+    /// <summary>
+    /// A <c>.nodes()</c> row column reports the receiver its rows came from,
+    /// so a chain of them keeps naming the originating column — and one whose
+    /// origin was a variable carries no prefix at all, like the variable.
+    /// </summary>
+    [TestMethod]
+    public void ReceiverName_IsInheritedThroughNodes()
+    {
+        var sim = ReceiverNamed();
+        AssertBracket(
+            sim,
+            "select n.c.value('(', 'int') from dbo.xr cross apply d.nodes('/r') as n(c)",
+            "dbo.xr.d.value()");
+        AssertBracket(
+            sim,
+            "select n2.c2.value('(', 'int') from dbo.xr cross apply d.nodes('/r') n(c) cross apply n.c.nodes('/a') n2(c2)",
+            "dbo.xr.d.value()");
+        AssertBracket(
+            sim,
+            "declare @x xml = '<r><a/></r>'; select n.c.value('(', 'int') from @x.nodes('/r') n(c)",
+            "value()");
+        AssertBracket(
+            sim,
+            "declare @x xml = '<r><a/></r>'; select n.c.value('(', 'int') from (values(@x)) v(z) cross apply v.z.nodes('/r') n(c)",
+            "v.z.value()");
+    }
+
+    /// <summary>
+    /// Every method carries its own name in the bracket, and a variable
+    /// receiver contributes no prefix to any of them.
+    /// </summary>
+    [TestMethod]
+    public void ReceiverName_CoversEveryMethodAndSkipsAVariable()
+    {
+        var sim = ReceiverNamed();
+        AssertBracket(sim, "select d.query('(') from dbo.xr", "dbo.xr.d.query()");
+        AssertBracket(sim, "select d.exist('(') from dbo.xr", "dbo.xr.d.exist()");
+        AssertBracket(sim, "select id from dbo.xr where d.exist('(') = 1", "dbo.xr.d.exist()");
+        AssertBracket(sim, "declare @x xml = '<r/>'; select @x.value('(', 'int')", "value()");
+        AssertBracket(sim, "declare @x xml = '<r/>'; set @x.modify('(')", "modify()");
+    }
+
+    /// <summary>
+    /// An UPDATE's mutator names its write target as the statement wrote it —
+    /// the table-name form directly, and the alias form through the FROM
+    /// clause the alias resolved against.
+    /// </summary>
+    [TestMethod]
+    public void ReceiverName_OnAnUpdateMutatorNamesTheWriteTarget()
+    {
+        var sim = ReceiverNamed();
+        AssertBracket(sim, "update dbo.xr set d.modify('(')", "dbo.xr.d.modify()");
+        AssertBracket(sim, "update a set d.modify('(') from dbo.xr as a", "dbo.xr.d.modify()");
+        AssertBracket(
+            sim,
+            "update a set d.modify('(') from dbo.xr as a join dbo.xr as b on a.id = b.id",
+            "dbo.xr.d.modify()");
+    }
+
+    /// <summary>
+    /// The bracket a subquery's receiver names is resolved in the subquery's
+    /// own scope, not the enclosing statement's.
+    /// </summary>
+    [TestMethod]
+    public void ReceiverName_ResolvesInTheEnclosingQuerysOwnScope()
+    {
+        var sim = ReceiverNamed();
+        AssertBracket(
+            sim,
+            "select (select d.value('(', 'int') from dbo.xr) from dbo.xr as o",
+            "dbo.xr.d.value()");
+        AssertBracket(
+            sim,
+            "select b.d.value('(', 'int') from dbo.xr as a join sx.xr2 as b on a.id = b.id",
+            "sx.xr2.d.value()");
+    }
 }

@@ -41,15 +41,25 @@ internal sealed class XmlMethodCall : Expression
     /// </summary>
     public readonly XmlSchemaCollection? TargetSchemaCollection;
 
+    /// <summary>
+    /// The dotted receiver name real prefixes this call's XQuery diagnostics
+    /// with, or empty for a receiver that carries none. Read by the
+    /// <c>.nodes()</c> FROM source, which stamps it on the row column it
+    /// produces so a downstream <c>.value()</c> reports the originating
+    /// column rather than the node source's own alias.
+    /// </summary>
+    public readonly string ReceiverName;
+
     private readonly string methodName;
     private readonly XmlMethod method;
     private readonly XmlQueryExpr? xquery;
     private readonly SqlType valueType;
     private readonly int? valueMaxLength;
 
-    private XmlMethodCall(Expression target, string methodName, XmlMethod method, XmlQueryExpr? xquery, SqlType valueType, int? valueMaxLength, XmlSchemaCollection? targetSchemaCollection)
+    private XmlMethodCall(Expression target, string methodName, XmlMethod method, XmlQueryExpr? xquery, SqlType valueType, int? valueMaxLength, XmlSchemaCollection? targetSchemaCollection, string receiverName)
     {
         this.Target = target;
+        this.ReceiverName = receiverName;
         this.methodName = methodName;
         this.method = method;
         this.xquery = xquery;
@@ -154,10 +164,11 @@ internal sealed class XmlMethodCall : Expression
         // collection's singleton element names, which is the one input the
         // static cardinality rules read out of the binding.
         var collection = ResolveTargetSchemaCollection(target, context);
+        var receiverName = ResolveReceiverName(target, context);
         var xquery = xqueryText is null
             ? null
-            : XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetSingletonElementNames());
-        return new XmlMethodCall(target, methodName, method, xquery, valueType, valueMaxLength, collection);
+            : XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetSingletonElementNames(), DisplayMethod(receiverName, methodName));
+        return new XmlMethodCall(target, methodName, method, xquery, valueType, valueMaxLength, collection, receiverName);
     }
 
     /// <summary>
@@ -168,6 +179,44 @@ internal sealed class XmlMethodCall : Expression
     /// variable declared <c>xml(&lt;collection&gt;)</c>. Everything else —
     /// a literal, a CAST, an expression — is untyped, as it is on real.
     /// </summary>
+    /// <summary>
+    /// What real writes between the brackets of an XQuery diagnostic raised by
+    /// a method call on <paramref name="target"/>: the receiver's dotted name
+    /// followed by the method, as in <c>XQuery [dbo.xr.d.value()]</c>. Empty
+    /// for a receiver real names nothing for — a variable, a literal, an
+    /// expression — whose diagnostics read <c>XQuery [value()]</c>.
+    /// </summary>
+    /// <remarks>
+    /// The source half is the object <em>as the FROM clause wrote it</em> with
+    /// any alias ignored (<c>xr</c>, <c>dbo.xr</c>, <c>ProbeScratch.dbo.xr</c>,
+    /// <c>#tt</c>, <c>@t</c>, a synonym by the synonym's own name), falling back
+    /// to the alias for a source that has no object name of its own — a derived
+    /// table, a CTE, a table value constructor. That is
+    /// <see cref="FromSource.WrittenObjectName"/>'s rule exactly, which the
+    /// GROUP BY containment diagnostics already read for the same reason.
+    /// </remarks>
+    internal static string ResolveReceiverName(Expression target, ParserContext context)
+    {
+        if (target is not Reference reference || context.ScopeSources is not { } sources)
+            return string.Empty;
+        var (sourceIndex, columnIndex) = Selection.FindSourceColumn(sources, reference.ReferencedName);
+        if (sourceIndex < 0)
+            return string.Empty;
+        var source = sources[sourceIndex];
+        if (source.XmlReceiverName is { } inherited)
+            return inherited;
+        return (source.WrittenObjectName ?? source.Qualifier) is { } name
+            ? $"{name}.{source.ColumnNames[columnIndex]}"
+            : string.Empty;
+    }
+
+    /// <summary>
+    /// Joins a receiver name to a method name the way real's bracket reads —
+    /// <c>dbo.xr.d.value</c>, or the bare <c>value</c> for an unnamed receiver.
+    /// </summary>
+    internal static string DisplayMethod(string receiverName, string method) =>
+        receiverName.Length == 0 ? method : $"{receiverName}.{method}";
+
     internal static XmlSchemaCollection? ResolveTargetSchemaCollection(Expression target, ParserContext context)
     {
         if (target is VariableReference variable)

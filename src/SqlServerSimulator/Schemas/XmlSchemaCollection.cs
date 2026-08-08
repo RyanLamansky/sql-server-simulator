@@ -53,6 +53,8 @@ internal sealed class XmlSchemaCollection(
     private FrozenSet<string>? singletonElementNames;
     private string? simpleContentNamesReadFrom;
     private FrozenSet<string>? simpleContentElementNames;
+    private string? compiledReadFrom;
+    private System.Xml.Schema.XmlSchemaSet? compiledSchemas;
 
     /// <summary>
     /// The element names this collection declares at most once wherever they
@@ -128,6 +130,60 @@ internal sealed class XmlSchemaCollection(
         }
 
         return this.simpleContentElementNames!;
+    }
+
+    /// <summary>
+    /// The collection's XSD compiled into a schema set, or null when it won't
+    /// compile. Post-compilation the set carries the resolved infoset — every
+    /// element's own <c>ElementSchemaType</c>, every complex type's
+    /// <c>ContentTypeParticle</c> and <c>AttributeUses</c> — which is what the
+    /// typed-write walk reads to validate and canonicalize an instance.
+    /// </summary>
+    /// <remarks>
+    /// A text that doesn't compile answers null and leaves the write untyped
+    /// rather than refusing it: the simulator accepted every instance before it
+    /// read the XSD at all, so a compiler gap can only cost fidelity, never
+    /// reject something real allows. Cached against <see cref="XsdText"/> by
+    /// reference like the two name sets, so an <c>ALTER</c> that reassigns the
+    /// text recompiles.
+    /// </remarks>
+    public System.Xml.Schema.XmlSchemaSet? GetCompiledSchemas()
+    {
+        if (!ReferenceEquals(this.compiledReadFrom, this.XsdText))
+        {
+            this.compiledReadFrom = this.XsdText;
+            this.compiledSchemas = CompileSchemas(this.XsdText);
+        }
+
+        return this.compiledSchemas;
+    }
+
+    private static System.Xml.Schema.XmlSchemaSet? CompileSchemas(string xsdText)
+    {
+        try
+        {
+            var set = new System.Xml.Schema.XmlSchemaSet();
+            // One CREATE may carry several schema documents back to back, so
+            // the text is read as a fragment and each root added in turn.
+            var settings = new System.Xml.XmlReaderSettings { ConformanceLevel = System.Xml.ConformanceLevel.Fragment };
+            using var reader = System.Xml.XmlReader.Create(new System.IO.StringReader(xsdText), settings);
+            while (reader.Read())
+            {
+                if (reader.NodeType != System.Xml.XmlNodeType.Element)
+                    continue;
+                if (System.Xml.Schema.XmlSchema.Read(reader.ReadSubtree(), null) is { } schema)
+                    _ = set.Add(schema);
+            }
+
+            if (set.Count == 0)
+                return null;
+            set.Compile();
+            return set;
+        }
+        catch (Exception e) when (e is System.Xml.XmlException or System.Xml.Schema.XmlSchemaException or InvalidOperationException or ArgumentException)
+        {
+            return null;
+        }
     }
 
     private const string XsdNamespace = "http://www.w3.org/2001/XMLSchema";

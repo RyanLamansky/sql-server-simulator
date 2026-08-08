@@ -52,7 +52,7 @@ The subsections that follow carry the areas with work in flight.
 - **XQuery beyond the expression subset** — the computed `attribute name {…}` and `text {…}` constructors in a *read* method (both ship in `.modify()`'s insert content, and the computed `element name {…}` ships in both), the direct comment / processing-instruction forms, `sql:variable()` / `sql:column()` accessors outside `.modify()`'s value terms, the `xs:` constructor functions, and named axis steps (`child::` / `descendant::` …).
   Predicates, the comparison / boolean / arithmetic operators, the function library, FLWOR / quantified / conditional expressions and the direct element constructor ship — see [`xml.md`](xml.md#the-xquery-subset) for the catalog.
   Every gap is reached by `.modify()` too, since the mutator's paths run through the same evaluator; its insert *content* is a separate sublanguage, so a `{…}` there still takes only literals and the `sql:` accessors → [`xml.md`](xml.md#not-modeled-yet).
-- **XSD validation against `xml(collection)` bindings** — the collection's XSD is read only for each element declaration's *occurrence*, which is what an XQuery path's static cardinality needs ([`xml.md`](xml.md#a-schema-collection-narrows-the-cardinality)); nothing validates an INSERT, an UPDATE, or a `.modify()` edit against it.
+- **XSD identity constraints and the `xsi:` attributes** — a typed write validates its content model, its attributes and every simple value against the collection ([`xml.md`](xml.md#typed-writes--validation-and-canonical-form)), but `xsd:key` / `keyref` / `unique` go unchecked and `xsi:type` / `xsi:nil` unhonored.
   That is what real's Msg 6923 (a validation failure after an edit) and Msg 2247 (a `with` value that isn't a subtype of the schema type) report, and what makes `replace value of` legal against a *typed* element rather than only its `text()` node.
   The **static type name** is unbuilt with it: a typed instance's paths still carry `xdt:untypedAtomic`, so a Msg 2389 over one quotes that where real quotes the schema type (`xs:string`), and the narrowing itself is keyed on the element *name* rather than resolved through the containing type — narrower than real, never wider.
   `ALTER XML SCHEMA COLLECTION ADD` sits behind the same missing parse → [`xml.md`](xml.md#known-gaps).
@@ -338,27 +338,12 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
-- **A typed `xml` value isn't normalized against its schema on write** — real stores `<Total>1</Total>` for an `xsd:decimal` element the insert wrote as `1.00`; the simulator keeps the text it was given.
-  The schema collection is read for the two static questions the XQuery layer asks it (an element's cardinality, and whether its content is simple) and for nothing else, so neither validation (real's Msg 6923) nor value normalization runs.
-  See [`xml.md`](xml.md#modify--xml-dml).
-- **An XQuery error over a *column* receiver doesn't name the receiver** — real prefixes the method with the receiver's own path, and it does so for **every** XML method rather than just `.modify()`: `XQuery [dbo.xr.d.value()]`, `XQuery [sx.xr2.d.modify()]`.
-  A **variable** receiver correctly carries no prefix (`XQuery [modify()]`), which is what the simulator emits for both.
-  The naming is per source kind, probed one at a time against SQL Server 2025:
-
-  | receiver | prefix |
-  |---|---|
-  | base table, even when aliased (`FROM dbo.xr AS t`) | `dbo.xr.d.` — the base table's schema-qualified name, never the alias |
-  | derived table (`FROM (…) z`) | `z.d.` — the alias, there being no base name |
-  | table variable | `@t.d.` |
-  | the row column a `.nodes()` produced | `dbo.xr.d.` — the *originating* column, not `x.n` |
-  | variable | none |
-
-  So the work is a receiver-name helper threaded into both compile sites (`XmlMethodCall.Parse` and `XmlModify.Parse`, which already resolve the source and column index for the schema-collection lookup), plus carrying a `.nodes()` row column's origin the way its schema binding is already carried.
-  Msg 6305 and the other non-XQuery-prefixed messages are unaffected.
-- **An alias-form UPDATE resolves no schema collection for its mutator** — `UPDATE a SET d.modify(…) FROM t AS a` refuses a typed element target with Msg 2356 where real performs the edit (probe-confirmed, with and without a joined second table); the table-name form reads correctly.
-  The cause is ordering: the SET list parses before the FROM clause, so `leadingTable` is null and `XmlSchemaCollectionOf` has nothing to resolve against.
-  Note the *qualified* mutator spelling isn't the shape to fix — `SET a.d.modify(…)` is Msg 102 on real as it is here; only the unqualified `SET d.modify(…)` is legal under an alias.
-  Closing it means splitting `XmlModify.Parse` so the token consumption still happens in the SET list while the XML-DML compile (which is what reads the collection and raises the static diagnostics) defers until `FindOrAppendMutationTarget` has identified the target — still compile time, as real's is.
+- **A typed `xml` edit's `with` value isn't typed against the schema** — real refuses one whose type doesn't match the target (Msg 2247) and computes a schema-typed operand in its **declared** type, where the evaluator works in `double`; the difference shows in the last digits of a long decimal chain.
+  The typing walk this needs now exists (a typed write validates and canonicalizes through it), so the work is reaching the target element's declared type from `XmlDmlParser` and evaluating the `with` expression under it.
+  See [`xml.md`](xml.md#typed-writes--validation-and-canonical-form).
+- **A typed write through `CAST(… AS xml(<collection>))` isn't validated** — the CAST grammar doesn't parse a collection argument, so that third typed target neither validates nor canonicalizes where the column and variable forms do.
+- **The bacpac loader writes typed `xml` unvalidated** — it copies decoded wire values straight into the row rather than through the per-column coercion the DML paths take, so an import neither checks nor canonicalizes.
+  Harmless for an exported bacpac, whose text is already real's canonical form, but it means an import is not the oracle a write is.
 - **Msg 13525 renders a MAX length uppercase** — real's temporal shape-mismatch message writes `nvarchar(max)` where the simulator writes `nvarchar(MAX)`, off `SqlType.SqlServerName`'s own casing.
   Worth checking which other messages inherit it before changing the shared renderer.
 

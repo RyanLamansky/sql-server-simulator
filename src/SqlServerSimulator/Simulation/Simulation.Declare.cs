@@ -137,14 +137,19 @@ partial class Simulation
                 // execution-scoped, so assigning there would overwrite the
                 // last real iteration's value with NULL.
                 if (hasInitializer && !context.Batch.IsSkipping)
-                    context.Batch.Variables[variableName].Value = initialValue;
+                    context.Batch.Variables[variableName].Assign(initialValue);
             }
             else
             {
-                context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, initialValue, parameter: null)
+                var slot = new VariableSlot(declaredType, declaredMaxLength, SqlValue.Null(declaredType), parameter: null)
                 {
                     XmlSchemaCollection = xmlSchemaCollection,
                 };
+                // Through Assign rather than the constructor so an initializer
+                // against an xml(<collection>) declaration is validated and
+                // canonicalized, as it is on every later assignment.
+                slot.Assign(initialValue);
+                context.Batch.Variables[variableName] = slot;
             }
             sawScalar = true;
         } while (context.Token is Operator { Character: ',' });

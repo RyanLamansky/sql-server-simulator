@@ -314,7 +314,7 @@ public sealed class XmlModifyTests
         Seeded().AssertSqlError(
             "update dbo.doc set body.modify('insert sql:column(\"id\") into (/r)[1]')",
             2207,
-            "XQuery [modify()]: Only non-document nodes can be inserted. Found \"xs:int ?\".");
+            "XQuery [dbo.doc.body.modify()]: Only non-document nodes can be inserted. Found \"xs:int ?\".");
 
     [TestMethod]
     public void Update_Modify_OutputProjectsBothSides()

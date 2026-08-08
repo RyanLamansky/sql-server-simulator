@@ -20,14 +20,59 @@ internal sealed class XmlModify : Expression
 {
     private readonly Expression instance;
     private readonly string instanceName;
-    private readonly XmlDml dml;
 
-    private XmlModify(Expression instance, string instanceName, XmlDml dml)
+    /// <summary>
+    /// The XML-DML text as written, kept only while the compile is deferred.
+    /// </summary>
+    private readonly string pendingXQuery;
+    private readonly Func<string, SqlType>? pendingResolveColumnType;
+
+    /// <summary>
+    /// The compiled statement, or null while the write target — and so the
+    /// receiver's schema-collection binding — is still unknown. Bound exactly
+    /// once, by <see cref="BindDeferredDml"/>.
+    /// </summary>
+    private XmlDml? dml;
+
+    private XmlModify(
+        Expression instance,
+        string instanceName,
+        string pendingXQuery,
+        Func<string, SqlType>? pendingResolveColumnType,
+        XmlDml? dml)
     {
         this.instance = instance;
         this.instanceName = instanceName;
+        this.pendingXQuery = pendingXQuery;
+        this.pendingResolveColumnType = pendingResolveColumnType;
         this.dml = dml;
     }
+
+    /// <summary>
+    /// Compiles the XML-DML text against the receiver's schema collection, for
+    /// the statement shape that couldn't supply one while its SET list parsed.
+    /// Idempotent: the forms that knew their target up front compiled at parse
+    /// and this does nothing for them.
+    /// </summary>
+    /// <remarks>
+    /// An alias-form <c>UPDATE a SET d.modify(…) FROM t AS a</c> names its
+    /// target through the FROM clause, which parses <em>after</em> the SET
+    /// list — so the collection that decides whether an element is a legal
+    /// <c>replace value of</c> target isn't knowable there, and a typed column
+    /// was refused with Msg 2356 on a statement real performs. Binding here
+    /// keeps every diagnostic at compile time, where real raises them.
+    /// </remarks>
+    internal void BindDeferredDml(ParserContext context, Schemas.XmlSchemaCollection? collection, string receiverName) =>
+        this.dml ??= XmlDml.Parse(
+            this.pendingXQuery,
+            context,
+            this.pendingResolveColumnType,
+            collection,
+            XmlMethodCall.DisplayMethod(receiverName, "modify"));
+
+    /// <summary>The compiled statement, which every execution path binds before reaching.</summary>
+    private XmlDml Dml => this.dml ?? throw new InvalidOperationException(
+        "The .modify() body was never bound — every UPDATE path must call BindDeferredDml once its target is known.");
 
     /// <summary>
     /// Parses <c>&lt;instance&gt;.&lt;method&gt;(…)</c> in a mutator position.
@@ -37,9 +82,12 @@ internal sealed class XmlModify : Expression
     /// <paramref name="resolveColumnType"/> supplies types for
     /// <c>sql:column</c> references, and is null where no column scope exists.
     /// <paramref name="schemaCollection"/> is the receiver's
-    /// <c>xml(&lt;collection&gt;)</c> binding when the caller already knows it
-    /// (an UPDATE names its target ahead of the SET list, whose columns are in
-    /// no FROM scope yet); null falls back to resolving it off the receiver.
+    /// <c>xml(&lt;collection&gt;)</c> binding when the caller already knows it;
+    /// <paramref name="deferDml"/> says it can't know yet, which leaves the
+    /// body uncompiled until <see cref="BindDeferredDml"/> supplies one — and
+    /// with it <paramref name="receiverName"/>, the dotted name real prefixes
+    /// this statement's diagnostics with (empty for a variable receiver, which
+    /// carries none).
     /// </summary>
     public static XmlModify Parse(
         Expression instance,
@@ -47,7 +95,9 @@ internal sealed class XmlModify : Expression
         string methodName,
         ParserContext context,
         Func<string, SqlType>? resolveColumnType,
-        Schemas.XmlSchemaCollection? schemaCollection = null)
+        Schemas.XmlSchemaCollection? schemaCollection = null,
+        bool deferDml = false,
+        string receiverName = "")
     {
         if (!methodName.Equals("modify", StringComparison.Ordinal))
             throw SimulatedSqlException.XmlNonMutatorInMutatorPosition(methodName);
@@ -69,7 +119,14 @@ internal sealed class XmlModify : Expression
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
-        return new XmlModify(instance, instanceName, XmlDml.Parse(xquery, context, resolveColumnType, collection));
+        return new XmlModify(
+            instance,
+            instanceName,
+            xquery,
+            resolveColumnType,
+            deferDml
+                ? null
+                : XmlDml.Parse(xquery, context, resolveColumnType, collection, XmlMethodCall.DisplayMethod(receiverName, "modify")));
     }
 
     public override SqlValue Run(RuntimeContext runtime)
@@ -77,7 +134,7 @@ internal sealed class XmlModify : Expression
         var input = this.instance.Run(runtime);
         return input.Type is not XmlSqlType ? throw SimulatedSqlException.CannotCallMethodsOn(input.Type.SqlServerName)
             : input.IsNull ? throw SimulatedSqlException.XmlMutatorOnNullValue(this.instanceName)
-            : SqlValue.FromXml(this.dml.Apply(input.AsString, runtime));
+            : SqlValue.FromXml(this.Dml.Apply(input.AsString, runtime));
     }
 
     /// <summary>
@@ -93,7 +150,7 @@ internal sealed class XmlModify : Expression
         var type = this.instance.GetSqlType(batch, resolveColumnType);
         if (type is not XmlSqlType)
             throw SimulatedSqlException.CannotCallMethodsOn(type.SqlServerName);
-        foreach (var accessor in this.dml.ValueAccessors)
+        foreach (var accessor in this.Dml.ValueAccessors)
         {
             if (accessor.IsColumn)
                 _ = resolveColumnType(XmlDml.ColumnNameOf(accessor.Name));

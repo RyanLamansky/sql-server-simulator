@@ -50,6 +50,7 @@ partial class Simulation
         var table = sources[targetIndex].BackingTable
             ?? throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(chain.TargetName);
 
+        BindDeferredXmlMutators(context, table, rawAssignments, targetName.ToString());
         FunctionBodyShape.NoteTableWrite(batch, "UPDATE", table);
         RejectDisabledClusteredIndex(table);
         RejectIncorrectSetOptionsForWrite(table, batch, "UPDATE");

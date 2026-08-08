@@ -512,6 +512,6 @@ partial class Simulation
         if (column.Default is null)
             return SqlValue.Null(column.Type);
         var runtime = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch);
-        return CoerceForInsert(column.Default.Run(runtime), column.Type);
+        return CoerceForInsert(column.Default.Run(runtime), column);
     }
 }

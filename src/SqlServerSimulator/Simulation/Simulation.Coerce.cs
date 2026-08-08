@@ -102,6 +102,29 @@ partial class Simulation
     /// strings/bytes is handled separately by <see cref="EnforceMaxLength"/>
     /// before this method runs.
     /// </summary>
+    /// <summary>
+    /// <see cref="CoerceForInsert(SqlValue, SqlType)"/> plus the typed-xml
+    /// contract: a value landing in an <c>xml(&lt;collection&gt;)</c> column is
+    /// validated against that collection and stored in <b>canonical form</b>,
+    /// so <c>&lt;c&gt;1.500&lt;/c&gt;</c> stores — and a trigger's
+    /// <c>INSERTED</c> reads — as <c>&lt;c&gt;1.5&lt;/c&gt;</c>
+    /// (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    /// <remarks>
+    /// Hung on the coercion each write performs <em>per assigned column</em>
+    /// rather than on a whole-row pass, because that is real's own rule and
+    /// the cheap one: an <c>UPDATE</c> that never names the xml column must
+    /// neither re-read its schema nor re-validate a value it isn't touching.
+    /// </remarks>
+    private static SqlValue CoerceForInsert(SqlValue source, HeapColumn column)
+    {
+        var coerced = CoerceForInsert(source, column.Type);
+        if (column.XmlSchemaCollection is not { } collection || coerced.IsNull)
+            return coerced;
+        var canonical = XmlSchemaValidation.ValidateAndNormalize(collection, coerced.AsString);
+        return ReferenceEquals(canonical, coerced.AsString) ? coerced : SqlValue.FromXml(canonical);
+    }
+
     private static SqlValue CoerceForInsert(SqlValue source, SqlType targetType)
     {
         try

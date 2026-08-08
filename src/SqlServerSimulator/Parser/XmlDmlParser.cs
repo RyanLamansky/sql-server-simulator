@@ -18,7 +18,8 @@ internal sealed class XmlDmlParser(
     Dictionary<string, string> prefixes,
     ParserContext context,
     Func<string, SqlType>? resolveColumnType,
-    Schemas.XmlSchemaCollection? schemaCollection)
+    Schemas.XmlSchemaCollection? schemaCollection,
+    string method)
 {
     private readonly string text = text;
     private readonly string? defaultNamespace = defaultNamespace;
@@ -32,6 +33,13 @@ internal sealed class XmlDmlParser(
     /// <c>replace value of</c> legal.
     /// </summary>
     private readonly Schemas.XmlSchemaCollection? schemaCollection = schemaCollection;
+
+    /// <summary>
+    /// What real writes between the brackets of every diagnostic raised here —
+    /// <c>modify</c> behind a variable receiver, and the
+    /// <c>schema.table.column.modify</c> the receiving column names otherwise.
+    /// </summary>
+    private readonly string method = method;
 
     private int index;
 
@@ -52,7 +60,7 @@ internal sealed class XmlDmlParser(
         // 6305) from "this isn't XQuery at all" (Msg 2209) by trying the
         // expression grammar on text no XML-DML keyword opened: `count(/r)`
         // and `for $i in /r return $i` are 6305 where `(` and `/r[` are 2209.
-        _ = XmlQueryEngine.CompileBody(this.text, this.defaultNamespace, this.prefixes, "modify");
+        _ = XmlQueryEngine.CompileBody(this.text, this.defaultNamespace, this.prefixes, this.method);
         throw SimulatedSqlException.XmlDmlExpressionRequired();
     }
 
@@ -60,8 +68,8 @@ internal sealed class XmlDmlParser(
     {
         var target = this.ParsePath(this.text.Length);
         return target.Kind == XmlDmlNodeKind.Document
-            ? throw SimulatedSqlException.XmlDmlOnlyNodesDeletable(target.Describe())
-            : XmlDml.CreateDelete(target, this.defaultNamespace, this.prefixes);
+            ? throw SimulatedSqlException.XmlDmlOnlyNodesDeletable(this.method, target.Describe())
+            : XmlDml.CreateDelete(target, this.defaultNamespace, this.prefixes, this.method);
     }
 
     private XmlDml ParseReplaceValueOf()
@@ -78,22 +86,22 @@ internal sealed class XmlDmlParser(
         // Real checks the target's cardinality first, then its kind — an
         // unbracketed path reports 2337 whatever it selects.
         if (!target.Singleton)
-            throw SimulatedSqlException.XmlDmlReplaceTargetNotSingleton(target.Describe());
+            throw SimulatedSqlException.XmlDmlReplaceTargetNotSingleton(this.method, target.Describe());
         if (target.Kind is not (XmlDmlNodeKind.Attribute or XmlDmlNodeKind.Text) && !this.TargetHasSimpleTypedContent(target))
-            throw SimulatedSqlException.XmlDmlReplaceTargetNotSimpleContent(target.Describe());
+            throw SimulatedSqlException.XmlDmlReplaceTargetNotSimpleContent(this.method, target.Describe());
 
         this.SkipWhitespace();
         if (this.Current is '<')
-            throw SimulatedSqlException.XmlDmlReplaceWithConstructedXml();
+            throw SimulatedSqlException.XmlDmlReplaceWithConstructedXml(this.method);
 
         // Real takes a whole XQuery expression here, not a term list, so the
         // rest of the text compiles through the read methods' own engine with
         // the `sql:` accessors admitted — which is what evaluates
         // `data(/IndividualSurvey/TotalPurchaseYTD)[1] + sql:column("inserted.LineTotal")`.
         var accessors = new XmlSqlAccessorScope();
-        var value = XmlQueryEngine.CompileBody(this.text[this.index..], this.defaultNamespace, this.prefixes, "modify()", accessors);
+        var value = XmlQueryEngine.CompileBody(this.text[this.index..], this.defaultNamespace, this.prefixes, this.method, accessors);
         this.ResolveAccessorNames(accessors);
-        return XmlDml.CreateReplaceValueOf(target, value, [.. accessors.Accessors], this.defaultNamespace, this.prefixes);
+        return XmlDml.CreateReplaceValueOf(target, value, [.. accessors.Accessors], this.defaultNamespace, this.prefixes, this.method);
     }
 
     /// <summary>
@@ -159,11 +167,11 @@ internal sealed class XmlDmlParser(
         // cardinality, then the content's own type, then the
         // attribute-with-a-position rule, then the target's node kind.
         if (!target.Singleton)
-            throw SimulatedSqlException.XmlDmlInsertTargetNotSingleton(target.Describe());
+            throw SimulatedSqlException.XmlDmlInsertTargetNotSingleton(this.method, target.Describe());
         foreach (var item in content)
         {
             if (item.Kind == XmlDmlItemKind.Value && item.Enclosed[0][0].StaticType is { } staticType && staticType is not XmlSqlType)
-                throw SimulatedSqlException.XmlDmlOnlyNodesInsertable(XmlDml.XQueryTypeName(staticType, item.Enclosed[0][0].IsLiteral));
+                throw SimulatedSqlException.XmlDmlOnlyNodesInsertable(this.method, XmlDml.XQueryTypeName(staticType, item.Enclosed[0][0].IsLiteral));
         }
         var positional = position is XmlDmlPosition.Before or XmlDmlPosition.After;
         if (positional)
@@ -171,20 +179,20 @@ internal sealed class XmlDmlParser(
             foreach (var item in content)
             {
                 if (item.Kind == XmlDmlItemKind.Attribute)
-                    throw SimulatedSqlException.XmlDmlAttributeInsertHasPosition($"attribute({item.Name},xdt:untypedAtomic)");
+                    throw SimulatedSqlException.XmlDmlAttributeInsertHasPosition(this.method, $"attribute({item.Name},xdt:untypedAtomic)");
             }
         }
         if (positional)
         {
             if (target.Kind is XmlDmlNodeKind.Attribute or XmlDmlNodeKind.Document)
-                throw SimulatedSqlException.XmlDmlInsertBeforeAfterTargetKind(target.Describe());
+                throw SimulatedSqlException.XmlDmlInsertBeforeAfterTargetKind(this.method, target.Describe());
         }
         else if (target.Kind is not (XmlDmlNodeKind.Element or XmlDmlNodeKind.Document))
         {
-            throw SimulatedSqlException.XmlDmlInsertIntoTargetKind(target.Describe());
+            throw SimulatedSqlException.XmlDmlInsertIntoTargetKind(this.method, target.Describe());
         }
 
-        return XmlDml.CreateInsert(target, content, position, this.defaultNamespace, this.prefixes);
+        return XmlDml.CreateInsert(target, content, position, this.defaultNamespace, this.prefixes, this.method);
     }
 
     /// <summary>

@@ -683,69 +683,69 @@ partial class SimulatedSqlException
     /// <c>(…)[n]</c> wrapper makes a step singular. Probe-confirmed wording
     /// against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException XmlDmlReplaceTargetNotSingleton(string staticType) =>
-        new($"XQuery [modify()]: The target of 'replace' must be at most one node, found '{staticType}'", 2337, 16, 1);
+    internal static SimulatedSqlException XmlDmlReplaceTargetNotSingleton(string method, string staticType) =>
+        new($"XQuery [{method}()]: The target of 'replace' must be at most one node, found '{staticType}'", 2337, 16, 1);
 
     /// <summary>
     /// Msg 2356: the <c>replace value of</c> target is a node whose value can't
     /// be written — an untyped element rather than an attribute or a
     /// <c>text()</c> node. Probe-confirmed wording against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException XmlDmlReplaceTargetNotSimpleContent(string staticType) =>
-        new($"XQuery [modify()]: The target of 'replace value of' must be a non-metadata attribute or an element with simple typed content, found '{staticType}'", 2356, 16, 1);
+    internal static SimulatedSqlException XmlDmlReplaceTargetNotSimpleContent(string method, string staticType) =>
+        new($"XQuery [{method}()]: The target of 'replace value of' must be a non-metadata attribute or an element with simple typed content, found '{staticType}'", 2356, 16, 1);
 
     /// <summary>
     /// Msg 9310: the <c>with</c> clause of a <c>replace value of</c> holds an
     /// XML constructor rather than a value. Probe-confirmed wording against
     /// SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException XmlDmlReplaceWithConstructedXml() =>
-        new("XQuery [modify()]: The 'with' clause of 'replace value of' cannot contain constructed XML.", 9310, 16, 1);
+    internal static SimulatedSqlException XmlDmlReplaceWithConstructedXml(string method) =>
+        new($"XQuery [{method}()]: The 'with' clause of 'replace value of' cannot contain constructed XML.", 9310, 16, 1);
 
     /// <summary>
     /// Msg 2226: the <c>insert</c> target isn't statically a single node.
     /// Probe-confirmed wording against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException XmlDmlInsertTargetNotSingleton(string staticType) =>
-        new($"XQuery [modify()]: The target of 'insert' must be a single node, found '{staticType}'", 2226, 16, 1);
+    internal static SimulatedSqlException XmlDmlInsertTargetNotSingleton(string method, string staticType) =>
+        new($"XQuery [{method}()]: The target of 'insert' must be a single node, found '{staticType}'", 2226, 16, 1);
 
     /// <summary>
     /// Msg 2240: an <c>insert … into</c> names something other than an element
     /// or the document node. Probe-confirmed wording against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException XmlDmlInsertIntoTargetKind(string staticType) =>
-        new($"XQuery [modify()]: The target of 'insert into' must be an element/document node, found '{staticType}'", 2240, 16, 1);
+    internal static SimulatedSqlException XmlDmlInsertIntoTargetKind(string method, string staticType) =>
+        new($"XQuery [{method}()]: The target of 'insert into' must be an element/document node, found '{staticType}'", 2240, 16, 1);
 
     /// <summary>
     /// Msg 2249: an <c>insert … before</c> / <c>after</c> names a node kind
     /// that has no siblings to sit among. Probe-confirmed wording against SQL
     /// Server 2025.
     /// </summary>
-    internal static SimulatedSqlException XmlDmlInsertBeforeAfterTargetKind(string staticType) =>
-        new($"XQuery [modify()]: The target of 'insert before/after' must be an element/PI/comment/text node, found '{staticType}'", 2249, 16, 1);
+    internal static SimulatedSqlException XmlDmlInsertBeforeAfterTargetKind(string method, string staticType) =>
+        new($"XQuery [{method}()]: The target of 'insert before/after' must be an element/PI/comment/text node, found '{staticType}'", 2249, 16, 1);
 
     /// <summary>
     /// Msg 2258: an attribute constructor is inserted with a positional
     /// keyword — attributes have no document order to sit in. Probe-confirmed
     /// wording against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException XmlDmlAttributeInsertHasPosition(string staticType) =>
-        new($"XQuery [modify()]: The position may not be specified when inserting an attribute node, found '{staticType}'", 2258, 16, 1);
+    internal static SimulatedSqlException XmlDmlAttributeInsertHasPosition(string method, string staticType) =>
+        new($"XQuery [{method}()]: The position may not be specified when inserting an attribute node, found '{staticType}'", 2258, 16, 1);
 
     /// <summary>
     /// Msg 2207: an <c>insert</c>'s content is an atomic value rather than a
     /// node. Probe-confirmed wording — including the sentence-final period and
     /// the double-quoted type — against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException XmlDmlOnlyNodesInsertable(string staticType) =>
-        new($"XQuery [modify()]: Only non-document nodes can be inserted. Found \"{staticType}\".", 2207, 16, 1);
+    internal static SimulatedSqlException XmlDmlOnlyNodesInsertable(string method, string staticType) =>
+        new($"XQuery [{method}()]: Only non-document nodes can be inserted. Found \"{staticType}\".", 2207, 16, 1);
 
     /// <summary>
     /// Msg 2264: a <c>delete</c> names the document node or an atomic value.
     /// Probe-confirmed wording against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException XmlDmlOnlyNodesDeletable(string staticType) =>
-        new($"XQuery [modify()]: Only non-document nodes may be deleted, found '{staticType}'", 2264, 16, 1);
+    internal static SimulatedSqlException XmlDmlOnlyNodesDeletable(string method, string staticType) =>
+        new($"XQuery [{method}()]: Only non-document nodes may be deleted, found '{staticType}'", 2264, 16, 1);
 
     /// <summary>
     /// Msg 6308: an <c>insert</c> would give an element two attributes of the
@@ -789,4 +789,73 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CouldNotFindPreparedStatement(int handle) =>
         new($"Could not find prepared statement with handle {handle}.", 8179, 16, 5);
+
+    /// <summary>
+    /// Msg 6926: an element or attribute's text isn't a valid value of the
+    /// type the schema declares for it — a facet violation and an out-of-range
+    /// value included. Real's <paramref name="location"/> is its own XPath-ish
+    /// trail: <c>/*:r[1]/*:a[1]</c> for an element, <c>/*:r[1]/@*:k</c> for an
+    /// attribute (probed against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlValidationInvalidSimpleTypeValue(string value, string location) =>
+        new($"XML Validation: Invalid simple type value: '{value}'. Location: {location}", 6926, 16, 1);
+
+    /// <summary>
+    /// Msg 6965: an element appeared where the content model expected a
+    /// different one — an undeclared child, or a declared one out of order.
+    /// Real's wording ends with a period after the location, which the rest of
+    /// the family doesn't.
+    /// </summary>
+    internal static SimulatedSqlException XmlValidationUnexpectedElement(string expected, string found, string location) =>
+        new(
+            $"XML Validation: Invalid content. Expected element(s): '{expected}'. Found: element '{found}' instead. Location: {location}.",
+            6965,
+            16,
+            1);
+
+    /// <summary>
+    /// Msg 6923: an element the content model allows, but more times than its
+    /// <c>maxOccurs</c> admits — reported against the offending occurrence's
+    /// own ordinal.
+    /// </summary>
+    internal static SimulatedSqlException XmlValidationTooManyOccurrences(string name, string location) =>
+        new($"XML Validation: Unexpected element(s): {name}. Location: {location}", 6923, 16, 1);
+
+    /// <summary>
+    /// Msg 6908: the content model still required an element when the parent
+    /// ended. Named against the parent, not the missing child.
+    /// </summary>
+    internal static SimulatedSqlException XmlValidationIncompleteContent(string expected, string location) =>
+        new($"XML Validation: Invalid content. Expected element(s): '{expected}'. Location: {location}", 6908, 16, 1);
+
+    /// <summary>Msg 6905 state 3: an attribute the element's type doesn't declare.</summary>
+    internal static SimulatedSqlException XmlValidationAttributeNotPermitted(string name, string location) =>
+        new($"XML Validation: Attribute '{name}' is not permitted in this context. Location: {location}", 6905, 16, 3);
+
+    /// <summary>Msg 6906: an attribute declared <c>use="required"</c> that the element didn't write.</summary>
+    internal static SimulatedSqlException XmlValidationRequiredAttributeMissing(string name, string location) =>
+        new($"XML Validation: Required attribute '{name}' is missing. Location: {location}", 6906, 16, 1);
+
+    /// <summary>
+    /// Msg 6913: no global element declaration matches the instance's own
+    /// element — the error a document whose root the collection never declared
+    /// takes, including one written in no namespace against a qualified schema.
+    /// A no-namespace name is reported bare, a qualified one as
+    /// <c>{uri}local</c>.
+    /// </summary>
+    internal static SimulatedSqlException XmlValidationDeclarationNotFound(string name, string location) =>
+        new($"XML Validation: Declaration not found for element '{name}'. Location: {location}", 6913, 16, 1);
+
+    /// <summary>
+    /// Msg 6909: character data inside an element whose type declares element-only
+    /// content. Real names the containing element, and the text's own position
+    /// within it doesn't change the message.
+    /// </summary>
+    internal static SimulatedSqlException XmlValidationTextNotAllowed(string location) =>
+        new(
+            "XML Validation: Text node is not allowed at this location, the type was defined with element only content or with simple content. Location: "
+                + location,
+            6909,
+            16,
+            1);
 }

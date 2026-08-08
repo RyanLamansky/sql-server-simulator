@@ -616,7 +616,7 @@ partial class Simulation
             ? rhs
             : TwoSidedExpression.FromCompoundOp(assignOp, new VariableReference(variableToken, context), rhs);
         var rhsValue = assignedExpr.Run(new RuntimeContext(NoColumnResolver, context.Batch));
-        slot.Value = Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength);
+        slot.Assign(Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength));
         return true;
     }
 
@@ -649,7 +649,7 @@ partial class Simulation
             var mutator = XmlModify.Parse(new VariableReference(variableToken, context), $"@{variableToken.Value}", method.Value, context, resolveColumnType: null);
             if (context.Batch.IsSkipping)
                 return true;
-            slot.Value = mutator.Run(new RuntimeContext(NoColumnResolver, context.Batch));
+            slot.Assign(mutator.Run(new RuntimeContext(NoColumnResolver, context.Batch)));
             context.Connection.LastStatementRowCount = 1;
             return true;
         }

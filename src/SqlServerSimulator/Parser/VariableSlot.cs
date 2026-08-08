@@ -36,4 +36,16 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     /// cardinality rules the binding narrows.
     /// </summary>
     public Schemas.XmlSchemaCollection? XmlSchemaCollection;
+
+    /// <summary>
+    /// Stores <paramref name="value"/>, validating and canonicalizing it first
+    /// when this slot carries an <c>xml(&lt;collection&gt;)</c> binding — real
+    /// does that on an assignment to a typed variable exactly as it does on a
+    /// write to a typed column, so <c>DECLARE @x xml(c) = '&lt;c&gt;1.500&lt;/c&gt;'</c>
+    /// reads back <c>&lt;c&gt;1.5&lt;/c&gt;</c> (probe-confirmed).
+    /// </summary>
+    public void Assign(SqlValue value) =>
+        this.Value = this.XmlSchemaCollection is { } collection && !value.IsNull && value.Type is XmlSqlType
+            ? SqlValue.FromXml(XmlSchemaValidation.ValidateAndNormalize(collection, value.AsString))
+            : value;
 }

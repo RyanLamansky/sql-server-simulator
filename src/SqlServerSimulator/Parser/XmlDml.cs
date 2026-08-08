@@ -323,6 +323,15 @@ internal sealed class XmlDml
     private readonly string? defaultElementNamespace;
     private readonly Dictionary<string, string> prefixes;
 
+    /// <summary>
+    /// What real writes between the brackets of this statement's own
+    /// diagnostics — the method name behind the receiver that named it, so a
+    /// column receiver's errors carry its <c>schema.table.column.</c> prefix.
+    /// Carried onto the instance because the insert path types its content at
+    /// <em>run</em> time, where the parser is long gone.
+    /// </summary>
+    private readonly string method;
+
     private XmlDml(
         XmlDmlKind kind,
         XmlDmlPath target,
@@ -331,7 +340,8 @@ internal sealed class XmlDml
         XmlQueryExpr? value,
         XmlSqlAccessorRef[] valueAccessors,
         string? defaultElementNamespace,
-        Dictionary<string, string> prefixes)
+        Dictionary<string, string> prefixes,
+        string method)
     {
         this.Kind = kind;
         this.Target = target;
@@ -341,15 +351,16 @@ internal sealed class XmlDml
         this.ValueAccessors = valueAccessors;
         this.defaultElementNamespace = defaultElementNamespace;
         this.prefixes = prefixes;
+        this.method = method;
     }
 
     /// <summary>Builds a parsed <c>delete</c>.</summary>
-    public static XmlDml CreateDelete(XmlDmlPath target, string? defaultElementNamespace, Dictionary<string, string> prefixes) =>
-        new(XmlDmlKind.Delete, target, [], XmlDmlPosition.Into, null, [], defaultElementNamespace, prefixes);
+    public static XmlDml CreateDelete(XmlDmlPath target, string? defaultElementNamespace, Dictionary<string, string> prefixes, string method) =>
+        new(XmlDmlKind.Delete, target, [], XmlDmlPosition.Into, null, [], defaultElementNamespace, prefixes, method);
 
     /// <summary>Builds a parsed <c>insert</c>.</summary>
-    public static XmlDml CreateInsert(XmlDmlPath target, XmlDmlItem[] content, XmlDmlPosition position, string? defaultElementNamespace, Dictionary<string, string> prefixes) =>
-        new(XmlDmlKind.Insert, target, content, position, null, [], defaultElementNamespace, prefixes);
+    public static XmlDml CreateInsert(XmlDmlPath target, XmlDmlItem[] content, XmlDmlPosition position, string? defaultElementNamespace, Dictionary<string, string> prefixes, string method) =>
+        new(XmlDmlKind.Insert, target, content, position, null, [], defaultElementNamespace, prefixes, method);
 
     /// <summary>Builds a parsed <c>replace value of</c>.</summary>
     public static XmlDml CreateReplaceValueOf(
@@ -357,8 +368,9 @@ internal sealed class XmlDml
         XmlQueryExpr value,
         XmlSqlAccessorRef[] valueAccessors,
         string? defaultElementNamespace,
-        Dictionary<string, string> prefixes) =>
-        new(XmlDmlKind.ReplaceValueOf, target, [], XmlDmlPosition.Into, value, valueAccessors, defaultElementNamespace, prefixes);
+        Dictionary<string, string> prefixes,
+        string method) =>
+        new(XmlDmlKind.ReplaceValueOf, target, [], XmlDmlPosition.Into, value, valueAccessors, defaultElementNamespace, prefixes, method);
 
     /// <summary>
     /// Parses one XML-DML statement, applying every check real settles at
@@ -370,10 +382,11 @@ internal sealed class XmlDml
         string xquery,
         ParserContext context,
         Func<string, SqlType>? resolveColumnType,
-        Schemas.XmlSchemaCollection? schemaCollection)
+        Schemas.XmlSchemaCollection? schemaCollection,
+        string method)
     {
         var (defaultNamespace, prefixes, body) = XmlQueryEngine.ParsePrologAndBody(xquery);
-        return new XmlDmlParser(body, defaultNamespace, prefixes, context, resolveColumnType, schemaCollection).ParseStatement();
+        return new XmlDmlParser(body, defaultNamespace, prefixes, context, resolveColumnType, schemaCollection, method).ParseStatement();
     }
 
     /// <summary>
@@ -697,7 +710,7 @@ internal sealed class XmlDml
                 if (value.IsNull)
                     break;
                 if (value.Type is not XmlSqlType)
-                    throw SimulatedSqlException.XmlDmlOnlyNodesInsertable(XQueryTypeName(value.Type, isLiteral: false));
+                    throw SimulatedSqlException.XmlDmlOnlyNodesInsertable(this.method, XQueryTypeName(value.Type, isLiteral: false));
                 // A stored value is already-serialized XML, so it brings its own
                 // namespace scope rather than the prolog's.
                 AppendFragment(nodes, value.AsString, prologScope: null);

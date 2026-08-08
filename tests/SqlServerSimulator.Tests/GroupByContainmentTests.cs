@@ -73,6 +73,33 @@ public sealed class GroupByContainmentTests
     public void SchemaQualifiedSource_MessageKeepsTheSchema()
         => Rejects("select a, b from dbo.t group by a", 8120, "'dbo.t.b'");
 
+    /// <summary>
+    /// A view is named the same way a table is — as the FROM clause wrote it,
+    /// with any alias ignored (probed 2026-08-08).
+    /// </summary>
+    [TestMethod]
+    public void ViewSource_MessageNamesTheViewAsWritten()
+    {
+        // CREATE VIEW must open its own batch, so the shared setup can't carry it.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(Setup);
+        _ = sim.ExecuteNonQuery("create view dbo.v as select a, b from t");
+        foreach (var select in new[] { "select a, b from dbo.v group by a", "select x.a, x.b from dbo.v as x group by x.a" })
+            Assert.Contains("'dbo.v.b'", sim.AssertSqlError(select, 8120).Message);
+    }
+
+    /// <summary>
+    /// A CTE has a name of its own, so it reports that rather than the alias
+    /// the reference gave it — unlike a derived table, which has only the
+    /// alias (probed 2026-08-08).
+    /// </summary>
+    [TestMethod]
+    public void CteSource_MessageNamesTheCte_NotTheAlias()
+    {
+        Rejects("with c as (select a, b from t) select a, b from c group by a", 8120, "'c.b'");
+        Rejects("with c as (select a, b from t) select q.a, q.b from c as q group by q.a", 8120, "'c.b'");
+    }
+
     // --- Licensed shapes: must NOT be flagged (false-positive guards) ---
 
     [TestMethod]
