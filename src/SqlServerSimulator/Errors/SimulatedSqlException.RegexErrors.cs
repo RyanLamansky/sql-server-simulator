@@ -2,13 +2,15 @@ using SqlServerSimulator.Parser.Expressions;
 
 namespace SqlServerSimulator;
 
-/// <summary>
-/// Factories for the <c>REGEXP_*</c> family's own 193xx diagnostics. All
-/// probe-confirmed against SQL Server 2025 (17.0.4065.4), including the state
-/// values — real shifts a pattern error's state between the scalar / predicate
-/// members and the two rowset members, and gives each
-/// (function, numeric argument) pair its own state under Msg 19301.
-/// </summary>
+// Factories for the REGEXP_* family's own 193xx diagnostics. All
+// probe-confirmed against SQL Server 2025 (17.0.4065.4), including the state
+// values — real shifts a pattern error's state between the scalar / predicate
+// members and the two rowset members, and gives each (function, numeric
+// argument) pair its own state under Msg 19301.
+//
+// A plain comment rather than a doc comment: this type is public, and the
+// compiler concatenates every partial's <summary> into the one the consumer
+// reads in IntelliSense.
 partial class SimulatedSqlException
 {
     /// <summary>

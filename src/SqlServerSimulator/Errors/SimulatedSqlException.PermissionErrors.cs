@@ -1,11 +1,13 @@
 namespace SqlServerSimulator;
 
-/// <summary>
-/// Permission-enforcement error factories (Msg 229 / 262 / 1088 / 4606 /
-/// 4611). The 15151 object-variant and the impersonation errors (15517 /
-/// 15406) live in <c>SimulatedSqlException.SchemaErrors.cs</c> alongside the
-/// principal-resolution factories.
-/// </summary>
+// Permission-enforcement error factories (Msg 229 / 262 / 1088 / 4606 / 4611).
+// The 15151 object-variant and the impersonation errors (15517 / 15406) live
+// in SimulatedSqlException.SchemaErrors.cs alongside the principal-resolution
+// factories.
+//
+// A plain comment rather than a doc comment: this type is public, and the
+// compiler concatenates every partial's <summary> into the one the consumer
+// reads in IntelliSense.
 public sealed partial class SimulatedSqlException
 {
     /// <summary>

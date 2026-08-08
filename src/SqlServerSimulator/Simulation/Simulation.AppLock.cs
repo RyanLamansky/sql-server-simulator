@@ -4,18 +4,18 @@ using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
-/// <summary>
-/// <c>sp_getapplock</c> / <c>sp_releaseapplock</c>: cooperative
-/// application locks over the shared <see cref="Storage.LockManager"/>.
-/// One <see cref="LockResource"/> per (database-principal, resource name)
-/// keeps conflict semantics unified across the two owner kinds; per-owner
-/// ledgers (<c>SimulatedDbConnection.SessionAppLocks</c> /
-/// <c>SimulatedDbTransaction.TransactionAppLocks</c>) carry the identity
-/// the owner-scoped views need. Every behavior here — return codes vs
-/// raised errors, reference counting, name truncation, lifecycle — is
-/// probe-confirmed against SQL Server 2025; the deep-dive lives in
-/// <c>docs/claude/app-locks.md</c>.
-/// </summary>
+// sp_getapplock / sp_releaseapplock: cooperative application locks over the
+// shared LockManager. One LockResource per (database-principal, resource name)
+// keeps conflict semantics unified across the two owner kinds; per-owner
+// ledgers (SimulatedDbConnection.SessionAppLocks /
+// SimulatedDbTransaction.TransactionAppLocks) carry the identity the
+// owner-scoped views need. Every behavior here — return codes vs raised
+// errors, reference counting, name truncation, lifecycle — is probe-confirmed
+// against SQL Server 2025; the deep-dive lives in docs/claude/app-locks.md.
+//
+// A plain comment rather than a doc comment: this type is public, and the
+// compiler concatenates every partial's <summary> into the one the consumer
+// reads in IntelliSense.
 public partial class Simulation
 {
     /// <summary>

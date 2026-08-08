@@ -256,7 +256,10 @@ Field rosters live in the source XML docs; this captures only identity + load-be
   Never split inside code fences, tables, headings, or link/inline-code spans; abbreviations (`e.g.`, `i.e.`, `vs.`) and dotted values (`17.0.4065.4`, `sys.tables`) are not sentence ends.
 - **No temporal words in code comments** — "currently", "now", "yet", "new" age badly.
 - **Fields over auto-properties on non-public types** (SSS001 generalized).
-- **No internal `<see cref>` in public-API XML docs** — a cref to an internal type dangles in consumer IntelliSense and implies stability for a name we're free to rename; state the contract in prose (`"an unrecognized collation name raises ArgumentException"`, not a cref to internal `Collation.IsRecognized`).
+- **The XML docs on the public surface are consumer-facing output, and `QualityTests` fails the build over two ways they rot.**
+  A cref to an internal name (`PublicApiDocsAvoidInternalCrefs`) dangles in consumer IntelliSense and implies stability for a name we're free to rename; state the contract in prose (`"an unrecognized collation name raises ArgumentException"`, not a cref to internal `Collation.IsRecognized`).
+  Watch the shadowing case the test also catches: inside `SimulatedDbConnection`, `cref="Simulation"` binds to that type's own internal field until it's written namespace-qualified.
+  A `///` comment on a *partial* declaration of a public type (`PublicTypeDocsHaveOneSummary`) is concatenated into the one summary a consumer reads — a note about what a partial file holds is a `//` comment.
 - **No conversation-scratch framing in code/docs/commits** — "Camp A/B", "this bundle", "Stage 1/2", "as we discussed" mean nothing to a future reader; describe behavior/motivation absolutely, cross-reference a sibling by the behavior it names, not the work-stage.
 - **Gap vocabulary: a gap is "not built yet", never "out of scope".**
   `deliberate` / `intentional` may describe *how shipped behavior works* — an approximation, shortcut, or divergence chosen on purpose — but never *whether a gap closes*; attach those words to a shape, not to an absence.

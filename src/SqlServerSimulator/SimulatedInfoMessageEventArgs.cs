@@ -11,8 +11,8 @@ namespace SqlServerSimulator;
 /// <remarks>
 /// Probe-confirmed batch-coalescing semantic (multiple <c>PRINT</c> /
 /// informational <c>RAISERROR</c> statements in one command join their
-/// payloads with <c>\n</c> into a single event firing) is implemented in
-/// <see cref="Parser.BatchContext"/>; this type only describes the delivered
+/// payloads with <c>\n</c> into a single event firing) is implemented where
+/// the command's batch is executed; this type only describes the delivered
 /// payload.
 /// </remarks>
 public sealed class SimulatedInfoMessageEventArgs : EventArgs

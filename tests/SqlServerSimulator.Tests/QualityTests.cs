@@ -1,6 +1,6 @@
 using System.Reflection;
 using System.Text.RegularExpressions;
-using SqlServerSimulator.Storage.Bacpac;
+using System.Xml.Linq;
 
 namespace SqlServerSimulator;
 
@@ -211,6 +211,15 @@ public partial class QualityTests
         foreach (var type in publicTypes)
             Assert.Contains(type, allowedMembers.Keys);
 
+        // One namespace is the whole contract, so `using SqlServerSimulator;`
+        // reaches everything and no consumer is sent into a namespace named
+        // after an implementation layer. The bacpac trio shipped in
+        // SqlServerSimulator.Storage.Bacpac through 1.0.0 and moved here for
+        // 2.0.0 — a nested namespace can't be refactored afterward without
+        // breaking consumers, which is the cost this pins.
+        foreach (var type in publicTypes)
+            Assert.AreEqual(nameof(SqlServerSimulator), type.Namespace, $"{type.Name} is public outside the root namespace.");
+
         foreach (var (type, allowedNames) in allowedMembers)
         {
             var memberNames = type
@@ -226,6 +235,157 @@ public partial class QualityTests
                 Assert.Contains(name, allowedNames, $"Unexpected public member '{name}' on {type.FullName}");
         }
     }
+
+    /// <summary>
+    /// A public type's documentation must carry exactly one <c>summary</c> and
+    /// at most one <c>remarks</c>.
+    /// </summary>
+    /// <remarks>
+    /// The compiler concatenates the doc comment of <em>every</em> partial
+    /// declaration into the single entry a consumer reads in IntelliSense, in
+    /// compilation order — so a note describing one partial file's contents,
+    /// written as <c>///</c> on the type it happens to sit above, silently
+    /// prepends itself to the type's summary and can outrank the sentence
+    /// saying what the type is. It shipped that way once: the summary of
+    /// <see cref="Simulation"/> opened on application-lock internals. A note
+    /// about a file's contents is a <c>//</c> comment.
+    /// </remarks>
+    [TestMethod]
+    [Description("Keeps a partial file's own notes out of the type summary consumers read.")]
+    public void PublicTypeDocsHaveOneSummary()
+    {
+        var documented = PublicApiDocumentation();
+        Assert.IsGreaterThan(20, documented.Count, "Documentation extraction found implausibly few public entries.");
+
+        var concatenated = documented
+            .Where(entry => entry.Key[0] == 'T')
+            .Where(entry => entry.Value.Elements("summary").Count() != 1 || entry.Value.Elements("remarks").Count() > 1)
+            .Select(entry => $"{entry.Key[2..]}: {entry.Value.Elements("summary").Count()} summaries, "
+                + $"{entry.Value.Elements("remarks").Count()} remarks")
+            .Order()
+            .ToArray();
+
+        Assert.IsEmpty(
+            concatenated,
+            "Public types whose documentation is the concatenation of several partials' doc comments. "
+            + $"Demote all but the canonical file's to a // comment.{Environment.NewLine}"
+            + string.Join(Environment.NewLine, concatenated));
+    }
+
+    /// <summary>
+    /// No <c>see cref</c> in a public member's documentation may point at a
+    /// non-public one.
+    /// </summary>
+    /// <remarks>
+    /// Such a cref dangles in consumer IntelliSense and implies stability for a
+    /// name we're free to rename; state the contract in prose instead. The
+    /// compiler's own CS1574 can't see this — the target resolves fine, it's
+    /// just invisible outside the assembly. Watch for the shadowing case, where
+    /// the cref reads like a public type but binds to a same-named member of
+    /// the enclosing type: <c>cref="Simulation"</c> inside
+    /// <see cref="SimulatedDbConnection"/> is its internal field until it's
+    /// written namespace-qualified.
+    /// </remarks>
+    [TestMethod]
+    [Description("Keeps internal names out of the documentation consumers read.")]
+    public void PublicApiDocsAvoidInternalCrefs()
+    {
+        var visible = PublicApiNames();
+        Assert.IsGreaterThan(100, visible.Count, "Public-surface enumeration found implausibly few names.");
+
+        var dangling = PublicApiDocumentation()
+            .SelectMany(entry => entry.Value
+                .Descendants()
+                .Select(element => (string?)element.Attribute("cref"))
+                .Where(cref => cref is not null)
+                .Select(cref => (Cref: cref!, Target: DocumentationTarget(cref!)))
+                .Where(cref => cref.Target.StartsWith("SqlServerSimulator", StringComparison.Ordinal)
+                    && !visible.Contains(cref.Target))
+                .Select(cref => $"{entry.Key[2..]} -> {cref.Cref}"))
+            .Distinct()
+            .Order()
+            .ToArray();
+
+        Assert.IsEmpty(
+            dangling,
+            "Public-API documentation naming internals. Replace the cref with prose, or namespace-qualify "
+            + $"one that a same-named member of the enclosing type is shadowing.{Environment.NewLine}"
+            + string.Join(Environment.NewLine, dangling));
+    }
+
+    /// <summary>
+    /// The documentation entries belonging to the public surface, keyed by
+    /// their documentation id. The generated XML carries every documented
+    /// member whatever its accessibility, so the internal ones are dropped
+    /// here — the rules above are about what a consumer sees.
+    /// </summary>
+    private static Dictionary<string, XElement> PublicApiDocumentation()
+    {
+        var xml = Path.ChangeExtension(typeof(Simulation).Assembly.Location, ".xml");
+        Assert.IsTrue(File.Exists(xml), $"No documentation file at {xml}; GenerateDocumentationFile may be off.");
+
+        var visible = PublicApiNames();
+        return XDocument
+            .Load(xml)
+            .Descendants("member")
+            .Select(member => (Id: (string)member.Attribute("name")!, Element: member))
+            .Where(entry => visible.Contains(DocumentationTarget(entry.Id)))
+            .ToDictionary(entry => entry.Id, entry => entry.Element, StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// Every public type's full name, plus <c>Type.Member</c> for each member
+    /// of one a consumer can reach — which is what a documentation id reduces
+    /// to once <see cref="DocumentationTarget"/> has taken the signature off.
+    /// Protected members count: a consumer can't derive from these sealed
+    /// types, but the accessibility is public-surface metadata either way.
+    /// </summary>
+    private static HashSet<string> PublicApiNames()
+    {
+        HashSet<string> names = new(StringComparer.Ordinal);
+        foreach (var type in typeof(Simulation).Assembly.GetTypes().Where(type => type.IsPublic))
+        {
+            _ = names.Add(type.FullName!);
+            foreach (var member in type.GetMembers(BindingFlags.Public | BindingFlags.NonPublic
+                | BindingFlags.Instance | BindingFlags.Static | BindingFlags.FlattenHierarchy))
+            {
+                if (IsConsumerVisible(member))
+                    _ = names.Add($"{type.FullName}.{(member is ConstructorInfo ? "#ctor" : member.Name)}");
+            }
+        }
+
+        return names;
+    }
+
+    private static bool IsConsumerVisible(MemberInfo member) => member switch
+    {
+        FieldInfo field => field.IsPublic || field.IsFamily,
+        MethodBase method => method.IsPublic || method.IsFamily,
+        PropertyInfo property => property.GetAccessors(nonPublic: true).Any(IsConsumerVisible),
+        EventInfo @event => @event.GetAddMethod(nonPublic: true) is { } add && IsConsumerVisible(add),
+        Type nested => nested.IsNestedPublic || nested.IsNestedFamily,
+        _ => false,
+    };
+
+    /// <summary>
+    /// Reduces a documentation id — <c>M:Ns.Type.Method(System.Int32)</c> — to
+    /// the <c>Ns.Type.Method</c> that <see cref="PublicApiNames"/> is keyed by,
+    /// dropping the one-letter kind prefix, the parameter list, a conversion
+    /// operator's trailing return type and any generic arity.
+    /// </summary>
+    private static string DocumentationTarget(string documentationId)
+    {
+        var target = documentationId.Length > 2 && documentationId[1] == ':' ? documentationId[2..] : documentationId;
+        var parameters = target.IndexOf('(', StringComparison.Ordinal);
+        if (parameters >= 0)
+            target = target[..parameters];
+
+        return DocumentationAritySuffix.Replace(target, "");
+    }
+
+    /// <summary>The <c>`1</c> / <c>``1</c> a generic type or method carries in a documentation id.</summary>
+    [GeneratedRegex(@"``?\d+")]
+    private static partial Regex DocumentationAritySuffix { get; }
 
     /// <summary>
     /// Every SQL Server message number a Markdown file cites must be one the

@@ -1,4 +1,4 @@
-namespace SqlServerSimulator.Storage.Bacpac;
+namespace SqlServerSimulator;
 
 /// <summary>
 /// Options passed to <see cref="Simulation.ImportBacpac(string, out BacpacImportResult, BacpacImportOptions?)"/>
@@ -21,7 +21,7 @@ public sealed record class BacpacImportOptions
     /// name for the stream-based overloads.
     /// </summary>
     /// <remarks>
-    /// The import always creates a fresh <see cref="Database"/>; a name that
+    /// The import always creates a fresh database; a name that
     /// already exists in <see cref="Simulation"/> raises
     /// <see cref="InvalidOperationException"/> (matches DACFx's create-only
     /// import contract).

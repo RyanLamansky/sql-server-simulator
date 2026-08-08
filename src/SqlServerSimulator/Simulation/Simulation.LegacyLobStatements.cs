@@ -5,23 +5,22 @@ using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
-/// <summary>
-/// The legacy text-pointer statements — <c>READTEXT</c>, <c>WRITETEXT</c> and
-/// <c>UPDATETEXT</c> — over a <c>text</c> / <c>ntext</c> / <c>image</c> column,
-/// addressed by the pointer <c>TEXTPTR</c> hands out (see
-/// <see cref="LegacyTextPointer"/> for the encoding and how a row is found from
-/// it). Grammar, units and every diagnostic are probe-confirmed against SQL
-/// Server 2025.
-/// </summary>
-/// <remarks>
-/// Offsets and sizes count <b>bytes</b> for <c>text</c> and <c>image</c> and
-/// <b>characters</b> for <c>ntext</c>. The three statements are not DML as far
-/// as the rest of the engine is concerned: no trigger fires (probe-confirmed
-/// against an AFTER UPDATE trigger, which stays silent for both writing forms),
-/// no <c>rowversion</c> column advances, <c>WRITETEXT</c> reports
-/// <c>@@ROWCOUNT</c> 0 and <c>UPDATETEXT</c> reports 1, and <c>READTEXT</c>
-/// returns one row of one column named after the column it read.
-/// </remarks>
+// The legacy text-pointer statements — READTEXT, WRITETEXT and UPDATETEXT —
+// over a text / ntext / image column, addressed by the pointer TEXTPTR hands
+// out (see LegacyTextPointer for the encoding and how a row is found from it).
+// Grammar, units and every diagnostic are probe-confirmed against SQL Server
+// 2025.
+//
+// Offsets and sizes count bytes for text and image and characters for ntext.
+// The three statements are not DML as far as the rest of the engine is
+// concerned: no trigger fires (probe-confirmed against an AFTER UPDATE
+// trigger, which stays silent for both writing forms), no rowversion column
+// advances, WRITETEXT reports @@ROWCOUNT 0 and UPDATETEXT reports 1, and
+// READTEXT returns one row of one column named after the column it read.
+//
+// A plain comment rather than a doc comment: this type is public, and the
+// compiler concatenates every partial's <summary> into the one the consumer
+// reads in IntelliSense.
 partial class Simulation
 {
     /// <summary>

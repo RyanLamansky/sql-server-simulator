@@ -134,7 +134,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// <summary>
     /// Materializes the column's bytes and copies the requested window into
     /// the caller's buffer. Real SqlClient streams from off-row pages;
-    /// the simulator decodes the column once via <see cref="RowDecoder"/>
+    /// the simulator decodes the whole column once
     /// and slices, so behavior matches per-call but the streaming-memory
     /// guarantee doesn't. Honors SqlClient's <c>buffer == null</c> contract:
     /// returns the total length without copying so callers can size their

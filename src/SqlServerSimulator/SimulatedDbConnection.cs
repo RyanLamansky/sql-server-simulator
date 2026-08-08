@@ -7,8 +7,10 @@ using SqlServerSimulator.Storage;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// ADO.NET <see cref="DbConnection"/> against a <see cref="Simulation"/>.
-/// Obtain via <see cref="Simulation.CreateDbConnection"/>; constructor is
+/// ADO.NET <see cref="DbConnection"/> against a
+/// <see cref="SqlServerSimulator.Simulation"/> — qualified because this type
+/// carries a field of that name, which an unqualified reference binds to
+/// instead. Obtain via <see cref="Simulation.CreateDbConnection"/>; constructor is
 /// internal (apps shouldn't materialize the connection without a backing
 /// simulation). The class is public so consumers can cast a base-typed
 /// <see cref="DbConnection"/> down to subscribe to
@@ -899,7 +901,7 @@ public sealed class SimulatedDbConnection : DbConnection
     public override ConnectionState State => this.state;
 
     /// <summary>
-    /// Switches <see cref="CurrentDatabase"/> to the named database, the
+    /// Switches the session's current database to the named one, the
     /// ADO.NET equivalent of issuing <c>USE &lt;db&gt;</c> on this connection.
     /// A missing database raises Msg 911 (the same error the <c>USE</c> path
     /// reports); a null/empty/whitespace name raises <see cref="ArgumentException"/>,

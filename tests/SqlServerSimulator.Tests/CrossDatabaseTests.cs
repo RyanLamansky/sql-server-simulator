@@ -1,5 +1,4 @@
 using SqlServerSimulator.Bacpac;
-using SqlServerSimulator.Storage.Bacpac;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;

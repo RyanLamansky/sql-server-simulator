@@ -133,10 +133,11 @@ public sealed class SimulatedDbCommand : DbCommand
     /// reader then drains already-materialized rows) — matching SqlClient's
     /// no-op when called with nothing to cancel. A <c>Cancel</c> with no
     /// live execution is a no-op.
-    /// <para>A cancel that <em>did</em> abort an execution surfaces as
-    /// <see cref="SimulatedSqlException.CommandCancelled"/> (Msg 0) out of the
-    /// execute call, mirroring SqlClient rather than returning a truncated
-    /// result as a successful one.</para>
+    /// <para>A cancel that <em>did</em> abort an execution surfaces as a
+    /// <see cref="SimulatedSqlException"/> out of the execute call, carrying
+    /// the Msg 0 severe-error wording real SqlClient reports for a cancelled
+    /// command rather than returning a truncated result as a successful
+    /// one.</para>
     /// </summary>
     public override void Cancel() => this.Connection?.CancelExecution();
 

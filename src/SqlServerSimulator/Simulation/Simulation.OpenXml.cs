@@ -4,12 +4,13 @@ using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
-/// <summary>
-/// <c>sp_xml_preparedocument</c> / <c>sp_xml_removedocument</c>: the session's
-/// prepared-document store, which <c>OPENXML</c> reads. Behavior is
-/// probe-confirmed against SQL Server 2025; the deep-dive is in
-/// <c>docs/claude/xml.md</c>.
-/// </summary>
+// sp_xml_preparedocument / sp_xml_removedocument: the session's
+// prepared-document store, which OPENXML reads. Behavior is probe-confirmed
+// against SQL Server 2025; the deep-dive is in docs/claude/xml.md.
+//
+// A plain comment rather than a doc comment: this type is public, and the
+// compiler concatenates every partial's <summary> into the one the consumer
+// reads in IntelliSense.
 public partial class Simulation
 {
     /// <summary>

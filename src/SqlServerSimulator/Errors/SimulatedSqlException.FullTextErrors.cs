@@ -1,10 +1,12 @@
 namespace SqlServerSimulator;
 
-/// <summary>
-/// Factories for the full-text query pipeline's diagnostics — Msg 7601 /
-/// 7630 / 7645. Numbers, severities, states and wording are probe-confirmed
-/// against SQL Server 2025 (17.0.4065.4) with Full-Text Search installed.
-/// </summary>
+// Factories for the full-text query pipeline's diagnostics — Msg 7601 / 7630 /
+// 7645. Numbers, severities, states and wording are probe-confirmed against
+// SQL Server 2025 (17.0.4065.4) with Full-Text Search installed.
+//
+// A plain comment rather than a doc comment: this type is public, and the
+// compiler concatenates every partial's <summary> into the one the consumer
+// reads in IntelliSense.
 partial class SimulatedSqlException
 {
     /// <summary>

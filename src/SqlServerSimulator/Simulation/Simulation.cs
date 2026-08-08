@@ -364,7 +364,7 @@ public sealed partial class Simulation
 
     /// <summary>
     /// Server-wide default collation name. Used as the seed for every
-    /// <see cref="Database"/> created on this simulation — both the lazy
+    /// database created on this simulation — both the lazy
     /// <c>"simulated"</c> seed picked up on first
     /// <see cref="CreateDbConnection"/> and bacpac imports that don't carry
     /// their own collation declaration. Defaults to
@@ -378,7 +378,7 @@ public sealed partial class Simulation
     /// API — set it in an object initializer
     /// (<c>new Simulation { ServerCollationName = "…" }</c>) before the
     /// first <see cref="CreateDbConnection"/> /
-    /// <see cref="ImportBacpac(Stream, out Storage.Bacpac.BacpacImportResult, Storage.Bacpac.BacpacImportOptions?)"/>.
+    /// <see cref="ImportBacpac(Stream, out BacpacImportResult, BacpacImportOptions?)"/>.
     /// Per-database divergence after construction goes through
     /// <c>ALTER DATABASE COLLATE</c>, which only affects the targeted
     /// database. An unrecognized collation name raises
@@ -413,7 +413,7 @@ public sealed partial class Simulation
     /// Resolved <see cref="Collation"/> backing <see cref="ServerCollationName"/>.
     /// Internal accessor used by <see cref="Database"/> seeding paths
     /// (<c>SimulatedDbConnection.ResolveInitialDatabase</c>,
-    /// <see cref="ImportBacpac(Stream, out Storage.Bacpac.BacpacImportResult, Storage.Bacpac.BacpacImportOptions?)"/>);
+    /// <see cref="ImportBacpac(Stream, out BacpacImportResult, BacpacImportOptions?)"/>);
     /// public callers go through the string-typed property to keep
     /// <see cref="Collation"/> off the public API surface.
     /// </summary>
@@ -427,7 +427,7 @@ public sealed partial class Simulation
     /// <see cref="DefaultDatabaseName"/> on first connection to a Simulation
     /// that has no user database (so the all-T-SQL use case keeps working
     /// without an explicit import / CREATE DATABASE).
-    /// <see cref="ImportBacpac(Stream, out Storage.Bacpac.BacpacImportResult, Storage.Bacpac.BacpacImportOptions?)"/>
+    /// <see cref="ImportBacpac(Stream, out BacpacImportResult, BacpacImportOptions?)"/>
     /// adds further entries; <c>USE &lt;db&gt;</c> switches a session's
     /// <see cref="SimulatedDbConnection.CurrentDatabase"/> across entries
     /// (Msg 911 on miss). Fresh connections pick the lazy seed when present,

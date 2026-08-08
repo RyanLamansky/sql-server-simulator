@@ -39,14 +39,19 @@ See [`docs/claude/schemas.md`](schemas.md) for the full multi-database resolutio
 Per-element exceptions land on `Skipped` with a `"Load failed: …"` prefix and the load continues; the entire load doesn't abort because one constraint / view / proc fails.
 Deferred-computed-column failures (phase 8, for the rare UDF-forward-ref table) use a `"Deferred: …"` prefix instead, so the `Load_AW_No_Per_Element_Failures` guard test stays meaningful — it would otherwise spuriously fire on known unmodeled-function gaps.
 
-## Code layout — `src/SqlServerSimulator/Storage/Bacpac/`
+## Code layout
+
+The loader is internal and lives in `src/SqlServerSimulator/Storage/Bacpac/`:
 
 - **`BacpacReader.cs`** — OPC zip walker, dispatches to model + data readers
 - **`ModelXmlReader.cs`** — `model.xml` → DDL emitter (the 9-phase dispatcher)
 - **`BcpRowReader.cs`** — `*.BCP` → row decoder (the wire-format matrix below)
-- **`BacpacImportResult.cs`** — diagnostics carrier
-- **`BacpacImportOptions.cs`** — target-database-name + parallelism options
 - **`Spatial/SpatialBinaryCodec.cs`** — see [`spatial.md`](spatial.md)
+
+The two public types sit at the project root in namespace `SqlServerSimulator`, beside the rest of the public surface rather than in the layer that happens to consume them:
+
+- **`BacpacImportResult.cs`** — diagnostics carrier, plus `BacpacSkipped`
+- **`BacpacImportOptions.cs`** — target-database-name + parallelism options
 
 ## Model.xml — 9-phase dispatcher
 

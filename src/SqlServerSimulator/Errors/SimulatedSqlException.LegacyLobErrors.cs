@@ -1,10 +1,12 @@
 namespace SqlServerSimulator;
 
-/// <summary>
-/// Diagnostics of the legacy text-pointer statements — <c>READTEXT</c>,
-/// <c>WRITETEXT</c> and <c>UPDATETEXT</c> — every one probe-confirmed against
-/// SQL Server 2025 for message text, class and state.
-/// </summary>
+// Diagnostics of the legacy text-pointer statements — READTEXT, WRITETEXT and
+// UPDATETEXT — every one probe-confirmed against SQL Server 2025 for message
+// text, class and state.
+//
+// A plain comment rather than a doc comment: this type is public, and the
+// compiler concatenates every partial's <summary> into the one the consumer
+// reads in IntelliSense.
 partial class SimulatedSqlException
 {
     /// <summary>

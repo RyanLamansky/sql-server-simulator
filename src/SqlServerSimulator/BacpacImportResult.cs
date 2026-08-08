@@ -1,4 +1,6 @@
-namespace SqlServerSimulator.Storage.Bacpac;
+using SqlServerSimulator.Storage.Bacpac;
+
+namespace SqlServerSimulator;
 
 /// <summary>
 /// Diagnostics carrier returned from <see cref="Simulation.ImportBacpac(string, out BacpacImportResult, BacpacImportOptions?)"/>

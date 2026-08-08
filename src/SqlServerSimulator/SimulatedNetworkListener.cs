@@ -9,12 +9,17 @@ namespace SqlServerSimulator;
 /// A TCP endpoint speaking the SQL Server wire protocol (TDS), letting
 /// unmodified SQL Server clients connect to a simulation with only a
 /// connection-string change. Created by the listen methods on the simulation
-/// type; accepts loopback connections only. The endpoint presents the TLS
-/// certificate supplied through the listen options, or a self-signed one
-/// shared by every listener in the process when none was supplied — the
-/// latter requires clients to connect with
-/// <c>TrustServerCertificate=true</c>. Credentials are accepted without
-/// validation.
+/// type, which decide what it binds: the loopback interfaces for
+/// <see cref="Simulation.ListenLocalAsync(int, CancellationToken)"/>, every
+/// interface for
+/// <see cref="Simulation.ListenNetworkAsync(int, CancellationToken)"/>. The
+/// endpoint presents the TLS certificate supplied through the listen options,
+/// or a self-signed one shared by every listener in the process when none was
+/// supplied — the latter requires clients to connect with
+/// <c>TrustServerCertificate=true</c>. A login is checked against those
+/// registered by <c>CREATE LOGIN</c>; while none are registered any
+/// credentials are accepted, which the network-binding method refuses to
+/// start under.
 /// </summary>
 /// <remarks>
 /// Disposal is immediate and waits for nothing: the listening sockets close,

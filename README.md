@@ -78,6 +78,27 @@ SQL Server Management Studio connects and browses: Object Explorer, the query ed
 By default any credentials are accepted; run `CREATE LOGIN` to switch the endpoint to enforced authentication.
 For clients on other machines, `ListenNetworkAsync` binds all interfaces — it requires at least one registered login up front, so an open endpoint can never face a network.
 
+## BACPAC import
+
+A simulation can be seeded from a `.bacpac`, the schema-and-data archive SSMS writes under **Tasks → Export Data-tier Application**, and `sqlpackage /Action:Export` produces from the command line.
+It's the quick way to point a test suite at the shape of a real database instead of maintaining a creation script that might drift from it:
+
+```C#
+var simulation = new Simulation();
+
+// Without options, the database takes its name from the file.
+simulation.ImportBacpac("prod-export.bacpac", out var result, new() { DatabaseName = "Northwind" });
+
+// Elements the simulator doesn't model end-to-end are reported rather than thrown.
+// A single gap can't stop the rest of the database from loading.
+foreach (var skipped in result.Skipped)
+    Console.WriteLine($"{skipped.ElementType} {skipped.ElementName}: {skipped.Reason}");
+```
+
+That reporting is worth wiring up: `Skipped` names what the loader couldn't translate at all, `Warnings` what it accepted with reduced fidelity, and together they're a feature-gap report.
+Import is create-only, so a database name already present in the simulation raises `InvalidOperationException`.
+A `Stream` overload covers bacpacs that don't come from a file path.
+
 ## Fidelity
 
 Behavior was probed against a live SQL Server reference instance before being modeled.

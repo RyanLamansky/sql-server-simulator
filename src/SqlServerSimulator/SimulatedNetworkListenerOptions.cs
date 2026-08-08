@@ -42,8 +42,11 @@ public sealed class SimulatedNetworkListenerOptions
     /// can serve many listeners: created once at suite setup and, for
     /// <c>Encrypt=Strict</c> clients, exported once to a file that connection
     /// strings pin via the <c>ServerCertificate</c> keyword. Null (the
-    /// default) generates an ephemeral self-signed certificate that lives and
-    /// dies with the listener.
+    /// default) presents a self-signed certificate generated on first use and
+    /// shared by every listener in the process that supplied none — generating
+    /// one costs an RSA key pair, far more than standing up the listener
+    /// around it, so a suite with a listener per test would otherwise pay that
+    /// price per case.
     /// </summary>
     public X509Certificate2? ServerCertificate { get; init; }
 }
