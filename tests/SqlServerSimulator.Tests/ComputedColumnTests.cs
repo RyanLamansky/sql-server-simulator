@@ -447,7 +447,8 @@ public sealed class ComputedColumnTests
     /// on it, which is what WideWorldImporters' <c>Warehouse.StockItems</c>
     /// (a <c>CONCAT</c> computed column against a NOT NULL history column)
     /// turns on. The table carries <c>a int NOT NULL</c>, <c>b int NULL</c>,
-    /// <c>s nvarchar(10) NOT NULL</c> and <c>u nvarchar(10) NULL</c>.
+    /// <c>s nvarchar(10) NOT NULL</c>, <c>u nvarchar(10) NULL</c> and
+    /// <c>f float NOT NULL</c>.
     /// </summary>
     [TestMethod]
     [DataRow("a", false)]
@@ -465,11 +466,18 @@ public sealed class ComputedColumnTests
     [DataRow("concat(s, u)", false)]
     [DataRow("abs(a)", true)]
     [DataRow("a * 2", true)]
+    // Approximate arithmetic is the one NOT NULL arithmetic shape, and it
+    // reaches a computed column through the same inference — see
+    // ResultNullabilityTests for the operand-conversion table behind it.
+    [DataRow("f * 2", false)]
+    [DataRow("f + f", false)]
+    [DataRow("f * a", false)]
+    [DataRow("f * b", true)]
     public void ComputedColumn_NullabilityFollowsTheExpression(string expression, bool expectedNullable)
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery(
-            $"create table t (a int not null, b int null, s nvarchar(10) not null, u nvarchar(10) null, cc as {expression})");
+            $"create table t (a int not null, b int null, s nvarchar(10) not null, u nvarchar(10) null, f float not null, cc as {expression})");
         Assert.AreEqual(expectedNullable, (bool)sim.ExecuteScalar("select is_nullable from sys.columns where object_id = object_id('t') and name = 'cc'")!);
     }
 

@@ -156,7 +156,7 @@ public sealed class ResultNullabilityTests
     // --- Operators ---
 
     [TestMethod]
-    // Arithmetic claims nullable however non-null the operands are.
+    // Exact-numeric arithmetic claims nullable however non-null the operands are.
     [DataRow("1 + 1", true)]
     [DataRow("nn + nn", true)]
     [DataRow("mnn + mnn", true)]
@@ -164,6 +164,37 @@ public sealed class ResultNullabilityTests
     [DataRow("nn - nn", true)]
     [DataRow("nn / nn", true)]
     [DataRow("nn % nn", true)]
+    // An *approximate* result is the one exception: NOT NULL when both operands
+    // are and each reaches the result type losing nothing. (`%` isn't here —
+    // real refuses modulo over float outright.)
+    [DataRow("fnn + fnn", false)]
+    [DataRow("fnn * fnn", false)]
+    [DataRow("fnn - fnn", false)]
+    [DataRow("fnn / fnn", false)]
+    [DataRow("rnn + rnn", false)]
+    [DataRow("rnn * rnn", false)]
+    [DataRow("fnn + nu", true)]                             // a nullable operand still decides
+    [DataRow("fnn * cast(2 as float)", true)]               // a CAST operand is nullable in its own right
+    // The conversion half: an operand keeps every value only where the target
+    // mantissa holds its whole integral range — float's 15 digits, real's 7 —
+    // and only when it carries no scale.
+    [DataRow("fnn * nn", false)]                            // int (10 digits) fits float
+    [DataRow("rnn * nn", true)]                             // …but not real
+    [DataRow("fnn * bnn", true)]                            // bigint (19) fits neither
+    [DataRow("fnn * tnn", false)]
+    [DataRow("rnn * tnn", false)]                           // tinyint fits real
+    [DataRow("fnn * 2", false)]
+    [DataRow("rnn * 2", true)]
+    [DataRow("fnn * 2.0", true)]                            // a scaled literal doesn't land on float's grid
+    [DataRow("fnn * mnn", true)]                            // decimal(9, 2) — scale disqualifies it
+    [DataRow("fnn * ynn", true)]                            // smallmoney carries scale 4
+    [DataRow("fnn * p70", false)]                           // decimal(7, 0) fits both
+    [DataRow("rnn * p70", false)]
+    [DataRow("fnn * p90", false)]                           // decimal(9, 0) fits float
+    [DataRow("fnn * p160", true)]                           // decimal(16, 0) exceeds float's 15
+    // The rule folds along a chain the same way concatenation does.
+    [DataRow("fnn * fnn * fnn", false)]
+    [DataRow("fnn * mnn * fnn", true)]
     // String / binary `+` is concatenation, which propagates.
     [DataRow("'a' + 'b'", false)]
     [DataRow("snn + snn", false)]

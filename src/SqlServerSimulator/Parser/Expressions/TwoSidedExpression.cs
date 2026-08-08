@@ -133,12 +133,14 @@ internal abstract class TwoSidedExpression : Expression
     {
         if (this.left is not TwoSidedExpression)
         {
+            var resultType = context.TypeOf(this);
             return this.Operator switch
             {
                 '&' or '|' or '^' => this.left.ResultIsNullable(context) || this.right.ResultIsNullable(context),
-                '+' when Concatenates(context.TypeOf(this)) =>
+                '+' when Concatenates(resultType) =>
                     this.left.ResultIsNullable(context) || this.right.ResultIsNullable(context),
-                _ => true,
+                _ => this.left.ResultIsNullable(context)
+                    || this.ArithmeticIsNullable(context.TypeOf(this.left), resultType, context),
             };
         }
 
@@ -155,20 +157,56 @@ internal abstract class TwoSidedExpression : Expression
         for (var i = spine.Count - 1; i >= 0; i--)
         {
             var current = spine[i];
+            var leftType = accumulatedType;
             accumulatedType = current.CombineType(accumulatedType, context.Batch, context.ColumnType);
             nullable = current.Operator switch
             {
                 '&' or '|' or '^' => nullable || current.right.ResultIsNullable(context),
                 '+' when Concatenates(accumulatedType) => nullable || current.right.ResultIsNullable(context),
-                _ => true,
+                _ => nullable || current.ArithmeticIsNullable(leftType, accumulatedType, context),
             };
-            // Nullability only widens along the chain, so the first arithmetic
-            // operator settles the whole answer.
+            // Nullability only widens along the chain — every arm is an `||`
+            // over what the prefix already answered — so the first operator to
+            // report nullable settles the whole answer.
             if (nullable)
                 return true;
         }
         return false;
     }
+
+    /// <summary>
+    /// Whether an arithmetic operator's result can be NULL, given its
+    /// already-resolved operand and result types. Exact-numeric arithmetic
+    /// always can — real marks even <c>1 + 1</c> nullable — but an
+    /// <b>approximate</b> result cannot, provided both operands are themselves
+    /// NOT NULL and each reaches the result type without losing anything.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// That last clause is the whole of it, and it is the same value-preservation
+    /// question the CASE-family arm rule asks
+    /// (<see cref="SqlType.ConversionPreservesEveryValue"/>): <c>f * i</c> over a
+    /// NOT NULL <c>float</c> and <c>int</c> is NOT NULL because every
+    /// <c>int</c> lands exactly on <c>float</c>'s 53-bit mantissa, while
+    /// <c>r * i</c> is nullable because it doesn't land on <c>real</c>'s 24-bit
+    /// one, and <c>f * d</c> is nullable because a scaled <c>decimal</c> doesn't
+    /// land on float's grid at all. A <c>CAST</c> operand is nullable in its own
+    /// right, so it never reaches the question.
+    /// </para>
+    /// <para>
+    /// Probe-confirmed against SQL Server 2025 across <c>+ - * /</c>, the
+    /// integer widths (<c>tinyint</c> / <c>smallint</c> preserve into
+    /// <c>real</c>, <c>int</c> / <c>bigint</c> don't), <c>money</c>, and both
+    /// the projection and computed-column readings of the flag. <c>%</c> never
+    /// reaches here — real refuses modulo over <c>float</c> outright.
+    /// Unary minus is a different node and stays nullable, as real leaves it.
+    /// </para>
+    /// </remarks>
+    private bool ArithmeticIsNullable(SqlType leftType, SqlType resultType, NullabilityContext context) =>
+        resultType.Category != SqlTypeCategory.Approximate
+        || this.right.ResultIsNullable(context)
+        || !SqlType.ConversionPreservesEveryValue(leftType, resultType)
+        || !SqlType.ConversionPreservesEveryValue(context.TypeOf(this.right), resultType);
 
     private static bool Concatenates(SqlType resultType) =>
         resultType.Category == SqlTypeCategory.String

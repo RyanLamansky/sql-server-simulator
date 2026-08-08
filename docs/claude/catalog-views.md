@@ -790,6 +790,8 @@ The `COLUMNS_UPDATED()` bitmask is keyed on these ids and sized from the waterma
 | `a` / `1` / `s + s` / `isnull(b, 0)` / `case when a = 1 then 1 else 2 end` / `getdate()` / `concat(s, u)` | 0 |
 | `b` / `a + b` / `s + u` / `len(s)` / `cast(a as bigint)` / `coalesce(b, 0)` / `abs(a)` / `a * 2` | 1 |
 
+Arithmetic is the one row with a wrinkle: it reads nullable over exact numerics but **NOT NULL** over an approximate result whose operands both preserve their values into it, so a `float` computed column is often NOT NULL where the `int` spelling beside it isn't — see [`indexes.md`](indexes.md#computed-columns-as-index-keys) for why a `float` computed column can't be an index key anyway, and the operator paragraph on `Expression.ResultIsNullable` for the rule.
+
 The inference runs on both declaration paths (`CREATE TABLE` and `ALTER TABLE … ADD`) and composes with the two rules that can only tighten it: a declared `PERSISTED NOT NULL`, and a `PRIMARY KEY` naming the column.
 
 It is load-bearing beyond the catalog — a system-versioned base table and its history sibling have to agree on it, which is what WideWorldImporters' `Warehouse.StockItems` turns on: a `CONCAT` computed column against a `NOT NULL` history column, where inferring nullable would refuse the `SYSTEM_VERSIONING = ON` with Msg 13519.

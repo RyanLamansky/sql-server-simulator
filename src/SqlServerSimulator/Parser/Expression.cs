@@ -778,8 +778,16 @@ internal abstract class Expression
     /// and window function — <c>COUNT</c> included, which real marks nullable
     /// despite never returning NULL.</item>
     /// </list>
-    /// <para><b>Operators.</b> Arithmetic <c>+ - * / %</c> is always nullable,
-    /// even over two NOT NULL <c>int</c>s and even for <c>1 + 1</c>. Bitwise
+    /// <para><b>Operators.</b> Arithmetic <c>+ - * / %</c> is nullable over
+    /// exact numerics, even over two NOT NULL <c>int</c>s and even for
+    /// <c>1 + 1</c>. An <b>approximate</b> result is the exception: NOT NULL
+    /// when both operands are and each reaches the result type losing nothing,
+    /// so <c>&lt;float&gt; * &lt;int&gt;</c> is NOT NULL while
+    /// <c>&lt;real&gt; * &lt;int&gt;</c> is not (<c>int</c> misses real's 24-bit
+    /// mantissa) and <c>&lt;float&gt; * &lt;decimal(9, 2)&gt;</c> is not (a
+    /// scaled decimal misses float's grid) — the same value-preservation test
+    /// the arm rule below applies. Unary minus is a different node and stays
+    /// nullable. Bitwise
     /// <c>~ &amp; | ^</c> and both concatenation operators — string / binary
     /// <c>+</c> and <c>||</c> — are NOT NULL when their operands are, which is
     /// why the inference resolves operand types (see
