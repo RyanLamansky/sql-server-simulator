@@ -121,13 +121,12 @@ partial class Selection
     {
         // Hoisted per-row scaffolding: one single-slot tuple, one cached
         // self-referencing resolver lambda (never a local function passed as its
-        // own selfRecursive argument — that allocates a delegate per resolution
+        // own conversion — that allocates a delegate per resolution
         // per row) and one RuntimeContext for the whole enumeration.
         FromSource[] one = [source];
         var tuple = new byte[]?[1];
         var memo = new SourceColumnMemo();
-        Func<MultiPartName, SqlValue> resolve = null!;
-        resolve = name => ResolveAcrossTuple(one, tuple, name, batch, outerResolver, resolve, memo);
+        SqlValue resolve(MultiPartName name) => ResolveAcrossTuple(one, tuple, name, batch, outerResolver, memo);
         var runtime = new RuntimeContext(resolve, batch);
 
         var probed = 0;

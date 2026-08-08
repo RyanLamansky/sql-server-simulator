@@ -591,7 +591,7 @@ partial class Selection
         {
             if (++examined > GroupedReductionKeyCap)
                 return null;
-            var value = DecodeOrCompute(partner, ordinal, row, batch, ThrowOnColumnReference);
+            var value = DecodeOrCompute(partner, ordinal, row, batch);
             if (value.IsNull)
                 continue;
             var coerced = value.CoerceTo(common);

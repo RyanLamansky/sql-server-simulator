@@ -338,29 +338,27 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
-- **A trigger body that joins `deleted` to `inserted` can't read a non-persisted computed column** — the pseudo-tables share the parent's `HeapColumn` instances, so such a column stays computed there and is re-evaluated per read; the evaluation goes through the *query's* multi-source resolver, where the expression's own column names are ambiguous across the two pseudo-tables.
-  A legitimate statement fails outright with **Msg 209**, and no foreign key or cascade is needed to reach it:
-
-  ```sql
-  CREATE TABLE t (id int NOT NULL PRIMARY KEY, a int NOT NULL, c AS a * 10);
-  GO
-  CREATE TRIGGER trg ON t AFTER UPDATE AS
-    SELECT d.c, i.c FROM deleted d JOIN inserted i ON d.id = i.id;
-  GO
-  INSERT t (id, a) VALUES (1, 4);
-  UPDATE t SET a = 7 WHERE id = 1;   -- real: reads 40 and 70; simulator: Msg 209 "Ambiguous column name 'a'"
-  ```
-
-  Reading the column from one pseudo-table alone works, which is why the shape went unnoticed.
-  The fix is in `Selection.DecodeOrCompute`, which hands a computed column's expression the caller's whole-tuple resolver: a computed column may only name stored columns of *its own* row (Msg 1759 guarantees it), so it should resolve within its own source instead.
-  Worth doing with the per-row allocation in mind — the narrow resolver would be built per computed-column read, so it wants gating on the multi-source case that actually needs it.
-
 - **A typed `xml` value isn't normalized against its schema on write** — real stores `<Total>1</Total>` for an `xsd:decimal` element the insert wrote as `1.00`; the simulator keeps the text it was given.
   The schema collection is read for the two static questions the XQuery layer asks it (an element's cardinality, and whether its content is simple) and for nothing else, so neither validation (real's Msg 6923) nor value normalization runs.
   See [`xml.md`](xml.md#modify--xml-dml).
-- **The XML-DML mutator's error prefix names only the method** — real writes `XQuery [dbo.t.d.modify()]` for a column receiver where the simulator writes `XQuery [modify()]`; the receiver's written name is in scope at the raise site, so this is threading it through the diagnostics rather than new analysis.
-- **An alias-form UPDATE resolves no schema collection for its mutator** — `UPDATE a SET a.d.modify(…) FROM t AS a` names its target through the FROM clause, which parses after the SET list, so a typed element target there is still Msg 2356 where the table-name form reads.
-  Closing it means deferring the mutator's compile until the FROM clause has identified the target, the same deferral OUTPUT wants on that path.
+- **An XQuery error over a *column* receiver doesn't name the receiver** — real prefixes the method with the receiver's own path, and it does so for **every** XML method rather than just `.modify()`: `XQuery [dbo.xr.d.value()]`, `XQuery [sx.xr2.d.modify()]`.
+  A **variable** receiver correctly carries no prefix (`XQuery [modify()]`), which is what the simulator emits for both.
+  The naming is per source kind, probed one at a time against SQL Server 2025:
+
+  | receiver | prefix |
+  |---|---|
+  | base table, even when aliased (`FROM dbo.xr AS t`) | `dbo.xr.d.` — the base table's schema-qualified name, never the alias |
+  | derived table (`FROM (…) z`) | `z.d.` — the alias, there being no base name |
+  | table variable | `@t.d.` |
+  | the row column a `.nodes()` produced | `dbo.xr.d.` — the *originating* column, not `x.n` |
+  | variable | none |
+
+  So the work is a receiver-name helper threaded into both compile sites (`XmlMethodCall.Parse` and `XmlModify.Parse`, which already resolve the source and column index for the schema-collection lookup), plus carrying a `.nodes()` row column's origin the way its schema binding is already carried.
+  Msg 6305 and the other non-XQuery-prefixed messages are unaffected.
+- **An alias-form UPDATE resolves no schema collection for its mutator** — `UPDATE a SET d.modify(…) FROM t AS a` refuses a typed element target with Msg 2356 where real performs the edit (probe-confirmed, with and without a joined second table); the table-name form reads correctly.
+  The cause is ordering: the SET list parses before the FROM clause, so `leadingTable` is null and `XmlSchemaCollectionOf` has nothing to resolve against.
+  Note the *qualified* mutator spelling isn't the shape to fix — `SET a.d.modify(…)` is Msg 102 on real as it is here; only the unqualified `SET d.modify(…)` is legal under an alias.
+  Closing it means splitting `XmlModify.Parse` so the token consumption still happens in the SET list while the XML-DML compile (which is what reads the collection and raises the static diagnostics) defers until `FindOrAppendMutationTarget` has identified the target — still compile time, as real's is.
 - **Msg 13525 renders a MAX length uppercase** — real's temporal shape-mismatch message writes `nvarchar(max)` where the simulator writes `nvarchar(MAX)`, off `SqlType.SqlServerName`'s own casing.
   Worth checking which other messages inherit it before changing the shared renderer.
 

@@ -222,8 +222,7 @@ partial class Simulation
             backingTable: original.BackingTable);
 
         byte[]?[] tuple = [];
-        Func<MultiPartName, SqlValue> resolveTuple = null!;
-        resolveTuple = name => ResolveAcrossMutationTuple(probeSources, tuple, name, batch, resolveTuple);
+        SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(probeSources, tuple, name, batch);
         var (_, belowRuntimes) = BuildChainResolvers(batch, chain, resolveTuple);
         foreach (var candidate in Selection.EnumerateJoinedRows(probeSources, chain.Joins, batch, outerResolver: null))
         {

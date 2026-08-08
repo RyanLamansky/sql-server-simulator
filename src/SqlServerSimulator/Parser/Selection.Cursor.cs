@@ -768,8 +768,7 @@ internal sealed partial class Selection
         // slots' correlation and the projection pass below share all three.
         var current = new byte[]?[width];
         var memo = new SourceColumnMemo();
-        Func<MultiPartName, SqlValue> resolve = null!;
-        resolve = name => ResolveAcrossTuple(sources, current, name, batch, outerResolver, resolve, memo);
+        SqlValue resolve(MultiPartName name) => ResolveAcrossTuple(sources, current, name, batch, outerResolver, memo);
         var runtime = new RuntimeContext(resolve, batch);
 
         // Live per-slot candidates: a base-table slot snapshots its heap, a

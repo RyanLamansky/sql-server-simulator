@@ -630,7 +630,7 @@ internal sealed partial class Selection
             var keyScratch = new SqlValue[this.groupingSet.Length];
             var currentTuple = default(byte[]?[])!;
             Func<MultiPartName, SqlValue> resolveColumn = null!;
-            resolveColumn = name => ResolveAcrossTuple(this.sources, currentTuple, name, this.batch, null, resolveColumn, memo);
+            resolveColumn = name => ResolveAcrossTuple(this.sources, currentTuple, name, this.batch, null, memo);
             var runtime = new RuntimeContext(resolveColumn, this.batch);
             var ungrouped = this.groupingSet.Length == 0 ? this.newGroup([]) : null;
             if (ungrouped is not null)

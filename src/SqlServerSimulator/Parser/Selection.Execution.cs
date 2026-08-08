@@ -1849,7 +1849,7 @@ internal sealed partial class Selection
             var memo = new SourceColumnMemo();
             var currentTuple = default(byte[]?[])!;
             Func<MultiPartName, SqlValue> resolveColumn = null!;
-            resolveColumn = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, resolveColumn, memo);
+            resolveColumn = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, memo);
             var rowRuntime = new RuntimeContext(resolveColumn, batch);
             foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
             {
@@ -1906,7 +1906,7 @@ internal sealed partial class Selection
         var memo = new SourceColumnMemo();
         var currentTuple = default(byte[]?[])!;
         Func<MultiPartName, SqlValue> resolveSource = null!;
-        resolveSource = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, resolveSource, memo);
+        resolveSource = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, memo);
         var rowRuntime = new RuntimeContext(resolveSource, batch);
 
         // Computed once: the column each projection reads, for the DISTINCT

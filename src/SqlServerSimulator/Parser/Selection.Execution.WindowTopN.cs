@@ -434,7 +434,7 @@ partial class Selection
         var memo = new SourceColumnMemo();
         var currentTuple = default(byte[]?[])!;
         Func<MultiPartName, SqlValue> resolveSource = null!;
-        resolveSource = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, resolveSource, memo);
+        resolveSource = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, memo);
         var rowRuntime = new RuntimeContext(resolveSource, batch);
 
         var orderByList = new List<OrderBySpec>(window.OrderBy);

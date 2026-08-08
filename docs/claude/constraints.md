@@ -52,6 +52,10 @@ An unnamed inline CHECK auto-names as the column-level shape `CK__<table>__<colu
 A computed column takes several inline constraints in any order — `PERSISTED PRIMARY KEY CHECK (cc > 0)`, the reverse, and the doubly-named `CONSTRAINT ck CHECK (…) CONSTRAINT uq UNIQUE` all parse — so `ParseComputedColumnInlineConstraint` loops rather than reading one constraint.
 A PRIMARY KEY naming the computed column promotes it to NOT NULL, inline and table-level alike, exactly as it does a regular column: the promotion happens where the computed `HeapColumn` is materialized, since `ParseColumnList`'s promotion loop walks the column list while that slot is still an unresolved placeholder.
 
+A **non-persisted** computed column is evaluated per read, and its expression resolves against **its own row's source** rather than the enclosing query's tuple.
+That distinction only shows when two sources expose the same underlying column name — `deleted d JOIN inserted i` in a trigger body, a self-join, or two tables that each have a column `a` — where resolving through the tuple made the expression's *own* column reference ambiguous and reported Msg 209 on a statement real answers.
+Msg 1759 is what makes the narrow scope sufficient: a computed column may only name stored columns of its own table, so the row is the whole scope its expression needs (`Selection.ResolveWithinSource`).
+
 A **UNIQUE** constraint takes a *non-persisted* computed column and enforces it, evaluating the value per row; a **PRIMARY KEY** still needs it persisted and non-nullable (**Msg 1711**, with real's trailing `Could not create constraint or index. See previous errors.`).
 The determinism and precision preconditions real puts on any such key — **Msg 2729** / **Msg 2799** — and how the enforcement reads it are in [`indexes.md`](indexes.md#computed-columns-as-index-keys); a UNIQUE constraint takes the same gates a `CREATE INDEX` does, since it is the same index underneath.
 

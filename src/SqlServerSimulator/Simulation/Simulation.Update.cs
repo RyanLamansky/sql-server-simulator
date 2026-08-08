@@ -630,12 +630,9 @@ partial class Simulation
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
 
         // Hoisted per-row scaffolding: one mutable tuple slot and one cached
-        // self-referencing lambda, so a non-persisted computed column's own
-        // column references re-enter the same resolver without allocating a
-        // delegate per resolution per row.
+        // delegate, so the per-row loop allocates neither.
         byte[]?[] currentTuple = [];
-        Func<MultiPartName, SqlValue> resolveTuple = null!;
-        resolveTuple = name => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch, resolveTuple);
+        SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch);
 
         foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, context.Batch, outerResolver: null))
         {
@@ -1389,7 +1386,7 @@ partial class Simulation
     /// column with no storage slot of its own.
     /// </summary>
     private static SqlValue ResolveAcrossMutationTuple(
-        FromSource[] sources, byte[]?[] tuple, MultiPartName name, BatchContext batch, Func<MultiPartName, SqlValue> selfRecursive)
+        FromSource[] sources, byte[]?[] tuple, MultiPartName name, BatchContext batch)
     {
         var (s, c) = Selection.FindSourceColumn(sources, name);
         if (s == -1)
@@ -1398,7 +1395,7 @@ partial class Simulation
         var bytes = tuple[s];
         return bytes is null
             ? SqlValue.Null(sources[s].Columns[c].Type)
-            : Selection.DecodeOrCompute(sources[s], c, bytes, batch, selfRecursive);
+            : Selection.DecodeOrCompute(sources[s], c, bytes, batch);
     }
 
     /// <summary>

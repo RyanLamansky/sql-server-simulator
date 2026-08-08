@@ -118,7 +118,7 @@ internal sealed partial class Selection
 
         // Row-invariant resolution scaffolding is hoisted out of every per-row
         // loop below: `currentTuple` is a mutable capture rewritten per row,
-        // and the resolver is a cached self-referencing lambda (see
+        // and the resolver is a cached delegate (see
         // EnumerateJoinedRows), so each loop allocates one closure + one
         // delegate + one RuntimeContext TOTAL instead of several per row —
         // per-row delegate churn dominated the allocation profile.
@@ -127,8 +127,7 @@ internal sealed partial class Selection
         var keyScratch = Array.Empty<SqlValue>();
         var ungroupedState = default(GroupState);
         var currentTuple = default(byte[]?[])!;
-        Func<MultiPartName, SqlValue> resolveColumn = null!;
-        resolveColumn = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, resolveColumn, memo);
+        SqlValue resolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, memo);
         var rowRuntime = new RuntimeContext(resolveColumn, batch);
 
         // One grouping set — no GROUP BY at all, or a plain GROUP BY — reads
@@ -264,15 +263,14 @@ internal sealed partial class Selection
         // Per-group resolution scaffolding, hoisted out of the grouping-set
         // loop like the per-row loops above: `currentGroupingSet` /
         // `currentState` / `currentProjected` are mutable captures rewritten
-        // per set and per group, and the resolvers are cached
-        // self-referencing lambdas — a large-group-count GROUP BY (one group
-        // per customer) evaluated several expressions per group through fresh
-        // delegates otherwise.
+        // per set and per group, and each resolver is converted to a delegate
+        // once — a large-group-count GROUP BY (one group per customer)
+        // evaluated several expressions per group through fresh delegates
+        // otherwise.
         Expression[] currentGroupingSet = [];
         var currentState = default(GroupState)!;
         var currentProjected = default(SqlValue[])!;
-        Func<MultiPartName, SqlValue> resolveByGroupKey = null!;
-        resolveByGroupKey = name =>
+        SqlValue resolveByGroupKey(MultiPartName name)
         {
             for (var i = 0; i < currentGroupingSet.Length; i++)
             {
@@ -303,11 +301,12 @@ internal sealed partial class Selection
             // to the outer resolver / Msg 207 when the name isn't a
             // source column, so this subsumes the outer-or-throw tail.
             return currentGroupingSet.Length > 0 && currentState.Representative is { } rep
-                ? ResolveAcrossTuple(sources, rep, name, batch, outerResolver, resolveByGroupKey, memo)
+                ? ResolveAcrossTuple(sources, rep, name, batch, outerResolver, memo)
                 : outerResolver is not null
                     ? outerResolver(name)
                     : throw SimulatedSqlException.InvalidColumnName(name);
-        };
+        }
+
         var groupRuntime = new RuntimeContext(resolveByGroupKey, batch);
 
         // Resolves an ORDER BY item's column references against this

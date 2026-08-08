@@ -31,7 +31,6 @@ internal sealed partial class Selection
         MultiPartName name,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
-        Func<MultiPartName, SqlValue> selfRecursive,
         SourceColumnMemo memo)
     {
         var (s, c) = memo.Find(sources, name);
@@ -49,7 +48,7 @@ internal sealed partial class Selection
         var bytes = tuple[s];
         return bytes is null
             ? SqlValue.Null(sources[s].Columns[c].Type)
-            : DecodeOrCompute(sources[s], c, bytes, batch, selfRecursive);
+            : DecodeOrCompute(sources[s], c, bytes, batch);
     }
 
     /// <summary>
@@ -90,15 +89,12 @@ internal sealed partial class Selection
 
         var memo = new SourceColumnMemo();
 
-        // Cached self-referencing lambda, NOT a local function: a local
-        // function passed as its own selfRecursive argument allocates a fresh
-        // delegate on every call — one per column resolution per row, the
-        // single largest allocation source of scan-bound queries (41% of
-        // bytes in the allocation profile). The lambda reads itself through
-        // the captured variable, so exactly one delegate exists per
-        // enumeration.
-        Func<MultiPartName, SqlValue> resolve = null!;
-        resolve = name => ResolveAcrossTuple(sources, tuple, name, batch, outerResolver, resolve, memo);
+        // One cached delegate per enumeration, NOT a local function converted
+        // per call: the conversion allocates a fresh delegate every time, once
+        // per column resolution per row, which was the single largest
+        // allocation source of scan-bound queries (41% of bytes in the
+        // allocation profile).
+        SqlValue resolve(MultiPartName name) => ResolveAcrossTuple(sources, tuple, name, batch, outerResolver, memo);
 
         return EnumerateFoldRange(sources, joins, 0, sources.Length, tuple, batch, resolve, outerResolver);
     }
@@ -1032,20 +1028,53 @@ internal sealed partial class Selection
     /// Stored columns (regular plus persisted-computed) decode directly via
     /// <see cref="RowDecoder.DecodeColumn(ReadOnlySpan{HeapColumn}, ReadOnlySpan{byte}, int, Heap?)"/>
     /// at their storage ordinal. Non-persisted computed columns evaluate
-    /// their expression through <paramref name="resolveByName"/> — the
-    /// recursive references inside the expression bind back through the same
-    /// caller's resolver, but are guaranteed by Msg 1759 to land only on
-    /// stored columns.
+    /// their expression against the source's own row (see
+    /// <see cref="ResolveWithinSource"/>), which is the whole scope Msg 1759
+    /// leaves such an expression needing.
     /// </summary>
-    internal static SqlValue DecodeOrCompute(
-        FromSource source,
-        int columnIndex,
-        byte[] bytes,
-        BatchContext batch,
-        Func<MultiPartName, SqlValue> resolveByName) =>
-        source.StorageOrdinals is null
-            ? RowDecoder.DecodeColumn(source.StoredSchema, bytes, columnIndex, source.LobStore)
-            : source.Columns[columnIndex].Computed is { } computedExpr && !source.Columns[columnIndex].IsPersisted
-                ? computedExpr.Run(new RuntimeContext(resolveByName, batch))
-                : RowDecoder.DecodeColumn(source.StoredSchema, bytes, source.StorageOrdinals[columnIndex], source.LobStore);
+    internal static SqlValue DecodeOrCompute(FromSource source, int columnIndex, byte[] bytes, BatchContext batch)
+    {
+        if (source.StorageOrdinals is null)
+            return RowDecoder.DecodeColumn(source.StoredSchema, bytes, columnIndex, source.LobStore);
+
+        var column = source.Columns[columnIndex];
+        return column.Computed is { } computedExpr && !column.IsPersisted
+            ? computedExpr.Run(new RuntimeContext(name => ResolveWithinSource(source, bytes, batch, name), batch))
+            : RowDecoder.DecodeColumn(source.StoredSchema, bytes, source.StorageOrdinals[columnIndex], source.LobStore);
+    }
+
+    /// <summary>
+    /// Resolves one name inside a computed column's own expression, against the
+    /// <em>source's own row</em> rather than the enclosing tuple.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A computed column may only name stored columns of its own table — Msg
+    /// 1759 refuses a computed-of-computed at declaration — so the source's row
+    /// is the whole scope its expression needs, and handing it the caller's
+    /// tuple-wide resolver was actively wrong: under
+    /// <c>deleted d JOIN inserted i</c> the two pseudo-tables expose the same
+    /// column names, so evaluating <c>d.c</c>'s <c>a * 10</c> through the tuple
+    /// reported Msg 209 on a statement real answers. The scan-prefilter path
+    /// passed a <em>throwing</em> resolver for the same argument and so refused
+    /// a computed column outright.
+    /// </para>
+    /// <para>
+    /// Matched on the leaf name, as <c>EvaluateComputedColumns</c> matches it —
+    /// a computed column's definition carries no qualifier. The recursive call
+    /// costs nothing in practice for the same Msg 1759 reason: the column it
+    /// lands on is always stored.
+    /// </para>
+    /// </remarks>
+    private static SqlValue ResolveWithinSource(FromSource source, byte[] bytes, BatchContext batch, MultiPartName name)
+    {
+        var collation = batch.CurrentDatabase.Collation;
+        for (var i = 0; i < source.ColumnNames.Length; i++)
+        {
+            if (collation.Equals(source.ColumnNames[i], name.Leaf))
+                return DecodeOrCompute(source, i, bytes, batch);
+        }
+
+        throw SimulatedSqlException.InvalidColumnName(name);
+    }
 }

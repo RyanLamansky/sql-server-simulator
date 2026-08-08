@@ -245,7 +245,7 @@ internal sealed partial class Selection
         foreach (var tuple in EnumerateJoinedRows(sources, [], batch, outerResolver))
         {
             var localTuple = tuple;
-            SqlValue Resolve(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, Resolve, memo);
+            SqlValue Resolve(MultiPartName name) => ResolveAcrossTuple(sources, localTuple, name, batch, outerResolver, memo);
 
             foreach (var col in unpivotColumns)
             {

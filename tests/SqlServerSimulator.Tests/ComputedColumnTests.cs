@@ -491,4 +491,54 @@ public sealed class ComputedColumnTests
         Assert.IsFalse((bool)sim.ExecuteScalar("select is_nullable from sys.columns where object_id = object_id('t') and name = 'cc'")!);
         Assert.IsTrue((bool)sim.ExecuteScalar("select is_nullable from sys.columns where object_id = object_id('t') and name = 'dd'")!);
     }
+
+    /// <summary>
+    /// A non-persisted computed column is evaluated per read, and its
+    /// expression resolves against <b>its own row's source</b> — not the
+    /// enclosing tuple. Two sources exposing the same underlying column name
+    /// is the shape that separates the two: through the tuple, the expression's
+    /// own <c>a</c> is ambiguous and the statement fails with Msg 209, which
+    /// real answers without complaint.
+    /// </summary>
+    [TestMethod]
+    public void Computed_ReadFromBothSidesOfASelfJoin_ResolvesWithinEachRow()
+        => Assert.AreEqual("70 70", new Simulation().ExecuteScalar("""
+            create table t (id int not null primary key, a int not null, c as a * 10);
+            insert t (id, a) values (1, 7);
+            select concat(x.c, ' ', y.c) from t x join t y on x.id = y.id
+            """));
+
+    /// <summary>Two different tables that both name a column <c>a</c>.</summary>
+    [TestMethod]
+    public void Computed_AcrossAJoinOfTablesSharingAColumnName_Resolves()
+        => Assert.AreEqual("70 101", new Simulation().ExecuteScalar("""
+            create table t (id int not null primary key, a int not null, c as a * 10);
+            create table u (id int not null primary key, a int not null, c2 as a + 1);
+            insert t (id, a) values (1, 7);
+            insert u (id, a) values (1, 100);
+            select concat(t.c, ' ', u.c2) from t join u on t.id = u.id
+            """));
+
+    /// <summary>
+    /// The reported shape: a trigger body joining <c>deleted</c> to
+    /// <c>inserted</c>, which expose identical column names, and reading the
+    /// computed column from both.
+    /// </summary>
+    [TestMethod]
+    public void Computed_ReadFromDeletedAndInsertedInOneTrigger_Resolves()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            """
+            create table tlog (note varchar(50));
+            create table t (id int not null primary key, a int not null, c as a * 10);
+            insert t (id, a) values (1, 4)
+            """,
+            """
+            create trigger trg on t after update as
+              insert tlog select concat('old=', d.c, ' new=', i.c) from deleted d join inserted i on d.id = i.id
+            """);
+        _ = sim.ExecuteNonQuery("update t set a = 7 where id = 1");
+        Assert.AreEqual("old=40 new=70", sim.ExecuteScalar("select note from tlog"));
+    }
 }

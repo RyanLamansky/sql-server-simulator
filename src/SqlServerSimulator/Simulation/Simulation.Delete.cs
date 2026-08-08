@@ -311,10 +311,9 @@ partial class Simulation
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
 
         // Hoisted per-row scaffolding — see ExecuteJoinedUpdate for why the
-        // lambda is cached and self-referencing rather than a local function.
+        // delegate is cached rather than a per-call local-function conversion.
         byte[]?[] currentTuple = [];
-        Func<MultiPartName, SqlValue> resolveTuple = null!;
-        resolveTuple = name => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch, resolveTuple);
+        SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch);
 
         foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, context.Batch, outerResolver: null))
         {
