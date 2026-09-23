@@ -162,6 +162,14 @@ partial class SimulatedSqlException
         new($"Could not find stored procedure '{name}'.", 2812, 16, 62);
 
     /// <summary>
+    /// Mimics SQL Server error 8199: <c>EXEC @v</c> names its procedure through
+    /// a variable that isn't a character string. Probe-confirmed against SQL
+    /// Server 2025 (2026-09-23), Class 16, State 1.
+    /// </summary>
+    internal static SimulatedSqlException ExecuteProcedureNameNotString() =>
+        new("In EXECUTE <procname>, procname can only be a literal or variable of type char, varchar, nchar, or nvarchar.", 8199, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 201 — EXEC failed to supply a required
     /// parameter (either a named argument referenced an unknown parameter,
     /// leaving a required one un-supplied, or the call simply omitted a

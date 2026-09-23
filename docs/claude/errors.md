@@ -16,10 +16,10 @@ All semantics below are probe-confirmed against SQL Server 2025.
 | Two statements on one line | that shared line | |
 | `THROW n, m, s` (value form) | the THROW statement's line | |
 | `THROW;` (re-raise in CATCH) | the **original** error's line | not the re-raising statement's line |
-| Procedure body error | line relative to the whole **CREATE** statement (header lines counted) | + `Procedure = "dbo.<name>"` (schema-qualified; real echoes the `EXEC`'s own spelling, so `exec p` reports `p` — a divergence) |
+| Procedure body error | line relative to the **batch that created it** — comments and blank lines ahead of the `CREATE` count | + `Procedure` = the name as the invoking `EXEC` spelled it, brackets dropped and case kept (`exec p` → `p`, `exec DBO.P` → `DBO.P`, probed 2026-09-23) |
 | Procedure / `sp_executesql` argument that fails to convert | **0** | + `Procedure` for a procedure (Msg 8114, or an xml parse error) |
-| Trigger body error | CREATE-relative line | + `Procedure = "<name>"` (**unqualified** — the one asymmetry from procedures) |
-| **CREATE-time bind error** (the body error that aborts the CREATE) | CREATE-relative line | + `Procedure = "<name>"` — **unqualified for every module kind**, procedures included, so `CREATE PROCEDURE dbo.p` reports `p` where the same body failing at EXEC reports `dbo.p` |
+| Trigger body error | creating-batch-relative line | + `Procedure = "<name>"` (**unqualified**) |
+| **CREATE-time bind error** (the body error that aborts the CREATE) | batch line | + `Procedure = "<name>"` — **unqualified for every module kind**, procedures included; a `CREATE TRIGGER` naming a missing parent (Msg 8197) is attributed the same way |
 | Scalar-UDF / inline-TVF / multi-statement-TVF / view body error | the **outer invoking** statement's line | no `Procedure` — real inlines these for attribution (even the multi-statement TVF) |
 | Nested procedure call | **innermost** procedure/trigger frame's line + procedure | a UDF error inside a proc attributes to the **proc's** calling line, not the UDF |
 | `EXEC('…')` / `sp_executesql` | line relative to the **dynamic batch** | no `Procedure` |
@@ -28,7 +28,8 @@ All semantics below are probe-confirmed against SQL Server 2025.
 `Server`: real SqlClient reports the **connection data source** on `SqlException.Server` / `SqlError.Server` (probe: `localhost,1433`), *not* the server's `@@SERVERNAME`.
 The wire ERROR/INFO token's server-name field carries `@@SERVERNAME` instead — SqlClient ignores it and substitutes the data source; token-rendering clients (sqlcmd) display it verbatim.
 
-`ERROR_PROCEDURE()` returns the same schema-qualified name as `SqlError.Procedure` (`dbo.p1`); `ERROR_LINE()` returns the same line the exception carries.
+`ERROR_PROCEDURE()` returns the same name as `SqlError.Procedure`; `ERROR_LINE()` returns the same line the exception carries.
+A `PRINT` or low-severity `RAISERROR` in a procedure body carries the procedure too.
 
 ## Bind errors are catchable here and aren't on real
 
@@ -49,9 +50,9 @@ The static exception factories (`SimulatedSqlException.*Errors.cs`) can't reach 
 - **`SimulatedError.LineNumber` / `.Procedure`** gain an `internal set` (public contract stays get-only, mirroring `SqlError`) so the boundary can stamp them.
 - **`SimulatedSqlException.ResolveDiagnostics(baseLine, lineOffset, procedure)`** runs once per exception, guarded by a `diagnosticsResolved` flag so the **innermost** dispatch frame — where the error was born — wins as it propagates outward (matching SQL Server's innermost-frame attribution).
   - `baseLine`: chosen at the boundary in `Simulation.DispatchOneStatement` — the parser's **current-token line** for severity-15 (syntax) errors, else the failing statement's `StatementContext.StartLine`.
-  - `lineOffset`: `BatchContext.LineOffset`, the newline count preceding a procedure/trigger body's start within its CREATE text, so body errors report a CREATE-relative line.
+  - `lineOffset`: `BatchContext.LineOffset`, the newline count preceding a procedure/trigger body's start within the batch that created it, so body errors report that batch's line.
     Zero for top-level and dynamic-SQL batches.
-  - `procedure`: `BatchContext.ErrorProcedureName` — the schema-qualified name for a stored-procedure body (`dbo.p`), the **unqualified** name for a trigger body (`tr`, matching real's `ERROR_PROCEDURE()` / `SqlError.Procedure` for triggers) and for **every** module kind's CREATE-time bind batch (see [`programmable.md`](programmable.md#create-time-body-binding)), empty otherwise.
+  - `procedure`: `BatchContext.ErrorProcedureName` — the invocation's spelling for a stored-procedure body (`p` / `dbo.p`), the **unqualified** name for a trigger body (`tr`, matching real's `ERROR_PROCEDURE()` / `SqlError.Procedure` for triggers) and for **every** module kind's CREATE-time bind batch (see [`programmable.md`](programmable.md#create-time-body-binding)), empty otherwise.
 - **Body-type attribution** hinges on which frame stamps.
   Procedures and triggers push their own attribution frame (they set `LineOffset` + `ErrorProcedureName` on the child batch); scalar UDFs, inline TVFs, multi-statement TVFs, and views **inline** — their child batch sets `BatchContext.SuppressDiagnosticsResolution`, so the dispatch catch skips `ResolveDiagnostics` and lets the error propagate unresolved to the enclosing invoking statement's frame (probe-confirmed: real reports the outer statement's line with no procedure, even for a multi-statement TVF's mid-body error).
   A UDF error inside a procedure body therefore attributes to the procedure's calling statement, not the UDF.

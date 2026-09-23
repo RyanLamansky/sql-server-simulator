@@ -291,7 +291,7 @@ Successful statements clear `LastErrorNumber` back to 0.
 
 **ERROR_*() scalars** (`Parser/Expressions/ErrorFunctions.cs`): zero-arg `ERROR_NUMBER` / `ERROR_MESSAGE` / `ERROR_SEVERITY` / `ERROR_STATE` / `ERROR_LINE` / `ERROR_PROCEDURE`.
 All return typed NULL when `BatchContext.InFlightError` is null (outside CATCH); inside CATCH they project the captured fields.
-The `CaughtError` captures the caught exception's *resolved* `LineNumber` / `Procedure`, so `ERROR_LINE()` and `ERROR_PROCEDURE()` report exactly what the exception carries — a schema-qualified `dbo.<name>` inside a stored-procedure body, NULL for top-level / dynamic-SQL scopes.
+The `CaughtError` captures the caught exception's *resolved* `LineNumber` / `Procedure`, so `ERROR_LINE()` and `ERROR_PROCEDURE()` report exactly what the exception carries — the procedure's name as its invocation spelled it inside a stored-procedure body (see [`errors.md`](errors.md)), NULL for top-level / dynamic-SQL scopes.
 Line-number semantics (statement-start for runtime/bind, token line for syntax, CREATE-relative for proc bodies) live in [`errors.md`](errors.md).
 
 **THROW statement** (`Simulation.Throw.cs`): two forms, both raise `SimulatedSqlException` (caught at the wrap boundary if in a TRY, propagates out of the batch otherwise).

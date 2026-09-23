@@ -152,13 +152,14 @@ internal sealed class BatchContext
     private List<string>? pendingInfoMessages;
 
     /// <summary>
-    /// Class / state / number / line of the <em>first</em> contributing
-    /// statement, captured when the first message is buffered. Coalesced
+    /// Class / state / number / line / procedure of the <em>first</em>
+    /// contributing statement, captured when the first message is buffered —
+    /// a <c>PRINT</c> in a procedure body names the procedure, as real's does. Coalesced
     /// events report through these fields; the first contributor's
     /// diagnostic metadata wins (matching the probe-confirmed first-line
     /// rule for the line-number field).
     /// </summary>
-    private (byte Class, byte State, int Number, int LineNumber) firstInfoMetadata;
+    private (byte Class, byte State, int Number, int LineNumber, string Procedure) firstInfoMetadata;
 
     /// <summary>
     /// Buffers a <c>PRINT</c>-emitted string against this batch's pending
@@ -186,7 +187,7 @@ internal sealed class BatchContext
         if (this.pendingInfoMessages is null)
         {
             this.pendingInfoMessages = [];
-            this.firstInfoMetadata = (@class, state, number, this.CurrentStatement.StartLine);
+            this.firstInfoMetadata = (@class, state, number, this.CurrentStatement.StartLine, this.ErrorProcedureName);
         }
         this.pendingInfoMessages.Add(message);
     }
@@ -220,13 +221,13 @@ internal sealed class BatchContext
         if (this.pendingInfoMessages is not { Count: > 0 } list)
             return;
         var joined = string.Join('\n', list);
-        var (firstClass, firstState, firstNumber, firstLine) = this.firstInfoMetadata;
+        var (firstClass, firstState, firstNumber, firstLine, firstProcedure) = this.firstInfoMetadata;
         var errors = new SimulatedErrorCollection([new SimulatedError(
             @class: firstClass,
             lineNumber: firstLine,
             message: joined,
             number: firstNumber,
-            procedure: "",
+            procedure: firstProcedure,
             server: this.Connection.DataSource,
             source: "SqlServerSimulator",
             state: firstState)]);

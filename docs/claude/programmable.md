@@ -652,6 +652,11 @@ A statement that *creates* — a plain `CREATE`, or a `CREATE OR ALTER` over a f
 A statement that *replaces* takes ALTER on the module instead, reporting **Msg 3701** sev 14 state 20 (`Cannot alter the <kind> '<leaf>'…`) when it's missing; the create permission alone does not admit it, probe-confirmed.
 See [`permissions.md`](permissions.md#ddl-statement-gates).
 
+## `EXEC @variable`
+
+`EXEC @v [args]` invokes the procedure a character-string variable names — parsed as a written name would be, system procedures included, and reported under that spelling (probed 2026-09-23, `Simulation.ProcedureNameFromVariable`).
+A variable of any other type is **Msg 8199**, and a NULL or unparsable value is **Msg 2812** naming the string.
+
 ## Dynamic SQL (`EXEC (@sql)` / `sp_executesql`)
 Two re-tokenizing paths in `Simulation.ExecDynamicSql.cs`.
 Both run the dynamic batch inside its own child `BatchContext` (`ProcFrame` set for `RETURN` legality but the return code is discarded), share the outer connection's database / transaction state, and forward result sets to the outer caller.

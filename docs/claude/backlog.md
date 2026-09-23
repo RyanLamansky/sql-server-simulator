@@ -249,8 +249,6 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 - `CONVERT(varchar, <timestamp>, 1)` doesn't render hex.
 - The TDS UDT type name leaves the database part empty (`.sys.geography`; real sends `<db>.sys.geography`).
 
-**Procedure attribution** — an error inside a procedure reports `Procedure` as the `EXEC` spelled the name on real (`exec p` → `p`, `exec dbo.p` → `dbo.p`, probed 2026-09-23); the simulator always schema-qualifies it.
-
 **Message stream**:
 
 - **Msg 3621 "The statement has been terminated."** is never sent; real sends it (class 0) after every statement-terminating error — 547, 2627, 2628, 220 from `ALTER COLUMN`, 8134 from a persisted computed column's insert.

@@ -400,10 +400,16 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 8197 — <c>CREATE TRIGGER</c> referenced a
     /// table that doesn't exist or isn't valid as a trigger parent
     /// (views aren't supported as AFTER-trigger parents — INSTEAD OF only).
-    /// Probe-confirmed verbatim against SQL Server 2025: Class 16, State 4.
+    /// Probe-confirmed verbatim against SQL Server 2025: Class 16, State 4,
+    /// attributed to the trigger by its unqualified name as a CREATE-time bind
+    /// error is (2026-09-23).
     /// </summary>
-    internal static SimulatedSqlException ObjectDoesNotExistForTrigger(string name) =>
-        new($"The object '{name}' does not exist or is invalid for this operation.", 8197, 16, 4);
+    internal static SimulatedSqlException ObjectDoesNotExistForTrigger(string name, string triggerName)
+    {
+        var exception = new SimulatedSqlException($"The object '{name}' does not exist or is invalid for this operation.", 8197, 16, 4);
+        exception.Errors[0].Procedure = triggerName;
+        return exception;
+    }
 
     /// <summary>
     /// Mimics SQL Server error 2111: a second <c>INSTEAD OF &lt;action&gt;</c>

@@ -502,6 +502,28 @@ public sealed class StoredProcedureTests
     }
 
     /// <summary>
+    /// <c>EXEC @v</c> invokes the procedure a character-string variable names,
+    /// with the same argument and return-code grammar as a written name.
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @n varchar(50) = '[dbo].[p]'; exec @n 7", 7)]
+    [DataRow("declare @n sysname = 'p'; exec @n @a = 3", 3)]
+    [DataRow("declare @n sysname = 'p'; exec @n", 5)]
+    public void ExecVariable_InvokesTheNamedProcedure(string sql, int expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create proc p @a int = 5 as select @a");
+        AreEqual(expected, simulation.ExecuteScalar(sql));
+    }
+
+    [TestMethod]
+    [DataRow("declare @n sysname; exec @n", 2812, "Could not find stored procedure ''.")]
+    [DataRow("declare @n nvarchar(50) = N'select 1'; exec @n", 2812, "Could not find stored procedure 'select 1'.")]
+    [DataRow("declare @n int = 5; exec @n", 8199, "In EXECUTE <procname>, procname can only be a literal or variable of type char, varchar, nchar, or nvarchar.")]
+    public void ExecVariable_Refusals(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
+
+    /// <summary>
     /// Binding converts each argument to its parameter's type, and any failure
     /// is Msg 8114 state 5 at line 0 — not the Msg 245 / 220 / 241 a CAST of
     /// the same value raises — while a malformed xml value keeps its own

@@ -10,9 +10,11 @@ partial class Simulation
     /// <summary>
     /// Counts newline characters in <paramref name="text"/> over the
     /// half-open range <c>[<paramref name="start"/>, <paramref name="end"/>)</c>
-    /// — the number of lines a body's start sits below its enclosing
-    /// <c>CREATE</c> statement's first line, which
-    /// <see cref="Schemas.Procedure.BodyLineOffset"/> adds to body error lines.
+    /// — the number of lines a body's start sits below the first line of the
+    /// batch that created it, which <see cref="Schemas.Procedure.BodyLineOffset"/>
+    /// adds to body error lines. Real numbers a module's lines from its batch,
+    /// so blank lines and comments ahead of the <c>CREATE</c> count
+    /// (probe-confirmed against SQL Server 2025, 2026-09-23).
     /// CR is folded into its following LF (CRLF and LF count identically),
     /// matching <see cref="Parser.Token.LineNumber"/>.
     /// </summary>
@@ -157,7 +159,7 @@ partial class Simulation
         // Newlines before the body start, so body errors — at bind time below
         // and per call later — report a line relative to the whole CREATE
         // statement (probe-confirmed).
-        var bodyLineOffset = CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart);
+        var bodyLineOffset = CountNewlines(commandText, 0, bodyStart);
 
         // Bind the body before anything touches the schema dict, so a binder
         // error leaves the procedure uncreated and an ALTER's previous body

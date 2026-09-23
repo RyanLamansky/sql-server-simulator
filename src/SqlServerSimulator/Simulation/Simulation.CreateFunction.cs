@@ -240,7 +240,7 @@ partial class Simulation
         context.Simulation.BindMultiStatementTvfBodyAtCreate(
             context, functionName.Leaf, parameters, returnVariableName, outputColumns,
             keyConstraints, checkConstraints, bodyText,
-            CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart));
+            CountNewlines(commandText, 0, bodyStart));
 
         var replaced = ResolveFunctionAlterTarget<MultiStatementTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
 
@@ -419,7 +419,7 @@ partial class Simulation
         // BindModuleBodyAtCreate.
         context.Simulation.BindScalarFunctionBodyAtCreate(
             context, functionName.Leaf, parameters, returnType, bodyText,
-            CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart));
+            CountNewlines(commandText, 0, bodyStart));
 
         var replaced = ResolveFunctionAlterTarget<ScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
 

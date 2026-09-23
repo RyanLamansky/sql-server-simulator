@@ -1378,6 +1378,7 @@ public sealed partial class Simulation
         // the EXEC-statement path does — see ParseExec, including carrying the
         // synonym through as the EXECUTE check's securable.
         var rpcSynonym = batch.TryResolveSynonym(procName, out var resolvedSynonym) ? resolvedSynonym : null;
+        var writtenName = procName.ToString();
         procName = batch.ExpandSynonym(procName);
         if (!batch.TryResolveProcedure(procName, out var procedure))
             throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.ToString());
@@ -1463,7 +1464,8 @@ public sealed partial class Simulation
             batch.Variables[returnCodeVarName] = new VariableSlot(SqlType.Int32, declaredMaxLength: null, SqlValue.FromInt32(0), returnValueWriteback);
         }
 
-        foreach (var outcome in InvokeProcedure(batch, procedure, arguments, returnCodeVarName, rpcSynonym))
+        var attributionName = rpcSynonym is null ? writtenName : $"{procedure.Schema.Name}.{procedure.Name}";
+        foreach (var outcome in InvokeProcedure(batch, procedure, arguments, returnCodeVarName, attributionName, rpcSynonym))
             yield return outcome;
 
         // Output param writeback: the per-argument OutputSlot.Value was

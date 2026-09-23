@@ -180,7 +180,7 @@ partial class Simulation
         if (context.Batch.TryResolveView(parentName, out var parentView))
         {
             if (timing != TriggerTiming.InsteadOf)
-                throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString());
+                throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString(), triggerName.Leaf);
             parent = parentView;
             parentKind = "view";
         }
@@ -193,7 +193,7 @@ partial class Simulation
         }
         else
         {
-            throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString());
+            throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString(), triggerName.Leaf);
         }
 
         // Bind the body against empty INSERTED / DELETED pseudo-tables shaped
@@ -207,7 +207,7 @@ partial class Simulation
         var bindTrigger = new Trigger(
             triggerSchema, triggerName.Leaf, objectId: 0, parent, actions, timing, bodyText,
             createDate: context.Batch.CurrentStatement.UtcNow);
-        var bodyLineOffset = CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart);
+        var bodyLineOffset = CountNewlines(commandText, 0, bodyStart);
         context.Simulation.BindTriggerBodyAtCreate(
             context,
             triggerName.Leaf,
@@ -499,7 +499,7 @@ partial class Simulation
         // form uses. A DDL body has no INSERTED / DELETED, so the frame only
         // carries the stand-in trigger and an empty EVENTDATA document; the
         // stand-in never reaches the database and takes no object id.
-        var bodyLineOffset = CountNewlines(commandText, context.Batch.CurrentStatement.StartIndex, bodyStart);
+        var bodyLineOffset = CountNewlines(commandText, 0, bodyStart);
         context.Simulation.BindTriggerBodyAtCreate(
             context,
             triggerName.Leaf,

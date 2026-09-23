@@ -32,12 +32,20 @@ partial class Simulation
     /// <item>Duplicate named arg fires Msg 8143 (at parse, not here).</item>
     /// <item>Recursion past 32 fires Msg 217.</item>
     /// </list>
+    /// <para>
+    /// <c>attributionName</c> is what an error raised in the body reports as
+    /// its <c>Procedure</c> and <c>ERROR_PROCEDURE()</c> reads: the
+    /// invocation's own spelling, brackets dropped and case kept, so
+    /// <c>exec p</c> reports <c>p</c> and <c>exec DBO.P</c> reports
+    /// <c>DBO.P</c> (probe-confirmed against SQL Server 2025, 2026-09-23).
+    /// </para>
     /// </remarks>
     internal IEnumerable<SimulatedStatementOutcome> InvokeProcedure(
         BatchContext outerBatch,
         Procedure procedure,
         List<ProcArgument> arguments,
         string? returnCodeVariableName,
+        string attributionName,
         Synonym? viaSynonym = null)
     {
         var connection = outerBatch.Connection;
@@ -176,7 +184,7 @@ partial class Simulation
                 tableVariables[param.Name] = clone;
                 continue;
             }
-            var coerced = BindParameterValue(boundValues[i]!.Value, param.Type, $"{procedure.Schema.Name}.{procedure.Name}");
+            var coerced = BindParameterValue(boundValues[i]!.Value, param.Type, attributionName);
             variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, coerced, parameter: null);
         }
 
@@ -224,10 +232,10 @@ partial class Simulation
             innerBatch = new BatchContext(bodyCommand, variables, procFrame, tableVariables)
             {
                 // Body errors report a line relative to the whole CREATE
-                // statement and carry the schema-qualified procedure name,
-                // matching real SqlClient (probe-confirmed).
+                // statement (probe-confirmed) and the invocation's spelling of
+                // the procedure's name.
                 LineOffset = procedure.BodyLineOffset,
-                ErrorProcedureName = $"{procedure.Schema.Name}.{procedure.Name}",
+                ErrorProcedureName = attributionName,
             };
             // Seed cursor parameters as unallocated cursor variables in the
             // child frame; the body SETs and OPENs a cursor on each.

@@ -7,6 +7,27 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
+    /// <c>EXEC @v</c>: the procedure named by a character-string variable,
+    /// parsed the way a written name is and reported as the string spells it —
+    /// probe-confirmed against SQL Server 2025 (2026-09-23), system procedures
+    /// included. A variable of another type is Msg 8199 even in a branch that
+    /// doesn't run; a NULL or unparsable value is Msg 2812 naming the string
+    /// (<c>''</c> for NULL).
+    /// </summary>
+    private static MultiPartName ProcedureNameFromVariable(BatchContext batch, string variableName)
+    {
+        var slot = batch.GetVariableSlot(variableName);
+        if (slot.DeclaredType is not (CharSqlType or VarcharSqlType or NCharSqlType or NVarcharSqlType or SystemNameSqlType))
+            throw SimulatedSqlException.ExecuteProcedureNameNotString();
+        if (batch.IsSkipping)
+            return new MultiPartName("");
+        var text = slot.Value.IsNull ? "" : slot.Value.AsString;
+        return Parser.Expressions.ObjectId.TryParseObjectName(text, out var parsed)
+            ? parsed
+            : throw SimulatedSqlException.CouldNotFindStoredProcedure(text);
+    }
+
+    /// <summary>
     /// Matches <paramref name="leaf"/> against the system procedure names
     /// under the database collation's equality, returning the canonical
     /// as-declared name (so the dispatch switch in <see cref="ParseExec"/>
@@ -85,7 +106,7 @@ partial class Simulation
             if (context.Token is AtPrefixedString rcCandidate)
             {
                 var checkpoint = context.SaveCheckpoint();
-                context.MoveNextRequired();
+                context.MoveNextOptional();
                 if (context.Token is Operator { Character: '=' })
                 {
                     returnCodeVar = rcCandidate.Value;
@@ -113,13 +134,20 @@ partial class Simulation
             }
         }
 
-        // A leading `.` opens a name whose db/schema positions are omitted
-        // (`..sp_tablecollations_100`, the form SqlClient's SqlBulkCopy sends);
-        // ParseObjectName consumes the empty leading segments.
-        if (context.Token is not Name and not Operator { Character: '.' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-
-        var procName = BatchContext.ParseObjectName(context);
+        MultiPartName procName;
+        if (!implicitExec && context.Token is AtPrefixedString nameVariable)
+        {
+            procName = ProcedureNameFromVariable(batch, nameVariable.Value);
+        }
+        else
+        {
+            // A leading `.` opens a name whose db/schema positions are omitted
+            // (`..sp_tablecollations_100`, the form SqlClient's SqlBulkCopy sends);
+            // ParseObjectName consumes the empty leading segments.
+            if (context.Token is not Name and not Operator { Character: '.' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            procName = BatchContext.ParseObjectName(context);
+        }
         context.MoveNextOptional();
 
         // System procedures route to built-in handlers before generic
@@ -198,11 +226,13 @@ partial class Simulation
         // wording (the synonym name never appears in that message). The synonym
         // itself is carried through as the securable the EXECUTE check runs on.
         var execSynonym = batch.TryResolveSynonym(procName, out var resolvedSynonym) ? resolvedSynonym : null;
+        var writtenName = procName.ToString();
         procName = batch.ExpandSynonym(procName);
         if (!batch.TryResolveProcedure(procName, out var procedure))
             throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.ToString());
 
-        var invocation = this.InvokeProcedure(batch, procedure, arguments, returnCodeVar, execSynonym);
+        var invocation = this.InvokeProcedure(
+            batch, procedure, arguments, returnCodeVar, execSynonym is null ? writtenName : $"{procedure.Schema.Name}.{procedure.Name}", execSynonym);
         foreach (var outcome in resultSets is null ? invocation : ApplyResultSetsContract(invocation, resultSets))
             yield return outcome;
     }

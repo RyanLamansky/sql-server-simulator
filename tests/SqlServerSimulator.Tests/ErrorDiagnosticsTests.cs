@@ -98,6 +98,56 @@ public sealed class ErrorDiagnosticsTests
         AreEqual("dbo.p_boom", ex.Procedure);
     }
 
+    /// <summary>
+    /// The procedure is named the way the invoking EXEC spelled it — brackets
+    /// dropped, case kept — and ERROR_PROCEDURE() reads the same.
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec p_boom", "p_boom")]
+    [DataRow("exec dbo.p_boom", "dbo.p_boom")]
+    [DataRow("exec [dbo].[p_boom]", "dbo.p_boom")]
+    [DataRow("exec DBO.P_BOOM", "DBO.P_BOOM")]
+    [DataRow("declare @n sysname = 'p_boom'; exec @n", "p_boom")]
+    public void ProcedureBodyError_NamesTheProcedureAsInvoked(string exec, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure dbo.p_boom as select 1 / 0");
+        AreEqual(expected, sim.AssertSqlError(exec, 8134).Procedure);
+        AreEqual(expected, sim.ExecuteScalar($"begin try {exec} end try begin catch select error_procedure() end catch"));
+    }
+
+    [TestMethod]
+    public void NestedProcedureError_NamesTheInnerCallsSpelling()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure p_boom as select 1 / 0", "create procedure p_outer as exec p_boom");
+        AreEqual("p_boom", sim.AssertSqlError("exec dbo.p_outer", 8134).Procedure);
+    }
+
+    /// <summary>
+    /// A module's lines count from the start of the batch that created it, so
+    /// a comment or blank line ahead of the CREATE moves every body line down.
+    /// </summary>
+    [TestMethod]
+    public void ModuleLines_CountFromTheCreatingBatch()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("\n-- a comment\ncreate procedure p_boom as\nselect 1 / 0");
+        AreEqual(4, sim.AssertSqlError("exec p_boom", 8134).LineNumber);
+    }
+
+    [TestMethod]
+    public void PrintInAProcedure_NamesTheProcedure()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure p_print as print 'hi'");
+        using var connection = sim.CreateOpenConnection();
+        string? procedure = null;
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => procedure = e.Errors[0].Procedure;
+        _ = connection.CreateCommand("exec dbo.p_print").ExecuteNonQuery();
+        AreEqual("dbo.p_print", procedure);
+    }
+
     [TestMethod]
     public void NestedProcedureError_ReportsInnermostFrame()
     {
