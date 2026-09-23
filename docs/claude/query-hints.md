@@ -172,7 +172,9 @@ Every other recognized OPTION hint is a pure no-op.
 
 ## Not enforced
 
-- **FORCESEEK plan rejection** (`Msg 8622`) — fires on real SQL Server when the planner can't honor the directive, which it does for every `FORCESEEK` over a query with no sargable predicate; the simulator validates the hint's names and then reads normally, since it has no plan to declare infeasible.
+- **FORCESEEK plan rejection** (`Msg 8622`, level 16 state 1, compile-time and so uncatchable) — fires on real SQL Server when the planner can't honor the directive; the simulator validates the hint's names and seek columns (Msg 308 / 362 / 365) and then reads normally, since it has no plan to declare infeasible.
+  Probed 2026-08-08 against SQL Server 2025: real refuses a `FORCESEEK` with **no predicate at all**, one whose only predicate is on an **unindexed** column, and one whose **named** index no predicate touches the keys of; it accepts an equality, a range, an `IN`, a `<>`, an `OR` mixing an indexed with an unindexed column, and a join `ON` equality.
+  Closing it wants the seek planner's sargability analysis lifted from execution to compile time — the accepting cases are what make a cheaper rule over-raise.
 - **`INDEX = (value-list)` equals-form** — probe-confirmed that real SQL Server raises `Msg 102` on the equals-with-multiple-values form anyway (the docs notwithstanding), so the simulator's "= takes one literal" rule matches by parsing as well.
 
 `FROM t NOLOCK` without parens is *not* a deprecated hint shape — it parses as the bare-alias form (`FROM t <alias>`) on both real SQL Server and the simulator.

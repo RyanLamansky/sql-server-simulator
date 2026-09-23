@@ -414,6 +414,16 @@ Both characters that break it are outside the range and both are load-bearing he
 That is also why a `Frozen*` collection keyed by `BuiltInToken.Comparer` is the wrong shape for a small accept-list: its per-lookup linguistic hash costs more than walking the whole list of candidates now does (measured at roughly 62 ns against 36 ns for a twelve-entry walk).
 `ObjectId.ClassifyTypeFilter` is the pattern to copy where a value is matched against many codes — classify once into a discriminator, then dispatch on that.
 
+**Choosing a matcher.**
+The three matchers, in cost order: a `switch` over string constants or `string.Equals(…, Ordinal[IgnoreCase])` (~1 ns, and a miss against a differently-sized literal is only a length check), `BuiltInToken`, and a `Collation` (the database's own semantics, mandatory for user identifiers).
+Pick by the semantics the site needs, then keep the shape simple, because the measured traps run the other way from intuition:
+
+- A short chain of ordinal compares **beats** a `Frozen*` lookup; hashing pays off at `ResolveBuiltIn`'s scale (~300 entries), not an accept-list's.
+- Uppercasing into a `stackalloc` span to reach a span `switch` (the SSS003 / SSS007 shape) may cost more than the chain it replaces at accept-list size; it too earns its keep across `ResolveBuiltIn`.
+- What does cost is **materializing a string to feed a lookup** when the token already exposes `Source` as a span (`Frozen*.GetAlternateLookup<ReadOnlySpan<char>>` is the fix), and **repeating a compare per row** that a parse-time discriminator settles once (`XmlMethodCall`'s `XmlMethod`, `ObjectId.ClassifyTypeFilter`).
+
+These compares sit behind the memo layers (`SourceColumnMemo`, the plan cache), so none of it moves a realistic query measurably; treat it as allocation and clarity work, not throughput work.
+
 ## Symbol sort weighting (other SQL_\* / Windows / locale families)
 
 `CultureCollation.Compare` (the `CompareInfo`-routed comparer behind every collation **other than the default**) gives hyphen (`-`) and apostrophe (`'`) the **minimal-weight** treatment SQL Server applies, while every other symbol keeps a real primary weight:

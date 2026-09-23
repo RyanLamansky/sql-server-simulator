@@ -397,7 +397,7 @@ EF Core's `ExecuteUpdate` / `ExecuteDelete` for batched single-statement DML emi
 ### Not modeled
 
 - `WHEN NOT MATCHED BY SOURCE` with `THEN INSERT` — Msg 10711 (parsing rejects).
-- MERGE into a view (real SQL Server allows updatable views as MERGE targets) — only base tables and table variables ship.
+- MERGE into a view ships for a single-base updatable view (`MergeViewTests`); `OUTPUT` through a view target raises `NotSupportedException`, and a join-view target is Msg 4405 where real accepts one naming a single base table — see [`programmable.md`](programmable.md#dml-through-a-join-view).
 - `OUTPUT … INTO @t` with `$action` — the existing `OUTPUT INTO @t` path uses `MutationOutputProjection`, which doesn't carry the `$action` slot.
   INTO-less OUTPUT works fully.
 - Multi-statement WHEN-clause bodies (real SQL Server only allows the one DML action per WHEN — same restriction here).

@@ -92,17 +92,11 @@ Tests get their data by scripting the key shapes in-code (`CREATE TABLE` + inser
 Layout: `Storage/` (pages, types, row encoder/decoder, heap, constraints, lock manager + DMVs), `Parser/` (tokenizer, expressions, query planning + execution), `Simulation/` (per-statement-kind partials), `Schemas/` (`SchemaObject` hierarchy + alias/catalog-view/full-text/spatial/xml-schema-collection types), `Errors/` (exception factory partials), root (`Simulated*` ADO.NET front-door + `Simulation` / `Database` / `Schema` / supporting types).
 
 ### Storage
-8KB heap pages.
-Rows encoded as bytes, navigated column-by-column without rehydrating; single-column reads via an array-typed schema take the `RowLayout` fast path (per-schema geometry cached by array identity in a `ConditionalWeakTable`, making `RowDecoder.DecodeColumn` O(1) vs two O(columns) walks — the per-row resolvers' path).
-Type-only `SqlType[]` schemas reach that same fast path through `RowDecoder.ColumnsFor`, which caches the `HeapColumn[]` conversion by schema-array identity — **never convert per call**: a fresh array defeats the layout cache's identity key and re-lays-out the geometry every read (measured at a third of result-drain CPU; the reader-cursor and subquery decode sites are the precedent consumers).
-The **write** side has the same rule and the same seam: `RowEncoder.EncodeRow` has an array-schema overload that routes through `ColumnsFor`, which overload resolution picks for every caller holding a `SqlType[]`; the span form builds the array *and* a column object per column, which on a row-at-a-time producer measures as the largest single allocation of a `SELECT … INTO`.
-`EncodeRow`'s own per-row scratch is `stackalloc` up to 64 columns and heap-allocated past it.
-A caller that hands the encoded bytes to a heap and drops them takes `EncodeRowInto`, which writes into a reused caller-owned buffer; one that **retains** them keeps the allocating `EncodeRow`, since a reused buffer outlives its row and is longer than it — see [`heap-storage.md`](docs/claude/heap-storage.md).
-Every non-NULL variable-length column carries a 1-byte inline/pointer marker.
-LOB-eligible types (`varchar/nvarchar/varbinary(MAX)`, `text`/`ntext`/`image`) flow through a parallel 8KB-LOB-page chain.
-Bounded `varchar/nvarchar/varbinary(N)` start inline; the encoder pushes the largest off-row greedily until the row fits 8060 bytes.
+8KB heap pages; rows are encoded bytes navigated column-by-column without rehydrating.
+Every non-NULL variable-length column carries a 1-byte inline/pointer marker; LOB-eligible types flow through a parallel LOB-page chain, and bounded `varchar/nvarchar/varbinary(N)` start inline, with the largest pushed off-row until the row fits 8060 bytes.
 Allocation is a flat page list (no IAM/PFS).
-`Heap.EnumerateRowsWithAddress` is the path **every** table scan runs, so it walks slots inline (one `HeapPage.TryReadLiveSlot` per row rather than a nested per-page enumerator plus four re-reads of the same 2-byte directory entry) and probes the forward-target set only when it holds something — its key is a tuple, and a `Count` test keeps that hash probe off the common scan; **don't re-add a layer here** (a nested per-page enumerator measures 71 ms against 11 ms inline on a 228k-row `COUNT(*)`, the floor under every scan-bound query) — see [`heap-storage.md`](docs/claude/heap-storage.md).
+**The scan and encode/decode paths are measured hot spots**: `Heap.EnumerateRowsWithAddress` (every table scan), `RowDecoder.ColumnsFor` / `DecodeColumn`, and the `RowEncoder.EncodeRow` / `EncodeRowInto` overloads carry XML docs saying what not to undo and why.
+Read them before touching those members → [`heap-storage.md`](docs/claude/heap-storage.md).
 
 ### Type system
 `SqlType` / `SqlValue` is the storage-layer pair.
@@ -116,28 +110,20 @@ Correlated subqueries re-run the plan per outer row via `outerResolver` (execute
 A deferred source whose rows can't change across one enumeration — any **non-leftmost, non-APPLY** `LateralPlan` source (derived table / CTE / view / generator), plus every catalog view — is executed once per enumeration by `MaterializeUncorrelatedDeferredSources` instead of once per left-side row, which also makes it hash-join-eligible; APPLY and a `NEWID()`-drawing plan keep per-row execution — see [`joins.md`](docs/claude/joins.md#deferred-sources-materialize-once-per-enumeration).
 
 ### Multi-source rows
-`FromSource[]`; enumeration rows are `byte[]?[]`, one slot per source, null = NULL-filled outer-join side (LEFT/RIGHT/FULL/OUTER APPLY).
-Column resolution is qualifier-aware via `FindSourceColumn` / `ResolveAcrossTuple`; ambiguous unqualified name → Msg 209.
-Per-row resolution goes through a per-enumeration `SourceColumnMemo` (name → (source, column), keyed by string reference identity — execution-scoped per the plan-cache shared-plan contract); un-memoized re-resolution was the largest CPU cost of scan-bound joins/aggregates.
-**Per-row resolver loops use the hoisted-scaffolding pattern**: one mutable-capture tuple slot + one cached _self-referencing lambda_ (never a local function passed as its own `selfRecursive` argument — that allocates a delegate per resolution per row; 41% of profile bytes) + one `RuntimeContext` per loop; follow it in executor loops.
-The same rule reaches the _arrays_ a per-row loop fills: a grouping key, a hash-join bucket key and a group's projection under a bounded `TOP (n)` are all written into reused scratch and copied out only where something retains them (a group's first row, a heap admission), which is one allocation per group rather than per row.
-The aggregate executor also accumulates straight off the enumeration for a single grouping set instead of buffering the rows first — real pipelines its Filter into its aggregate the same way, which is observable in _which_ error a row raises — see [`query.md`](docs/claude/query.md#streaming-accumulation-and-where-an-error-surfaces).
+`FromSource[]`; enumeration rows are `byte[]?[]`, one slot per source, null = NULL-filled outer-join side.
+Column resolution is qualifier-aware via `FindSourceColumn` / `ResolveAcrossTuple` (ambiguous unqualified name → Msg 209), memoized per enumeration in `SourceColumnMemo`, which is execution-scoped per the plan-cache shared-plan contract.
+**Per-row resolver loops use the hoisted-scaffolding pattern**: one mutable-capture tuple slot + one cached _self-referencing lambda_ + one `RuntimeContext` per loop.
+Never pass a local function as its own `selfRecursive` argument; that allocates a delegate per resolution per row, which once measured as 41% of profile bytes.
+The same rule reaches the _arrays_ a per-row loop fills (grouping keys, hash-join bucket keys, bounded-`TOP` projections): write into reused scratch and copy out only where something retains them.
+The aggregate executor accumulates straight off the enumeration for a single grouping set, which is observable in _which_ error a row raises → [`query.md`](docs/claude/query.md#streaming-accumulation-and-where-an-error-surfaces).
 
 ### `MultiPartName`
 Readonly struct, up to 4 inline slots.
 API: `Leaf`, `ImmediateQualifier` (null when unqualified — pair with `Collation.Baseline.Equals(name.ImmediateQualifier, "INSERTED")`, which folds null into `false`), `Count`, `ToString()`.
 
 ### Matching a name against a fixed vocabulary
-Three matchers, in cost order: a `switch` over string constants or `string.Equals(…, Ordinal[IgnoreCase])` (~1 ns, and a miss against a differently-sized literal is only a length check), `BuiltInToken` (spec-defined tokens — an ASCII-alphanumeric shortcut over an invariant `CompareInfo`, see [`collations.md`](docs/claude/collations.md#fixed-tokens-builtintoken)), and a `Collation` (the database's own semantics, mandatory for user identifiers).
-**Pick by the semantics the site needs, then keep the shape simple** — the measured traps run the other way from intuition:
-
-- A short chain of ordinal compares **beats** a `Frozen*` lookup, so don't convert one.
-  Hashing pays off at `ResolveBuiltIn`'s scale, not an accept-list's.
-- Uppercasing into a `stackalloc` span to reach a span `switch` (the SSS003 / SSS007 shape) may cost more than the chain it replaces at accept-list size.
-  It earns its keep across `ResolveBuiltIn`'s ~300 entries.
-- What does cost: **materializing a string to feed a lookup**, when the token already exposes `Source` as a span (`Frozen*.GetAlternateLookup<ReadOnlySpan<char>>` is the fix), and **repeating a compare per row** that a parse-time discriminator settles once (`XmlMethodCall`'s `XmlMethod`, `ObjectId.ClassifyTypeFilter`).
-
-Because these compares sit behind the memo layers (`SourceColumnMemo`, the plan cache), none of it moves a realistic query measurably; treat it as allocation and clarity work, not throughput work.
+Three matchers: string constants / `Ordinal[IgnoreCase]` compares, `BuiltInToken` (spec-defined tokens), and a `Collation` (mandatory for user identifiers).
+Pick by the semantics the site needs, then keep the shape simple: a short ordinal chain beats a `Frozen*` lookup at accept-list size → [`collations.md`](docs/claude/collations.md#fixed-tokens-builtintoken).
 
 ### Exception factories
 `SimulatedSqlException` ctor is private; each error case is an `internal static` factory in a topical partial (`TypeErrors`, `SchemaErrors`, `ConstraintErrors`, `ResolutionErrors`, `QueryErrors`, `SyntaxErrors`).
@@ -157,20 +143,20 @@ Six scopes, one home each.
 Field rosters live in the source XML docs; this captures only identity + load-bearing contracts.
 
 - **`Simulation`** = server / instance.
-  Holds `SystemHeapTables`, the `Databases` dict, and `ServerCollationName` (`init`-only; defaults `SQL_Latin1_General_CP1_CI_AS`; mirrors `model.collation` — install-time seed for every new `Database`, both the lazy `"simulated"` seed and collation-less bacpac imports; `init` reflects real immutability).
-  Public surface = `Simulation` ctor + `CreateDbConnection()` + `ImportBacpac()` + `AddRemoteSimulation()` + `ServerCollationName` + `EnableClr` + `ListenLocalAsync()` / `ListenNetworkAsync()` (int-port or `SimulatedNetworkListenerOptions` overloads) → `SimulatedNetworkListener`.
+  Holds `SystemHeapTables`, the `Databases` dict, and the `init`-only `ServerCollationName`, which seeds every new `Database` ([`collations.md`](docs/claude/collations.md#server-level-seed-simulationservercollationname)).
+  Its public surface is whatever `QualityTests.PublicApiWhitelist` lists.
 - **`Database`** (internal) = one database.
-  Holds `Schemas`, `CompatibilityLevel`, `CollationName`, the rowversion counter (`@@DBTS`), the MVCC version store, and the principal/permission/extended-property/full-text/DDL-trigger surfaces.
-  `Databases` is seeded at construction with all four system databases — `master` / `tempdb` / `model` / `msdb` (so `USE <systemdb>` / `master.sys.*` / `master.dbo.<proc>` / SSMS's `msdb.dbo.syspolicy_system_health_state` all resolve without an import); the first `CreateDbConnection()` lazily seeds `DefaultDatabaseName` (`"simulated"`) when no *user* database is present, and all four system databases are excluded from the initial-database fallback (`Simulation.SystemDatabaseNames`) so a fresh connection still lands on `simulated`.
-  Database ids: the four system databases carry fixed ids (master = 1, tempdb = 2, model = 3, msdb = 4, from `Simulation.SystemDatabaseIds`); every user database carries a **stored** `Database.Id` assigned at registration (`Simulation.RegisterUserDatabase` — the smallest free id ≥ 5, so a dropped id is reused, matching real). `DbId.DatabasesWithIds` projects `(db, db.Id)` ordered by id — single source of truth consumed by `DB_ID`/`DB_NAME`, `sys.databases`, `OBJECT_NAME`, and `DBCC SHRINKDATABASE`. `CREATE DATABASE` (via `RegisterUserDatabase`) and `Simulation.ImportBacpac` and the lazy `simulated` seed all allocate through the same path.
-  `has_dbaccess` is accessibility-aware: 1 for master/tempdb/msdb/user dbs, 0 for `model` (restricted template), NULL for unknown.
-  `#temp` still routes through the connection's `TempTables`, not the seeded `tempdb`.
-  `USE <db>` switches session (Msg 911 on miss); 3-part names route both reads and writes cross-DB (`INSERT other.dbo.t …`, synonyms and `db..t` included), with the per-database state — rowversion counter, version store, trigger dispatch, object-id allocation — following the *target* via `HeapTable.OwningDatabase` / `BatchContext.DatabaseFor`, while `@@ROWCOUNT` / `SCOPE_IDENTITY` / the transaction stay the session's; a 4-part write still raises `NotSupportedException` via `BatchContext.RejectCrossServerMutation` — see [`schemas.md`](docs/claude/schemas.md#cross-database-writes).
+  Holds `Schemas`, `CompatibilityLevel`, `CollationName`, the rowversion counter (`@@DBTS`), the MVCC version store, and the principal / permission / extended-property / full-text / DDL-trigger surfaces.
+  All four system databases are seeded at construction, and a fresh connection lazily seeds and lands on `simulated`; ids, the id allocator and `has_dbaccess` are in [`schemas.md`](docs/claude/schemas.md).
+  `#temp` routes through the connection's `TempTables`, not the seeded `tempdb`.
+  A three-part name routes reads and writes cross-database, with per-database state following the *target* (`HeapTable.OwningDatabase` / `BatchContext.DatabaseFor`) while `@@ROWCOUNT` / `SCOPE_IDENTITY` / the transaction stay the session's → [`schemas.md`](docs/claude/schemas.md#cross-database-writes).
 - **`Schema`** (internal) = one namespace in a database.
   Holds the object dicts (`HeapTables` / `Functions` / `Views` / `Procedures` / `Sequences` / `Triggers` — DML triggers share the object namespace) + the type namespace (`TableTypes` / `AliasTypes` / `XmlSchemaCollections`).
   Schema-qualified refs route through `Database.Schemas[<schema>]`; unqualified falls back to `DefaultSchemaName` (`"dbo"`).
 - **`SimulatedDbConnection`** = session.
-  Holds `@@`-state (`LastIdentity` = `SCOPE_IDENTITY`/`@@IDENTITY`, `LastStatementRowCount` = `@@ROWCOUNT`, `LastErrorNumber` = `@@ERROR`), `CurrentDatabase` / `CurrentTransaction`, per-session `TempTables` (`#foo`, cleared on Dispose), `NestingLevel` (cap 32), `Spid` (≥51), `SessionIsolationLevel`, `LockTimeoutMillis`, `Session` (the `SessionToken` every shared structure names it by — see [`locking.md`](docs/claude/locking.md#abandoned-session-reclamation)), `CurrentExecutingThreadId` (same-thread-deadlock detection, carried on the token), and `Security` (`SessionSecurityContext`: original login + base database principal + impersonation stack; default = dbo everywhere; read by the identity scalars, mutated by `EXECUTE AS`/`REVERT` and module `WITH EXECUTE AS`, stamped by connection-string / TDS auth; `EffectiveIsDbo` is the same-database permission-enforcement bypass, while a cross-database reference resolves the login's user in the *target* database and asks the boundary-aware bypass, which a database-scoped `dbo` frame (a module's `WITH EXECUTE AS OWNER` / `SELF`) fails — see [`permissions.md`](docs/claude/permissions.md)).
+  Holds the `@@`-state (`SCOPE_IDENTITY` / `@@ROWCOUNT` / `@@ERROR`), `CurrentDatabase` / `CurrentTransaction`, per-session `TempTables`, `NestingLevel`, isolation and lock-timeout settings, and two contracts:
+  - `Session`: the one-way `SessionToken` every shared structure names the session by, so an abandoned connection can be reclaimed → [`locking.md`](docs/claude/locking.md#abandoned-session-reclamation).
+  - `Security`: the login, database principal and impersonation stack; the default is dbo everywhere, and dbo bypasses same-database checks → [`permissions.md`](docs/claude/permissions.md).
   Full roster in the source XML docs.
 - **`BatchContext`** (internal, `Parser/`) = one command execution.
   Owns the `ParserContext` (parse-time scratch) + batch-lifetime runtime state: `Variables`, `TableVariables` (`@t`), `CurrentUndoLog`, `CurrentTableVarUndoLog` (statement-only, disjoint from the tx-scoped log so `ROLLBACK TRAN` skips `@t`), `UdfFrame` / `ProcFrame` (non-null in a UDF/proc body — gates value-form `RETURN`).
@@ -191,50 +177,21 @@ Field rosters live in the source XML docs; this captures only identity + load-be
 
 ## Conventions that fail builds
 
-- **SSS001**: non-public types may not have auto-properties or trivial wrappers over same-type fields.
-  Expose the field directly: `public readonly T Foo = expr;` (`static readonly` for static-singleton).
-  Overrides, abstracts, interface impls exempt.
-  A **positional record**'s parameter list reaches the same auto-properties indirectly and is reported too — once on the record's identifier, since the fix rewrites the whole list rather than any one parameter.
-  A derived record forwarding every parameter to a base (`record D(int A) : B(A)`) declares none of its own and is exempt.
-- **SSS002**: a `readonly` field in a non-public type whose declared type is a strict supertype of its initializer should use the concrete type.
-  Public types, value-typed initializers (boxing), const, and uninitialized fields exempt.
-- **SSS003**: `string.ToUpperInvariant()`/`ToLowerInvariant()` as a `switch`'s *governing expression* allocates a temp string.
-  Use the `Span<char>` overload — `Span<char> buf = stackalloc char[s.Length]; s.AsSpan().ToUpperInvariant(buf)` — and switch on that.
-- **SSS004**: 2+ `if`/`else if` branches of shape `<sameScrutinee> is <SameType> { <SameProperty>: … }` should be a single `switch` (fuses isinst + ldfld; the if-chain repeats both per arm).
-- **SSS005**: a `switch` (expr or statement) whose arms are all single string/numeric constants must be sorted — strings ordinal, numbers numerically (`_`/`null` excluded).
-  Exempts a guard, or/relational/recursive/`var` pattern, or **enum/`char`/`bool`** constant (those order by meaning).
-  A switch deliberately ordered by meaning (time-unit magnitude, host level): `#pragma warning disable SSS005` + one-line rationale rather than sort.
-- **SSS006**: 2+ consecutive self-returning `StringBuilder` calls (`Append`/`Insert`/`Replace`/…) on the same builder, result discarded (bare or `_ =`), should be one fluent chain.
-  An already-chained statement peels to its base receiver, so `sb.Append(a).Append(b)` beside `sb.Append(c)` merges.
-  Only when the base is side-effect-free (identifier / `this.field` / dotted); call-valued roots exempt.
-  Comments between statements don't exempt — slot them into the chain.
-- **SSS007**: a `switch` **expression** over `Span<char>`/`ReadOnlySpan<char>` whose arm is a discard guard `_ when <governing>.SequenceEqual("literal")` should be the constant pattern `"literal"` — a span-of-char switch matches string constants directly since C# 11.
-  Only the pure single-invocation guard whose receiver is the switch's governing expression is flagged (negated / `&&`-combined / different-span conditions are left alone).
-  Enforcement companion to SSS003 (which creates the `stackalloc Span<char>` scrutinee); `ResolveBuiltIn` in `Parser/Expression.cs` is the reference shape.
-- **SSS008**: a `static readonly` field typed as a general-purpose collection from `System.Collections{,.Generic,.Immutable}` must be an array or a `Frozen` type — a static's contents are fixed for the process, so they should be laid out once for reading.
-  Throughput, not immutability, is the motive: arrays are permitted, `Immutable*` dictionary / set / list are flagged too (a per-lookup tree walk buys nothing here), `ImmutableArray<T>` is exempt.
-  `Lazy<T>` unwraps first; `Concurrent*` and `PriorityQueue` are exempt; anything genuinely mutated after init takes `#pragma warning disable SSS008` + rationale.
-- **SSS009**: a non-public type may not be declared as a `record`.
-  The compiler emits `Equals` / `GetHashCode` / the equality operators / `ToString` / `PrintMembers` / a copy constructor / `Deconstruct` whether or not anything calls them, so on a type with no API surface each uncalled member is shipped metadata and an uncovered member in every coverage report.
-  Declare a plain class or struct with readonly fields; the primary-constructor + field-initializer shape is what the repo uses (`internal sealed class Foo(int a) { public readonly int A = a; }` — `FrameSpec`, `PlanCacheEntry` are the precedent).
-  **Value equality alone is not a justification**: a dictionary key or hash-set member implements `IEquatable<T>` directly, which emits the two members the lookup calls and keeps a struct off `ValueType.Equals`'s boxing-and-reflection fallback — `Simulation.PlanCacheKey` is the reference shape.
-  A record kept for a genuinely-used `with`, deconstruction or printed `ToString` takes `#pragma warning disable SSS009` + rationale; `with` needs init properties, so such a record takes an SSS001 suppression alongside it.
-  Public types are exempt — there the synthesized members are deliberate API surface.
-- **SSS010**: a non-public method / constructor / local function parameter declared as a general-purpose collection **interface** (the `System.Collections{,.Generic,.Immutable}` `IEnumerable` / `ICollection` / `IList` / `ISet` / `IDictionary` / `IReadOnly*` / `IImmutable*` family) should declare the concrete type when **every call site in the compilation** passes that one type — the parameter half of SSS002's field rule.
-  The interface buys flexibility nobody uses: each read through it is a dispatch the concrete type resolves statically, and the concrete type's own members are hidden from the body.
-  A **struct** collection is the highest-value hit, since passing it as an interface boxes on every call — the value-type case runs the *opposite* way from SSS002, which exempts a value-typed initializer precisely to keep a field's boxing boundary.
-  Because the verdict is call-site evidence, the rule needs a compilation-end pass and **converges by iteration**: an argument whose own compile-time type is the interface (it arrived through another interface-typed parameter or field) settles the callee as genuinely interface-fed, so fixing the upstream declaration is what exposes the next hit — rebuild until the build is clean.
-  Exempt: public / protected members of public types, overrides, abstract / virtual members, interface implementations, partial methods, `params` and by-reference parameters, lambda / delegate parameter positions, a parameter whose type mentions a type parameter, and a method whose group is converted to a delegate.
-  A `null` / `default` / omitted argument contributes no type rather than disqualifying — but it blocks a *struct* replacement, which couldn't restate the null.
-  Two call sites with different concrete types is genuine polymorphism and goes unreported; polymorphism visible only outside the compilation (a call from a test assembly into an `internal` member) takes `#pragma warning disable SSS010` + rationale.
-  Hits on `private` members overlap CA1859, which is already on; SSS010 is what extends the same fix to `internal` members, constructors and local functions.
-- **SSS011**: the same judgement in return position — a non-public method / local function whose **return type** is one of those collection interfaces should declare the concrete type when every `return` in its body produces it.
-  **Iterators are exempt by construction** — a `yield` body can only be declared as `IEnumerable<T>` / `IEnumerator<T>`, and deferred execution is the flexibility an interface return genuinely buys; the rest of the exemption list is SSS010's, plus `ref` returns.
-  Evidence is the body's own returns (an expression body counts as one), read past nested lambdas and local functions; a `null` / `default` return contributes no type but blocks a *struct* replacement, a return whose own type is an interface settles the member as interface-returning, two different concrete types is polymorphism, and a throw-only body has nothing to judge.
-  A separate id from SSS010 because the evidence is local rather than compilation-wide — and so one member carrying both can suppress them independently — but the two cascade into each other (a narrowed return makes a caller's argument concrete, and vice versa), so iterate them together.
-- **MSTEST0049**: async tests must thread `TestContext.CancellationToken`.
-  Pattern: `public TestContext TestContext { get; set; } = null!;`.
-- **MSTEST0037**: prefer `Assert.IsEmpty(values)` over `Assert.AreEqual(0, values.Count)`; typed asserts over generic.
+The repo's own analyzers (`src/SqlServerSimulator.Analyzers`) enforce these, and each diagnostic's message and description name the fix and the exemptions.
+Write to them up front to save a build round trip:
+
+- **SSS001**: no auto-properties or trivial wrappers on non-public types; expose the field (`public readonly T Foo = expr;`).
+- **SSS002** / **SSS010** / **SSS011**: on non-public members, declare the concrete type rather than a supertype or collection interface, for fields, parameters and return types respectively.
+  SSS010 and SSS011 judge from call-site and return evidence, so fixing one declaration exposes the next: **rebuild until the build is clean**.
+- **SSS003** / **SSS007**: switch on a `stackalloc` `Span<char>` case-fold rather than `ToUpperInvariant()`, and match its arms with string constants rather than `SequenceEqual` guards; `ResolveBuiltIn` in `Parser/Expression.cs` is the reference shape.
+- **SSS004**: a chain of `x is T { P: … }` tests on the same scrutinee is one `switch`.
+- **SSS005**: constant-only switch arms are sorted (strings ordinal, numbers numerically).
+- **SSS006**: consecutive discarded `StringBuilder` calls on one builder are one fluent chain.
+- **SSS008**: a `static readonly` collection is an array or a `Frozen*` type.
+- **SSS009**: a non-public type is not a `record`; use a plain class or struct with readonly fields, implementing `IEquatable<T>` if it is a key (`Simulation.PlanCacheKey`).
+- A deliberate exception takes `#pragma warning disable SSSnnn` plus a one-line rationale.
+- **MSTEST0049**: async tests thread `TestContext.CancellationToken` (`public TestContext TestContext { get; set; } = null!;`).
+- **MSTEST0037**: prefer `Assert.IsEmpty(values)` and typed asserts over generic ones.
 
 ## Style notes
 
@@ -380,38 +337,21 @@ Where an entry carries a second clause it is because that fact changes what you'
 ## Not modeled yet
 
 Status, not decision.
-Everything here is unbuilt for cost reasons and is fair game to pick up — [`backlog.md`](docs/claude/backlog.md) carries the weighting and the prospective view of the same ground.
+Everything here is unbuilt for cost reasons and is fair game to pick up.
+This is a trigger list: [`backlog.md`](docs/claude/backlog.md) carries the weighting, and the linked deep-dive carries the detail and the probe results.
 Entries that raise a *real* SQL Server error deliberately are **not** here; they're coverage, and live in their feature's deep-dive.
+The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 
-- **Key-range coverage past a sargable predicate on a leading key prefix** — a SERIALIZABLE / HOLDLOCK read fences a key range when its predicate bounds a **leading prefix** of some key or index; a whole-table scan, a predicate on an unindexed or non-leading column, an `ORDER BY`-eliminated ordered scan and a view / multi-source read all keep the whole-table S, which is what real degenerates to for the unindexed cases.
-  A SERIALIZABLE **writer** takes no fence of its own (real converts its key locks to `RangeX-X`), and two readers' ranges meet only on an *identical* interval, since ranges intern per interval and containment is tested on the write path — see [`locking.md`](docs/claude/locking.md#key-range-locks).
-- **An aggregate reading only an enclosing query's columns** (`(SELECT MAX(t.col) FROM u)` inside a query over `t`) → `NotSupportedException` where the scope offers nowhere to move it to; real binds it to the outer query, collapsing that query to one row.
-  Correlation itself ships, as does the rehoming where a collector exists, and a name that resolves in *no* scope is real's own Msg 207 — see [`query.md`](docs/claude/query.md#outer-scope-correlation-in-the-select-list).
-- **Cross-server DML** (`INSERT`/`UPDATE`/`DELETE`/`MERGE` through a 4-part linked-server name) → `NotSupportedException` via `BatchContext.RejectCrossServerMutation`; open a connection on the target `Simulation` instead.
-  Four-part *reads* (SELECT/JOIN) ship; catalog-view reads via four-part names (`srv.db.sys.tables`) fall to Msg 208.
-  Cross-*database* DML inside one `Simulation` ships, permission resolution, catalog-view metadata visibility and snapshot stamps included; the surface still reading the session's database is the `OBJECT_*` scalars' visibility gate.
-  See [`schemas.md`](docs/claude/schemas.md#cross-database-writes), [`linked-servers.md`](docs/claude/linked-servers.md).
-- **`SET <option>` accept-list** (`Simulation.Set.cs`): the ANSI/session-state toggles, `STATISTICS {IO|TIME|XML|PROFILE}`, `DATEFORMAT` / `DEADLOCK_PRIORITY` / `QUERY_GOVERNOR_COST_LIMIT` and the rest of the value-taking family — parse-and-discard.
-  Unknown SET → Msg 195.
-  `SET @v`, `IDENTITY_INSERT`, `NOCOUNT`, `LOCK_TIMEOUT`, `TEXTSIZE` (client-boundary LOB truncation — see [`scalars.md`](docs/claude/scalars.md)), `TRANSACTION ISOLATION LEVEL`, `QUOTED_IDENTIFIER` (and `ANSI_DEFAULTS`'s QI component), `XACT_ABORT`, `ROWCOUNT`, `DATEFIRST` and `LANGUAGE` carry semantic effect.
-  `SET DATEFORMAT` not following `SET LANGUAGE` is the one coupling those leave open — see [`scalars.md`](docs/claude/scalars.md#set-language-and-the-datefirst-it-moves).
-- **`ALTER DATABASE … SET` / `COLLATE`** — see [`database-options.md`](docs/claude/database-options.md).
-  Most options parse-and-discard; `COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY` / `READ_WRITE`, `QUERY_STORE` are load-bearing, and every option lands on the **named** database (`CURRENT` for the session's; an unhosted name is Msg 5011).
-- **`MERGE … OUTPUT` through a view** → `NotSupportedException` (view-column projection through `INSERTED`/`DELETED` deferred); the other MERGE shapes ship — see [`dml.md`](docs/claude/dml.md).
-- Heap allocation tracking (flat page list, no IAM/PFS).
-- **`ALTER AUTHORIZATION`** in every form — there is no parser for the statement, so a schema's owner is settled once by `CREATE SCHEMA … AUTHORIZATION` and an object's follows its schema.
-  See [`schemas.md`](docs/claude/schemas.md#create-schemas-owner-and-its-element-list).
-- **Programmable-object top-level gaps**: CLR procedures / TVFs / aggregates / UDTs (CLR *scalar functions* ship — see [`clr-assemblies.md`](docs/claude/clr-assemblies.md)), logon triggers, INSTEAD OF UPDATE/DELETE on non-updatable views, DML through a JOIN view whose own source is another JOIN view, and MERGE into a JOIN view (the single-base INSERT / UPDATE, and a chain of single-source views over such a body, ship — see [`programmable.md`](docs/claude/programmable.md#dml-through-a-join-view)), OUTPUT through views, multi-source alias-form UPDATE/DELETE through views (Msg 4405).
-  Natively-compiled + CLR procedures ship at parser-fidelity only (ATOMIC boundary → session isolation; CLR proc bodies parse but `EXEC` no-ops).
-  `WITH RESULT SETS`'s `AS OBJECT` / `AS TYPE` / `AS FOR XML` definition shorthands raise `NotSupportedException`; its three main forms ship, on a system procedure as well as a user one.
-  A module body binds at CREATE and its shape is checked there, but a statement contributes at most one binder error to the report (real names every bad column reference of one statement), and a bind abandoned at a deferral reports only what it gathered and leaves the last-statement rule unrun.
-  See [`programmable.md`](docs/claude/programmable.md).
-- **`ALTER TABLE` shapes not built**: `SWITCH PARTITION`, and the `ALTER COLUMN … ADD | DROP {PERSISTED | MASKED}` sub-clauses (the `ROWGUIDCOL` / `SPARSE` pair ships, as do `ADD` / `DROP PERIOD FOR SYSTEM_TIME`).
-  Modeled shapes in [`alter-table.md`](docs/claude/alter-table.md).
-- **`FORCESEEK`'s plan-infeasibility refusal** (Msg 8622 level 16 state 1, compile-time and so uncatchable) — real raises it whenever the planner can't honour the directive; the simulator validates the hint's index and seek columns (Msg 308 / 362 / 365) and then reads normally, having no plan to declare infeasible.
-  Probed 2026-08-08: real refuses a `FORCESEEK` with **no predicate at all**, one whose only predicate is on an **unindexed** column, and one whose **named** index no predicate touches the keys of; it accepts an equality, a range, an `IN`, a `<>`, an `OR` mixing an indexed with an unindexed column, and a join `ON` equality.
-  Closing it wants the seek planner's sargability analysis lifted from execution to compile time — the accepting cases are what make a cheaper rule over-raise.
-  Surface in [`query-hints.md`](docs/claude/query-hints.md).
+- **Key-range locks past a sargable leading-key-prefix predicate** — other SERIALIZABLE reads take the whole-table S → [`locking.md`](docs/claude/locking.md#key-range-locks).
+- **An aggregate reading only an enclosing query's columns** where no collector can rehome it → `NotSupportedException` → [`query.md`](docs/claude/query.md#outer-scope-correlation-in-the-select-list).
+- **Cross-server DML** through a four-part name → `NotSupportedException` via `BatchContext.RejectCrossServerMutation` (cross-*database* DML ships) → [`linked-servers.md`](docs/claude/linked-servers.md), [`schemas.md`](docs/claude/schemas.md#cross-database-writes).
+- **Most `SET <option>` toggles parse and are discarded** (`Simulation.Set.cs`); the ones with semantic effect are handled by name there.
+  The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
+- **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
+- **`ALTER AUTHORIZATION`**, in every form → [`schemas.md`](docs/claude/schemas.md#create-schemas-owner-and-its-element-list).
+- **Programmable-object gaps**: CLR procedures / TVFs / aggregates / UDTs, logon triggers, INSTEAD OF UPDATE/DELETE on non-updatable views, a join view over a join view, MERGE into or OUTPUT through views, `WITH RESULT SETS`' shorthand forms, and one binder error per statement → [`programmable.md`](docs/claude/programmable.md), [`clr-assemblies.md`](docs/claude/clr-assemblies.md), [`triggers.md`](docs/claude/triggers.md).
+- **`ALTER TABLE … SWITCH PARTITION`** and `ALTER COLUMN … ADD | DROP {PERSISTED | MASKED}` → [`alter-table.md`](docs/claude/alter-table.md).
+- **`FORCESEEK`'s plan-infeasibility refusal** (Msg 8622) → [`query-hints.md`](docs/claude/query-hints.md#not-enforced).
 
 ## Quirks (modeled, not byte-identical to SQL Server)
 

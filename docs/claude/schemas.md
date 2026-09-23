@@ -83,6 +83,7 @@ Locks likewise: the `LockManager` is per-`Simulation` and its resources hang off
 
 - **Four-part writes to a linked server** stay rejected by `BatchContext.RejectCrossServerMutation` — the remote's lock manager and undo log are its own, and that's the [`linked-servers.md`](linked-servers.md) gap, not this one.
 - **The database name in Msg 515 / 547 constraint messages** is still the literal `Simulation.DefaultDatabaseName`, so a violation in another database names `simulated` where real names the target (a pre-existing hardcode, unrelated to which database the write came from).
+- **The `OBJECT_*` scalars' metadata-visibility gate** reads the session's database rather than the one a three-part argument names; catalog-view visibility already follows the target.
 - **`CREATE VIEW` / `PROCEDURE` / `FUNCTION` / `TRIGGER` with a db prefix** — real raises Msg 166 (`does not allow specifying the database name as a prefix`); the simulator doesn't enforce that yet.
 
 ## DROP SCHEMA

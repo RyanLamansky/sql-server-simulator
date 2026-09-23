@@ -120,7 +120,10 @@ internal static class RowDecoder
     /// The nameless all-nullable <see cref="HeapColumn"/>[] equivalent of a
     /// type-only schema, cached by the schema array's identity (schema arrays
     /// are per-result-set and long-lived, mirroring <see cref="RowLayout"/>'s
-    /// keying).
+    /// keying). A caller holding a <see cref="SqlType"/>[] goes through here
+    /// rather than building its own <see cref="HeapColumn"/>[] per call: a
+    /// fresh array defeats the layout cache's identity key and re-lays-out
+    /// the geometry on every read.
     /// </summary>
     public static HeapColumn[] ColumnsFor(SqlType[] schema) =>
         typeOnlyColumns.GetValue(schema, static s =>

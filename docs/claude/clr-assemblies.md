@@ -131,6 +131,7 @@ The strong-named case is unprobed.
 - **CLR stored procedures, table-valued functions, aggregates, and UDTs.**
   These reference `Microsoft.SqlServer.Server.SqlContext` / `SqlPipe` / `SqlDataRecord` / `SqlMetaData`, which lived in .NET Framework's `System.Data.dll` and are absent from .NET's facade — a routine using them fails to load unless the load context supplies a substitute `System.Data` that type-forwards `SqlTypes` onward and adds the missing namespace.
   Scalar functions need no such shim, which is why they ship first.
+  The procedure parser has no `AS EXTERNAL NAME` form at all, so `CREATE PROCEDURE … AS EXTERNAL NAME` raises Msg 102 at `EXTERNAL`.
 - Plain-CLR parameter and return forms real also accepts (`string`, `int?`, `SqlChars`, `SqlBytes`) — only the `System.Data.SqlTypes` family binds.
 - `ALTER ASSEMBLY`, `CREATE ASSEMBLY … FROM '<path>'`, assembly `AUTHORIZATION`, `sp_add_trusted_assembly`, and assembly signing / `clr strict security` enforcement.
 - BACPAC round-trip of `SqlAssembly` model elements.
