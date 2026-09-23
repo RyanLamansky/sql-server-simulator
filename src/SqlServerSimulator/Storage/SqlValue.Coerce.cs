@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using SqlServerSimulator.Storage.Spatial;
 
 namespace SqlServerSimulator.Storage;
@@ -98,7 +99,7 @@ internal readonly partial struct SqlValue
             // Real parses every value it converts to xml, so a malformed one
             // raises here rather than surviving to its first read.
             return target is XmlSqlType && this.Type is not XmlSqlType
-                ? FromXml(XmlWellFormedness.Checked(this.AsString, SqlType.IsNationalStringCategory(this.Type)))
+                ? this.CoerceToXml(preserveWhitespace: false)
                 : FromString(target, this.AsString);
         }
 
@@ -136,10 +137,9 @@ internal readonly partial struct SqlValue
 
         if (this.Type is VarbinarySqlType or BinarySqlType && SqlType.IsStringCategory(target))
         {
-            var text = this.CoerceBinaryToStringWithStyle(target, 0);
             return target is XmlSqlType
-                ? FromXml(XmlWellFormedness.Checked(text.AsString, nationalSource: this.AsBytes is [0xFF, 0xFE, ..]))
-                : text;
+                ? this.CoerceToXml(preserveWhitespace: false)
+                : this.CoerceBinaryToStringWithStyle(target, 0);
         }
 
         // image → string: real disallows the explicit CAST outright (Msg 529)
@@ -1282,6 +1282,77 @@ internal readonly partial struct SqlValue
                 out var d) && !double.IsNaN(d) && !double.IsInfinity(d)
                     ? d
                     : throw SimulatedSqlException.StringConversionToNumberFailed(sourceType, "float");
+
+    /// <summary>
+    /// A string or binary value converted to <c>xml</c>: parsed, so a
+    /// malformed one raises real's parse error, and stored in the canonical
+    /// form real serializes it as (see <see cref="XmlWellFormedness"/>).
+    /// <paramref name="preserveWhitespace"/> is <c>CONVERT</c> style 1, which
+    /// keeps whitespace-only text; any other source takes the ordinary
+    /// conversion.
+    /// </summary>
+    internal SqlValue CoerceToXml(bool preserveWhitespace)
+    {
+        if (this.IsNull || this.Type is XmlSqlType)
+            return this.CoerceTo(SqlType.Xml);
+        if (SqlType.IsStringCategory(this.Type))
+            return FromXml(XmlWellFormedness.Canonical(this.AsString, SqlType.IsNationalStringCategory(this.Type), preserveWhitespace));
+        if (this.Type is VarbinarySqlType or BinarySqlType)
+        {
+            var (text, national) = DecodeXmlBytes(this.AsBytes);
+            return FromXml(XmlWellFormedness.Canonical(text, national, preserveWhitespace));
+        }
+        return this.CoerceTo(SqlType.Xml);
+    }
+
+    /// <summary>
+    /// Reads a binary value as XML text the way real does, probed 2026-09-23
+    /// against SQL Server 2025: a byte-order mark decides the encoding (UTF-8,
+    /// or UTF-16 either way round), so does an unmarked UTF-16 <c>&lt;</c>
+    /// (<c>3C 00</c> / <c>00 3C</c>); otherwise the XML declaration's
+    /// encoding, and failing that UTF-8. A byte sequence the encoding can't
+    /// read decodes to U+FFFF, which the parse then reports as the illegal
+    /// XML character real reports there (<c>0x3C613EE9…</c>, a bare Latin-1
+    /// <c>é</c>, is Msg 9420). Answers whether the text arrived as UTF-16.
+    /// </summary>
+    private static (string Text, bool National) DecodeXmlBytes(byte[] bytes)
+    {
+        switch (bytes)
+        {
+            case [0xEF, 0xBB, 0xBF, ..]:
+                return (StrictXmlEncoding(Encoding.UTF8).GetString(bytes, 3, bytes.Length - 3), false);
+            case [0xFF, 0xFE, ..]:
+                return (StrictXmlEncoding(Encoding.Unicode).GetString(bytes, 2, bytes.Length - 2), true);
+            case [0xFE, 0xFF, ..]:
+                return (StrictXmlEncoding(Encoding.BigEndianUnicode).GetString(bytes, 2, bytes.Length - 2), true);
+            case [0x3C, 0x00, ..]:
+                return (StrictXmlEncoding(Encoding.Unicode).GetString(bytes), true);
+            case [0x00, 0x3C, ..]:
+                return (StrictXmlEncoding(Encoding.BigEndianUnicode).GetString(bytes), true);
+        }
+
+        var encoding = Encoding.UTF8;
+        if (DeclaredXmlEncoding().Match(Encoding.Latin1.GetString(bytes, 0, Math.Min(bytes.Length, 200))) is { Success: true } declared)
+        {
+            // An unrecognized name, or a 16-bit encoding these bytes can't be,
+            // reaches the parse as written, which reports it.
+            try
+            {
+                if (Encoding.GetEncoding(declared.Groups[1].Value) is not (UnicodeEncoding or UTF32Encoding) and var named)
+                    encoding = named;
+            }
+            catch (ArgumentException)
+            {
+            }
+        }
+        return (StrictXmlEncoding(encoding).GetString(bytes), false);
+    }
+
+    private static Encoding StrictXmlEncoding(Encoding encoding) =>
+        Encoding.GetEncoding(encoding.CodePage, EncoderFallback.ExceptionFallback, new DecoderReplacementFallback("\uFFFF"));
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"^<\?xml[^>]*?\sencoding\s*=\s*[""']([^""']+)[""']")]
+    private static partial System.Text.RegularExpressions.Regex DeclaredXmlEncoding();
 
     private SqlValue CoerceToDecimal(DecimalSqlType target) => this.Type switch
     {

@@ -35,7 +35,7 @@ The document row is the simulator's, and it is what makes a `.nodes()` row work:
 The divergence shows only where a relative path is written against a single-root instance directly — `@x.query('a')` over `<r><a/></r>` selects the `a` where real selects nothing.
 
 Whitespace-only text between top-level nodes is insignificant and dropped, and an XML declaration is dropped, both matching real; text carrying anything else keeps its surrounding spaces (`'<a/> x <b/>'` round-trips as written).
-That normalization is the *evaluator's* — an `xml` payload is stored verbatim, so it becomes visible only on the `.modify()` round trip.
+A converted value is already stored that way — see [Well-formedness](#well-formedness) for the canonical form every conversion to `xml` produces — while a payload that arrives already typed `xml` (a bacpac row, a `FOR XML …, TYPE` result) is stored as it came.
 
 `.modify()` edits a mutable container (`XmlInstance.CreateMutableContainer`) whose children are the instance's top-level nodes, which is what lets an edit *produce* a fragment: `insert <b/> after (/r)[1]` on `<r/>` answers `<r/><b/>` and `insert <c/> into (/)[1]` on `<a/>` answers `<a/><c/>`, both as on real.
 
@@ -994,13 +994,14 @@ The family behaves as any error does under `SET XACT_ABORT ON`, whatever the opt
 `TRY_CAST` / `TRY_CONVERT` answer NULL for it, and an argument bound to a parameter reports it at line 0, as real does.
 
 A `CONVERT` style against an `xml` target is whitespace and DTD handling, not a text layout, so a binary source is parsed rather than rendered as hex.
+A binary source is decoded in the encoding its bytes announce — a byte-order mark, an unmarked UTF-16 `<`, or the declaration — and as UTF-8 otherwise, so a stray Latin-1 byte is Msg 9420 there (probed 2026-09-23; `SqlValue.DecodeXmlBytes`).
+
+The same pass answers the **canonical form** real serializes the stored value as, and that text is what the column or variable holds — so `CAST('<a b=''x''></a>' AS xml)` reads back as `<a b="x"/>` through a text cast, and SqlClient's own re-rendering of the value on the wire (`<a b="x" />`) matches what it renders for real (probed 2026-09-23; the rules are in the class's remarks).
+The declaration is dropped, which also keeps SqlClient from refusing a value whose declaration names an 8-bit encoding; whitespace-only text is dropped unless `CONVERT` style 1 or `xml:space="preserve"` keeps it.
 
 ### Not modeled yet
 
-- **Canonical rendering.** Real stores parsed XML and serializes it canonically — the declaration dropped, attributes double-quoted and single-spaced, whitespace-only text dropped (kept under `CONVERT` style 1), CDATA folded to escaped text, character references decoded, an empty element as `<a/>`.
-  The simulator stores the text as written, so `CAST('<a b=''x''></a>' AS xml)` reads back unchanged where real reads `<a b="x"/>`.
-  A kept declaration naming an 8-bit encoding also reaches SqlClient as UTF-16 text claiming that encoding, which its `GetValue` refuses.
-- **`CONVERT` style 2** — real's limited internal-subset DTD support, which strips the DTD, expands its entities and raises informational Msg 6338; a `DOCTYPE` under it raises `NotSupportedException`.
+- **`CONVERT` styles 2 and 3** — real's limited internal-subset DTD support, which strips the DTD, expands its entities and raises informational Msg 6338; a `DOCTYPE` under either raises `NotSupportedException`.
 
 ## Known gaps
 

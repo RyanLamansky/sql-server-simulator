@@ -127,18 +127,19 @@ internal sealed class ConvertExpression : Expression
 
     /// <summary>
     /// An <c>xml</c> target reads the style as whitespace and DTD handling
-    /// rather than as a text layout, so a binary source isn't rendered as hex.
-    /// Style 2's limited internal-subset DTD support isn't built: a DTD under
-    /// it raises <see cref="NotSupportedException"/> rather than the Msg 6359
-    /// the style exists to lift.
+    /// rather than as a text layout, so a binary source isn't rendered as hex:
+    /// styles 1 and 3 keep whitespace-only text. Style 2's limited
+    /// internal-subset DTD support (and 3's, which is 1 and 2 together) isn't
+    /// built: a DTD under it raises <see cref="NotSupportedException"/> rather
+    /// than the Msg 6359 the style exists to lift.
     /// </summary>
     private static SqlValue CoerceToXmlWithStyle(SqlValue source, int style)
     {
         try
         {
-            return source.CoerceTo(SqlType.Xml);
+            return source.CoerceToXml(preserveWhitespace: style is 1 or 3);
         }
-        catch (SimulatedSqlException ex) when (style == 2 && ex.Number == 6359)
+        catch (SimulatedSqlException ex) when (style is 2 or 3 && ex.Number == 6359)
         {
             throw new NotSupportedException("CONVERT to xml with style 2 (internal-subset DTD support) isn't built.");
         }

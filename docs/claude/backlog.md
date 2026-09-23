@@ -249,8 +249,6 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 - `CONVERT(varchar, <timestamp>, 1)` doesn't render hex.
 - The TDS UDT type name leaves the database part empty (`.sys.geography`; real sends `<db>.sys.geography`).
 
-**`xml` rendering** — well-formedness ships, but a converted value is stored as written rather than in real's canonical serialization; see [`xml.md`](xml.md#well-formedness) (its Not modeled yet list) for the rules probed 2026-09-23 and the SqlClient failure a kept `encoding="utf-8"` declaration causes.
-
 **Procedure attribution** — an error inside a procedure reports `Procedure` as the `EXEC` spelled the name on real (`exec p` → `p`, `exec dbo.p` → `dbo.p`, probed 2026-09-23); the simulator always schema-qualifies it.
 
 **Message stream**:

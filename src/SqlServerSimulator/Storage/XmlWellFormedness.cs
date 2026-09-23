@@ -4,9 +4,10 @@ using System.Xml;
 namespace SqlServerSimulator.Storage;
 
 /// <summary>
-/// The well-formedness check real's XML parser applies to every value
-/// converted to <c>xml</c>: one linear pass over the text that raises the
-/// 9400-family error real raises, at the position real reports.
+/// What real's XML parser does to every value converted to <c>xml</c>, in one
+/// linear pass over the text: it raises the 9400-family error real raises, at
+/// the position real reports, and otherwise answers the canonical text real
+/// serializes the stored value as.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -38,33 +39,70 @@ namespace SqlServerSimulator.Storage;
 /// <c>varchar</c> source can't switch to UTF-16 and an <c>nvarchar</c> one
 /// can't switch to an 8-bit encoding.</item>
 /// </list>
+/// <para>
+/// The canonical form, probed the same way: the XML declaration and a
+/// byte-order mark are dropped; a start tag is its name, then its namespace
+/// declarations, then its other attributes, each in written order,
+/// double-quoted and single-spaced; an element with no content is
+/// <c>&lt;a/&gt;</c>; adjacent text, CDATA and references merge into one text
+/// node; a processing instruction is its target, one space and its content
+/// with leading whitespace trimmed; comments are kept. Line ends become LF.
+/// Text escapes <c>&amp;</c> <c>&lt;</c> <c>&gt;</c>, and an attribute value
+/// adds <c>"</c>, with a written tab, line feed or carriage return in it read
+/// as a space and one that arrived as a reference written back as one.
+/// A whitespace-only text node made entirely of written characters is
+/// insignificant and dropped, unless <c>CONVERT</c> style 1 or
+/// <c>xml:space="preserve"</c> keeps it; a kept one writes its last character
+/// as a reference (<c>&amp;#x20;</c>) so it survives being parsed again,
+/// unless a carriage return — always written as <c>&amp;#x0D;</c> — already
+/// does that.
+/// </para>
 /// </remarks>
 internal static class XmlWellFormedness
 {
     private const string XmlNamespaceUri = "http://www.w3.org/XML/1998/namespace";
 
     /// <summary>
-    /// Returns <paramref name="text"/> when it is well-formed XML content,
-    /// else raises the error real raises for it. <paramref name="nationalSource"/>
-    /// says whether the value arrived as UTF-16 (<c>nvarchar</c> and its
-    /// family, or an <c>xml</c> parameter), which decides the encodings an
-    /// XML declaration may name.
+    /// The canonical form of <paramref name="text"/> when it is well-formed
+    /// XML content, else raises the error real raises for it.
+    /// <paramref name="nationalSource"/> says whether the value arrived as
+    /// UTF-16 (<c>nvarchar</c> and its family, or an <c>xml</c> parameter),
+    /// which decides the encodings an XML declaration may name;
+    /// <paramref name="preserveWhitespace"/> is <c>CONVERT</c> style 1.
     /// </summary>
-    public static string Checked(string text, bool nationalSource)
-    {
-        new Scanner(text, nationalSource).Run();
-        return text;
-    }
+    public static string Canonical(string text, bool nationalSource, bool preserveWhitespace = false) =>
+        new Scanner(text, nationalSource, preserveWhitespace).Run();
 
-    private sealed class Scanner(string text, bool nationalSource)
+    private sealed class Scanner(string text, bool nationalSource, bool preserveWhitespace)
     {
         private readonly string s = text;
         private readonly int n = text.Length;
         private readonly bool nationalSource = nationalSource;
+        private readonly bool preserveWhitespace = preserveWhitespace;
         private readonly int documentStart = text is ['\uFEFF', ..] ? 1 : 0;
         private readonly List<(int Start, int Length)> openElements = [];
         private readonly List<List<(string Prefix, string Uri)>?> namespaceFrames = [];
+
+        /// <summary>Per open element, whether <c>xml:space</c> preserves its whitespace.</summary>
+        private readonly List<bool> preserveFrames = [];
+
         private readonly List<Attribute> attributes = [];
+        private readonly StringBuilder output = new();
+        private readonly StringBuilder attributeValue = new();
+
+        /// <summary>The text node being gathered, flushed at the next markup.</summary>
+        private readonly StringBuilder text = new();
+
+        private bool textAllWhitespace = true;
+
+        /// <summary>Whether any of the text node came from a reference or CDATA, which keeps it significant.</summary>
+        private bool textFromMarkup;
+
+        private bool textHasCarriageReturn;
+
+        /// <summary>Whether the last start tag written still awaits its <c>&gt;</c> or <c>/&gt;</c>.</summary>
+        private bool startTagOpen;
+
         private int p;
 
         /// <summary>
@@ -74,7 +112,7 @@ internal static class XmlWellFormedness
         /// </summary>
         private bool prologOnly = true;
 
-        public void Run()
+        public string Run()
         {
             this.p = this.documentStart;
             while (this.p < this.n)
@@ -83,25 +121,115 @@ internal static class XmlWellFormedness
                 switch (c)
                 {
                     case '&':
-                        this.Reference();
+                        this.AppendText(this.Reference(), fromMarkup: true);
                         this.prologOnly = false;
                         break;
                     case '<':
                         this.Markup();
+                        break;
+                    case '\r':
+                        // A written line end is LF, whether CR LF or a lone CR.
+                        this.AppendText('\n', fromMarkup: false);
+                        this.p += this.At(this.p + 1, '\n') ? 2 : 1;
                         break;
                     default:
                         if (c == ']' && this.At(this.p + 1, ']') && this.At(this.p + 2, '>'))
                             throw this.Error(XmlParseError.CDataEndInContent, this.p);
                         if (!IsWhitespace(c))
                             this.prologOnly = false;
+                        var start = this.p;
                         this.Character();
+                        this.AppendText(this.s.AsSpan(start, this.p - start), fromMarkup: false);
                         break;
                 }
             }
 
             if (this.openElements.Count > 0)
                 throw this.Error(XmlParseError.UnexpectedEndOfInput, this.n - 1);
+            this.FlushText();
+            return this.output.ToString();
         }
+
+        private void AppendText(int codePoint, bool fromMarkup)
+        {
+            if (codePoint > char.MaxValue)
+            {
+                _ = this.text.Append(char.ConvertFromUtf32(codePoint));
+                this.textAllWhitespace = false;
+            }
+            else
+            {
+                this.AppendText((char)codePoint, fromMarkup);
+            }
+            this.textFromMarkup |= fromMarkup;
+        }
+
+        private void AppendText(char c, bool fromMarkup)
+        {
+            _ = this.text.Append(c);
+            this.textAllWhitespace &= IsWhitespace(c);
+            this.textFromMarkup |= fromMarkup;
+            this.textHasCarriageReturn |= c == '\r';
+        }
+
+        private void AppendText(ReadOnlySpan<char> written, bool fromMarkup)
+        {
+            foreach (var c in written)
+                this.AppendText(c, fromMarkup);
+        }
+
+        /// <summary>
+        /// Writes the gathered text node — or drops it, when it is
+        /// insignificant whitespace — ahead of the markup that ends it.
+        /// </summary>
+        private void FlushText()
+        {
+            if (this.text.Length == 0)
+                return;
+
+            var preserve = this.preserveWhitespace || (this.preserveFrames.Count > 0 && this.preserveFrames[^1]);
+            if (!this.textAllWhitespace || this.textFromMarkup || preserve)
+            {
+                this.CloseStartTag();
+                var referenceLast = this.textAllWhitespace && !this.textHasCarriageReturn;
+                for (var i = 0; i < this.text.Length; i++)
+                {
+                    var c = this.text[i];
+                    if (c == '\r' || (referenceLast && i == this.text.Length - 1))
+                        AppendCharacterReference(this.output, c);
+                    else if (EscapeMarkup(c) is { } escaped)
+                        _ = this.output.Append(escaped);
+                    else
+                        _ = this.output.Append(c);
+                }
+            }
+
+            _ = this.text.Clear();
+            this.textAllWhitespace = true;
+            this.textFromMarkup = false;
+            this.textHasCarriageReturn = false;
+        }
+
+        /// <summary>Finishes a start tag left open for content, now that content follows.</summary>
+        private void CloseStartTag()
+        {
+            if (this.startTagOpen)
+            {
+                _ = this.output.Append('>');
+                this.startTagOpen = false;
+            }
+        }
+
+        private static string? EscapeMarkup(char c) => c switch
+        {
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            _ => null,
+        };
+
+        private static void AppendCharacterReference(StringBuilder builder, char c) =>
+            builder.Append("&#x").Append(((int)c).ToString("X2", System.Globalization.CultureInfo.InvariantCulture)).Append(';');
 
         private void Markup()
         {
@@ -114,12 +242,15 @@ internal static class XmlWellFormedness
                     this.Bang();
                     break;
                 case '/':
+                    this.FlushText();
                     this.EndTag();
                     break;
                 case '?':
+                    this.FlushText();
                     this.ProcessingInstruction(lessThan == this.documentStart);
                     break;
                 default:
+                    this.FlushText();
                     this.StartTag();
                     break;
             }
@@ -170,7 +301,7 @@ internal static class XmlWellFormedness
                 if (quote is not ('"' or '\''))
                     throw this.Error(XmlParseError.StringLiteralExpected, this.p);
                 this.p++;
-                var valueStart = this.p;
+                _ = this.attributeValue.Clear();
                 while (true)
                 {
                     if (this.p >= this.n)
@@ -178,15 +309,27 @@ internal static class XmlWellFormedness
                     var c = this.s[this.p];
                     if (c == quote)
                         break;
-                    if (c == '<')
-                        throw this.Error(XmlParseError.LessThanInAttributeValue, this.p);
-                    if (c == '&')
-                        this.Reference();
-                    else
-                        this.Character();
+                    switch (c)
+                    {
+                        case '<':
+                            throw this.Error(XmlParseError.LessThanInAttributeValue, this.p);
+                        case '&':
+                            _ = this.attributeValue.Append(char.ConvertFromUtf32(this.Reference()));
+                            break;
+                        case '\t' or '\n' or '\r':
+                            // A written tab or line end in a value reads as a space, CR LF as one.
+                            _ = this.attributeValue.Append(' ');
+                            this.p += c == '\r' && this.At(this.p + 1, '\n') ? 2 : 1;
+                            break;
+                        default:
+                            var start = this.p;
+                            this.Character();
+                            _ = this.attributeValue.Append(this.s, start, this.p - start);
+                            break;
+                    }
                 }
 
-                this.attributes.Add(new Attribute(attributeName, valueStart, this.p));
+                this.attributes.Add(new Attribute(attributeName, this.attributeValue.ToString()));
                 this.p++;
             }
         }
@@ -204,7 +347,7 @@ internal static class XmlWellFormedness
                     continue;
                 if (prefix == "xmlns")
                     throw this.Error(XmlParseError.XmlnsPrefixDeclared, at);
-                var uri = this.s[attribute.ValueStart..attribute.ValueEnd];
+                var uri = attribute.Value;
                 // The xml prefix and its URI belong only to each other.
                 if (prefix == "xml" ? uri != XmlNamespaceUri : uri == XmlNamespaceUri)
                     throw this.Error(XmlParseError.XmlPrefixRebound, at);
@@ -241,11 +384,66 @@ internal static class XmlWellFormedness
             }
 
             this.prologOnly = false;
+            this.WriteStartTag(name, empty);
             if (!empty)
             {
                 this.openElements.Add((name.Start, name.Length));
                 this.namespaceFrames.Add(declared);
+                this.preserveFrames.Add(this.XmlSpacePreserves() ?? (this.preserveFrames.Count > 0 && this.preserveFrames[^1]));
             }
+        }
+
+        /// <summary>
+        /// Writes the start tag canonically — namespace declarations ahead of
+        /// the other attributes — leaving it open for content unless empty.
+        /// </summary>
+        private void WriteStartTag(QName name, bool empty)
+        {
+            this.CloseStartTag();
+            _ = this.output.Append('<').Append(this.s, name.Start, name.Length);
+            this.WriteAttributes(declarations: true);
+            this.WriteAttributes(declarations: false);
+            if (empty)
+                _ = this.output.Append("/>");
+            else
+                this.startTagOpen = true;
+        }
+
+        private void WriteAttributes(bool declarations)
+        {
+            foreach (var attribute in this.attributes)
+            {
+                if ((this.DeclaredPrefix(attribute.Name) is not null) != declarations)
+                    continue;
+                _ = this.output.Append(' ').Append(this.s, attribute.Name.Start, attribute.Name.Length).Append("=\"");
+                foreach (var c in attribute.Value)
+                {
+                    if (c is '\t' or '\n' or '\r')
+                        AppendCharacterReference(this.output, c);
+                    else if (c == '"')
+                        _ = this.output.Append("&quot;");
+                    else if (EscapeMarkup(c) is { } escaped)
+                        _ = this.output.Append(escaped);
+                    else
+                        _ = this.output.Append(c);
+                }
+                _ = this.output.Append('"');
+            }
+        }
+
+        /// <summary>
+        /// The element's own <c>xml:space</c> setting: true for
+        /// <c>preserve</c>, false for <c>default</c>, null when it has none
+        /// and inherits its parent's.
+        /// </summary>
+        private bool? XmlSpacePreserves()
+        {
+            foreach (var attribute in this.attributes)
+            {
+                if (attribute.Name.HasPrefix && this.Prefix(attribute.Name) == "xml" && this.Local(attribute.Name) == "space")
+                    return attribute.Value == "preserve";
+            }
+            return null;
         }
 
         /// <summary>
@@ -305,8 +503,18 @@ internal static class XmlWellFormedness
             {
                 throw this.Error(XmlParseError.EndTagMismatch, this.p);
             }
+            if (this.startTagOpen)
+            {
+                _ = this.output.Append("/>");
+                this.startTagOpen = false;
+            }
+            else
+            {
+                _ = this.output.Append("</").Append(this.s, name.Start, name.Length).Append('>');
+            }
             this.openElements.RemoveAt(depth - 1);
             this.namespaceFrames.RemoveAt(depth - 1);
+            this.preserveFrames.RemoveAt(depth - 1);
             this.p++;
         }
 
@@ -318,6 +526,7 @@ internal static class XmlWellFormedness
             switch (this.s[at])
             {
                 case '-':
+                    this.FlushText();
                     this.Comment();
                     return;
                 case '[':
@@ -339,6 +548,7 @@ internal static class XmlWellFormedness
             if (this.s[second] != '-')
                 throw this.Error(XmlParseError.IncorrectCommentSyntax, second);
             this.p = second + 1;
+            var contentStart = this.p;
             while (true)
             {
                 if (this.p >= this.n)
@@ -350,6 +560,10 @@ internal static class XmlWellFormedness
                         throw this.Error(XmlParseError.GreaterThanExpected, this.n - 1);
                     if (this.s[this.p + 2] != '>')
                         throw this.Error(XmlParseError.GreaterThanExpected, this.p + 2);
+                    this.CloseStartTag();
+                    _ = this.output.Append("<!--");
+                    this.AppendNormalizingLineEnds(contentStart, this.p);
+                    _ = this.output.Append("-->");
                     this.p += 3;
                     return;
                 }
@@ -379,7 +593,15 @@ internal static class XmlWellFormedness
                     this.p += 3;
                     return;
                 }
+                if (this.s[this.p] == '\r')
+                {
+                    this.AppendText('\n', fromMarkup: true);
+                    this.p += this.At(this.p + 1, '\n') ? 2 : 1;
+                    continue;
+                }
+                var start = this.p;
                 this.Character();
+                this.AppendText(this.s.AsSpan(start, this.p - start), fromMarkup: true);
             }
         }
 
@@ -454,16 +676,35 @@ internal static class XmlWellFormedness
                 throw this.Error(XmlParseError.IncorrectProcessingInstructionSyntax, this.n - 1);
             if (this.s[this.p] != '?' && !IsWhitespace(this.s[this.p]))
                 throw this.Error(XmlParseError.IllegalNameCharacter, this.p);
+            var targetEnd = this.p;
+            _ = this.SkipWhitespace();
+            var contentStart = this.p;
             while (true)
             {
                 if (this.p >= this.n)
                     throw this.Error(XmlParseError.IncorrectProcessingInstructionSyntax, this.n - 1);
                 if (this.s[this.p] == '?' && this.At(this.p + 1, '>'))
                 {
+                    this.CloseStartTag();
+                    _ = this.output.Append("<?").Append(this.s, targetStart, targetEnd - targetStart).Append(' ');
+                    this.AppendNormalizingLineEnds(contentStart, this.p);
+                    _ = this.output.Append("?>");
                     this.p += 2;
                     return;
                 }
                 this.Character();
+            }
+        }
+
+        /// <summary>Copies written markup content to the output with its line ends made LF.</summary>
+        private void AppendNormalizingLineEnds(int start, int end)
+        {
+            for (var i = start; i < end; i++)
+            {
+                if (this.s[i] != '\r')
+                    _ = this.output.Append(this.s[i]);
+                else if (!this.At(i + 1, '\n'))
+                    _ = this.output.Append('\n');
             }
         }
 
@@ -571,9 +812,10 @@ internal static class XmlWellFormedness
         }
 
         /// <summary>
-        /// An entity or character reference, starting at its <c>&amp;</c>.
+        /// An entity or character reference, starting at its <c>&amp;</c>;
+        /// answers the code point it stands for.
         /// </summary>
-        private void Reference()
+        private int Reference()
         {
             this.p++;
             if (this.p >= this.n)
@@ -602,7 +844,7 @@ internal static class XmlWellFormedness
                 if (!IsXmlCodePoint(value))
                     throw this.Error(XmlParseError.IllegalXmlCharacter, this.p);
                 this.p++;
-                return;
+                return value;
             }
 
             if (this.NameCharWidth(this.p, start: true) == 0)
@@ -610,9 +852,17 @@ internal static class XmlWellFormedness
             var nameStart = this.p;
             this.SkipName(allowColon: true);
             this.RequireSemicolon();
-            if (this.s.AsSpan(nameStart, this.p - nameStart) is not ("amp" or "apos" or "gt" or "lt" or "quot"))
-                throw this.Error(XmlParseError.UndeclaredEntity, this.p);
+            var entity = this.s.AsSpan(nameStart, this.p - nameStart) switch
+            {
+                "amp" => '&',
+                "apos" => '\'',
+                "gt" => '>',
+                "lt" => '<',
+                "quot" => '"',
+                _ => throw this.Error(XmlParseError.UndeclaredEntity, this.p),
+            };
             this.p++;
+            return entity;
         }
 
         private void RequireSemicolon()
@@ -766,11 +1016,12 @@ internal static class XmlWellFormedness
             public bool HasPrefix => this.Colon >= 0;
         }
 
-        private readonly struct Attribute(QName name, int valueStart, int valueEnd)
+        private readonly struct Attribute(QName name, string value)
         {
             public readonly QName Name = name;
-            public readonly int ValueStart = valueStart;
-            public readonly int ValueEnd = valueEnd;
+
+            /// <summary>The value with its references resolved and written whitespace read as spaces.</summary>
+            public readonly string Value = value;
         }
     }
 }
