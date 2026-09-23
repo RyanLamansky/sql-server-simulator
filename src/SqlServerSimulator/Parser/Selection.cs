@@ -464,19 +464,18 @@ internal sealed partial class Selection
     /// table or subquery, or null at end of command).
     /// </summary>
     /// <param name="context">Manages the overall parsing state.</param>
-    /// <param name="depth">The current depth of recursed selection, such as with derived tables. 0 for the top-level SELECT.</param>
-    /// <param name="outerTypeResolver">Outer-scope column type resolver used during projection planning when this SELECT references an enclosing scope's columns. Null for the top-level / non-correlated case.</param>
+    /// <param name="scope">Where the query sits in its statement, and the resolver for an enclosing query's columns.</param>
     /// <returns>The prepared plan; call <see cref="Execute"/> to materialize results.</returns>
     /// <exception cref="SimulatedSqlException">A variety of messages are possible for various problems with the command.</exception>
     /// <exception cref="NotSupportedException">A condition was encountered that may be valid but can't currently be parsed.</exception>
-    public static Selection Parse(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver = null)
+    public static Selection Parse(ParserContext context, QueryScope scope)
     {
         // A subquery is never constant, and the predicate forms that hold one
         // without routing it through Expression.Parse (EXISTS, IN (SELECT …),
         // the quantified comparisons) would otherwise leave an enclosing
         // constant-fold frame believing every operand was a literal.
         context.FoldableArguments = false;
-        return ParseQueryExpression(context, depth, outerTypeResolver);
+        return ParseQueryExpression(context, scope);
     }
 
     /// <summary>
@@ -485,7 +484,7 @@ internal sealed partial class Selection
     /// precedence: <c>INTERSECT</c> binds tighter than <c>UNION</c> /
     /// <c>EXCEPT</c> (which are at the same level, left-to-right).
     /// </summary>
-    private static Selection ParseQueryExpression(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver)
+    private static Selection ParseQueryExpression(ParserContext context, QueryScope scope)
     {
         // The outermost query expression owns the securable sink; every nested
         // subquery / derived table appends to it, so the returned top-level
@@ -501,14 +500,9 @@ internal sealed partial class Selection
             context.PendingGroupByBindError = null;
         }
 
-        // A set-op result column is an output column of the query expression,
-        // so a branch pair that can't settle one collation reports Msg 451
-        // there — unless the whole result feeds an assignment target (which
-        // supplies the collation) or an EXISTS (whose projection is discarded).
         var sequenceDrawsBefore = context.SequenceDrawsParsed;
         var unwindowedSequenceDrawsBefore = context.UnwindowedSequenceDrawsParsed;
-        var combined = ParseUnionExceptChain(
-            context, depth, outerTypeResolver, !context.ProjectionDiscarded && !context.InInsertSourceSelect);
+        var combined = ParseUnionExceptChain(context, scope);
 
         // Msg 422 is settled against the shape of the whole statement, so the
         // bare-projection flag is read before the clauses below can consume
@@ -545,12 +539,14 @@ internal sealed partial class Selection
         // / FOR BROWSE do (after ORDER BY / OFFSET-FETCH, before OPTION); a
         // non-JSON FOR clause is left in place for the downstream Msg 102.
         var beforeForClauses = combined;
-        combined = ParseOptionalForJson(context, combined, depth);
+        if (scope.RefusesTrailingClauses && context.Token is ReservedKeyword { Keyword: Keyword.For } forKeyword)
+            throw SimulatedSqlException.SyntaxErrorNearKeyword(forKeyword);
+        combined = ParseOptionalForJson(context, combined, scope);
 
         // Trailing FOR XML { RAW | AUTO | PATH } [, ELEMENTS …] [, ROOT …]:
         // wraps the result in a single-column xml serializer. Sits in the same
         // slot; a non-XML FOR clause is left in place for the downstream Msg 102.
-        combined = ParseOptionalForXml(context, combined, depth);
+        combined = ParseOptionalForXml(context, combined, scope);
         if (!ReferenceEquals(combined, beforeForClauses))
             bareProjectionStatement = false;
 
@@ -615,13 +611,13 @@ internal sealed partial class Selection
     /// <c>allowOrderBy=false</c> and any post-chain ORDER BY is applied
     /// at the top level.
     /// </summary>
-    private static Selection ParseUnionExceptChain(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool namesOwnCollation)
+    private static Selection ParseUnionExceptChain(ParserContext context, QueryScope scope)
     {
         var savedRejection = context.NextValueForRejection;
         var sequenceDrawsBefore = context.SequenceDrawsParsed;
         try
         {
-            return ParseUnionExceptChainCore(context, depth, outerTypeResolver, namesOwnCollation, sequenceDrawsBefore);
+            return ParseUnionExceptChainCore(context, scope, sequenceDrawsBefore);
         }
         finally
         {
@@ -629,9 +625,9 @@ internal sealed partial class Selection
         }
     }
 
-    private static Selection ParseUnionExceptChainCore(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool namesOwnCollation, int sequenceDrawsBefore)
+    private static Selection ParseUnionExceptChainCore(ParserContext context, QueryScope scope, int sequenceDrawsBefore)
     {
-        var left = ParseIntersectChain(context, depth, outerTypeResolver, isFirstBranch: true, namesOwnCollation);
+        var left = ParseIntersectChain(context, scope, isFirstBranch: true);
         while (context.Token is ReservedKeyword { Keyword: Keyword.Union or Keyword.Except } op)
         {
             RejectSequenceDrawUnderSetOperator(context, sequenceDrawsBefore);
@@ -655,9 +651,9 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
             }
 
-            var right = ParseIntersectChain(context, depth, outerTypeResolver, isFirstBranch: false, namesOwnCollation);
+            var right = ParseIntersectChain(context, scope, isFirstBranch: false);
             RecordSetOperationShape(context);
-            left = CombineSetOps(left, right, kind, namesOwnCollation);
+            left = CombineSetOps(left, right, kind, scope.NamesOutputCollation);
         }
         return left;
     }
@@ -699,13 +695,13 @@ internal sealed partial class Selection
     /// Higher-precedence set-op level: parses a chain of INTERSECT
     /// operators left-to-right.
     /// </summary>
-    internal static Selection ParseIntersectChain(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool isFirstBranch, bool namesOwnCollation)
+    internal static Selection ParseIntersectChain(ParserContext context, QueryScope scope, bool isFirstBranch)
     {
         var savedRejection = context.NextValueForRejection;
         var sequenceDrawsBefore = context.SequenceDrawsParsed;
         try
         {
-            return ParseIntersectChainCore(context, depth, outerTypeResolver, isFirstBranch, namesOwnCollation, sequenceDrawsBefore);
+            return ParseIntersectChainCore(context, scope, isFirstBranch, sequenceDrawsBefore);
         }
         finally
         {
@@ -713,16 +709,16 @@ internal sealed partial class Selection
         }
     }
 
-    private static Selection ParseIntersectChainCore(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool isFirstBranch, bool namesOwnCollation, int sequenceDrawsBefore)
+    private static Selection ParseIntersectChainCore(ParserContext context, QueryScope scope, bool isFirstBranch, int sequenceDrawsBefore)
     {
-        var left = ParseSetOpBranch(context, depth, outerTypeResolver, allowOrderBy: isFirstBranch, namesOwnCollation);
+        var left = ParseSetOpBranch(context, scope, allowOrderBy: isFirstBranch);
         while (context.Token is ReservedKeyword { Keyword: Keyword.Intersect })
         {
             RejectSequenceDrawUnderSetOperator(context, sequenceDrawsBefore);
             context.MoveNextRequired();
-            var right = ParseSetOpBranch(context, depth, outerTypeResolver, allowOrderBy: false, namesOwnCollation);
+            var right = ParseSetOpBranch(context, scope, allowOrderBy: false);
             RecordSetOperationShape(context);
-            left = CombineSetOps(left, right, SetOpKind.Intersect, namesOwnCollation);
+            left = CombineSetOps(left, right, SetOpKind.Intersect, scope.NamesOutputCollation);
         }
         return left;
     }
@@ -737,13 +733,13 @@ internal sealed partial class Selection
     /// looked like a one-column select list and the chain failed the
     /// equal-expression-count check instead.
     /// </summary>
-    private static Selection ParseSetOpBranch(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy, bool namesOwnCollation)
+    private static Selection ParseSetOpBranch(ParserContext context, QueryScope scope, bool allowOrderBy)
     {
         if (context.Token is not Operator { Character: '(' })
-            return ParseSingleSelectStatement(context, depth, outerTypeResolver, allowOrderBy);
+            return ParseSingleSelectStatement(context, scope, allowOrderBy);
 
         context.MoveNextRequired();
-        var inner = ParseUnionExceptChain(context, depth, outerTypeResolver, namesOwnCollation);
+        var inner = ParseUnionExceptChain(context, scope);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
@@ -761,19 +757,13 @@ internal sealed partial class Selection
     /// non-projected source columns; subsequent branches must defer
     /// ORDER BY to the top level.
     /// </summary>
-    internal static Selection ParseSingleSelectStatement(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy)
+    internal static Selection ParseSingleSelectStatement(ParserContext context, QueryScope scope, bool allowOrderBy)
     {
         // Save / restore the parser's aggregate and window collectors so
         // each branch gets its own scope. Aggregates and window functions
         // parsed inside the projection / HAVING register into the
         // respective lists; the executor uses the populated lists to
         // switch into aggregate or windowed-projection mode.
-        // An EXISTS body's projection is never materialized, so it doesn't have
-        // to name an output collation. Claim the flag here — the SELECT that
-        // consumes it is the one EXISTS wrapped — and leave it cleared so a
-        // derived table or subquery nested inside the body names its own.
-        var projectionDiscarded = context.ProjectionDiscarded;
-        context.ProjectionDiscarded = false;
         var savedAggregateCollector = context.AggregateCollector;
         var savedWindowCollector = context.WindowCollector;
         // ParseInner installs this scope's FROM sources as the outer resolver
@@ -800,7 +790,7 @@ internal sealed partial class Selection
         context.WindowCollector = windows;
         try
         {
-            return ParseInner(context, depth, aggregates, windows, outerTypeResolver, allowOrderBy, projectionDiscarded);
+            return ParseInner(context, scope, aggregates, windows, allowOrderBy);
         }
         finally
         {
@@ -1098,7 +1088,7 @@ internal sealed partial class Selection
             : count < candidateCount ? (int)count : candidateCount;
     }
 
-    private static Selection ParseInner(ParserContext context, uint depth, List<AggregateExpression> aggregates, List<WindowExpression> windows, Func<MultiPartName, SqlType>? outerTypeResolver, bool allowOrderBy, bool projectionDiscarded)
+    private static Selection ParseInner(ParserContext context, QueryScope scope, List<AggregateExpression> aggregates, List<WindowExpression> windows, bool allowOrderBy)
     {
         var distinct = false;
         Expression? topExpression = null;
@@ -1228,7 +1218,7 @@ internal sealed partial class Selection
             var candidateJoins = new List<JoinSpec>();
             try
             {
-                ParseSourcesAndJoins(context, depth, candidateSources, candidateJoins, outerTypeResolver);
+                ParseSourcesAndJoins(context, scope, candidateSources, candidateJoins);
                 afterSources = context.SaveCheckpoint();
                 preParsedSources = candidateSources;
                 preParsedJoins = candidateJoins;
@@ -1251,10 +1241,10 @@ internal sealed partial class Selection
 
             // Chain this scope ahead of any enclosing one, so a select-list
             // subquery resolves outer columns at every nesting level.
-            if (preParsedSources is { } scope)
+            if (preParsedSources is { } preParsed)
             {
-                var scopeSources = scope.ToArray();
-                context.OuterTypeResolver = name => ResolveColumnTypeAcrossSources(scopeSources, name, outerTypeResolver);
+                var scopeSources = preParsed.ToArray();
+                context.OuterTypeResolver = name => ResolveColumnTypeAcrossSources(scopeSources, name, scope.OuterTypeResolver);
                 // A projection-level CONTAINS / FREETEXT (`CASE WHEN
                 // CONTAINS(col, 'x') THEN …`) and a spatial column's property
                 // form (`Location.Lat`) both bind against the same scope.
@@ -1265,13 +1255,13 @@ internal sealed partial class Selection
         // No FROM of this statement's own bound (there is none, or the
         // speculative pre-pass above discarded it): install the enclosing
         // scope directly. A nested subquery reads its outer chain from
-        // `context.OuterTypeResolver` — it never sees this parse's
-        // `outerTypeResolver` argument — so leaving whatever the enclosing
-        // parse happened to have there is what made a FROM-less APPLY body's
+        // `context.OuterTypeResolver` — it never sees this parse's `scope` —
+        // so leaving whatever the enclosing parse happened to have there is
+        // what made a FROM-less APPLY body's
         // `WHERE EXISTS (… c.k …)` fail to bind against the APPLY's left side
         // (a body carrying its own FROM installed the chain and worked).
-        if (preParsedSources is null && outerTypeResolver is not null)
-            context.OuterTypeResolver = outerTypeResolver;
+        if (preParsedSources is null && scope.OuterTypeResolver is not null)
+            context.OuterTypeResolver = scope.OuterTypeResolver;
 
         // A FROM-less SELECT bakes its projection at parse time, which is only
         // sound while nothing in it can read an enclosing row. A subquery can:
@@ -1360,19 +1350,19 @@ internal sealed partial class Selection
                 // separate statements with `;`. Checked before the general
                 // statement-boundary case (which also treats WITH as a
                 // boundary) so the more specific Msg 319 wins.
-                case ReservedKeyword { Keyword: Keyword.With } when depth == 0:
+                case ReservedKeyword { Keyword: Keyword.With } when !scope.Parenthesized:
                     throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
 
-                // At the top level (depth 0), the start of another statement
+                // In a statement's own query, the start of another statement
                 // terminates this SELECT and lets the dispatch loop pick up
                 // where it left off. Real SQL Server allows back-to-back
                 // statements without `;` between them; we mirror by stopping
-                // the projection-list parse here. Inside a subquery (depth > 0)
-                // these keywords are still invalid — fall through to the
-                // generic Msg 156 catch-all below.
-                case Operator { Character: ';' } when depth == 0:
+                // the projection-list parse here. Inside parentheses these
+                // keywords are still invalid — fall through to the generic
+                // Msg 156 catch-all below.
+                case Operator { Character: ';' } when !scope.Parenthesized:
                     goto ExitWhileTokenLoop;
-                case ReservedKeyword statementStart when depth == 0 && Simulation.IsStatementBoundary(statementStart):
+                case ReservedKeyword statementStart when !scope.Parenthesized && Simulation.IsStatementBoundary(statementStart):
                     goto ExitWhileTokenLoop;
 
                 case ReservedKeyword { Keyword: not Keyword.Null } keyword:
@@ -1386,7 +1376,7 @@ internal sealed partial class Selection
                     elementExpected = true;
                     continue;
                 case Operator { Character: ')' }:
-                    if (depth == 0)
+                    if (!scope.Parenthesized)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     goto ExitWhileTokenLoop;
 
@@ -1495,12 +1485,12 @@ internal sealed partial class Selection
                     continue;
 
                 // A `)` at the lookahead-after-expression position closes the
-                // enclosing subquery / derived table when this Parse is at
-                // depth > 0. The pre-expression switch above also has a `)`
+                // enclosing subquery / derived table when this query is
+                // parenthesized. The pre-expression switch above also has a `)`
                 // case for the empty-projection error path; this one fires
                 // when at least one expression has been parsed.
                 case Operator { Character: ')' }:
-                    if (depth == 0)
+                    if (!scope.Parenthesized)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     goto ExitWhileTokenLoop;
 
@@ -1532,13 +1522,13 @@ internal sealed partial class Selection
                         sources = preParsedSources;
                         joins = preParsedJoins!;
                         context.RestoreCheckpoint(afterSources);
-                        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], outerTypeResolver, allowOrderBy, depth);
+                        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], allowOrderBy, scope);
                     }
                     else
                     {
                         sources = [];
                         joins = [];
-                        ParseFromSourceAndJoins(context, depth, sources, joins, fromClause, outerTypeResolver, allowOrderBy);
+                        ParseFromSourceAndJoins(context, scope, sources, joins, fromClause, allowOrderBy);
                     }
 
                     if (topExpression is not null && fromClause.OffsetExpression is not null)
@@ -1549,7 +1539,7 @@ internal sealed partial class Selection
                     // drops its ORDER BY and returns the rows in scan order
                     // (probe-confirmed 2026-09-23, WITH TIES and parentheses
                     // alike); at the top level the ORDER BY stands.
-                    if ((depth > 0 || context.Batch.ViewBody) && topPercent && topExpression is not null
+                    if (scope.OrderingIgnoredUnderFullTop && topPercent && topExpression is not null
                         && ConstantFolding.TryFold(topExpression, context, out var topConstant)
                         && !topConstant.IsNull && topConstant.CoerceTo(SqlType.Float).AsDouble == 100)
                     {
@@ -1559,13 +1549,13 @@ internal sealed partial class Selection
                     }
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, sources);
                     JoinSpec[] joinArray = [.. joins];
-                    var plan = BuildSqlProjection(context.Batch, [.. sources], joinArray, expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink, projectionDiscarded, projectionUnread: projectionDiscarded);
+                    var plan = BuildSqlProjection(context.Batch, [.. sources], joinArray, expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, scope, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink);
                     // The decorrelated key plan an enclosing EXISTS / IN can
                     // answer itself from; null for every body that isn't
                     // equi-correlated, which is every top-level query.
                     plan.SemiJoin = TryBuildSemiJoinShape(
                         context.Batch, plan, [.. sources], joinArray, expressions, fromClause,
-                        distinct, topExpression, aggregates, windows, outerTypeResolver);
+                        distinct, topExpression, aggregates, windows, scope.OuterTypeResolver);
                     return plan;
 
                 // SELECT projection INTO target [FROM ...] — captures the
@@ -1588,12 +1578,12 @@ internal sealed partial class Selection
                 // ConsumeWhereAndOrderBy already reads them in grammar order
                 // from whichever of the three the cursor sits on.
                 case ReservedKeyword { Keyword: Keyword.Where or Keyword.Group or Keyword.Having }:
-                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, depth);
+                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope);
                     goto ExitWhileTokenLoop;
 
                 case ReservedKeyword { Keyword: Keyword.Order }:
-                    if (allowOrderBy || depth == context.ParenthesizedInsertSourceDepth)
-                        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, depth);
+                    if (allowOrderBy || scope.RefusesTrailingClauses)
+                        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope);
                     // When this branch is part of a set-op chain, leave
                     // the cursor on ORDER for the top-level driver to
                     // consume (or for the outer caller to error on, per
@@ -1616,14 +1606,14 @@ internal sealed partial class Selection
                 // SQL Server's specific error here. Checked before the general
                 // statement-boundary case (which also treats WITH as a
                 // boundary) so the more specific Msg 319 wins.
-                case ReservedKeyword { Keyword: Keyword.With } when depth == 0:
+                case ReservedKeyword { Keyword: Keyword.With } when !scope.Parenthesized:
                     throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
 
-                // At the top level (depth 0), the start of another statement
+                // In a statement's own query, the start of another statement
                 // terminates this SELECT — the dispatch loop picks up there.
-                // Inside a subquery these keywords stay invalid (fall through
+                // Inside parentheses these keywords stay invalid (fall through
                 // to the generic Msg 102 below).
-                case ReservedKeyword statementStart when depth == 0 && Simulation.IsStatementBoundary(statementStart):
+                case ReservedKeyword statementStart when !scope.Parenthesized && Simulation.IsStatementBoundary(statementStart):
                     goto ExitWhileTokenLoop;
 
                 // A boolean-predicate keyword directly after a complete
@@ -1669,8 +1659,8 @@ internal sealed partial class Selection
         {
             return BuildSqlProjection(context.Batch, [], [], expressions, fromClause, distinct,
                 topExpression, topPercent, topWithTies, aggregates, windows,
-                context.OuterTypeResolver ?? outerTypeResolver, ResolveAssignmentMode(expressions),
-                intoTarget, context.ReadColumnSink, projectionDiscarded, projectionUnread: projectionDiscarded);
+                scope.WithOuter(context.OuterTypeResolver ?? scope.OuterTypeResolver), ResolveAssignmentMode(expressions),
+                intoTarget, context.ReadColumnSink);
         }
 
         // A set operator one token past this branch refuses the whole statement
@@ -1705,8 +1695,8 @@ internal sealed partial class Selection
                 : ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch),
             ResolveRowCountLimit(fromClause.OffsetExpression, RowLimitKind.Offset, context.Batch),
             ResolveRowCountLimit(fromClause.FetchExpression, RowLimitKind.Fetch, context.Batch),
-            ResolveAssignmentMode(expressions), intoTarget, context.OuterTypeResolver ?? outerTypeResolver,
-            containsSubquery, projectionDiscarded);
+            ResolveAssignmentMode(expressions), intoTarget, scope.WithOuter(context.OuterTypeResolver ?? scope.OuterTypeResolver),
+            containsSubquery);
     }
 
     /// <summary>
@@ -1862,17 +1852,16 @@ internal sealed partial class Selection
 
     private static void ParseFromSourceAndJoins(
         ParserContext context,
-        uint depth,
+        QueryScope scope,
         List<FromSource> sources,
         List<JoinSpec> joins,
         FromClause fromClause,
-        Func<MultiPartName, SqlType>? outerTypeResolver,
         bool allowOrderBy)
     {
-        ParseSourcesAndJoins(context, depth, sources, joins, outerTypeResolver);
+        ParseSourcesAndJoins(context, scope, sources, joins);
 
         // Now register the multi-source type resolver and parse WHERE / etc.
-        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], outerTypeResolver, allowOrderBy, depth);
+        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], allowOrderBy, scope);
     }
 
     /// <summary>
@@ -1887,10 +1876,9 @@ internal sealed partial class Selection
     /// </summary>
     internal static void ParseSourcesAndJoins(
         ParserContext context,
-        uint depth,
+        QueryScope scope,
         List<FromSource> sources,
-        List<JoinSpec> joins,
-        Func<MultiPartName, SqlType>? outerTypeResolver)
+        List<JoinSpec> joins)
     {
         // A FROM clause at any nesting depth is what makes a function body's
         // rejected SELECT real's Msg 444 state 2 rather than state 3.
@@ -1900,7 +1888,7 @@ internal sealed partial class Selection
         // after it, so the check can't run per source. Local to this FROM, so a
         // nested one validates against its own sources.
         var siblingCandidates = new List<Reference>();
-        ParseExplicitJoinChain(context, depth, sources, joins, outerTypeResolver, siblingCandidates);
+        ParseExplicitJoinChain(context, scope, sources, joins, siblingCandidates);
 
         // Comma-separated FROM (ANSI-89 syntax) binds at lower precedence than
         // explicit JOINs: `FROM a, b JOIN c ON p` means `a CROSS JOIN (b JOIN c
@@ -1914,18 +1902,17 @@ internal sealed partial class Selection
         while (context.Token is Operator { Character: ',' })
         {
             joins.Add(new JoinSpec(JoinKind.Cross, onPredicate: null));
-            ParseExplicitJoinChain(context, depth, sources, joins, outerTypeResolver, siblingCandidates);
+            ParseExplicitJoinChain(context, scope, sources, joins, siblingCandidates);
         }
 
-        RejectSiblingReferences(siblingCandidates, sources, outerTypeResolver);
+        RejectSiblingReferences(siblingCandidates, sources, scope.OuterTypeResolver);
     }
 
     private static void ParseExplicitJoinChain(
         ParserContext context,
-        uint depth,
+        QueryScope scope,
         List<FromSource> sources,
         List<JoinSpec> joins,
-        Func<MultiPartName, SqlType>? outerTypeResolver,
         List<Reference> siblingCandidates)
     {
         // A parenthesized join group as the leftmost item — `(A JOIN B ON …)
@@ -1933,9 +1920,9 @@ internal sealed partial class Selection
         // already groups its left operand, so the group's interior sources /
         // joins splice directly into this chain with no group marker.
         if (NextSourceIsJoinGroup(context))
-            ParseJoinGroup(context, depth, sources, joins, outerTypeResolver, siblingCandidates);
+            ParseJoinGroup(context, scope, sources, joins, siblingCandidates);
         else
-            sources.Add(ParseSourceCollectingColumnReads(context, depth, outerTypeResolver, sources, siblingCandidates));
+            sources.Add(ParseSourceCollectingColumnReads(context, scope, sources, siblingCandidates));
 
         // Parse JOIN clauses. ParseSingleFromSource ends with the cursor at
         // the lookahead-after-source token (e.g. WHERE, ORDER, JOIN, INNER,
@@ -1944,7 +1931,7 @@ internal sealed partial class Selection
         {
             if (kind is JoinKind.CrossApply or JoinKind.OuterApply)
             {
-                sources.Add(ParseLateralFromSource(context, depth, sources, outerTypeResolver));
+                sources.Add(ParseLateralFromSource(context, scope, sources));
                 if (context.Token is ReservedKeyword { Keyword: Keyword.On } onToken)
                     throw SimulatedSqlException.SyntaxErrorNearKeyword(onToken);
                 joins.Add(new JoinSpec(kind, onPredicate: null));
@@ -1969,7 +1956,7 @@ internal sealed partial class Selection
                 // inserted only after this nested group finishes), so
                 // `groupStart - 1` would misplace the join under nesting.
                 var groupJoinIndex = joins.Count;
-                ParseJoinGroup(context, depth, sources, joins, outerTypeResolver, siblingCandidates);
+                ParseJoinGroup(context, scope, sources, joins, siblingCandidates);
                 var groupCount = sources.Count - groupStart;
                 BooleanExpression? groupOn = null;
                 if (kind == JoinKind.Cross)
@@ -1988,7 +1975,7 @@ internal sealed partial class Selection
                 else
                 {
                     context.MoveNextRequired();
-                    groupOn = ParseOnPredicateWithScope(context, sources, outerTypeResolver);
+                    groupOn = ParseOnPredicateWithScope(context, sources, scope.OuterTypeResolver);
                 }
                 joins.Insert(groupJoinIndex, new JoinSpec(kind, groupOn) { GroupCount = groupCount });
                 continue;
@@ -2000,7 +1987,7 @@ internal sealed partial class Selection
             // play so a correlated derived table here is at least diagnosed
             // (NotSupportedException at execute time) rather than silently
             // resolving against a wrong scope.
-            sources.Add(ParseSourceCollectingColumnReads(context, depth, outerTypeResolver, sources, siblingCandidates));
+            sources.Add(ParseSourceCollectingColumnReads(context, scope, sources, siblingCandidates));
             BooleanExpression? on = null;
             if (kind == JoinKind.Cross)
             {
@@ -2017,7 +2004,7 @@ internal sealed partial class Selection
                 var savedRejectInOn = context.EnterNextValueForScope(NextValueForScope.Clause);
                 try
                 {
-                    on = ParseOnPredicateWithScope(context, sources, outerTypeResolver);
+                    on = ParseOnPredicateWithScope(context, sources, scope.OuterTypeResolver);
                 }
                 finally
                 {
@@ -2088,15 +2075,14 @@ internal sealed partial class Selection
     /// </summary>
     private static void ParseJoinGroup(
         ParserContext context,
-        uint depth,
+        QueryScope scope,
         List<FromSource> sources,
         List<JoinSpec> joins,
-        Func<MultiPartName, SqlType>? outerTypeResolver,
         List<Reference> siblingCandidates)
     {
         var joinsBefore = joins.Count;
         context.MoveNextRequired();
-        ParseExplicitJoinChain(context, depth, sources, joins, outerTypeResolver, siblingCandidates);
+        ParseExplicitJoinChain(context, scope, sources, joins, siblingCandidates);
         if (joins.Count == joinsBefore || context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
@@ -2114,15 +2100,14 @@ internal sealed partial class Selection
     /// </summary>
     private static Selection ParseNestedQueryRejectingNextValueFor(
         ParserContext context,
-        uint depth,
-        Func<MultiPartName, SqlType>? outerTypeResolver)
+        QueryScope scope)
     {
         var saved = context.NextValueForRejection;
         if (!context.AllowNextValueForInFromClause)
             _ = context.EnterNextValueForScope(NextValueForScope.Nested);
         try
         {
-            return Selection.Parse(context, depth, outerTypeResolver);
+            return Selection.Parse(context, scope);
         }
         finally
         {
@@ -2142,8 +2127,7 @@ internal sealed partial class Selection
     /// </summary>
     private static FromSource ParseSourceCollectingColumnReads(
         ParserContext context,
-        uint depth,
-        Func<MultiPartName, SqlType>? outerTypeResolver,
+        QueryScope scope,
         List<FromSource> sourcesSoFar,
         List<Reference> siblingCandidates)
     {
@@ -2152,7 +2136,7 @@ internal sealed partial class Selection
         context.FromSourceColumnSink = siblingCandidates;
         try
         {
-            return ParseSingleFromSource(context, depth, outerTypeResolver);
+            return ParseSingleFromSource(context, scope);
         }
         catch (SimulatedSqlException ex) when (ex.Number == InvalidColumnNameNumber)
         {
@@ -2163,7 +2147,7 @@ internal sealed partial class Selection
             // the Msg 4104 real gives when the offending name is qualified by
             // a source already written to the left of this one.
             RejectSiblingReferences(siblingCandidates.GetRange(collectedBefore, siblingCandidates.Count - collectedBefore),
-                sourcesSoFar, outerTypeResolver);
+                sourcesSoFar, scope.OuterTypeResolver);
             throw;
         }
         finally
@@ -2266,9 +2250,8 @@ internal sealed partial class Selection
     /// </summary>
     private static FromSource ParseLateralFromSource(
         ParserContext context,
-        uint depth,
-        List<FromSource> leftSources,
-        Func<MultiPartName, SqlType>? surroundingOuter)
+        QueryScope scope,
+        List<FromSource> leftSources)
     {
         // Peek next token. A parenthesized derived table `(SELECT ...)`
         // stays on the dedicated path so the chained outer-type resolver
@@ -2289,7 +2272,7 @@ internal sealed partial class Selection
         if (next is ReservedKeyword { Keyword: Keyword.OpenQuery or Keyword.OpenXml })
         {
             context.RestoreCheckpoint(checkpoint);
-            return ParseSingleFromSource(context, depth, surroundingOuter);
+            return ParseSingleFromSource(context, scope);
         }
 
         if (next is Name nextName)
@@ -2300,7 +2283,7 @@ internal sealed partial class Selection
             // calls reach them.
             var leftSnapshotForName = leftSources.ToArray();
             SqlType ChainedResolverForName(MultiPartName name) =>
-                ResolveColumnTypeAcrossSources(leftSnapshotForName, name, surroundingOuter);
+                ResolveColumnTypeAcrossSources(leftSnapshotForName, name, scope.OuterTypeResolver);
 
             // Built-in rowset functions (OPENJSON, STRING_SPLIT,
             // GENERATE_SERIES) share the same APPLY-friendly shape as user-
@@ -2313,7 +2296,7 @@ internal sealed partial class Selection
                 || IsRegexpRowsetName(nextName.Value, context))
             {
                 context.RestoreCheckpoint(checkpoint);
-                return ParseSingleFromSource(context, depth, ChainedResolverForName);
+                return ParseSingleFromSource(context, scope.WithOuter(ChainedResolverForName));
             }
 
             // Peek the resolved object name to decide between TVF route
@@ -2346,7 +2329,7 @@ internal sealed partial class Selection
             var isFunctionCallShape = context.MoveNext() && context.Token is Operator { Character: '(' };
             context.RestoreCheckpoint(checkpoint);
             if (resolvedIsTvf)
-                return ParseSingleFromSource(context, depth, ChainedResolverForName);
+                return ParseSingleFromSource(context, scope.WithOuter(ChainedResolverForName));
             // A function-call shape that didn't resolve to a known TVF is a
             // deferred name-resolution error (Msg 208), not a syntax error:
             // real SQL Server binds the TVF name lazily, so an un-taken IF
@@ -2364,7 +2347,7 @@ internal sealed partial class Selection
 
         var leftSnapshot = leftSources.ToArray();
         SqlType ChainedResolver(MultiPartName name) =>
-            ResolveColumnTypeAcrossSources(leftSnapshot, name, surroundingOuter);
+            ResolveColumnTypeAcrossSources(leftSnapshot, name, scope.OuterTypeResolver);
 
         // CROSS / OUTER APPLY (VALUES (…), (…)) alias(cols): the table value
         // constructor's rows can reference the left APPLY sources — the SSMS
@@ -2376,7 +2359,7 @@ internal sealed partial class Selection
         if (afterApplyParen is not ReservedKeyword { Keyword: Keyword.Select })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        var lateralPlan = ParseNestedQueryRejectingNextValueFor(context, depth + 1, ChainedResolver);
+        var lateralPlan = ParseNestedQueryRejectingNextValueFor(context, QueryScope.Nested(QueryPosition.Derived, ChainedResolver));
 
         var schema = lateralPlan.Schema;
         var columnNames = lateralPlan.ColumnNames;
@@ -2462,8 +2445,8 @@ internal sealed partial class Selection
         }
     }
 
-    private static FromSource ParseSingleFromSource(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver) =>
-        ApplyOptionalPivotUnpivot(context, ParseSingleFromSourceCore(context, depth, outerTypeResolver), outerTypeResolver);
+    private static FromSource ParseSingleFromSource(ParserContext context, QueryScope scope) =>
+        ApplyOptionalPivotUnpivot(context, ParseSingleFromSourceCore(context, scope), scope.OuterTypeResolver);
 
     /// <summary>
     /// Parses one FROM source: a table name (with optional alias) or a
@@ -2473,7 +2456,7 @@ internal sealed partial class Selection
     /// return, the cursor is at the first un-consumed token after the
     /// source — typically WHERE / ORDER / a JOIN keyword / ON / etc.
     /// </summary>
-    private static FromSource ParseSingleFromSourceCore(ParserContext context, uint depth, Func<MultiPartName, SqlType>? outerTypeResolver)
+    private static FromSource ParseSingleFromSourceCore(ParserContext context, QueryScope scope)
     {
         var token = context.GetNextRequired();
         switch (token)
@@ -2500,14 +2483,14 @@ internal sealed partial class Selection
                 // Server's grammar, so dispatch fires before ParseObjectName
                 // / cursor advance.
                 if (string.Equals(tableName.Value, "OPENJSON", StringComparison.OrdinalIgnoreCase))
-                    return BuiltInRowsetSource(context, ParseOpenJson(context, outerTypeResolver));
+                    return BuiltInRowsetSource(context, ParseOpenJson(context, scope.OuterTypeResolver));
 
                 if (string.Equals(tableName.Value, "STRING_SPLIT", StringComparison.OrdinalIgnoreCase))
-                    return BuiltInRowsetSource(context, ParseStringSplit(context, outerTypeResolver));
+                    return BuiltInRowsetSource(context, ParseStringSplit(context, scope.OuterTypeResolver));
 
                 // GENERATE_SERIES: single-column (`value`) plan, SQL Server 2022+.
                 if (string.Equals(tableName.Value, "GENERATE_SERIES", StringComparison.OrdinalIgnoreCase))
-                    return BuiltInRowsetSource(context, ParseGenerateSeries(context, outerTypeResolver));
+                    return BuiltInRowsetSource(context, ParseGenerateSeries(context, scope.OuterTypeResolver));
 
                 // The two REGEXP rowset members ship only at compatibility
                 // level 170; below it the name falls through to the ordinary
@@ -2515,8 +2498,8 @@ internal sealed partial class Selection
                 if (IsRegexpRowsetName(tableName.Value, context))
                 {
                     return BuiltInRowsetSource(context, string.Equals(tableName.Value, "REGEXP_MATCHES", StringComparison.OrdinalIgnoreCase)
-                        ? ParseRegexpMatches(context, outerTypeResolver)
-                        : ParseRegexpSplitToTable(context, outerTypeResolver));
+                        ? ParseRegexpMatches(context, scope.OuterTypeResolver)
+                        : ParseRegexpSplitToTable(context, scope.OuterTypeResolver));
                 }
 
                 // fn_listextendedproperty: 7-arg system TVF projecting the
@@ -2902,7 +2885,7 @@ internal sealed partial class Selection
                 // SELECT, so a VALUES source correlates to outer scope the same
                 // way (needed for a comma-FROM VALUES referencing an outer CTE).
                 if (afterOpenParen is ReservedKeyword { Keyword: Keyword.Values })
-                    return ParseValuesDerivedTable(context, context.OuterTypeResolver ?? outerTypeResolver);
+                    return ParseValuesDerivedTable(context, context.OuterTypeResolver ?? scope.OuterTypeResolver);
 
                 if (afterOpenParen is not ReservedKeyword { Keyword: Keyword.Select })
                 {
@@ -2932,11 +2915,11 @@ internal sealed partial class Selection
                 // BY references that point at outer columns. Both
                 // <see cref="ParserContext.OuterTypeResolver"/> (set inside
                 // the WHERE / GROUP BY / HAVING parse of the enclosing
-                // Selection) and the explicit <paramref name="outerTypeResolver"/>
+                // Selection) and the explicit <paramref name="scope"/> resolver
                 // chain (set when this FROM source is itself nested inside
                 // a subquery) are honored.
-                var derivedSelection = ParseNestedQueryRejectingNextValueFor(context, depth + 1,
-                    context.OuterTypeResolver ?? outerTypeResolver);
+                var derivedSelection = ParseNestedQueryRejectingNextValueFor(context,
+                    QueryScope.Nested(QueryPosition.Derived, context.OuterTypeResolver ?? scope.OuterTypeResolver));
 
                 // Inner SELECT result rows are LOB-inline (projections never
                 // emit LOB pointers because they have no destination Heap),
@@ -3422,11 +3405,10 @@ internal sealed partial class Selection
         ParserContext context,
         FromClause fromClause,
         FromSource[] sources,
-        Func<MultiPartName, SqlType>? outerTypeResolver,
         bool allowOrderBy,
-        uint depth)
+        QueryScope scope)
     {
-        SqlType MyResolver(MultiPartName name) => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
+        SqlType MyResolver(MultiPartName name) => ResolveColumnTypeAcrossSources(sources, name, scope.OuterTypeResolver);
 
         var saved = context.OuterTypeResolver;
         var savedScopeSources = context.ScopeSources;
@@ -3436,7 +3418,7 @@ internal sealed partial class Selection
         context.ScopeSources = sources;
         try
         {
-            ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, depth);
+            ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope);
         }
         finally
         {
@@ -3531,14 +3513,12 @@ internal sealed partial class Selection
     /// the lookahead contract, and an extra advance here would silently swallow
     /// the next clause's opening keyword.
     /// </remarks>
-    private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy, uint depth)
+    private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy, QueryScope scope)
     {
-        // A parenthesized INSERT source's own query may not carry an ORDER BY:
-        // real refuses it there even with the TOP that would license one in a
-        // derived table, and does so as Msg 156 on the keyword
-        // (probe-confirmed 2026-08-06). Matched on depth so a derived table or
-        // subquery nested inside the source keeps the ordinary rules.
-        if (depth == context.ParenthesizedInsertSourceDepth
+        // A parenthesized INSERT source's own query may not carry an ORDER BY
+        // (Msg 156 on the keyword); a derived table or subquery nested inside
+        // it parses at its own position and keeps the ordinary rules.
+        if (scope.RefusesTrailingClauses
             && context.Token is ReservedKeyword { Keyword: Keyword.Order } orderKeyword)
         {
             throw SimulatedSqlException.SyntaxErrorNearKeyword(orderKeyword);
@@ -4183,7 +4163,7 @@ internal sealed partial class Selection
     /// no-op for sort but its presence flips <see cref="HasOrderBy"/>
     /// so the set-op chain rejects per-branch ORDER BY (Msg 156).
     /// </summary>
-    private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly, MultiPartName? intoTarget, Func<MultiPartName, SqlType>? outerTypeResolver, bool containsSubquery, bool projectionDiscarded)
+    private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly, MultiPartName? intoTarget, QueryScope scope, bool containsSubquery)
     {
         // The FROM-less SELECT path bakes projection values at parse time
         // (see the Run-then-GetSqlType loop below) — replaying that closure
@@ -4232,8 +4212,8 @@ internal sealed partial class Selection
         // This is the path a derived table over no FROM takes, so it is what
         // reports a body that names a sibling FROM source.
         SqlType TypeResolver(MultiPartName column) =>
-            outerTypeResolver is not null
-                ? outerTypeResolver(column)
+            scope.OuterTypeResolver is not null
+                ? scope.OuterTypeResolver(column)
                 : throw UnresolvedNameError([], column);
 
         var parseRuntime = new RuntimeContext(column => throw SimulatedSqlException.InvalidColumnName(column), parseBatch);
@@ -4249,14 +4229,28 @@ internal sealed partial class Selection
             schema[i] = expressions[i].GetSqlType(parseBatch, TypeResolver);
         }
 
+        // A statement's own select list names its output collation here as it
+        // does over a FROM: a subquery over conflicting columns hands its
+        // unresolved collation up to this projection to settle or refuse.
+        var feedsAssignment = isAssignmentOnly || scope.FeedsInsert;
+        for (var i = 0; i < schema.Length; i++)
+        {
+            if (UnresolvedCollation.On(schema[i]) is null)
+                continue;
+            if (feedsAssignment)
+                UnresolvedCollation.RequireAssignable(schema[i]);
+            else if (scope.NamesOutputCollation)
+                RequireSettledOutputCollation(schema[i], "SELECT", i + 1);
+        }
+
         // Values come from the executor instead when an outer reference is in
         // play; only the types are needed here, and Run would throw on it. An
         // EXISTS never reads its select list, so real evaluates none of it —
         // `EXISTS (SELECT 1/0)` is true (probe-confirmed 2026-09-23) — and the
         // row it counts carries typed NULLs instead.
-        for (var i = 0; (projectionDiscarded || !referencesOuterColumns) && i < expressions.Count; i++)
+        for (var i = 0; (scope.ProjectionUnread || !referencesOuterColumns) && i < expressions.Count; i++)
         {
-            if (projectionDiscarded)
+            if (scope.ProjectionUnread)
             {
                 values[i] = SqlValue.Null(schema[i]);
                 continue;
@@ -4288,7 +4282,7 @@ internal sealed partial class Selection
                     return [];
             }
 
-            if (projectionDiscarded || !referencesOuterColumns)
+            if (scope.ProjectionUnread || !referencesOuterColumns)
                 return [RowEncoder.EncodeRow(schema, values)];
 
             // Deferred projection: evaluate against this invocation's outer row.

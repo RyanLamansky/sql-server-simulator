@@ -879,16 +879,14 @@ internal sealed partial class Selection
         bool topWithTies,
         List<AggregateExpression> aggregates,
         List<WindowExpression> windows,
-        Func<MultiPartName, SqlType>? outerTypeResolver,
+        QueryScope scope,
         bool isAssignmentOnly,
         MultiPartName? intoTarget,
-        Dictionary<int, ColumnReadTarget>? readColumnSink,
-        bool projectionDiscarded = false,
-        bool projectionUnread = false)
+        Dictionary<int, ColumnReadTarget>? readColumnSink)
     {
         RecordIndexedViewShape(parseBatch, sources, joins, fromClause, distinct, topExpression, aggregates);
 
-        RehomeAggregatesOverOuterScope(parseBatch, sources, aggregates, parseBatch.Parser.OuterTypeResolver ?? outerTypeResolver);
+        RehomeAggregatesOverOuterScope(parseBatch, sources, aggregates, parseBatch.Parser.OuterTypeResolver ?? scope.OuterTypeResolver);
 
         // Convert a comma-join / CROSS JOIN carrying an equi-join predicate in
         // WHERE into an INNER JOIN, so it rides the equi-join seek / hash path
@@ -931,7 +929,7 @@ internal sealed partial class Selection
         var outputSchema = new SqlType[expressions.Count];
         var outputColumnNames = new string[expressions.Count];
 
-        SqlType ResolveColumnType(MultiPartName name) => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
+        SqlType ResolveColumnType(MultiPartName name) => ResolveColumnTypeAcrossSources(sources, name, scope.OuterTypeResolver);
 
         // Column-level read tracking (parse-time, principal-independent): record
         // every table / view column this query reads into the shared sink so the
@@ -993,28 +991,27 @@ internal sealed partial class Selection
             }
         }
 
-        // A projection that reaches the client, or that materializes a column
-        // (SELECT … INTO, a view's output), has to name one collation itself
-        // and reports Msg 451 when the term it built carries an unresolved one.
-        // An assignment target supplies the collation instead — real settles
-        // the same conflict against it silently — so an INSERT … SELECT source,
-        // a `SELECT @v = …` list, and an EXISTS body (whose projection is never
-        // materialized) never demand one.
-        var projectionFeedsAnAssignment = isAssignmentOnly || parseBatch.Parser.InInsertSourceSelect;
-        var projectionNamesOwnCollation = !projectionFeedsAnAssignment && !projectionDiscarded;
+        // A statement's own projection, which reaches the client or
+        // materializes a column (SELECT … INTO, a view's output), has to name
+        // one collation itself and reports Msg 451 when the term it built
+        // carries an unresolved one. An assignment target supplies the
+        // collation instead — so an INSERT … SELECT source and a
+        // `SELECT @v = …` list never demand one — and a nested query hands the
+        // unresolved collation on to whatever reads its column.
+        var projectionFeedsAnAssignment = isAssignmentOnly || scope.FeedsInsert;
+        var projectionNamesOwnCollation = !projectionFeedsAnAssignment && scope.NamesOutputCollation;
         for (var i = 0; i < expressions.Count; i++)
         {
             outputSchema[i] = expressions[i].GetSqlType(parseBatch, readColumnSink is null ? ResolveColumnType : RecordingResolver);
             outputColumnNames[i] = expressions[i].Name;
         }
 
-        // An EXISTS body only counts rows (`projectionUnread` — a semi-join's
-        // key plan discards its projection's collation but reads its values),
-        // so real never evaluates its select list — `EXISTS (SELECT 1/0 FROM t)` is true over a non-empty t
+        // An EXISTS body only counts rows, so real never evaluates its select
+        // list — `EXISTS (SELECT 1/0 FROM t)` is true over a non-empty t
         // (probe-confirmed 2026-09-23). Once the list is bound, each term
         // becomes a typed NULL under its own name; a grouped or windowed body
         // keeps its terms, which its aggregation machinery reads.
-        if (projectionUnread && aggregates.Count == 0 && windows.Count == 0)
+        if (scope.ProjectionUnread && aggregates.Count == 0 && windows.Count == 0)
         {
             for (var i = 0; i < expressions.Count; i++)
                 expressions[i] = new NamedExpression(new Value(SqlValue.Null(outputSchema[i])), outputColumnNames[i]);

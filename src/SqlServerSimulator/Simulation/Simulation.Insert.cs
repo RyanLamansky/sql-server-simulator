@@ -973,26 +973,11 @@ partial class Simulation
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Select })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        // Parsing at the open-paren count is what makes the query parser read
-        // the closing `)` as its terminator rather than as a stray token — the
-        // same depth a derived table's body is parsed at.
-        //
-        // The source query's own ORDER BY is refused there (Msg 156), which is
-        // stricter than the derived-table rule: real declines it even with a
-        // TOP. Recording the depth rather than a flag keeps the restriction to
-        // that one query — anything nested inside it parses deeper and keeps
-        // the ordinary rules.
-        var savedOrderByDepth = context.ParenthesizedInsertSourceDepth;
-        context.ParenthesizedInsertSourceDepth = (uint)depth;
-        List<SqlValue[]> rows;
-        try
-        {
-            rows = ExecuteSelectSource(context, expectedColumnCount, hasExplicitColumnList, identityColumn, destinationTable, (uint)depth);
-        }
-        finally
-        {
-            context.ParenthesizedInsertSourceDepth = savedOrderByDepth;
-        }
+        // The parenthesized position is what makes the query parser read the
+        // closing `)` as its terminator rather than as a stray token, and what
+        // refuses the source query's own ORDER BY / FOR clause (Msg 156) while
+        // anything nested inside it keeps the ordinary rules.
+        var rows = ExecuteSelectSource(context, expectedColumnCount, hasExplicitColumnList, identityColumn, destinationTable, QueryPosition.ParenthesizedInsertSource);
 
         while (depth > 0)
         {
@@ -1010,19 +995,9 @@ partial class Simulation
         bool hasExplicitColumnList,
         HeapColumn? identityColumn = null,
         HeapTable? destinationTable = null,
-        uint parseDepth = 0)
+        QueryPosition position = QueryPosition.InsertSource)
     {
-        var wasInsertSource = context.InInsertSourceSelect;
-        context.InInsertSourceSelect = true;
-        Selection selection;
-        try
-        {
-            selection = Selection.Parse(context, parseDepth);
-        }
-        finally
-        {
-            context.InInsertSourceSelect = wasInsertSource;
-        }
+        var selection = Selection.Parse(context, new QueryScope(position, null));
 
         if (!context.Batch.IsSkipping)
             PermissionEnforcement.CheckReadSources(context.Batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);

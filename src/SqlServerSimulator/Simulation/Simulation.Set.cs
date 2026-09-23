@@ -664,6 +664,9 @@ partial class Simulation
         var assignedExpr = assignOp == '='
             ? rhs
             : TwoSidedExpression.FromCompoundOp(assignOp, new VariableReference(variableToken, context), rhs);
+        // A subquery hands an unresolved collation on to the variable, which
+        // settles it as any assignment target does (Msg 456 for varchar).
+        UnresolvedCollation.RequireAssignable(assignedExpr.GetSqlType(context.Batch, NoColumnTypeResolver));
         var rhsValue = assignedExpr.Run(new RuntimeContext(NoColumnResolver, context.Batch));
         slot.Assign(Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength));
         return true;

@@ -225,6 +225,45 @@ public sealed class CollationConflictPropagationTests
     }
 
     /// <summary>
+    /// A nested query doesn't settle its own output collation: it hands the
+    /// conflict on to whatever reads its column, so a derived table, CTE or
+    /// subquery whose conflicted column nobody reads answers normally
+    /// (probed 2026-09-23).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select count(*) from (select concat(a.n, b.n) x from a, b) d")]
+    [DataRow("with c as (select concat(a.n, b.n) x from a, b) select count(*) from c")]
+    [DataRow("select 1 where exists (select x from (select concat(a.n, b.n) x from a, b) d)")]
+    [DataRow("select count(*) from (select concat(a.s, b.s) x, 2 y from a, b) d where y = 2")]
+    public void NestedQueryHandsTheConflictOn(string sql)
+    {
+        var sim = SeededCrossCollationTables();
+        AreEqual(1, sim.ExecuteScalar(sql));
+    }
+
+    /// <summary>
+    /// The query that reads a nested query's conflicted column reports it as
+    /// if the conflict were its own: an output column names it (Msg 451), a
+    /// comparison needs it settled (Msg 4191), and a <c>varchar</c> reaching an
+    /// <c>INSERT</c> target or a variable can't convert (Msg 456; all probed
+    /// 2026-09-23).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select x from (select concat(a.n, b.n) x from a, b) d", 451)]
+    [DataRow("with c as (select concat(a.n, b.n) x from a, b) select x from c", 451)]
+    [DataRow("select (select concat(a.n, b.n) from a, b)", 451)]
+    [DataRow("select (select top 1 x from (select concat(a.n, b.n) x from a, b) d)", 451)]
+    [DataRow("select 1 from (select concat(a.n, b.n) x from a, b) d where d.x = N'q'", 4191)]
+    [DataRow("create table u (v varchar(40)); insert u select x from (select concat(a.s, b.s) x from a, b) d", 456)]
+    [DataRow("declare @v varchar(40); set @v = (select concat(a.s, b.s) from a, b)", 456)]
+    [DataRow("declare @v varchar(40) = (select concat(a.s, b.s) from a, b)", 456)]
+    public void NestedConflictReportsWhereItIsRead(string sql, int number)
+    {
+        var sim = SeededCrossCollationTables();
+        _ = sim.AssertSqlError(sql, number);
+    }
+
+    /// <summary>
     /// Every operation that needs a definite collation to do its work reports
     /// <b>Msg 4191</b> naming itself and nothing else — not the conflicting
     /// pair, and not the operator that produced the conflict. Real's own odd
@@ -287,6 +326,7 @@ public sealed class CollationConflictPropagationTests
     [TestMethod]
     [DataRow("select 1 from a join b on concat(a.n, b.n) = b.n", "equal to")]
     [DataRow("select count(*) from a, b group by a.i having max(concat(a.n, b.n)) > N'a'", "max")]
+    [DataRow("select 1 where N'xy' in (select concat(a.n, b.n) from a, b)", "equal to")]
     public void PredicateSitesReportMsg4191(string sql, string operationName)
     {
         var sim = SeededCrossCollationTables();

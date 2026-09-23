@@ -25,11 +25,11 @@ partial class Selection
     /// that isn't <c>XML</c> (<c>FOR BROWSE</c> / leftover) restores the cursor
     /// and returns <paramref name="inner"/> unchanged for the downstream Msg
     /// 102. Leaves the cursor on the first token past the clause.
-    /// <paramref name="depth"/> is the enclosing query's nesting depth: only a
-    /// statement's own SELECT (depth 0) can be the one an INSERT / SELECT INTO
-    /// writes from, so only there does the clause raise Msg 6819.
+    /// Only a statement's own SELECT can be the one an INSERT / SELECT INTO
+    /// writes from, so only there (per <paramref name="scope"/>) does the
+    /// clause raise Msg 6819.
     /// </summary>
-    internal static Selection ParseOptionalForXml(ParserContext context, Selection inner, uint depth)
+    internal static Selection ParseOptionalForXml(ParserContext context, Selection inner, QueryScope scope)
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.For })
             return inner;
@@ -158,7 +158,7 @@ partial class Selection
         // Real settles the statement shape before any name: an INSERT source
         // SELECT raises Msg 6819 even when the projection also carries an
         // unusable name (probe-confirmed), while a syntax error still wins.
-        RejectSerializationInWriteStatement(context, inner, depth, forJson: false);
+        RejectSerializationInWriteStatement(inner, scope, forJson: false);
 
         // XSINIL owns the xsi prefix for its nil markers, so a clause that
         // rebinds the prefix can't be honored (real's Msg 6873).
@@ -218,16 +218,16 @@ partial class Selection
     /// (Msg 6819 for both clauses — real reports the FOR XML wording even for
     /// FOR JSON there). Nested scopes are unaffected: the clause is legal in a
     /// derived table, a scalar subquery and a <c>SET @v = (SELECT … FOR XML)</c>
-    /// alike, so only <paramref name="depth"/> 0 is checked.
+    /// alike, so only a statement's own query is checked.
     /// </summary>
-    private static void RejectSerializationInWriteStatement(ParserContext context, Selection inner, uint depth, bool forJson)
+    private static void RejectSerializationInWriteStatement(Selection inner, QueryScope scope, bool forJson)
     {
-        if (depth != 0)
+        if (scope.Parenthesized)
             return;
         if (inner.IsAssignmentOnly)
             throw SimulatedSqlException.ForXmlNotAllowedInAssignment();
 
-        var statementKind = context.InInsertSourceSelect ? "INSERT" : inner.IntoTarget is not null ? "SELECT INTO" : null;
+        var statementKind = scope.FeedsInsert ? "INSERT" : inner.IntoTarget is not null ? "SELECT INTO" : null;
         if (statementKind is null)
             return;
         throw forJson

@@ -234,7 +234,8 @@ Those parens are only reachable once an explicit column list has been consumed: 
 **The source query may not carry an `ORDER BY`** — real refuses it as **Msg 156** on the keyword, and refuses it even with the `TOP` that licenses one in a derived table, so this is stricter than the [Msg 1033 rule](ctes.md) the nested constructs take.
 A set-operator source is refused the same way.
 The restriction belongs to that one query: a derived table or a subquery written *inside* the source keeps the ordinary rules and may order with its own `TOP`.
-`ParserContext.ParenthesizedInsertSourceDepth` records the nesting depth rather than a flag for exactly that reason — and is cleared across a subquery boundary, since a subquery always parses at depth 1 whatever encloses it and would otherwise collide with a source parsed at that same depth.
+A `FOR XML` / `FOR JSON` clause on it is the same Msg 156, on the `FOR` (probed 2026-09-23), where the unparenthesized source reports the write-statement refusal instead.
+Both follow from the query's `QueryPosition.ParenthesizedInsertSource`, which a nested query inside it doesn't inherit.
 
 **Full buffering**: source materializes to `List<SqlValue[]>` before any destination write — makes self-insert (`INSERT t SELECT … FROM t`) safe.
 

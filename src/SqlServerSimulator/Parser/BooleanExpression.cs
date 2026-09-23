@@ -441,11 +441,7 @@ internal abstract class BooleanExpression : ExpressionNode
             extraParens++;
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Select })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        // EXISTS counts rows and throws the projection away, so its select list
-        // never has to settle an output collation (probe-confirmed).
-        context.ProjectionDiscarded = true;
-        var inner = Expression.ParseSubqueryRejectingNextValueFor(context);
-        context.ProjectionDiscarded = false;
+        var inner = Expression.ParseSubqueryRejectingNextValueFor(context, QueryPosition.Exists);
         for (var i = 0; i <= extraParens; i++)
         {
             if (context.Token is not Operator { Character: ')' })

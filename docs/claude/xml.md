@@ -863,7 +863,7 @@ The row tag is checked before the ROOT name.
 | `SELECT @v = … FOR JSON` | **Msg 6819** state 3 — real reports the *FOR XML* wording for the JSON clause too |
 
 The rejection is about the statement's own SELECT, so every nested position stays legal: a scalar subquery (`INSERT z SELECT (SELECT … FOR XML RAW)`), a derived table (`… FROM (SELECT … FOR XML RAW) d(v)`) and `SET @v = (SELECT … FOR XML RAW)` all work.
-Real settles the statement shape before any name (an INSERT source SELECT with an unusable alias reports 6819, not 6850) but after parsing, so a syntax error still wins; the simulator matches by checking once the clause has parsed, at nesting depth 0 only, off `ParserContext.InInsertSourceSelect` (set by the INSERT parser) plus the parsed selection's own `IntoTarget` / `IsAssignmentOnly`.
+Real settles the statement shape before any name (an INSERT source SELECT with an unusable alias reports 6819, not 6850) but after parsing, so a syntax error still wins; the simulator matches by checking once the clause has parsed, for a statement's own query only, off its `QueryScope` (an `INSERT` source's position) plus the parsed selection's own `IntoTarget` / `IsAssignmentOnly`.
 
 Real reaches its verdict before resolving the target table (`INSERT INTO nosuchtable SELECT … FOR XML` reports 6819); the simulator resolves the INSERT target first, so a missing table reports Msg 208 there.
 

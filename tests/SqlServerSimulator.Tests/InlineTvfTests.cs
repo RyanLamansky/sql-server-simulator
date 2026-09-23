@@ -294,4 +294,22 @@ public sealed class InlineTvfTests
         AreEqual(3, reader.GetInt32(0));
         AreEqual(6, reader.GetInt32(1));
     }
+
+    /// <summary>
+    /// An inline function's body is inlined into the query that reads it the
+    /// way a view's is, so a constant <c>TOP 100 PERCENT</c> drops its
+    /// <c>ORDER BY</c> and the rows come back in scan order (probed 2026-09-23).
+    /// </summary>
+    [TestMethod]
+    public void TopHundredPercent_DropsTheOrderBy()
+    {
+        using var connection = Open();
+        _ = connection.CreateCommand("create table t (a int); insert t values (3), (1), (2)").ExecuteNonQuery();
+        _ = connection.CreateCommand("create function dbo.tf() returns table as return (select top 100 percent a from t order by a)").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("select a from dbo.tf()").ExecuteReader();
+        var values = new List<int>();
+        while (reader.Read())
+            values.Add(reader.GetInt32(0));
+        CollectionAssert.AreEqual(new[] { 3, 1, 2 }, values);
+    }
 }

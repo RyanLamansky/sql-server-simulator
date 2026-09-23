@@ -734,6 +734,19 @@ public class InsertTests
             "Incorrect syntax near the keyword 'order'.",
             new Simulation().AssertSqlError($"create table t (a int null); {statement}", 156).Message);
 
+    /// <summary>
+    /// A <c>FOR XML</c> / <c>FOR JSON</c> clause on a parenthesized source is
+    /// the same Msg 156, on the <c>FOR</c> (probed 2026-09-23); unparenthesized
+    /// it is the write-statement refusal (Msg 6819 / 13602).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert into t (a) (select 'x' a for xml path)")]
+    [DataRow("insert into t (a) ((select 'x' a for json path))")]
+    public void ParenthesizedSource_RefusesItsOwnForClause(string statement)
+        => AreEqual(
+            "Incorrect syntax near the keyword 'for'.",
+            new Simulation().AssertSqlError($"create table t (a nvarchar(max) null); {statement}", 156).Message);
+
     [TestMethod]
     public void UnparenthesizedSource_StillTakesOrderBy()
         => AreEqual(2, new Simulation().ExecuteScalar("""

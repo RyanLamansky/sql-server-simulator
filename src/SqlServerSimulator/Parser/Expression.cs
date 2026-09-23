@@ -1300,7 +1300,12 @@ internal abstract class Expression : ExpressionNode
     /// A subquery is one of the constructs real's message names, and the
     /// refusal holds for the body's whole parse rather than only its clauses.
     /// </summary>
-    internal static Selection ParseSubqueryRejectingNextValueFor(ParserContext context)
+    /// <param name="context">Manages the overall parsing state.</param>
+    /// <param name="position">
+    /// <see cref="QueryPosition.Exists"/> for the query an <c>EXISTS</c> tests,
+    /// whose select list is never read.
+    /// </param>
+    internal static Selection ParseSubqueryRejectingNextValueFor(ParserContext context, QueryPosition position = QueryPosition.Subquery)
     {
         // Every subquery shape funnels through here — the scalar form, EXISTS,
         // the quantified comparisons and IN — so this is where an operand that
@@ -1309,22 +1314,14 @@ internal abstract class Expression : ExpressionNode
         if (context.ScalarOnlyOperand)
             throw ScalarOnlyOperandError(context);
         var saved = context.EnterNextValueForScope(NextValueForScope.Nested);
-        // A subquery always parses at depth 1 whatever its enclosing depth, so
-        // the parenthesized-INSERT-source marker — which is a depth — would
-        // collide with a subquery written inside such a source and refuse its
-        // ORDER BY too. The restriction belongs to the source query alone, so
-        // clear the marker across this boundary.
-        var savedInsertSourceDepth = context.ParenthesizedInsertSourceDepth;
-        context.ParenthesizedInsertSourceDepth = null;
         Selection subquery;
         try
         {
-            subquery = Selection.Parse(context, depth: 1, outerTypeResolver: context.OuterTypeResolver);
+            subquery = Selection.Parse(context, QueryScope.Nested(position, context.OuterTypeResolver));
         }
         finally
         {
             context.NextValueForRejection = saved;
-            context.ParenthesizedInsertSourceDepth = savedInsertSourceDepth;
         }
 
         // Msg 1033: a subquery is one of the five constructs the message names,

@@ -307,7 +307,7 @@ partial class Simulation
             Selection selection;
             try
             {
-                selection = Selection.Parse(context, depth: 1);
+                selection = Selection.Parse(context, QueryScope.Nested(QueryPosition.Derived, null));
             }
             finally
             {

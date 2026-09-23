@@ -141,7 +141,7 @@ internal sealed partial class Selection
         var plan = BuildSqlProjection(
             context.Batch, [source], joins: [], projection, fromClause,
             distinct: false, topExpression: null, topPercent: false, topWithTies: false, aggregates, windows: [],
-            outerTypeResolver, isAssignmentOnly: false, intoTarget: null, context.ReadColumnSink);
+            QueryScope.Nested(QueryPosition.Derived, outerTypeResolver), isAssignmentOnly: false, intoTarget: null, context.ReadColumnSink);
 
         return WrapRotatedPlan(alias, plan);
     }

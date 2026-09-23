@@ -627,7 +627,10 @@ Note there's no leading *the* (Msg 468's wording has one), the collation names f
 A `WHERE` predicate's Msg 4191, a `GROUP BY` term's Msg 451 and an `ORDER BY` term's all report ahead of it, and an `ORDER BY` naming the conflicted projection column — by ordinal *or* by alias — reports as `ORDER BY statement column <n>` rather than the select list's slot (all probe-confirmed).
 So the select-list slot is recorded during the projection loop and raised only once every other clause has bound.
 
-Three projections don't name a collation at all: an `INSERT … SELECT` source and a `SELECT @v = …` list (an assignment target supplies one — see Msg 456 below), and an **`EXISTS` body**, whose projection real never materializes (`ParserContext.ProjectionDiscarded`, claimed by the single-SELECT parse that consumes it so a derived table nested inside the body still names its own).
+Only a **statement's own** projection names a collation, and two of those don't: an `INSERT … SELECT` source and a `SELECT @v = …` list, where the assignment target supplies one (see Msg 456 below).
+A **nested** query — a derived table, CTE, subquery, `EXISTS` body, or a view or inline function inlined into its caller — never settles its own output collation: the conflict travels on in its column's type, and whatever reads that column reports it as its own (probed 2026-09-23).
+So `SELECT COUNT(*) FROM (SELECT concat(a, b) x …) d` answers, `SELECT x FROM (…) d` is Msg 451 at the outer select list, `WHERE d.x = 'q'` is Msg 4191, and an `INSERT` or `SET @v = (SELECT …)` reading it is Msg 456.
+`QueryScope.NamesOutputCollation` carries the rule.
 `SELECT … INTO` is not an assignment in that sense: it has to materialize a column of its own, so it raises.
 Like every other site the check binds at compile time, so an empty rowset and a `CREATE PROCEDURE` whose body carries the conflict both raise, the latter attributed to the module.
 
@@ -680,7 +683,7 @@ Cross-collation branches of a set operation must resolve to a single output coll
 | `UNION ALL` | per [`UnresolvedCollation.Settle`](#which-producers-travel-and-which-report) — **Msg 457** for a `varchar` result, the marker for `nvarchar`, then **Msg 451** at the combined output column |
 
 The value-comparing operators have to dedup, and a value with no collation has no comparison to dedup by; `UNION ALL` only concatenates, so it settles like the string operators do.
-The combined column *is* an output column, so its ordinal counts by output position like the select list's — unless the whole result feeds an assignment target or a discarded projection, which `CombineSetOps`'s `namesOwnCollation` parameter carries in from the query-expression parse.
+The combined column *is* an output column when the set operation is a statement's own query, so its ordinal counts by output position like the select list's; in a nested query or an assignment source it travels on like any other nested column.
 Note real upper-cases the set operator where it lower-cases the comparison / `add` names, and says *operation* for 468 versus *operator* for 457.
 Collation names follow the same right-then-left order the comparison sites use.
 
@@ -707,9 +710,9 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
   A differential fuzz of the five scalars against live (3,000 random cases per seed over an alphabet holding three bare marks) puts the whole class at ~1% of cases; with the marks removed from the alphabet the same fuzz is 0.2%, and every remaining case is the ligature or zero-weight entry above.
 - **An unresolved collation reaching a consumer the marker model doesn't cover.**
   The catalog under [Msg 4191](#msg-4191--the-consuming-operation-reports) is what probing established; a value with no collation that reaches full-text, spatial, XML or the JSON builders isn't gated, and a conflict that survives to execution falls back to the left operand's collation rather than raising.
-- **`IN (SELECT <conflicted> …)` reports the subquery's Msg 451 where real reports the comparison's Msg 4191** (`equal to`), and `SET @v = (SELECT <conflicted varchar> …)` reports Msg 451 where real reports Msg 456.
-  Both are the same shape: a subquery whose projection real treats as consumed by its context rather than as an output column, where the simulator's projection slot names it first.
-  The predicate forms that read a column directly (`WHERE concat(a, b) = 'x'`) and the assignment forms without a subquery both match.
+- **An operator that converts an unresolved string doesn't refuse it.**
+  Real raises Msg 456 when arithmetic or a set operator's type unification implicitly converts a `varchar` whose collation is unresolved (`concat(a, b) + 1`, `… UNION ALL SELECT 1`, `… UNION ALL SELECT N'q'`, each naming the destination type), and Msg 457 when `+` meets one (`SET @v += (SELECT concat(a, b) …)`); the simulator converts the value (a runtime Msg 245 for a non-number) or, at a statement's own set operation, reports the output column's Msg 451 (probed 2026-09-23).
+  A conversion to `datetime` is the odd one out on real too: it raises the ordinary runtime Msg 241.
 - **Msg 456 names the source type as its destination too.**
   The seam that raises it carries the value's type, not the target's, so a *cross-family* assignment (`insert <nvarchar col> select concat(<varchar pair>)`) reads `varchar value to varchar` where real reads `varchar value to nvarchar`.
   Number, State, the collation pair and the producing operator all match; the same-family assignment — much the more common one — is verbatim.

@@ -164,11 +164,10 @@ internal sealed partial class Selection
                 topWithTies: false,
                 aggregates: [],
                 windows: [],
-                outerTypeResolver,
+                QueryScope.Nested(QueryPosition.Subquery, outerTypeResolver),
                 isAssignmentOnly: false,
                 intoTarget: null,
-                readColumnSink: null,
-                projectionDiscarded: true);
+                readColumnSink: null);
             return new SemiJoinShape(keyPlan, [.. outerKeys], [.. keyTypes], SeekableInnerTable(sources, innerKeys));
         }
         catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)

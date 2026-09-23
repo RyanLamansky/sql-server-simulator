@@ -2278,7 +2278,7 @@ public sealed partial class Simulation
         {
             if (fmtKeyword == Keyword.Select)
             {
-                var metadataSelection = Selection.Parse(context, 0);
+                var metadataSelection = Selection.Parse(context, QueryScope.Statement);
                 connection.LastStatementRowCount = 0;
                 if (metadataSelection.IntoTarget is null)
                 {
@@ -2328,7 +2328,7 @@ public sealed partial class Simulation
         {
             case ReservedKeyword { Keyword: Keyword.Select }:
                 {
-                    var selection = Selection.Parse(context, 0);
+                    var selection = Selection.Parse(context, QueryScope.Statement);
                     // A value literal left dangling after a complete SELECT is
                     // always unconsumed trailing input — real SQL Server raises
                     // Msg 102 rather than silently ignoring it (the non-T-SQL

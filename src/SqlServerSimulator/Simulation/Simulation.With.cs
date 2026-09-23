@@ -46,7 +46,7 @@ partial class Simulation
     /// rejecting the WITH, matching real.
     /// </para>
     /// </remarks>
-    internal static Selection ParseBodyQuery(ParserContext context, bool rejectsNextValueFor = false)
+    internal static Selection ParseBodyQuery(ParserContext context, bool rejectsNextValueFor = false, QueryPosition position = QueryPosition.Statement)
     {
         // A view or function body is one of the constructs real names in
         // Msg 11719, and it refuses the CREATE rather than the later reference
@@ -58,7 +58,7 @@ partial class Simulation
         {
             if (context.Token is ReservedKeyword { Keyword: Keyword.With })
                 ParseCteBindings(context);
-            return Selection.Parse(context, depth: 0);
+            return Selection.Parse(context, new QueryScope(position, null));
         }
         finally
         {
@@ -242,7 +242,7 @@ partial class Simulation
     /// </remarks>
     private static Selection ParseCteBody(ParserContext context, CteBinding binding, string[]? renameList)
     {
-        var firstBranch = Selection.ParseIntersectChain(context, depth: 1, outerTypeResolver: null, isFirstBranch: true, namesOwnCollation: false);
+        var firstBranch = Selection.ParseIntersectChain(context, QueryScope.Nested(QueryPosition.Derived, null), isFirstBranch: true);
 
         var branches = new List<(Selection plan, bool selfRef, SetOpKind op)>
         {
@@ -281,7 +281,7 @@ partial class Simulation
 
                 binding.SelfReferenceCountInCurrentBranch = 0;
                 context.RecursiveBranchConstructs = default;
-                var branch = Selection.ParseIntersectChain(context, depth: 1, outerTypeResolver: null, isFirstBranch: false, namesOwnCollation: false);
+                var branch = Selection.ParseIntersectChain(context, QueryScope.Nested(QueryPosition.Derived, null), isFirstBranch: false);
                 var selfRefCount = binding.SelfReferenceCountInCurrentBranch;
                 if (selfRefCount > 1)
                     throw SimulatedSqlException.RecursiveCteMultipleReferences(binding.Name);

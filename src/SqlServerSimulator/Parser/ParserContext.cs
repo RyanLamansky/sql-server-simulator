@@ -434,31 +434,6 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool StopExpressionAtBareColon;
 
     /// <summary>
-    /// True while the source <c>SELECT</c> of an <c>INSERT … SELECT</c> is
-    /// being parsed, which is where real refuses a <c>FOR XML</c> (Msg 6819) /
-    /// <c>FOR JSON</c> (Msg 13602) clause. The INSERT parser sets and restores
-    /// it around that one parse; the trailing-clause parsers read it only at
-    /// nesting depth 0, so a derived table or subquery inside the source SELECT
-    /// keeps its own clause.
-    /// </summary>
-    public bool InInsertSourceSelect;
-
-    /// <summary>
-    /// The nesting depth at which a parenthesized <c>INSERT</c> source's own
-    /// query is being parsed, or null outside one. That query may not carry an
-    /// <c>ORDER BY</c> — real refuses it there even with the <c>TOP</c> that
-    /// would license one in a derived table, as <strong>Msg 156</strong>.
-    /// </summary>
-    /// <remarks>
-    /// Recorded as a depth rather than a bool because the restriction is the
-    /// source query's alone: a derived table or subquery <em>inside</em> it
-    /// parses deeper and keeps the ordinary rules, so
-    /// <c>INSERT … (SELECT x FROM (SELECT TOP 1 v FROM u ORDER BY v) d)</c>
-    /// stays legal.
-    /// </remarks>
-    public uint? ParenthesizedInsertSourceDepth;
-
-    /// <summary>
     /// Set for a statement whose parser leaves the cursor at its first
     /// <em>un</em>-consumed token, so anything there that isn't a statement
     /// boundary is unconsumed input rather than the parse's own tail.
@@ -490,18 +465,6 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         this.statementOwnsItsTrailingToken = false;
         return value;
     }
-
-    /// <summary>
-    /// Set on the <c>SELECT</c> that sits immediately inside an <c>EXISTS</c>,
-    /// whose projection real never materializes — an unresolved collation in
-    /// that select list settles into nothing rather than reporting Msg 451
-    /// (probe-confirmed: <c>EXISTS (SELECT concat(a, b) …)</c> returns rows
-    /// where the same projection at statement level raises).
-    /// <para>Claimed and cleared by the single-SELECT parse that consumes it,
-    /// so a derived table or subquery nested inside the <c>EXISTS</c> body
-    /// still names its own output collation.</para>
-    /// </summary>
-    public bool ProjectionDiscarded;
 
     /// <summary>
     /// Parse-time chain of outer-scope column-type resolvers, used to plan

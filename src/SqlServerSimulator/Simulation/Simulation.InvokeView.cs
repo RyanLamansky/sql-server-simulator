@@ -129,11 +129,7 @@ partial class Simulation
         bodyCommand.CommandText = view.BodyText;
 #pragma warning restore CA2100
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
-        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32))
-        {
-            SuppressDiagnosticsResolution = true,
-            ViewBody = true,
-        };
+        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32)) { SuppressDiagnosticsResolution = true };
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
         connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
@@ -142,7 +138,7 @@ partial class Simulation
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
-            return ParseBodyQuery(parser);
+            return ParseBodyQuery(parser, position: QueryPosition.Inlined);
         }
         finally
         {
@@ -178,7 +174,7 @@ partial class Simulation
         connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
         // Body errors attribute to the outer statement that referenced the view
         // (probe-confirmed: real reports the outer SELECT's line, no procedure).
-        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true, ViewBody = true };
+        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
         // The body is part of the referencing statement, not a statement of its
         // own, so its current-time calls read that statement's freeze.
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
@@ -187,7 +183,7 @@ partial class Simulation
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
-            var bodySelection = ParseBodyQuery(parser);
+            var bodySelection = ParseBodyQuery(parser, position: QueryPosition.Inlined);
             // A view body is inlined into the referencing statement, so its
             // reads reach no ordinary check site — and every same-database one
             // is chained anyway. What isn't chained is a read into another

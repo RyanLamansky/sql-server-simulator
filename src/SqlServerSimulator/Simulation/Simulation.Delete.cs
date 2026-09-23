@@ -264,7 +264,7 @@ partial class Simulation
         context.AllowNextValueForInFromClause = true;
         try
         {
-            Selection.ParseSourcesAndJoins(context, depth: 0, sourcesList, joinsList, outerTypeResolver: null);
+            Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourcesList, joinsList);
         }
         finally
         {
