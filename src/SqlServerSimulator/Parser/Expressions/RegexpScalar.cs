@@ -348,4 +348,6 @@ internal sealed class RegexpScalar : Expression
 
     internal override string DebugDisplay() =>
         $"{this.UpperName}({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.kind).Children(this.arguments);
 }

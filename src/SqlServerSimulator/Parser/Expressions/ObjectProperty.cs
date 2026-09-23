@@ -316,4 +316,6 @@ internal sealed class ObjectProperty : Expression
         };
 
     internal override string DebugDisplay() => $"OBJECTPROPERTY({this.idArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.idArg).Child(this.propertyArg);
 }

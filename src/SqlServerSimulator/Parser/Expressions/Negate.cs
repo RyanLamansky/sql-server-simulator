@@ -115,11 +115,6 @@ internal sealed class Negate(Expression operand) : Expression
 
     internal override bool ResultReportsNumeric => this.Operand.ResultReportsNumeric;
 
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) =>
-        this.Operand.VisitColumnReferences(visit);
-
-    internal override bool ContainsVariableReference => this.Operand.ContainsVariableReference;
-
     internal override bool IsRowIndependent => this.Operand.IsRowIndependent;
 
     private protected override bool IsStructuralConstant => this.Operand.IsWrittenConstant;
@@ -127,4 +122,6 @@ internal sealed class Negate(Expression operand) : Expression
     internal override bool IsNonNullConstantComputation => this.Operand.IsNonNullConstantComputation;
 
     internal override string DebugDisplay() => $"-{this.Operand.DebugDisplay()}";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.Operand);
 }

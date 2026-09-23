@@ -18,6 +18,8 @@ internal sealed class DateFirstExpression(ParserContext context) : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@DATEFIRST";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -36,6 +38,8 @@ internal sealed class LanguageExpression(ParserContext context) : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@LANGUAGE";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -53,6 +57,8 @@ internal sealed class LangIdExpression(ParserContext context) : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@LANGID";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -79,4 +85,6 @@ internal sealed class OptionsExpression(ParserContext context) : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@OPTIONS";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.baseOptions);
 }

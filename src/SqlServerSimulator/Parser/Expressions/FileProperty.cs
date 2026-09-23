@@ -103,4 +103,6 @@ internal sealed class FileProperty : Expression
 
     internal override string DebugDisplay() =>
         $"FILEPROPERTY({this.nameArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.nameArg).Child(this.propertyArg);
 }

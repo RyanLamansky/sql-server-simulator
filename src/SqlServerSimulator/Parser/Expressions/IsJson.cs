@@ -35,4 +35,6 @@ internal sealed class IsJson(ParserContext context) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"ISJSON({this.operand.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.operand);
 }

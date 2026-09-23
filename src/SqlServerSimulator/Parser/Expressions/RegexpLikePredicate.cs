@@ -86,4 +86,6 @@ internal sealed class RegexpLikePredicate : BooleanExpression
     internal override string DebugDisplay() => this.flags is null
         ? $"REGEXP_LIKE({this.input.DebugDisplay()}, {this.pattern.DebugDisplay()})"
         : $"REGEXP_LIKE({this.input.DebugDisplay()}, {this.pattern.DebugDisplay()}, {this.flags.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.input).Child(this.pattern).Child(this.flags);
 }

@@ -103,4 +103,6 @@ internal sealed class IsNumeric(ParserContext context) : Expression
     private static bool IsCurrencySymbol(char c) => char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.CurrencySymbol;
 
     internal override string DebugDisplay() => $"ISNUMERIC({this.operand.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.operand);
 }

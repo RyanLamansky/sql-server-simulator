@@ -1703,7 +1703,7 @@ internal readonly partial struct SqlValue
         var value = this.AsDateTime;
         var bytes = new byte[8];
         System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(bytes, (value.Date - baseDate).Days);
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(4), (uint)Math.Round(value.TimeOfDay.Ticks * 300.0 / TimeSpan.TicksPerSecond));
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(4), (uint)DateTimeSqlType.UnitsFromTicks(value.TimeOfDay.Ticks));
         return bytes;
     }
 
@@ -1717,17 +1717,11 @@ internal readonly partial struct SqlValue
     {
         var aligned = RightAligned(bytes, 8);
         var days = System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(aligned);
-        var ticks300 = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(aligned.AsSpan(4));
-        const int MinDays = -53690; // 1753-01-01
-        const int MaxDays = 2958463; // 9999-12-31
-        if (days is < MinDays or > MaxDays || ticks300 >= 300u * 86400)
+        var units = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(aligned.AsSpan(4));
+        if (days is < DateTimeSqlType.MinDayCount or > DateTimeSqlType.MaxDayCount || units >= DateTimeSqlType.TicksPerDay)
             throw SimulatedSqlException.ConversionFailedFromBinaryToDateTime();
 
-        // 1/300-second granularity, rounded to the nearest 100 ns as every
-        // datetime read is (10_000_000 / 300 isn't whole, so the
-        // multiplication stays on the high side of the division).
-        var baseDate = new DateTime(1900, 1, 1).AddDays(days);
-        return baseDate.AddTicks(((ticks300 * TimeSpan.TicksPerSecond) + 150) / 300L);
+        return DateTimeSqlType.FromParts(days, units);
     }
 
     /// <summary>

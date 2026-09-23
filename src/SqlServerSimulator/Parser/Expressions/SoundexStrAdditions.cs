@@ -44,6 +44,8 @@ internal sealed class Soundex : Expression
 
     internal override string DebugDisplay() => $"SOUNDEX({this.input.DebugDisplay()})";
 
+    internal override void Describe(NodeShape shape) => shape.Child(this.input);
+
     internal static string Compute(string source)
     {
         if (string.IsNullOrEmpty(source))
@@ -156,6 +158,8 @@ internal sealed class Difference : Expression
     }
 
     internal override string DebugDisplay() => $"DIFFERENCE({this.left.DebugDisplay()}, {this.right.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.left).Child(this.right);
 }
 
 /// <summary>
@@ -344,4 +348,6 @@ internal sealed class Str : Expression
     }
 
     internal override string DebugDisplay() => $"STR({this.numArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.numArg).Child(this.lengthArg).Child(this.decimalsArg);
 }

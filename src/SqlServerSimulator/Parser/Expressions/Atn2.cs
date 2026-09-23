@@ -48,4 +48,6 @@ internal sealed class Atn2 : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
 
     internal override string DebugDisplay() => $"ATN2({this.first.DebugDisplay()}, {this.second.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.first).Child(this.second);
 }

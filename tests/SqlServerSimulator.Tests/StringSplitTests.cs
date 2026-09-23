@@ -212,6 +212,8 @@ public sealed class StringSplitTests
     [DataRow("cast(@e as int)")]
     [DataRow("@e + 0")]
     [DataRow("(@e)")]
+    [DataRow("coalesce(@e, 1)")]
+    [DataRow("iif(@e = 1, 1, 0)")]
     [TestMethod]
     public void EnableOrdinal_WrappedVariable_RaisesMsg8748(string enableOrdinal)
         => new Simulation().AssertSqlError(

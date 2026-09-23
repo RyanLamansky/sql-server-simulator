@@ -31,4 +31,6 @@ internal sealed class Lower(ParserContext context) : Expression
         StringScalars.ResolveResultType(StringScalars.BindArgument(source, batch, resolveColumnType, "lower"), batch);
 
     internal override string DebugDisplay() => $"LOWER({source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source);
 }

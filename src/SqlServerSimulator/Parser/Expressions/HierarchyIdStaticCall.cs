@@ -76,9 +76,8 @@ internal sealed class HierarchyIdStaticCall : Expression
 
     internal override string DebugDisplay() => $"hierarchyid::{this.method}({this.argument?.DebugDisplay() ?? ""})";
 
+    internal override void Describe(NodeShape shape) => shape.Local(this.method).Child(this.argument);
+
     internal override bool ResultIsNullable(NullabilityContext context) =>
         this.argument is not null && this.argument.ResultIsNullable(context);
-
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) =>
-        this.argument?.VisitColumnReferences(visit);
 }

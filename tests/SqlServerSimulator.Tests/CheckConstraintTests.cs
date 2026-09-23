@@ -189,6 +189,20 @@ public sealed class CheckConstraintTests
             8141,
             "Column CHECK constraint for column 'a' references another column, table 't'.");
 
+    /// <summary>
+    /// A peer inside a function argument or a CASE is found at CREATE too
+    /// (probed 2026-09-23 for DATEPART).
+    /// </summary>
+    [DataRow("datepart(year, a) > 0")]
+    [DataRow("case when a > 0 then 1 else 0 end = 1")]
+    [DataRow("coalesce(a, 0) > 0")]
+    [TestMethod]
+    public void InlineCheck_PeerInsideExpression_Msg8141(string predicate)
+        => new Simulation().AssertSqlError(
+            $"create table t (a int, b int check ({predicate}))",
+            8141,
+            "Column CHECK constraint for column 'b' references another column, table 't'.");
+
     [TestMethod]
     public void InlineCheck_OwningAndPeer_StillMsg8141()
         => new Simulation().AssertSqlError(

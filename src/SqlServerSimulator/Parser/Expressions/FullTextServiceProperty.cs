@@ -56,4 +56,6 @@ internal sealed class FullTextServiceProperty : Expression
         => SqlType.Int32;
 
     internal override string DebugDisplay() => $"FULLTEXTSERVICEPROPERTY({this.nameArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.nameArg);
 }

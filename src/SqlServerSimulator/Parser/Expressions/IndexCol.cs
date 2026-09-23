@@ -72,4 +72,6 @@ internal sealed class IndexCol : Expression
 
     internal override string DebugDisplay() =>
         $"INDEX_COL({this.tableArg.DebugDisplay()}, {this.indexIdArg.DebugDisplay()}, {this.keyIdArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.tableArg).Child(this.indexIdArg).Child(this.keyIdArg);
 }

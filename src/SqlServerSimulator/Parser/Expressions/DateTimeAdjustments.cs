@@ -60,6 +60,8 @@ internal sealed class DateTrunc : Expression
 
     internal override string DebugDisplay() => $"DATETRUNC({this.keywordText}, {this.source.DebugDisplay()})";
 
+    internal override void Describe(NodeShape shape) => shape.Local(this.kind).Child(this.source);
+
     private static DateOnly TruncateDate(DateOnly d, DatePartKind k, int dateFirst) => k switch
     {
         DatePartKind.Year => new DateOnly(d.Year, 1, 1),
@@ -171,6 +173,8 @@ internal sealed class SwitchOffset : Expression
         this.dtoArg.GetSqlType(batch, resolveColumnType) is DateTimeOffsetSqlType t ? t : SqlType.GetDateTimeOffset(7);
 
     internal override string DebugDisplay() => $"SWITCHOFFSET({this.dtoArg.DebugDisplay()}, {this.offsetArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.dtoArg).Child(this.offsetArg);
 }
 
 /// <summary>
@@ -217,4 +221,6 @@ internal sealed class ToDateTimeOffset : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
 
     internal override string DebugDisplay() => $"TODATETIMEOFFSET({this.dtArg.DebugDisplay()}, {this.offsetArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.dtArg).Child(this.offsetArg);
 }

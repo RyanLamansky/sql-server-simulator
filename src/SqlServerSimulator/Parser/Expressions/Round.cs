@@ -78,6 +78,8 @@ internal sealed class Round : Expression
 
     internal override string DebugDisplay() => $"ROUND({this.value.DebugDisplay()}, {this.length.DebugDisplay()})";
 
+    internal override void Describe(NodeShape shape) => shape.Child(this.value).Child(this.length).Child(this.function);
+
     /// <summary>
     /// The rounded value settled back into the argument's own declared
     /// precision, which is what the result carries — so a carry out of it is

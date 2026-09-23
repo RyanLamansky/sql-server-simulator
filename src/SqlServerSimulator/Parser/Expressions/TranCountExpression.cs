@@ -20,4 +20,6 @@ internal sealed class TranCountExpression(ParserContext context) : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@TRANCOUNT";
+
+    internal override void Describe(NodeShape shape) { }
 }

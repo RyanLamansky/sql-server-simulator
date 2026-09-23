@@ -21,4 +21,6 @@ internal sealed class Log10(ParserContext context) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
 
     internal override string DebugDisplay() => $"LOG10({this.source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source);
 }

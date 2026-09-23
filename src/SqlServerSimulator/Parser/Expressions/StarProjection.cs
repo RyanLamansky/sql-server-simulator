@@ -23,4 +23,6 @@ internal sealed class StarProjection(string? qualifier) : Expression
         throw SimulatedSqlException.SyntaxErrorNear('*');
 
     internal override string DebugDisplay() => this.Qualifier is { } q ? $"{q}.*" : "*";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.Qualifier);
 }

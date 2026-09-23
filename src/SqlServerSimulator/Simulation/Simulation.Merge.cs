@@ -1983,6 +1983,8 @@ partial class Simulation
         public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType>? resolver) => NVarcharSqlType.Get(10, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
         public override SqlValue Run(RuntimeContext runtime) => SqlValue.Null(NVarcharSqlType.Get(10, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault));
         internal override string DebugDisplay() => "$action";
+
+        internal override void Describe(NodeShape shape) { }
     }
 
     /// <summary>

@@ -236,4 +236,6 @@ internal sealed class JsonModify : Expression
     }
 
     internal override string DebugDisplay() => $"JSON_MODIFY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()}, {this.newValueInput.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.jsonInput).Child(this.pathInput).Child(this.newValueInput);
 }

@@ -177,7 +177,7 @@ internal sealed partial class Selection
     private static void ValidateGroupByReferences(FromSource[] sources, List<Expression> expressions, List<OrderBySpec> orderBy, string[] outputColumnNames, FromClause fromClause, List<WindowExpression> windows)
     {
         var groupedBare = new HashSet<(int Source, int Column)>();
-        var groupingKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var groupingKeys = new HashSet<ShapeKey>();
         foreach (var grouping in fromClause.AllGroupingExpressions)
         {
             // Parentheses are not part of the grouping key: `GROUP BY (region)`
@@ -193,13 +193,19 @@ internal sealed partial class Selection
             }
             else
             {
-                _ = groupingKeys.Add(GroupingKey(peeled));
+                _ = groupingKeys.Add(GroupingKey(sources, peeled));
             }
         }
 
-        var coversSubtree = groupingKeys.Count == 0
-            ? null
-            : (Func<Expression, bool>)(node => node is not Reference && groupingKeys.Contains(GroupingKey(node)));
+        // GROUPING() / GROUPING_ID() answer their own mismatch (Msg 8161), so
+        // their arguments aren't this check's to report.
+        bool coversSubtree(Expression node) => node switch
+        {
+            Grouping or GroupingId => true,
+            NullIf { FoldedBeforeGroupingCheck: true } => true,
+            Reference => false,
+            _ => groupingKeys.Count != 0 && groupingKeys.Contains(GroupingKey(sources, node)),
+        };
 
         void Check(MultiPartName name, Func<string, SimulatedSqlException> error)
         {
@@ -278,55 +284,18 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// The structural identity a GROUP BY expression is matched on: the node's
-    /// own rendering with every qualifier dropped, so a projection and a
-    /// grouping clause that spell the same column differently still match
-    /// (<c>SELECT a + 1 FROM t AS x GROUP BY x.a + 1</c> runs on real). The
-    /// normalization can only merge keys, never split them, so what it costs is
-    /// the occasional over-permissive match across a join — the safe direction,
-    /// since the alternative is refusing a query real accepts.
-    /// <para>
-    /// Parentheses are transparent to the match (<c>GROUP BY (a + 1)</c> covers
-    /// <c>SELECT a + 1</c> and the reverse), so a grouping key is peeled before
-    /// it is rendered; the projection side needs no peeling because the walk
-    /// descends through the wrapper and meets the inner node in its own right.
-    /// </para>
+    /// The structural identity a GROUP BY expression is matched on: its
+    /// <see cref="ShapeKey"/>, with each column keyed by the source column it
+    /// resolves to rather than by its spelling, so a projection and a grouping
+    /// clause that qualify the same column differently still match
+    /// (<c>SELECT a + 1 FROM t AS x GROUP BY x.a + 1</c> runs on real) while the
+    /// same name read from two sides of a join does not. A name no source
+    /// answers (an enclosing query's column) is keyed by its spelling.
+    /// Parentheses are transparent to the match, so <c>GROUP BY (a + 1)</c>
+    /// covers <c>SELECT a + 1</c> and the reverse.
     /// </summary>
-    private static string GroupingKey(Expression expression)
-    {
-        var peeled = expression;
-        while (peeled is Parenthesized paren)
-            peeled = paren.Wrapped;
-        return StripQualifiers(peeled.DebugDisplay());
-    }
-
-    /// <summary>
-    /// Removes every <c>&lt;identifier&gt;.</c> prefix from a rendered
-    /// expression. A run has to start with a letter or <c>_</c> to qualify, so
-    /// the <c>.</c> of a numeric literal survives.
-    /// </summary>
-    private static string StripQualifiers(string display)
-    {
-        if (!display.Contains('.', StringComparison.Ordinal))
-            return display;
-
-        var result = new System.Text.StringBuilder(display.Length);
-        for (var i = 0; i < display.Length; i++)
-        {
-            var start = i;
-            if (char.IsLetter(display[i]) || display[i] == '_')
-            {
-                while (i < display.Length && (char.IsLetterOrDigit(display[i]) || display[i] is '_' or '$' or '#' or '@'))
-                    i++;
-                if (i < display.Length && display[i] == '.')
-                    continue;
-            }
-
-            _ = result.Append(display.AsSpan(start, i - start + (i < display.Length ? 1 : 0)));
-        }
-
-        return result.ToString();
-    }
+    private static ShapeKey GroupingKey(FromSource[] sources, Expression expression) =>
+        ShapeKey.Of(expression, name => TryResolveSourceColumn(sources, name) is { } id ? id : name.ToString());
 
     /// <summary>
     /// Best-effort local resolution for GROUP BY validation: the resolved

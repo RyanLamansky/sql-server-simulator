@@ -21,6 +21,8 @@ internal sealed class ConnectionsExpression : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@CONNECTIONS";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -42,6 +44,8 @@ internal sealed class NestLevelExpression : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@NESTLEVEL";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -84,6 +88,8 @@ internal sealed class DbTsExpression : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@DBTS";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -113,4 +119,6 @@ internal sealed class ProcIdExpression : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@PROCID";
+
+    internal override void Describe(NodeShape shape) { }
 }

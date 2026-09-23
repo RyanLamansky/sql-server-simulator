@@ -167,4 +167,6 @@ internal sealed class Substring : Expression
     }
 
     internal override string DebugDisplay() => $"SUBSTRING({source.DebugDisplay()}, {start.DebugDisplay()}, {length.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source).Child(this.start).Child(this.length);
 }

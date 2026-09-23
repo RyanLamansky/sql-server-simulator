@@ -10,11 +10,7 @@ namespace SqlServerSimulator.Parser;
 /// containment is decided sub-expression by sub-expression — real licenses
 /// <c>SELECT a + 1</c> against <c>GROUP BY a + 1</c> and refuses a bare
 /// <c>SELECT a</c> against the same clause — so the check has to be able to
-/// stop descending the moment a node matches a grouping expression. Every
-/// composite expression recurses through
-/// <see cref="Expression.VisitColumnReferences(ColumnReferenceVisitor)"/>
-/// rather than calling its child's <c>Core</c> directly, which is what puts
-/// the predicate in front of each node.
+/// stop descending the moment a node matches a grouping expression.
 /// </remarks>
 internal sealed class ColumnReferenceVisitor(Action<MultiPartName> onReference, Func<Expression, bool>? coversSubtree)
 {

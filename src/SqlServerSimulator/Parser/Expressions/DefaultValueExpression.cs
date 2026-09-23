@@ -29,4 +29,6 @@ internal sealed class DefaultValueExpression : Expression
         throw new NotSupportedException("DEFAULT is only valid in INSERT ... VALUES and must be resolved by the INSERT encoder.");
 
     internal override string DebugDisplay() => "DEFAULT";
+
+    internal override void Describe(NodeShape shape) { }
 }

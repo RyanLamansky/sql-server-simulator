@@ -281,14 +281,9 @@ internal sealed class HierarchyIdMethodCall : Expression
 
     internal override string DebugDisplay() => $"{this.target.DebugDisplay()}.{this.method}({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";
 
-    internal override bool ResultIsNullable(NullabilityContext context) => true;
+    internal override void Describe(NodeShape shape) => shape.Local(this.method).Child(this.target).Children(this.arguments);
 
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit)
-    {
-        this.target.VisitColumnReferences(visit);
-        foreach (var a in this.arguments)
-            a.VisitColumnReferences(visit);
-    }
+    internal override bool ResultIsNullable(NullabilityContext context) => true;
 }
 
 /// <summary>

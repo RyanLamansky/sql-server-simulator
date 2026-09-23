@@ -79,4 +79,6 @@ internal sealed class JsonQuery : Expression
     internal override string DebugDisplay() => this.pathInput is null
         ? $"JSON_QUERY({this.jsonInput.DebugDisplay()})"
         : $"JSON_QUERY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.jsonInput).Child(this.pathInput);
 }

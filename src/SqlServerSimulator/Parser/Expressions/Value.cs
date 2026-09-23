@@ -157,6 +157,8 @@ internal sealed class Value : Expression
 
     internal override string DebugDisplay() => this.Constant.DebugDisplay();
 
+    internal override void Describe(NodeShape shape) => shape.Local(this.Constant).Local(this.IsUntypedNull);
+
     internal override bool IsRowIndependent => true;
 
     private protected override bool IsStructuralConstant => this.IsLiteral;

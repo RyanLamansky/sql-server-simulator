@@ -56,4 +56,6 @@ internal sealed class DateAdd : Expression
             : DatePartKinds.ResolveImplicitDateType(sourceType);
 
     internal override string DebugDisplay() => $"DATEADD({this.keywordText}, {number.DebugDisplay()}, {source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.kind).Child(this.number).Child(this.source);
 }

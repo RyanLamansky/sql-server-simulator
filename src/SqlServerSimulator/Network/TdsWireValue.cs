@@ -173,8 +173,7 @@ internal static class TdsWireValue
         var payload = reader.ReadBytes(8);
         var days = BinaryPrimitives.ReadInt32LittleEndian(payload);
         var thirds = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
-        var ticks = (((long)thirds * 10_000_000) + 150) / 300;
-        return SqlValue.FromDateTime(Epoch1900.AddDays(days).AddTicks(ticks));
+        return SqlValue.FromDateTime(DateTimeSqlType.FromParts(days, thirds));
     }
 
     private static SqlValue ReadVariantDecimal(TdsValueReader reader, byte propBytes)

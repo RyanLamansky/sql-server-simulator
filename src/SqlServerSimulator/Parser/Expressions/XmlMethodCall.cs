@@ -52,16 +52,24 @@ internal sealed class XmlMethodCall : Expression
 
     private readonly string methodName;
     private readonly XmlMethod method;
+
+    /// <summary>
+    /// The XQuery argument as written: what <see cref="Describe"/> reports,
+    /// since the compiled <see cref="xquery"/> has no equality of its own.
+    /// </summary>
+    private readonly string? xqueryText;
+
     private readonly XmlQueryExpr? xquery;
     private readonly SqlType valueType;
     private readonly int? valueMaxLength;
 
-    private XmlMethodCall(Expression target, string methodName, XmlMethod method, XmlQueryExpr? xquery, SqlType valueType, int? valueMaxLength, XmlSchemaCollection? targetSchemaCollection, string receiverName)
+    private XmlMethodCall(Expression target, string methodName, XmlMethod method, string? xqueryText, XmlQueryExpr? xquery, SqlType valueType, int? valueMaxLength, XmlSchemaCollection? targetSchemaCollection, string receiverName)
     {
         this.Target = target;
         this.ReceiverName = receiverName;
         this.methodName = methodName;
         this.method = method;
+        this.xqueryText = xqueryText;
         this.xquery = xquery;
         this.valueType = valueType;
         this.valueMaxLength = valueMaxLength;
@@ -168,7 +176,7 @@ internal sealed class XmlMethodCall : Expression
         var xquery = xqueryText is null
             ? null
             : XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetSingletonElementNames(), DisplayMethod(receiverName, methodName));
-        return new XmlMethodCall(target, methodName, method, xquery, valueType, valueMaxLength, collection, receiverName);
+        return new XmlMethodCall(target, methodName, method, xqueryText, xquery, valueType, valueMaxLength, collection, receiverName);
     }
 
     /// <summary>
@@ -265,6 +273,8 @@ internal sealed class XmlMethodCall : Expression
         };
 
     internal override string DebugDisplay() => $"({this.Target.DebugDisplay()}).{this.methodName}(…)";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.method).LocalExact(this.xqueryText).Local(this.valueType).Local(this.valueMaxLength).Child(this.Target);
 
     /// <summary>
     /// Evaluates <paramref name="argument"/> against an empty resolver to pull

@@ -33,4 +33,6 @@ internal sealed class ColumnsUpdatedFunction : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
 
     internal override string DebugDisplay() => "COLUMNS_UPDATED()";
+
+    internal override void Describe(NodeShape shape) { }
 }

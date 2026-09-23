@@ -173,4 +173,6 @@ internal sealed class Format : Expression
     internal override string DebugDisplay() => this.culture is null
         ? $"FORMAT({this.value.DebugDisplay()}, {this.format.DebugDisplay()})"
         : $"FORMAT({this.value.DebugDisplay()}, {this.format.DebugDisplay()}, {this.culture.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.value).Child(this.format).Child(this.culture);
 }

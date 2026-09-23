@@ -133,4 +133,6 @@ internal sealed class GreatestLeast : Expression
 
     internal override string DebugDisplay() =>
         $"{(this.isLeast ? "LEAST" : "GREATEST")}({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.isLeast).Children(this.arguments);
 }

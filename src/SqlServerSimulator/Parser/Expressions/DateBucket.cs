@@ -122,4 +122,6 @@ internal sealed class DateBucket : Expression
             : dateType;
 
     internal override string DebugDisplay() => $"DATE_BUCKET({this.keywordText}, {this.bucketWidth.DebugDisplay()}, {this.date.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.kind).Child(this.bucketWidth).Child(this.date).Child(this.origin);
 }

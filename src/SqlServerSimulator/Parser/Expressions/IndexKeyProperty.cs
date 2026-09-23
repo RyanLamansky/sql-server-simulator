@@ -90,4 +90,6 @@ internal sealed class IndexKeyProperty : Expression
 
     internal override string DebugDisplay() =>
         $"INDEXKEY_PROPERTY({this.objectIdArg.DebugDisplay()}, {this.indexIdArg.DebugDisplay()}, {this.keyIdArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.objectIdArg).Child(this.indexIdArg).Child(this.keyIdArg).Child(this.propertyArg);
 }

@@ -76,6 +76,8 @@ internal sealed class ParseFunction : Expression
 
     internal override string DebugDisplay() => $"{(this.tryMode ? "TRY_PARSE" : "PARSE")}({this.source.DebugDisplay()} AS {this.targetType.SqlServerName})";
 
+    internal override void Describe(NodeShape shape) => shape.Local(this.tryMode).Local(this.targetType).Local(this.culture).Child(this.source);
+
     private static SqlValue ParseInto(string input, SqlType target, CultureInfo culture)
     {
         if (target == SqlType.Int32) return SqlValue.FromInt32(int.Parse(input, NumberStyles.Number, culture));

@@ -666,51 +666,7 @@ internal abstract class TwoSidedExpression : Expression
     /// </summary>
     internal bool BothOperandsMatch(Func<Expression, bool> predicate) => predicate(this.left) && predicate(this.right);
 
-    internal sealed override void VisitColumnReferencesCore(ColumnReferenceVisitor visit)
-    {
-        if (visit.CoversSubtree is not null)
-        {
-            // A covering predicate has to meet every node, and the spine walk
-            // below reaches the leaves without entering the intermediate ones —
-            // which is what a `SELECT a + 1 + 0` against `GROUP BY a + 1` needs.
-            // Its recursion is affordable here: the predicate is asked once per
-            // statement compile, never per row.
-            this.left.VisitColumnReferences(visit);
-            this.right.VisitColumnReferences(visit);
-            return;
-        }
-
-        // Iterative left-spine walk (see Run) so a long flat chain doesn't
-        // recurse per term; visits the leftmost leaf then each right operand in
-        // source order, matching the former recursive traversal.
-        var spine = new List<TwoSidedExpression>();
-        Expression node = this;
-        while (node is TwoSidedExpression twoSided)
-        {
-            spine.Add(twoSided);
-            node = twoSided.left;
-        }
-        node.VisitColumnReferences(visit);
-        for (var i = spine.Count - 1; i >= 0; i--)
-            spine[i].right.VisitColumnReferences(visit);
-    }
-
-    internal sealed override bool ContainsVariableReference
-    {
-        get
-        {
-            // Iterative left-spine walk (see Run): OR across every right operand
-            // plus the leftmost leaf, avoiding per-term recursion on long chains.
-            Expression node = this;
-            while (node is TwoSidedExpression twoSided)
-            {
-                if (twoSided.right.ContainsVariableReference)
-                    return true;
-                node = twoSided.left;
-            }
-            return node.ContainsVariableReference;
-        }
-    }
+    internal sealed override void Describe(NodeShape shape) => shape.Local(this.Operator).Child(this.left).Child(this.right);
 
     internal sealed override bool IsRowIndependent
     {

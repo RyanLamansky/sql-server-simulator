@@ -81,4 +81,6 @@ internal sealed class AssemblyProperty : Expression
 
     internal override string DebugDisplay() =>
         $"ASSEMBLYPROPERTY({this.assemblyArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.assemblyArg).Child(this.propertyArg);
 }

@@ -65,4 +65,6 @@ internal sealed class ScalarSubqueryExpression(Selection inner) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Inner.Schema[0];
 
     internal override string DebugDisplay() => "(SELECT ...)";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.Inner);
 }

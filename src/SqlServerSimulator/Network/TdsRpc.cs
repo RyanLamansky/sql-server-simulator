@@ -395,8 +395,7 @@ internal sealed class TdsRpcRequest
 
         var days = BinaryPrimitives.ReadInt32LittleEndian(payload);
         var thirds = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
-        var ticks = (((long)thirds * 10_000_000) + 150) / 300;
-        return new TdsRpcParameter(name, isOutput, DbType.DateTime, TdsWireValue.Epoch1900.AddDays(days).AddTicks(ticks));
+        return new TdsRpcParameter(name, isOutput, DbType.DateTime, DateTimeSqlType.FromParts(days, thirds));
     }
 
     private static TdsRpcParameter DecodeAnsiString(TdsValueReader reader, string name, bool isOutput, DbType dbType)

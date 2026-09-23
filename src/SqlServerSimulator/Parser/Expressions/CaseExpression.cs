@@ -167,6 +167,14 @@ internal sealed class CaseExpression : Expression
 
     internal override string DebugDisplay() => "CASE ...";
 
+    internal override void Describe(NodeShape shape)
+    {
+        _ = shape.Child(this.input).Local(this.thens.Length);
+        for (var i = 0; i < this.thens.Length; i++)
+            _ = shape.Child(this.searchedWhens is { } whens ? whens[i] : this.compareValues![i]).Child(this.thens[i]);
+        _ = shape.Child(this.elseBranch);
+    }
+
     // Non-null iff every surviving THEN and the ELSE (or the implicit
     // ELSE NULL) is non-null — proving exhaustive WHEN coverage is
     // intractable, so real's projection rule is the OR over arms.

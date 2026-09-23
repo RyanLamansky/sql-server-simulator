@@ -64,4 +64,6 @@ internal sealed class EOMonth : Expression
         this.monthOffset is null
             ? $"EOMONTH({this.startDate.DebugDisplay()})"
             : $"EOMONTH({this.startDate.DebugDisplay()}, {this.monthOffset.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.startDate).Child(this.monthOffset);
 }

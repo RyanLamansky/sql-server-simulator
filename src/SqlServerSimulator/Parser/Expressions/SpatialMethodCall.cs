@@ -700,10 +700,5 @@ internal sealed class SpatialMethodCall : Expression
         ? $"({this.target.DebugDisplay()}).{this.memberName}(…)"
         : $"({this.target.DebugDisplay()}).{this.memberName}";
 
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit)
-    {
-        this.target.VisitColumnReferences(visit);
-        foreach (var argument in this.arguments)
-            argument.VisitColumnReferences(visit);
-    }
+    internal override void Describe(NodeShape shape) => shape.Local(this.memberName).Local(this.writtenAsMethod).Child(this.target).Children(this.arguments);
 }

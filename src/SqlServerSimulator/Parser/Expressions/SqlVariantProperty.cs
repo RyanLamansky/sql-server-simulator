@@ -174,4 +174,6 @@ internal sealed class SqlVariantProperty : Expression
     }
 
     internal override string DebugDisplay() => $"SQL_VARIANT_PROPERTY({this.valueArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.valueArg).Child(this.propertyArg);
 }

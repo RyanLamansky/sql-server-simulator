@@ -26,7 +26,7 @@ internal enum RangeComparison
 /// A specific type of expression used in WHERE clauses and similar branching scenarios.
 /// </summary>
 [DebuggerDisplay("{DebugDisplay(),nq}")]
-internal abstract class BooleanExpression
+internal abstract class BooleanExpression : ExpressionNode
 {
     private protected BooleanExpression()
     {
@@ -1346,6 +1346,8 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() =>
             $"{value switch { true => "TRUE", false => "FALSE", _ => "UNKNOWN" }} /* {folded.DebugDisplay()} */";
 
+        internal override void Describe(NodeShape shape) => shape.Local(value).Child(folded);
+
         internal override bool ParallelSafe => folded.ParallelSafe;
 
         internal override void VisitOperandExpressions(Action<Expression> visitor) => folded.VisitOperandExpressions(visitor);
@@ -1385,6 +1387,8 @@ internal abstract class BooleanExpression
         public override bool? Run(RuntimeContext runtime) => false;
 
         internal override string DebugDisplay() => $"FALSE /* {inner.DebugDisplay()} */";
+
+        internal override void Describe(NodeShape shape) => shape.Child(inner);
 
         internal override bool ParallelSafe => inner.ParallelSafe;
 
@@ -1457,6 +1461,8 @@ internal abstract class BooleanExpression
         }
 
         internal override string DebugDisplay() => string.Join(" AND ", operands.Select(o => o.DebugDisplay()));
+
+        internal override void Describe(NodeShape shape) => shape.Children(operands);
 
         internal override void VisitOperandExpressions(Action<Expression> visitor)
         {
@@ -1559,6 +1565,8 @@ internal abstract class BooleanExpression
 
         internal override string DebugDisplay() => string.Join(" OR ", operands.Select(o => o.DebugDisplay()));
 
+        internal override void Describe(NodeShape shape) => shape.Children(operands);
+
         internal override void VisitOperandExpressions(Action<Expression> visitor)
         {
             foreach (var operand in operands)
@@ -1632,6 +1640,8 @@ internal abstract class BooleanExpression
 
         internal override string DebugDisplay() => $"{source.DebugDisplay()} IS {(negated ? "NOT NULL" : "NULL")}";
 
+        internal override void Describe(NodeShape shape) => shape.Local(negated).Child(source);
+
         internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(source);
 
         private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
@@ -1679,6 +1689,8 @@ internal abstract class BooleanExpression
 
         internal override string DebugDisplay() =>
             $"{left.DebugDisplay()} IS {(negated ? "NOT " : "")}DISTINCT FROM {right.DebugDisplay()}";
+
+        internal override void Describe(NodeShape shape) => shape.Local(negated).Child(left).Child(right);
 
         internal override void VisitOperandExpressions(Action<Expression> visitor)
         {
@@ -1768,6 +1780,8 @@ internal abstract class BooleanExpression
             return $"{source.DebugDisplay()} {keyword} ({string.Join(", ", candidates.Select(c => c.DebugDisplay()))})";
         }
 
+        internal override void Describe(NodeShape shape) => shape.Local(negated).Child(source).Children(candidates);
+
         internal override void VisitOperandExpressions(Action<Expression> visitor)
         {
             visitor(source);
@@ -1846,6 +1860,8 @@ internal abstract class BooleanExpression
 
         internal override string DebugDisplay() => "EXISTS (...)";
 
+        internal override void Describe(NodeShape shape) => shape.Local(inner);
+
         // No top-level Expression operands — the subquery's references are
         // unreachable from this validator (and a subquery in inline CHECK
         // raises Msg 1046 in real SQL Server anyway).
@@ -1920,6 +1936,8 @@ internal abstract class BooleanExpression
 
         internal override string DebugDisplay() =>
             $"{value.DebugDisplay()} {(negated ? "NOT BETWEEN" : "BETWEEN")} {lower.DebugDisplay()} AND {upper.DebugDisplay()}";
+
+        internal override void Describe(NodeShape shape) => shape.Local(negated).Child(value).Child(lower).Child(upper);
 
         internal override void VisitOperandExpressions(Action<Expression> visitor)
         {
@@ -2118,6 +2136,8 @@ internal abstract class BooleanExpression
         }
 
         internal override string DebugDisplay() => $"{source.DebugDisplay()} {(negated ? "NOT IN" : "IN")} (...)";
+
+        internal override void Describe(NodeShape shape) => shape.Local(negated).Child(source).Local(inner);
 
         internal override bool TryGetSubqueryProbeSubject([NotNullWhen(true)] out Expression? subject)
         {
@@ -2372,6 +2392,8 @@ internal abstract class BooleanExpression
             return $"{left.DebugDisplay()} {opText} {kindText} (...)";
         }
 
+        internal override void Describe(NodeShape shape) => shape.Local(op).Local(kind).Child(left).Local(inner);
+
         internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(left);
 
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
@@ -2416,6 +2438,8 @@ internal abstract class BooleanExpression
 
         internal override string DebugDisplay() => $"NOT {inner.DebugDisplay()}";
 
+        internal override void Describe(NodeShape shape) => shape.Child(inner);
+
         internal override bool ParallelSafe => inner.ParallelSafe;
 
         internal override void VisitOperandExpressions(Action<Expression> visitor) => inner.VisitOperandExpressions(visitor);
@@ -2449,6 +2473,8 @@ internal abstract class BooleanExpression
             this.left = left;
             this.right = right;
         }
+
+        internal override void Describe(NodeShape shape) => shape.Child(this.left).Child(this.right);
 
         /// <summary>
         /// Evaluates both sides, applies SQL Server type promotion to a common
@@ -2771,6 +2797,8 @@ internal abstract class BooleanExpression
         internal override string DebugDisplay() => this.escape is null
             ? $"{left.DebugDisplay()} {(this.negated ? "NOT LIKE" : "LIKE")} {right.DebugDisplay()}"
             : $"{left.DebugDisplay()} {(this.negated ? "NOT LIKE" : "LIKE")} {right.DebugDisplay()} ESCAPE {this.escape.DebugDisplay()}";
+
+        internal override void Describe(NodeShape shape) => shape.Local(this.negated).Child(this.left).Child(this.right).Child(this.escape);
 
         protected override string OperatorName => "like";
 

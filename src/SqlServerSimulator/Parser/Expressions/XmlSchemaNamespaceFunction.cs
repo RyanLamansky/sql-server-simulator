@@ -51,4 +51,6 @@ internal sealed class XmlSchemaNamespaceFunction : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Xml;
 
     internal override string DebugDisplay() => "XML_SCHEMA_NAMESPACE(...)";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.schemaArg).Child(this.nameArg);
 }

@@ -94,6 +94,8 @@ internal sealed class BitCount : Expression
 
     internal override string DebugDisplay() => $"BIT_COUNT({this.operand.DebugDisplay()})";
 
+    internal override void Describe(NodeShape shape) => shape.Child(this.operand);
+
     /// <summary>
     /// Reinterprets the operand's value as a 64-bit unsigned integer for
     /// the bit-population count. Integer types are sign-extended to 64
@@ -166,6 +168,8 @@ internal sealed class GetBit : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Bit;
 
     internal override string DebugDisplay() => $"GET_BIT({this.numArg.DebugDisplay()}, {this.positionArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.numArg).Child(this.positionArg);
 }
 
 /// <summary>
@@ -217,6 +221,8 @@ internal sealed class SetBit : Expression
         this.numArg.GetSqlType(batch, resolveColumnType);
 
     internal override string DebugDisplay() => $"SET_BIT({this.numArg.DebugDisplay()}, {this.positionArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.numArg).Child(this.positionArg).Child(this.valueArg);
 
     internal static SqlValue UnsignedBitsToTyped(ulong bits, SqlType type) =>
         type == SqlType.TinyInt ? SqlValue.FromByte((byte)(bits & 0xff))
@@ -307,4 +313,6 @@ internal sealed class BitShift : Expression
         this.numArg.GetSqlType(batch, resolveColumnType);
 
     internal override string DebugDisplay() => $"{(this.isLeftShift ? "LEFT_SHIFT" : "RIGHT_SHIFT")}({this.numArg.DebugDisplay()}, {this.shiftArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.isLeftShift).Child(this.numArg).Child(this.shiftArg);
 }

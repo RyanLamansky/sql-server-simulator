@@ -35,4 +35,6 @@ internal sealed class Sign(ParserContext context) : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => this.source.ResultIsNullable(context);
 
     internal override string DebugDisplay() => $"SIGN({this.source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source);
 }

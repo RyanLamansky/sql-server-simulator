@@ -21,4 +21,6 @@ internal sealed class LastErrorExpression : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@ERROR";
+
+    internal override void Describe(NodeShape shape) { }
 }

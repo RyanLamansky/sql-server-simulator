@@ -475,10 +475,8 @@ internal static class BcpRowReader
     private static SqlValue DecodeDateTime(ReadOnlySpan<byte> bytes)
     {
         var days = BinaryPrimitives.ReadInt32LittleEndian(bytes[..4]);
-        var ticks300 = BinaryPrimitives.ReadUInt32LittleEndian(bytes[4..8]);
-        var epoch = new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
-        var dt = epoch.AddDays(days).AddTicks(((ticks300 * TimeSpan.TicksPerSecond) + 150) / 300L);
-        return SqlValue.FromDateTime(dt);
+        var units = BinaryPrimitives.ReadUInt32LittleEndian(bytes[4..8]);
+        return SqlValue.FromDateTime(DateTimeSqlType.FromParts(days, units));
     }
 
     /// <summary>

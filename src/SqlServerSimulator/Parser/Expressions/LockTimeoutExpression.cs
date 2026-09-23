@@ -20,4 +20,6 @@ internal sealed class LockTimeoutExpression(ParserContext context) : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@LOCK_TIMEOUT";
+
+    internal override void Describe(NodeShape shape) { }
 }

@@ -63,6 +63,8 @@ internal sealed class PrincipalIdLookup : Expression
         PrincipalIdKind.DatabasePrincipalId => "DATABASE_PRINCIPAL_ID(...)",
         _ => "PRINCIPAL_ID(...)",
     };
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.kind).Child(this.nameArg);
 }
 
 internal enum PrincipalIdKind
@@ -184,6 +186,8 @@ internal sealed class Permissions : Expression
     internal override string DebugDisplay() => this.objectIdArg is null
         ? "PERMISSIONS()"
         : $"PERMISSIONS({this.objectIdArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.objectIdArg).Child(this.columnArg);
 }
 
 /// <summary>
@@ -302,6 +306,8 @@ internal sealed class HasPermsByName : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"HAS_PERMS_BY_NAME(...{this.args.Length} args)";
+
+    internal override void Describe(NodeShape shape) => shape.Children(this.args);
 }
 
 /// <summary>
@@ -387,4 +393,6 @@ internal sealed class RoleMemberCheck : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"IS_MEMBER({this.roleArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.serverScope).Child(this.roleArg).Child(this.principalArg);
 }

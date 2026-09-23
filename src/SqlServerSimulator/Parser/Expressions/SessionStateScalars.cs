@@ -36,6 +36,8 @@ internal sealed class SessionContext : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
 
     internal override string DebugDisplay() => $"SESSION_CONTEXT({this.keyArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.keyArg);
 }
 
 /// <summary>
@@ -61,6 +63,8 @@ internal sealed class ContextInfoFunction : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
 
     internal override string DebugDisplay() => "CONTEXT_INFO()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -113,6 +117,8 @@ internal sealed class ConnectionProperty : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
 
     internal override string DebugDisplay() => $"CONNECTIONPROPERTY({this.nameArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.nameArg);
 }
 
 /// <summary>
@@ -136,6 +142,8 @@ internal sealed class CurrentTransactionId : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.BigInt;
 
     internal override string DebugDisplay() => "CURRENT_TRANSACTION_ID()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -158,4 +166,6 @@ internal sealed class CurrentRequestId : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "CURRENT_REQUEST_ID()";
+
+    internal override void Describe(NodeShape shape) { }
 }

@@ -38,6 +38,8 @@ internal sealed class MinActiveRowVersion : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "MIN_ACTIVE_ROWVERSION()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -117,4 +119,6 @@ internal sealed class Checksum : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"{(this.isBinary ? "BINARY_CHECKSUM" : "CHECKSUM")}(...{this.args.Length} args)";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.isBinary).Children(this.args);
 }

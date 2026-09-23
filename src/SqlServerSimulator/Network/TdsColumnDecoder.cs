@@ -302,8 +302,7 @@ internal static class TdsColumnDecoder
 
             var dtDays = BinaryPrimitives.ReadInt32LittleEndian(payload);
             var thirds = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
-            var ticks = (((long)thirds * 10_000_000) + 150) / 300;
-            return SqlValue.FromDateTime(TdsWireValue.Epoch1900.AddDays(dtDays).AddTicks(ticks));
+            return SqlValue.FromDateTime(DateTimeSqlType.FromParts(dtDays, thirds));
         }
 
         private SqlValue ReadDecimal(TdsValueReader reader)
@@ -437,8 +436,7 @@ internal static class TdsColumnDecoder
             var payload = reader.ReadBytes(8);
             var days = BinaryPrimitives.ReadInt32LittleEndian(payload);
             var thirds = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
-            var ticks = (((long)thirds * 10_000_000) + 150) / 300;
-            return SqlValue.FromDateTime(TdsWireValue.Epoch1900.AddDays(days).AddTicks(ticks));
+            return SqlValue.FromDateTime(DateTimeSqlType.FromParts(days, thirds));
         }
     }
 

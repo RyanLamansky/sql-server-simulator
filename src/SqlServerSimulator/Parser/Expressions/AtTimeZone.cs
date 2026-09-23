@@ -195,4 +195,6 @@ internal sealed class AtTimeZone(Expression source, Expression zoneNameExpressio
 
     internal override string DebugDisplay() =>
         $"{this.source.DebugDisplay()} AT TIME ZONE {this.zoneNameExpression.DebugDisplay()}";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source).Child(this.zoneNameExpression);
 }

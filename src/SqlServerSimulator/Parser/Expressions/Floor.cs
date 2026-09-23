@@ -36,4 +36,6 @@ internal sealed class Floor(ParserContext context) : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => this.source.ResultIsNullable(context);
 
     internal override string DebugDisplay() => $"FLOOR({this.source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source);
 }

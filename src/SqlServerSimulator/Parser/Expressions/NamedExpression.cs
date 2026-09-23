@@ -27,6 +27,8 @@ internal sealed class NamedExpression(Expression expression, string name) : Expr
 
     internal override string DebugDisplay() => $"{this.Inner.DebugDisplay()} {this.name}";
 
+    internal override void Describe(NodeShape shape) => shape.Local(this.name).Child(this.Inner);
+
     internal override bool ResultIsNullable(NullabilityContext context) => this.Inner.ResultIsNullable(context);
 
     /// <summary>
@@ -34,7 +36,5 @@ internal sealed class NamedExpression(Expression expression, string name) : Expr
     /// doesn't hide what the expression reads. Without this a caller walking
     /// references sees <c>t.col AS v</c> as reference-free.
     /// </summary>
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => this.Inner.VisitColumnReferences(visit);
-
     internal override bool ResultReportsNumeric => this.Inner.ResultReportsNumeric;
 }

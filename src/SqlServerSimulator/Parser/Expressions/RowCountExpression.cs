@@ -26,4 +26,6 @@ internal sealed class RowCountExpression : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@ROWCOUNT";
+
+    internal override void Describe(NodeShape shape) { }
 }

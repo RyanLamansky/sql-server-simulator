@@ -73,6 +73,8 @@ internal sealed class ClrFunctionCall(ClrScalarFunction function, Expression?[] 
     internal override string DebugDisplay() =>
         $"{this.function.Schema.Name}.{this.function.Name}({string.Join(", ", this.arguments.Select(a => a?.DebugDisplay() ?? "DEFAULT"))})";
 
+    internal override void Describe(NodeShape shape) => shape.Local(this.function).Children(this.arguments);
+
     /// <summary>
     /// Parses the argument list of a CLR function call. Cursor on entry: the
     /// token <em>after</em> the opening <c>(</c>; on exit, the closing

@@ -342,4 +342,6 @@ internal sealed class StringConcat : Expression
 
     internal override string DebugDisplay() =>
         $"{LowercaseName(this.kind).ToUpperInvariant()}({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.kind).Children(this.arguments);
 }

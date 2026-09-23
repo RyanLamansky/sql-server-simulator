@@ -63,6 +63,8 @@ internal sealed class HashBytes : Expression
 
     internal override string DebugDisplay() => $"HASHBYTES({this.algorithmArg.DebugDisplay()}, {this.inputArg.DebugDisplay()})";
 
+    internal override void Describe(NodeShape shape) => shape.Child(this.algorithmArg).Child(this.inputArg);
+
     /// <summary>
     /// Extracts the hashing input bytes, returning false when the argument's
     /// type is neither character nor binary (the Msg 8116 path). NULL-valued

@@ -70,4 +70,6 @@ internal sealed class IsDate(ParserContext context) : Expression
         && dt.Year is >= 1753 and <= 9999;
 
     internal override string DebugDisplay() => $"ISDATE({this.operand.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.operand);
 }

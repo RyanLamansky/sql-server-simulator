@@ -22,4 +22,6 @@ internal sealed class Exp(ParserContext context) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
 
     internal override string DebugDisplay() => $"EXP({this.source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source);
 }

@@ -317,27 +317,13 @@ internal sealed partial class Selection
                     : throw SimulatedSqlException.InvalidColumnName(name);
         }
 
-        // Whether any of the expressions names the column. Read from the
-        // rendered text rather than the reference walk, which doesn't descend
-        // into a function's arguments (`ROLLUP(YEAR(d))` has to find `d`); a
-        // spurious match is harmless, since only a column the grouping
-        // expressions cover can reach this test.
         static bool NamedIn(IEnumerable<Expression> groupingExpressions, MultiPartName name)
         {
+            var found = false;
             foreach (var expression in groupingExpressions)
-            {
-                var text = expression.DebugDisplay();
-                for (var at = text.IndexOf(name.Leaf, StringComparison.OrdinalIgnoreCase); at >= 0; at = text.IndexOf(name.Leaf, at + 1, StringComparison.OrdinalIgnoreCase))
-                {
-                    var end = at + name.Leaf.Length;
-                    if ((at == 0 || !IsIdentifierChar(text[at - 1])) && (end == text.Length || !IsIdentifierChar(text[end])))
-                        return true;
-                }
-            }
-            return false;
+                expression.VisitColumnReferences(named => found |= SourceReferenceMatches(named, name));
+            return found;
         }
-
-        static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c is '_' or '@' or '#' or '$';
 
         var groupRuntime = new RuntimeContext(resolveByGroupKey, batch);
 

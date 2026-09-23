@@ -66,4 +66,6 @@ internal sealed class AbsoluteValue(ParserContext context) : Expression
     }
 
     internal override string DebugDisplay() => $"ABS({this.source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source);
 }

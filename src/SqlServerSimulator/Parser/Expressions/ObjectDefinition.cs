@@ -60,4 +60,6 @@ internal sealed class ObjectDefinition : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;
 
     internal override string DebugDisplay() => $"OBJECT_DEFINITION({this.idArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.idArg);
 }

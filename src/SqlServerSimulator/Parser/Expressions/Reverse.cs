@@ -37,4 +37,6 @@ internal sealed class Reverse(ParserContext context) : Expression
         StringScalars.ResolveResultType(StringScalars.BindArgument(source, batch, resolveColumnType, "reverse"), batch);
 
     internal override string DebugDisplay() => $"REVERSE({source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source);
 }

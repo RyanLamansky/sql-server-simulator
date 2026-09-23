@@ -42,11 +42,9 @@ partial class Selection
     /// row-invariant for this execution (<see cref="IsStableValueSide"/>, which
     /// admits a literal, a variable and an enclosing-scope column but rejects a
     /// sibling's). That structural whitelist is what makes the push provably
-    /// source-local: both operand shapes are enumerated node by node, so unlike a
-    /// <see cref="Expression.VisitColumnReferences(Action{MultiPartName})"/> walk it cannot miss a
-    /// reference buried in a container it doesn't descend into, and every name
-    /// the pushed conjunct can read is either this source's own column or one the
-    /// enclosing resolver answers.
+    /// source-local: both operand shapes are enumerated node by node, so every
+    /// name the pushed conjunct can read is either this source's own column or
+    /// one the enclosing resolver answers.
     /// </para>
     /// <para>
     /// <b>The pushed conjunct stays in the enclosing WHERE.</b> The prefilter is

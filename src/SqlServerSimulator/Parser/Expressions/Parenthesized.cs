@@ -20,9 +20,7 @@ internal sealed class Parenthesized(Expression wrapped) : Expression
 
     internal override string DebugDisplay() => $"( {this.Wrapped.DebugDisplay()} )";
 
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => this.Wrapped.VisitColumnReferences(visit);
-
-    internal override bool ContainsVariableReference => this.Wrapped.ContainsVariableReference;
+    internal override void Describe(NodeShape shape) => shape.Child(this.Wrapped);
 
     internal override Expression? PureConversionOperand => this.Wrapped;
 

@@ -188,4 +188,6 @@ internal sealed class TypeProperty : Expression
 
     internal override string DebugDisplay() =>
         $"TYPEPROPERTY({this.typeArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.typeArg).Child(this.propertyArg);
 }

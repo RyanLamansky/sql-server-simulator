@@ -62,6 +62,8 @@ internal sealed class IsNullExpression : Expression
 
     internal override string DebugDisplay() => $"ISNULL({this.check.DebugDisplay()}, {this.replacement.DebugDisplay()})";
 
+    internal override void Describe(NodeShape shape) => shape.Child(this.check).Child(this.replacement);
+
     // ISNULL(x, y) is non-null iff EITHER operand is non-null: a non-null x
     // short-circuits, otherwise the result is the (possibly-non-null) y.
     internal override bool ResultIsNullable(NullabilityContext context) =>

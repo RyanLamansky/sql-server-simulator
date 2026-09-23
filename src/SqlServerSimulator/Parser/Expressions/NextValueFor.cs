@@ -104,4 +104,6 @@ internal sealed class NextValueFor : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Sequence.DeclaredType;
 
     internal override string DebugDisplay() => $"NEXT VALUE FOR {this.Sequence.FullName}";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.Sequence);
 }

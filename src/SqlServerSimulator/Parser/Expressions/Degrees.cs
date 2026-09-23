@@ -56,4 +56,6 @@ internal sealed class Degrees(ParserContext context) : Expression
     }
 
     internal override string DebugDisplay() => $"DEGREES({this.source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source);
 }

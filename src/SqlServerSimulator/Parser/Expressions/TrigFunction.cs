@@ -108,4 +108,6 @@ internal sealed class TrigFunction : Expression
 
     internal override string DebugDisplay() =>
         $"{LowercaseName(this.kind).ToUpperInvariant()}({this.source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.kind).Child(this.source);
 }

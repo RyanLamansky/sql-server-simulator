@@ -333,7 +333,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         // Split into day count + time-of-day so the * 300 arithmetic doesn't
         // overflow long for late dates.
         var dayCount = (int)(value.Date - DateTimeSqlType.BaseDate).TotalDays;
-        var timeUnits = ((value.TimeOfDay.Ticks * 300) + (TimeSpan.TicksPerSecond / 2)) / TimeSpan.TicksPerSecond;
+        var timeUnits = DateTimeSqlType.UnitsFromTicks(value.TimeOfDay.Ticks);
         if (timeUnits == DateTimeSqlType.TicksPerDay)
         {
             // Half-up rounding pushed past midnight; carry into the next day.
@@ -343,9 +343,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         if (dayCount is < DateTimeSqlType.MinDayCount or > DateTimeSqlType.MaxDayCount)
             throw SimulatedSqlException.OutOfRangeDateTimeConversion(SqlType.DateTime);
 
-        var roundedTimeTicks = ((timeUnits * TimeSpan.TicksPerSecond) + 150) / 300;
-        var rounded = DateTimeSqlType.BaseDate.AddDays(dayCount).AddTicks(roundedTimeTicks);
-        return new(SqlType.DateTime, rounded.Ticks, null, isNull: false);
+        return new(SqlType.DateTime, DateTimeSqlType.FromParts(dayCount, timeUnits).Ticks, null, isNull: false);
     }
 
     /// <summary>
@@ -372,13 +370,13 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         // Quantize to legacy 1/300s tick first so the .999/.998 boundary
         // matches SQL Server: only ticks at or after the 30s mark roll to
         // the next minute.
-        var legacyUnits = ((value.TimeOfDay.Ticks * 300) + (TimeSpan.TicksPerSecond / 2)) / TimeSpan.TicksPerSecond;
+        var legacyUnits = DateTimeSqlType.UnitsFromTicks(value.TimeOfDay.Ticks);
         if (legacyUnits == DateTimeSqlType.TicksPerDay)
         {
             dayCount++;
             legacyUnits = 0;
         }
-        var quantizedTicks = legacyUnits * TimeSpan.TicksPerSecond / 300;
+        var quantizedTicks = DateTimeSqlType.TicksFromUnits(legacyUnits);
         // Half-up minute rounding on the quantized ticks. With 1/300s
         // granularity the smallest distance from the 30s boundary is one
         // tick, so adding TicksPerMinute/2 and integer-dividing produces

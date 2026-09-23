@@ -152,6 +152,8 @@ internal sealed class PwdEncrypt : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
 
     internal override string DebugDisplay() => $"PWDENCRYPT({this.clearArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.clearArg);
 }
 
 /// <summary>
@@ -199,4 +201,6 @@ internal sealed class PwdCompare : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"PWDCOMPARE({this.clearArg.DebugDisplay()}, {this.hashArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.clearArg).Child(this.hashArg);
 }

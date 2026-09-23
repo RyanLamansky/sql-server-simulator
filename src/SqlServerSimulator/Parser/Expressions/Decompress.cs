@@ -53,4 +53,6 @@ internal sealed class Decompress(ParserContext context) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.VarbinaryMax;
 
     internal override string DebugDisplay() => $"DECOMPRESS({this.operand.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.operand);
 }

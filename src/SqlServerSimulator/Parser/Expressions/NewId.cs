@@ -26,4 +26,6 @@ internal sealed class NewId : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.UniqueIdentifier;
 
     internal override string DebugDisplay() => "NEWID()";
+
+    internal override void Describe(NodeShape shape) { }
 }

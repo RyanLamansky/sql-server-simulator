@@ -59,6 +59,8 @@ internal sealed class TypeName : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
     internal override string DebugDisplay() => $"TYPE_NAME({this.idArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.idArg);
 }
 
 /// <summary>
@@ -106,6 +108,8 @@ internal sealed class ParseName : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
     internal override string DebugDisplay() => $"PARSENAME({this.nameArg.DebugDisplay()}, {this.indexArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.nameArg).Child(this.indexArg);
 }
 
 /// <summary>
@@ -129,6 +133,8 @@ internal sealed class OriginalDbName : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
     internal override string DebugDisplay() => "ORIGINAL_DB_NAME()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -163,4 +169,6 @@ internal sealed class GetAnsiNull : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 
     internal override string DebugDisplay() => this.dbArg is null ? "GETANSINULL()" : $"GETANSINULL({this.dbArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.dbArg);
 }

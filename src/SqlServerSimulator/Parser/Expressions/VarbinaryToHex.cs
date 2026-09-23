@@ -132,4 +132,6 @@ internal sealed class VarbinaryToHex : Expression
     internal override string DebugDisplay() => this.fullLength is null
         ? $"fn_varbintohexstr({this.value.DebugDisplay()})"
         : $"fn_varbintohexsubstring({this.fullLength.DebugDisplay()}, {this.value.DebugDisplay()}, {this.start!.DebugDisplay()}, {this.length!.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.fullLength).Child(this.value).Child(this.start).Child(this.length);
 }

@@ -460,9 +460,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 - **`SqlValue.FromDecimal` validates scale but not precision** — it restates the payload at the declared scale and leaves the declared precision to the caller, which is what lets the storage decoder reconstruct whatever is on disk.
   The coercion path is the precision gate for every conversion, but a *computation* that lands on a narrower type has to check for itself — `ROUND` does (see [`scalars.md`](scalars.md#math-scalar-functions)), and a future scalar that narrows its own result would have to.
 
-- **GROUP BY containment reaches only the expression kinds the reference walk descends** — the structural rule ships (see [`query.md`](query.md#group-by-containment)), but the walk descends through arithmetic, concatenation, parentheses, CAST / CONVERT, COLLATE, negation and the length / spatial / hierarchyid / XML members only.
-  A column buried in any other composite — a `CASE` arm, `COALESCE`, a date or JSON scalar's argument — is never visited, so `SELECT COALESCE(a, 0) FROM t GROUP BY b` runs here and is **Msg 8120** on real.
-  Every missing kind is one `VisitColumnReferencesCore` override; the coverage gap predates the containment rule and is shared with CREATE TABLE's Msg 8141 peer-reference check.
 - **An unterminated `BEGIN` block names the wrong token** — `BEGIN TRY` at end of batch is Msg 102 `near 'TRY'` here and `near 'BEGIN'` on real, which names the block opener rather than the last token it read (probed 2026-08-05).
   The end-of-batch naming rule otherwise matches across the whole probed family (see [`grammar.md`](grammar.md#what-a-syntax-error-names-at-end-of-batch)); a block is the one construct real reports against its own start.
 - **An unbalanced paren around a non-boolean reports Msg 4145 rather than Msg 102** — `IF ((1)` is real's Msg 102 `near ')'` and the simulator's Msg 4145 at the same token (probed 2026-08-05).

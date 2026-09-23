@@ -321,7 +321,7 @@ internal static class DatePartKinds
     private static int LegacyNanoseconds(TimeSpan time)
     {
         var fraction = time.Ticks % TimeSpan.TicksPerSecond;
-        var units300 = ((fraction * 300) + (TimeSpan.TicksPerSecond / 2)) / TimeSpan.TicksPerSecond;
+        var units300 = DateTimeSqlType.UnitsFromTicks(fraction);
         return (int)(units300 * 1_000_000_000L / 300);
     }
 

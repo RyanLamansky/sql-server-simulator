@@ -56,4 +56,6 @@ internal sealed class LeftTrim : Expression
         StringScalars.ResolveResultType(StringScalars.BindTrimmed(source, trimChars, batch, resolveColumnType, "ltrim"), batch);
 
     internal override string DebugDisplay() => $"LTRIM({source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source).Child(this.trimChars);
 }

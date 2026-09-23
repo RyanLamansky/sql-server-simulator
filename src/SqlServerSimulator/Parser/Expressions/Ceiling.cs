@@ -34,4 +34,6 @@ internal sealed class Ceiling(ParserContext context) : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => this.source.ResultIsNullable(context);
 
     internal override string DebugDisplay() => $"CEILING({this.source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source);
 }

@@ -63,4 +63,6 @@ internal sealed class CollationProperty : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
 
     internal override string DebugDisplay() => $"COLLATIONPROPERTY({this.collationArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.collationArg).Child(this.propertyArg);
 }

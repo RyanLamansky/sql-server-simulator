@@ -112,4 +112,6 @@ internal sealed class ServerProperty : Expression
         => Collation.SqlServerSortOrders.TryGetValue(collationName, out var so) ? checked((byte)so.OrderNumber) : (byte)0;
 
     internal override string DebugDisplay() => $"SERVERPROPERTY({this.nameArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.nameArg);
 }

@@ -86,4 +86,6 @@ internal sealed class Power : Expression
     internal override bool ResultReportsNumeric => this.baseExpr.ResultReportsNumeric;
 
     internal override string DebugDisplay() => $"POWER({this.baseExpr.DebugDisplay()}, {this.exponent.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.baseExpr).Child(this.exponent);
 }

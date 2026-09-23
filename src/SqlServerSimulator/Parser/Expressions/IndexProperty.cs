@@ -168,4 +168,6 @@ internal sealed class IndexProperty : Expression
 
     internal override string DebugDisplay() =>
         $"INDEXPROPERTY({this.idArg.DebugDisplay()}, {this.indexNameArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.idArg).Child(this.indexNameArg).Child(this.propertyArg);
 }

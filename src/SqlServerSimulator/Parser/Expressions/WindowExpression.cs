@@ -1080,4 +1080,28 @@ internal sealed class WindowExpression : Expression
         var separator = partitionPart.Length > 0 && orderPart.Length > 0 ? " " : "";
         return $"{name} OVER({partitionPart}{separator}{orderPart})";
     }
+
+    internal override void Describe(NodeShape shape)
+    {
+        _ = shape.Local(this.Kind).Child(this.AggregateInfo).Child(this.Operand).Child(this.OffsetArg).Child(this.DefaultArg).Child(this.BucketCount).Child(this.PercentileArg);
+
+        // The percentile pair's ordering is its WITHIN GROUP clause, written ahead of OVER.
+        var withinGroup = this.Kind is WindowKind.PercentileCont or WindowKind.PercentileDisc;
+        if (withinGroup)
+            this.DescribeOrderBy(shape);
+        _ = shape.Children(this.PartitionBy);
+        if (!withinGroup)
+            this.DescribeOrderBy(shape);
+
+        _ = shape.Local(this.Frame is not null);
+        if (this.Frame is { } frame)
+            _ = shape.Local(frame.IsRange).Local(frame.Start.Kind).Local(frame.Start.Offset).Local(frame.End.Kind).Local(frame.End.Offset);
+    }
+
+    private void DescribeOrderBy(NodeShape shape)
+    {
+        _ = shape.Local(this.OrderBy.Length);
+        foreach (var item in this.OrderBy)
+            _ = shape.Local(item.Descending).Child(item.Expr);
+    }
 }

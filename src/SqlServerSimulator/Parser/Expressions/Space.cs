@@ -46,4 +46,6 @@ internal sealed class Space(ParserContext context) : Expression
             : StringScalars.ContainerResultType(SqlType.Varchar, batch);
 
     internal override string DebugDisplay() => $"SPACE({this.count.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.count);
 }

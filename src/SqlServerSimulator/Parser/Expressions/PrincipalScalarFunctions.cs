@@ -55,6 +55,8 @@ internal sealed class UserName : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
     internal override string DebugDisplay() => this.idArg is null ? "USER_NAME()" : $"USER_NAME({this.idArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.idArg);
 }
 
 /// <summary>
@@ -95,6 +97,8 @@ internal sealed class SUserName : Expression
     internal override string DebugDisplay() => this.arg is null
         ? (this.isSidVariant ? "SUSER_SNAME()" : "SUSER_NAME()")
         : $"{(this.isSidVariant ? "SUSER_SNAME" : "SUSER_NAME")}({this.arg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.isSidVariant).Child(this.arg);
 }
 
 /// <summary>
@@ -147,6 +151,8 @@ internal sealed class SUserSid : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => true;
 
     internal override string DebugDisplay() => this.loginArg is null ? "SUSER_SID()" : $"SUSER_SID({this.loginArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.loginArg);
 }
 
 /// <summary>
@@ -181,6 +187,8 @@ internal sealed class SidBinary : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => true;
 
     internal override string DebugDisplay() => $"SID_BINARY({this.arg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.arg);
 }
 
 /// <summary>
@@ -203,6 +211,8 @@ internal sealed class OriginalLogin : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
     internal override string DebugDisplay() => "ORIGINAL_LOGIN()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -226,6 +236,8 @@ internal sealed class HostName : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     internal override string DebugDisplay() => "HOST_NAME()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -248,6 +260,8 @@ internal sealed class AppName : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     internal override string DebugDisplay() => "APP_NAME()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -276,4 +290,6 @@ internal sealed class CurrentPrincipalKeyword(string keywordText, bool isLogin =
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
     internal override string DebugDisplay() => this.keywordText;
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.keywordText).Local(this.isLogin);
 }

@@ -77,4 +77,6 @@ internal sealed class DateName : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
 
     internal override string DebugDisplay() => $"DATENAME({this.keywordText}, {this.source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.kind).Child(this.source);
 }

@@ -161,4 +161,6 @@ internal sealed class ColumnProperty : Expression
 
     internal override string DebugDisplay() =>
         $"COLUMNPROPERTY({this.idArg.DebugDisplay()}, {this.columnArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.idArg).Child(this.columnArg).Child(this.propertyArg);
 }

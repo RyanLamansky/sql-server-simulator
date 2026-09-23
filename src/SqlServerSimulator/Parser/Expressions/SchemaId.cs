@@ -45,4 +45,6 @@ internal sealed class SchemaId : Expression
 
     internal override string DebugDisplay() =>
         this.nameArg is null ? "SCHEMA_ID()" : $"SCHEMA_ID({this.nameArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.nameArg);
 }

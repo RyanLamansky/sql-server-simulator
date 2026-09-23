@@ -26,4 +26,6 @@ internal sealed class GetFilestreamTransactionContext : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.VarbinaryMax;
 
     internal override string DebugDisplay() => "GET_FILESTREAM_TRANSACTION_CONTEXT()";
+
+    internal override void Describe(NodeShape shape) { }
 }

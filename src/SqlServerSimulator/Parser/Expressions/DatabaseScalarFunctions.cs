@@ -82,6 +82,8 @@ internal sealed class DbId : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 
     internal override string DebugDisplay() => this.nameArg is null ? "DB_ID()" : $"DB_ID({this.nameArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.nameArg);
 }
 
 /// <summary>
@@ -122,6 +124,8 @@ internal sealed class DbName : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
     internal override string DebugDisplay() => this.idArg is null ? "DB_NAME()" : $"DB_NAME({this.idArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.idArg);
 }
 
 /// <summary>
@@ -174,6 +178,8 @@ internal sealed class HasDbAccess : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"HAS_DBACCESS({this.nameArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.nameArg);
 }
 
 /// <summary>
@@ -226,6 +232,8 @@ internal sealed class FileId : Expression
 
     internal override string DebugDisplay() =>
         $"{(this.extended ? "FILE_IDEX" : "FILE_ID")}({this.nameArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.extended).Child(this.nameArg);
 }
 
 /// <summary>
@@ -264,6 +272,8 @@ internal sealed class FileNameLookup : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
     internal override string DebugDisplay() => $"FILE_NAME({this.idArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.idArg);
 }
 
 /// <summary>
@@ -301,6 +311,8 @@ internal sealed class FilegroupId : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 
     internal override string DebugDisplay() => $"FILEGROUP_ID({this.nameArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.nameArg);
 }
 
 /// <summary>
@@ -341,4 +353,6 @@ internal sealed class FilegroupName : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
     internal override string DebugDisplay() => $"FILEGROUP_NAME({this.idArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.idArg);
 }

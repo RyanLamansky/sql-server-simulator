@@ -172,12 +172,8 @@ internal sealed class SpatialStaticCall : Expression
         return $"{this.type}::{this.method}({argDisplay})";
     }
 
+    internal override void Describe(NodeShape shape) => shape.Local(this.type).Local(this.method).Children(this.arguments);
+
     internal override bool ResultIsNullable(NullabilityContext context) =>
         this.arguments.Any(a => a.ResultIsNullable(context));
-
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit)
-    {
-        foreach (var arg in this.arguments)
-            arg.VisitColumnReferences(visit);
-    }
 }

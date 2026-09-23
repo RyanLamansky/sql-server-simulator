@@ -57,5 +57,5 @@ internal sealed class Length(ParserContext context) : Expression
 
     internal override string DebugDisplay() => $"LEN({source.DebugDisplay()})";
 
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => source.VisitColumnReferences(visit);
+    internal override void Describe(NodeShape shape) => shape.Child(this.source);
 }

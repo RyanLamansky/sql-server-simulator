@@ -143,5 +143,5 @@ internal sealed class TextPointer : Expression
 
     internal override string DebugDisplay() => $"TEXTPTR({this.column.DebugDisplay()})";
 
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => this.column.VisitColumnReferences(visit);
+    internal override void Describe(NodeShape shape) => shape.Child(this.column);
 }

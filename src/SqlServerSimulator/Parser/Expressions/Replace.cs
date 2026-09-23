@@ -102,4 +102,6 @@ internal sealed class Replace : Expression
     }
 
     internal override string DebugDisplay() => $"REPLACE({input.DebugDisplay()}, {oldValue.DebugDisplay()}, {newValue.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.input).Child(this.oldValue).Child(this.newValue);
 }

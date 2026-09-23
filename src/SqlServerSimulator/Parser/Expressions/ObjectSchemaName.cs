@@ -96,4 +96,6 @@ internal sealed class ObjectSchemaName : Expression
         this.dbIdArg is null
             ? $"OBJECT_SCHEMA_NAME({this.idArg.DebugDisplay()})"
             : $"OBJECT_SCHEMA_NAME({this.idArg.DebugDisplay()}, {this.dbIdArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.idArg).Child(this.dbIdArg);
 }

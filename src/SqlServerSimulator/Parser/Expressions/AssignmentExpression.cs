@@ -44,4 +44,6 @@ internal sealed class AssignmentExpression(VariableSlot slot, Expression source)
     }
 
     internal override string DebugDisplay() => $"@{this.Slot.DeclaredType} = {this.Source.DebugDisplay()}";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.Slot).Child(this.Source);
 }

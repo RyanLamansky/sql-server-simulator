@@ -11,7 +11,7 @@ namespace SqlServerSimulator.Parser;
 /// Contains the logic described by a SQL command and computes its results.
 /// </summary>
 [DebuggerDisplay("{DebugDisplay(),nq}")]
-internal abstract class Expression
+internal abstract class Expression : ExpressionNode
 {
     private protected Expression()
     {
@@ -1057,51 +1057,36 @@ internal abstract class Expression
         !IsUntypedNullLiteral(arm) && !SqlType.ConversionPreservesEveryValue(context.TypeOf(arm), promoted);
 
     /// <summary>
-    /// Visits every <see cref="Reference"/> node in this expression's tree,
-    /// calling <paramref name="visit"/> with each reference's
-    /// <see cref="MultiPartName"/>. Used by CREATE TABLE's inline-CHECK
-    /// validator (Msg 8141) to enumerate column references statically —
-    /// distinct from <see cref="GetSqlType"/>'s walk because the latter is
-    /// optimized for type inference and several function-call subclasses
-    /// shortcut to a fixed result type without visiting their child
-    /// expressions. Default implementation is empty; container Expression
-    /// subclasses override to recurse into their child Expressions.
+    /// Calls <paramref name="visit"/> with the name of every column reference in
+    /// this expression, in source order, including those inside a predicate it
+    /// carries (a <c>CASE</c> condition). The walk stops at an aggregate or a
+    /// window function, whose operands are read in another phase than the
+    /// expression around them, and never enters a subquery, which binds in its
+    /// own scope.
     /// </summary>
-    /// <remarks>
-    /// Coverage gap: only the most common container subclasses
-    /// (<see cref="Reference"/>, <see cref="Parenthesized"/>, the binary
-    /// arithmetic / bitwise via <see cref="TwoSidedExpression"/>,
-    /// <see cref="Cast"/>, <see cref="Length"/>) currently override this.
-    /// Less-common containers (date-arithmetic functions, JSON functions,
-    /// nested CASE, etc.) fall through to the empty default, so peer
-    /// references buried inside them silently escape Msg 8141 detection at
-    /// CREATE TABLE. Real SQL Server catches these; the simulator surfaces
-    /// the runtime error at INSERT instead. New overrides can be added as
-    /// applications surface the gap.
-    /// </remarks>
     internal void VisitColumnReferences(Action<MultiPartName> visit) =>
         this.VisitColumnReferences(new ColumnReferenceVisitor(visit, coversSubtree: null));
 
     /// <summary>
-    /// The walk's node boundary: every recursion into a child goes through
-    /// here, so <see cref="ColumnReferenceVisitor.CoversSubtree"/> is asked
-    /// once per node and a subtree it answers for is never entered.
+    /// <see cref="VisitColumnReferences(Action{MultiPartName})"/> with the
+    /// visitor's <see cref="ColumnReferenceVisitor.CoversSubtree"/> asked at
+    /// each expression node, this one included, so a subtree it answers for is
+    /// never entered.
     /// </summary>
-    internal void VisitColumnReferences(ColumnReferenceVisitor visit)
-    {
-        if (visit.CoversSubtree?.Invoke(this) != true)
-            this.VisitColumnReferencesCore(visit);
-    }
+    internal void VisitColumnReferences(ColumnReferenceVisitor visit) =>
+        this.Walk((node, shape) =>
+        {
+            if (node is AggregateExpression or WindowExpression)
+                return false;
+            if (node is Expression expression && visit.CoversSubtree?.Invoke(expression) == true)
+                return false;
+            if (shape.Column is { } name)
+                visit.OnReference(name);
+            return true;
+        });
 
     /// <summary>
-    /// Per-subclass recursion; call the boundary above for children rather
-    /// than this directly. Default implementation is empty.
-    /// </summary>
-    internal virtual void VisitColumnReferencesCore(ColumnReferenceVisitor visit) { }
-
-    /// <summary>
-    /// True when this expression's parse tree contains a
-    /// <see cref="VariableReference"/> anywhere. Used by
+    /// True when this expression's tree reads a variable anywhere. Used by
     /// <c>STRING_SPLIT</c>'s <c>enable_ordinal</c> gate, which must reject
     /// every variable-bearing shape (real SQL Server: Msg 8748 —
     /// probe-confirmed the wrapped forms <c>CAST(@v AS int)</c>, <c>@v + 0</c>,
@@ -1109,12 +1094,20 @@ internal abstract class Expression
     /// accepting constant expressions like <c>CAST(1 AS int)</c> / <c>(1)</c> /
     /// <c>1 + 0</c>. A runtime-eval probe can't see the variable (its slot is
     /// declared in the batch), so the detection is a static parse-tree walk.
-    /// Default is <see langword="false"/>; the same common-container subclasses
-    /// that override <see cref="VisitColumnReferences(Action{MultiPartName})"/> (plus
-    /// <see cref="VariableReference"/> itself) recurse here, so a
-    /// variable buried in a less-common container is a residual coverage gap.
     /// </summary>
-    internal virtual bool ContainsVariableReference => false;
+    internal bool ContainsVariableReference
+    {
+        get
+        {
+            var found = false;
+            this.Walk((node, _) =>
+            {
+                found |= node is VariableReference;
+                return !found;
+            });
+            return found;
+        }
+    }
 
     /// <summary>
     /// When this expression is a deterministic, side-effect-free pass-through of

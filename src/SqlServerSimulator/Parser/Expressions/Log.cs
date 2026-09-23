@@ -40,4 +40,6 @@ internal sealed class Log : Expression
 
     internal override string DebugDisplay()
         => this.logBase is null ? $"LOG({this.value.DebugDisplay()})" : $"LOG({this.value.DebugDisplay()}, {this.logBase.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.value).Child(this.logBase);
 }

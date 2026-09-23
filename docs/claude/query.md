@@ -602,6 +602,8 @@ Probed against SQL Server 2025 (2026-08-05):
 | `SELECT CAST(a + 1 AS bigint)` | runs — the match is on the inner node |
 | `SELECT YEAR(d) * 100 + MONTH(d)` over `GROUP BY YEAR(d), MONTH(d)` | runs |
 | `SELECT a + 1 FROM t AS x GROUP BY x.a + 1` | runs — the qualifier's spelling doesn't enter it |
+| `SELECT x.a + 1 … x JOIN t AS y … GROUP BY y.a + 1` | Msg 8120 — the column it resolves to does (probed 2026-09-23) |
+| `SELECT b + 'X'` over `GROUP BY b + 'x'` | Msg 8120 — a string literal matches exactly, even under a case-insensitive collation (probed 2026-09-23) |
 | `SELECT a` | Msg 8120 |
 | `SELECT a + 0` | Msg 8120 — structural, not algebraic |
 | `SELECT 1 + a` | Msg 8120 — operand order counts |
@@ -609,13 +611,12 @@ Probed against SQL Server 2025 (2026-08-05):
 | `SELECT a + b` over `GROUP BY b + a` | Msg 8120, once per column |
 
 The walk carries the covering predicate down the tree (`ColumnReferenceVisitor.CoversSubtree`), so it stops the moment a node matches a grouping expression and every reference that reaches the check is one nothing covered.
-A node's identity is its `DebugDisplay()` with qualifiers dropped, compared case-insensitively; the normalization is applied to both sides, so it can only *merge* keys — the cost is the occasional over-permissive match across a join, which is the safe direction.
+A node's identity is its `ShapeKey`: the tree's node kinds, their own state and their children, with each column keyed by the source column it resolves to.
+The walk reaches every expression kind (each describes its children through `ExpressionNode.Describe`), so a column inside a `CASE` arm, `COALESCE` or any scalar's argument is checked like any other (`SELECT COALESCE(a, 0) … GROUP BY b` is Msg 8120, probed 2026-09-23); it stops only at an aggregate, a window function and a subquery.
 
 The message names the object the FROM clause **wrote**, not the alias: `SELECT a, b FROM t AS x GROUP BY a` reports `'t.b'`, a self-join reports the table twice, a schema-qualified source keeps its schema (`'dbo.t.b'`), a view is named like a table (`FROM dbo.v AS x` reports `'dbo.v.b'`), and a source with no object of its own falls back to its alias (a derived table `'z.b'`, a table variable `'@t.b'`) — all probed 2026-08-05, the view and CTE rows 2026-08-08.
 A **CTE** sits between the two: it has a name of its own and reports it however the reference aliased it (`FROM c AS q` reports `'c.b'`).
 The same `FromSource.WrittenObjectName` answers the receiver name an XQuery diagnostic is bracketed with, probed independently and agreeing on every source kind — see [`xml.md`](xml.md#the-receiver-names-the-diagnostic).
-
-The traversal's own reach is the limit: only the composite expression kinds that override `VisitColumnReferencesCore` are descended (arithmetic, concatenation, parentheses, CAST / CONVERT, COLLATE, negation, and the length / spatial / hierarchyid / XML members), so a column buried in a `CASE` arm or a scalar function's argument is never visited — see the over-permissive register in [`backlog.md`](backlog.md#over-permissive-register).
 
 ## DISTINCT over a grouped query
 
@@ -664,7 +665,7 @@ Parse-time type-checking is alias-aware to match.
 Returns `tinyint` 0/1 and `int` bitmap respectively; **leftmost arg of `GROUPING_ID` occupies the most-significant bit** (probe-confirmed against SQL Server 2025 — `GROUPING_ID(region, product)` with region grouped + product not grouped returns `2`, the inverse case returns `1`).
 Argument must match a GROUP BY expression.
 Arg not in any grouping set → Msg 8161; same Msg for GROUPING outside any GROUP BY context.
-Two `Reference` operands match by leaf-name equality (qualifier-tolerant); any other pair matches by **structural equality** of the parenthesis-stripped parse tree (`Grouping.FindArg` strips redundant parens off both sides, then compares `DebugDisplay` renderings ordinal-ignore-case).
+The match is the containment rule's `ShapeKey` with each column keyed by its name alone, so it is qualifier-tolerant (`GROUPING(x.a + 1)` over `ROLLUP(a + 1)` matches on real, probed 2026-09-23) and parentheses are transparent.
 Probe-confirmed: `GROUPING(a+1)` / `GROUPING_ID(a+1, b)` with matching GROUP BY expressions return their 0/1 markers, `GROUPING((a+1))` (extra parens) still matches, while `GROUPING(1+a)` (operand order differs — no commutative normalization) and `GROUPING(a+2)` (value mismatch) both raise Msg 8161.
 
 `STRING_AGG(expr, sep) WITHIN GROUP (ORDER BY ...)` reorders concatenation per group (EF emits this from `GroupBy(...).Select(g => string.Join(sep, g.OrderBy(...)))`).

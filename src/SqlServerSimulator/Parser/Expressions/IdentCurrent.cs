@@ -49,4 +49,6 @@ internal sealed class IdentCurrent : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
 
     internal override string DebugDisplay() => $"IDENT_CURRENT('{this.tableName}')";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.tableName);
 }

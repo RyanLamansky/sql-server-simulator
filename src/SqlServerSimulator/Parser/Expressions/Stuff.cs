@@ -118,4 +118,6 @@ internal sealed class Stuff : Expression
 
     internal override string DebugDisplay() =>
         $"STUFF({this.input.DebugDisplay()}, {this.start.DebugDisplay()}, {this.length.DebugDisplay()}, {this.replacement.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.input).Child(this.start).Child(this.length).Child(this.replacement);
 }

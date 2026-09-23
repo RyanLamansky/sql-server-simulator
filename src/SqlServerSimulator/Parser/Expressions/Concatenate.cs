@@ -78,13 +78,7 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
 
     internal override string DebugDisplay() => $"{left.DebugDisplay()} || {right.DebugDisplay()}";
 
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit)
-    {
-        left.VisitColumnReferences(visit);
-        right.VisitColumnReferences(visit);
-    }
-
-    internal override bool ContainsVariableReference => left.ContainsVariableReference || right.ContainsVariableReference;
+    internal override void Describe(NodeShape shape) => shape.Child(left).Child(right);
 
     internal override bool IsRowIndependent => left.IsRowIndependent && right.IsRowIndependent;
 

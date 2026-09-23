@@ -60,6 +60,28 @@ internal sealed class DateTimeSqlType() : SqlType(SqlTypeCategory.DateTime, Type
     /// <summary>Number of 1/300-second ticks in a day (300 × 86400).</summary>
     public const int TicksPerDay = 25_920_000;
 
+    /// <summary>
+    /// A time of day in 100-ns ticks as a count of 1/300-second units, rounded
+    /// half up; a value within half a unit of midnight answers
+    /// <see cref="TicksPerDay"/>, which a caller building a value carries into
+    /// the next day.
+    /// </summary>
+    public static long UnitsFromTicks(long timeOfDayTicks) =>
+        ((timeOfDayTicks * 300) + (TimeSpan.TicksPerSecond / 2)) / TimeSpan.TicksPerSecond;
+
+    /// <summary>
+    /// A count of 1/300-second units as 100-ns ticks, rounded to the nearest
+    /// tick (a unit is 33,333⅓ ticks, so no tie occurs).
+    /// </summary>
+    public static long TicksFromUnits(long units) => ((units * TimeSpan.TicksPerSecond) + 150) / 300;
+
+    /// <summary>
+    /// The value a stored day count and 1/300-second unit count denote — the
+    /// one decoding every reader of real's 8-byte form shares, whether from
+    /// storage, a bacpac, the wire or a binary conversion.
+    /// </summary>
+    public static DateTime FromParts(int dayCount, long units) => BaseDate.AddDays(dayCount).AddTicks(TicksFromUnits(units));
+
     public override bool IsFixedLength => true;
 
     public override int FixedLength => 8;
@@ -68,7 +90,7 @@ internal sealed class DateTimeSqlType() : SqlType(SqlTypeCategory.DateTime, Type
     {
         var dt = value.AsDateTime;
         var dayCount = (int)(dt.Date - BaseDate).TotalDays;
-        var timeUnits = (uint)(((dt.TimeOfDay.Ticks * 300) + (TimeSpan.TicksPerSecond / 2)) / TimeSpan.TicksPerSecond);
+        var timeUnits = (uint)UnitsFromTicks(dt.TimeOfDay.Ticks);
         BinaryPrimitives.WriteUInt32LittleEndian(destination, timeUnits);
         BinaryPrimitives.WriteInt32LittleEndian(destination[4..], dayCount);
         return 8;
@@ -78,8 +100,7 @@ internal sealed class DateTimeSqlType() : SqlType(SqlTypeCategory.DateTime, Type
     {
         var timeUnits = BinaryPrimitives.ReadUInt32LittleEndian(source);
         var dayCount = BinaryPrimitives.ReadInt32LittleEndian(source[4..]);
-        var timeTicks = ((timeUnits * TimeSpan.TicksPerSecond) + 150) / 300;
-        return SqlValue.FromDateTimeUnchecked(BaseDate.AddDays(dayCount).AddTicks(timeTicks));
+        return SqlValue.FromDateTimeUnchecked(FromParts(dayCount, timeUnits));
     }
 
     /// <summary>

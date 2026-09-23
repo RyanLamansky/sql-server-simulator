@@ -108,4 +108,6 @@ internal sealed class LoginProperty : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
 
     internal override string DebugDisplay() => $"LOGINPROPERTY({this.loginArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.loginArg).Child(this.propertyArg);
 }

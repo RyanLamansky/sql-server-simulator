@@ -84,4 +84,6 @@ internal sealed class FilegroupProperty : Expression
 
     internal override string DebugDisplay() =>
         $"FILEGROUPPROPERTY({this.nameArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.nameArg).Child(this.propertyArg);
 }

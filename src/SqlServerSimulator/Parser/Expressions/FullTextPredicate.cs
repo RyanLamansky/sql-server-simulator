@@ -136,4 +136,12 @@ internal sealed class FullTextPredicate : BooleanExpression
 
     internal override string DebugDisplay() =>
         $"{(this.freeText ? "FREETEXT" : "CONTAINS")}({string.Join(", ", this.binding.ColumnNames)}, {this.condition.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape)
+    {
+        _ = shape.Local(this.freeText).Local(this.binding.Table).Local(this.binding.ColumnNames.Length);
+        foreach (var name in this.binding.ColumnNames)
+            _ = shape.Local(name.ToString());
+        _ = shape.Child(this.condition);
+    }
 }

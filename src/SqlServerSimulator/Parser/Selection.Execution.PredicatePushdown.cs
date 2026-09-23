@@ -659,6 +659,13 @@ partial class Selection
         internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(subject);
 
         internal override string DebugDisplay() => $"{subject.DebugDisplay()} IN (<{keys.Length} join keys>)";
+
+        internal override void Describe(NodeShape shape)
+        {
+            _ = shape.Local(keyType).Local(keys.Length).Child(subject);
+            foreach (var key in keys)
+                _ = shape.Local(key);
+        }
     }
 
     /// <summary>
@@ -681,5 +688,7 @@ partial class Selection
             throw new NotSupportedException("A pushed-predicate projection slot must be rebound before it binds.");
 
         internal override string DebugDisplay() => $"<projection slot {this.Ordinal}>";
+
+        internal override void Describe(NodeShape shape) => shape.Local(this.Ordinal);
     }
 }

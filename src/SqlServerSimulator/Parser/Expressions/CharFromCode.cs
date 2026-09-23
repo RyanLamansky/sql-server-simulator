@@ -39,4 +39,6 @@ internal sealed class CharFromCode(ParserContext context) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => Char1For(batch);
 
     internal override string DebugDisplay() => $"CHAR({this.code.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.code);
 }

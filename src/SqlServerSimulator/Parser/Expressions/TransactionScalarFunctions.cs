@@ -28,6 +28,8 @@ internal sealed class XactState : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 
     internal override string DebugDisplay() => "XACT_STATE()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -53,4 +55,6 @@ internal sealed class RowCountBig : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "ROWCOUNT_BIG()";
+
+    internal override void Describe(NodeShape shape) { }
 }

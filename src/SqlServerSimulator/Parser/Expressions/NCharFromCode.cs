@@ -38,4 +38,6 @@ internal sealed class NCharFromCode(ParserContext context) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => NChar1For(batch);
 
     internal override string DebugDisplay() => $"NCHAR({this.code.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.code);
 }

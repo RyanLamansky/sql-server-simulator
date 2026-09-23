@@ -65,4 +65,6 @@ internal sealed class DataLength(ParserContext context) : Expression
     }
 
     internal override string DebugDisplay() => $"DATALENGTH({source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source);
 }

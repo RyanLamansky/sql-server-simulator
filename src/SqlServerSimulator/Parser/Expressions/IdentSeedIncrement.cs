@@ -47,4 +47,6 @@ internal sealed class IdentSeedIncrement : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
 
     internal override string DebugDisplay() => $"{(this.isSeed ? "IDENT_SEED" : "IDENT_INCR")}('{this.tableName}')";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.isSeed).Local(this.tableName);
 }

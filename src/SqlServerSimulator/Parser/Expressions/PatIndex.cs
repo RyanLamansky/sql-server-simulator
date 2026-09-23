@@ -128,4 +128,6 @@ internal sealed class PatIndex : Expression
         || (type is NVarcharSqlType n && n.length == SqlType.MaxLengthSentinel);
 
     internal override string DebugDisplay() => $"PATINDEX({this.pattern.DebugDisplay()}, {this.subject.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.pattern).Child(this.subject);
 }

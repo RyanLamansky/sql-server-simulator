@@ -19,4 +19,6 @@ internal sealed class TextSizeExpression(ParserContext context) : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@TEXTSIZE";
+
+    internal override void Describe(NodeShape shape) { }
 }

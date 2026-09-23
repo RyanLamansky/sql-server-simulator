@@ -543,4 +543,11 @@ internal sealed class AggregateExpression : Expression
         var separator = this.Separator is null ? "" : $", {this.Separator.DebugDisplay()}";
         return $"{name}({distinct}{operand}{separator})";
     }
+
+    internal override void Describe(NodeShape shape)
+    {
+        _ = shape.Local(this.Kind).Local(this.Distinct).Local(this.JsonNulls).Child(this.KeyExpression).Child(this.Operand).Child(this.Separator).Local(this.OrderBy?.Count ?? -1);
+        foreach (var item in this.OrderBy ?? [])
+            _ = shape.Local(item.Descending).Local(item.Ordinal).Child(item.Expr);
+    }
 }

@@ -35,6 +35,8 @@ internal sealed class ErrorNumberFunction : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => "ERROR_NUMBER()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 internal sealed class ErrorMessageFunction : Expression
@@ -49,6 +51,8 @@ internal sealed class ErrorMessageFunction : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     internal override string DebugDisplay() => "ERROR_MESSAGE()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 internal sealed class ErrorSeverityFunction : Expression
@@ -63,6 +67,8 @@ internal sealed class ErrorSeverityFunction : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => "ERROR_SEVERITY()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 internal sealed class ErrorStateFunction : Expression
@@ -77,6 +83,8 @@ internal sealed class ErrorStateFunction : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => "ERROR_STATE()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 internal sealed class ErrorLineFunction : Expression
@@ -91,6 +99,8 @@ internal sealed class ErrorLineFunction : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => "ERROR_LINE()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 internal sealed class ErrorProcedureFunction : Expression
@@ -105,6 +115,8 @@ internal sealed class ErrorProcedureFunction : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     internal override string DebugDisplay() => "ERROR_PROCEDURE()";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>

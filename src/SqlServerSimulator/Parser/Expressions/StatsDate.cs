@@ -56,4 +56,6 @@ internal sealed class StatsDate : Expression
 
     internal override string DebugDisplay() =>
         $"STATS_DATE({this.objectIdArg.DebugDisplay()}, {this.statsIdArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.objectIdArg).Child(this.statsIdArg);
 }

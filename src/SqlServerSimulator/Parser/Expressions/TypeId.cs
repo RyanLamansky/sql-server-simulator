@@ -72,4 +72,6 @@ internal sealed class TypeId : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumn) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"TYPE_ID({this.nameArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.nameArg);
 }

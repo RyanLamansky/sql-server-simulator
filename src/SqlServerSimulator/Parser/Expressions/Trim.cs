@@ -145,4 +145,6 @@ internal sealed class Trim : Expression
     }
 
     internal override string DebugDisplay() => $"TRIM({source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.side).Child(this.trimChars).Child(this.source);
 }

@@ -102,4 +102,6 @@ internal sealed class UpdatePredicate : BooleanExpression
     }
 
     internal override string DebugDisplay() => $"UPDATE({this.columnName})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.columnId);
 }

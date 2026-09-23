@@ -69,6 +69,8 @@ internal sealed class StringEscape : Expression
     }
 
     internal override string DebugDisplay() => $"STRING_ESCAPE({this.textArg.DebugDisplay()}, {this.modeArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.textArg).Child(this.modeArg);
 }
 
 /// <summary>
@@ -172,4 +174,6 @@ internal sealed class Translate : Expression
             : SqlType.NVarchar;
 
     internal override string DebugDisplay() => $"TRANSLATE({this.inputArg.DebugDisplay()}, {this.charsArg.DebugDisplay()}, {this.translationsArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.inputArg).Child(this.charsArg).Child(this.translationsArg);
 }

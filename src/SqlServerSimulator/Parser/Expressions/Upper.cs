@@ -30,4 +30,6 @@ internal sealed class Upper(ParserContext context) : Expression
         StringScalars.ResolveResultType(StringScalars.BindArgument(source, batch, resolveColumnType, "upper"), batch);
 
     internal override string DebugDisplay() => $"UPPER({source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source);
 }

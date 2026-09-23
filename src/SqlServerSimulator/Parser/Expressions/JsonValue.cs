@@ -86,4 +86,6 @@ internal sealed class JsonValue : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     internal override string DebugDisplay() => $"JSON_VALUE({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.jsonInput).Child(this.pathInput);
 }

@@ -87,7 +87,7 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
 
     internal override string DebugDisplay() => $"{this.Inner.DebugDisplay()} COLLATE {this.ResolvedCollation.Name}";
 
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => this.Inner.VisitColumnReferences(visit);
+    internal override void Describe(NodeShape shape) => shape.Local(this.ResolvedCollation.Name).Child(this.Inner);
 
     internal override bool IsRowIndependent => this.Inner.IsRowIndependent;
 

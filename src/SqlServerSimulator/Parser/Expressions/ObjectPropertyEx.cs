@@ -239,4 +239,6 @@ internal sealed class ObjectPropertyEx : Expression
 
     internal override string DebugDisplay() =>
         $"OBJECTPROPERTYEX({this.idArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.idArg).Child(this.propertyArg);
 }

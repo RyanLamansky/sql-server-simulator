@@ -124,9 +124,5 @@ internal sealed class FullTextCatalogProperty : Expression
 
     internal override string DebugDisplay() => $"FULLTEXTCATALOGPROPERTY({this.catalogArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
 
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit)
-    {
-        this.catalogArg.VisitColumnReferences(visit);
-        this.propertyArg.VisitColumnReferences(visit);
-    }
+    internal override void Describe(NodeShape shape) => shape.Child(this.catalogArg).Child(this.propertyArg);
 }

@@ -84,4 +84,6 @@ internal sealed class CharIndex : Expression
     internal override string DebugDisplay() => start is null
         ? $"CHARINDEX({needle.DebugDisplay()}, {haystack.DebugDisplay()})"
         : $"CHARINDEX({needle.DebugDisplay()}, {haystack.DebugDisplay()}, {start.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.needle).Child(this.haystack).Child(this.start);
 }

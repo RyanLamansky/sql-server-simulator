@@ -72,6 +72,8 @@ internal abstract class DateDiff : Expression
     internal override string DebugDisplay() =>
         $"{this.functionLowerName.ToUpperInvariant()}({this.keywordText}, {this.start.DebugDisplay()}, {this.end.DebugDisplay()})";
 
+    internal sealed override void Describe(NodeShape shape) => shape.Local(this.kind).Child(this.start).Child(this.end);
+
     internal sealed class Standard(ParserContext context) : DateDiff(context, "datediff", SqlType.Int32)
     {
         protected override SqlValue WrapResult(long diff) =>

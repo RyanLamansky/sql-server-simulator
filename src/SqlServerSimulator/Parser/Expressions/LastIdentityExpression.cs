@@ -38,4 +38,6 @@ internal sealed class LastIdentityExpression : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
 
     internal override string DebugDisplay() => "SCOPE_IDENTITY()";
+
+    internal override void Describe(NodeShape shape) { }
 }

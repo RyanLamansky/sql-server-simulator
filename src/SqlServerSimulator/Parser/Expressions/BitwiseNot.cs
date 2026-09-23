@@ -41,10 +41,7 @@ internal sealed class BitwiseNot(Expression operand) : Expression
     internal override bool ResultIsNullable(NullabilityContext context) =>
         operand.ResultIsNullable(context);
 
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) =>
-        operand.VisitColumnReferences(visit);
-
-    internal override bool ContainsVariableReference => operand.ContainsVariableReference;
-
     internal override string DebugDisplay() => $"~{operand.DebugDisplay()}";
+
+    internal override void Describe(NodeShape shape) => shape.Child(operand);
 }

@@ -124,4 +124,31 @@ internal sealed class NullIf : Expression
         !context.TryFold(this, out var folded) || folded.IsNull;
 
     internal override string DebugDisplay() => $"NULLIF({this.a.DebugDisplay()}, {this.b.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.a).Child(this.b);
+
+    /// <summary>
+    /// Whether real's GROUP BY containment pass reads this node as the NULL it
+    /// folds to, so neither argument's columns are checked. It does when the
+    /// first argument is a constant NULL that carries an aggregate —
+    /// <c>NULLIF(CASE 23 WHEN -38 THEN COUNT(*) END, a)</c> runs over an
+    /// ungrouped <c>a</c> — and not otherwise:
+    /// <c>NULLIF(CAST(NULL AS int), a)</c> beside a <c>COUNT(*)</c> is
+    /// Msg 8120 (both probed 2026-09-23 against SQL Server 2025).
+    /// </summary>
+    internal bool FoldedBeforeGroupingCheck
+    {
+        get
+        {
+            if (!this.constantNullFirst)
+                return false;
+            var aggregated = false;
+            this.a.Walk((node, _) =>
+            {
+                aggregated |= node is AggregateExpression;
+                return !aggregated;
+            });
+            return aggregated;
+        }
+    }
 }

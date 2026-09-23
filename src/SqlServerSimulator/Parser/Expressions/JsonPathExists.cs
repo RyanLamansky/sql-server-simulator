@@ -51,4 +51,6 @@ internal sealed class JsonPathExists : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => $"JSON_PATH_EXISTS({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.jsonInput).Child(this.pathInput);
 }

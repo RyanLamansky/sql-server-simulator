@@ -40,44 +40,28 @@ internal sealed class Grouping(ParserContext context) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.TinyInt;
 
     /// <summary>
-    /// Looks for <paramref name="argument"/> in <paramref name="haystack"/>.
-    /// Two <see cref="Reference"/> operands match by leaf-name equality
-    /// (case-insensitive via <see cref="BuiltInToken"/>, so a qualified GROUP
-    /// BY column matches an unqualified GROUPING argument); any other pair
-    /// matches by structural equality of the parenthesis-stripped parse tree
-    /// (rendered via <see cref="Expression.DebugDisplay"/>, which deterministically
-    /// serializes the tree). Real SQL Server resolves the non-Reference case by
-    /// exact-match parser comparison; the render-and-compare proxy reproduces
-    /// the probed order-sensitive / value-exact boundary while normalizing
-    /// redundant parentheses.
+    /// Looks for <paramref name="argument"/> in <paramref name="haystack"/> by
+    /// <see cref="ShapeKey"/>, keying each column by its name alone: real
+    /// matches <c>GROUPING(x.a + 1)</c> against <c>ROLLUP(a + 1)</c> (probed
+    /// 2026-09-23), treats redundant parentheses as transparent, and refuses
+    /// <c>GROUPING(1 + a)</c> and <c>GROUPING(a + 2)</c> there.
     /// </summary>
     internal static bool FindArg(IReadOnlyList<Expression> haystack, Expression argument)
     {
-        var arg = StripParens(argument);
+        var key = KeyOf(argument);
         foreach (var entry in haystack)
         {
-            var candidate = StripParens(entry);
-            if (arg is Reference ra && candidate is Reference rb)
-            {
-                if (BuiltInToken.Equals(ra.ReferencedName.Leaf, rb.ReferencedName.Leaf))
-                    return true;
-            }
-            else if (string.Equals(arg.DebugDisplay(), candidate.DebugDisplay(), StringComparison.OrdinalIgnoreCase))
-            {
+            if (key.Equals(KeyOf(entry)))
                 return true;
-            }
         }
         return false;
     }
 
-    private static Expression StripParens(Expression expression)
-    {
-        while (expression is Parenthesized parenthesized)
-            expression = parenthesized.Wrapped;
-        return expression;
-    }
+    private static ShapeKey KeyOf(Expression expression) => ShapeKey.Of(expression, name => name.Leaf);
 
     internal override string DebugDisplay() => $"GROUPING({this.argument.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.argument);
 }
 
 /// <summary>
@@ -126,4 +110,6 @@ internal sealed class GroupingId : Expression
 
     internal override string DebugDisplay() =>
         $"GROUPING_ID({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";
+
+    internal override void Describe(NodeShape shape) => shape.Children(this.arguments);
 }

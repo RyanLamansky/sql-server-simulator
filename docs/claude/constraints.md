@@ -4,7 +4,7 @@ Sibling deep-dives: [`foreign-keys.md`](foreign-keys.md) (the FK family in full)
 
 - `CHECK`: inline single-column + table-level; Msg 547 per row on definitely-false predicate (UNKNOWN passes — opposite of WHERE).
   Inline column-level CHECK may only reference its owning column — peer refs raise **Msg 8141** at CREATE TABLE (probe-confirmed).
-  The walker is structural (`Expression.VisitColumnReferences` + `BooleanExpression.VisitOperandExpressions`); coverage spans the common containers (`Reference`, `Parenthesized`, `TwoSidedExpression`, `Cast`, `Length`) — peer refs in rarer ones (`DATEPART`, `SUBSTRING`, nested `CASE`) escape the CREATE check and surface at INSERT.
+  The walker (`Expression.VisitColumnReferences` + `BooleanExpression.VisitOperandExpressions`) reaches every expression kind, so a peer inside `DATEPART` or a nested `CASE` is caught at CREATE as on real.
   Table-level CHECK has no peer restriction.
   A predicate over a computed column has its own persistence rules — [below](#computed-columns-in-a-check-constraint).
 - `PRIMARY KEY` / `UNIQUE` / secondary `CREATE INDEX`: no B-tree; reads, `UPDATE`/`DELETE`/`MERGE` target scans, **and key-uniqueness enforcement itself** go through the **incrementally-maintained** per-`Heap` seek acceleration (equality / IN / leading-column range / equality-prefix+range continuation / ORDER BY elimination / keyset).
@@ -104,7 +104,7 @@ The peer-reference gate still wins when the peer is persisted or regular.
 As with the FK family's Msg 1764, real's trailing informational **Msg 1750** (`Could not create constraint or index. See previous errors.`) is collapsed away.
 
 Both gates reach `DECLARE @t TABLE` and `CREATE TYPE … AS TABLE` through the shared column parser, naming the variable (`'@t'`) or the type in the Msg 1764 text.
-The Msg 1764 walk shares `Expression.VisitColumnReferences` with the Msg 8141 gate and so inherits its container-coverage limits (see the bullet above): a reference buried in a rarer container escapes the declaration-time check.
+The Msg 1764 walk shares `Expression.VisitColumnReferences` with the Msg 8141 gate.
 
 ## `IGNORE_DUP_KEY`
 

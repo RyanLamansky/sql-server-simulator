@@ -316,6 +316,8 @@ internal sealed class ObjectId : Expression
             ? $"OBJECT_ID({this.nameArg.DebugDisplay()})"
             : $"OBJECT_ID({this.nameArg.DebugDisplay()}, {this.typeArg.DebugDisplay()})";
 
+    internal override void Describe(NodeShape shape) => shape.Child(this.nameArg).Child(this.typeArg);
+
     /// <summary>
     /// Splits a runtime-string object name into a <see cref="MultiPartName"/>.
     /// Honors bracket quoting (<c>[dbo].[foo]</c>) on a per-segment basis;

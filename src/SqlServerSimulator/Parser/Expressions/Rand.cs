@@ -66,6 +66,8 @@ internal sealed class Rand : Expression
     internal override string DebugDisplay() => this.seed is null
         ? "RAND()"
         : $"RAND({this.seed.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.seed);
 }
 
 /// <summary>

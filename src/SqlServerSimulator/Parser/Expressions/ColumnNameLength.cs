@@ -49,6 +49,8 @@ internal sealed class ColName : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
 
     internal override string DebugDisplay() => $"COL_NAME({this.tableIdArg.DebugDisplay()}, {this.colIdArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.tableIdArg).Child(this.colIdArg);
 }
 
 /// <summary>
@@ -130,4 +132,6 @@ internal sealed class ColLength : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 
     internal override string DebugDisplay() => $"COL_LENGTH({this.tableNameArg.DebugDisplay()}, {this.colNameArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.tableNameArg).Child(this.colNameArg);
 }

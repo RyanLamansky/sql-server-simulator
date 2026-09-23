@@ -342,6 +342,13 @@ internal sealed class JsonObject : Expression
 
     internal override string DebugDisplay() =>
         $"JSON_OBJECT({string.Join(", ", this.entries.Select(e => $"{e.Key.DebugDisplay()}: {e.Value.DebugDisplay()}"))})";
+
+    internal override void Describe(NodeShape shape)
+    {
+        _ = shape.Local(this.nullClause).Local(this.entries.Length);
+        foreach (var (key, value, _) in this.entries)
+            _ = shape.Child(key).Child(value);
+    }
 }
 
 /// <summary>
@@ -411,4 +418,6 @@ internal sealed class JsonArray : Expression
 
     internal override string DebugDisplay() =>
         $"JSON_ARRAY({string.Join(", ", this.items.Select(i => i.Value.DebugDisplay()))})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.nullClause).Children([.. this.items.Select(item => item.Value)]);
 }

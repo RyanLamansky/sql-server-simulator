@@ -56,6 +56,8 @@ internal sealed class AppLockMode : Expression
 
     internal override string DebugDisplay() =>
         $"APPLOCK_MODE({this.principal.DebugDisplay()}, {this.resource.DebugDisplay()}, {this.owner.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.principal).Child(this.resource).Child(this.owner);
 }
 
 /// <summary>
@@ -121,6 +123,8 @@ internal sealed class AppLockTest : Expression
 
     internal override string DebugDisplay() =>
         $"APPLOCK_TEST({this.principal.DebugDisplay()}, {this.resource.DebugDisplay()}, {this.mode.DebugDisplay()}, {this.owner.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.principal).Child(this.resource).Child(this.mode).Child(this.owner);
 }
 
 /// <summary>

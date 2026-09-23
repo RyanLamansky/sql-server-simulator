@@ -156,12 +156,12 @@ internal sealed class ConvertExpression : Expression
     /// aggregate whose argument is wrapped in CONVERT looked reference-free to
     /// callers that walk references.
     /// </summary>
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => this.source.VisitColumnReferences(visit);
-
     internal override string DebugDisplay() =>
         this.style is null
             ? $"{(this.tryMode ? "TRY_CONVERT" : "CONVERT")}({this.targetType}, {this.source.DebugDisplay()})"
             : $"{(this.tryMode ? "TRY_CONVERT" : "CONVERT")}({this.targetType}, {this.source.DebugDisplay()}, {this.style.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.tryMode).Local(this.targetType).Local(this.targetMaxLength).Local(this.targetReportsNumeric).Child(this.source).Child(this.style);
 
     // Stability is governed by the value operand; the optional style is a
     // constant / variable and never row-varying.

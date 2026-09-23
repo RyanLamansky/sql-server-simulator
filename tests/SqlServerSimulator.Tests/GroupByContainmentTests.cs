@@ -193,6 +193,57 @@ public sealed class GroupByContainmentTests
         => Rejects("select a + 1 from t group by a + 1.0", 8120, "'t.a'");
 
     [TestMethod]
+    public void StringLiteralCaseMatters_Msg8120()
+        // A string literal matches exactly even under a case-insensitive
+        // collation (probed 2026-09-23).
+        => Rejects("select name + 'X' from t group by name + 'x'", 8120, "'t.name'");
+
+    [TestMethod]
+    public void SameNameFromOtherJoinSide_Msg8120()
+        // The match keys a column by what it resolves to, so y.a + 1 doesn't
+        // cover x.a + 1 (probed 2026-09-23).
+        => Rejects("select x.a + 1 from t as x join t as y on x.id = y.id group by y.a + 1", 8120, "'t.a'");
+
+    [TestMethod]
+    public void SameSideOfJoin_Licensed()
+        => IsNull(Run("select x.a + 1 from t as x join t as y on x.id = y.id where 1 = 0 group by x.a + 1"));
+
+    /// <summary>
+    /// A column inside any expression kind is checked, not only inside the
+    /// arithmetic and conversion nodes (probed 2026-09-23).
+    /// </summary>
+    [DataRow("coalesce(a, 0)")]
+    [DataRow("case when a > 0 then 1 end")]
+    [DataRow("iif(a > 0, 1, 0)")]
+    [DataRow("abs(a)")]
+    [DataRow("datepart(year, a)")]
+    [TestMethod]
+    public void ColumnInsideAnyExpressionKind_Msg8120(string projection)
+        => Rejects($"select {projection} from t group by b", 8120, "'t.a'");
+
+    /// <summary>
+    /// Real reads a NULLIF whose first argument is a constant NULL carrying an
+    /// aggregate as the NULL it folds to, so its second argument's columns go
+    /// unchecked; without the aggregate the fold doesn't happen (probed
+    /// 2026-09-23).
+    /// </summary>
+    [TestMethod]
+    public void NullIfFoldedOverAggregate_Licensed()
+        => AreEqual(DBNull.Value, Run("select nullif(case 23 when -38 then count(*) end, a), count(*) from t"));
+
+    [TestMethod]
+    public void NullIfOverConstantNullWithoutAggregate_Msg8120()
+        => Rejects("select nullif(cast(null as int), a), count(*) from t", 8120, "'t.a'");
+
+    [TestMethod]
+    public void FunctionMatchingGroupedFunction_Licensed()
+        => AreEqual(10, Run("select coalesce(a, 0) from t where id = 1 group by coalesce(a, 0)"));
+
+    [TestMethod]
+    public void FunctionArgumentMatters_Msg8120()
+        => Rejects("select coalesce(a, 0) from t group by coalesce(a, 1)", 8120, "'t.a'");
+
+    [TestMethod]
     public void BareComponentInHaving_Msg8121()
         => Rejects("select count(*) from t group by a + 1 having a > 0", 8121, "'t.a'");
 

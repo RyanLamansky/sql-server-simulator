@@ -111,4 +111,6 @@ internal sealed class CurrentTimeFunction(CurrentTimeKind kind) : Expression
         CurrentTimeKind.CurrentDate => "CURRENT_DATE",
         _ => throw new InvalidOperationException($"Unknown current-time kind {this.Kind}."),
     };
+
+    internal override void Describe(NodeShape shape) => shape.Local(this.Kind);
 }

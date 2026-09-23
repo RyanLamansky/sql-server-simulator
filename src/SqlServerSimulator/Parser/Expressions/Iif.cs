@@ -104,4 +104,6 @@ internal sealed class Iif : Expression
         this.trueValue.ResultReportsNumeric || this.falseValue.ResultReportsNumeric;
 
     internal override string DebugDisplay() => $"IIF(..., {this.trueValue.DebugDisplay()}, {this.falseValue.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.condition).Child(this.trueValue).Child(this.falseValue);
 }

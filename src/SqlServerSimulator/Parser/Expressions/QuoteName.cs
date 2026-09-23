@@ -130,4 +130,6 @@ internal sealed class QuoteName : Expression
     internal override string DebugDisplay() => this.delimiter is null
         ? $"QUOTENAME({this.name.DebugDisplay()})"
         : $"QUOTENAME({this.name.DebugDisplay()}, {this.delimiter.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.name).Child(this.delimiter);
 }

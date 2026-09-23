@@ -24,4 +24,6 @@ internal sealed class Pi : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "PI()";
+
+    internal override void Describe(NodeShape shape) { }
 }

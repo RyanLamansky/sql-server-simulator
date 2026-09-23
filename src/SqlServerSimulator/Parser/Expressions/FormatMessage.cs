@@ -423,4 +423,6 @@ internal sealed class FormatMessage : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     internal override string DebugDisplay() => $"FORMATMESSAGE({this.formatArg.DebugDisplay()}, ...)";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.formatArg).Children(this.substitutionArgs);
 }

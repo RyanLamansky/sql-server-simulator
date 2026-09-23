@@ -55,4 +55,6 @@ internal sealed class RightTrim : Expression
         StringScalars.ResolveResultType(StringScalars.BindTrimmed(source, trimChars, batch, resolveColumnType, "rtrim"), batch);
 
     internal override string DebugDisplay() => $"RTRIM({source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source).Child(this.trimChars);
 }

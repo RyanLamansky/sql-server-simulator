@@ -17,4 +17,6 @@ internal sealed class SpidExpression(ParserContext context) : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@SPID";
+
+    internal override void Describe(NodeShape shape) { }
 }

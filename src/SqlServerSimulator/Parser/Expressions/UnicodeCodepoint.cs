@@ -42,4 +42,6 @@ internal sealed class UnicodeCodepoint(ParserContext context) : Expression
     }
 
     internal override string DebugDisplay() => $"UNICODE({this.source.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source);
 }

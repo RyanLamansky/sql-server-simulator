@@ -21,4 +21,6 @@ internal sealed class TriggerNestLevelFunction : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
     internal override string DebugDisplay() => "TRIGGER_NESTLEVEL()";
+
+    internal override void Describe(NodeShape shape) { }
 }

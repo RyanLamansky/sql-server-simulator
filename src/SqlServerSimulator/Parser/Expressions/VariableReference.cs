@@ -45,7 +45,7 @@ internal sealed class VariableReference : Expression
 
     internal override string DebugDisplay() => $"@{this.VariableName}";
 
-    internal override bool ContainsVariableReference => true;
+    internal override void Describe(NodeShape shape) => shape.Local(this.VariableName);
 
     internal override bool IsRowIndependent => true;
 }

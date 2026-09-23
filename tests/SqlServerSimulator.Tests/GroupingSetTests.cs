@@ -319,6 +319,30 @@ public sealed class GroupingSetTests
     }
 
     [TestMethod]
+    public void GroupingOfDifferentlyQualifiedExpression_Matches()
+    {
+        // Probed 2026-09-23: the GROUPING argument matches its GROUP BY
+        // expression whatever the qualifiers.
+        using var conn = SeededExpr();
+        using var cmd = conn.CreateCommand(
+            "select grouping(x.a + 1) g from t as x group by rollup(a + 1) order by g");
+        using var reader = cmd.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual((byte)0, reader.GetByte(0));
+    }
+
+    [TestMethod]
+    public void GroupingOfFunctionExpression_Matches()
+    {
+        using var conn = SeededExpr();
+        using var cmd = conn.CreateCommand(
+            "select grouping(coalesce(a, 0)) g from t group by rollup(coalesce(a, 0)) order by g desc");
+        using var reader = cmd.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual((byte)1, reader.GetByte(0));
+    }
+
+    [TestMethod]
     public void GroupingOfDifferentConstantExpression_RaisesMsg8161()
     {
         // Probe-confirmed 2026-07-10: GROUPING(a+2) against GROUP BY a+1 is a

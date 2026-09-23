@@ -99,6 +99,8 @@ internal sealed class Cast : Expression
 
     internal override bool ResultReportsNumeric => this.targetReportsNumeric;
 
+    internal override void Describe(NodeShape shape) => shape.Local(this.tryMode).Local(this.targetType).Local(this.targetMaxLength).Local(this.targetReportsNumeric).Child(this.source);
+
     /// <summary>
     /// Collation of a CAST/CONVERT result whose target is a character type.
     /// Real SQL Server (probe-confirmed against SQL Server 2025): a character
@@ -153,10 +155,6 @@ internal sealed class Cast : Expression
 
     internal override string DebugDisplay() =>
         $"{(this.tryMode ? "TRY_CAST" : "CAST")}({source.DebugDisplay()} AS {targetType})";
-
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => this.source.VisitColumnReferences(visit);
-
-    internal override bool ContainsVariableReference => this.source.ContainsVariableReference;
 
     internal override Expression? PureConversionOperand => this.source;
 

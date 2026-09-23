@@ -67,5 +67,5 @@ internal sealed class Reference : Expression
 
     internal override bool ResultIsNullable(NullabilityContext context) => context.ColumnIsNullable(this.ReferencedName);
 
-    internal override void VisitColumnReferencesCore(ColumnReferenceVisitor visit) => visit.OnReference(this.ReferencedName);
+    internal override void Describe(NodeShape shape) => shape.ColumnReference(this.ReferencedName);
 }

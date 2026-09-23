@@ -227,11 +227,8 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// named kind as the parser builds expressions. Bracketing a sub-parse
     /// (snapshot before, compare after) answers "did this expression contain an
     /// aggregate / subquery / column reference?" without walking the finished
-    /// tree — which matters because only a minority of the 170-odd
-    /// <see cref="Expression"/> subclasses override
-    /// <see cref="Expression.VisitColumnReferences(Action{MultiPartName})"/>, so a tree walk silently
-    /// misses containers like <c>CASE</c> and most scalar function calls.
-    /// Counting at construction is complete by construction instead.
+    /// tree, and counts a subquery's own aggregates and columns too, which a
+    /// walk (stopping at the subquery's scope) would not.
     /// <para>Consumed by the aggregate-binding rules: Msg 130 (aggregate over an
     /// aggregate or subquery), Msg 144 (aggregate / subquery in a GROUP BY
     /// item) and Msg 164 (GROUP BY item with no column of its own). Deltas are

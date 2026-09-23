@@ -98,6 +98,8 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
     internal override string DebugDisplay() =>
         $"{this.function.Schema.Name}.{this.function.Name}({string.Join(", ", this.arguments.Select(a => a?.DebugDisplay() ?? "DEFAULT"))})";
 
+    internal override void Describe(NodeShape shape) => shape.Local(this.function).Children(this.arguments);
+
     /// <summary>
     /// Parses the comma-separated argument list of a <c>schema.fn(...)</c>
     /// call. Cursor on entry: the token <em>after</em> the opening <c>(</c>.

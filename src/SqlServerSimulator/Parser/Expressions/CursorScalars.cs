@@ -17,6 +17,8 @@ internal sealed class FetchStatusExpression : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@FETCH_STATUS";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -33,6 +35,8 @@ internal sealed class CursorRowsExpression : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => "@@CURSOR_ROWS";
+
+    internal override void Describe(NodeShape shape) { }
 }
 
 /// <summary>
@@ -95,4 +99,6 @@ internal sealed class CursorStatusFunction : Expression
         this.scopeArg.ResultIsNullable(context) || this.nameArg.ResultIsNullable(context);
 
     internal override string DebugDisplay() => $"CURSOR_STATUS({this.scopeArg.DebugDisplay()}, {this.nameArg.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.scopeArg).Child(this.nameArg);
 }

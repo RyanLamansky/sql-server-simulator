@@ -66,4 +66,6 @@ internal sealed class Right : Expression
     }
 
     internal override string DebugDisplay() => $"RIGHT({source.DebugDisplay()}, {count.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.source).Child(this.count);
 }

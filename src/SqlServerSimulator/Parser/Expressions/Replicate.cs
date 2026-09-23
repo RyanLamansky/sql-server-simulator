@@ -108,4 +108,6 @@ internal sealed class Replicate : Expression
             || type is NVarcharSqlType { length: SqlType.MaxLengthSentinel };
 
     internal override string DebugDisplay() => $"REPLICATE({this.input.DebugDisplay()}, {this.count.DebugDisplay()})";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.input).Child(this.count);
 }

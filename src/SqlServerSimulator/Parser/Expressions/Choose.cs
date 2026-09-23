@@ -68,4 +68,6 @@ internal sealed class Choose : Expression
     }
 
     internal override string DebugDisplay() => $"CHOOSE({this.indexExpr.DebugDisplay()}, ...{this.values.Length} values)";
+
+    internal override void Describe(NodeShape shape) => shape.Child(this.indexExpr).Children(this.values);
 }

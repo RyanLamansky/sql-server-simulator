@@ -28,4 +28,6 @@ internal sealed class EventDataFunction : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => true;
 
     internal override string DebugDisplay() => "EVENTDATA()";
+
+    internal override void Describe(NodeShape shape) { }
 }
