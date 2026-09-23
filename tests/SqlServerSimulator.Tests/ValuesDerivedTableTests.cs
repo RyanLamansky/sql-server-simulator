@@ -186,4 +186,24 @@ public sealed class ValuesDerivedTableTests
     [TestMethod]
     public void EmptyRow_RaisesMsg102() =>
         new Simulation().AssertSqlError("select * from (values ()) v(a)", 102);
+
+    /// <summary>
+    /// The rows unify as a <c>UNION ALL</c> would: an untyped <c>NULL</c> cell
+    /// yields to its typed siblings, and an integer literal sizes against a
+    /// decimal one.
+    /// </summary>
+    [TestMethod]
+    public void UntypedNullCell_YieldsToTheTypedRows()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using var reader = connection.CreateCommand("select x, y, z from (values ('a', 1, null), (null, 2.5, null), ('bcd', 3, null)) v(x, y, z)").ExecuteReader();
+        AreEqual("varchar", reader.GetDataTypeName(0));
+        AreEqual("decimal", reader.GetDataTypeName(1));
+        AreEqual("int", reader.GetDataTypeName(2));
+        var rows = ReadAll(reader);
+        HasCount(3, rows);
+        AreEqual("a", rows[0][0]);
+        IsNull(rows[1][0]);
+        AreEqual(2.5m, rows[1][1]);
+    }
 }

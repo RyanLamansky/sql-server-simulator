@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -15,12 +16,10 @@ partial class Simulation
     /// from <see cref="BatchContext.InFlightError"/>.</item>
     /// <item><c>THROW number, message, state;</c> — value form. Raises a
     /// new <see cref="SimulatedSqlException"/> with the supplied number
-    /// (50000-2147483647 in real SQL Server; the simulator doesn't enforce
-    /// the range until apps need it), message (string-typed expression),
-    /// and state (tinyint-typed expression). Severity is always class 16
-    /// per real SQL Server — probe-confirmed against SQL Server 2025
-    /// (2026-05-12) that <c>THROW 50001, 'custom', 7</c> reports Class 16
-    /// State 7.</item>
+    /// (50000-2147483647, else Msg 35100), message, and state. Severity is
+    /// always class 16 per real SQL Server — probe-confirmed against SQL
+    /// Server 2025 (2026-05-12) that <c>THROW 50001, 'custom', 7</c> reports
+    /// Class 16 State 7.</item>
     /// </list>
     /// </summary>
     /// <remarks>
@@ -36,10 +35,15 @@ partial class Simulation
     /// <c>!IsSkipping</c>.
     /// </para>
     /// <para>
-    /// The value form supports literal and variable expressions for each
-    /// argument; runtime evaluation goes through standard
-    /// <see cref="Expression.Run"/>, so coercion via the type system is the
-    /// same as elsewhere. Formatted-message arguments (<c>%d</c> / <c>%s</c>
+    /// Each value-form argument is a literal or a variable, nothing else —
+    /// probe-confirmed 2026-09-23 against SQL Server 2025: an expression,
+    /// parentheses or a unary <c>+</c> is Msg 102, <c>NULL</c> Msg 156, and a
+    /// number or state literal that isn't an <c>int</c> Msg 1080, while a
+    /// leading <c>-</c> on a literal is accepted. A variable converts the way
+    /// <c>CAST</c> would (<c>int</c> for the number and state, <c>nvarchar</c>
+    /// for the message), and a NULL one reads as 0 or the empty string. A
+    /// negative state is Msg 2756; otherwise only its low byte is kept, so 256
+    /// raises state 0 and 300 state 44. Formatted-message arguments (<c>%d</c> / <c>%s</c>
     /// placeholders) — real SQL Server's <c>FORMATMESSAGE</c>-style
     /// substitution — aren't modeled in this bundle; defer to a follow-on
     /// alongside <c>RAISERROR</c>.
@@ -68,16 +72,16 @@ partial class Simulation
             throw SimulatedSqlException.ThrowReRaised(err.Number, err.Message, err.State, err.Line, err.Procedure);
         }
 
-        // Value form: parse three comma-separated expressions.
-        var numberExpr = Expression.Parse(context);
+        // Value form: three comma-separated literals or variables.
+        var number = ParseThrowArgument(context, isMessage: false);
         if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        var messageExpr = Expression.Parse(context);
+        var message = ParseThrowArgument(context, isMessage: true);
         if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        var stateExpr = Expression.Parse(context);
+        var state = ParseThrowArgument(context, isMessage: false);
 
         // Real parses the whole statement before running any of it, so a stray
         // token after the argument list is Msg 102 — not the error this THROW
@@ -91,17 +95,68 @@ partial class Simulation
         if (batch.IsSkipping)
             return;
 
-        var runtime = new RuntimeContext(NoColumnResolver, batch);
-        var numberValue = numberExpr.Run(runtime).CoerceTo(SqlType.Int32);
-        var messageValue = messageExpr.Run(runtime).CoerceTo(SqlType.NVarchar);
-        var stateValue = stateExpr.Run(runtime).CoerceTo(SqlType.TinyInt);
+        var numberValue = Cast.CoerceToDeclared(number.Read(), SqlType.Int32);
+        var messageValue = Cast.CoerceToDeclared(message.Read(), SqlType.NVarchar);
+        var stateValue = Cast.CoerceToDeclared(state.Read(), SqlType.Int32);
+        var numberInt = numberValue.IsNull ? 0 : numberValue.AsInt32;
+        if (numberInt < 50000)
+            throw SimulatedSqlException.ThrowNumberOutOfRange(numberInt);
+        var stateInt = stateValue.IsNull ? 0 : stateValue.AsInt32;
+        if (stateInt < 0)
+            throw SimulatedSqlException.ThrowStateNegative(stateInt);
 
-        // SQL Server accepts NULL on any THROW arg (it converts to a
-        // run-time error of its own). Apps rarely hit this — surface a
-        // generic Msg-style error rather than modeling the exact path.
-        if (numberValue.IsNull || messageValue.IsNull || stateValue.IsNull)
-            throw SimulatedSqlException.ThrowRaised(0, "THROW: arguments cannot be NULL.", 1);
+        throw SimulatedSqlException.ThrowRaised(numberInt, messageValue.IsNull ? "" : messageValue.AsString, (byte)stateInt);
+    }
 
-        throw SimulatedSqlException.ThrowRaised(numberValue.AsInt32, messageValue.AsString, stateValue.AsByte);
+    /// <summary>
+    /// One value-form <c>THROW</c> argument: a variable's slot, or a literal's
+    /// value — a string for the message, an <c>int</c> (optionally negated)
+    /// for the number and state. Anything else is the syntax error real
+    /// raises; see <see cref="ParseThrowStatement"/>.
+    /// </summary>
+    private static ThrowArgument ParseThrowArgument(ParserContext context, bool isMessage)
+    {
+        var negative = !isMessage && context.Token is Operator { Character: '-' };
+        if (negative)
+            context.MoveNextRequired();
+
+        ThrowArgument argument;
+        switch (context.Token)
+        {
+            case AtPrefixedString variable when !negative:
+                argument = new(context.Batch.GetVariableSlot(variable.Value), default);
+                break;
+            case Literal { Value: { IsNull: false } text } when isMessage && SqlType.IsStringCategory(text.Type):
+                argument = new(null, text);
+                break;
+            case Numeric { Value.IsNull: false } literal when !isMessage:
+                // A literal that can't be an int — past its range or carrying a
+                // fraction — is Msg 1080, echoing the value as written.
+                if (literal.Value.Type == SqlType.BigInt)
+                    throw SimulatedSqlException.IntegerValueOutOfRange((negative ? -literal.Value.AsInt64 : literal.Value.AsInt64).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                if (literal.Value.Type is DecimalSqlType)
+                    throw SimulatedSqlException.IntegerValueOutOfRange(negative ? literal.Value.AsDecimal38.Negate().ToString() : literal.Value.AsDecimal38.ToString());
+                argument = new(null, SqlValue.FromInt32(negative ? -literal.Value.AsInt32 : literal.Value.AsInt32));
+                break;
+            case ReservedKeyword keyword:
+                throw SimulatedSqlException.SyntaxErrorNearKeyword(keyword);
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+
+        context.MoveNextOptional();
+        return argument;
+    }
+
+    /// <summary>
+    /// A parsed <c>THROW</c> argument: the variable read when the statement
+    /// runs, or the literal's value.
+    /// </summary>
+    private readonly struct ThrowArgument(VariableSlot? slot, SqlValue literal)
+    {
+        public readonly VariableSlot? Slot = slot;
+        public readonly SqlValue Literal = literal;
+
+        public SqlValue Read() => this.Slot is null ? this.Literal : this.Slot.Value;
     }
 }

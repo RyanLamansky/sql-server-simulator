@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 using System.Text;
 using SqlServerSimulator.Storage;
 
@@ -157,7 +158,9 @@ internal sealed class Difference : Expression
 /// fixed-width numeric-to-string conversion. Default length is 10;
 /// default decimals is 0 (rounds, not truncates). Negative or
 /// excessive numbers that don't fit in <c>length</c> render as a
-/// string of <c>*</c> characters. NULL input returns NULL. The projected
+/// string of <c>*</c> characters. NULL input returns NULL, as does a NULL
+/// or out-of-range <c>length</c> (below 1 or above 8000) and a negative
+/// <c>decimals</c>; a NULL <c>decimals</c> reads as 0. The projected
 /// result type is <c>varchar(length)</c> — the <c>length</c> argument
 /// (default 10) capped at 8000 and floored at 1 when it is a constant,
 /// else the <c>varchar(8000)</c> container. Probe-confirmed against SQL
@@ -170,6 +173,15 @@ internal sealed class Str : Expression
     private readonly Expression? lengthArg;
     private readonly Expression? decimalsArg;
 
+    /// <summary>
+    /// The projected result width: 10 with no <c>length</c> argument, the
+    /// value of a constant <c>length</c> — a negated literal included — later
+    /// clamped to 1..8000 by <see cref="StringScalars.SizedResultType"/>, or
+    /// 8000 for a non-constant length (matching real's <c>varchar(8000)</c>
+    /// container).
+    /// </summary>
+    private readonly int projectedLength;
+
     public Str(ParserContext context)
     {
         this.numArg = Parse(context);
@@ -181,44 +193,136 @@ internal sealed class Str : Expression
         }
         if (context.Token is not Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        this.projectedLength = ProjectedLength(this.lengthArg, context);
     }
 
     public override SqlValue Run(RuntimeContext runtime)
     {
         // Project the same bounded varchar type GetSqlType reports so the
         // value's declared width matches the result-set schema.
-        var resultType = (VarcharSqlType)StringScalars.SizedResultType(SqlType.Varchar, this.ProjectedLength(), runtime.Batch);
+        var resultType = (VarcharSqlType)StringScalars.SizedResultType(SqlType.Varchar, this.projectedLength, runtime.Batch);
         var v = this.numArg.Run(runtime);
         if (v.IsNull)
             return SqlValue.Null(resultType);
         var num = v.CoerceTo(SqlType.Float).AsDouble;
-        var length = this.lengthArg is null ? 10 : StringScalars.CoerceLengthArgument(this.lengthArg.Run(runtime));
-        var decimals = this.decimalsArg is null ? 0 : StringScalars.CoerceLengthArgument(this.decimalsArg.Run(runtime));
-        if (length < 1)
-            length = 1;
-        if (decimals < 0)
-            decimals = 0;
-        var formatted = Math.Round(num, decimals, MidpointRounding.AwayFromZero)
-            .ToString("F" + decimals.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
+        int length;
+        if (this.lengthArg is null)
+        {
+            length = 10;
+        }
+        else
+        {
+            var lengthValue = this.lengthArg.Run(runtime);
+            if (lengthValue.IsNull)
+                return SqlValue.Null(resultType);
+            length = StringScalars.CoerceLengthArgument(lengthValue);
+        }
+        var decimals = 0;
+        if (this.decimalsArg?.Run(runtime) is { IsNull: false } decimalsValue)
+            decimals = StringScalars.CoerceLengthArgument(decimalsValue);
+        if (length is < 1 or > 8000 || decimals < 0)
+            return SqlValue.Null(resultType);
+
+        var formatted = Format(num, length, Math.Min(decimals, 16));
         return formatted.Length > length
             ? SqlValue.FromVarchar(resultType, new string('*', length))
             : SqlValue.FromVarchar(resultType, formatted.PadLeft(length));
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        StringScalars.SizedResultType(SqlType.Varchar, this.ProjectedLength(), batch);
+    /// <summary>
+    /// Renders <paramref name="num"/> the way real's STR does, probed
+    /// 2026-09-23 against SQL Server 2025.
+    /// The decimals shrink to whatever room the <em>unrounded</em> integer
+    /// part and sign leave, so <c>STR(99.99, 4, 1)</c> rounds to
+    /// <c>100.0</c> and overflows to <c>****</c> rather than falling back to
+    /// <c>100</c>.
+    /// The double's exact value is truncated to 17 significant digits and
+    /// only then rounded half away from zero at the decimals, zero-filling
+    /// past the 17th digit: <c>STR(2.675, 5, 2)</c> is <c>2.67</c>,
+    /// <c>STR(2.5, 1)</c> is <c>3</c>, and <c>1234567890123456.75</c> keeps
+    /// <c>.7</c> at five decimals.
+    /// </summary>
+    private static string Format(double num, int length, int decimals)
+    {
+        // A negative zero keeps its sign (`STR(-0e0, 4)` is `  -0`).
+        var negative = double.IsNegative(num);
+        var (digits, exponent) = LeadingDigits(Math.Abs(num));
+        var integerDigits = Math.Max(exponent + 1, 1);
+        decimals = Math.Clamp(length - integerDigits - (negative ? 1 : 0) - 1, 0, decimals);
+
+        // scaled is the value times 10^decimals, as an integer.
+        var kept = exponent + 1 + decimals;
+        BigInteger scaled;
+        if (kept >= 17)
+        {
+            scaled = digits * BigInteger.Pow(10, kept - 17);
+        }
+        else if (kept < 0)
+        {
+            scaled = BigInteger.Zero;
+        }
+        else
+        {
+            var divisor = BigInteger.Pow(10, 17 - kept);
+            scaled = BigInteger.DivRem(digits, divisor, out var dropped);
+            if (dropped * 2 >= divisor)
+                scaled += 1;
+        }
+
+        var text = scaled.ToString(CultureInfo.InvariantCulture).PadLeft(decimals + 1, '0');
+        var sign = negative ? "-" : "";
+        return decimals == 0
+            ? sign + text
+            : string.Concat(sign, text.AsSpan(0, text.Length - decimals), ".", text.AsSpan(text.Length - decimals));
+    }
 
     /// <summary>
-    /// The projected result width: 10 with no <c>length</c> argument, the
-    /// constant integer value of a literal <c>length</c> (later clamped to
-    /// 1..8000 by <see cref="StringScalars.SizedResultType"/>), or 8000 for a
-    /// non-constant length (matching real's <c>varchar(8000)</c> container).
+    /// The first 17 significant digits of <paramref name="magnitude"/>'s exact
+    /// value, truncated, as an integer in <c>[10^16, 10^17)</c>, with the
+    /// decimal exponent of the leading digit; zero is <c>(0, 0)</c>.
     /// </summary>
-    private int ProjectedLength()
+    private static (BigInteger Digits, int Exponent) LeadingDigits(double magnitude)
     {
-        if (this.lengthArg is null)
+        if (magnitude == 0 || !double.IsFinite(magnitude))
+            return (BigInteger.Zero, 0);
+        var bits = BitConverter.DoubleToInt64Bits(magnitude);
+        var biasedExponent = (int)(bits >> 52);
+        var mantissa = bits & 0xF_FFFF_FFFF_FFFF;
+        if (biasedExponent == 0)
+            biasedExponent = 1;
+        else
+            mantissa |= 1L << 52;
+        // magnitude = numerator / denominator exactly.
+        var binaryExponent = biasedExponent - 1075;
+        var numerator = binaryExponent >= 0 ? (BigInteger)mantissa << binaryExponent : mantissa;
+        var denominator = binaryExponent >= 0 ? BigInteger.One : BigInteger.One << -binaryExponent;
+
+        var lower = BigInteger.Pow(10, 16);
+        var upper = lower * 10;
+        var exponent = (int)Math.Floor(Math.Log10(magnitude));
+        while (true)
+        {
+            var shift = 16 - exponent;
+            var digits = shift >= 0
+                ? numerator * BigInteger.Pow(10, shift) / denominator
+                : numerator / (denominator * BigInteger.Pow(10, -shift));
+            if (digits >= upper)
+                exponent++;
+            else if (digits < lower)
+                exponent--;
+            else
+                return (digits, exponent);
+        }
+    }
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        StringScalars.SizedResultType(SqlType.Varchar, this.projectedLength, batch);
+
+    private static int ProjectedLength(Expression? lengthArg, ParserContext context)
+    {
+        if (lengthArg is null)
             return 10;
-        if (this.lengthArg is Value { Constant: { IsNull: false } constant }
+        if (ConstantFolding.TryFold(lengthArg, context, out var constant) && !constant.IsNull
             && (SqlType.IsIntegerCategory(constant.Type) || constant.Type is DecimalSqlType || SqlType.IsMoneyCategory(constant.Type)))
         {
             try

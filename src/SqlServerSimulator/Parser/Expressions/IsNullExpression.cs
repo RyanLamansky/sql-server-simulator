@@ -12,7 +12,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// SQL Server 2025: <c>ISNULL(varchar(5), 'longerstring')</c> truncates the
 /// fallback to 5 characters; <c>ISNULL(int_null, '42')</c> parses the string
 /// fallback through int's CAST path; <c>ISNULL(int_null, 'abc')</c> raises
-/// Msg 245 at runtime when the parse fails. Wrong arity
+/// Msg 245 at runtime when the parse fails, and an out-of-range fallback
+/// raises CAST's own Msg 220. Wrong arity
 /// (1 or 3+ arguments) raises Msg 174.
 /// </summary>
 internal sealed class IsNullExpression : Expression
@@ -39,7 +40,10 @@ internal sealed class IsNullExpression : Expression
         if (!primary.IsNull)
             return primary;
         var fallback = this.replacement.Run(runtime);
-        return this.cachedResultType is { } target && fallback.Type != target ? fallback.CoerceTo(target) : fallback;
+        // A FROM-less SELECT runs its projection before typing it, so the
+        // cached type may not be set yet; the check's own NULL carries it.
+        var target = this.cachedResultType ?? (IsUntypedNullLiteral(this.check) ? null : primary.Type);
+        return target is not null && fallback.Type != target ? Cast.CoerceToDeclared(fallback, target) : fallback;
     }
 
     // ISNULL fixes the result to the FIRST argument's type — but an untyped

@@ -361,6 +361,15 @@ partial class SimulatedSqlException
         new($"Adding a value to a '{typeName}' column caused an overflow.", 517, 16, 3);
 
     /// <summary>
+    /// Mimics SQL Server error 517 as <c>EOMONTH</c> raises it when its month
+    /// offset carries the date out of range: state 1 rather than
+    /// <c>DATEADD</c>'s 3, and always naming <c>date</c> whatever the input's
+    /// type (probe-confirmed 2026-09-23 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException EOMonthOverflow() =>
+        new("Adding a value to a 'date' column caused an overflow.", 517, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 535: <c>DATEDIFF</c> / <c>DATEDIFF_BIG</c>
     /// produced a value outside the result type's range (int for DATEDIFF,
     /// bigint for DATEDIFF_BIG). The function name appears twice in the

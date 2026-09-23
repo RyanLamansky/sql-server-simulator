@@ -346,6 +346,31 @@ internal sealed class Cast : Expression
     private static bool IsAnsiOrUnicodeString(SqlType type) =>
         IsAnsiString(type) || type is NCharSqlType or NVarcharSqlType;
 
+    /// <summary>
+    /// Converts <paramref name="value"/> to exactly <paramref name="targetType"/>
+    /// the way <c>CAST</c> to that type would, cutting a string or binary to
+    /// its declared length — the conversion an implicitly typed slot (an
+    /// <c>ISNULL</c> replacement, a <c>LAG</c> default) applies.
+    /// </summary>
+    internal static SqlValue CoerceToDeclared(SqlValue value, SqlType targetType) =>
+        ApplyCoercion(value, targetType, DeclaredLength(targetType));
+
+    /// <summary>
+    /// The declared length a value converted to <paramref name="type"/> is cut
+    /// to, as a <c>CAST</c> to that type would be given it — null where the
+    /// type carries none (MAX, unspecified, or not a string / binary type).
+    /// </summary>
+    private static int? DeclaredLength(SqlType type) => type switch
+    {
+        VarcharSqlType { length: > 0 } t => t.length,
+        NVarcharSqlType { length: > 0 } t => t.length,
+        VarbinarySqlType { length: > 0 } t => t.length,
+        CharSqlType { length: > 0 } t => t.length,
+        NCharSqlType { length: > 0 } t => t.length,
+        BinarySqlType { length: > 0 } t => t.length,
+        _ => null,
+    };
+
     internal static SqlValue ApplyCoercion(SqlValue value, SqlType targetType, int? targetMaxLength, Collation? budgetCollation = null)
     {
         if (IsRejectedLegacyLobConversion(value.Type, targetType))

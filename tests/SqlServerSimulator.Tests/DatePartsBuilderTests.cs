@@ -183,6 +183,29 @@ public sealed class DatePartsBuilderTests
         AreEqual(DateTime.Parse(expectedIso), ExecuteScalar($"select {expression}"));
 
     [TestMethod]
+    [DataRow("eomonth('9999-11-30', 1)", "9999-12-31")]
+    [DataRow("eomonth('0001-02-15', -1)", "0001-01-31")]
+    public void EOMonth_OffsetToTheRangeEdge_Answers(string expression, string expectedIso) =>
+        AreEqual(DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture), ExecuteScalar($"select {expression}"));
+
+    /// <summary>
+    /// An offset past either end of the range is Msg 517 at state 1, naming
+    /// <c>date</c> whatever the start date's own type.
+    /// </summary>
+    [TestMethod]
+    [DataRow("eomonth('9999-12-01', 1)")]
+    [DataRow("eomonth('0001-01-15', -1)")]
+    [DataRow("eomonth(cast('9999-12-01' as datetime2), 1)")]
+    [DataRow("eomonth('2024-01-31', 2147483647)")]
+    [DataRow("eomonth('2024-01-31', -2147483648)")]
+    public void EOMonth_OffsetPastTheRange_RaisesMsg517(string expression)
+    {
+        var ex = new Simulation().AssertSqlError($"select {expression}", 517);
+        AreEqual("Adding a value to a 'date' column caused an overflow.", ex.Message);
+        AreEqual(1, ex.State);
+    }
+
+    [TestMethod]
     public void EOMonth_NullStartDate_PropagatesNull() =>
         IsInstanceOfType<DBNull>(ExecuteScalar("select eomonth(null)"));
 

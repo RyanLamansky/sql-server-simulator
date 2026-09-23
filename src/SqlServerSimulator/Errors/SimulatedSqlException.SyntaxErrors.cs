@@ -565,6 +565,23 @@ partial class SimulatedSqlException
         new(message, number, 16, state) { TerminatesBatch = true };
 
     /// <summary>
+    /// Mimics SQL Server error 35100: a <c>THROW</c> number below 50000,
+    /// including the 0 a NULL variable reads as (probe-confirmed 2026-09-23
+    /// against SQL Server 2025). Class 16, State 10, and it ends the batch as
+    /// the THROW it replaces would have.
+    /// </summary>
+    internal static SimulatedSqlException ThrowNumberOutOfRange(int number) =>
+        new($"Error number {number} in the THROW statement is outside the valid range. Specify an error number in the valid range of 50000 to 2147483647.", 35100, 16, 10) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 2756: a negative <c>THROW</c> state, literal or
+    /// variable (probe-confirmed 2026-09-23 against SQL Server 2025). Class 16,
+    /// State 1; it ends the batch.
+    /// </summary>
+    internal static SimulatedSqlException ThrowStateNegative(int state) =>
+        new($"Invalid value {state} for state. State value must not be less than 0.", 2756, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
     /// The no-argument <c>THROW;</c> re-raise form, reconstructed from the
     /// enclosing CATCH's in-flight error. Unlike the value form, real SQL
     /// Server preserves the <em>original</em> error's line and procedure

@@ -104,6 +104,7 @@ internal sealed partial class Selection
         var leftReportsNumeric = left.ColumnReportsNumeric;
         var rightReportsNumeric = right.ColumnReportsNumeric;
         int[]? combinedDigits = null;
+        bool[]? combinedUntypedNulls = null;
         bool[]? combinedReportsNumeric = null;
         for (var i = 0; i < combinedSchema.Length; i++)
         {
@@ -111,6 +112,25 @@ internal sealed partial class Selection
             var rightDigit = rightDigits is null ? 0 : rightDigits[i];
             var leftType = left.Schema[i];
             var rightType = right.Schema[i];
+            // An untyped NULL branch takes its partner's type — and its
+            // literal digit count, so a later decimal branch still sizes it —
+            // rather than imposing its placeholder int.
+            var leftNull = left.ColumnIsUntypedNull is { } leftNulls && leftNulls[i];
+            var rightNull = right.ColumnIsUntypedNull is { } rightNulls && rightNulls[i];
+            if (leftNull && !rightNull)
+            {
+                leftType = rightType;
+                leftDigit = rightDigit;
+            }
+            else if (rightNull && !leftNull)
+            {
+                rightType = leftType;
+                rightDigit = leftDigit;
+            }
+            else if (leftNull)
+            {
+                (combinedUntypedNulls ??= new bool[combinedSchema.Length])[i] = true;
+            }
             var effectiveLeft = leftDigit > 0 && rightType.Category == SqlTypeCategory.Decimal ? SqlType.GetDecimal(leftDigit, 0) : leftType;
             var effectiveRight = rightDigit > 0 && leftType.Category == SqlTypeCategory.Decimal ? SqlType.GetDecimal(rightDigit, 0) : rightType;
             // Cross-collation branches must resolve to one output collation.
@@ -216,6 +236,7 @@ internal sealed partial class Selection
             AutoColumnSource = left.AutoSourceNames is null ? null : NoSourceColumnBinding(combinedSchema.Length),
             AutoColumnOrdinal = left.AutoSourceNames is null ? null : NoSourceColumnBinding(combinedSchema.Length),
             ColumnIntegerLiteralDigits = combinedDigits,
+            ColumnIsUntypedNull = combinedUntypedNulls,
             ColumnReportsNumeric = combinedReportsNumeric,
         };
     }
@@ -249,6 +270,22 @@ internal sealed partial class Selection
                 (digits ??= new int[expressions.Count])[i] = count;
         }
         return digits;
+    }
+
+    /// <summary>
+    /// Per-column flags marking the projection columns that are the bare
+    /// untyped <c>NULL</c>, for <see cref="ColumnIsUntypedNull"/>; null when
+    /// none is.
+    /// </summary>
+    internal static bool[]? UntypedNullsOf(List<Expression> expressions)
+    {
+        bool[]? flags = null;
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            if (Expression.IsUntypedNullLiteral(expressions[i]))
+                (flags ??= new bool[expressions.Count])[i] = true;
+        }
+        return flags;
     }
 
     /// <summary>

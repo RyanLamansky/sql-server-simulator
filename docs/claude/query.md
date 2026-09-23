@@ -20,6 +20,7 @@
   `<op> ANY` cannot be negated directly (`NOT <op> ANY` isn't grammar — apps must flip the operator: `NOT (x > ALL y)` ≡ `x <= ANY y`).
 - Set ops (UNION / UNION ALL / INTERSECT / EXCEPT): standard precedence (INTERSECT > UNION/EXCEPT).
   **NULLs are equal during set-op dedup/matching** (opposite of `=`'s tri-state).
+  An untyped `NULL` column takes its partner branch's type rather than its placeholder `int` (`SELECT NULL UNION ALL SELECT 'a'` is `varchar`), and stays untyped through a chain of them until a typed branch arrives (`Selection.ColumnIsUntypedNull`, probed 2026-09-23).
   Per-branch ORDER BY in non-final branch → Msg 156.
   A branch may be **parenthesized**, and the parentheses may wrap a whole nested chain rather than a single SELECT — `SELECT … UNION (SELECT … UNION SELECT …)` and `… EXCEPT (… INTERSECT …)` are what an ORM emits when it combines an already-combined queryset (`ParseSetOpBranch`).
   Without it the opening paren read as a scalar subquery, so the branch looked like a one-column select list and the chain failed the equal-expression-count check.
@@ -30,9 +31,8 @@
   Unbound `<qualifier>.*` → Msg 4104.
 - **Table-value-constructor derived tables** (`Selection.ParseValuesDerivedTable`): `(VALUES (row), (row), …) alias(col, …)` as a FROM source, a JOIN source, or a `CROSS` / `OUTER APPLY` source.
   Rides the same deferred `FromSource.LateralPlan` seam as a derived-table SELECT (`Selection.ForValuesConstructor`), so a VALUES source **under APPLY correlates to the outer row** — the SSMS server-properties shape `… CROSS APPLY (VALUES (1001, 'host_platform', 0, host_platform), …) t(id, [name], internal_value, [value])`, whose rows mix literals with outer-column references.
-  Per-column result types promote across every row's cell via `SqlType.Promote` (set-op / CASE joint-envelope rule): int + decimal → decimal, varchar + N'…' → nvarchar; the promoted type coerces each cell at runtime (so `(1),('abc')` promotes to int, then Msg 245 on the `'abc'` row).
+  Per-column result types unify across every row's cell the way a `UNION ALL` would (`SqlType.PromoteBranches`): an untyped `NULL` cell yields to its typed siblings (an all-`NULL` column is `int`), an integer literal sizes against a decimal one (`(1), (2.5)` → `numeric(2, 1)`), and varchar + N'…' → nvarchar; the unified type coerces each cell at runtime (so `(1),('abc')` promotes to int, then Msg 245 on the `'abc'` row).
   Both the **alias and its column-alias list are required**: no alias → Msg 102 near `)`; no column list → **Msg 8155**; more row columns than list names → **Msg 8158**, fewer → **Msg 8159** (shared factory with CTE / view rename lists); rows of differing arity → **Msg 10709**; empty row `()` → Msg 102.
-  Untyped `NULL` cells carry the simulator's default `int` type (`SELECT NULL` quirk), so an all-`NULL` column is `int` (matches real) but a `NULL` + string column stays `int` and the string fails to coerce (diverges from real's untyped-NULL adoption — the bare-NULL-is-int limitation, not VALUES-specific).
 - **FROM-less `SELECT` with a trailing `ORDER BY`**: `SELECT 2 AS X, 1 AS Y ORDER BY X` is legal (the one synthesized row makes the sort a no-op, but the clause must parse rather than raise Msg 156).
   Also legal as the final `ORDER BY` of a set-op chain whose branches are FROM-less (`SELECT 2 AS X UNION ALL SELECT 1 ORDER BY X DESC` → 2, 1), applied by `ApplyTopLevelOrderBy`.
   The `OFFSET`/`FETCH` tail attaches too.
@@ -668,7 +668,7 @@ Probe-confirmed: `GROUPING(a+1)` / `GROUPING_ID(a+1, b)` with matching GROUP BY 
 
 `STRING_AGG(expr, sep) WITHIN GROUP (ORDER BY ...)` reorders concatenation per group (EF emits this from `GroupBy(...).Select(g => string.Join(sep, g.OrderBy(...)))`).
 NULL operand rows skip both ORDER BY input and output.
-The result type is the operand's string type.
+The result widens to the family maximum — `varchar(8000)` / `nvarchar(4000)`, MAX staying MAX — and a numeric or date/time operand converts to `nvarchar(4000)` the way a default-style `CAST` would; every other type is Msg 8116 (`StringAggAggregator.ResultType`, probed 2026-09-23).
 **A bounded (non-MAX) operand whose concatenation exceeds 8000 bytes raises Msg 9829** (`"STRING_AGG aggregation result exceeded the limit of 8000 bytes. Use LOB types to avoid result truncation."`, probe-confirmed against SQL Server 2025) rather than truncating — the byte count uses UTF-16 width for `nvarchar` and the result collation's ANSI code page for `varchar`; a `varchar(max)` / `nvarchar(max)` operand streams unbounded and skips the check (and, retyped through the operand, rides PLP over the TDS wire).
 Non-`STRING_AGG` aggregate with `WITHIN GROUP` → **Msg 10757**; ORDER BY ordinal in this context → **Msg 5308** (distinct from projection-level ORDER BY which accepts ordinals); `WITHIN` is contextual (not reserved).
 Cross-aggregate Msg 8711 isn't modeled (EF doesn't emit).

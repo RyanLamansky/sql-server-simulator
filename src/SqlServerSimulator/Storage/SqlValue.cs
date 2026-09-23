@@ -408,15 +408,32 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// Non-NULL SQL <c>datetime2(N)</c> value. The supplied <paramref name="value"/>
     /// is rounded to the precision of <paramref name="type"/>: SQL Server's
     /// CAST/parameter-binding semantics round half-away-from-zero when more
-    /// fractional precision is supplied than the destination can hold.
+    /// fractional precision is supplied than the destination can hold — except
+    /// where rounding would pass <c>9999-12-31 23:59:59.9999999</c>, which
+    /// truncates instead (probe-confirmed 2026-09-23 against SQL Server 2025:
+    /// that value as <c>datetime2(0)</c> is <c>23:59:59</c>).
     /// </summary>
     public static SqlValue FromDateTime2(SqlType type, DateTime value)
     {
         if (type is not DateTime2SqlType dt2)
             throw new ArgumentException($"{type} is not a datetime2 type.", nameof(type));
-        var unit = dt2.ticksPerUnit;
-        var rounded = unit == 1 ? value.Ticks : (value.Ticks + (unit / 2)) / unit * unit;
-        return new(type, rounded, null, isNull: false);
+        return new(type, RoundBelowMax(value.Ticks, dt2.ticksPerUnit, 0), null, isNull: false);
+    }
+
+    /// <summary>
+    /// Rounds <paramref name="ticks"/> half-up to a multiple of
+    /// <paramref name="unit"/>, truncating instead when the rounded instant —
+    /// shifted back by <paramref name="offsetTicks"/>, for a
+    /// <c>datetimeoffset</c>'s UTC side — would pass the last representable
+    /// tick.
+    /// </summary>
+    private static long RoundBelowMax(long ticks, long unit, long offsetTicks)
+    {
+        if (unit == 1)
+            return ticks;
+        var rounded = (ticks + (unit / 2)) / unit * unit;
+        var max = DateTime.MaxValue.Ticks;
+        return rounded > max || rounded - offsetTicks > max ? ticks / unit * unit : rounded;
     }
 
     /// <summary>
@@ -465,9 +482,10 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             // Round the local-instant ticks (DateTimeOffset.Ticks) so that the
             // wall-clock representation rounds half-away-from-zero, matching
             // SQL Server. Reconstructing with the same offset preserves the
-            // user-visible time-zone label.
-            var rounded = (value.Ticks + (unit / 2)) / unit * unit;
-            value = new DateTimeOffset(rounded, value.Offset);
+            // user-visible time-zone label. Rounding that would carry either
+            // the local or the UTC instant past the maximum truncates instead
+            // (probe-confirmed 2026-09-23).
+            value = new DateTimeOffset(RoundBelowMax(value.Ticks, unit, value.Offset.Ticks), value.Offset);
         }
         return new(type, value.UtcTicks, value, isNull: false);
     }

@@ -97,6 +97,30 @@ public sealed class SetOperationTests
         CollectionAssert.AreEquivalent(new[] { 1m, 2.5m }, values);
     }
 
+    /// <summary>
+    /// An untyped <c>NULL</c> branch, aliased or not and on either side, takes
+    /// its partner's type rather than imposing the placeholder <c>int</c> — and
+    /// a chain of them stays untyped until a typed branch arrives.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 'a' x union all select null", "varchar")]
+    [DataRow("select null x union all select 'a'", "varchar")]
+    [DataRow("select (null) x union all select N'z'", "nvarchar")]
+    [DataRow("select null x union all select null union all select 'abc'", "varchar")]
+    [DataRow("select null x union select cast('2024-01-01' as date) union select null", "date")]
+    [DataRow("select 'a' x except select null", "varchar")]
+    [DataRow("select null x union all select 1 union all select 2.5", "decimal")]
+    [DataRow("select null x union all select null", "int")]
+    public void UntypedNullBranch_TakesThePartnersType(string sql, string typeName)
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using var reader = connection.CreateCommand(sql).ExecuteReader();
+        AreEqual(typeName, reader.GetDataTypeName(0));
+        while (reader.Read())
+        {
+        }
+    }
+
     [TestMethod]
     public void MismatchedColumnCount_RaisesMsg205()
         => new Simulation().AssertSqlError("select 1, 2 union select 3", 205,

@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -277,6 +278,37 @@ public sealed class CastTests
     {
         var dt = IsInstanceOfType<DateTime>(ExecuteScalar("select cast(cast('2026-05-04 13:45:30.5' as datetime2(7)) as datetime2(0))"));
         AreEqual(new DateTime(2026, 5, 4, 13, 45, 31), dt);
+    }
+
+    /// <summary>
+    /// Rounding that would carry past <c>9999-12-31 23:59:59.9999999</c>
+    /// truncates instead, whatever the source; below the maximum the same
+    /// fraction still rounds up across midnight.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast('9999-12-31 23:59:59.9999999' as datetime2(0))", "9999-12-31T23:59:59")]
+    [DataRow("cast('9999-12-31 23:59:59.9999999' as datetime2(3))", "9999-12-31T23:59:59.999")]
+    [DataRow("cast('9999-12-31 23:59:59.5' as datetime2(0))", "9999-12-31T23:59:59")]
+    [DataRow("cast(cast('9999-12-31 23:59:59.9999999' as datetime2) as datetime2(1))", "9999-12-31T23:59:59.9")]
+    [DataRow("convert(datetime2(0), '9999-12-31T23:59:59.9999999')", "9999-12-31T23:59:59")]
+    [DataRow("cast('2024-01-01 23:59:59.9999999' as datetime2(0))", "2024-01-02T00:00:00")]
+    public void Cast_DateTime2_RoundingPastTheMaximumTruncates(string expression, string expectedIso) =>
+        AreEqual(DateTime.Parse(expectedIso, CultureInfo.InvariantCulture), ExecuteScalar($"select {expression}"));
+
+    /// <summary>
+    /// A <c>datetimeoffset</c> truncates when rounding would carry either its
+    /// local or its UTC instant past the maximum.
+    /// </summary>
+    [TestMethod]
+    [DataRow("9999-12-31 23:59:59.9999999 +00:00", "9999-12-31T23:59:59+00:00")]
+    [DataRow("9999-12-31 18:59:59.9999999 -05:00", "9999-12-31T18:59:59-05:00")]
+    [DataRow("9999-12-31 23:59:59.9999999 +05:00", "9999-12-31T23:59:59+05:00")]
+    public void Cast_DateTimeOffset_RoundingPastTheMaximumTruncates(string input, string expectedIso)
+    {
+        var actual = IsInstanceOfType<DateTimeOffset>(ExecuteScalar($"select cast('{input}' as datetimeoffset(0))"));
+        var expected = DateTimeOffset.Parse(expectedIso, CultureInfo.InvariantCulture);
+        AreEqual(expected.DateTime, actual.DateTime);
+        AreEqual(expected.Offset, actual.Offset);
     }
 
     [TestMethod]

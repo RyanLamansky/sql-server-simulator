@@ -353,22 +353,6 @@ internal sealed partial class Selection
         rowCount == 0 ? SqlValue.Null(SqlType.Int32) : arg.Run(runtimeAt(0));
 
     /// <summary>
-    /// The declared length a value converted to <paramref name="type"/> is cut
-    /// to, as a <c>CAST</c> to that type would be given it — null where the
-    /// type carries none (MAX, unspecified, or not a string / binary type).
-    /// </summary>
-    private static int? DeclaredLength(SqlType type) => type switch
-    {
-        VarcharSqlType { length: > 0 } t => t.length,
-        NVarcharSqlType { length: > 0 } t => t.length,
-        VarbinarySqlType { length: > 0 } t => t.length,
-        CharSqlType { length: > 0 } t => t.length,
-        NCharSqlType { length: > 0 } t => t.length,
-        BinarySqlType { length: > 0 } t => t.length,
-        _ => null,
-    };
-
-    /// <summary>
     /// Positional row context for the window engine: activates the buffered
     /// row at <paramref name="index"/> and returns the
     /// <see cref="RuntimeContext"/> that expressions evaluate against.
@@ -688,8 +672,7 @@ internal sealed partial class Selection
                                     }
                                     else
                                     {
-                                        results[indices[i]] = Cast.ApplyCoercion(
-                                            win.DefaultArg.Run(runtimeAt(indices[i])), operandType, DeclaredLength(operandType));
+                                        results[indices[i]] = Cast.CoerceToDeclared(win.DefaultArg.Run(runtimeAt(indices[i])), operandType);
                                     }
                                 }
                                 else

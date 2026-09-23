@@ -236,17 +236,16 @@ A hand-written corpus of 548 deliberately odd statements, run through the simula
 The harness is local-only and not checked in; its three connection-killing findings shipped, and the accept-what-real-rejects half lives in the [over-permissive register](#over-permissive-register).
 Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized set-op branches, `SET DATEFORMAT` carrying no effect, Msg 245 dooming the transaction, and the parse-phase batch divergence.
 
-**Internal failures** — each surfaces as Msg 50000 `SqlServerSimulator: unhandled …` or `… isn't implemented`:
+**Type-pair legality** — a 27-type pairwise matrix (`CASE` result type, `=`, `+` and `-` over typed NULLs, each statement its own batch) differs from real on most pairs (probed 2026-09-23):
 
-- `STR(1, 0)` and `STR(0.1, 20, 17)` hit .NET's rounding-digits range; real answers NULL and `'  0.1000000000000000'`.
-- `0x61 = 'a'` and `datetime ± decimal` (`CAST('2024-01-01' AS datetime) - 1.5`) fall through cross-category promotion; real answers true and `2023-12-30 12:00`.
-- `ISNULL(CAST(NULL AS tinyint), 300)` throws a raw `OverflowException` where real raises Msg 220.
-- `SELECT 1 AS select` follows the right Msg 156 with a second internal error.
-- `STRING_AGG(<int>, '-')` throws where real converts the operand to `nvarchar`.
-- `EOMONTH('9999-12-01', 1)` throws where real raises Msg 517 naming `date`.
-- `CAST('9999-12-31 23:59:59.9999999' AS datetime2(0))` throws where real truncates to the maximum rather than rounding past it.
-- `THROW 50000, 'x', 256` overflows where real accepts it and reports state 0.
-- `CAST('<a>' AS xml)` raises nothing, and the client's `GetValue` throws `XmlException`; real raises Msg 9400.
+- Promotion has no arm for most cross-category pairs, which fail internally (Msg 50000 `Cross-category type promotion isn't implemented`) — binary against string, `decimal`, `money` or legacy date/time, legacy `datetime` / `smalldatetime` against `decimal` / `float` / `money`, `uniqueidentifier` against anything but a string, and every pair involving `xml`, `sql_variant`, the CLR types, the legacy LOBs or `timestamp`.
+  Real either promotes (`0x61 = 'a'` is true, `CAST('2024-01-01' AS datetime) - 1.5` is `2023-12-30 12:00`) or raises Msg 206 / 402 / 403 / 8117.
+- A comparison isn't type-checked while compiling, so `CAST(NULL AS int) = CAST(NULL AS date)` answers here where real raises Msg 206 — likewise `=` on `geography` (Msg 403) and on `text` / `xml` pairs (Msg 402).
+- The arithmetic operators accept pairs real refuses, and where both raise, Msg 206 names the operands in a different order.
+
+**`xml` well-formedness** — a string converted to untyped `xml` isn't parsed at all, so `CAST('<a>' AS xml)` answers here and the client's `GetValue` then throws `XmlException`, and `DECLARE @x xml = '<a><b></a>'` succeeds.
+Real raises its XML-parsing family with a line and character position (probed 2026-09-23): Msg 9400 unexpected end of input, Msg 9436 mismatched end tag, Msg 9413 unquoted attribute, Msg 9448 undeclared entity, Msg 9455 illegal name character, Msg 9423 / Msg 9424 bad CDATA / comment, Msg 9438 misplaced XML declaration, Msg 9420 illegal character.
+Real accepts a fragment (`<a/><b/>`) and bare text, so the check is well-formedness rather than a single root element.
 
 **Message stream**:
 
@@ -284,7 +283,10 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 - `CEILING(-0.5e0)` renders `-0`; real `0`.
 - `RAND(seed)` follows a different sequence (`RAND(1)` is 0.7135919932129235 on real, and `RAND(-1)` equals `RAND(1)`).
 - `GROUP BY ()` over zero input rows answers one row here and none on real.
-- `STRING_AGG(x, ',') WITHIN GROUP (ORDER BY x DESC)` over `varchar` raises Msg 245 converting to `int`.
+- `STRING_AGG`'s separator isn't checked: real requires a literal or variable (Msg 8733), a string (Msg 8116 on argument 2), and no `nvarchar` under a `varchar` operand (Msg 8116 naming `nvarchar`).
+- `CAST(<datetime2> AS datetime)` at the top of the range raises Msg 242 here; real clamps `9999-12-31 23:59:59.9999999` to `.997`, raising Msg 242 only from a string or `datetimeoffset` source.
+  The simulator's Msg 242 also names `varchar` as the source where real names the actual type (`datetime2` → `smalldatetime`).
+- A `datetimeoffset` string whose UTC instant falls past the range (`'9999-12-31 23:59:59 -05:00'`) raises Msg 241 here; real raises Msg 8114 state 31.
 - `SELECT a + 1 … GROUP BY ROLLUP(a + 1)` raises Msg 207 — a grouped-away *expression* isn't NULLed in the rolled-up row, since the grouped-key resolver matches bare references only.
 - A non-persisted computed column that errors (`b AS a / 0`) fails even `SELECT a`; real fails only when the column is projected.
 - `DATEADD(day, n, '<string>')` returns `datetime2`; real `datetime`, which also names the type in its Msg 517.
@@ -313,7 +315,7 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 - `sp_refreshview` (Msg 2812 here) — a drifted `SELECT *` view keeps its CREATE-time names until altered.
 - `RAISERROR` `%*.*s` width / precision (Msg 2787 here); state −1 should report 1 and 300 should report 44 (real reduces modulo 256).
 - `RAISERROR … WITH LOG` as sysadmin (Msg 2778 raised here).
-- CAST sources: `''` → `money` 0 and `date` 1900-01-01; `'12:00'` → `date`; `'1e2'` / `'1d2'` → `float`; month names (`'Jan 5 2024'`, `'5 January 2024'`, `'January 2024'`); `AM` / `PM` suffixes, including `'13:00 PM'`; two-digit years (`'01/01/49'` → 2049); `datetime` → `float` / `int` / `decimal`; `decimal` → `varbinary`.
+- CAST sources: a space-separated date-and-time string to `date` or `time` (`CAST('2024-12-31 23:59:59' AS date)`, only the `T` form parses here); more than seven fractional-second digits (real rounds at the seventh); `''` → `money` 0 and `date` 1900-01-01; `'12:00'` → `date`; `'1e2'` / `'1d2'` → `float`; month names (`'Jan 5 2024'`, `'5 January 2024'`, `'January 2024'`); `AM` / `PM` suffixes, including `'13:00 PM'`; two-digit years (`'01/01/49'` → 2049); `datetime` → `float` / `int` / `decimal`; `decimal` → `varbinary`.
 
 **Same error, different number, state or class**:
 `TRANSLATE` length mismatch 9828 (here 9819); `NTILE(0)` 4116 class 15 (here 9819); `ROW_NUMBER() OVER ()` 4112 (here 102); `decimal(39, 0)` 2717 (here 1001); `decimal(2, 3)` 192 (here 1002); `float(54)` accepted on real (here 1001); `TOP (<NULL variable>)` 1014 (here 1060); `TOP '1'` 102 (here 1060); `EXEC p @b = 1` 8145 (here 201); a string datetime out of range (`'2024'`, hour 25) 242 (here 241); `xml = xml` 305 (here 402); `$action` in an INSERT's OUTPUT 207 (here 4104); a bare `VALUES (1)` statement 156 (here 102); `DELETE … ORDER BY` 156 (here 102); `@t.a` 137 class 16 state 1 (here class 15 state 2); states differing on 506, 235, 9810, 9812, 8148, 2714 for a temp table, and 195.
@@ -394,7 +396,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
   a select alias used inside an ORDER BY *expression* (`ORDER BY x + 0`, Msg 207 — a bare alias is fine);
   `LAG` / `LEAD` with a negative offset (Msg 8730);
   UNPIVOT over columns of differing types (Msg 8167);
-  `THROW 49999, …` (Msg 35100);
   one column assigned twice in an UPDATE's SET list (Msg 264);
   more than 1000 rows in one `INSERT … VALUES` (Msg 10738);
   `TRUNCATE TABLE` on a table a foreign key references (Msg 4712);

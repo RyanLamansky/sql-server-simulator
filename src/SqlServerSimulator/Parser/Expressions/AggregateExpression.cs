@@ -292,7 +292,7 @@ internal sealed class AggregateExpression : Expression
     {
         var operandType = StringScalars.BindArgument(this.Operand!, batch, resolveColumnType, "string_agg");
         _ = StringScalars.BindArgument(this.Separator!, batch, resolveColumnType, "string_agg", argumentIndex: 2);
-        return operandType;
+        return Aggregators.StringAggAggregator.ResultType(operandType, batch);
     }
 
     // SUM / AVG / MIN / MAX preserve the operand's decimal-vs-numeric name; the other

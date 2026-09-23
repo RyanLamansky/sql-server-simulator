@@ -52,7 +52,10 @@ internal sealed class EOMonth : Expression
                 offset = ScalarArguments.CoerceToInt(offsetValue);
         }
 
-        var shifted = asDate.AddMonths(offset);
+        var months = (asDate.Year * 12L) + asDate.Month - 1 + offset;
+        if (months is < 12 or >= 10000 * 12)
+            throw SimulatedSqlException.EOMonthOverflow();
+        var shifted = new DateOnly((int)(months / 12), (int)(months % 12) + 1, 1);
         var lastDay = DateTime.DaysInMonth(shifted.Year, shifted.Month);
         return SqlValue.FromDate(new DateOnly(shifted.Year, shifted.Month, lastDay));
     }

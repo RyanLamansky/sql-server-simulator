@@ -970,6 +970,7 @@ internal abstract class Expression
     /// </summary>
     internal static bool IsUntypedNullLiteral(Expression expression) => expression switch
     {
+        NamedExpression named => IsUntypedNullLiteral(named.Inner),
         Parenthesized p => IsUntypedNullLiteral(p.Wrapped),
         Value v => v.IsUntypedNull,
         _ => false,

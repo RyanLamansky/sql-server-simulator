@@ -29,6 +29,20 @@ public sealed class IsNullIifNullIfTests
     }
 
     [TestMethod]
+    [DataRow("select isnull(cast(null as tinyint), 300)", "tinyint, value = 300")]
+    [DataRow("select isnull(cast(null as smallint), 40000)", "smallint, value = 40000")]
+    [DataRow("declare @t tinyint, @v int = -1; select isnull(@t, @v)", "tinyint, value = -1")]
+    public void IsNull_FallbackOutOfRange_RaisesMsg220(string sql, string messageTail)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 220);
+        EndsWith(messageTail + ".", ex.Message);
+    }
+
+    [TestMethod]
+    public void IsNull_FallbackTruncatesToTheFirstArgumentsLength()
+        => AreEqual("abc", ExecuteScalar("select isnull(cast(null as varchar(3)), 'abcdef')"));
+
+    [TestMethod]
     public void IsNull_BothNull_ReturnsTypedNull()
     {
         AreEqual(DBNull.Value, ExecuteScalar("select isnull(cast(null as int), cast(null as bigint))"));

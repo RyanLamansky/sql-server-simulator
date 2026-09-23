@@ -1299,6 +1299,7 @@ internal sealed partial class Selection
         selection.ColumnNullability = columnNullability;
         selection.ProjectionExpressions = [.. expressions];
         selection.ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions);
+        selection.ColumnIsUntypedNull = UntypedNullsOf(expressions);
         selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
         selection.BranchFromSources = sources;
         selection.AutoSourceNames = AutoSourceNamesOf(sources);

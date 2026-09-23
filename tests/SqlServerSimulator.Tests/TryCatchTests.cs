@@ -210,9 +210,87 @@ public sealed class TryCatchTests
         var ex = new Simulation().AssertSqlError(
             "throw 50001, 'custom message', 7", 50001);
         AreEqual("custom message", ex.Message);
-        // State / Class on SimulatedSqlException are internal; round-trip
-        // them through ERROR_STATE() / ERROR_SEVERITY() in the next test.
+        AreEqual(7, ex.State);
+        AreEqual(16, ex.Class);
     }
+
+    /// <summary>Only the state's low byte is kept, so 256 raises state 0.</summary>
+    [TestMethod]
+    [DataRow("0", 0)]
+    [DataRow("255", 255)]
+    [DataRow("256", 0)]
+    [DataRow("300", 44)]
+    [DataRow("2147483647", 255)]
+    [DataRow("@s", 1)]
+    public void Throw_Value_StateKeepsItsLowByte(string state, int expected)
+        => AreEqual(expected, new Simulation().AssertSqlError($"declare @s int = 257; throw 50000, 'x', {state}", 50000).State);
+
+    [TestMethod]
+    [DataRow("throw 50000, 'x', -1", "Invalid value -1 for state. State value must not be less than 0.")]
+    [DataRow("declare @s int = -3; throw 50000, 'x', @s", "Invalid value -3 for state. State value must not be less than 0.")]
+    public void Throw_Value_NegativeState_RaisesMsg2756(string sql, string message)
+        => new Simulation().AssertSqlError(sql, 2756, message);
+
+    /// <summary>
+    /// A number below 50000 is Msg 35100 — including the 0 a NULL variable
+    /// reads as — and it is checked before the state.
+    /// </summary>
+    [TestMethod]
+    [DataRow("throw 49999, 'x', 1", 49999)]
+    [DataRow("throw -5, 'x', 1", -5)]
+    [DataRow("throw 49999, 'x', -1", 49999)]
+    [DataRow("declare @n int; throw @n, 'x', 1", 0)]
+    public void Throw_Value_NumberBelow50000_RaisesMsg35100(string sql, int number)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 35100);
+        AreEqual($"Error number {number} in the THROW statement is outside the valid range. Specify an error number in the valid range of 50000 to 2147483647.", ex.Message);
+        AreEqual(10, ex.State);
+    }
+
+    /// <summary>
+    /// A variable argument converts the way <c>CAST</c> would, and a NULL one
+    /// reads as 0 or the empty message.
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @n varchar(10) = '50002';", "@n, 'x', 1", 50002, "x", 1)]
+    [DataRow("declare @n decimal(10, 2) = 50003.7;", "@n, 'x', 1", 50003, "x", 1)]
+    [DataRow("declare @m int = 5;", "50000, @m, 1", 50000, "5", 1)]
+    [DataRow("declare @m nvarchar(10);", "50000, @m, 1", 50000, "", 1)]
+    [DataRow("declare @s int;", "50000, 'x', @s", 50000, "x", 0)]
+    public void Throw_Value_VariableArgumentsConvert(string declare, string arguments, int number, string message, int state)
+    {
+        using var reader = new Simulation().ExecuteReader($"""
+            {declare}
+            begin try throw {arguments} end try
+            begin catch select error_number(), error_message(), error_state() end catch
+            """);
+        IsTrue(reader.Read());
+        AreEqual(number, reader.GetInt32(0));
+        AreEqual(message, reader.GetString(1));
+        AreEqual(state, reader.GetInt32(2));
+    }
+
+    [TestMethod]
+    public void Throw_Value_NumberVariableOverflowingInt_RaisesMsg8115()
+        => new Simulation().AssertSqlError("declare @n bigint = 3000000000; throw @n, 'x', 1", 8115);
+
+    /// <summary>
+    /// Each argument is a literal or a variable: an expression, parentheses or
+    /// a unary <c>+</c> is a syntax error, and a number literal that isn't an
+    /// <c>int</c> is Msg 1080. A leading <c>-</c> on a literal is accepted.
+    /// </summary>
+    [TestMethod]
+    [DataRow("throw 50000, 'a' + 'b', 1", 102, "Incorrect syntax near '+'.")]
+    [DataRow("throw +50000, 'x', 1", 102, "Incorrect syntax near '+'.")]
+    [DataRow("throw 50000, 'x', (1)", 102, "Incorrect syntax near '('.")]
+    [DataRow("throw 50000, 1, 1", 102, "Incorrect syntax near '1'.")]
+    [DataRow("throw null, 'x', 1", 156, "Incorrect syntax near the keyword 'null'.")]
+    [DataRow("throw 50000, 'x', null", 156, "Incorrect syntax near the keyword 'null'.")]
+    [DataRow("throw 3000000000, 'x', 1", 1080, "The integer value 3000000000 is out of range.")]
+    [DataRow("throw 50000.5, 'x', 1", 1080, "The integer value 50000.5 is out of range.")]
+    [DataRow("throw - 50000, 'x', 1", 35100, "Error number -50000 in the THROW statement is outside the valid range. Specify an error number in the valid range of 50000 to 2147483647.")]
+    public void Throw_Value_ArgumentGrammar(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
 
     [TestMethod]
     public void Throw_Value_Caught_ErrorFunctionsReflectValues()

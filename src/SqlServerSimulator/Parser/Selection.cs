@@ -235,6 +235,17 @@ internal sealed partial class Selection
     internal int[]? ColumnIntegerLiteralDigits;
 
     /// <summary>
+    /// Per-column flag for projection columns that are the bare untyped
+    /// <c>NULL</c>; null when no column is. Set-op unification lets such a
+    /// column yield to its partner branch's type instead of forcing the
+    /// placeholder <c>int</c> (<c>SELECT 'a' UNION ALL SELECT NULL</c> is
+    /// <c>varchar</c>), and the flag survives a combine only where both
+    /// branches carried it. Set post-construction alongside
+    /// <see cref="ColumnIntegerLiteralDigits"/>.
+    /// </summary>
+    internal bool[]? ColumnIsUntypedNull;
+
+    /// <summary>
     /// Per-column decimal-vs-numeric reported type name for projection columns; true =
     /// report the <c>numeric</c> type name rather than <c>decimal</c>, null
     /// when no decimal column is numeric-named. Flows to the result set's
@@ -1283,9 +1294,12 @@ internal sealed partial class Selection
             // Msg 156 naming that keyword, where the statement-boundary arms
             // below would otherwise end the projection and leave a short or
             // zero-column SELECT behind. End-of-input isn't a keyword, so a
-            // bare SELECT keeps its Msg 102.
+            // bare SELECT keeps its Msg 102; a `;` there is Msg 102 naming the
+            // `;` (`SELECT;`, `SELECT 1,;` — probe-confirmed 2026-09-23).
             if (elementExpected && context.Token is ReservedKeyword blocking && !CanBeginProjectionElement(blocking))
                 throw SimulatedSqlException.SyntaxErrorNearKeyword(blocking);
+            if (elementExpected && context.Token is Operator { Character: ';' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
 
             // The mirror case: this switch is re-entered after an alias was
             // taken, so a further value token is one too many for a single
@@ -3099,13 +3113,22 @@ internal sealed partial class Selection
             outerTypeResolver is not null
                 ? outerTypeResolver(name)
                 : throw SimulatedSqlException.InvalidColumnName(name);
+        // Real unifies the rows as a UNION ALL would, so an untyped NULL cell
+        // yields to its typed siblings and an integer literal sizes against a
+        // decimal one (probe-confirmed 2026-09-23: `(VALUES ('a'), (NULL))`
+        // is varchar, `(VALUES (1), (2.5))` numeric(2, 1)).
         var schema = new SqlType[arity];
+        var cells = new (SqlType, int)[tuples.Count];
         for (var c = 0; c < arity; c++)
         {
-            var colType = tuples[0][c].GetSqlType(context.Batch, TypeResolver);
-            for (var i = 1; i < tuples.Count; i++)
-                colType = SqlType.Promote(colType, tuples[i][c].GetSqlType(context.Batch, TypeResolver));
-            schema[c] = colType;
+            var count = 0;
+            foreach (var tuple in tuples)
+            {
+                var cell = tuple[c];
+                if (!Expression.IsUntypedNullLiteral(cell))
+                    cells[count++] = (cell.GetSqlType(context.Batch, TypeResolver), Expression.IntegerLiteralDigits(cell));
+            }
+            schema[c] = SqlType.PromoteBranches(cells.AsSpan(0, count));
         }
 
         // Per-column nullability = OR across every row's cell: a VALUES column
@@ -4276,6 +4299,7 @@ internal sealed partial class Selection
             AutoColumnSource = NoSourceColumnBinding(expressions.Count),
             AutoColumnOrdinal = NoSourceColumnBinding(expressions.Count),
             ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions),
+            ColumnIsUntypedNull = UntypedNullsOf(expressions),
             ColumnReportsNumeric = ColumnReportsNumericOf(expressions, schema),
             // A FROM-less projection has no sources, so column nullability is
             // the per-expression rule alone (literals NOT NULL, other

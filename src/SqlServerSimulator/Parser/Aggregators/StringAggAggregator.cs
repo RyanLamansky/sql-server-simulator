@@ -9,7 +9,10 @@ namespace SqlServerSimulator.Parser.Aggregators;
 /// with the separator between them. The separator is evaluated once per row
 /// (SQL Server allows a per-row separator value, though it's typically a
 /// constant) — the simulator uses the most recent non-NULL separator. Empty /
-/// all-NULL input → NULL. Two execution modes share this class:
+/// all-NULL input → NULL. A non-string operand converts to <c>nvarchar</c>
+/// the way a default-style <c>CAST</c> does (<c>1e10</c> → <c>1e+010</c>, a
+/// <c>datetime</c> → <c>Jan  2 2024  3:04AM</c>); see <see cref="ResultType"/>
+/// for the types it refuses. Two execution modes share this class:
 /// <list type="bullet">
 ///   <item><b>Streaming</b> (no <c>WITHIN GROUP</c>): rows append directly to
 ///   <see cref="streamingBuffer"/> in arrival order — O(1) per row.</item>
@@ -53,6 +56,37 @@ internal sealed class StringAggAggregator : Aggregator
         }
     }
 
+    /// <summary>
+    /// The aggregate's result type for an operand of
+    /// <paramref name="operandType"/>, probed 2026-09-23 against SQL Server
+    /// 2025: the ANSI family widens to <c>varchar(8000)</c>, the national
+    /// family to <c>nvarchar(4000)</c>, each keeping MAX and the operand's
+    /// collation, and a numeric or date/time operand is <c>nvarchar(4000)</c>
+    /// in the database's collation.
+    /// Every other type — <c>uniqueidentifier</c>, the binary family,
+    /// <c>xml</c>, <c>sql_variant</c>, the CLR types — is Msg 8116.
+    /// </summary>
+    public static SqlType ResultType(SqlType operandType, BatchContext batch)
+    {
+        switch (operandType)
+        {
+            case VarcharSqlType or CharSqlType:
+                return VarcharSqlType.Get(
+                    operandType is VarcharSqlType { length: SqlType.MaxLengthSentinel } ? SqlType.MaxLengthSentinel : 8000,
+                    operandType.Collation!,
+                    operandType.Coercibility);
+            case NVarcharSqlType or NCharSqlType or SystemNameSqlType:
+                return NVarcharSqlType.Get(
+                    operandType is NVarcharSqlType { length: SqlType.MaxLengthSentinel } ? SqlType.MaxLengthSentinel : 4000,
+                    operandType.Collation!,
+                    operandType.Coercibility);
+        }
+
+        if (operandType.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate or SqlTypeCategory.DateTime)
+            return NVarcharSqlType.Get(4000, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+        throw SimulatedSqlException.InvalidArgumentDataType(operandType.SqlServerName, 1, "string_agg");
+    }
+
     public override void Add(SqlValue value)
     {
         StringScalars.RejectLegacyLob(value, "string_agg");
@@ -61,9 +95,12 @@ internal sealed class StringAggAggregator : Aggregator
 
         if (this.sawAny)
             _ = this.streamingBuffer.Append(this.lastSeparator);
-        _ = this.streamingBuffer.Append(value.AsString);
+        _ = this.streamingBuffer.Append(this.Text(value));
         this.sawAny = true;
     }
+
+    private string Text(SqlValue value) =>
+        SqlType.IsStringCategory(value.Type) ? value.AsString : Cast.CoerceToDeclared(value, this.resultType).AsString;
 
     /// <summary>
     /// Buffered-path companion to <see cref="Add"/>: stashes the row's value
@@ -77,7 +114,7 @@ internal sealed class StringAggAggregator : Aggregator
         StringScalars.RejectLegacyLob(value, "string_agg");
         if (value.IsNull)
             return;
-        this.orderedBuffer!.Add(new OrderedRow(value.AsString, this.lastSeparator, orderKeys));
+        this.orderedBuffer!.Add(new OrderedRow(this.Text(value), this.lastSeparator, orderKeys));
         this.sawAny = true;
     }
 

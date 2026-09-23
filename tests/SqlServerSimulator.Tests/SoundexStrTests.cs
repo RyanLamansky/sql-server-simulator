@@ -55,4 +55,54 @@ public sealed class SoundexStrTests
     [TestMethod]
     public void Str_Null_ReturnsNull()
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select str(cast(null as float))"));
+
+    [TestMethod]
+    [DataRow("str(1, 0)")]
+    [DataRow("str(1, -1)")]
+    [DataRow("str(1, 8001)")]
+    [DataRow("str(1, 5, -1)")]
+    [DataRow("str(1, null)")]
+    public void Str_LengthOutOfRangeOrNegativeDecimals_ReturnsNull(string call)
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar($"select {call}"));
+
+    [TestMethod]
+    public void Str_NullDecimals_ReadsAsZero()
+        => AreEqual("    1", new Simulation().ExecuteScalar("select str(1.4, 5, null)"));
+
+    /// <summary>
+    /// The decimals shrink to fit the room the <em>unrounded</em> integer part
+    /// leaves, and are capped at 16; so a value that rounds up a digit
+    /// overflows rather than dropping its decimal.
+    /// </summary>
+    [TestMethod]
+    [DataRow("str(0.1, 20, 17)", "  0.1000000000000000")]
+    [DataRow("str(123.456, 10, 16)", "123.456000")]
+    [DataRow("str(123.456, 5, 3)", "123.5")]
+    [DataRow("str(123.456, 4, 3)", " 123")]
+    [DataRow("str(-123.456, 5, 3)", " -123")]
+    [DataRow("str(0.4, 2, 1)", " 0")]
+    [DataRow("str(99.99, 4, 1)", "****")]
+    [DataRow("str(9.5, 1)", "*")]
+    public void Str_DecimalsFitTheWidth(string call, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {call}"));
+
+    /// <summary>
+    /// The double's exact value is truncated to 17 significant digits and then
+    /// rounded half away from zero, so <c>2.675</c> (really 2.67499…) rounds
+    /// down, an exact half rounds up, and a tie at the 17th digit truncates.
+    /// </summary>
+    [TestMethod]
+    [DataRow("str(2.675, 5, 2)", " 2.67")]
+    [DataRow("str(0.45, 4, 1)", " 0.5")]
+    [DataRow("str(2.5, 1)", "3")]
+    [DataRow("str(-2.5, 4)", "  -3")]
+    [DataRow("str(-0.4, 2)", "-0")]
+    [DataRow("str(-cast(0 as float), 4)", "  -0")]
+    [DataRow("str(-cast(0 as float), 1)", "*")]
+    [DataRow("str(0.123456789012345678, 20, 16)", "  0.1234567890123457")]
+    [DataRow("str(12345678901234567890.0, 25, 5)", "12345678901234567000.0000")]
+    [DataRow("str(1234567890123456.75e0, 25, 5)", "   1234567890123456.70000")]
+    [DataRow("str(1e308, 5)", "*****")]
+    public void Str_RoundsTheExactValueToSeventeenDigits(string call, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {call}"));
 }

@@ -217,6 +217,58 @@ public sealed class AggregateTests
     }
 
     /// <summary>
+    /// A non-string operand converts to <c>nvarchar</c> the way a default-style
+    /// <c>CAST</c> would, ordered by its own value under <c>WITHIN GROUP</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("(1), (2)", "1-2")]
+    [DataRow("(cast(1e10 as float))", "1e+010")]
+    [DataRow("(cast('2024-01-02 03:04:05' as datetime))", "Jan  2 2024  3:04AM")]
+    [DataRow("(cast(5 as smallmoney))", "5.00")]
+    [DataRow("(cast('03:04:05' as time))", "03:04:05.0000000")]
+    [DataRow("(cast('2024-01-02 03:04:05 +02:00' as datetimeoffset))", "2024-01-02 03:04:05.0000000 +02:00")]
+    public void StringAgg_NonStringOperand_ConvertsLikeCast(string rows, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select string_agg(a, '-') from (values {rows}) v(a)"));
+
+    [TestMethod]
+    public void StringAgg_WithinGroup_NonStringOperand_OrdersByValue()
+        => AreEqual("20,3,1", new Simulation().ExecuteScalar("select string_agg(a, ',') within group (order by a desc) from (values (1), (20), (3)) v(a)"));
+
+    /// <summary>
+    /// The result widens to the family maximum — <c>varchar(8000)</c> for the
+    /// ANSI family, <c>nvarchar(4000)</c> (8000 bytes) for the national family
+    /// and for every converted operand — rather than keeping the operand's own
+    /// declared type.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast('x' as char(3))", "varchar")]
+    [DataRow("cast('x' as varchar(10))", "varchar")]
+    [DataRow("cast(N'x' as nchar(2))", "nvarchar")]
+    [DataRow("1", "nvarchar")]
+    public void StringAgg_ResultTypeWidensToTheFamilyMaximum(string operand, string baseType)
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using var reader = connection.CreateCommand($"""
+            select sql_variant_property(string_agg(a, ','), 'BaseType'), sql_variant_property(string_agg(a, ','), 'MaxLength')
+            from (values ({operand})) v(a)
+            """).ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(baseType, reader.GetValue(0));
+        AreEqual(8000, reader.GetValue(1));
+    }
+
+    [TestMethod]
+    [DataRow("cast('6F9619FF-8B86-D011-B42D-00C04FC964FF' as uniqueidentifier)", "uniqueidentifier")]
+    [DataRow("cast(0x61 as varbinary(10))", "varbinary")]
+    [DataRow("cast('<a/>' as xml)", "xml")]
+    [DataRow("cast(1 as sql_variant)", "sql_variant")]
+    public void StringAgg_UnconvertibleOperand_RaisesMsg8116(string operand, string typeName)
+        => new Simulation().AssertSqlError(
+            $"select string_agg(a, ',') from (values ({operand})) v(a)",
+            8116,
+            $"Argument data type {typeName} is invalid for argument 1 of string_agg function.");
+
+    /// <summary>
     /// A bounded (non-MAX) STRING_AGG operand whose concatenation exceeds 8000
     /// bytes raises Msg 9829 on real SQL Server (probe-confirmed against SQL
     /// Server 2025) rather than truncating — 200 rows × 100 nvarchar chars is

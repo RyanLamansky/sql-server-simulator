@@ -415,10 +415,11 @@ This is the *argument* rule; the slots these types can't reach at all — sortin
   Result `int`; NULL on either side → NULL.
   Unlike SOUNDEX it accepts a `text` argument (implicitly converted to `varchar`) while refusing `ntext` / `image` — see *Legacy LOB arguments* above.
 - **`STR(float [, length [, decimals]])`** — right-aligned fixed-width numeric-to-string.
-  Defaults: length 10, decimals 0 (rounds half-away-from-zero, doesn't truncate).
+  Defaults: length 10, decimals 0.
   Overflow (formatted value exceeds `length`) returns a string of `*` characters of length `length`.
-  NULL → NULL.
-  Projects `varchar(length)` — the `length` argument (default 10) clamped to 1..8000 when it is a constant, else the `varchar(8000)` container (probe-confirmed against SQL Server 2025: `STR(3.14159, 6, 2)` → `varchar(6)`, a variable length → `varchar(8000)`); the earlier length-0 container described as `varchar(8000)` for every call.
+  The decimals shrink to fit the width *before* rounding, and rounding reads the double's exact value truncated to 17 significant digits, so `STR(99.99, 4, 1)` overflows and `STR(2.675, 5, 2)` is `2.67` — the full rule set is on `Str.Format` (probed 2026-09-23).
+  NULL → NULL, as are a length outside 1..8000 and negative decimals.
+  Projects `varchar(length)` — a constant `length` (default 10, a negated literal included) clamped to 1..8000, else the `varchar(8000)` container (probe-confirmed against SQL Server 2025: `STR(3.14159, 6, 2)` → `varchar(6)`, `STR(x, 0)` → `varchar(1)` though it answers NULL, a variable length → `varchar(8000)`).
 - **`TRANSLATE(input, chars, translations)`** (`Parser/Expressions/StringScalarAdditions.cs`) — character-by-character substitution.
   The input is walked one code unit at a time and each character looked up in `chars` under the collation the three arguments resolve to (`Collation.IndexOfElement`), with the substitution taken from the **position** the lookup reports — so a combining mark is its own character, and `TRANSLATE(N'café', N'e', N'Z')` is `cafZ` under an `_AI` collation and unchanged under an `_AS` one.
   The `chars` and `translations` arguments must have equal length; mismatch raises Msg 9819 via a dedicated `TranslateUnequalChars` factory.

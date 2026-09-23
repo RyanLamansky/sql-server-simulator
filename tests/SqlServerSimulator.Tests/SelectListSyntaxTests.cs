@@ -126,6 +126,20 @@ public sealed class SelectListSyntaxTests
     public void TrailingComma_RaisesMsg102AtTheComma() =>
         new Simulation().AssertSqlError("select 1,", 102, "Incorrect syntax near ','.");
 
+    /// <summary>
+    /// A <c>;</c> where an element is expected reports at the <c>;</c>, whether
+    /// the list never began or a comma promised one; it doesn't end the
+    /// statement as a zero-column SELECT.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select;")]
+    [DataRow("select distinct;")]
+    [DataRow("select top 1;")]
+    [DataRow("select 1,;")]
+    [DataRow("if 1 = 1 select;")]
+    public void SemicolonWhereAnElementBelongs_RaisesMsg102AtTheSemicolon(string commandText) =>
+        new Simulation().AssertSqlError(commandText, 102, "Incorrect syntax near ';'.");
+
     // === Alias swallow ===
 
     /// <summary>

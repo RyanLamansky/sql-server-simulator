@@ -72,12 +72,23 @@ public sealed class StringFunctionWidthTests
     [DataRow("str(3.14159, 6, 2)", 6)]
     [DataRow("str(3.14159)", 10)]
     [DataRow("str(3.14159, 12)", 12)]
-    [DataRow("str(3.14159, 0)", 1)]
+    [DataRow("str(3.14159, 1)", 1)]
     public void Str_VarcharWidthFromLengthArgument(string expr, int width)
     {
         AreEqual("varchar", BaseType(expr));
         AreEqual(width, MaxLength(expr));
     }
+
+    /// <summary>
+    /// A length below 1 answers NULL but still types the column
+    /// <c>varchar(1)</c>, and one past 8000 <c>varchar(8000)</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("str(3.14159, 0)", (short)1)]
+    [DataRow("str(3.14159, -5)", (short)1)]
+    [DataRow("str(3.14159, 9000)", (short)8000)]
+    public void Str_NullAnsweringLength_StillTypesTheColumn(string expr, short width)
+        => AreEqual(width, new Simulation().ExecuteScalar($"select {expr} as a into t; select col_length('t', 'a')"));
 
     // --- DATENAME: fixed nvarchar(30). ---
 
