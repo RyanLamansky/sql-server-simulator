@@ -238,6 +238,13 @@ partial class Simulation
         throw SimulatedSqlException.InvalidColumnName(name);
 
     /// <summary>
+    /// The type-resolver twin of <see cref="NoColumnResolver"/>, for binding
+    /// a FROM-less condition (<c>IF</c> / <c>WHILE</c>) while compiling.
+    /// </summary>
+    internal static SqlType NoColumnTypeResolver(MultiPartName name) =>
+        throw SimulatedSqlException.InvalidColumnName(name);
+
+    /// <summary>
     /// Tries to bind <paramref name="variableName"/> to a user-defined
     /// <see cref="TableType"/>. Returns true on success (a fresh
     /// <see cref="HeapTable"/> clone is registered on

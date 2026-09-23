@@ -47,12 +47,15 @@ partial class Simulation
         context.MoveNextRequired(); // consume IF
         var cond = BooleanExpression.Parse(context);
 
+        var bindError = BindCondition(cond, batch);
+
         // Capture both pieces of state we need to restore independently:
         // the raw IF-skip flag (restored in the finally) and the combined
         // initial skip state (drives the cond-skip and rowcount-reset
-        // decisions). LoopControl propagates through unchanged.
+        // decisions). LoopControl propagates through unchanged. A condition
+        // that failed to bind runs neither branch.
         var wasSkipModeFlag = batch.SkipModeFlag;
-        var outerSkipping = batch.IsSkipping;
+        var outerSkipping = batch.IsSkipping || bindError is not null;
         var condResult = !outerSkipping
             && cond.Run(new RuntimeContext(NoColumnResolver, batch)) == true;
         var thenSkip = !condResult;
@@ -75,6 +78,7 @@ partial class Simulation
                 // above for the THEN dispatch is sticky and would conflate
                 // with the outer-initial state.
                 batch.SkipModeFlag = wasSkipModeFlag
+                    || bindError is not null
                     || condResult
                     || batch.LoopControl != LoopControl.None;
                 foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
@@ -93,6 +97,29 @@ partial class Simulation
         // branch's last statement already set @@ROWCOUNT.
         if (!outerSkipping && thenSkip && !hadElse)
             connection.LastStatementRowCount = 0;
+
+        if (bindError is not null)
+            throw bindError;
+    }
+
+    /// <summary>
+    /// Binds an <c>IF</c> / <c>WHILE</c> condition the way real compiles it
+    /// with the batch, so a comparison it refuses (<c>IF CAST(NULL AS int) =
+    /// CAST(NULL AS date)</c>) raises whether or not a branch would run. The
+    /// error is handed back rather than thrown so the caller can still step
+    /// its cursor past the body — which never runs — before raising it.
+    /// </summary>
+    private static SimulatedSqlException? BindCondition(BooleanExpression condition, BatchContext batch)
+    {
+        try
+        {
+            condition.Bind(batch, NoColumnTypeResolver);
+            return null;
+        }
+        catch (SimulatedSqlException error)
+        {
+            return error;
+        }
     }
 
     /// <summary>
@@ -174,10 +201,11 @@ partial class Simulation
 
         context.MoveNextRequired(); // consume WHILE
         var cond = BooleanExpression.Parse(context);
+        var bindError = BindCondition(cond, batch);
 
         var bodyStart = context.SaveCheckpoint();
         var wasSkipModeFlag = batch.SkipModeFlag;
-        var outerSkipping = batch.IsSkipping;
+        var outerSkipping = batch.IsSkipping || bindError is not null;
 
         batch.LoopDepth++;
         batch.BlockDepth++;
@@ -265,6 +293,9 @@ partial class Simulation
         // WHILEs leave @@ROWCOUNT untouched (the surrounding scope owns it).
         if (!outerSkipping)
             connection.LastStatementRowCount = 0;
+
+        if (bindError is not null)
+            throw bindError;
     }
 
     /// <summary>

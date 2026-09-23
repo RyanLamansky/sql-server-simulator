@@ -433,8 +433,8 @@ partial class SimulatedSqlException
     /// <c>LIKE</c> doesn't take an <c>xml</c> operand — and capitalizes the type
     /// name where every neighbouring message lowercases it.
     /// </summary>
-    internal static SimulatedSqlException XmlCannotBeComparedOrSorted() =>
-        new("The XML data type cannot be compared or sorted, except when using the IS NULL operator.", 305, 16, 1);
+    internal static SimulatedSqlException XmlCannotBeComparedOrSorted(byte state = 1) =>
+        new("The XML data type cannot be compared or sorted, except when using the IS NULL operator.", 305, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 249: the spatial sibling of

@@ -15,8 +15,10 @@ namespace SqlServerSimulator.Storage;
 /// rather than reimplementing it; the natural .NET <see cref="Guid.CompareTo(Guid)"/>
 /// uses a different (and incompatible) order.
 /// </remarks>
-internal sealed class UniqueIdentifierSqlType() : SqlType(SqlTypeCategory.UniqueIdentifier)
+internal sealed class UniqueIdentifierSqlType() : SqlType(SqlTypeCategory.UniqueIdentifier, TypePairClass.UniqueIdentifier)
 {
+    public override int Precedence => 7;
+
     public override Type ClrType => typeof(Guid);
 
     public override bool IsFixedLength => true;

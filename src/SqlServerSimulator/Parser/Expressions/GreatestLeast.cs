@@ -47,7 +47,16 @@ internal sealed class GreatestLeast : Expression
     {
         var branches = new (SqlType, int)[this.arguments.Length];
         for (var i = 0; i < this.arguments.Length; i++)
-            branches[i] = (this.arguments[i].GetSqlType(batch, resolveColumnType), IntegerLiteralDigits(this.arguments[i]));
+        {
+            var type = this.arguments[i].GetSqlType(batch, resolveColumnType);
+
+            // The types real can't compare are refused as arguments before any
+            // pair is unified — Msg 8116 naming the first such argument
+            // (probe-confirmed against SQL Server 2025, 2026-09-23).
+            if (type.IsLob)
+                throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, i + 1, this.isLeast ? "least" : "greatest", state: 4);
+            branches[i] = (type, IntegerLiteralDigits(this.arguments[i]));
+        }
         this.cachedResultType = SqlType.PromoteBranches(branches);
         return this.cachedResultType;
     }

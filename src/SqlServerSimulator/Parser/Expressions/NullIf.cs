@@ -105,7 +105,10 @@ internal sealed class NullIf : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var t = this.narrowedLiteralType ?? this.a.GetSqlType(batch, resolveColumnType);
+        // NULLIF is an implicit `a = b`, so the pair has to be comparable.
+        var aType = this.a.GetSqlType(batch, resolveColumnType);
+        BooleanExpression.RequireComparable(this.a, aType, this.b, this.b.GetSqlType(batch, resolveColumnType), batch, "equal to");
+        var t = this.narrowedLiteralType ?? aType;
         this.cachedResultType = t;
         return t;
     }

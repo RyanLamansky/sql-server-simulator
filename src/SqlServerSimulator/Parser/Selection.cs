@@ -4183,13 +4183,12 @@ internal sealed partial class Selection
         var schema = new SqlType[expressions.Count];
         var columnNames = new string[expressions.Count];
 
-        // Run-then-GetSqlType: any expression whose runtime path raises a
-        // type-error message with operator-name wording (e.g. <c>dt + time</c>
-        // → "add operator") emits that error from Run before GetSqlType has
-        // a chance to throw a Promote-side message with comparison-only
-        // wording. For successful runs, GetSqlType then bridges the matched
-        // branch's runtime type to the joint-promoted schema (CASE / Coalesce
-        // with mixed-type branches in a FROM-less SELECT).
+        // GetSqlType-then-Run, the order real compiles and executes in: a
+        // type-pair refusal (`1/0 + CAST(NULL AS date)`) is the compile error
+        // real reports ahead of any runtime one, and a CASE / COALESCE caches
+        // its unified type there, which is what makes the arm Run picks
+        // convert to it (`CASE … int … ELSE varchar END` is int, not the
+        // taken arm's varchar).
         // A FROM-less SELECT nested in an outer query can still reference the
         // outer row (`SELECT (SELECT t.col) FROM t` — real returns one value
         // per outer row), and such a projection cannot be baked at parse time
@@ -4225,20 +4224,23 @@ internal sealed partial class Selection
                 : throw UnresolvedNameError([], column);
 
         var parseRuntime = new RuntimeContext(column => throw SimulatedSqlException.InvalidColumnName(column), parseBatch);
+        // The WHERE binds too, so a comparison real refuses while compiling —
+        // `WHERE CAST(NULL AS int) = CAST(NULL AS date)`, whose NULL operand
+        // folded it to UNKNOWN — still raises.
+        foreach (var excluder in excluders)
+            excluder.Bind(parseBatch, TypeResolver);
+
         for (var i = 0; i < expressions.Count; i++)
         {
             columnNames[i] = expressions[i].Name;
-            if (referencesOuterColumns)
-            {
-                // Values come from the executor instead; only the type is
-                // needed here, and Run would throw on the outer reference.
-                schema[i] = expressions[i].GetSqlType(parseBatch, TypeResolver);
-                continue;
-            }
-
-            // Run before GetSqlType — see the ordering note above.
-            var raw = expressions[i].Run(parseRuntime);
             schema[i] = expressions[i].GetSqlType(parseBatch, TypeResolver);
+        }
+
+        // Values come from the executor instead when an outer reference is in
+        // play; only the types are needed here, and Run would throw on it.
+        for (var i = 0; !referencesOuterColumns && i < expressions.Count; i++)
+        {
+            var raw = expressions[i].Run(parseRuntime);
             values[i] = raw.IsNull || raw.Type == schema[i] ? raw : raw.CoerceTo(schema[i]);
         }
 

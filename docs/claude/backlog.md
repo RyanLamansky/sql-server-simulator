@@ -171,8 +171,6 @@ Still open from what it surfaced:
 - **Many-way joins do not scale**: `select5`'s 20-24-table equi-joins answer in milliseconds on real and exceed a 15-second `CommandTimeout` here, one of them running past a 40-second wall without honoring its own timeout.
   Not a correctness gap, but it is why the sweep's file list is `random/` rather than the whole corpus — see the join-strategy notes in [`joins.md`](joins.md).
 - **A `FROM`-less star is three behaviors real distinguishes and the simulator answers Msg 102 for all**: `SELECT *`, `SELECT 1, *` and `SELECT COUNT(*), *` are **Msg 263** ("Must specify table to select from."), `SELECT t.*` is **Msg 107**, and `EXISTS (SELECT *)` is legal.
-- **`<binary> <operator> <approximate>`** (`0x02 + CAST(2 AS real)`) is real's **Msg 206** in both operand orders for `+ - * /`; the simulator raises `NotSupportedException`.
-- **`STDEV` / `VAR` over `money`** is `float` on real; the simulator raises **Msg 529**.
 - **An integer literal padded past 12 characters is `numeric(significant_digits, 0)`**, not `int` — `SELECT 0000000000300` is `numeric(3, 0)` on real while the 11-character `00000000300` is `int`.
   The rule belongs to the bare-literal tokenizer — see [`arithmetic.md`](arithmetic.md).
 - **Real answers a statement's binder errors together where the simulator raises the leading one alone** — `INSERT` reports 207 + 110, and 273 + 10709, as one multi-error response.
@@ -236,12 +234,20 @@ A hand-written corpus of 548 deliberately odd statements, run through the simula
 The harness is local-only and not checked in; its three connection-killing findings shipped, and the accept-what-real-rejects half lives in the [over-permissive register](#over-permissive-register).
 Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized set-op branches, `SET DATEFORMAT` carrying no effect, Msg 245 dooming the transaction, and the parse-phase batch divergence.
 
-**Type-pair legality** — a 27-type pairwise matrix (`CASE` result type, `=`, `+` and `-` over typed NULLs, each statement its own batch) differs from real on most pairs (probed 2026-09-23):
+**Type-pair neighbors** — found by the type-pair probes and left open (probed 2026-09-23):
 
-- Promotion has no arm for most cross-category pairs, which fail internally (Msg 50000 `Cross-category type promotion isn't implemented`) — binary against string, `decimal`, `money` or legacy date/time, legacy `datetime` / `smalldatetime` against `decimal` / `float` / `money`, `uniqueidentifier` against anything but a string, and every pair involving `xml`, `sql_variant`, the CLR types, the legacy LOBs or `timestamp`.
-  Real either promotes (`0x61 = 'a'` is true, `CAST('2024-01-01' AS datetime) - 1.5` is `2023-12-30 12:00`) or raises Msg 206 / 402 / 403 / 8117.
-- A comparison isn't type-checked while compiling, so `CAST(NULL AS int) = CAST(NULL AS date)` answers here where real raises Msg 206 — likewise `=` on `geography` (Msg 403) and on `text` / `xml` pairs (Msg 402).
-- The arithmetic operators accept pairs real refuses, and where both raise, Msg 206 names the operands in a different order.
+- `ISNULL` converts with the one-way assignment table, not the unification grid, so `ISNULL(<decimal>, <datetime>)` is Msg 257 on real and converts here.
+- The subquery side of `IN (SELECT …)` / `= ANY (…)` reports Msg 257 where real reports Msg 260 naming the inner column.
+- A `numeric` column is spelled `decimal` in type-pair messages; only `CAST … AS numeric` and literals report `numeric`.
+- Binary comparison doesn't zero-pad the shorter operand (`0x0102 = 0x010200` is true on real).
+- Under a SQL collation, a `varchar` containing `CHAR(0)` compares unequal to the same string without it.
+- A constant-folded `CASE WHEN 1 = 0 …` takes the ELSE arm's type on real.
+- A `datetimeoffset` string without seconds (`'2024-01-01 06:00 +02:00'`) doesn't parse.
+- Binary or padded `char` converted to `xml` isn't validated or whitespace-stripped, and a `hierarchyid` parse failure's Msg 6522 wording differs.
+- A new database's rowversion counter starts at 0; real's starts at 2000.
+- A `UNION` whose second branch fails at runtime raises before sending the first branch's rows; real sends them first.
+- `CONVERT(varchar, <timestamp>, 1)` doesn't render hex.
+- The TDS UDT type name leaves the database part empty (`.sys.geography`; real sends `<db>.sys.geography`).
 
 **`xml` well-formedness** — a string converted to untyped `xml` isn't parsed at all, so `CAST('<a>' AS xml)` answers here and the client's `GetValue` then throws `XmlException`, and `DECLARE @x xml = '<a><b></a>'` succeeds.
 Real raises its XML-parsing family with a line and character position (probed 2026-09-23): Msg 9400 unexpected end of input, Msg 9436 mismatched end tag, Msg 9413 unquoted attribute, Msg 9448 undeclared entity, Msg 9455 illegal name character, Msg 9423 / Msg 9424 bad CDATA / comment, Msg 9438 misplaced XML declaration, Msg 9420 illegal character.

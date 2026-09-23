@@ -26,9 +26,12 @@ internal readonly partial struct SqlValue
     /// <c>yyyy-MM-ddTHH:mm:ss[.fffffff]</c> (time portion discarded). SQL Server
     /// accepts many additional locale-sensitive formats; the simulator handles
     /// only the language-neutral ones for now and raises Msg 241 otherwise.
+    /// Every date/time parse here ignores surrounding spaces, as real does —
+    /// which is what lets a padded <c>char(N)</c> value convert
+    /// (probe-confirmed against SQL Server 2025, 2026-09-23).
     /// </summary>
     private static DateOnly ParseDate(string value) =>
-        DateOnly.TryParseExact(value, dateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date) ? date
+        DateOnly.TryParseExact(value = value.Trim(' '), dateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date) ? date
         : DateTime.TryParseExact(value, dateAsDateTimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt) ? DateOnly.FromDateTime(dt)
         : throw SimulatedSqlException.ConversionFailedDateTimeFromString();
 
@@ -67,7 +70,7 @@ internal readonly partial struct SqlValue
     /// modeled; out-of-range or unparseable inputs raise Msg 241.
     /// </summary>
     private static DateTime ParseDateTime2(string value) =>
-        DateTime.TryParseExact(value, dateTime2Formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt) ? dt
+        DateTime.TryParseExact(value = value.Trim(' '), dateTime2Formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt) ? dt
         : DateOnly.TryParseExact(value, dateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d.ToDateTime(TimeOnly.MinValue)
         : TimeSpan.TryParseExact(value, timeFormats, CultureInfo.InvariantCulture, out var ts) && ts.Ticks is >= 0 and < TimeSpan.TicksPerDay ? DateTimeSqlType.BaseDate.Add(ts)
         : throw SimulatedSqlException.ConversionFailedDateTimeFromString();
@@ -109,7 +112,8 @@ internal readonly partial struct SqlValue
     /// </summary>
     internal static bool TryParseLegacyDateTime(string value, out DateTime result)
     {
-        if (string.IsNullOrEmpty(value))
+        value = value.Trim(' ');
+        if (value.Length == 0)
         {
             result = DateTimeSqlType.BaseDate;
             return true;
@@ -220,7 +224,7 @@ internal readonly partial struct SqlValue
     /// Out-of-range or unparseable inputs raise Msg 241.
     /// </summary>
     private static TimeSpan ParseTime(string value) =>
-        TimeSpan.TryParseExact(value, timeFormats, CultureInfo.InvariantCulture, out var ts) && ts.Ticks is >= 0 and < TimeSpan.TicksPerDay
+        TimeSpan.TryParseExact(value.Trim(' '), timeFormats, CultureInfo.InvariantCulture, out var ts) && ts.Ticks is >= 0 and < TimeSpan.TicksPerDay
             ? ts
             : throw SimulatedSqlException.ConversionFailedDateTimeFromString();
 
@@ -249,7 +253,7 @@ internal readonly partial struct SqlValue
     /// offset is absent, SQL Server treats the value as <c>+00:00</c>.
     /// </summary>
     private static DateTimeOffset ParseDateTimeOffset(string value) =>
-        DateTimeOffset.TryParseExact(value, dateTimeOffsetFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto) ? dto
+        DateTimeOffset.TryParseExact(value = value.Trim(' '), dateTimeOffsetFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto) ? dto
         : DateTime.TryParseExact(value, dateTime2Formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt) ? new DateTimeOffset(dt, TimeSpan.Zero)
         : DateOnly.TryParseExact(value, dateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? new DateTimeOffset(d.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero)
         : throw SimulatedSqlException.ConversionFailedDateTimeFromString();

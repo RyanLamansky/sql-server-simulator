@@ -70,11 +70,17 @@ partial class Simulation
             // CharSqlType (fixed-length, no GetVariableByteCount override).
             actual = column.Type.Collation!.StorageEncoding.GetByteCount(source.AsString);
         }
-        else
+        else if (column.Type is NVarcharSqlType or NCharSqlType or SystemNameSqlType)
         {
             if (source.Type.Category != SqlTypeCategory.String)
                 return;
             actual = source.AsString.Length;
+        }
+        else
+        {
+            // A hierarchyid carries a byte budget of its own that a string
+            // source's text length says nothing about.
+            return;
         }
 
         if (actual <= max)

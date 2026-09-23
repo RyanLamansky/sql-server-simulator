@@ -10,8 +10,10 @@ namespace SqlServerSimulator.Storage;
 /// always 8-byte. Empty-string CAST yields 0 (verified against SQL Server
 /// 2025 — distinct from <c>decimal</c>, where empty raises Msg 8114).
 /// </summary>
-internal sealed class FloatSqlType() : SqlType(SqlTypeCategory.Approximate)
+internal sealed class FloatSqlType() : SqlType(SqlTypeCategory.Approximate, TypePairClass.Approximate)
 {
+    public override int Precedence => 21;
+
     public override Type ClrType => typeof(double);
 
     public override bool IsFixedLength => true;
@@ -37,8 +39,10 @@ internal sealed class FloatSqlType() : SqlType(SqlTypeCategory.Approximate)
 /// SQL Server's <c>real</c> (4-byte IEEE 754 single). Equivalent to
 /// <c>float(24)</c>.
 /// </summary>
-internal sealed class RealSqlType() : SqlType(SqlTypeCategory.Approximate)
+internal sealed class RealSqlType() : SqlType(SqlTypeCategory.Approximate, TypePairClass.Approximate)
 {
+    public override int Precedence => 20;
+
     public override Type ClrType => typeof(float);
 
     public override bool IsFixedLength => true;

@@ -12,44 +12,44 @@ namespace SqlServerSimulator.Storage;
 internal abstract partial class SqlType
 {
     /// <summary>
-    /// Returns the higher-precedence type when <paramref name="a"/> and
-    /// <paramref name="b"/> share a category (both numeric or both string),
-    /// the cross-family date/time rule when both are date/time, or the
-    /// date/time partner when one side is a string and the other is a
-    /// date/time type. Other cross-category pairs (e.g. integer ↔ string)
-    /// aren't implemented; SQL Server allows those via implicit conversion
-    /// but the simulator hasn't modeled them yet.
+    /// The common type of <paramref name="a"/> and <paramref name="b"/> — the
+    /// unification CASE / COALESCE / the set operators perform, and the type a
+    /// comparison converts both operands to. Raises real's own error for a
+    /// pair that has none (<see cref="PairError"/>'s unification grid);
+    /// otherwise the higher-<see cref="Precedence"/> operand wins, with the
+    /// families that share a joint envelope (numbers, dates and times,
+    /// character strings and binaries) widening to cover both.
     /// </summary>
     /// <remarks>
-    /// Dispatch is structured as an outer switch on the left operand's
-    /// <see cref="Category"/> with each arm handing off to a helper that
-    /// switches on the right operand's category. Both switches are over
-    /// dense byte-typed enums, so the JIT can lower them to jump tables.
-    /// varbinary / binary vs an integer partner: the binary side implicitly
-    /// converts to the integer type (probe-confirmed against SQL Server
-    /// 2025 — <c>0x01 = 1</c> compares equal, <c>1 + 0x01</c> and
-    /// <c>255 &amp; 0x01</c> stay int, <c>cast(5 as bigint) / 0x02</c> stays
-    /// bigint). Comparison and arithmetic both route through here.
+    /// A binary operand meeting a character string unifies as the string
+    /// family's own shape of the binary's byte length — <c>binary(N)</c> as
+    /// the fixed form, <c>varbinary(N)</c> as the variable one — so
+    /// <c>char(3)</c> with <c>varbinary(4)</c> is <c>varchar(4)</c> and
+    /// <c>nchar(3)</c> with <c>binary(2)</c> stays <c>nchar(3)</c>
+    /// (probe-confirmed against SQL Server 2025). Against a number, a
+    /// date or a <c>uniqueidentifier</c> the binary simply converts to the
+    /// partner's type.
     /// </remarks>
-    public static SqlType Promote(SqlType a, SqlType b) =>
-        a == b ? a
-        : a is SqlVariantSqlType || b is SqlVariantSqlType ? SqlVariant
-        : a is RowVersionSqlType ? PromoteFromRowVersion(b)
-        : b is RowVersionSqlType ? PromoteFromRowVersion(a)
-        : (a is VarbinarySqlType or BinarySqlType) && IsIntegerCategory(b) ? b
-        : (b is VarbinarySqlType or BinarySqlType) && IsIntegerCategory(a) ? a
-        : (a is VarbinarySqlType or BinarySqlType) && (b is VarbinarySqlType or BinarySqlType) ? PromoteBinaryFamily(a, b)
-        : a.Category switch
-        {
-            SqlTypeCategory.Approximate => PromoteFromApproximate(a, b),
-            SqlTypeCategory.Decimal => PromoteFromDecimal(a, b),
-            SqlTypeCategory.Money => PromoteFromMoney(a, b),
-            SqlTypeCategory.Integer => PromoteFromInteger(a, b),
-            SqlTypeCategory.String => PromoteFromString(a, b),
-            SqlTypeCategory.DateTime => PromoteFromDateTime(a, b),
-            SqlTypeCategory.UniqueIdentifier => PromoteFromUniqueIdentifier(a, b),
-            _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
-        };
+    public static SqlType Promote(SqlType a, SqlType b)
+    {
+        if (a == b)
+            return a;
+        if (PairError(TypePairOperation.Unify, a, b, "") is { } error)
+            throw error;
+
+        return a is SqlVariantSqlType || b is SqlVariantSqlType ? SqlVariant
+            : IsNumericPairClass(a) && IsNumericPairClass(b) ? PromoteNumericPair(a, b)
+            : a.Category == SqlTypeCategory.DateTime && b.Category == SqlTypeCategory.DateTime ? PromoteDateTime(a, b)
+            : IsCharacterOrBinaryPairClass(a) && IsCharacterOrBinaryPairClass(b)
+                ? (a.PairClass == TypePairClass.Binary && b.PairClass == TypePairClass.Binary ? PromoteBinaryFamily(a, b) : PromoteStringPair(a, b))
+            : a.Precedence >= b.Precedence ? a : b;
+    }
+
+    private static bool IsNumericPairClass(SqlType type) =>
+        type.PairClass is TypePairClass.Bit or TypePairClass.Integer or TypePairClass.ExactNumeric or TypePairClass.Approximate;
+
+    private static bool IsCharacterOrBinaryPairClass(SqlType type) =>
+        type.PairClass is TypePairClass.AnsiString or TypePairClass.UnicodeString or TypePairClass.Text or TypePairClass.Binary;
 
     /// <summary>
     /// Joint-envelope common type for a set of value branches (CASE / COALESCE /
@@ -87,19 +87,6 @@ internal abstract partial class SqlType
     }
 
     /// <summary>
-    /// rowversion participates in comparison with the binary family — chiefly
-    /// to support EF Core's optimistic-concurrency <c>WHERE [RowVersion] = @p</c>
-    /// pattern, where <c>@p</c> binds as <c>varbinary</c>. Cross-binary
-    /// promotion picks the binary side as the common type; the rowversion
-    /// side coerces via its <see cref="RowVersionSqlType"/> outbound CAST.
-    /// Other categories raise the operand-type-clash error.
-    /// </summary>
-    private static SqlType PromoteFromRowVersion(SqlType other) =>
-        other == Varbinary ? Varbinary
-        : other is BinarySqlType ? other
-        : throw SimulatedSqlException.OperandTypeClash(RowVersion, other);
-
-    /// <summary>
     /// Binary-family unification: either operand being <c>varbinary(MAX)</c>
     /// makes the result <c>varbinary(MAX)</c> (DacFx's bacpac-export row-size
     /// sampler compares <c>varbinary(N)</c> columns against MAX-typed
@@ -120,127 +107,102 @@ internal abstract partial class SqlType
     }
 
     /// <summary>
-    /// Approximate (float/real) wins over every other numeric or string
-    /// partner. When both sides are approximate, <c>float</c> wins over
-    /// <c>real</c>; same-type pairs short-circuit at the top of
-    /// <see cref="Promote"/>, so this only sees mixed approximate pairs.
+    /// Two numbers: dispatched on the left operand's category, each arm
+    /// switching on the right's, so both steps lower to jump tables.
     /// </summary>
-    private static SqlType PromoteFromApproximate(SqlType a, SqlType b) => b.Category switch
+    private static SqlType PromoteNumericPair(SqlType a, SqlType b) => a.Category switch
     {
-        SqlTypeCategory.Approximate => a == Float || b == Float ? Float : Real,
-        SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Integer or SqlTypeCategory.String => a,
-        _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
+        SqlTypeCategory.Approximate => PromoteFromApproximate(a, b),
+        SqlTypeCategory.Decimal => PromoteFromDecimal(a, b),
+        SqlTypeCategory.Money => PromoteFromMoney(a, b),
+        _ => PromoteFromInteger(a, b),
     };
+
+    /// <summary>
+    /// Approximate (float/real) wins over every other numeric partner. When
+    /// both sides are approximate, <c>float</c> wins over <c>real</c>.
+    /// </summary>
+    private static SqlType PromoteFromApproximate(SqlType a, SqlType b) =>
+        b.Category == SqlTypeCategory.Approximate ? (a == Float || b == Float ? Float : Real) : a;
 
     /// <summary>
     /// Decimal vs decimal widens to the joint envelope. Decimal vs integer
     /// or money canonicalizes the partner to its decimal equivalent
     /// (bit→(1,0) … bigint→(19,0); money→(19,4); smallmoney→(10,4)) and
-    /// rerun the envelope rule. Decimal beats string (string parses).
+    /// rerun the envelope rule.
     /// </summary>
     private static SqlType PromoteFromDecimal(SqlType a, SqlType b) => b.Category switch
     {
         SqlTypeCategory.Approximate => b,
         SqlTypeCategory.Decimal => PromoteDecimalPair((DecimalSqlType)a, (DecimalSqlType)b),
         SqlTypeCategory.Integer => PromoteDecimalPair((DecimalSqlType)a, IntegerAsDecimalType(b)),
-        SqlTypeCategory.Money => PromoteDecimalPair((DecimalSqlType)a, MoneyAsDecimalType(b)),
-        SqlTypeCategory.String => a,
-        _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
+        _ => PromoteDecimalPair((DecimalSqlType)a, MoneyAsDecimalType(b)),
     };
 
     /// <summary>
     /// Money pairings: money vs money picks money over smallmoney; money
-    /// vs integer or string keeps the money type; money vs decimal goes
-    /// through <see cref="PromoteFromDecimal"/> with the operands swapped
-    /// so the decimal arm handles canonicalization; money vs float/real
-    /// promotes to float/real.
+    /// vs integer keeps the money type; money vs decimal canonicalizes the
+    /// money side and widens; money vs float/real promotes to float/real.
     /// </summary>
     private static SqlType PromoteFromMoney(SqlType a, SqlType b) => b.Category switch
     {
         SqlTypeCategory.Approximate => b,
         SqlTypeCategory.Decimal => PromoteDecimalPair(MoneyAsDecimalType(a), (DecimalSqlType)b),
         SqlTypeCategory.Money => a == Money || b == Money ? Money : SmallMoney,
-        SqlTypeCategory.Integer or SqlTypeCategory.String => a,
-        _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
+        _ => a,
     };
 
     /// <summary>
-    /// Integer vs each numeric / string / date-time category. Integer
-    /// canonicalizes to its decimal equivalent for decimal/money partners.
-    /// Integer vs string keeps the integer's specific type (probe-confirmed
-    /// against SQL Server 2025: <c>tinyint + '3'</c> → tinyint,
-    /// <c>bigint + '3'</c> → bigint); the string side parses through the
-    /// integer's CAST path at runtime, which fails with Msg 245 for
-    /// decimal-shaped strings (<c>'5.5'</c>, <c>'5.0'</c>) — SQL Server
-    /// does not route through decimal even when the string represents an
-    /// exact-integer value with a fractional zero. Integer vs date/time
-    /// only succeeds for the legacy datetime types (datetime,
-    /// smalldatetime); other date/time types raise the operand-type-clash
-    /// error.
+    /// Integer vs each numeric category. Integer canonicalizes to its
+    /// decimal equivalent for a decimal partner; the wider integer wins an
+    /// integer pair.
     /// </summary>
     private static SqlType PromoteFromInteger(SqlType a, SqlType b) => b.Category switch
     {
-        SqlTypeCategory.Approximate => b,
         SqlTypeCategory.Decimal => PromoteDecimalPair(IntegerAsDecimalType(a), (DecimalSqlType)b),
-        SqlTypeCategory.Money => b,
         SqlTypeCategory.Integer => a.Precedence >= b.Precedence ? a : b,
-        SqlTypeCategory.String => a,
-        SqlTypeCategory.DateTime => b == DateTime || b == SmallDateTime ? b : throw SimulatedSqlException.OperandTypeClash(a, b),
-        _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
+        _ => b,
     };
 
     /// <summary>
-    /// String vs each higher-precedence partner. The partner wins (the
-    /// string parses through that partner's CAST path); same-category
-    /// strings pick the higher precedence (sysname &gt; nvarchar &gt;
-    /// nchar &gt; varchar &gt; char). For two parameterized siblings of
-    /// the same kind (e.g. char(5) vs char(10)), the longer length wins so
-    /// the shorter side doesn't truncate. String vs uniqueidentifier
-    /// promotes to uid; string vs integer keeps the integer's specific
-    /// type (so <c>'5' + cast(3 as bigint)</c> → bigint).
-    /// </summary>
-    private static SqlType PromoteFromString(SqlType a, SqlType b) => b.Category switch
-    {
-        SqlTypeCategory.Approximate or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.DateTime or SqlTypeCategory.UniqueIdentifier or SqlTypeCategory.Integer => b,
-        SqlTypeCategory.String => PromoteStringPair(a, b),
-        _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
-    };
-
-    /// <summary>
-    /// Joint-envelope unification of two string operands for CASE / COALESCE /
-    /// NULLIF / IIF / set-op / comparison common-type decisions. The result
-    /// takes the <b>maximum declared width</b> of the two operands (not the
-    /// sum — that's concatenation, in <see cref="PromoteForArithmetic"/>) so a
-    /// projected column is wide enough for either arm's value: probe-confirmed
-    /// against SQL Server 2025 (<c>CASE … 'ab' … 'wxyz'</c> → <c>varchar(4)</c>,
+    /// Joint-envelope unification of two character operands — or one
+    /// character operand and a binary, which unifies as the character family's
+    /// own form of its byte length — for CASE / COALESCE / NULLIF / IIF /
+    /// set-op / comparison common-type decisions. The result takes the
+    /// <b>maximum declared width</b> of the two operands (not the sum — that's
+    /// concatenation, in <see cref="PromoteForArithmetic"/>) so a projected
+    /// column is wide enough for either arm's value: probe-confirmed against
+    /// SQL Server 2025 (<c>CASE … 'ab' … 'wxyz'</c> → <c>varchar(4)</c>,
     /// <c>… 'ab' … N'wxyz'</c> → <c>nvarchar(4)</c>, <c>SELECT 'ab' UNION ALL
     /// SELECT 'wxyz'</c> → <c>varchar(4)</c>). National family (nvarchar /
-    /// nchar) wins over the CP1252 family and the width stays measured in
-    /// characters across the family change; a fixed pair (char / nchar) stays
-    /// fixed, and any variable operand drops the result to the variable form.
-    /// Either operand at <see cref="MaxLengthSentinel"/> makes the result MAX.
-    /// The length-unspecified sentinel (0) contributes 0 to the max so a bare
-    /// var* operand yields to a sized partner. Operands outside the four
-    /// bounded var/fixed classes (text / ntext / sysname / xml-ish) fall back
-    /// to the precedence pick, preserving prior behavior.
+    /// nchar / sysname) wins over the CP1252 family and the width stays
+    /// measured in characters across the family change; a fixed pair (char /
+    /// nchar / binary) stays fixed, and any variable operand drops the result
+    /// to the variable form. Either operand at <see cref="MaxLengthSentinel"/>
+    /// makes the result MAX. The length-unspecified sentinel (0) contributes 0
+    /// to the max so a bare var* operand yields to a sized partner. A
+    /// <c>text</c> / <c>ntext</c> operand outranks every bounded string, so the
+    /// higher-ranked legacy type is the result as it stands.
     /// </summary>
     private static SqlType PromoteStringPair(SqlType a, SqlType b)
     {
-        var aLen = SimpleStringLength(a);
-        var bLen = SimpleStringLength(b);
-        if (aLen is null || bLen is null)
-        {
+        if (a.PairClass == TypePairClass.Text || b.PairClass == TypePairClass.Text)
             return a.Precedence >= b.Precedence ? a : b;
-        }
+
+        var aLen = UnifiedStringLength(a);
+        var bLen = UnifiedStringLength(b);
 
         // sysname is nvarchar(128) under an alias, so it carries the national
         // family into a promotion the way an nvarchar does (probe-confirmed:
         // real types `TYPE_NAME(56) + ''` as nvarchar(129)).
-        var national = a is NVarcharSqlType or NCharSqlType or SystemNameSqlType || b is NVarcharSqlType or NCharSqlType or SystemNameSqlType;
-        var fixedLength = a is CharSqlType or NCharSqlType && b is CharSqlType or NCharSqlType;
-        var resolved = Collation.Resolve(a, b);
-        var (collation, coercibility) = resolved
-            ?? (a.Collation ?? b.Collation ?? Collation.Baseline, Coercibility.CoercibleDefault);
+        var national = a.PairClass == TypePairClass.UnicodeString || b.PairClass == TypePairClass.UnicodeString;
+        var fixedLength = a is CharSqlType or NCharSqlType or BinarySqlType && b is CharSqlType or NCharSqlType or BinarySqlType;
+
+        // A binary operand has no collation to offer, so the character side's
+        // stands; between two character operands it is the coercibility rule.
+        var (collation, coercibility) = a.PairClass == TypePairClass.Binary ? (b.Collation ?? Collation.Baseline, b.Coercibility)
+            : b.PairClass == TypePairClass.Binary ? (a.Collation ?? Collation.Baseline, a.Coercibility)
+            : Collation.Resolve(a, b) ?? (a.Collation ?? b.Collation ?? Collation.Baseline, Coercibility.CoercibleDefault);
 
         if (aLen == MaxLengthSentinel || bLen == MaxLengthSentinel)
         {
@@ -249,7 +211,7 @@ internal abstract partial class SqlType
                 : VarcharSqlType.Get(MaxLengthSentinel, collation, coercibility);
         }
 
-        var max = Math.Max(aLen.Value, bLen.Value);
+        var max = Math.Max(aLen, bLen);
         if (max == 0)
         {
             return national
@@ -268,42 +230,19 @@ internal abstract partial class SqlType
     }
 
     /// <summary>
-    /// Declared width of a bounded var / fixed string operand
-    /// (<c>varchar</c> / <c>nvarchar</c> / <c>char</c> / <c>nchar</c>), for
-    /// the max-width unification in <see cref="PromoteStringPair"/>. Returns
-    /// <see langword="null"/> for LOB / sysname / any other string type so the
-    /// caller falls back to precedence.
+    /// Declared width an operand contributes to <see cref="PromoteStringPair"/>'s
+    /// max-width unification: the bounded character and binary families carry
+    /// it on the type, and <c>sysname</c> is <c>nvarchar(128)</c>.
     /// </summary>
-    private static int? SimpleStringLength(SqlType type) => type switch
+    private static int UnifiedStringLength(SqlType type) => type switch
     {
         VarcharSqlType v => v.length,
         NVarcharSqlType nv => nv.length,
         CharSqlType c => c.length,
         NCharSqlType nc => nc.length,
-        _ => null,
-    };
-
-    /// <summary>
-    /// Date/time pairings dispatch to <see cref="PromoteDateTime"/>; date/
-    /// time vs string takes the date/time side (string parses); date/time
-    /// vs integer succeeds only for the legacy types.
-    /// </summary>
-    private static SqlType PromoteFromDateTime(SqlType a, SqlType b) => b.Category switch
-    {
-        SqlTypeCategory.DateTime => PromoteDateTime(a, b),
-        SqlTypeCategory.String => a,
-        SqlTypeCategory.Integer => a == DateTime || a == SmallDateTime ? a : throw SimulatedSqlException.OperandTypeClash(a, b),
-        _ => throw new NotSupportedException($"Cross-category type promotion isn't implemented: {a} vs {b}."),
-    };
-
-    /// <summary>
-    /// uniqueidentifier vs string promotes to uniqueidentifier (the string
-    /// parses); every other partner raises the operand-type-clash error.
-    /// </summary>
-    private static SqlType PromoteFromUniqueIdentifier(SqlType a, SqlType b) => b.Category switch
-    {
-        SqlTypeCategory.String => a,
-        _ => throw SimulatedSqlException.OperandTypeClash(a, b),
+        VarbinarySqlType vb => vb.length,
+        BinarySqlType bin => bin.length,
+        _ => 128,
     };
 
     /// <summary>
@@ -351,52 +290,29 @@ internal abstract partial class SqlType
     /// — those produce wider integer / money results that match
     /// <see cref="Promote"/>.
     /// </remarks>
-    public static SqlType PromoteForArithmetic(SqlType a, SqlType b, char op)
+    public static SqlType PromoteForArithmetic(SqlType a, SqlType b, char op) =>
+        PromoteOperandsForArithmetic(new TypePairOperand(a), new TypePairOperand(b), op);
+
+    /// <summary>
+    /// <see cref="PromoteForArithmetic"/> for callers
+    /// holding the operand expressions, whose refusal names the operands the
+    /// way real's does (<c>numeric</c>, a column's object for Msg 260).
+    /// </summary>
+    public static SqlType PromoteOperandsForArithmetic(TypePairOperand left, TypePairOperand right, char op)
     {
-        // sql_variant has no arithmetic / concatenation behavior. Probe-confirmed
-        // against SQL Server 2025: variant + variant, and variant + string
-        // (a concatenation context), raise Msg 402 ("incompatible in the <op>
-        // operator"); variant + a numeric / other convertible type raises Msg 257
-        // (the non-variant side is the disallowed implicit-conversion target).
-        if (a is SqlVariantSqlType || b is SqlVariantSqlType)
-        {
-            var other = a is SqlVariantSqlType ? b : a;
-            throw (a is SqlVariantSqlType && b is SqlVariantSqlType) || other.Category == SqlTypeCategory.String
-                ? SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, op == '+' ? "add" : BinaryOperatorWord(op))
-                : SimulatedSqlException.ImplicitConversionFromSqlVariantNotAllowed(other);
-        }
-
-        // Binary operands. One binary + one integer converts the binary side
-        // to the integer type (Promote handles it — applies to arithmetic AND
-        // bitwise). Binary + binary is varbinary/binary concatenation for '+',
-        // and an error for every other operator: Msg 402 for '- % & | ^',
-        // Msg 8117 for '* /' (probe-confirmed against SQL Server 2025).
-        var aBinary = a is VarbinarySqlType or BinarySqlType;
-        var bBinary = b is VarbinarySqlType or BinarySqlType;
-        if (aBinary && bBinary)
-            return BinaryPairResultType(a, b, op);
-        if ((aBinary && IsIntegerCategory(b)) || (bBinary && IsIntegerCategory(a)))
-            return Promote(a, b);
-
-        // Bitwise operators (&, |, ^) don't have per-operator scale rules
-        // and don't accept decimal operands anyway — fall through to the
-        // joint-envelope rule for type unification (decimal × bitwise will
-        // raise the unsupported-numeric-pair error at runtime instead).
-        // bit & bit / | / ^ are legal and land here (probe-confirmed).
+        var a = left.Type;
+        var b = right.Type;
         if (op is '&' or '|' or '^')
-            return Promote(a, b);
+            return PromoteForBitwise(a, b, op);
 
-        // bit paired with bit has no arithmetic at all on real, splitting the
-        // same way the binary pair above does: Msg 8117 for '* /', Msg 402 for
-        // '+ - %' (probe-confirmed against SQL Server 2025, including the
-        // modulo wording). A mixed bit + int promotes and computes normally,
-        // so only the same-type pair is refused.
-        if (a == Bit && b == Bit)
-        {
-            throw op is '*' or '/'
-                ? SimulatedSqlException.OperandDataTypeInvalid(a, BinaryOperatorWord(op))
-                : SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, op == '+' ? "add" : BinaryOperatorWord(op));
-        }
+        if (OperandPairError(ArithmeticOperation(op), left, right, ArithmeticOperatorWord(op)) is { } error)
+            throw error;
+
+        // A legacy datetime partner makes the result that datetime: real
+        // converts the other operand to it and adds or subtracts day counts.
+        // Only + and - get here, the grids refusing every other operator.
+        if (a.PairClass == TypePairClass.LegacyDateTime || b.PairClass == TypePairClass.LegacyDateTime)
+            return Promote(a, b);
 
         // String + string is concatenation, not arithmetic. Lengths combine
         // as min(8000, N+M) for varchar/char pairs, min(4000, N+M) for any
@@ -409,7 +325,9 @@ internal abstract partial class SqlType
         // operands (length=0 sentinel — e.g. CAST/runtime forms that haven't
         // pinned a length) treat the missing operand as length 0 in the sum,
         // mirroring the no-info-available behavior.
-        if (op == '+' && a.Category == SqlTypeCategory.String && b.Category == SqlTypeCategory.String)
+        var aCharacter = a.PairClass is TypePairClass.AnsiString or TypePairClass.UnicodeString;
+        var bCharacter = b.PairClass is TypePairClass.AnsiString or TypePairClass.UnicodeString;
+        if (aCharacter && bCharacter)
         {
             return (a, b) switch
             {
@@ -421,56 +339,89 @@ internal abstract partial class SqlType
             };
         }
 
-        // Modulo has no float / real form at all — probe-confirmed against SQL
-        // Server 2025 across the whole approximate row and column. The split
-        // matches the bit and binary pairs above: two approximate operands
-        // raise Msg 8117 naming the LEFT one ("Operand data type real is
-        // invalid for modulo operator." for `real % float` as well as `real %
-        // real`), while an approximate paired with any exact-numeric, string or
-        // binary partner raises Msg 402 naming both in written order. A
-        // date/time partner is left to the promotion below, which reports the
-        // date pair's own error.
-        if (op == '%'
-            && (a.Category == SqlTypeCategory.Approximate || b.Category == SqlTypeCategory.Approximate)
-            && a.Category != SqlTypeCategory.DateTime
-            && b.Category != SqlTypeCategory.DateTime)
-        {
-            throw a.Category == b.Category
-                ? SimulatedSqlException.OperandDataTypeInvalid(a, "modulo")
-                : SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, "modulo");
-        }
+        // Binary + binary (a timestamp included) concatenates.
+        var aBinary = a.PairClass is TypePairClass.Binary or TypePairClass.Timestamp;
+        var bBinary = b.PairClass is TypePairClass.Binary or TypePairClass.Timestamp;
+        if (aBinary && bBinary)
+            return BinaryConcatResultType(a, b);
+
+        // Every other legal pair has a number on at least one side, and a
+        // string, binary or timestamp operand converts to that number's type —
+        // so `decimal(5,2) + 0x…` is the decimal pair's decimal(6,2), and
+        // `bigint + '3'` stays bigint (probe-confirmed against SQL Server 2025).
+        // bit does the same against a decimal: `bit * decimal(5,2)` is
+        // decimal(11,4), the decimal(5,2) pair's own product, where every other
+        // integer brings its own digits (`tinyint * decimal(5,2)` is decimal(9,2)).
+        if (aCharacter || aBinary || (a == Bit && b is DecimalSqlType))
+            a = b;
+        else if (bCharacter || bBinary || (b == Bit && a is DecimalSqlType))
+            b = a;
 
         // Float / real win over everything else, same as the joint-envelope
         // path; no decimal-style scale dance needed.
         if (a.Category == SqlTypeCategory.Approximate || b.Category == SqlTypeCategory.Approximate)
             return Promote(a, b);
 
-        // A string operand adopts the other side's decimal type so the
-        // per-operator formula below sees a uniform decimal pair (SQL Server
-        // converts the low-precedence string to the numeric partner's type;
-        // runtime coercion mirrors this in TwoSidedExpression). Integer / money
-        // string pairings resolve through the joint-envelope Promote below.
-        if (a.Category == SqlTypeCategory.String && b is DecimalSqlType)
-            a = b;
-        else if (b.Category == SqlTypeCategory.String && a is DecimalSqlType)
-            b = a;
-
         // Decimal-involving cases: the per-operator formula applies. Money
         // and integer canonicalize to their decimal equivalent so the
         // formula sees a uniform (precision, scale) pair on both sides.
-        var aIsDecimal = a is DecimalSqlType;
-        var bIsDecimal = b is DecimalSqlType;
-        if (aIsDecimal || bIsDecimal)
+        if (a is DecimalSqlType || b is DecimalSqlType)
         {
             var (p1, s1) = AsDecimalPrecisionScale(a);
             var (p2, s2) = AsDecimalPrecisionScale(b);
             return ComputeDecimalArithmeticResultType(p1, s1, p2, s2, op);
         }
 
-        // Pure integer / money / date / string pairs: arithmetic result type
-        // matches the joint-envelope rule (e.g., int + bigint → bigint;
-        // money + money → money; int + int → int).
+        // Pure integer / money pairs: arithmetic result type matches the
+        // joint-envelope rule (e.g., int + bigint → bigint; money + money →
+        // money; int + int → int).
         return Promote(a, b);
+    }
+
+    private static TypePairOperation ArithmeticOperation(char op) => op switch
+    {
+        '+' => TypePairOperation.Add,
+        '-' => TypePairOperation.Subtract,
+        '*' => TypePairOperation.Multiply,
+        '/' => TypePairOperation.Divide,
+        _ => TypePairOperation.Modulo,
+    };
+
+    /// <summary>
+    /// The operator as real's arithmetic diagnostics spell it: the word form
+    /// for <c>+ - * / %</c> and the quoted character for the bitwise
+    /// <c>&amp;</c>/<c>|</c>/<c>^</c> operators.
+    /// </summary>
+    internal static string ArithmeticOperatorWord(char op) => op switch
+    {
+        '+' => "add",
+        '-' => "subtract",
+        '*' => "multiply",
+        '/' => "divide",
+        '%' => "modulo",
+        _ => $"'{op}'",
+    };
+
+    /// <summary>
+    /// The bitwise operators, which the pair grids don't cover. sql_variant
+    /// has no bitwise behavior: variant with variant or a string raises
+    /// Msg 402, with anything else Msg 257. Binary with binary is Msg 402;
+    /// binary with an integer converts the binary to the integer's type
+    /// (probe-confirmed against SQL Server 2025).
+    /// </summary>
+    private static SqlType PromoteForBitwise(SqlType a, SqlType b, char op)
+    {
+        if (a is SqlVariantSqlType || b is SqlVariantSqlType)
+        {
+            var other = a is SqlVariantSqlType ? b : a;
+            throw (a is SqlVariantSqlType && b is SqlVariantSqlType) || other.Category == SqlTypeCategory.String
+                ? SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, ArithmeticOperatorWord(op))
+                : SimulatedSqlException.ImplicitConversionFromSqlVariantNotAllowed(other);
+        }
+
+        return a is VarbinarySqlType or BinarySqlType && b is VarbinarySqlType or BinarySqlType
+            ? throw SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, ArithmeticOperatorWord(op))
+            : Promote(a, b);
     }
 
     /// <summary>
@@ -561,119 +512,80 @@ internal abstract partial class SqlType
     }
 
     /// <summary>
-    /// Date/time-category promotion. <c>time</c> is incompatible with any
-    /// non-<c>time</c> partner (Msg 402); other pairs widen to the
-    /// highest-precedence family with a precision that's the max of the two
-    /// participants. Legacy <c>datetime</c> contributes scale 3 to that max
-    /// (matching its 1/300-second display granularity).
+    /// Date/time-category promotion: the highest-precedence family present,
+    /// with a fractional precision that's the max of the two participants.
+    /// Legacy <c>datetime</c> contributes scale 3 to that max (matching its
+    /// 1/300-second display granularity) and <c>time</c> its own precision, so
+    /// <c>time(7)</c> with <c>datetime2(3)</c> is <c>datetime2(7)</c>. The one
+    /// pair with no common type — <c>date</c> with <c>time</c> — never gets
+    /// here; <see cref="PairError"/> refuses it first.
     /// </summary>
     private static SqlType PromoteDateTime(SqlType a, SqlType b)
     {
-        // time-vs-non-time rejection comes first so the more permissive
-        // within-family rule below doesn't accidentally swallow it.
-        var aIsTime = a is TimeSqlType;
-        var bIsTime = b is TimeSqlType;
-        if (aIsTime != bIsTime)
-            throw SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, "equal to");
-
-        if (aIsTime && bIsTime)
-        {
-            var ta = (TimeSqlType)a;
-            var tb = (TimeSqlType)b;
+        if (a is TimeSqlType ta && b is TimeSqlType tb)
             return ta.precision >= tb.precision ? a : b;
-        }
 
-        // Effective precision contributed by each side: dt2/dto carry their
-        // declared precision; legacy datetime is scale 3; date contributes 0.
-        var aPrecision = PrecisionForPromotion(a);
-        var bPrecision = PrecisionForPromotion(b);
-        var precision = Math.Max(aPrecision, bPrecision);
-
-        // Pick the highest-precedence family present.
-        if (a is DateTimeOffsetSqlType || b is DateTimeOffsetSqlType)
-            return GetDateTimeOffset(precision);
-        if (a is DateTime2SqlType || b is DateTime2SqlType)
-            return GetDateTime2(precision);
-        if (a == DateTime || b == DateTime)
-            return DateTime;
-        if (a == SmallDateTime || b == SmallDateTime)
-            return SmallDateTime;
-
-        // Both are `date` is handled by the `a == b` short-circuit upstream.
-        return Date;
+        var precision = Math.Max(PrecisionForPromotion(a), PrecisionForPromotion(b));
+        return a is DateTimeOffsetSqlType || b is DateTimeOffsetSqlType ? GetDateTimeOffset(precision)
+            : a is DateTime2SqlType || b is DateTime2SqlType ? GetDateTime2(precision)
+            : a == DateTime || b == DateTime ? DateTime
+            : a == SmallDateTime || b == SmallDateTime ? SmallDateTime
+            : Date;
     }
 
     private static int PrecisionForPromotion(SqlType type) => type switch
     {
         DateTime2SqlType dt2 => dt2.precision,
         DateTimeOffsetSqlType dto => dto.precision,
+        TimeSqlType time => time.precision,
         _ when type == DateTime => 3,
         _ => 0,
     };
 
     /// <summary>
-    /// Result type for a binary-+-binary operator pair. <c>+</c> concatenates
-    /// (<c>binary(N+M)</c> when both sides are fixed-length binary, else
-    /// <c>varbinary(N+M)</c>, capped at 8000); <c>- % &amp; | ^</c> raise Msg 402;
-    /// <c>* /</c> raise Msg 8117. Probe-confirmed against SQL Server 2025
-    /// (2026-07-14).
-    /// </summary>
-    private static SqlType BinaryPairResultType(SqlType a, SqlType b, char op) => op switch
-    {
-        '+' => BinaryConcatResultType(a, b),
-        '*' or '/' => throw SimulatedSqlException.OperandDataTypeInvalid(a, BinaryOperatorWord(op)),
-        _ => throw SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, BinaryOperatorWord(op)),
-    };
-
-    /// <summary>
     /// Concatenation result type for binary <c>+</c> binary. Both fixed-length
     /// binary operands give <c>binary(N+M)</c>; any varbinary participant gives
-    /// <c>varbinary(N+M)</c>; the summed length caps at 8000. Length-unspecified
-    /// operands (hex literals carry no static length) fall back to the
-    /// unspecified varbinary form.
+    /// <c>varbinary(N+M)</c>; the summed length caps at 8000, and a MAX operand
+    /// makes the result MAX. Length-unspecified operands (hex literals carry no
+    /// static length) fall back to the unspecified varbinary form.
     /// </summary>
     private static SqlType BinaryConcatResultType(SqlType a, SqlType b)
     {
+        if (a is VarbinarySqlType { length: MaxLengthSentinel } || b is VarbinarySqlType { length: MaxLengthSentinel })
+            return VarbinaryMax;
+
         var summed = Math.Min(8000, BinaryLength(a) + BinaryLength(b));
         return summed <= 0 ? Varbinary
             : a is BinarySqlType && b is BinarySqlType ? GetBinary(summed)
             : VarbinarySqlType.Get(summed);
     }
 
+    /// <summary>
+    /// A binary operand's declared width in a concatenation. A timestamp
+    /// counts 40 rather than its 8 bytes: real types <c>varbinary(4) +
+    /// timestamp</c> as <c>varbinary(44)</c> and <c>timestamp + timestamp</c>
+    /// as <c>varbinary(80)</c>, though the value is the 8-byte concatenation
+    /// (probe-confirmed against SQL Server 2025, 2026-09-23).
+    /// </summary>
     private static int BinaryLength(SqlType type) => type switch
     {
         BinarySqlType binary => binary.length,
         VarbinarySqlType varbinary => varbinary.length > 0 ? varbinary.length : 0,
+        RowVersionSqlType => 40,
         _ => 0,
-    };
-
-    /// <summary>
-    /// Operator wording for the binary-pair Msg 402 / 8117 errors: the word
-    /// form for <c>-</c>/<c>*</c>/<c>/</c>/<c>%</c> and the quoted operator
-    /// character for the bitwise <c>&amp;</c>/<c>|</c>/<c>^</c> operators.
-    /// </summary>
-    private static string BinaryOperatorWord(char op) => op switch
-    {
-        '-' => "subtract",
-        '*' => "multiply",
-        '/' => "divide",
-        '%' => "modulo",
-        _ => $"'{op}'",
     };
 
     /// <summary>
     /// Computes the result type for a string-+-string operand pair when at
     /// least one side is variable-length. National-string family wins; the
     /// declared-length sum is capped at the family's maximum (4000 for
-    /// nvarchar, 8000 for varchar). LOB operands (text / ntext) drop the
-    /// result to the unspecified-length form because LOB has no per-cell
-    /// width to add.
+    /// nvarchar, 8000 for varchar). The legacy LOB types never get here —
+    /// real refuses to concatenate them (Msg 402, in the pair grids).
     /// </summary>
     private static SqlType StringConcatResult(SqlType a, SqlType b)
     {
         var national = a is NVarcharSqlType or NCharSqlType or SystemNameSqlType
-            || b is NVarcharSqlType or NCharSqlType or SystemNameSqlType
-            || a == NText || b == NText;
+            || b is NVarcharSqlType or NCharSqlType or SystemNameSqlType;
 
         // Resolve the result collation via SQL Server's collation-coercibility
         // resolution over the input operands; mismatched same-rank operands
@@ -685,13 +597,6 @@ internal abstract partial class SqlType
         var resolved = Collation.Resolve(a, b);
         var (resultCollation, resultCoercibility) = resolved
             ?? (a.Collation ?? b.Collation ?? Collation.Baseline, Coercibility.CoercibleDefault);
-
-        if (a == Text || b == Text || a == NText || b == NText)
-        {
-            return national
-                ? NVarcharSqlType.Get(0, resultCollation, resultCoercibility)
-                : VarcharSqlType.Get(0, resultCollation, resultCoercibility);
-        }
 
         var aLen = StringLengthForConcat(a);
         var bLen = StringLengthForConcat(b);
@@ -728,12 +633,15 @@ internal abstract partial class SqlType
     /// Returns the declared length of a string operand for use in
     /// <see cref="StringConcatResult"/>. char(N) / nchar(N) carry length on
     /// the type; varchar(N) / nvarchar(N) carry it via the per-length
-    /// singleton. The unspecified-length form (length=0) and LOB families
-    /// (text / ntext / sysname) report 0, which the caller interprets as
-    /// "fall back to the unspecified result form."
+    /// singleton; <c>sysname</c> is the <c>nvarchar(128)</c> it aliases
+    /// (probe-confirmed: <c>sysname + varchar(10)</c> is <c>nvarchar(138)</c>).
+    /// The unspecified-length form (length=0) and the LOB families (text /
+    /// ntext) report 0, which the caller interprets as "fall back to the
+    /// unspecified result form."
     /// </summary>
     private static int StringLengthForConcat(SqlType type) => type switch
     {
+        SystemNameSqlType => 128,
         CharSqlType c => c.length,
         NCharSqlType nc => nc.length,
         VarcharSqlType v => v.length,

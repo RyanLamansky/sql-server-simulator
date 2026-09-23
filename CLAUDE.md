@@ -265,7 +265,8 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **Legacy LOB** — where `text` / `ntext` / `image` can't go, binary `SUBSTRING`, `TEXTPTR` / `TEXTVALID`, and `READTEXT` / `WRITETEXT` / `UPDATETEXT`.
   The non-comparable rejections split by *slot* rather than by type, so `xml` and the spatial pair share most of them → [`legacy-lob.md`](docs/claude/legacy-lob.md).
 - **Type promotion and arithmetic** — `Promote` / `PromoteForArithmetic`, `Storage/Decimal38`, decimal precision-scale, integer overflow and literal typing.
-  `PromoteForArithmetic` is the single source of truth for both `GetSqlType` and the runtime; **they must agree**, because the row encoder rejects a type mismatch → [`arithmetic.md`](docs/claude/arithmetic.md).
+  `PromoteForArithmetic` is the single source of truth for both `GetSqlType` and the runtime; **they must agree**, because the row encoder rejects a type mismatch.
+  Whether two types may unify, compare or meet in an operator — and which error real raises when not — is a probed per-class grid (`SqlType.PairRules.cs`), checked while compiling → [`arithmetic.md`](docs/claude/arithmetic.md).
 - **`Cast` / coercion** — CAST / CONVERT / TRY_* / PARSE, the per-style string→date input grammar, and the `float` / `real` → string style split.
   Conversion *legality* is settled from the two types while compiling, so a typed NULL and an empty rowset raise it too → [`casting.md`](docs/claude/casting.md).
 - **`SimulatedDbDataReader` client surface** — typed accessors, `GetOrdinal` precedence, and the client-side rounding and materialization divergences → [`data-reader.md`](docs/claude/data-reader.md).

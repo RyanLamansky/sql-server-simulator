@@ -79,7 +79,14 @@ internal sealed class SqlVariantProperty : Expression
         };
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        // The argument's own type is what the properties describe, so it has
+        // to be settled here — a CASE / COALESCE argument converts the arm it
+        // picks to its unified type only once that type is known.
+        _ = this.valueArg.GetSqlType(batch, resolveColumnType);
+        return SqlType.SqlVariant;
+    }
 
     private static SqlValue Compute(PropertyKind kind, SqlValue value)
     {

@@ -157,7 +157,7 @@ internal sealed class CaseExpression : Expression
         {
             var inputType = this.input!.GetSqlType(batch, resolveColumnType);
             foreach (var compareValue in this.compareValues!)
-                BooleanExpression.RequireResolvableCollation(inputType, compareValue.GetSqlType(batch, resolveColumnType), "equal to");
+                BooleanExpression.RequireComparable(this.input, inputType, compareValue, compareValue.GetSqlType(batch, resolveColumnType), batch, "equal to");
         }
 
         var arms = this.elseBranch is null ? this.thens : [.. this.thens, this.elseBranch];

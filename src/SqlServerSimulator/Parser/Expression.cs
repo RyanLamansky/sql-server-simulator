@@ -919,6 +919,27 @@ internal abstract class Expression
     }
 
     /// <summary>
+    /// <paramref name="operand"/> as a type-pair legality check sees it: its
+    /// type, whether it spells a <c>decimal</c> as <c>numeric</c>, and — when
+    /// it is a column of the query level being compiled — the object and
+    /// column Msg 260 names, read from the scope the parser has installed.
+    /// </summary>
+    internal static TypePairOperand PairOperand(Expression operand, SqlType type, BatchContext batch)
+    {
+        while (operand is Parenthesized parenthesized)
+            operand = parenthesized.Wrapped;
+
+        if (operand is Reference reference && batch.Parser.ScopeSources is { } sources)
+        {
+            var (sourceIndex, columnIndex) = Selection.FindSourceColumn(sources, reference.ReferencedName);
+            if (sourceIndex >= 0 && (sources[sourceIndex].WrittenObjectName ?? sources[sourceIndex].Qualifier) is { } table)
+                return new TypePairOperand(type, operand, table, sources[sourceIndex].ColumnNames[columnIndex]);
+        }
+
+        return new TypePairOperand(type, operand);
+    }
+
+    /// <summary>
     /// Significant-digit count when <paramref name="expression"/> is (or wraps,
     /// through parentheses or unary minus) a non-negative integer literal —
     /// e.g. <c>3</c>, <c>-3</c>, <c>-(3)</c>, <c>- -3</c> all report <c>1</c>;

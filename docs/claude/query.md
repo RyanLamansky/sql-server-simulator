@@ -5,6 +5,7 @@
   Tri-valued except for the two `IS`-family forms (always definitive).
 - `IS [NOT] DISTINCT FROM` (`BooleanExpression.DistinctFromExpression`): two NULLs are *not* distinct (match), exactly one NULL *is* distinct (no match), two non-NULLs distinct iff unequal under the regular promote-and-compare.
   Type-mismatch operand pairs still surface the underlying Msg 245 / Msg 402 — the NULL-safety lives in the per-side null check, the value-side coerces normally.
+  The pair is checked against the comparison grid while compiling, with the operator spelled `is not`; two `xml` operands are the exception, compiling and refusing only a row where both carry a value (Msg 305, state 3).
   Reachable in any boolean context (WHERE / HAVING / ON / CASE-WHEN / CHECK); bare SELECT-list use raises Msg 156 in real SQL Server because `IS` isn't a value operator.
 - `[NOT] BETWEEN` desugars to `value >= lower AND value <= upper` (inclusive on both ends, probe-confirmed).
   Reversed bounds (low > high) collapse to a definite false; NULL in any operand position propagates through three-valued AND.

@@ -19,8 +19,10 @@ namespace SqlServerSimulator.Storage;
 /// <c>ToString()</c> and the instance methods.
 /// </para>
 /// </remarks>
-internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other)
+internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other, TypePairClass.HierarchyId)
 {
+    public override int Precedence => 30;
+
     public override Type ClrType => typeof(byte[]);
 
     public override bool IsFixedLength => false;

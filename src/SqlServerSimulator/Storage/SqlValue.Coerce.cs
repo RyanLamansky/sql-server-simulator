@@ -196,19 +196,52 @@ internal readonly partial struct SqlValue
         if (SqlType.IsIntegerCategory(this.Type) && target is VarbinarySqlType intToVarbinary)
             return FromVarbinary(EncodeIntegerToBinary(this, intToVarbinary.length, fixedWidth: false));
 
-        // rowversion outbound CAST: bigint reads the 8 bytes big-endian (matches
-        // SQL Server: the database-scoped @@DBTS counter is exposed as a signed
-        // bigint); varbinary / binary copy the raw 8 bytes. No reverse direction
-        // — rowversion can only be auto-generated, never CAST in.
+        // rowversion converts out as the binary(8) it is: bigint reads the 8
+        // bytes big-endian (the database-scoped @@DBTS counter is exposed as a
+        // signed bigint), varbinary / binary copy them, and every other target
+        // takes the binary path — a narrower integer the rightmost bytes, a
+        // datetime the day / tick pair. In, a value lands as binary(8) would —
+        // a binary or string padded or cut on the right, a number or datetime
+        // right-aligned (probe-confirmed against SQL Server 2025, 2026-09-23:
+        // CAST(0x0102 AS timestamp) is 0x0102000000000000, CAST(1 AS timestamp)
+        // 0x0000000000000001).
         if (this.Type is RowVersionSqlType)
         {
-            if (target == SqlType.BigInt)
-                return FromInt64(System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(this.AsBytes));
-            if (target is VarbinarySqlType)
-                return FromVarbinary(this.AsBytes);
-            if (target is BinarySqlType targetRvBinary)
-                return FromBinary(targetRvBinary, this.AsBytes);
+            return target is VarbinarySqlType ? FromVarbinary(this.AsBytes)
+                : target is BinarySqlType targetRvBinary ? FromBinary(targetRvBinary, this.AsBytes)
+                : target is DecimalSqlType rowVersionToDecimal ? this.CoerceToDecimal(rowVersionToDecimal)
+                : target == SqlType.SmallDateTime ? FromSmallDateTime(DecodeSmallDateTimeFromBytes(this.AsBytes, fromRowVersion: true))
+                : FromBinary(SqlType.GetBinary(8), this.AsBytes).CoerceTo(target);
         }
+        if (target is RowVersionSqlType)
+        {
+            return FromRowVersion(System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(this.CoerceTo(SqlType.GetBinary(8)).AsBytes));
+        }
+
+        // datetime / smalldatetime → binary: the stored day / tick form, big
+        // endian and right-aligned like an integer's — binary(N) pads or cuts
+        // on the left, varbinary(N) only cuts (probe-confirmed against SQL
+        // Server 2025, 2026-09-23: CAST(<datetime> AS binary(4)) keeps the
+        // time half).
+        if (this.Type is DateTimeSqlType or SmallDateTimeSqlType && target is BinarySqlType or VarbinarySqlType)
+        {
+            var legacy = this.EncodeLegacyDateTime();
+            return target is BinarySqlType dateTimeToBinary
+                ? FromBinary(dateTimeToBinary, RightAligned(legacy, dateTimeToBinary.length))
+                : FromVarbinary(((VarbinarySqlType)target).length is > 0 and var width && width < legacy.Length ? RightAligned(legacy, width) : legacy);
+        }
+
+        // hierarchyid ↔ string: the canonical /1/2/ path text both ways, the
+        // conversion a CASE or a comparison against a string literal needs.
+        if (this.Type is HierarchyIdSqlType && SqlType.IsStringCategory(target))
+            return FromString(target, HierarchyIdSqlType.PathToString(this.AsHierarchyId));
+        if (target is HierarchyIdSqlType && SqlType.IsStringCategory(this.Type))
+            return FromHierarchyId(HierarchyIdSqlType.ParsePath(this.AsString));
+
+        // An ANSI string reaches image as its code-page bytes; a Unicode one is
+        // real's Msg 529 (the explicit-conversion table's image row).
+        if (target is ImageSqlType && this.Type is CharSqlType or VarcharSqlType or TextSqlType)
+            return FromImage(EncodeStringForBinary(this.AsString, this.Type));
 
         // hierarchyid ↔ varbinary/binary: hierarchyid stores its canonical
         // OrdPath bytes, so CAST(node AS varbinary) is a zero-copy byte read
@@ -322,7 +355,7 @@ internal readonly partial struct SqlValue
         DateTime2SqlType => FromSmallDateTime(this.AsDateTime2),
         TimeSqlType => FromSmallDateTime(new DateTime(1900, 1, 1).Add(this.AsTime)),
         DateTimeOffsetSqlType => FromSmallDateTime(this.AsDateTimeOffset.DateTime),
-        VarbinarySqlType or BinarySqlType => FromSmallDateTime(DecodeSmallDateTimeFromBytes(this.AsBytes)),
+        VarbinarySqlType or BinarySqlType => FromSmallDateTime(DecodeSmallDateTimeFromBytes(this.AsBytes, fromRowVersion: false)),
         _ when SqlType.IsIntegerCategory(this.Type) => CoerceIntegerDaysToSmallDateTime(AsInt64Widened(this)),
         DecimalSqlType => CoerceFractionalDaysToSmallDateTime(FractionalDaysOrOverflow(this.AsDecimal38, SqlType.SmallDateTime)),
         _ when this.Type == SqlType.Float => CoerceFractionalDaysToSmallDateTime((decimal)this.AsDouble),
@@ -1181,6 +1214,7 @@ internal readonly partial struct SqlValue
             DecimalSqlType => this.AsDecimal38.ToDouble(),
             _ when this.Type == SqlType.Float => this.AsDouble,
             _ when this.Type == SqlType.Real => this.AsSingle,
+            _ when SqlType.IsMoneyCategory(this.Type) => (double)this.AsMoney,
             _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
         };
         return target == SqlType.Float ? FromDouble(d) : FromSingle((float)d);
@@ -1253,11 +1287,7 @@ internal readonly partial struct SqlValue
         // float parameter as float, so SQLAlchemy's decimal inserts land here).
         _ when this.Type == SqlType.Float => FromDecimal(target, FloatToDecimal38(this.AsDouble, target, SqlType.Float)),
         _ when this.Type == SqlType.Real => FromDecimal(target, FloatToDecimal38(this.AsSingle, target, SqlType.Real)),
-        // varbinary / binary → decimal / numeric is disallowed: SQL Server
-        // raises Msg 8114 ("Error converting data type varbinary to numeric.")
-        // rather than the Msg 529 explicit-conversion rejection used elsewhere.
-        // Probe-confirmed 2026-07-14; TRY_CAST swallows the 8114 to NULL.
-        VarbinarySqlType or BinarySqlType => throw SimulatedSqlException.ConvertingDataTypeError(this.Type, "numeric"),
+        VarbinarySqlType or BinarySqlType or RowVersionSqlType => FromDecimal(target, RescaleOrOverflow(DecodeNumericFromBytes(this.AsBytes, this.Type), target, SqlType.Varbinary)),
         _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
     };
 
@@ -1511,19 +1541,91 @@ internal readonly partial struct SqlValue
     }
 
     /// <summary>
-    /// Decodes the legacy 8-byte <c>datetime</c> binary format: 4 bytes
-    /// big-endian signed day count from 1900-01-01, then 4 bytes big-endian
-    /// unsigned 1/300-second ticks since midnight.
+    /// Reads SQL Server's own <c>numeric</c> byte form, the one
+    /// <c>CAST(&lt;decimal&gt; AS varbinary)</c> writes: precision, scale, a
+    /// reserved byte, a sign byte (zero for negative), then the magnitude
+    /// little-endian. Anything else — too short, a precision outside 1–38, a
+    /// scale past the precision, a magnitude wider than the precision — is
+    /// real's Msg 8114, spelled <c>varbinary</c> for either binary source and
+    /// <c>timestamp</c> for a rowversion (probe-confirmed against SQL Server
+    /// 2025, 2026-09-23).
+    /// </summary>
+    private static Decimal38 DecodeNumericFromBytes(byte[] bytes, SqlType source)
+    {
+        var precision = bytes.Length > 4 ? bytes[0] : 0;
+        var scale = bytes.Length > 4 ? bytes[1] : 0;
+        UInt128 magnitude = 0;
+        var fits = precision is >= 1 and <= Decimal38.MaxPrecision && scale <= precision;
+        for (var i = bytes.Length - 1; fits && i >= 4; i--)
+        {
+            fits = magnitude >> 120 == 0;
+            magnitude = (magnitude << 8) | bytes[i];
+        }
+
+        var value = fits ? Decimal38.FromParts(magnitude, bytes[3] == 0, scale) : default;
+        return fits && value.SignificantDigits() <= precision
+            ? value
+            : throw SimulatedSqlException.ConvertingDataTypeError(source is RowVersionSqlType ? "timestamp" : "varbinary", "numeric");
+    }
+
+    /// <summary>
+    /// The rightmost <paramref name="width"/> bytes of a binary value, zero
+    /// padded on the left when it is shorter — how real reads a binary as a
+    /// fixed-width date/time form, the same big-endian alignment the integer
+    /// conversions use (probe-confirmed against SQL Server 2025, 2026-09-23:
+    /// <c>CAST(0x0102 AS datetime)</c> is <c>1900-01-01 00:00:00.860</c>).
+    /// </summary>
+    private static byte[] RightAligned(byte[] bytes, int width)
+    {
+        if (bytes.Length == width)
+            return bytes;
+        var aligned = new byte[width];
+        var take = Math.Min(width, bytes.Length);
+        Array.Copy(bytes, bytes.Length - take, aligned, width - take, take);
+        return aligned;
+    }
+
+    /// <summary>
+    /// The inverse of <see cref="DecodeLegacyDateTimeFromBytes"/> /
+    /// <see cref="DecodeSmallDateTimeFromBytes"/>: a <c>datetime</c>'s 8-byte
+    /// day / 1/300-second pair, or a <c>smalldatetime</c>'s 4-byte day /
+    /// minute pair, big-endian.
+    /// </summary>
+    private byte[] EncodeLegacyDateTime()
+    {
+        var baseDate = new DateTime(1900, 1, 1);
+        if (this.Type is SmallDateTimeSqlType)
+        {
+            var small = this.AsSmallDateTime;
+            var smallBytes = new byte[4];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(smallBytes, (ushort)(small.Date - baseDate).Days);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(smallBytes.AsSpan(2), (ushort)small.TimeOfDay.TotalMinutes);
+            return smallBytes;
+        }
+
+        var value = this.AsDateTime;
+        var bytes = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(bytes, (value.Date - baseDate).Days);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(4), (uint)Math.Round(value.TimeOfDay.Ticks * 300.0 / TimeSpan.TicksPerSecond));
+        return bytes;
+    }
+
+    /// <summary>
+    /// Decodes the legacy 8-byte <c>datetime</c> binary format, read from the
+    /// rightmost eight bytes: a big-endian signed day count since 1900-01-01,
+    /// then a big-endian count of 1/300-second granules. A day outside the
+    /// type's range or a granule count past midnight is real's Msg 210.
     /// </summary>
     private static DateTime DecodeLegacyDateTimeFromBytes(byte[] bytes)
     {
-        if (bytes.Length != 8)
-            throw new NotSupportedException($"CAST(varbinary(…) AS datetime) requires exactly 8 bytes; got {bytes.Length}.");
-        // Day count is a signed 32-bit integer (the byte-rebuild is intentional
-        // wrap-aware to recover the sign bit). Tick count is an unsigned 32-bit
-        // count of 1/300-second granules.
-        var days = (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
-        var ticks300 = (uint)(bytes[4] << 24) | (uint)(bytes[5] << 16) | (uint)(bytes[6] << 8) | bytes[7];
+        var aligned = RightAligned(bytes, 8);
+        var days = System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(aligned);
+        var ticks300 = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(aligned.AsSpan(4));
+        const int MinDays = -53690; // 1753-01-01
+        const int MaxDays = 2958463; // 9999-12-31
+        if (days is < MinDays or > MaxDays || ticks300 >= 300u * 86400)
+            throw SimulatedSqlException.ConversionFailedFromBinaryToDateTime();
+
         // 1/300-second granularity. The literal `TicksPerSecond / 300L`
         // truncates because 10_000_000 / 300 isn't whole — keep the
         // multiplication on the high side of the division.
@@ -1532,17 +1634,22 @@ internal readonly partial struct SqlValue
     }
 
     /// <summary>
-    /// Decodes the legacy 4-byte <c>smalldatetime</c> binary format: 2 bytes
-    /// big-endian unsigned days since 1900-01-01, then 2 bytes big-endian
-    /// unsigned minutes since midnight.
+    /// Decodes the legacy 4-byte <c>smalldatetime</c> binary format, read from
+    /// the rightmost four bytes: 2 bytes big-endian unsigned days since
+    /// 1900-01-01, then 2 bytes big-endian unsigned minutes since midnight.
+    /// A minute count past midnight or a day past 2079-06-06 is real's Msg 210
+    /// from a binary, but Msg 8115 from a rowversion (probe-confirmed against
+    /// SQL Server 2025, 2026-09-23).
     /// </summary>
-    private static DateTime DecodeSmallDateTimeFromBytes(byte[] bytes)
+    private static DateTime DecodeSmallDateTimeFromBytes(byte[] bytes, bool fromRowVersion)
     {
-        if (bytes.Length != 4)
-            throw new NotSupportedException($"CAST(varbinary(…) AS smalldatetime) requires exactly 4 bytes; got {bytes.Length}.");
-        var days = (bytes[0] << 8) | bytes[1];
-        var minutes = (bytes[2] << 8) | bytes[3];
-        return new DateTime(1900, 1, 1).AddDays(days).AddMinutes(minutes);
+        var aligned = RightAligned(bytes, 4);
+        var days = (aligned[0] << 8) | aligned[1];
+        var minutes = (aligned[2] << 8) | aligned[3];
+        const int MaxDays = 65378; // 2079-06-06
+        return days <= MaxDays && minutes < 1440 ? new DateTime(1900, 1, 1).AddDays(days).AddMinutes(minutes)
+            : fromRowVersion ? throw SimulatedSqlException.ArithmeticOverflow("smalldatetime")
+            : throw SimulatedSqlException.ConversionFailedFromBinaryToDateTime();
     }
 
     private static int TimeWidthForScale(byte scale) => scale switch

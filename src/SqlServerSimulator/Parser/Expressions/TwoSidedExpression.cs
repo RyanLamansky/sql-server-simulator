@@ -220,9 +220,9 @@ internal abstract class TwoSidedExpression : Expression
     private SqlType CombineType(SqlType leftType, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var rightType = this.right.GetSqlType(batch, resolveColumnType);
-        var result = SqlType.PromoteForArithmetic(
-            ArithmeticOperandType(this.left, leftType, rightType),
-            ArithmeticOperandType(this.right, rightType, leftType),
+        var result = SqlType.PromoteOperandsForArithmetic(
+            PairOperand(this.left, ArithmeticOperandType(this.left, leftType, rightType), batch),
+            PairOperand(this.right, ArithmeticOperandType(this.right, rightType, leftType), batch),
             this.Operator);
         if (result.Category == SqlTypeCategory.String
             && leftType.Category == SqlTypeCategory.String
@@ -294,65 +294,29 @@ internal abstract class TwoSidedExpression : Expression
     /// hot path one byte-comparison deep and jump-table-friendly.
     /// </summary>
     /// <remarks>
-    /// Cross-category integer ↔ string is normalized at the top: the string
-    /// operand parses to the integer side's specific type (<c>tinyint + '3'</c>
-    /// stays tinyint, <c>bigint + '3'</c> stays bigint — verified against
-    /// SQL Server 2025), so the rest of the dispatcher stays integer ↔
-    /// integer. Bit is the sole exception: bit + string raises Msg 402 (for
-    /// <c>+ - %</c>) or Msg 8117 (for <c>* /</c>) without parsing, mirroring
-    /// SQL Server's same treatment of bit arithmetic with another bit and
-    /// matching the bitwise-operator restrictions on strings (which also
-    /// fail rather than coerce).
+    /// A string, binary or timestamp operand meeting a number converts to
+    /// that number's own type first — <c>tinyint + '3'</c> stays tinyint,
+    /// <c>decimal(5,2) + 0x…</c> reads the binary as a decimal(5,2) (verified
+    /// against SQL Server 2025) — so the dispatch below only ever sees two
+    /// numbers. Whether the pair is legal at all is settled by
+    /// <see cref="SqlType.PromoteForArithmetic"/>, the same rules the static
+    /// type reads, so a refused pair raises here exactly what it raised
+    /// while compiling. A bitwise operator converts only a binary meeting
+    /// an integer.
     /// </remarks>
     private protected static SqlValue IntegerArithmetic(SqlValue left, SqlValue right, char op, Func<long, long, long> compute)
     {
-        // sql_variant has no arithmetic behavior; delegate to the single-source
-        // rejection so the runtime error matches GetSqlType's (Msg 402 / 257).
-        if (left.Type is SqlVariantSqlType || right.Type is SqlVariantSqlType)
-            _ = SqlType.PromoteForArithmetic(left.Type, right.Type, op);
-
-        // A string operand paired with a numeric one converts to that numeric
-        // type — SQL Server's low string-precedence rule (probe-confirmed 2025:
-        // `decimal - '0.4'`, `'3' * float`, `money + '2.5'` all coerce, and the
-        // result carries the numeric partner's type). Two exceptions: bit +
-        // string raises Msg 402 / 8117 (BitWithStringArithmetic), and modulo
-        // against a non-integer numeric (decimal / money / float) is Msg 402
-        // "incompatible in the modulo operator" even though + - * / coerce.
-        // Bitwise operators (& | ^) aren't string-coercible and fall through to
-        // the unsupported-pair error below.
-        var leftIsString = left.Type.Category == SqlTypeCategory.String;
-        var rightIsString = right.Type.Category == SqlTypeCategory.String;
-        if (op is not '&' and not '|' and not '^' && leftIsString != rightIsString)
+        var leftConverts = ConvertsToNumericPartner(left.Type);
+        var rightConverts = ConvertsToNumericPartner(right.Type);
+        if (leftConverts || rightConverts || left.Type is SqlVariantSqlType || right.Type is SqlVariantSqlType)
         {
-            var numericType = leftIsString ? right.Type : left.Type;
-            if (IsStringCoercibleNumericCategory(numericType.Category))
-            {
-                if (numericType == SqlType.Bit)
-                    throw BitWithStringArithmetic(left.Type, right.Type, op);
-                if (op == '%' && numericType.Category != SqlTypeCategory.Integer)
-                    throw SimulatedSqlException.IncompatibleDataTypesInOperator(left.Type, right.Type, OperatorWord(op));
-                if (leftIsString)
-                    left = left.IsNull ? SqlValue.Null(numericType) : left.CoerceTo(numericType);
-                else
-                    right = right.IsNull ? SqlValue.Null(numericType) : right.CoerceTo(numericType);
-            }
-        }
-
-        // Binary ↔ integer: the binary operand converts to the integer side's
-        // specific type (big-endian, left-truncated to that width), for
-        // arithmetic AND bitwise operators alike (unlike the string path,
-        // which excludes bitwise). Probe-confirmed against SQL Server 2025:
-        // 1 + 0x01 → 2 (int), 255 & 0x01 → 1 (int), cast(5 as bigint) / 0x02
-        // → 2 (bigint), cast(5 as tinyint) + 0x01 → 6 (tinyint).
-        if (left.Type.Category == SqlTypeCategory.Integer && right.Type is VarbinarySqlType or BinarySqlType)
-            right = right.IsNull ? SqlValue.Null(left.Type) : right.CoerceTo(left.Type);
-        else if (right.Type.Category == SqlTypeCategory.Integer && left.Type is VarbinarySqlType or BinarySqlType)
-            left = left.IsNull ? SqlValue.Null(right.Type) : left.CoerceTo(right.Type);
-        else if (left.Type is VarbinarySqlType or BinarySqlType && right.Type is VarbinarySqlType or BinarySqlType)
-            // Binary + binary is concatenation (handled in Add.Run before it
-            // reaches here); every other operator raises Msg 402 ('- % & | ^')
-            // or Msg 8117 ('* /') with the wording PromoteForArithmetic emits.
             _ = SqlType.PromoteForArithmetic(left.Type, right.Type, op);
+            var bitwise = op is '&' or '|' or '^';
+            if (leftConverts && !rightConverts && (!bitwise || (left.Type.PairClass == TypePairClass.Binary && SqlType.IsIntegerCategory(right.Type))))
+                left = left.IsNull ? SqlValue.Null(right.Type) : left.CoerceTo(right.Type);
+            else if (rightConverts && !leftConverts && (!bitwise || (right.Type.PairClass == TypePairClass.Binary && SqlType.IsIntegerCategory(left.Type))))
+                right = right.IsNull ? SqlValue.Null(left.Type) : right.CoerceTo(left.Type);
+        }
 
         return left.Type.Category switch
         {
@@ -383,28 +347,11 @@ internal abstract class TwoSidedExpression : Expression
     }
 
     /// <summary>
-    /// True for the numeric categories a string operand implicitly converts to
-    /// in arithmetic (integer / decimal / money / float-real). String vs
-    /// date-time / uniqueidentifier / binary aren't arithmetic-coercible and
-    /// surface as the unsupported-pair error instead.
+    /// The operand families that take their numeric partner's type in
+    /// arithmetic rather than bringing one of their own.
     /// </summary>
-    private static bool IsStringCoercibleNumericCategory(SqlTypeCategory category) =>
-        category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate;
-
-    private static SimulatedSqlException BitWithStringArithmetic(SqlType left, SqlType right, char op) =>
-        op is '*' or '/'
-            ? SimulatedSqlException.OperandDataTypeInvalid(left, OperatorWord(op))
-            : SimulatedSqlException.IncompatibleDataTypesInOperator(left, right, OperatorWord(op));
-
-    private static string OperatorWord(char op) => op switch
-    {
-        '+' => "add",
-        '-' => "subtract",
-        '*' => "multiply",
-        '/' => "divide",
-        '%' => "modulo",
-        _ => op.ToString(),
-    };
+    private static bool ConvertsToNumericPartner(SqlType type) =>
+        type.PairClass is TypePairClass.AnsiString or TypePairClass.UnicodeString or TypePairClass.Binary or TypePairClass.Timestamp;
 
     /// <summary>
     /// Integer-only path: both sides are guaranteed integer-category.
@@ -554,9 +501,9 @@ internal abstract class TwoSidedExpression : Expression
     /// legacy <c>datetime</c> and <c>smalldatetime</c> types; non-legacy
     /// operands raise Msg 402 / 8117 (per SQL Server's exact rules).
     /// </summary>
-    private protected static SqlValue AdditiveArithmetic(SqlValue left, SqlValue right, char op, string operatorName, Func<long, long, long> compute) =>
+    private protected static SqlValue AdditiveArithmetic(SqlValue left, SqlValue right, char op, Func<long, long, long> compute) =>
         SqlType.IsDateTimeCategory(left.Type) || SqlType.IsDateTimeCategory(right.Type)
-            ? DateAdditiveArithmetic(left, right, operatorName, compute)
+            ? DateAdditiveArithmetic(left, right, op, compute)
             : IntegerArithmetic(left, right, op, compute);
 
     /// <summary>
@@ -651,50 +598,29 @@ internal abstract class TwoSidedExpression : Expression
         : SqlValue.AsInt64Widened(v);
 
     /// <summary>
-    /// Date arithmetic for <c>+</c> / <c>-</c>: works only when both
-    /// operands resolve to a legacy datetime tick offset (i.e. each side is
-    /// either an integer treated as days-since-1900-01-01, or a
-    /// <c>datetime</c>/<c>smalldatetime</c> value). Result is rendered as
-    /// the higher-precedence date type (datetime > smalldatetime). NULL
-    /// propagates. Three error variants:
-    /// <list type="bullet">
-    /// <item>Both non-legacy date types (e.g. <c>date + date</c>,
-    /// <c>dt2 + date</c>) → Msg 8117 with the left operand's type;</item>
-    /// <item>One legacy and one non-legacy date type (e.g. <c>dt + date</c>)
-    /// → Msg 402 with both names and the operator;</item>
-    /// <item>Non-legacy date + integer (e.g. <c>date + 1</c>) → Msg 206
-    /// from <see cref="SqlType.Promote"/>'s integer-vs-non-legacy rule.</item>
-    /// </list>
-    /// Out-of-range arithmetic results raise Msg 8115 with the result type
-    /// name (matching the int→datetime overflow path).
+    /// Date arithmetic for <c>+</c> / <c>-</c>, which exists only for the
+    /// legacy <c>datetime</c> and <c>smalldatetime</c>: the partner converts
+    /// to the result type — a number reading as a day count, a string parsing,
+    /// a binary decoding its day / tick pair — and the two day counts combine,
+    /// so <c>'2024-01-01' - 1.5</c> is <c>2023-12-30 12:00</c> and
+    /// <c>1.5 - '2024-01-01'</c> lands in 1776 (probe-confirmed against SQL
+    /// Server 2025). The partner's conversion rounds to the result type's own
+    /// grid first — <c>smalldatetime + 0.0003</c> (26 seconds) adds nothing.
+    /// Every pair real refuses (a non-legacy date type, a date meeting an
+    /// unconvertible partner) raises from <see cref="SqlType.PromoteForArithmetic"/>,
+    /// the static type's own rules. NULL propagates; a result outside the
+    /// type's range raises Msg 8115 naming it.
     /// </summary>
-    private static SqlValue DateAdditiveArithmetic(SqlValue left, SqlValue right, string operatorName, Func<long, long, long> compute)
+    private static SqlValue DateAdditiveArithmetic(SqlValue left, SqlValue right, char op, Func<long, long, long> compute)
     {
-        var leftIsLegacy = left.Type == SqlType.DateTime || left.Type == SqlType.SmallDateTime;
-        var rightIsLegacy = right.Type == SqlType.DateTime || right.Type == SqlType.SmallDateTime;
-        var leftIsNonLegacyDateTime = SqlType.IsDateTimeCategory(left.Type) && !leftIsLegacy;
-        var rightIsNonLegacyDateTime = SqlType.IsDateTimeCategory(right.Type) && !rightIsLegacy;
-
-        // Both non-legacy date types — including different-non-legacy pairs
-        // like `date + dt2`. SQL Server reports just the left operand's type
-        // in Msg 8117, so we don't need both names.
-        if (leftIsNonLegacyDateTime && rightIsNonLegacyDateTime)
-            throw SimulatedSqlException.OperandDataTypeInvalid(left.Type, operatorName);
-
-        // One legacy, one non-legacy date type — e.g. `dt + date`, `dt2 + dt`.
-        if ((leftIsLegacy && rightIsNonLegacyDateTime) || (leftIsNonLegacyDateTime && rightIsLegacy))
-            throw SimulatedSqlException.IncompatibleDataTypesInOperator(left.Type, right.Type, operatorName);
-
-        // Promote handles the remaining cases: legacy×legacy, legacy×int,
-        // int×non-legacy (which throws Msg 206 from inside Promote).
-        var common = SqlType.Promote(left.Type, right.Type);
+        var common = SqlType.PromoteForArithmetic(left.Type, right.Type, op);
         if (left.IsNull || right.IsNull)
             return SqlValue.Null(common);
 
         long resultTicks;
         try
         {
-            resultTicks = checked(compute(TicksFromBase(left), TicksFromBase(right)));
+            resultTicks = checked(compute(TicksFromBase(left, common), TicksFromBase(right, common)));
         }
         catch (OverflowException)
         {
@@ -711,14 +637,14 @@ internal abstract class TwoSidedExpression : Expression
     /// Integer operands treat the value as a whole-day count
     /// (multiplied by <see cref="TimeSpan.TicksPerDay"/> with overflow
     /// checking — bigint × TicksPerDay can exceed <see cref="long"/>);
-    /// legacy date types subtract their base-date ticks. Caller must have
-    /// already filtered out non-legacy date types.
+    /// legacy date types subtract their base-date ticks; every other operand
+    /// converts to <paramref name="common"/> first.
     /// </summary>
-    private static long TicksFromBase(SqlValue v) =>
+    private static long TicksFromBase(SqlValue v, SqlType common) =>
         SqlType.IsIntegerCategory(v.Type) ? checked(SqlValue.AsInt64Widened(v) * TimeSpan.TicksPerDay)
         : v.Type == SqlType.DateTime ? v.AsDateTime.Ticks - new DateTime(1900, 1, 1).Ticks
         : v.Type == SqlType.SmallDateTime ? v.AsSmallDateTime.Ticks - new DateTime(1900, 1, 1).Ticks
-        : throw new InvalidOperationException($"TicksFromBase received unexpected type {v.Type}.");
+        : TicksFromBase(v.CoerceTo(common), common);
 
     protected abstract char Operator { get; }
 

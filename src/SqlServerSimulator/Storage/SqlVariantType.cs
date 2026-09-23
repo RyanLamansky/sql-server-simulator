@@ -24,8 +24,10 @@ namespace SqlServerSimulator.Storage;
 /// MS-TDS-specified format SqlClient decodes.
 /// </para>
 /// </remarks>
-internal sealed class SqlVariantSqlType() : SqlType(SqlTypeCategory.Other)
+internal sealed class SqlVariantSqlType() : SqlType(SqlTypeCategory.Other, TypePairClass.Variant)
 {
+    public override int Precedence => 29;
+
     // Untyped accessors surface the inner value's CLR type per row, so the
     // column-level field type is object — matching SqlClient's GetFieldType
     // for a sql_variant column.

@@ -148,7 +148,7 @@ CONCAT/CONCAT_WS are reachable from raw SQL (`FromSqlInterpolated` / direct comm
 **NULL-propagating** (matches default `CONCAT_NULL_YIELDS_NULL ON`; OFF setting not modeled).
 Result is `nvarchar` when either operand is national-string, else `varchar`.
 EF's dominant string-concat path.
-`text` / `ntext` / `image` / `varbinary` operands → Msg 402.
+`text` / `ntext` / `image` / `varbinary` operands → Msg 402 (the [pair grids](arithmetic.md#type-pair-legality)).
 
 **Bare-NULL divergence**: simulator's untyped `NULL` literal carries `SqlType.Int32`, so `'a' + NULL` and `'a' + cast(NULL as int)` are indistinguishable at runtime.
 Both treated as string concat (returning NULL of the result string type); matches real SQL Server on bare NULL but diverges from `cast(NULL as int) + 'a'` (real raises Msg 245).
@@ -157,7 +157,8 @@ Bare NULL dominates in practice; typed-null-int is a rare hand-written shape EF 
 **Result-type fidelity**: `char(N) + char(M)` → `char(N+M)` (capped at 8000); `nchar` analogous; mixed `char + nchar` → `nchar`.
 Variable-length pairs and mixed fixed/variable → length-bearing `varchar(N+M)` / `nvarchar(N+M)` (capped at 8000/4000).
 LOB and unspecified-length operands fall back to the unspecified form.
-A string operand paired with a **numeric** one in `+` `-` `*` `/` implicitly converts to that numeric type (SQL Server's low string-precedence rule — `decimal - '0.4'` → `10.10`, `'3' * float` → float, result carries the numeric partner's type; `TwoSidedExpression.IntegerArithmetic` + `SqlType.PromoteForArithmetic`). Two exceptions: `bit + string` → Msg 402/8117, and modulo (`%`) against a non-integer numeric → Msg 402 ("incompatible in the modulo operator") even though `+ - * /` coerce. A non-numeric string surfaces its target's conversion error (Msg 8114 / 245 / 235). String-vs-string / string-vs-non-numeric arithmetic → the unsupported-pair error.
+A string operand paired with a **numeric** one in `+` `-` `*` `/` implicitly converts to that numeric type (SQL Server's low string-precedence rule — `decimal - '0.4'` → `10.10`, `'3' * float` → float, result carries the numeric partner's type; `TwoSidedExpression.IntegerArithmetic` + `SqlType.PromoteForArithmetic`). Two exceptions: `bit + string` → Msg 402/8117, and modulo (`%`) against a non-integer numeric → Msg 402 ("incompatible in the modulo operator") even though `+ - * /` coerce. A non-numeric string surfaces its target's conversion error (Msg 8114 / 245 / 235).
+Every other string pairing under `- * / %` raises real's own refusal from the [pair grids](arithmetic.md#type-pair-legality) — `varchar - varchar` is Msg 402, `varchar * varchar` Msg 8117.
 
 `REGEXP_LIKE` is **not** modeled as a built-in: SQL Server 2025 ships it as a native *reserved predicate* (`WHERE REGEXP_LIKE(col, pattern)`), while `dbo.REGEXP_LIKE(...)` — the schema-qualified scalar form mssql-django emits for Django `__regex` lookups — exists on real only when mssql-django's regex **CLR assembly** is installed.
 That CLR path now works (see [`clr-assemblies.md`](clr-assemblies.md)), so the schema-qualified form resolves once the assembly is registered; the bare native predicate remains unbuilt, and with it the compat-170 keyword reservation that makes real reject the unbracketed `dbo.REGEXP_LIKE(...)`.

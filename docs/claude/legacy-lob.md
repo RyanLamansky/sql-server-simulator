@@ -19,7 +19,7 @@ All of it binds while compiling: probe-confirmed that an **empty** table raises 
 | `MAX` / `MIN` | **Msg 8117** — `Operand data type text is invalid for max operator.` | Msg 8117 | **Msg 6210** `CLR type 'geography' is not fully comparable.`, and then the Msg 8117 |
 | `COUNT` / `COUNT_BIG` | **Msg 8117** state 1 | accepted | accepted |
 | `COUNT(DISTINCT …)` | Msg 8117 **state 2** | Msg 8117 state 2 | Msg 8117 state 2 |
-| `=` / `<>` / `<` … | **Msg 402** against a string, **Msg 206** against anything else — see [`casting.md`](casting.md) | — | — |
+| `=` / `<>` / `<` … | **Msg 402** against a string, a binary, another LOB, `xml`, or the `date` / `time` / `datetime2` family, **Msg 206** against anything else — see [`arithmetic.md`](arithmetic.md#type-pair-legality) | **Msg 305** against `xml`, Msg 402 / 206 against the rest by the same split | **Msg 403** naming the spatial operand |
 | `LIKE` | accepted, in either slot | **Msg 8116** naming argument 1 or 2 `of like function` | Msg 8116, same shape |
 | `UNION ALL`, `IS NULL`, `COUNT(*)` | accepted | accepted | accepted |
 

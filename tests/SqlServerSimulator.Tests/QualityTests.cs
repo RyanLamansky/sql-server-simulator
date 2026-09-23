@@ -537,7 +537,7 @@ public partial class QualityTests
     /// owning feature's <c>Not modeled yet</c> section.
     /// </summary>
     private static readonly int[] CitedButNotRaised = [
-        107, 147, 159, 185, 263, 264, 282, 403, 557, 596,
+        107, 147, 159, 185, 263, 264, 282, 557, 596,
         1784, 1789, 1909, 2247, 2390, 2396, 3604, 3607, 3609, 3920,
         3997, 4124, 4624, 4712, 4860, 4919, 4922, 5592, 5703, 6947,
         7222, 8105, 8153, 8622, 8628, 8711, 8729, 8730, 8733, 9341,

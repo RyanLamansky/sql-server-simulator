@@ -36,7 +36,7 @@ Without this, a baseline-collated system-function result (e.g. `DATABASEPROPERTY
 Same-type pairs (which after the interning split are also same-collation pairs) take the fast path.
 Cross-type cases flow through `CompareValuesPromoted` (in `BooleanExpression.cs`), which:
 
-1. Rejects LOB-typed operands (Msg 402 — unchanged).
+1. Rejects a pair the comparison grid refuses — a LOB operand even beside a NULL, any other pair once both values are non-NULL (see [`arithmetic.md`](arithmetic.md#type-pair-legality); the compile-time check has normally raised it already).
 2. Runs `Collation.Resolve` for string-string pairs with different types; raises **Msg 468 State 9** on conflict (probe-confirmed wording: `Cannot resolve the collation conflict between "X" and "Y" in the <op> operation.`).
    The check fires before NULL short-circuits, matching real SQL Server (`NULL = NULL` across cross-collation columns also raises).
 3. Falls through to `SqlType.Promote` + per-side `CoerceTo` for the value coercion.

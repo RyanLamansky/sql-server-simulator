@@ -114,8 +114,14 @@ Layouts probed against SQL Server 2025:
 - `datetime` — 8 bytes **BE**: `int32` days since `1900-01-01` + `uint32` 1/300-second ticks since midnight.
 - `smalldatetime` — 4 bytes **BE**: `uint16` days + `uint16` minutes.
 
+The two legacy forms read the **rightmost** 8 / 4 bytes, zero-padding a shorter payload on the left the way the integer conversions do — `CAST(0x0102 AS datetime)` is `1900-01-01 00:00:00.860`, and an 8-byte payload reaches `smalldatetime` through its last four bytes.
+A day outside the type's range or a time part past midnight is **Msg 210** (`Conversion failed when converting datetime from binary/varbinary string.`) — `CAST(0x6100 AS smalldatetime)`, whose 24832 minutes overrun the day (probed 2026-09-23).
+A `timestamp` source refuses the same `smalldatetime` payload with **Msg 8115** (`Arithmetic overflow error converting expression to data type smalldatetime.`) instead.
+These are the conversions a binary meeting a legacy date in a comparison, a CASE or `+` / `-` takes (see [`arithmetic.md`](arithmetic.md#type-pair-legality)).
+
 Decoders live next to `VarbinaryToGuid` in `Storage/SqlValue.Coerce.cs`.
-Reverse direction (date-family → varbinary) isn't modeled — no production scripts emit that direction; `bcp` and BACPAC do the encoding upstream.
+The reverse direction is modeled for the legacy pair only: `datetime` / `smalldatetime` → `binary(N)` / `varbinary(N)` writes the same big-endian form right-aligned, `binary(N)` padding or cutting on the left and `varbinary(N)` only cutting (`CAST(<datetime> AS binary(4))` keeps the time half).
+The other date types → binary isn't modeled — no production scripts emit that direction; `bcp` and BACPAC do the encoding upstream.
 
 ## String ↔ binary CAST
 
@@ -146,7 +152,7 @@ This is what makes SSMS's connect queries (`CAST(0x0001 AS int)`, `(@@microsoftv
 | --- | --- |
 | `binary`/`varbinary` → `bit`/`tinyint`/`smallint`/`int`/`bigint` | Big-endian; **left-truncate** to the target width (keep the rightmost bytes), zero-fill high bytes when shorter, read two's-complement. **Silent — never overflows.** `cast(0x0102 as int)`=258, `cast(0x0102030405 as int)`=33752069, `cast(0xFF01 as tinyint)`=1 (no Msg 244), `cast(0xFFFFFFFF as int)`=-1, `cast(0x as int)`=0. `bit` tests the final byte for non-zero (`cast(0x0100 as bit)`=0, `cast(0x01 as bit)`=1). |
 | `binary`/`varbinary` → `money`/`smallmoney` | Rightmost 8 (money) / 4 (smallmoney) bytes = raw **scale-4 units**, big-endian two's-complement ÷ 10000. `cast(0x01 as money)`=0.0001, `cast(0x01 as smallmoney)`=0.0001. |
-| `binary`/`varbinary` → `decimal`/`numeric` | **Msg 8114** (`"Error converting data type varbinary to numeric."`, class 16 state 5) — *not* the Msg 529 used elsewhere. `TRY_CAST` swallows it to NULL. |
+| `binary`/`varbinary` → `decimal`/`numeric` | Reads SQL Server's own `numeric` byte form — precision, scale, a reserved byte, a sign byte (0 = negative), then the magnitude little-endian — and converts that value to the target with the usual rounding: `cast(0x0502000196000000 as decimal(5,2))` = 1.50, `cast(0x05020000E1000000 as decimal(4,1))` = -2.3, a 1-byte magnitude (`0x0502000196`) suffices. Any other payload — shorter than 5 bytes, precision 0 or past 38, scale past precision, a magnitude wider than the precision — is **Msg 8114** (`"Error converting data type varbinary to numeric."`, class 16 state 5), spelled `varbinary` for a `binary(N)` source too and `timestamp` for a rowversion; `TRY_CAST` swallows it to NULL. |
 | `binary`/`varbinary` → `float`/`real` | **Msg 529** (`"Explicit conversion from data type varbinary to float is not allowed."`, class 16 state 1) — via `CoerceToApproximate`'s default arm. NOT swallowed by `TRY_CAST` (`try_cast(0x41 as float)` still raises 529). |
 | `bit`/`tinyint`/`smallint`/`int`/`bigint` → `binary(N)` | Native-width big-endian two's-complement (bit/tinyint→1, smallint→2, int→4, bigint→8), then **left-zero-pad or left-truncate to exactly N** (fixed width). `cast(258 as binary(4))`=`0x00000102`, `cast(258 as binary(1))`=`0x02`, `cast(-1 as binary(4))`=`0xFFFFFFFF`, `cast(258 as binary)`=30 zero-padded bytes (CAST default length 30). |
 | `bit`/`tinyint`/`smallint`/`int`/`bigint` → `varbinary(N)` | Native-width bytes, **left-truncated only when N < native, never left-padded** (variable width). `cast(258 as varbinary(4))`=`0x00000102`, `cast(cast(1 as tinyint) as varbinary(4))`=`0x01`, `cast(cast(258 as smallint) as varbinary(1))`=`0x02`, `cast(258 as varbinary)`=`0x00000102`. |
@@ -154,6 +160,15 @@ This is what makes SSMS's connect queries (`CAST(0x0001 AS int)`, `(@@microsoftv
 Helpers: `VarbinaryToInteger` / `VarbinaryToMoneyUnits` / `EncodeIntegerToBinary` in `SqlValue.Coerce.cs`.
 `binary(N)` targets carry their length on the `BinarySqlType`; `varbinary(N)` targets carry it on the `VarbinarySqlType` (length ≤ 0 — unspecified / MAX — keeps native width).
 Arithmetic/bitwise/comparison with a binary operand routes through these same paths — see [`arithmetic.md`](arithmetic.md)'s *Binary operand promotion*.
+
+A `timestamp` converts out as the `binary(8)` it is, to every target a binary reaches, and a binary or ANSI string converts **in** as `binary(8)` would — padded or cut on the right (`CAST(0x0102 AS timestamp)` is `0x0102000000000000`).
+An ANSI string reaches `image` as its code-page bytes, and a string reaches `hierarchyid` by parsing its `/1/2/` path (and back), which is what a comparison or CASE between the two needs.
+`money` / `smallmoney` → `float` / `real` converts rather than raising Msg 529.
+Probed 2026-09-23 against SQL Server 2025.
+
+## Date/time strings ignore surrounding spaces
+
+Every date/time parse trims leading and trailing spaces first, as real does, so a padded `char(N)` value converts — `CAST('  2024-01-02  ' AS datetime)`, `CAST('12:34:56   ' AS time)` — and a `char(N)` column compares against a date column (probed 2026-09-23).
 
 ## Conversion legality is settled while compiling
 

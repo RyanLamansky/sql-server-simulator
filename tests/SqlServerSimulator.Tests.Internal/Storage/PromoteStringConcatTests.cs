@@ -45,23 +45,18 @@ public sealed class PromoteStringConcatTests
     }
 
     [TestMethod]
-    public void Text_Plus_Varchar_DropsToVarcharUnspecified()
+    public void Text_Plus_Varchar_Refused()
     {
-        // LOB family operands have no per-cell width to add — the fall-back
-        // is the unspecified-length form of the right family. Text carries
-        // Implicit coercibility (it's a column-typed family), so the
-        // Collation.Resolve hand-off yields Implicit rather than
-        // CoercibleDefault.
-        var result = SqlType.PromoteForArithmetic(SqlType.Text, VarcharSqlType.Get(10, Collation.Baseline, Coercibility.CoercibleDefault), '+');
-        AreSame(VarcharSqlType.Get(0, Collation.Baseline, Coercibility.Implicit), result);
+        // The legacy LOB types don't concatenate: real refuses the pair with
+        // Msg 402 while compiling (probe-confirmed against SQL Server 2025).
+        var ex = ThrowsExactly<SimulatedSqlException>(() => SqlType.PromoteForArithmetic(SqlType.Text, VarcharSqlType.Get(10, Collation.Baseline, Coercibility.CoercibleDefault), '+'));
+        AreEqual("The data types text and varchar are incompatible in the add operator.", ex.Message);
     }
 
     [TestMethod]
-    public void NText_Plus_Char_DropsToNVarcharUnspecified()
+    public void NText_Plus_Char_Refused()
     {
-        // NText carries Implicit; the char(5) bridge is also Implicit (via
-        // SqlType.GetChar's static helper), so the resolved rank is Implicit.
-        var result = SqlType.PromoteForArithmetic(SqlType.NText, SqlType.GetChar(5), '+');
-        AreSame(NVarcharSqlType.Get(0, Collation.Baseline, Coercibility.Implicit), result);
+        var ex = ThrowsExactly<SimulatedSqlException>(() => SqlType.PromoteForArithmetic(SqlType.NText, SqlType.GetChar(5), '+'));
+        AreEqual("The data types ntext and char are incompatible in the add operator.", ex.Message);
     }
 }

@@ -592,7 +592,7 @@ Values convert through the CAST value path, so the `varchar` asterisk fallback, 
 - **Msg 11538** — the declared type isn't reachable from the run-time type by *implicit* conversion.
   This is a narrower gate than CAST: `xml` → `varchar` and `varchar` → `varbinary` both have a legal explicit CAST and are still refused.
   Both type names render bare, so a `decimal(5,2)` declaration reports `'decimal'`.
-  The gate is a family matrix (`IsImplicitlyConvertible` / `ConversionFamilyOf`), differentially checked cell-by-cell against real over a 25 × 25 type grid: 601 of 625 cells agree, and the 24 that don't are all `hierarchyid`-as-source, which never reach the gate because `CAST(<string> AS hierarchyid)` isn't in `SqlValue.CoerceTo` yet.
+  The gate is a family matrix (`IsImplicitlyConvertible` / `ConversionFamilyOf`), differentially checked cell-by-cell against real over a 25 × 25 type grid: 601 of 625 cells agree, and the 24 left over are all `hierarchyid`-as-source, whose probe values couldn't be built while `SqlValue.CoerceTo` had no string → `hierarchyid` conversion — those cells are unchecked rather than known to differ.
 - **Msg 11553** — a `NOT NULL` column received a NULL. Raised per row as the set streams, so preceding rows reach the client.
 - **Msg 8114** — a value-level conversion failure, with both type names *decorated* (`Error converting data type varchar(5) to numeric(5,2).`).
   Real routes every conversion rule through this one number here, so the simulator remaps the CAST path's own failures (Msg 245 / 8115 / 8170 / …) onto it.

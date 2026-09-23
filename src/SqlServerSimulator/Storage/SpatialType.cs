@@ -17,8 +17,10 @@ namespace SqlServerSimulator.Storage;
 /// boundaries. <see cref="SqlType.ClrType"/> stays <see cref="string"/>
 /// because the in-process reader surfaces a spatial column as its WKT.
 /// </remarks>
-internal abstract class SpatialSqlType() : SqlType(SqlTypeCategory.String)
+internal abstract class SpatialSqlType() : SqlType(SqlTypeCategory.String, TypePairClass.Spatial)
 {
+    public override int Precedence => 30;
+
     public override Type ClrType => typeof(string);
 
     public override bool IsFixedLength => false;

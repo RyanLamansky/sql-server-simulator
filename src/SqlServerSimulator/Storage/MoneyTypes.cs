@@ -11,8 +11,10 @@ namespace SqlServerSimulator.Storage;
 /// <c>decimal(10, 4)</c>); the per-operator decimal formulas already cover
 /// the cross-promotion path.
 /// </summary>
-internal sealed class MoneySqlType() : SqlType(SqlTypeCategory.Money)
+internal sealed class MoneySqlType() : SqlType(SqlTypeCategory.Money, TypePairClass.ExactNumeric)
 {
+    public override int Precedence => 18;
+
     public override Type ClrType => typeof(decimal);
 
     /// <summary>Number of fractional decimal digits represented in the scaled int.</summary>
@@ -47,8 +49,10 @@ internal sealed class MoneySqlType() : SqlType(SqlTypeCategory.Money)
 /// SQL Server's <c>smallmoney</c>: 4-byte scaled int32, scale 4, range
 /// <c>[-214748.3648, 214748.3647]</c>.
 /// </summary>
-internal sealed class SmallMoneySqlType() : SqlType(SqlTypeCategory.Money)
+internal sealed class SmallMoneySqlType() : SqlType(SqlTypeCategory.Money, TypePairClass.ExactNumeric)
 {
+    public override int Precedence => 17;
+
     public override Type ClrType => typeof(decimal);
 
     public override bool IsFixedLength => true;

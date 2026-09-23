@@ -3,8 +3,10 @@ using System.Globalization;
 
 namespace SqlServerSimulator.Storage;
 
-internal sealed class Int32SqlType() : SqlType(SqlTypeCategory.Integer)
+internal sealed class Int32SqlType() : SqlType(SqlTypeCategory.Integer, TypePairClass.Integer)
 {
+    public override int Precedence => 15;
+
     public override Type ClrType => typeof(int);
 
     public override bool IsFixedLength => true;
@@ -26,8 +28,10 @@ internal sealed class Int32SqlType() : SqlType(SqlTypeCategory.Integer)
     public override string ToString() => "int";
 }
 
-internal sealed class BigIntSqlType() : SqlType(SqlTypeCategory.Integer)
+internal sealed class BigIntSqlType() : SqlType(SqlTypeCategory.Integer, TypePairClass.Integer)
 {
+    public override int Precedence => 16;
+
     public override Type ClrType => typeof(long);
 
     public override bool IsFixedLength => true;
@@ -49,8 +53,10 @@ internal sealed class BigIntSqlType() : SqlType(SqlTypeCategory.Integer)
     public override string ToString() => "bigint";
 }
 
-internal sealed class SmallIntSqlType() : SqlType(SqlTypeCategory.Integer)
+internal sealed class SmallIntSqlType() : SqlType(SqlTypeCategory.Integer, TypePairClass.Integer)
 {
+    public override int Precedence => 14;
+
     public override Type ClrType => typeof(short);
 
     public override bool IsFixedLength => true;
@@ -75,8 +81,10 @@ internal sealed class SmallIntSqlType() : SqlType(SqlTypeCategory.Integer)
 /// <remarks>
 /// SQL Server's <c>tinyint</c> is unsigned 0-255, stored as a single byte.
 /// </remarks>
-internal sealed class TinyIntSqlType() : SqlType(SqlTypeCategory.Integer)
+internal sealed class TinyIntSqlType() : SqlType(SqlTypeCategory.Integer, TypePairClass.Integer)
 {
+    public override int Precedence => 13;
+
     public override Type ClrType => typeof(byte);
 
     public override bool IsFixedLength => true;
@@ -108,8 +116,10 @@ internal sealed class TinyIntSqlType() : SqlType(SqlTypeCategory.Integer)
 /// that surfaces architectural drift if RowEncoder's bit-special-case
 /// is ever removed without thinking it through.
 /// </remarks>
-internal sealed class BitSqlType() : SqlType(SqlTypeCategory.Integer)
+internal sealed class BitSqlType() : SqlType(SqlTypeCategory.Integer, TypePairClass.Bit)
 {
+    public override int Precedence => 12;
+
     public override Type ClrType => typeof(bool);
 
     public override bool IsFixedLength => true;

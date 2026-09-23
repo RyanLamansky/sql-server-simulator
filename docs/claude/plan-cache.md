@@ -73,7 +73,7 @@ It's set in three places, all at parse time:
 
 1. **`BatchContext.TryResolveTable` for `#temp` / `##gtemp` / `@t`**: those bindings hold a specific `HeapTable` instance whose identity is meaningful only to this session (or this batch, for `@t`).
    A cross-session plan-cache replay would project the wrong instance.
-2. **`BuildSynthesizedSqlRow` (the FROM-less SELECT path)**: that path evaluates projection expressions at parse time (the documented Run-then-GetSqlType ordering for error-message fidelity) and bakes the resulting `SqlValue`s into the row source.
+2. **`BuildSynthesizedSqlRow` (the FROM-less SELECT path)**: that path types, then evaluates, projection expressions at parse time and bakes the resulting `SqlValue`s into the row source.
    Caching would emit those stale values forever; `NEWID()` / `GETDATE()` / `@@TRANCOUNT` / `NEXT VALUE FOR seq` need a fresh parse per call.
 3. **The recursive-CTE builder** (`Simulation.With.cs`): a recursive-CTE plan rebinds `CteBinding.CurrentIterationRows` at execution time, so a cached copy replayed by two commands concurrently would cross-feed iteration rowsets.
    A FROM-less anchor (`SELECT 1 … UNION ALL …`) was already disqualified by rule 2; the builder's own flag covers FROM-ful anchors.

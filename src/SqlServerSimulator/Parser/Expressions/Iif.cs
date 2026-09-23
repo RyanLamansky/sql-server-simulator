@@ -72,6 +72,7 @@ internal sealed class Iif : Expression
     // sizes by digit count against a decimal sibling — via PromoteValueArms.
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        this.condition.Bind(batch, resolveColumnType);
         this.cachedResultType = PromoteValueArms([this.trueValue, this.falseValue], batch, resolveColumnType);
         return this.cachedResultType;
     }

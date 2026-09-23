@@ -1083,10 +1083,39 @@ internal abstract class BooleanExpression
     /// <see cref="RequireResolvableCollation"/> over the pair.
     /// </summary>
     private static void BindComparison(Expression left, Expression right, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string operatorName) =>
-        RequireResolvableCollation(
-            left.GetSqlType(batch, resolveColumnType),
-            right.GetSqlType(batch, resolveColumnType),
-            operatorName);
+        RequireComparable(left, left.GetSqlType(batch, resolveColumnType), right, right.GetSqlType(batch, resolveColumnType), batch, operatorName);
+
+    /// <summary>
+    /// The compile-time half of a comparison: real settles whether the two
+    /// operand types may be compared at all from the types alone
+    /// (<see cref="SqlType.OperandPairError"/>'s comparison grid), so a typed
+    /// NULL or an empty rowset raises it too, and then whether their
+    /// collations resolve. A bare <c>NULL</c> has no type to judge.
+    /// </summary>
+    internal static void RequireComparable(Expression left, SqlType leftType, Expression right, SqlType rightType, BatchContext batch, string operatorName)
+    {
+        if (!Expression.IsBareNullLiteral(left) && !Expression.IsBareNullLiteral(right))
+            ThrowIfIncomparable(Expression.PairOperand(left, leftType, batch), Expression.PairOperand(right, rightType, batch), operatorName);
+        RequireResolvableCollation(leftType, rightType, operatorName);
+    }
+
+    /// <summary>
+    /// <see cref="RequireComparable"/> for an <c>IN</c> / quantified subquery,
+    /// whose right side is the inner plan's column type. A diagnostic that
+    /// would name that column's object (Msg 260) names the bare types instead.
+    /// </summary>
+    private static void RequireComparableToSubquery(Expression left, SqlType leftType, SqlType innerType, BatchContext batch, string operatorName)
+    {
+        if (!Expression.IsBareNullLiteral(left))
+            ThrowIfIncomparable(Expression.PairOperand(left, leftType, batch), new TypePairOperand(innerType), operatorName);
+        RequireResolvableCollation(leftType, innerType, operatorName);
+    }
+
+    private static void ThrowIfIncomparable(TypePairOperand left, TypePairOperand right, string operatorName)
+    {
+        if (SqlType.OperandPairError(TypePairOperation.Compare, left, right, operatorName) is { } error)
+            throw error;
+    }
 
     /// <summary>
     /// Flattens a top-level <c>AND</c> chain into its individual conjuncts,
@@ -1638,6 +1667,11 @@ internal abstract class BooleanExpression
             {
                 (true, true) => false,
                 (true, false) or (false, true) => true,
+                // Two xml operands compile (see Bind) and only refuse once both
+                // carry a value — at state 3, where every other xml comparison
+                // refuses at state 1 while compiling (probe-confirmed against
+                // SQL Server 2025, 2026-09-23).
+                _ when l.Type is XmlSqlType && r.Type is XmlSqlType => throw SimulatedSqlException.XmlCannotBeComparedOrSorted(state: 3),
                 _ => CompareValuesPromoted(l, r, "not equal to", static (a, b) => !a.Equals(b)) == true,
             };
             return distinct ^ negated;
@@ -1654,9 +1688,15 @@ internal abstract class BooleanExpression
 
         // Real names the operator "is not" here, not the "not equal to" the
         // runtime comparator borrows (probe-confirmed on
-        // `x IS DISTINCT FROM y` across two collations).
-        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-            BindComparison(left, right, batch, resolveColumnType, "is not");
+        // `x IS DISTINCT FROM y` across two collations), and checks the pair
+        // against the comparison grid — except that two xml operands pass.
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+        {
+            var leftType = left.GetSqlType(batch, resolveColumnType);
+            var rightType = right.GetSqlType(batch, resolveColumnType);
+            if (leftType is not XmlSqlType || rightType is not XmlSqlType)
+                RequireComparable(left, leftType, right, rightType, batch, "is not");
+        }
     }
 
     /// <summary>
@@ -1719,7 +1759,7 @@ internal abstract class BooleanExpression
         {
             var sourceType = source.GetSqlType(batch, resolveColumnType);
             foreach (var candidate in candidates)
-                RequireResolvableCollation(sourceType, candidate.GetSqlType(batch, resolveColumnType), "equal to");
+                RequireComparable(source, sourceType, candidate, candidate.GetSqlType(batch, resolveColumnType), batch, "equal to");
         }
 
         internal override string DebugDisplay()
@@ -1894,8 +1934,8 @@ internal abstract class BooleanExpression
             // one reported (probe-confirmed: real names "greater than or equal
             // to" for a BETWEEN whose every operand conflicts).
             var valueType = value.GetSqlType(batch, resolveColumnType);
-            RequireResolvableCollation(valueType, lower.GetSqlType(batch, resolveColumnType), "greater than or equal to");
-            RequireResolvableCollation(valueType, upper.GetSqlType(batch, resolveColumnType), "less than or equal to");
+            RequireComparable(value, valueType, lower, lower.GetSqlType(batch, resolveColumnType), batch, "greater than or equal to");
+            RequireComparable(value, valueType, upper, upper.GetSqlType(batch, resolveColumnType), batch, "less than or equal to");
         }
 
         internal override bool TryGetBetweenOperands([NotNullWhen(true)] out Expression? v, [NotNullWhen(true)] out Expression? lo, [NotNullWhen(true)] out Expression? hi)
@@ -2142,7 +2182,7 @@ internal abstract class BooleanExpression
         internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(source);
 
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-            RequireResolvableCollation(source.GetSqlType(batch, resolveColumnType), inner.Schema[0], "equal to");
+            RequireComparableToSubquery(source, source.GetSqlType(batch, resolveColumnType), inner.Schema[0], batch, "equal to");
     }
 
     /// <summary>
@@ -2335,7 +2375,7 @@ internal abstract class BooleanExpression
         internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(left);
 
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-            RequireResolvableCollation(left.GetSqlType(batch, resolveColumnType), inner.Schema[0], GetComparator(op).OperatorName);
+            RequireComparableToSubquery(left, left.GetSqlType(batch, resolveColumnType), inner.Schema[0], batch, GetComparator(op).OperatorName);
 
         private static (string OperatorName, Func<SqlValue, SqlValue, bool> Compare) GetComparator(ComparisonOp op) => op switch
         {
@@ -2498,7 +2538,7 @@ internal abstract class BooleanExpression
             if (l.IsNull || r.IsNull)
                 return null;
             if (l.Type.IsLob || r.Type.IsLob)
-                throw SimulatedSqlException.IncompatibleDataTypesInOperator(l.Type, r.Type, operatorName);
+                throw SqlType.PairError(TypePairOperation.Compare, l.Type, r.Type, operatorName) ?? SimulatedSqlException.IncompatibleDataTypesInOperator(l.Type, r.Type, operatorName);
             if (l.Type is not SqlVariantSqlType)
                 l = SqlValue.FromVariant(l);
             if (r.Type is not SqlVariantSqlType)
@@ -2506,8 +2546,10 @@ internal abstract class BooleanExpression
             return compare(l, r);
         }
 
-        if (l.Type.IsLob || r.Type.IsLob)
-            throw SimulatedSqlException.IncompatibleDataTypesInOperator(l.Type, r.Type, operatorName);
+        // The non-comparable types refuse even a NULL operand, as the
+        // compile-time check already did for every statically typed one.
+        if ((l.Type.IsLob || r.Type.IsLob) && SqlType.PairError(TypePairOperation.Compare, l.Type, r.Type, operatorName) is { } lobError)
+            throw lobError;
 
         // Cross-collation operand pair: pick the higher-coercibility side's
         // collation; same rank but different collation raises Msg 468. The
@@ -2528,6 +2570,8 @@ internal abstract class BooleanExpression
         // call memoized rather than one parse per row; see
         // <see cref="StringCoercionMemo"/> for why identity is the right key and
         // why a missing memo just means the old behavior.
+        if (SqlType.PairError(TypePairOperation.Compare, l.Type, r.Type, operatorName) is { } error)
+            throw error;
         var common = SqlType.Promote(l.Type, r.Type);
         return compare(
             leftMemo is null ? l.CoerceTo(common) : leftMemo.Coerce(l, common),
@@ -2740,9 +2784,14 @@ internal abstract class BooleanExpression
 
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         {
-            RejectUncomparableLikeArgument(left.GetSqlType(batch, resolveColumnType), 1);
-            RejectUncomparableLikeArgument(right.GetSqlType(batch, resolveColumnType), 2);
-            base.Bind(batch, resolveColumnType);
+            // LIKE matches strings rather than comparing the two types, so the
+            // comparison grid doesn't apply — `textcol LIKE 'a%'` is legal
+            // where `textcol = 'a'` is not; only the collations must resolve.
+            var leftType = left.GetSqlType(batch, resolveColumnType);
+            var rightType = right.GetSqlType(batch, resolveColumnType);
+            RejectUncomparableLikeArgument(leftType, 1);
+            RejectUncomparableLikeArgument(rightType, 2);
+            RequireResolvableCollation(leftType, rightType, "like");
             _ = this.escape?.GetSqlType(batch, resolveColumnType);
         }
     }

@@ -2,8 +2,10 @@ using System.Buffers.Binary;
 
 namespace SqlServerSimulator.Storage;
 
-internal sealed class DateSqlType() : SqlType(SqlTypeCategory.DateTime)
+internal sealed class DateSqlType() : SqlType(SqlTypeCategory.DateTime, TypePairClass.Date)
 {
+    public override int Precedence => 23;
+
     public override Type ClrType => typeof(DateTime);
 
     public override bool IsFixedLength => true;
@@ -40,8 +42,10 @@ internal sealed class DateSqlType() : SqlType(SqlTypeCategory.DateTime)
 /// <see cref="SqlValue"/>'s primitive slot, decoded on demand via
 /// <see cref="SqlValue.AsDateTime"/>.
 /// </summary>
-internal sealed class DateTimeSqlType() : SqlType(SqlTypeCategory.DateTime)
+internal sealed class DateTimeSqlType() : SqlType(SqlTypeCategory.DateTime, TypePairClass.LegacyDateTime)
 {
+    public override int Precedence => 25;
+
     public override Type ClrType => typeof(DateTime);
 
     /// <summary>Reference date for the day-count portion of legacy datetime.</summary>
@@ -109,8 +113,10 @@ internal sealed class DateTimeSqlType() : SqlType(SqlTypeCategory.DateTime)
 /// <see cref="SqlValue"/>'s primitive slot (always aligned to a minute
 /// boundary), decoded on demand via <see cref="SqlValue.AsSmallDateTime"/>.
 /// </summary>
-internal sealed class SmallDateTimeSqlType() : SqlType(SqlTypeCategory.DateTime)
+internal sealed class SmallDateTimeSqlType() : SqlType(SqlTypeCategory.DateTime, TypePairClass.LegacyDateTime)
 {
+    public override int Precedence => 24;
+
     public override Type ClrType => typeof(DateTime);
 
     /// <summary>Reference date for the day-count portion of smalldatetime.</summary>
@@ -166,8 +172,10 @@ internal sealed class SmallDateTimeSqlType() : SqlType(SqlTypeCategory.DateTime)
 /// pattern-matches against it to read the precision-derived fields it needs
 /// (rounding unit, etc.) when constructing or rendering datetime2 values.
 /// </summary>
-internal sealed class DateTime2SqlType(int precision) : SqlType(SqlTypeCategory.DateTime)
+internal sealed class DateTime2SqlType(int precision) : SqlType(SqlTypeCategory.DateTime, TypePairClass.DateTime2)
 {
+    public override int Precedence => 26;
+
     public readonly int precision = precision;
     public readonly int timeBytes = precision <= 2 ? 3 : precision <= 4 ? 4 : 5;
     public readonly long ticksPerUnit = TicksPerPrecisionUnit(precision);
@@ -220,8 +228,10 @@ internal sealed class DateTime2SqlType(int precision) : SqlType(SqlTypeCategory.
 /// 10^-precision seconds since midnight, 3/4/5 bytes for N=0-2/3-4/5-7);
 /// no date portion is stored.
 /// </remarks>
-internal sealed class TimeSqlType(int precision) : SqlType(SqlTypeCategory.DateTime)
+internal sealed class TimeSqlType(int precision) : SqlType(SqlTypeCategory.DateTime, TypePairClass.Time)
 {
+    public override int Precedence => 22;
+
     public readonly int precision = precision;
     public readonly int timeBytes = precision <= 2 ? 3 : precision <= 4 ? 4 : 5;
     public readonly long ticksPerUnit = TicksPerPrecisionUnit(precision);
@@ -273,8 +283,10 @@ internal sealed class TimeSqlType(int precision) : SqlType(SqlTypeCategory.DateT
 /// pattern-matches against it for type-specific paths (rounding, formatting,
 /// cross-type cast targets).
 /// </summary>
-internal sealed class DateTimeOffsetSqlType(int precision) : SqlType(SqlTypeCategory.DateTime)
+internal sealed class DateTimeOffsetSqlType(int precision) : SqlType(SqlTypeCategory.DateTime, TypePairClass.DateTime2)
 {
+    public override int Precedence => 27;
+
     public readonly int precision = precision;
     public readonly int timeBytes = precision <= 2 ? 3 : precision <= 4 ? 4 : 5;
     public readonly long ticksPerUnit = TicksPerPrecisionUnit(precision);

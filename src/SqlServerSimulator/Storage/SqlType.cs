@@ -10,9 +10,10 @@ namespace SqlServerSimulator.Storage;
 /// </summary>
 internal abstract partial class SqlType
 {
-    private protected SqlType(SqlTypeCategory category)
+    private protected SqlType(SqlTypeCategory category, TypePairClass pairClass)
     {
         this.Category = category;
+        this.PairClass = pairClass;
     }
 
     /// <summary>
@@ -22,6 +23,14 @@ internal abstract partial class SqlType
     /// type pins its category at construction.
     /// </summary>
     public readonly SqlTypeCategory Category;
+
+    /// <summary>
+    /// Which row and column of the type-pair legality grids this type reads
+    /// (see <see cref="PairError"/>). Pinned at construction for the same
+    /// reason as <see cref="Category"/>: a comparison between two different
+    /// types asks it once per row.
+    /// </summary>
+    public readonly TypePairClass PairClass;
 
     /// <summary>
     /// CLR type that an out-of-the-box, untyped accessor on the data reader
@@ -168,42 +177,19 @@ internal abstract partial class SqlType
         throw new NotSupportedException($"{this} isn't reachable as a parameter type via DbParameter.DbType; ConvertParameter is unreachable in normal binding.");
 
     /// <summary>
-    /// SQL Server data-type precedence for implicit conversion. Higher means
-    /// "wins" when a binary expression must pick a common type. The numeric
-    /// values are simulator-internal; only their relative ordering matters.
-    /// Within the numeric family the SQL Server chart orders
-    /// <c>float &gt; real &gt; decimal/numeric &gt; money &gt; smallmoney
-    /// &gt; bigint &gt; int &gt; smallint &gt; tinyint &gt; bit</c>
-    /// (<c>decimal</c> and <c>numeric</c> share a slot; <c>numeric</c> is
-    /// just an alias).
+    /// SQL Server data-type precedence for implicit conversion: the partner
+    /// with the higher value is the one the other converts to when a
+    /// unification (CASE / COALESCE / set operation) or an operator needs a
+    /// common type. The values are simulator-internal; only their order
+    /// matters, and it is the chart's, strings and binaries at the bottom —
+    /// which is why <c>0x61 = 'a'</c> compares as <c>varchar</c> and
+    /// <c>text</c> outranks <c>nvarchar</c>. Whether the conversion is
+    /// allowed at all is a separate question, answered by
+    /// <see cref="PairError"/> before this is consulted. Each concrete type
+    /// states its own rank, from the chart linked below.
     /// </summary>
     /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/data-types/data-type-precedence-transact-sql</remarks>
-    public int Precedence => this switch
-    {
-        SqlVariantSqlType => 18,
-        _ when this == HierarchyId => 17,
-        XmlSqlType => 17,
-        SpatialSqlType => 17,
-        _ when this == UniqueIdentifier => 16,
-        _ when this == SystemName => 15,
-        _ when this == NText => 14,
-        NVarcharSqlType => 14,
-        NCharSqlType => 13,
-        _ when this == Text => 12,
-        VarcharSqlType => 12,
-        CharSqlType => 11,
-        _ when this == Float => 9,
-        _ when this == Real => 8,
-        DecimalSqlType => 7,
-        _ when this == Money => 6,
-        _ when this == SmallMoney => 5,
-        _ when this == BigInt => 4,
-        _ when this == Int32 => 3,
-        _ when this == SmallInt => 2,
-        _ when this == TinyInt => 1,
-        _ when this == Bit => 0,
-        _ => throw new NotSupportedException($"No precedence defined for {this}."),
-    };
+    public abstract int Precedence { get; }
 
     /// <summary>
     /// Tinyint system-type id matching real SQL Server's <c>sys.types.system_type_id</c> /

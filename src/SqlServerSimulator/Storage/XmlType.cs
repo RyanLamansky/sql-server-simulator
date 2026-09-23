@@ -23,8 +23,10 @@ namespace SqlServerSimulator.Storage;
 /// re-serializes is a <c>.modify()</c> edit, which normalizes the instance
 /// the way real does.
 /// </remarks>
-internal sealed class XmlSqlType() : SqlType(SqlTypeCategory.String)
+internal sealed class XmlSqlType() : SqlType(SqlTypeCategory.String, TypePairClass.Xml)
 {
+    public override int Precedence => 28;
+
     public override Type ClrType => typeof(string);
 
     public override string SqlServerName => "xml";

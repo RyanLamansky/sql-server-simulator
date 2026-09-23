@@ -37,6 +37,45 @@ And it moves error behavior — `5 / -0 * CAST(NULL AS int)` pulls the NULL into
 
 The legacy paren-less `SELECT TOP n` takes no unary prefix at all (its count is a bare constant or variable): real raises **Msg 102** naming the operator for `TOP -1` / `TOP +1` / `TOP ~1`, where the parenthesized `TOP (-1)` takes the sign and validates the resulting value.
 
+## Type-pair legality
+
+Whether two operand types may meet is settled from the two types alone, while compiling, and separately for each of six operations: **unification** (the common type CASE, COALESCE, IIF, CHOOSE, GREATEST / LEAST and the set operators need), **comparison** (`= <> < <= > >=`, and every construct that implies one — `IN`, `BETWEEN`, a simple CASE, `NULLIF`, `IS [NOT] DISTINCT FROM`, `= ANY`, `IN (SELECT …)`), `+`, `-`, `*` / `/` (identical), and `%`.
+The error, when there is one, fires over a typed NULL or an empty rowset exactly as over a value, and ahead of any runtime error in the same statement (`SELECT 1/0 + CAST(NULL AS date)` is Msg 206, not Msg 8134).
+
+The rules are the probed grids in `SqlType.PairRules.cs`, read by `SqlType.PairError` / `OperandPairError`, one row and column per `TypePairClass`.
+Probed 2026-09-23 against SQL Server 2025 over every ordered pair of 37 types (every class member, the MAX forms, `sysname`, `numeric`) × 11 statements, each statement alone in its batch over empty-table columns so neither constant folding nor a sibling's compile error could intervene.
+The 37 types collapse to **19 classes** that answer identically against every partner in every operation — and the grouping is not the precedence chart's: `bit` parts company with the other integers, `money` joins `decimal`, `date` and `time` each stand alone while `datetime2` and `datetimeoffset` share one, `char` / `varchar` and `nchar` / `nvarchar` / `sysname` split (`nvarchar` doesn't reach `image`), and `text` / `ntext` share one.
+The one exception to class uniformity is folded in by hand: a MAX string or binary can't reach `sql_variant`, so that pair is Msg 206 naming the MAX side first, where the bounded forms unify to `sql_variant`.
+
+A grid over classes rather than a rule over the precedence chart plus a conversion table, because the two don't reproduce real: real's comparison refusals follow neither the unification's implicit-conversion answer (`time` with `datetime` unifies to `datetime` but compares as Msg 402; `date` with `xml` is Msg 206 to unify and Msg 402 to compare) nor any ordering the precedence chart offers, and the Msg 206 operand order in a comparison is a fixed per-pair order that no single rank explains.
+So each cell stores the number *and* the operand order real reports, and the grid is the spec — regenerating it from a probe run is the way to extend it.
+
+What the cells say:
+
+- **Msg 206** `Operand type clash: X is incompatible with Y` — no conversion at all.
+  In a unification X is the lower-precedence side (the one that would convert), except that `xml` outranks a CLR type and `sql_variant`, and between two CLR types the later branch is named first.
+  In a comparison or an operator the order is fixed per pair whichever side each is written on (`int = date` and `date = int` both name `date` first; `int <> hierarchyid` names `int` first).
+- **Msg 257** `Implicit conversion from data type X to Y is not allowed. Use the CONVERT function to run this query.` (state 3) — a conversion real only performs explicitly: a binary to `date` / `time` / `datetime2` / `datetimeoffset` in a unification, a string to `timestamp`, `datetime` / `smalldatetime` / `sql_variant` meeting a number under `*` `/`, and `sql_variant` meeting a number under `+` `-`.
+  An **operator** whose converted operand is a column reports **Msg 260** instead — `Disallowed implicit conversion from data type X to data type Y, table 'T', column 'C'.` — naming the object as the FROM clause wrote it, alias ignored (`#t`, `dbo.t`, a derived table or CTE by its alias, the column by its name there); a unification never does, even over two columns.
+  The subquery side of `IN (SELECT …)` / `= ANY (…)` has no column reachable to name, so there the simulator reports Msg 257 where real names the inner column with Msg 260.
+- **Msg 402** `The data types X and Y are incompatible in the <op> operator.` — written order, the operator spelled as `equal to` / `less than or equal to` / `add` / `modulo` / `is not` (for `IS [NOT] DISTINCT FROM`).
+- **Msg 8117** `Operand data type X is invalid for <op> operator.` — always the left operand.
+- **Msg 403** `Invalid operator for data type. Operator equals <op>, type equals X.` — a CLR type under an operator it doesn't define: `hierarchyid` and the spatial pair in arithmetic, a spatial type in a comparison; whichever side it is on.
+- **Msg 305** — two `xml` operands compared.
+  `IS [NOT] DISTINCT FROM` is the exception: two `xml` operands compile, and only a row where both carry a value raises, at **state 3**.
+
+A decimal operand the expression spells `numeric` (a `CAST(… AS numeric)`, a decimal literal) is named `numeric`; a `sysname` is named `nvarchar`.
+
+Legal pairs take their result from the precedence chart (`SqlType.Precedence`, the full list, strings and binaries at the bottom), widened within the families that have a joint envelope (numbers, dates and times, character strings with binaries), and the value follows the conversion that implies:
+
+- `0x61 = 'a'` is true — the binary converts to the string.
+- `CAST('2024-01-01' AS datetime) - 1.5` is `2023-12-30 12:00`: a `datetime` / `smalldatetime` meeting a number, string, bit or binary under `+` / `-` converts the partner to itself and combines day counts, so `1.5 - <2024-01-01>` lands in 1776, and the partner rounds to the result's own grid first (`smalldatetime + 0.0003` adds nothing, `+ 0.0004` a minute).
+- A binary or `timestamp` meeting a number takes that number's type — including a `decimal`, read as the `numeric` byte form (`decimal(5,2) + 0x0502000196000000` is `decimal(6,2)` 3.00) — and a string does the same; `bit` does too against a `decimal`, so `bit * decimal(5,2)` is the decimal(5,2) pair's `decimal(11,4)` where `tinyint * decimal(5,2)` is `decimal(9,2)`.
+- Two binaries (a `timestamp` included) concatenate under `+`; a `timestamp` counts 40 toward the result's declared length (`varbinary(4) + timestamp` is `varbinary(44)`) though its value is 8 bytes.
+- `time` unifies with `datetime` / `smalldatetime` / `datetime2` / `datetimeoffset` to the partner, at the larger fractional precision.
+
+Oracle: `TypePairLegalityTests`.
+
 ## Integer ↔ string promotion
 Cross-category `int ↔ string` lands the integer's specific subtype (`tinyint + '3'` stays tinyint; `bigint + '3'` stays bigint).
 String parses through the integer's CAST path: empty/whitespace → 0, `+`/`-` accepted, leading/trailing whitespace trimmed.
@@ -68,7 +107,7 @@ Like the [LIKE pattern memo](collations.md#the-pattern-compilation-is-memoized-p
 ## `bit` operand pairs
 
 A `bit` paired with a `bit` has no arithmetic on real, and the rejection splits by operator the same way the binary pair does: `*` / `/` raise **Msg 8117** (`"Operand data type bit is invalid for multiply operator."`), while `+` / `-` / `%` raise **Msg 402** (`"The data types bit and bit are incompatible in the add operator."`, and the subtract / modulo wordings).
-The gate lives in `SqlType.PromoteForArithmetic`, so it fires from the static type path as well as the runtime one.
+It is a cell of the [pair grids](#type-pair-legality), so it fires from the static type path as well as the runtime one.
 
 Two neighbours stay legal and are deliberately outside the gate: the **bitwise** operators (`&`, `|`, `^`) accept a bit pair, and a **mixed** `bit + int` promotes to `int` and computes normally — only the same-type arithmetic pair is refused.
 `SUM(bit)` is refused separately by the aggregate dispatch, also with Msg 8117.
@@ -78,11 +117,13 @@ One `binary`/`varbinary` operand paired with one integer-family operand converts
 Comparison converts the same way (`0x01 = 1` compares equal).
 `SqlType.Promote` handles the type unification (binary-vs-integer → the integer type), and `TwoSidedExpression.IntegerArithmetic` coerces the runtime binary value via the binary→integer path (see [`casting.md`](casting.md)); the string↔integer normalization sitting beside it excludes bitwise, but the binary path does not.
 
-Two **binary** operands: `+` is byte concatenation (`0x01 + 0x01` → varbinary `0x0101`; `binary(N) + binary(M)` → `binary(N+M)`, else `varbinary(N+M)`, capped 8000 — `Add.BinaryConcatenation` + `PromoteForArithmetic`'s `BinaryPairResultType`).
+A binary meeting a `decimal`, `money` or legacy `datetime` converts the same way, to the partner's own type (see [Type-pair legality](#type-pair-legality)); against `float` / `real` it is Msg 206 in every operator but `%`.
+
+Two **binary** operands: `+` is byte concatenation (`0x01 + 0x01` → varbinary `0x0101`; `binary(N) + binary(M)` → `binary(N+M)`, else `varbinary(N+M)`, capped 8000, a MAX operand making it MAX — `Add.BinaryConcatenation` + `PromoteForArithmetic`'s `BinaryConcatResultType`).
 Every other operator errors, matching SQL Server: `- % & | ^` → **Msg 402** (`"The data types varbinary and varbinary are incompatible in the '&' operator."`), `* /` → **Msg 8117** (`"Operand data type varbinary is invalid for multiply operator."`).
 `PromoteForArithmetic` raises for the static schema; `IntegerArithmetic` re-raises the same wording at runtime.
 
-`BuildSynthesizedSqlRow` (FROM-less SELECT) runs each expression first (surfacing runtime-only errors with operator-name wording), then `GetSqlType` for schema, then bridges any mismatch via `CoerceTo` — required for mixed-type CASE/Coalesce without a FROM clause.
+`BuildSynthesizedSqlRow` (FROM-less SELECT) binds the WHERE and types every projection before it runs any of them — real's compile-then-execute order, which is what puts a refused pair's error ahead of a runtime one in the same statement — then bridges any value whose type differs from the schema via `CoerceTo`.
 
 ## The approximate family (`float` / `real`)
 
@@ -99,8 +140,8 @@ The FROM-less path hid it, since `BuildSynthesizedSqlRow` bridges a mismatch wit
 
 **Modulo has no float form at all.**
 An approximate operand on either side raises, splitting the way the `bit` and binary pairs do: two approximate operands raise **Msg 8117** naming the **left** one (`"Operand data type real is invalid for modulo operator."` — for `real % float` as much as `real % real`, and `float % real` names `float`), while an approximate paired with any exact-numeric, string or binary partner raises **Msg 402** naming both in written order (`"The data types real and int are incompatible in the modulo operator."`).
-The gate lives in `PromoteForArithmetic` beside the `bit`-pair one, so it fires from the static path and the runtime path alike.
-Real's Msg 402 here beats the Msg 206 operand-type clash it reports for a binary partner under `+` — `0x02 % CAST(2 AS real)` is 402 while `0x02 + CAST(2 AS real)` is 206 (the latter unmodeled; see [Not modeled yet](#not-modeled-yet-approximate)).
+It is a cell of the [pair grids](#type-pair-legality) like the `bit` pair, so it fires from the static path and the runtime path alike.
+Real's Msg 402 here beats the Msg 206 operand-type clash it reports for a binary partner under `+` — `0x02 % CAST(2 AS real)` is 402 while `0x02 + CAST(2 AS real)` is 206.
 
 `SUM` and `AVG` are the one place `real` does **not** survive: both **widen it to `float`**, while `MIN` / `MAX` keep `real` and the statistical family (`STDEV` / `STDEVP` / `VAR` / `VARP`) was already `float` for every operand type.
 Accumulation is in `double`, each single widening exactly on the way in, which is what real does — `SUM` over `real` values `{16777216, 1, 1, 1, 1}` returns `16777220`, where a single-width running total would have stuck at `16777216`.
@@ -126,12 +167,6 @@ The decimal→approximate coercions fold it away; the sign is invisible on every
 
 Every string surface reports the sign — `CAST … AS varchar`, `CONCAT`, `STR`, `CONVERT` styles 1/2/3, `PRINT`, `FOR JSON`, `FOR XML` — **except `FORMAT`**, which gives an unsigned zero for every format string probed (`G` / `N2` / `F3` / `E2` / `C` / `0.00` / `#.##`), the .NET Framework rendering its CLR implementation carries; .NET Core signs it, so `Format` folds it.
 `SIGN` and `ABS` of `-0` are `0`, as on real.
-
-<a id="not-modeled-yet-approximate"></a>
-**Not modeled yet.**
-`<binary> <op> <approximate>` (`0x02 + CAST(2 AS real)`) is real's **Msg 206** operand-type clash in both orders and for `+ - * /`; the simulator raises `NotSupportedException` from the promotion dispatch instead.
-Modulo is unaffected — its own gate answers first, with real's Msg 402 — except in a FROM-less `SELECT`, where `BuildSynthesizedSqlRow` runs the value before the schema and a *binary left operand* reaches the runtime dispatch's unsupported-pair fallback first.
-`STDEV` / `VAR` over `money` is real's `float`; the simulator raises Msg 529 (`"Explicit conversion from data type money to float is not allowed."`) from the statistical aggregator's operand coercion.
 
 ## Integer arithmetic overflow
 SQL Server keeps the narrow integer type through arithmetic instead of widening, so a result outside the operand width raises **Msg 8115 St 2** (`"Arithmetic overflow error converting expression to data type {type}."`) rather than wrapping.
@@ -313,10 +348,12 @@ String and binary literals type at their **exact value width**, and that width f
 - **Concatenation `+`** (`PromoteForArithmetic` string arm / `StringConcatResult`): sum of widths, capped at the family maximum (`'ab' + 'cde'` → `varchar(5)`; `varchar(5000) + varchar(5000)` → `varchar(8000)`, **not** MAX).
   National family (nvarchar/nchar) wins and the sum stays in characters across the family change (`'ab' + N'cde'` → `nvarchar(5)`).
   Either operand MAX → MAX.
+  A `sysname` counts as the `nvarchar(128)` it aliases (`sysname + varchar(10)` → `nvarchar(138)`).
 - **CASE / COALESCE / IIF / NULLIF / set ops / comparison common-type** (`SqlType.Promote` → `PromoteStringPair`): **maximum** of the operand widths (not the sum).
   `CASE … 'ab' … 'wxyz'` → `varchar(4)`; `… N'wxyz'` → `nvarchar(4)`; `SELECT 'ab' UNION ALL SELECT 'wxyz'` → `varchar(4)`.
   Fixed pairs (char/nchar) stay fixed; any variable operand drops to the variable form; either operand MAX → MAX.
   The length-0 sentinel contributes 0 to the max so a bare var\* operand yields to a sized partner.
+  A binary operand takes part as the character family's own form of its byte length — `binary(N)` as the fixed form, `varbinary(N)` as the variable one — so `char(3)` with `varbinary(4)` is `varchar(4)` and `nchar(3)` with `binary(2)` stays `nchar(3)`; a `text` / `ntext` operand outranks every bounded string and is the result as it stands (`nvarchar(10)` with `text` is `text`).
   (Before this, `PromoteFromString` fell through to a precedence pick that returned one whole operand — `Promote(varchar(2), varchar(4))` gave `varchar(2)`, narrower than a runtime value; the max rule is the parity fix.)
 - **ISNULL** fixes the result to the **first** argument's declared type/width (`ISNULL('ab', 'wxyz')` → `varchar(2)`), unlike COALESCE's joint promote — see [`dml.md`](dml.md)/`IsNullExpression`.
 

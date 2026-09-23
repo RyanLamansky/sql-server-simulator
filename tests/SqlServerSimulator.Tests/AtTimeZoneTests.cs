@@ -140,15 +140,12 @@ public sealed class AtTimeZoneTests
 
     /// <summary>
     /// <c>expr AT TIME ZONE 'UT' + 'C'</c> parses as <c>(expr AT TIME ZONE 'UT') + 'C'</c>,
-    /// which is <c>datetimeoffset + varchar</c>. The inner zone-name <c>'UT'</c>
-    /// fails first with Msg 9820, demonstrating the binding precedence by
-    /// error path. (Real SQL Server's exact wording is Msg 402 about
-    /// <c>datetimeoffset + varchar</c>, but the simulator's earlier-evaluated
-    /// zone resolution surfaces 9820 first — same precedence outcome either way.)
+    /// which is <c>datetimeoffset + varchar</c> — refused while compiling, so
+    /// real's Msg 402 comes ahead of the unknown zone name's runtime Msg 9820.
     /// </summary>
     [TestMethod]
     public void Precedence_BindsTighterThanPlus_AdditionAfterAtTimeZoneRaisesMsg402() =>
-        AssertSqlError("select cast('2026-05-09' as datetime2) at time zone 'UT' + 'C'", 9820);
+        AssertSqlError("select cast('2026-05-09' as datetime2) at time zone 'UT' + 'C'", 402);
 
     [TestMethod]
     public void Chained_AtTimeZoneAfterAtTimeZone_ReConverts()

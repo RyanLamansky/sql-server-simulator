@@ -9,9 +9,9 @@ internal sealed class Add : TwoSidedExpression
     protected override SqlValue Run(SqlValue left, SqlValue right) =>
         IsStringConcatPair(left, right)
             ? StringConcatenation(left, right)
-            : left.Type is VarbinarySqlType or BinarySqlType && right.Type is VarbinarySqlType or BinarySqlType
+            : left.Type.PairClass is TypePairClass.Binary or TypePairClass.Timestamp && right.Type.PairClass is TypePairClass.Binary or TypePairClass.Timestamp
                 ? BinaryConcatenation(left, right)
-                : AdditiveArithmetic(left, right, '+', "add", static (a, b) => checked(a + b));
+                : AdditiveArithmetic(left, right, '+', static (a, b) => checked(a + b));
 
     /// <summary>
     /// Binary <c>+</c> binary concatenation: the two byte payloads are joined

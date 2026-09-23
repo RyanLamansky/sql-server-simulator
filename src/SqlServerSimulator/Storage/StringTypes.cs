@@ -15,6 +15,8 @@ namespace SqlServerSimulator.Storage;
 /// </summary>
 internal sealed class VarcharSqlType : SqlType
 {
+    public override int Precedence => 4;
+
     public readonly short length;
 
     private readonly Collation collation;
@@ -22,7 +24,7 @@ internal sealed class VarcharSqlType : SqlType
     private readonly Coercibility coercibility;
 
     private VarcharSqlType(short length, Collation collation, Coercibility coercibility)
-        : base(SqlTypeCategory.String)
+        : base(SqlTypeCategory.String, TypePairClass.AnsiString)
     {
         // Runs once per interned (length, collation, coercibility) triple, so
         // the Msg 459 gate costs nothing on the cache-hit path.
@@ -75,6 +77,8 @@ internal sealed class VarcharSqlType : SqlType
 /// </summary>
 internal sealed class NVarcharSqlType : SqlType
 {
+    public override int Precedence => 6;
+
     public readonly short length;
 
     private readonly Collation collation;
@@ -82,7 +86,7 @@ internal sealed class NVarcharSqlType : SqlType
     private readonly Coercibility coercibility;
 
     private NVarcharSqlType(short length, Collation collation, Coercibility coercibility)
-        : base(SqlTypeCategory.String)
+        : base(SqlTypeCategory.String, TypePairClass.UnicodeString)
     {
         this.length = length;
         this.collation = collation;
@@ -132,8 +136,10 @@ internal sealed class NVarcharSqlType : SqlType
 /// columns don't accept a <c>COLLATE</c> clause and never coerce, so a
 /// single shared instance is sufficient.
 /// </summary>
-internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String)
+internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String, TypePairClass.UnicodeString)
 {
+    public override int Precedence => 6;
+
     public override Type ClrType => typeof(string);
 
     public override bool IsFixedLength => false;
@@ -179,9 +185,11 @@ internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String)
 /// </summary>
 internal sealed class VarbinarySqlType : SqlType
 {
+    public override int Precedence => 2;
+
     public readonly short length;
 
-    private VarbinarySqlType(short length) : base(SqlTypeCategory.Other) => this.length = length;
+    private VarbinarySqlType(short length) : base(SqlTypeCategory.Other, TypePairClass.Binary) => this.length = length;
 
     public override Type ClrType => typeof(byte[]);
 
@@ -235,8 +243,10 @@ internal sealed class VarbinarySqlType : SqlType
 /// <c>COLLATE</c> clause; the simulator's single shared instance models the
 /// default case (the deprecated type isn't worth interning per collation).
 /// </summary>
-internal sealed class TextSqlType() : SqlType(SqlTypeCategory.String)
+internal sealed class TextSqlType() : SqlType(SqlTypeCategory.String, TypePairClass.Text)
 {
+    public override int Precedence => 10;
+
     public override Type ClrType => typeof(string);
 
     public override bool IsFixedLength => false;
@@ -261,8 +271,10 @@ internal sealed class TextSqlType() : SqlType(SqlTypeCategory.String)
 /// string, stored off-row in LOB pages. Same operation restrictions as
 /// <see cref="TextSqlType"/>.
 /// </summary>
-internal sealed class NTextSqlType() : SqlType(SqlTypeCategory.String)
+internal sealed class NTextSqlType() : SqlType(SqlTypeCategory.String, TypePairClass.Text)
 {
+    public override int Precedence => 11;
+
     public override Type ClrType => typeof(string);
 
     public override bool IsFixedLength => false;
@@ -287,8 +299,10 @@ internal sealed class NTextSqlType() : SqlType(SqlTypeCategory.String)
 /// stored off-row in LOB pages. Same operation restrictions as
 /// <see cref="TextSqlType"/>.
 /// </summary>
-internal sealed class ImageSqlType() : SqlType(SqlTypeCategory.Other)
+internal sealed class ImageSqlType() : SqlType(SqlTypeCategory.Other, TypePairClass.Image)
 {
+    public override int Precedence => 9;
+
     public override Type ClrType => typeof(byte[]);
 
     public override bool IsFixedLength => false;
@@ -319,6 +333,8 @@ internal sealed class ImageSqlType() : SqlType(SqlTypeCategory.Other)
 /// </summary>
 internal sealed class CharSqlType : SqlType
 {
+    public override int Precedence => 3;
+
     public readonly short length;
 
     private readonly Collation collation;
@@ -326,7 +342,7 @@ internal sealed class CharSqlType : SqlType
     private readonly Coercibility coercibility;
 
     private CharSqlType(short length, Collation collation, Coercibility coercibility)
-        : base(SqlTypeCategory.String)
+        : base(SqlTypeCategory.String, TypePairClass.AnsiString)
     {
         // Interned per triple, so the Msg 459 gate runs once per pairing.
         collation.RejectIfUnicodeOnly();
@@ -389,6 +405,8 @@ internal sealed class CharSqlType : SqlType
 /// </summary>
 internal sealed class NCharSqlType : SqlType
 {
+    public override int Precedence => 5;
+
     public readonly short length;
 
     private readonly Collation collation;
@@ -396,7 +414,7 @@ internal sealed class NCharSqlType : SqlType
     private readonly Coercibility coercibility;
 
     private NCharSqlType(short length, Collation collation, Coercibility coercibility)
-        : base(SqlTypeCategory.String)
+        : base(SqlTypeCategory.String, TypePairClass.UnicodeString)
     {
         this.length = length;
         this.collation = collation;
@@ -436,8 +454,10 @@ internal sealed class NCharSqlType : SqlType
 /// 1-8000. Each declared length is a distinct singleton. Stored payloads are
 /// right-padded with <c>0x00</c> to the declared length.
 /// </summary>
-internal sealed class BinarySqlType(short length) : SqlType(SqlTypeCategory.Other)
+internal sealed class BinarySqlType(short length) : SqlType(SqlTypeCategory.Other, TypePairClass.Binary)
 {
+    public override int Precedence => 1;
+
     public readonly short length = length;
 
     public override Type ClrType => typeof(byte[]);

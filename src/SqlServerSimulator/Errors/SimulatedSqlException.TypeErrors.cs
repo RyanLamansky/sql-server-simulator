@@ -29,10 +29,17 @@ partial class SimulatedSqlException
     /// <c>MAX(DISTINCT …)</c> stays at state 1.</para>
     /// </summary>
     internal static SimulatedSqlException OperandDataTypeInvalid(SqlType operand, string operatorName, byte state = 1) =>
-        new($"Operand data type {FamilyRootName(operand)} is invalid for {operatorName} operator.", 8117, 16, state);
+        OperandDataTypeInvalid(FamilyRootName(operand), operatorName, state);
 
     /// <summary>
-    /// The untyped-<c>NULL</c> variant of <see cref="OperandDataTypeInvalid"/>:
+    /// <see cref="OperandDataTypeInvalid(SqlType, string, byte)"/> over an
+    /// already-rendered type name.
+    /// </summary>
+    internal static SimulatedSqlException OperandDataTypeInvalid(string operand, string operatorName, byte state = 1) =>
+        new($"Operand data type {operand} is invalid for {operatorName} operator.", 8117, 16, state);
+
+    /// <summary>
+    /// The untyped-<c>NULL</c> variant of <see cref="OperandDataTypeInvalid(string, string, byte)"/>:
     /// an aggregate whose operand is the bare <c>NULL</c> keyword reports the
     /// literal type name <c>NULL</c>, which no <see cref="SqlType"/> models (the
     /// simulator resolves a bare NULL to a placeholder <see cref="SqlType.Int32"/>).
@@ -216,6 +223,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ConversionFailedFromStringToUniqueIdentifier() =>
         new("Conversion failed when converting from a character string to uniqueidentifier.", 8169, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 210: a binary value whose bytes don't form a
+    /// legacy <c>datetime</c> / <c>smalldatetime</c> — a day count outside the
+    /// type's range, or a time part past midnight. Probe-confirmed 2026-09-23.
+    /// </summary>
+    internal static SimulatedSqlException ConversionFailedFromBinaryToDateTime() =>
+        new("Conversion failed when converting datetime from binary/varbinary string.", 210, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 8114: a non-numeric value was passed to a
@@ -479,11 +494,13 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 8116: an argument to a function has the wrong
-    /// data type — currently surfaced for <c>CONVERT</c>'s third (style)
-    /// argument when it isn't an integer.
+    /// data type (e.g. <c>CONVERT</c>'s style argument when it isn't an
+    /// integer). The state is the function's own: 1 for most, 4 for
+    /// <c>GREATEST</c> / <c>LEAST</c> refusing a type it can't compare
+    /// (probe-confirmed 2026-09-23).
     /// </summary>
-    internal static SimulatedSqlException InvalidArgumentDataType(string sourceTypeWord, int argumentIndex, string functionName) =>
-        new($"Argument data type {sourceTypeWord} is invalid for argument {argumentIndex} of {functionName} function.", 8116, 16, 1);
+    internal static SimulatedSqlException InvalidArgumentDataType(string sourceTypeWord, int argumentIndex, string functionName, byte state = 1) =>
+        new($"Argument data type {sourceTypeWord} is invalid for argument {argumentIndex} of {functionName} function.", 8116, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 206: the binary expression's two operands
@@ -492,7 +509,15 @@ partial class SimulatedSqlException
     /// (time-vs-non-time-date) and Msg 529 (explicit-CAST rejection).
     /// </summary>
     internal static SimulatedSqlException OperandTypeClash(SqlType left, SqlType right) =>
-        new($"Operand type clash: {FamilyRootName(left)} is incompatible with {FamilyRootName(right)}", 206, 16, 2);
+        OperandTypeClash(FamilyRootName(left), FamilyRootName(right));
+
+    /// <summary>
+    /// <see cref="OperandTypeClash(SqlType, SqlType)"/> over already-rendered
+    /// type names, for the type-pair rules, which spell a <c>numeric</c>
+    /// operand and a <c>sysname</c> one the way real does.
+    /// </summary>
+    internal static SimulatedSqlException OperandTypeClash(string left, string right) =>
+        new($"Operand type clash: {left} is incompatible with {right}", 206, 16, 2);
 
     /// <summary>
     /// Mimics SQL Server error 206 against a user-defined table type: the
@@ -570,7 +595,14 @@ partial class SimulatedSqlException
     /// callers pass <c>"add"</c> or <c>"subtract"</c>.
     /// </summary>
     internal static SimulatedSqlException IncompatibleDataTypesInOperator(SqlType a, SqlType b, string operatorName) =>
-        new($"The data types {FamilyRootName(a)} and {FamilyRootName(b)} are incompatible in the {operatorName} operator.", 402, 16, 1);
+        IncompatibleDataTypesInOperator(FamilyRootName(a), FamilyRootName(b), operatorName);
+
+    /// <summary>
+    /// <see cref="IncompatibleDataTypesInOperator(SqlType, SqlType, string)"/>
+    /// over already-rendered type names.
+    /// </summary>
+    internal static SimulatedSqlException IncompatibleDataTypesInOperator(string a, string b, string operatorName) =>
+        new($"The data types {a} and {b} are incompatible in the {operatorName} operator.", 402, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 257: an <c>sql_variant</c> operand meets a
@@ -580,7 +612,35 @@ partial class SimulatedSqlException
     /// <paramref name="target"/> is the non-variant operand's type.
     /// </summary>
     internal static SimulatedSqlException ImplicitConversionFromSqlVariantNotAllowed(SqlType target) =>
-        new($"Implicit conversion from data type sql_variant to {FamilyRootName(target)} is not allowed. Use the CONVERT function to run this query.", 257, 16, 3);
+        ImplicitConversionNotAllowed("sql_variant", FamilyRootName(target));
+
+    /// <summary>
+    /// Mimics SQL Server error 257: the implicit conversion a unification or
+    /// an operator needs is one real only performs explicitly (e.g.
+    /// <c>varbinary</c> to <c>date</c>, <c>datetime</c> to <c>int</c> for
+    /// <c>*</c>). An operator whose converted operand is a column reports
+    /// <see cref="DisallowedImplicitConversionFromColumn"/> instead.
+    /// </summary>
+    internal static SimulatedSqlException ImplicitConversionNotAllowed(string source, string target) =>
+        new($"Implicit conversion from data type {source} to {target} is not allowed. Use the CONVERT function to run this query.", 257, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 260: the column-operand form of
+    /// <see cref="ImplicitConversionNotAllowed"/>, naming the column and its
+    /// object as the FROM clause wrote it (<c>#t</c>, <c>dbo.t</c>, a derived
+    /// table's alias; never a table alias). Probe-confirmed 2026-09-23.
+    /// </summary>
+    internal static SimulatedSqlException DisallowedImplicitConversionFromColumn(string source, string target, string table, string column) =>
+        new($"Disallowed implicit conversion from data type {source} to data type {target}, table '{table}', column '{column}'. Use the CONVERT function to run this query.", 260, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 403: an operator applied to a CLR type that
+    /// defines none (<c>hierarchyid</c> or a spatial type in arithmetic, a
+    /// spatial type in a comparison). Real names the one offending operand,
+    /// and spells the operator the way Msg 402 does. Probe-confirmed 2026-09-23.
+    /// </summary>
+    internal static SimulatedSqlException InvalidOperatorForDataType(string operatorName, string type) =>
+        new($"Invalid operator for data type. Operator equals {operatorName}, type equals {type}.", 403, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 536: a length / count argument to a string
@@ -878,7 +938,7 @@ partial class SimulatedSqlException
     /// <c>datetimeoffset</c>) without a precision suffix, matching
     /// real-server output.
     /// </summary>
-    private static string FamilyRootName(SqlType type) => type switch
+    internal static string FamilyRootName(SqlType type) => type switch
     {
         DateTime2SqlType => "datetime2",
         TimeSqlType => "time",

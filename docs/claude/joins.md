@@ -186,7 +186,7 @@ The original equi-join win still stands — with ≥1 equi-key the inner is inde
   Both row lists are sized from the backing table's row count where there is one, and the matched-right bitmap is allocated only for RIGHT / FULL, the two kinds that read it.
 - NULL keys are excluded (NULL = NULL is UNKNOWN) but retained for the unmatched-right tail of RIGHT / FULL.
 - Residual non-equi conjuncts are re-checked per probed candidate (a conjunct passes only when it evaluates to `true`, matching the streaming path's `== true` gate).
-- Falls back to the nested-loop operators below for non-equi ON predicates, the lateral / derived-table right sides the materialization pass below declines, CROSS / APPLY, and key-type pairs `SqlType.Promote` rejects (LOB, collation conflict, cross-category) — preserving their exact per-row error behavior.
+- Falls back to the nested-loop operators below for non-equi ON predicates, the lateral / derived-table right sides the materialization pass below declines, CROSS / APPLY, and key-type pairs `SqlType.Promote` rejects (LOB, collation conflict, a pair the unification grid refuses) — preserving their exact per-row error behavior.
 
 MERGE's own match phase hashes its source the same way when the target can't be seeked, over its two name spaces rather than a `FromSource[]`; the key-type rule is literally shared (`TryPromoteComparableKeyTypes`).
 See [`dml.md`](dml.md#match-strategies).

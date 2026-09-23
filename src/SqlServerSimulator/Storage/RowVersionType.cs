@@ -21,8 +21,10 @@ namespace SqlServerSimulator.Storage;
 /// <see cref="Database.AllocateRowVersion"/>: monotonic per-database,
 /// mirroring SQL Server's database-scoped <c>@@DBTS</c>.
 /// </remarks>
-internal sealed class RowVersionSqlType() : SqlType(SqlTypeCategory.Other)
+internal sealed class RowVersionSqlType() : SqlType(SqlTypeCategory.Other, TypePairClass.Timestamp)
 {
+    public override int Precedence => 8;
+
     public override Type ClrType => typeof(byte[]);
 
     public override bool IsFixedLength => true;

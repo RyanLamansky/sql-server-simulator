@@ -20,8 +20,10 @@ namespace SqlServerSimulator.Storage;
 /// non-negative) then the absolute mantissa little-endian, scaled to the
 /// declared scale and zero-padded to the type's storage width.
 /// </remarks>
-internal sealed class DecimalSqlType(byte precision, byte scale) : SqlType(SqlTypeCategory.Decimal)
+internal sealed class DecimalSqlType(byte precision, byte scale) : SqlType(SqlTypeCategory.Decimal, TypePairClass.ExactNumeric)
 {
+    public override int Precedence => 19;
+
     public readonly byte precision = precision;
     public readonly byte scale = scale;
 
