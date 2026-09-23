@@ -690,6 +690,7 @@ Cross-aggregate Msg 8711 isn't modeled (EF doesn't emit).
 - Value functions (ORDER BY required, operand re-evaluated against another row's resolver):
   - `LAG(expr [, offset [, default]]) OVER (...)` — operand type.
     Offset defaults to 1; default expression is evaluated in the boundary row's resolver context when the offset crosses the partition boundary (and typed NULL when no default is given).
+    The default then converts to the operand's exact type with CAST semantics — `'7'` becomes 7, `2.9` becomes 2, a longer string is cut to the operand's declared length, and `'x'` over an int is Msg 245 — but only a default actually used converts, so one that never reaches a row raises nothing (probed 2026-09-23).
   - `LEAD(expr [, offset [, default]]) OVER (...)` — same shape, opposite direction.
   - `FIRST_VALUE(expr) OVER ([PARTITION BY ...] ORDER BY ... [frame])` — operand type.
     Returns the operand evaluated against the frame's first row (default frame `RANGE UNBOUNDED PRECEDING TO CURRENT ROW` → partition's leading row, broadcast).

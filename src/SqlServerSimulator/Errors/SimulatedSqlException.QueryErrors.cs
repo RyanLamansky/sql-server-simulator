@@ -505,6 +505,14 @@ partial class SimulatedSqlException
         new($"'{name}' has more columns than were specified in the column list.", 8158, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 4502: a view's body, re-bound at a reference,
+    /// now projects fewer columns than the names the view recorded at CREATE —
+    /// a <c>SELECT *</c> view whose base table lost a column since.
+    /// </summary>
+    internal static SimulatedSqlException ViewHasMoreColumnNamesThanColumns(string viewName) =>
+        new($"View or function '{viewName}' has more column names specified than columns defined.", 4502, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 8159: a column-rename list has more names than
     /// the rowset it renames produces — a CTE / view body projection or a
     /// table-value-constructor derived table with fewer columns than its

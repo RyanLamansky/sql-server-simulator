@@ -20,6 +20,11 @@ partial class Simulation
     /// </summary>
     /// <param name="outerBatch">The batch whose statement referenced the view.</param>
     /// <param name="view">The view to execute.</param>
+    /// <param name="columnCount">
+    /// How many of the body's columns the reference reads — the count
+    /// <see cref="BindViewColumns"/> settled. A body that has grown past it
+    /// since CREATE has its extra trailing columns dropped from every row.
+    /// </param>
     /// <param name="pushedPredicates">
     /// WHERE conjunct templates the referencing statement pushed into this
     /// reference, applied to the body plan once it is parsed (a view's own
@@ -27,10 +32,51 @@ partial class Simulation
     /// body whose shape can't take them keeps running unchanged.
     /// </param>
     internal IEnumerable<byte[]> InvokeView(
-        BatchContext outerBatch, View view, List<BooleanExpression>? pushedPredicates = null) =>
+        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates = null) =>
         outerBatch.Connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel
             ? throw SimulatedSqlException.MaximumNestingLevelExceeded()
-            : InvokeViewCore(outerBatch, view, pushedPredicates);
+            : InvokeViewCore(outerBatch, view, columnCount, pushedPredicates);
+
+    /// <summary>
+    /// The columns a reference to <paramref name="view"/> reads, settled the
+    /// way real binds one: the body is re-bound against the objects as they
+    /// stand now, and its output maps onto the names recorded at CREATE <em>by
+    /// position</em>. The names and their count stay the recorded ones; each
+    /// column's type is whatever the re-bound body now projects there.
+    /// </summary>
+    /// <remarks>
+    /// Only a <c>SELECT *</c> body over a table changed since CREATE can drift,
+    /// and real's positional mapping is observable there (probed 2026-09-23):
+    /// a column added to the first table of <c>SELECT * FROM t CROSS JOIN u</c>
+    /// reads under <c>u</c>'s recorded column name; a dropped-and-recreated
+    /// base table serves its new first column under the old name, typed as
+    /// the new column; a body left with fewer columns than recorded names is
+    /// Msg 4502. <c>sp_refreshview</c> is what re-records the names on real.
+    /// A body that no longer binds returns the recorded columns unchanged, so
+    /// its own error surfaces at execution as it always has.
+    /// </remarks>
+    internal HeapColumn[] BindViewColumns(BatchContext outerBatch, View view)
+    {
+        if (this.TryParseViewBodyPlan(outerBatch, view) is not { } plan)
+            return view.OutputColumns;
+
+        var recorded = view.OutputColumns;
+        var bound = plan.Schema;
+        if (bound.Length < recorded.Length)
+            throw SimulatedSqlException.ViewHasMoreColumnNamesThanColumns(view.Name);
+
+        var nullability = plan.ColumnNullability;
+        HeapColumn[]? rebound = null;
+        for (var i = 0; i < recorded.Length; i++)
+        {
+            if (ReferenceEquals(bound[i], recorded[i].Type))
+                continue;
+            rebound ??= [.. recorded];
+            var nullable = nullability is null || i >= nullability.Length || nullability[i];
+            rebound[i] = new HeapColumn(recorded[i].Name, bound[i], maxLength: null, nullable: nullable);
+        }
+        return rebound ?? recorded;
+    }
 
     /// <summary>
     /// Parses a view's stored body and returns its plan without executing it —
@@ -107,7 +153,7 @@ partial class Simulation
     }
 
     private IEnumerable<byte[]> InvokeViewCore(
-        BatchContext outerBatch, View view, List<BooleanExpression>? pushedPredicates)
+        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates)
     {
         var connection = outerBatch.Connection;
         using var bodyCommand = new SimulatedDbCommand(this, connection);
@@ -157,8 +203,19 @@ partial class Simulation
                 ? bodySelection
                 : bodySelection.PredicatePushdown?.Invoke(pushedPredicates) ?? bodySelection;
             var resultSet = effective.Execute(innerBatch, outerResolver: null);
-            foreach (var rowBytes in resultSet.RowBytes)
-                yield return rowBytes;
+            if (resultSet.Schema.Length > columnCount)
+            {
+                // The body grew since CREATE; the reference reads only the
+                // leading columns the view recorded names for.
+                var leading = resultSet.Schema[..columnCount];
+                foreach (var values in resultSet.RowValues)
+                    yield return RowEncoder.EncodeRow(leading, values.AsSpan(0, columnCount));
+            }
+            else
+            {
+                foreach (var rowBytes in resultSet.RowBytes)
+                    yield return rowBytes;
+            }
         }
         finally
         {

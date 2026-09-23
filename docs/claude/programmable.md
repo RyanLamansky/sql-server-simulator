@@ -291,6 +291,9 @@ Probed against SQL Server 2025.
 - **CREATE-time validation**: body parses once to derive `OutputColumns`.
   Unnamed projection → **Msg 4511** (distinct from inline TVF's Msg 4514 and SELECT INTO's Msg 1038 — different wording too: `"Create View or Function failed because no column name was specified for column N."`).
   Duplicate column name → **Msg 4506** (shared with inline TVFs).
+- **A reference re-binds the body and maps it by position** (`Simulation.BindViewColumns`): the column *names and their count* are the ones recorded at CREATE, while each column's *type* is what the body projects now.
+  Only a `SELECT *` body over a table changed since CREATE can drift, and real's positional mapping is observable there (probed 2026-09-23): a column added to the first table of `SELECT * FROM t CROSS JOIN u` reads under `u`'s recorded name, a dropped-and-recreated base table serves its new leading column under the old name and new type, a retyped column reads its new type, and a body left with fewer columns than recorded names is **Msg 4502**.
+  A column added past the recorded ones isn't reachable by name (Msg 207).
 - **WITH-clause options**: `SCHEMABINDING` is captured on `View.IsSchemaBound` (it gates `CREATE INDEX` on the view, surfaces through `sys.sql_modules.is_schema_bound` / `OBJECTPROPERTY(id,'IsSchemaBound')`, is the precondition `OBJECTPROPERTY(id,'IsDeterministic')` reads — see [`catalog-views.md`](catalog-views.md#isdeterministic) — and enrolls the body's references in the dependency gate, [Schema binding](#schema-binding-with-schemabinding)).
   `ENCRYPTION` / `VIEW_METADATA` parse-and-ignore.
   **`WITH CHECK OPTION`** (trailing the body) parses and records on `View.WithCheckOption`, enforced at DML time (Msg 550).
@@ -300,7 +303,7 @@ Probed against SQL Server 2025.
 - **Catalog surface**:
   - `sys.objects` `type='V '` (char(2) padded) / `type_desc='VIEW'`.
   - `sys.views` (load-bearing subset): `object_id`, `name`, `schema_id`, `with_check_option`, `is_date_correlation_view` (always False).
-  - `sys.columns` emits one row per output column (`is_identity=0`, `is_computed=0`; `is_nullable` always True — same fidelity gap as inline TVFs).
+  - `sys.columns` emits one row per output column (`is_identity=0`, `is_computed=0`, `is_nullable` from the body's projection inference).
   - `INFORMATION_SCHEMA.VIEWS` (full ISO 6-col shape): `VIEW_DEFINITION` surfaces the stored body text; `CHECK_OPTION` is `'CASCADE'` / `'NONE'`; **`IS_UPDATABLE` always `'NO'`** — probe-confirmed real SQL Server hardcodes this regardless of actual updatability.
   - `INFORMATION_SCHEMA.TABLES` includes views with `TABLE_TYPE='VIEW'`.
   - `OBJECT_ID(name, 'V')` resolves views only; no-filter form falls through both functions and views before tables.
@@ -311,7 +314,7 @@ Probed against SQL Server 2025.
 
 **Fidelity gaps**:
 - **`VIEW_DEFINITION` always surfaces body text** even for WITH ENCRYPTION views (real SQL Server returns NULL for ENCRYPTION views).
-- **`is_nullable` always True** in `sys.columns` for view output — same gap as inline TVFs.
+- **`sp_refreshview`** isn't built, so a drifted `SELECT *` view keeps its CREATE-time names until it's altered or re-created; real's `sp_refreshview` re-records them.
 
 ## Schema binding (`WITH SCHEMABINDING`)
 `WITH SCHEMABINDING` on a view, scalar function, inline TVF or multi-statement TVF pins everything the body names: the referenced objects can't be dropped, altered, renamed or moved while the module stands.

@@ -157,6 +157,41 @@ public sealed class ColumnNullabilityWireTests
     }
 
     [TestMethod]
+    [DataRow("group by rollup(a, b)")]
+    [DataRow("group by cube(a, b)")]
+    [DataRow("group by grouping sets ((a, b), (a))")]
+    [DataRow("group by a, b with rollup")]
+    [DataRow("group by a, b with cube")]
+    [DataRow("group by grouping sets ((a, b))")]
+    public async Task GroupingSets_EveryColumnReferenceReadsNullable(string groupBy)
+    {
+        // Probe-confirmed against SQL Server 2025: once a GROUP BY spells any
+        // grouping-set form, every projected column reference is nullable —
+        // including one present in every set — while an expression keeps its
+        // own rule (ISNULL over a non-null default stays NOT NULL). Claiming
+        // NOT NULL and then streaming a rolled-up NULL killed the session.
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, """
+            create table t (a int not null, b int not null);
+            insert t values (1, 1), (2, 2)
+            """);
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand($"select a, b, isnull(a, 0), count(*) from t {groupBy}", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        var columns = reader.GetColumnSchema();
+        IsTrue(columns[0].AllowDBNull);
+        IsTrue(columns[1].AllowDBNull);
+        IsFalse(columns[2].AllowDBNull);
+        var rows = 0;
+        while (await reader.ReadAsync(TestContext.CancellationToken))
+            rows++;
+        IsGreaterThan(0, rows);
+    }
+
+    [TestMethod]
     public async Task NotNullFixedWidthColumns_ReadOverWire_WithFixedLenTokens()
     {
         // A NOT NULL fixed-width column now carries the FIXEDLENTYPE token

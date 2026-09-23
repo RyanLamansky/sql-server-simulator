@@ -414,6 +414,50 @@ public sealed class WindowFunctionTests
         IsNull(byId[5]); // grp 2's first row — wouldn't be NULL if partition was ignored.
     }
 
+    [TestMethod]
+    public void LagLead_DefaultConvertsToTheOperandsExactType()
+    {
+        // Probe-confirmed against SQL Server 2025: a numeric string converts,
+        // a decimal truncates to the int operand, and a longer string is cut
+        // to the operand's declared length (varchar(1) from the VALUES rows).
+        var simulation = new Simulation();
+        using (var reader = simulation.ExecuteBatchesReader(
+            "select lag(a, 1, '7') over (order by a), lead(a, 1, 2.9) over (order by a) from (values(1),(2)) v(a) order by a"))
+        {
+            AreEqual(typeof(int), reader.GetFieldType(0));
+            IsTrue(reader.Read());
+            AreEqual(7, reader.GetInt32(0));
+            AreEqual(2, reader.GetInt32(1));
+            IsTrue(reader.Read());
+            AreEqual(1, reader.GetInt32(0));
+            AreEqual(2, reader.GetInt32(1));
+        }
+
+        using (var reader = simulation.ExecuteBatchesReader(
+            "select lag(s, 1, 'longer default') over (order by s) from (values('a'),('b')) v(s) order by s"))
+        {
+            IsTrue(reader.Read());
+            AreEqual("l", reader.GetString(0));
+        }
+    }
+
+    [TestMethod]
+    [DataRow("'x'", 245)]
+    [DataRow("3000000000", 8115)]
+    public void Lag_DefaultThatDoesNotConvert_RaisesWhenUsed(string defaultValue, int errorNumber) =>
+        _ = new Simulation().AssertSqlError(
+            $"select lag(a, 1, {defaultValue}) over (order by a) from (values(1),(2)) v(a)", errorNumber);
+
+    [TestMethod]
+    public void Lag_OverNoRows_NeitherReadsTheOffsetNorConvertsTheDefault()
+    {
+        // Nothing reaches the default, so real raises nothing for it; the
+        // explicit offset has no row to be read against either.
+        using var reader = new Simulation().ExecuteBatchesReader(
+            "select lag(a, 2, 'x') over (order by a) from (values(1)) v(a) where 1 = 0");
+        IsFalse(reader.Read());
+    }
+
     // === FIRST_VALUE ===
 
     [TestMethod]

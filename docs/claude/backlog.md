@@ -230,6 +230,94 @@ Worth keeping from that round: the backlog's own statement of the Msg 164 rule w
 
 Not sim bugs (**fail on real too** — leave alone): boolean-expression `=` comparison `WHERE (a<%s)=(b<%s)` → Msg 4145 on both; `CAST(<numeric> AS datetime2)` → Msg 529 on both (Django's DurationField tests expect it); most `get_or_create` `manual_pk`/duplicate IntegrityError tests (the savepoint-rollback-after-constraint pattern was probed identical to real). Not Django-specific: default-path string→date parsing is language-neutral, so `'1/2/3'` raises Msg 241 where real's `us_english` reads it mdy (deliberate — see [`casting.md`](casting.md)).
 
+### Edge-case differential sweep — surfaced gaps
+
+A hand-written corpus of 548 deliberately odd statements, run through the simulator's TDS listener and against SQL Server 2025 (17.0.4065.4) with identical SqlClient code on both sides, a fresh database per case, and every error routed through `InfoMessage` so a whole batch's output compares (probed 2026-09-23).
+The harness is local-only and not checked in; its three connection-killing findings shipped, and the accept-what-real-rejects half lives in the [over-permissive register](#over-permissive-register).
+Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized set-op branches, `SET DATEFORMAT` carrying no effect, Msg 245 dooming the transaction, and the parse-phase batch divergence.
+
+**Internal failures** — each surfaces as Msg 50000 `SqlServerSimulator: unhandled …` or `… isn't implemented`:
+
+- `STR(1, 0)` and `STR(0.1, 20, 17)` hit .NET's rounding-digits range; real answers NULL and `'  0.1000000000000000'`.
+- `0x61 = 'a'` and `datetime ± decimal` (`CAST('2024-01-01' AS datetime) - 1.5`) fall through cross-category promotion; real answers true and `2023-12-30 12:00`.
+- `ISNULL(CAST(NULL AS tinyint), 300)` throws a raw `OverflowException` where real raises Msg 220.
+- `SELECT 1 AS select` follows the right Msg 156 with a second internal error.
+- `STRING_AGG(<int>, '-')` throws where real converts the operand to `nvarchar`.
+- `EOMONTH('9999-12-01', 1)` throws where real raises Msg 517 naming `date`.
+- `CAST('9999-12-31 23:59:59.9999999' AS datetime2(0))` throws where real truncates to the maximum rather than rounding past it.
+- `THROW 50000, 'x', 256` overflows where real accepts it and reports state 0.
+- `CAST('<a>' AS xml)` raises nothing, and the client's `GetValue` throws `XmlException`; real raises Msg 9400.
+
+**Message stream**:
+
+- **Msg 3621 "The statement has been terminated."** is never sent; real sends it (class 0) after every statement-terminating error — 547, 2627, 2628, 220 from `ALTER COLUMN`, 8134 from a persisted computed column's insert.
+- **Msg 8153** (`Warning: Null value is eliminated by an aggregate or other SET operation.`) is never sent for `SUM` / `COUNT(x)` / `COUNT(ALL x)` over a NULL.
+- Several `PRINT`s or low-severity `RAISERROR`s in one batch reach the client as **one** message joined with `\n`, and after the batch's result sets rather than in position.
+- `RAISERROR` at severity 10 arrives with class 10; real sends class 0.
+- Informational messages not sent: Msg 5703 on `SET LANGUAGE`, Msg 282 when a procedure returns NULL, Msg 11729 when a sequence's cache exceeds its remaining values.
+- Line numbers: GOTO label errors (Msg 132 / 133) report line 0 where real reports 1; errors binding a procedure call (Msg 201 / 8144 / 8145) report the batch line where real reports line 0 with `Procedure` set.
+- Msg 2628 names the table `'t'` where real names `'db.dbo.t'`, and for `ALTER COLUMN` real reports the truncated value as `''`.
+
+**Batch compilation** — real compiles the whole batch before running any of it, so a compile error means nothing runs:
+
+- `SELECT top 0 1; SELECT top (1.5) 1` runs the first statement here; real answers Msg 1060 alone.
+- `SELECT 1; CREATE VIEW v AS SELECT 1 a` runs the SELECT, raises Msg 111 **and creates the view**; real raises Msg 111 alone.
+- CTE errors (Msg 8158 / 240 / 252) are followed by a spurious Msg 208; Msg 319 repeats and cascades into further Msg 102s; `NATURAL JOIN` and `TABLESAMPLE` over a derived table run the query and then raise.
+- `BEGIN TRY SELECT * FROM nope END TRY BEGIN CATCH … END CATCH` catches the Msg 208 here, where real's same-scope compile error isn't catchable.
+- `SELECT * FROM v; SELECT b FROM v` over a view whose base gained `b` runs the first statement; real raises Msg 207 for the batch.
+
+**Session options with no effect**:
+
+- `SET ANSI_NULLS OFF` — `NULL = NULL` and `@x = NULL` stay UNKNOWN.
+- `SET CONCAT_NULL_YIELDS_NULL OFF` — `'a' + NULL` stays NULL; separately, `'a' + NULL` is typed `int` here where real types it `varchar`.
+- `SET ARITHABORT OFF; SET ANSI_WARNINGS OFF` — `1/0` and `CAST(300 AS tinyint)` should answer NULL with Msg 3607 / 3606; `ANSI_WARNINGS OFF` alone should truncate an over-long insert silently.
+- `SET NUMERIC_ROUNDABORT ON` — `CAST(1.25 AS decimal(2,1))` should raise Msg 8115 rather than round.
+- `@@ROWCOUNT` read immediately after `SET NOCOUNT ON` is 1 here, 0 on real.
+
+**Wrong results**:
+
+- `WHERE EXISTS (SELECT 1/0)` raises Msg 8134; real never evaluates an EXISTS select list.
+- A dangling escape (`'a!' LIKE 'a!' ESCAPE '!'`) matches here; real doesn't match.
+- `CAST(0.1 AS bit)` is 0 here; real treats any non-zero as 1.
+- `1e308 * 10` is `Infinity` here; real raises Msg 8115.
+- `ROUND(2147483647, -1)` wraps here; real raises Msg 8115.
+- `CEILING(-0.5e0)` renders `-0`; real `0`.
+- `RAND(seed)` follows a different sequence (`RAND(1)` is 0.7135919932129235 on real, and `RAND(-1)` equals `RAND(1)`).
+- `GROUP BY ()` over zero input rows answers one row here and none on real.
+- `STRING_AGG(x, ',') WITHIN GROUP (ORDER BY x DESC)` over `varchar` raises Msg 245 converting to `int`.
+- `SELECT a + 1 … GROUP BY ROLLUP(a + 1)` raises Msg 207 — a grouped-away *expression* isn't NULLed in the rolled-up row, since the grouped-key resolver matches bare references only.
+- A non-persisted computed column that errors (`b AS a / 0`) fails even `SELECT a`; real fails only when the column is projected.
+- `DATEADD(day, n, '<string>')` returns `datetime2`; real `datetime`, which also names the type in its Msg 517.
+- `datetime` renders `.678` as `.676` where real renders `.677` (CONVERT styles 109 / 113 / 121 / 126 / 127 / 130 / 131), and style 113 pads the day as `' 2'` where real writes `'02'`.
+- `DATEPART(nanosecond, <datetime .123>)` is 123333300; real 123333333.
+- `DATE_BUCKET(week, 2, CAST('2024-05-05' AS date))` is 2024-05-06; real 2024-04-22.
+- `LOWER(N'İ')` keeps `İ`; real answers `i`.
+- `SOUNDEX('Ashcraft')` is `A261`; real `A226`, the H/W-separator rule.
+- `CAST(N'Ā' AS varchar)` is `?`; real best-fits it to `A`.
+- `FORMAT(1234.5, 'N')` and `'P'` render three decimals; real two, unknown culture included.
+- A `TOP 100 PERCENT … ORDER BY` view reads back sorted; real optimizes the ORDER BY away and returns scan order.
+- `JSON_VALUE` over a 5000-character string answers NULL; SQL Server 2025 returns it.
+- `OBJECT_ID('sys.objects')` is −1463410581 where real is −385, and `COL_LENGTH('sys.objects', 'name')` is NULL where real is 256.
+- Result types: `LEN` / `REPLICATE` over a MAX value, `NTILE`, and `OPENJSON`'s `type` column report `int`; real reports `bigint`, `bigint` and `tinyint`.
+
+**Real accepts, the simulator refuses**:
+
+- Numeric literals `1e` and `1e+` (both 1.0 `float`) and `1.e2`; `.e1` is a column reference on real (Msg 4104), not a syntax error.
+- `a LEFT JOIN b JOIN c ON … ON …` — nested join-ON precedence.
+- `LAST_VALUE(x) IGNORE NULLS OVER (…)`.
+- `SELECT IDENTITY(int, 1, 1) AS id, … INTO`.
+- `ALTER TABLE … ADD c int DEFAULT 8 WITH VALUES`.
+- An `IDENTITY` column of `decimal(p, 0)` (Msg 2749 raised here).
+- Numbered procedures (`CREATE PROC p;2`, `EXEC p;2`).
+- `UPDATE t SET @x = a = a + @x`.
+- `sp_refreshview` (Msg 2812 here) — a drifted `SELECT *` view keeps its CREATE-time names until altered.
+- `RAISERROR` `%*.*s` width / precision (Msg 2787 here); state −1 should report 1 and 300 should report 44 (real reduces modulo 256).
+- `RAISERROR … WITH LOG` as sysadmin (Msg 2778 raised here).
+- CAST sources: `''` → `money` 0 and `date` 1900-01-01; `'12:00'` → `date`; `'1e2'` / `'1d2'` → `float`; month names (`'Jan 5 2024'`, `'5 January 2024'`, `'January 2024'`); `AM` / `PM` suffixes, including `'13:00 PM'`; two-digit years (`'01/01/49'` → 2049); `datetime` → `float` / `int` / `decimal`; `decimal` → `varbinary`.
+
+**Same error, different number, state or class**:
+`TRANSLATE` length mismatch 9828 (here 9819); `NTILE(0)` 4116 class 15 (here 9819); `ROW_NUMBER() OVER ()` 4112 (here 102); `decimal(39, 0)` 2717 (here 1001); `decimal(2, 3)` 192 (here 1002); `float(54)` accepted on real (here 1001); `TOP (<NULL variable>)` 1014 (here 1060); `TOP '1'` 102 (here 1060); `EXEC p @b = 1` 8145 (here 201); a string datetime out of range (`'2024'`, hour 25) 242 (here 241); `xml = xml` 305 (here 402); `$action` in an INSERT's OUTPUT 207 (here 4104); a bare `VALUES (1)` statement 156 (here 102); `DELETE … ORDER BY` 156 (here 102); `@t.a` 137 class 16 state 1 (here class 15 state 2); states differing on 506, 235, 9810, 9812, 8148, 2714 for a temp table, and 195.
+
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 
 Both clauses ship (see [`xml.md`](xml.md#for-xml-result-serialization), [`json.md`](json.md#for-json-result-serialization)); these are the parts that don't:
@@ -296,6 +384,24 @@ Entries are verified against the simulator, so one that no longer reproduces is 
   → [`permissions.md`](permissions.md#known-gaps).
 - **An unterminated delimited identifier tokenizes as if it closed** — `SELECT [abc` reads as the column `abc` and answers Msg 207 here, where real reports **Msg 105** (`Unclosed quotation mark after the character string 'abc'`, the same wording it uses for a character literal) followed by Msg 102 (probed 2026-08-05).
   The `'…'` half already raises Msg 105; only the bracket form runs off the end silently.
+- **Found by the edge-case differential sweep** (probed 2026-09-23 against SQL Server 2025) — each accepted here, rejected on real with the error named:
+  an ORDER BY position past the select list, zero or negative (Msg 108);
+  duplicate column names in a derived table's projection (Msg 8156) and in `CREATE TABLE` (Msg 2705);
+  unary minus on a string, `-'1'` (Msg 403);
+  `NULLIF(NULL, …)` (Msg 4151) and `COALESCE(NULL, NULL)` (Msg 4127), with `COALESCE(NULL)` a syntax error (Msg 102) where the simulator fails internally;
+  `SUBSTRING(NULL, 1, 1)` and `CHECKSUM(NULL)` (Msg 8116);
+  a lowercase `n'x'`, which real reads as the column `n` followed by a string alias (Msg 207);
+  a select alias used inside an ORDER BY *expression* (`ORDER BY x + 0`, Msg 207 — a bare alias is fine);
+  `LAG` / `LEAD` with a negative offset (Msg 8730);
+  UNPIVOT over columns of differing types (Msg 8167);
+  `THROW 49999, …` (Msg 35100);
+  one column assigned twice in an UPDATE's SET list (Msg 264);
+  more than 1000 rows in one `INSERT … VALUES` (Msg 10738);
+  `TRUNCATE TABLE` on a table a foreign key references (Msg 4712);
+  `sp_executesql` with a `varchar` statement (Msg 214) or a named parameter supplied twice (Msg 8144);
+  a transaction name longer than 32 characters (Msg 103);
+  a duplicate CTE name, or a CTE defined but never used (Msg 422 — real also never evaluates the unused body);
+  a tab before an integer string, `CAST(CHAR(9) + '1' AS int)` (Msg 245).
 - **A CHECK constraint carrying an illegal explicit conversion is created** — `ALTER TABLE t ADD CONSTRAINT ck CHECK (CAST(d AS int) > 0)` is **Msg 529** followed by **Msg 1750** on real and is accepted here (probed 2026-08-05).
   The Msg 529 compile-time gate ships everywhere an expression's type is resolved (see [`casting.md`](casting.md#conversion-legality-is-settled-while-compiling)), and a computed column's expression goes through it; a CHECK predicate's operands are only typed when a row is measured against them.
 - **A character real weights and `CompareInfo` ignores compares equal to nothing** — `N'x' + NCHAR(0x00AD) = N'x'` (soft hyphen) is true here and false on real, so a row real excludes comes back (probed 2026-08-05, matrix re-run 2026-08-05 across the whole ignorable family).

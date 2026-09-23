@@ -834,6 +834,16 @@ internal sealed partial class Selection
         /// </summary>
         public readonly List<Expression> AllGroupingExpressions = [];
 
+        /// <summary>
+        /// True when the GROUP BY spelled a <c>ROLLUP</c>, <c>CUBE</c>,
+        /// <c>GROUPING SETS</c> or legacy <c>WITH ROLLUP</c> / <c>WITH CUBE</c>
+        /// — whatever sets that expands to. Real then reports every projected
+        /// column reference nullable in the result metadata, even one present
+        /// in every set (<c>GROUPING SETS ((a))</c>, <c>GROUP BY a, ROLLUP(b)</c>
+        /// both report <c>a</c> nullable; probed 2026-09-23).
+        /// </summary>
+        public bool GroupingSetsWritten;
+
         public BooleanExpression? Having;
         public readonly List<OrderBySpec> OrderBy = [];
 
@@ -869,6 +879,7 @@ internal sealed partial class Selection
             var copy = new FromClause
             {
                 Having = this.Having,
+                GroupingSetsWritten = this.GroupingSetsWritten,
                 OffsetExpression = this.OffsetExpression,
                 FetchExpression = this.FetchExpression,
             };
@@ -2672,9 +2683,10 @@ internal sealed partial class Selection
                 // the caller's parser cursor.
                 if (context.Batch.TryResolveView(objectName, out var resolvedView))
                 {
-                    var viewColumnNames = new string[resolvedView.OutputColumns.Length];
+                    var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView);
+                    var viewColumnNames = new string[viewColumns.Length];
                     for (var ci = 0; ci < viewColumnNames.Length; ci++)
-                        viewColumnNames[ci] = resolvedView.OutputColumns[ci].Name;
+                        viewColumnNames[ci] = viewColumns[ci].Name;
                     var viewAlias = ConsumeOptionalAlias(context);
                     var viewHints = ParseOptionalFromSourceHints(context, viewAlias is not null, objectName.ToString());
                     // NOEXPAND reads an indexed view's materialized index
@@ -2697,12 +2709,12 @@ internal sealed partial class Selection
                     return new FromSource(
                         qualifier: viewAlias ?? resolvedView.Name,
                         columnNames: viewColumnNames,
-                        columns: resolvedView.OutputColumns,
-                        storedSchema: resolvedView.OutputColumns,
+                        columns: viewColumns,
+                        storedSchema: viewColumns,
                         storageOrdinals: null,
                         lobStore: null,
                         rows: [],
-                        lateralPlan: Selection.ForView(resolvedView),
+                        lateralPlan: Selection.ForView(resolvedView, viewColumns),
                         backingView: resolvedView,
                         viaSynonym: viewSynonym,
                         autoElementName: viewAlias ?? objectName.ToString(),
@@ -3731,6 +3743,10 @@ internal sealed partial class Selection
             var subqueriesBefore = context.SubqueriesParsed;
             var columnsBefore = context.ColumnReferencesParsed;
 
+            fromClause.GroupingSetsWritten |= context.Token is UnquotedString
+            {
+                ContextualKeyword: ContextualKeyword.Rollup or ContextualKeyword.Cube or ContextualKeyword.Grouping,
+            };
             var contribution = ParseGroupByItem(context);
             itemContributions.Add(contribution);
 
@@ -3782,6 +3798,7 @@ internal sealed partial class Selection
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
             var modifierToken = context.GetNextRequired();
+            fromClause.GroupingSetsWritten = true;
             var columns = combined.Count == 1 ? combined[0] : [.. combined.SelectMany(static s => s)];
             combined = modifierToken switch
             {
@@ -4265,7 +4282,7 @@ internal sealed partial class Selection
             // expressions nullable) — matching real's result metadata
             // (`select 1` → Int, not IntN). The resolver is never consulted
             // (no column can appear without a source).
-            ColumnNullability = ComputeColumnNullability(expressions, [], [], parseBatch, TypeResolver),
+            ColumnNullability = ComputeColumnNullability(expressions, [], [], groupingSetsWritten: false, parseBatch, TypeResolver),
         };
     }
 

@@ -519,4 +519,69 @@ public sealed class ViewTests
         _ = simulation.ExecuteNonQuery("create view dbo.v as select id, label from dbo.t1");
         _ = simulation.AssertSqlError("update dbo.v set id = 99 where id = 1", 8102);
     }
+
+    // Real re-binds a view's body at every reference and maps its output onto
+    // the column names recorded at CREATE by position; everything below was
+    // probe-confirmed against SQL Server 2025.
+
+    private static Simulation WithStarViewAfter(string change)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int, b int); create table u (c int); insert t values (1, 2); insert u values (3)",
+            "create view v as select * from t cross join u",
+            change);
+        return simulation;
+    }
+
+    [TestMethod]
+    public void StarView_ColumnAddedToBase_ReadsUnderTheRecordedNamesByPosition()
+    {
+        using var reader = WithStarViewAfter("alter table t add d int").ExecuteBatchesReader("select * from v");
+        Assert.AreEqual(3, reader.FieldCount);
+        Assert.AreEqual("c", reader.GetName(2));
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(1, reader.GetInt32(0));
+        Assert.AreEqual(2, reader.GetInt32(1));
+        Assert.IsTrue(reader.IsDBNull(2)); // t.d, now third, reads under u's recorded 'c'.
+    }
+
+    [TestMethod]
+    public void StarView_BaseLeftWithFewerColumnsThanRecordedNames_RaisesMsg4502()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int, b int)",
+            "create view v as select * from t",
+            "alter table t drop column b");
+        simulation.AssertSqlError("select * from v", 4502,
+            "View or function 'v' has more column names specified than columns defined.");
+    }
+
+    [TestMethod]
+    public void StarView_BaseColumnRetyped_ReadsTheNewType()
+    {
+        using var reader = WithStarViewAfter("alter table t alter column a varchar(10)").ExecuteBatchesReader("select a from v");
+        Assert.AreEqual(typeof(string), reader.GetFieldType(0));
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual("1", reader.GetString(0));
+    }
+
+    [TestMethod]
+    public void StarView_BaseRecreated_ServesItsLeadingColumnUnderTheOldName()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int)",
+            "create view v as select * from t",
+            "drop table t",
+            "create table t (x varchar(5), a int); insert t values ('q', 9)");
+        using var reader = simulation.ExecuteBatchesReader("select a from v");
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual("q", reader.GetString(0));
+    }
+
+    [TestMethod]
+    public void StarView_ColumnAddedToBase_IsNotReachableByName() =>
+        _ = WithStarViewAfter("alter table t add d int").AssertSqlError("select d from v", 207);
 }

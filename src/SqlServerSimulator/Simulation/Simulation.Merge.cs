@@ -422,14 +422,15 @@ partial class Simulation
 
         if (context.Batch.TryResolveView(objectName, out var resolvedView))
         {
-            sourceSchema = new SqlType[resolvedView.OutputColumns.Length];
-            columnNames = new string[resolvedView.OutputColumns.Length];
-            for (var i = 0; i < resolvedView.OutputColumns.Length; i++)
+            var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView);
+            sourceSchema = new SqlType[viewColumns.Length];
+            columnNames = new string[viewColumns.Length];
+            for (var i = 0; i < viewColumns.Length; i++)
             {
-                sourceSchema[i] = resolvedView.OutputColumns[i].Type;
-                columnNames[i] = resolvedView.OutputColumns[i].Name;
+                sourceSchema[i] = viewColumns[i].Type;
+                columnNames[i] = viewColumns[i].Name;
             }
-            var viewSelection = Selection.ForView(resolvedView);
+            var viewSelection = Selection.ForView(resolvedView, viewColumns);
             materialize = batch =>
             {
                 var rs = viewSelection.Execute(batch);

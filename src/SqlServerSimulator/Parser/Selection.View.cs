@@ -31,6 +31,11 @@ partial class Selection
     /// </para>
     /// </remarks>
     /// <param name="view">The view this source reads.</param>
+    /// <param name="columns">
+    /// The columns the reference reads — <see cref="Simulation.BindViewColumns"/>'s
+    /// positional re-bind — or null for the CREATE-time
+    /// <see cref="View.OutputColumns"/>.
+    /// </param>
     /// <param name="pushedPredicates">
     /// WHERE conjunct templates an enclosing statement pushed into this
     /// reference (see <c>Selection.Execution.PredicatePushdown.cs</c>), carried
@@ -40,14 +45,15 @@ partial class Selection
     /// into the body's child batch (holding none of the caller's variables) and
     /// what makes the wrapper safe to rebuild per push rather than per parse.
     /// </param>
-    internal static Selection ForView(View view, List<BooleanExpression>? pushedPredicates = null)
+    internal static Selection ForView(View view, HeapColumn[]? columns = null, List<BooleanExpression>? pushedPredicates = null)
     {
-        var schema = new SqlType[view.OutputColumns.Length];
-        var columnNames = new string[view.OutputColumns.Length];
-        for (var i = 0; i < view.OutputColumns.Length; i++)
+        columns ??= view.OutputColumns;
+        var schema = new SqlType[columns.Length];
+        var columnNames = new string[columns.Length];
+        for (var i = 0; i < columns.Length; i++)
         {
-            schema[i] = view.OutputColumns[i].Type;
-            columnNames[i] = view.OutputColumns[i].Name;
+            schema[i] = columns[i].Type;
+            columnNames[i] = columns[i].Name;
         }
         return new Selection(
             schema,
@@ -55,10 +61,10 @@ partial class Selection
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             rowSource: (outerBatch, _) =>
-                outerBatch.Connection.Simulation.InvokeView(outerBatch, view, pushedPredicates))
+                outerBatch.Connection.Simulation.InvokeView(outerBatch, view, columns.Length, pushedPredicates))
         {
             PredicatePushdown = templates => ForView(
-                view, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates]),
+                view, columns, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates]),
             // Whether the body groups can't be known here — it isn't parsed
             // until the reference executes — but CREATE VIEW already classified
             // it: the updatability rejection names the aggregate / GROUP BY

@@ -1218,7 +1218,7 @@ internal sealed partial class Selection
         var (updatabilityProfile, updatabilityRejection) = ComputeViewUpdatabilityProfile(
             sources, joins, expressions, fromClause, distinct, aggregates, windows);
 
-        var columnNullability = ComputeColumnNullability(expressions, sources, joins, parseBatch, ResolveColumnType);
+        var columnNullability = ComputeColumnNullability(expressions, sources, joins, fromClause.GroupingSetsWritten, parseBatch, ResolveColumnType);
 
         ReduceConstantCounts(aggregates, fromClause);
 
@@ -1426,12 +1426,16 @@ internal sealed partial class Selection
     /// export: its BCP data-file layout drops the per-value length prefix
     /// on fixed-width columns whose wire metadata says NOT NULL, and the
     /// bacpac loader reads the file per the model.xml declaration — the two
-    /// must agree.
+    /// must agree. Under written grouping sets
+    /// (<see cref="FromClause.GroupingSetsWritten"/>) every column reference
+    /// reads nullable, since a set that groups the column away emits it NULL;
+    /// claiming NOT NULL there and then sending a NULL kills the TDS session.
     /// </summary>
     private static bool[]? ComputeColumnNullability(
         List<Expression> expressions,
         FromSource[] sources,
         JoinSpec[] joins,
+        bool groupingSetsWritten,
         BatchContext parseBatch,
         Func<MultiPartName, SqlType> resolveColumnType)
     {
@@ -1439,6 +1443,8 @@ internal sealed partial class Selection
 
         bool ResolveNullable(MultiPartName name)
         {
+            if (groupingSetsWritten)
+                return true;
             var (s, c) = FindSourceColumn(sources, name);
             return s == -1 || nullFilled[s] || sources[s].Columns[c].Nullable;
         }

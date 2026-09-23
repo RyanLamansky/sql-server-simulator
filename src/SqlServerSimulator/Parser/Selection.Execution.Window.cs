@@ -353,6 +353,22 @@ internal sealed partial class Selection
         rowCount == 0 ? SqlValue.Null(SqlType.Int32) : arg.Run(runtimeAt(0));
 
     /// <summary>
+    /// The declared length a value converted to <paramref name="type"/> is cut
+    /// to, as a <c>CAST</c> to that type would be given it — null where the
+    /// type carries none (MAX, unspecified, or not a string / binary type).
+    /// </summary>
+    private static int? DeclaredLength(SqlType type) => type switch
+    {
+        VarcharSqlType { length: > 0 } t => t.length,
+        NVarcharSqlType { length: > 0 } t => t.length,
+        VarbinarySqlType { length: > 0 } t => t.length,
+        CharSqlType { length: > 0 } t => t.length,
+        NCharSqlType { length: > 0 } t => t.length,
+        BinarySqlType { length: > 0 } t => t.length,
+        _ => null,
+    };
+
+    /// <summary>
     /// Positional row context for the window engine: activates the buffered
     /// row at <paramref name="index"/> and returns the
     /// <see cref="RuntimeContext"/> that expressions evaluate against.
@@ -639,6 +655,10 @@ internal sealed partial class Selection
                 case WindowKind.Lag:
                 case WindowKind.Lead:
                     {
+                        // No rows, nothing to compute — and the offset can't be
+                        // read without a row to evaluate it against.
+                        if (rowCount == 0)
+                            break;
                         var sign = win.Kind == WindowKind.Lag ? -1 : 1;
                         var lagOffset = win.OffsetArg is null
                             ? 1
@@ -657,14 +677,19 @@ internal sealed partial class Selection
                                     // (or typed NULL). Default is evaluated in the
                                     // current row's resolver context, matching real
                                     // SQL Server (default expressions can reference
-                                    // the row's columns).
+                                    // the row's columns), then converted to the
+                                    // operand's exact type with CAST semantics — so
+                                    // `'x'` over an int is Msg 245, `2.9` is 2, and a
+                                    // longer string truncates to the operand's
+                                    // length. Only a default actually used converts.
                                     if (win.DefaultArg is null)
                                     {
                                         results[indices[i]] = SqlValue.Null(operandType);
                                     }
                                     else
                                     {
-                                        results[indices[i]] = win.DefaultArg.Run(runtimeAt(indices[i]));
+                                        results[indices[i]] = Cast.ApplyCoercion(
+                                            win.DefaultArg.Run(runtimeAt(indices[i])), operandType, DeclaredLength(operandType));
                                     }
                                 }
                                 else
